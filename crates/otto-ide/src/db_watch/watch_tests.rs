@@ -548,3 +548,33 @@ fn a_huge_text_cell_keeps_a_hash_of_the_whole_value() {
     assert_ne!(a, b, "a change past the prefix is still a change");
     assert_eq!(cap_cell(json!("short")), json!("short"));
 }
+
+#[tokio::test]
+async fn binding_a_session_that_already_ended_takes_its_last_checkpoint() {
+    let fake = Arc::new(Fake::default());
+    fake.set("a", &["id"], vec![]);
+    let host = as_host(&fake);
+    let w = Watch::new(&user("u"), "/p", target(true), None, items(&["a"])).unwrap();
+    w.checkpoint(
+        &host,
+        Checkpoint::new(IdeDbWatchCheckpointReason::Start),
+        true,
+    )
+    .await;
+    let (_tx, rx) = watch::channel(DapStopSignal {
+        stop_seq: 2,
+        ended: true,
+    });
+    let _task = bind_debug(&w, Arc::clone(&host), rx, || (None, None));
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while w.view().bound_ended_at_ms.is_none() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("ended at once");
+    assert_eq!(
+        w.view().latest.unwrap().reason,
+        IdeDbWatchCheckpointReason::SessionEnd
+    );
+}

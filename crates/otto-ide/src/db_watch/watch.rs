@@ -824,9 +824,10 @@ pub fn bind_debug(
 ) -> tokio::task::AbortHandle {
     let w = Arc::clone(watch);
     let mut last = stops.borrow_and_update().stop_seq;
+    let already_ended = stops.borrow().ended;
     tokio::spawn(with_request_credential(watch.cred, async move {
         loop {
-            let ended = stops.changed().await.is_err() || stops.borrow().ended;
+            let ended = already_ended || stops.changed().await.is_err() || stops.borrow().ended;
             let signal = *stops.borrow_and_update();
             if ended {
                 w.checkpoint(
