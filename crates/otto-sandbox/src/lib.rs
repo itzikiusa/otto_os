@@ -541,9 +541,10 @@ impl SandboxPolicy {
         // sockets (IDE `/tmp/oi-<pid>-<n>/c.s`, SFTP `$TMPDIR/otto-sftp-*/ctl.sock`)
         // too: a mux client rides the master's logged-in connection with no
         // credential of its own. One `remote unix-socket` per filter.
-        let mut sockets = vec![
-            r#"(remote unix-socket (path-regex #"/(otto-(rth|ptyh)-[0-9a-f]+|oi-[0-9]+-[0-9]+|otto-sftp-[^/]+)/[^/]+$"))"#.to_string(),
-        ];
+        let socket_dir = "/(otto-(rth|ptyh)-[0-9a-f]+|oi-[0-9]+-[0-9]+|otto-sftp-[^/]+)";
+        let mut sockets = vec![format!(
+            r#"(remote unix-socket (path-regex #"{socket_dir}/[^/]+$"))"#
+        )];
         if data_dir_set {
             for d in ["runtime-holders", "pty-holders"] {
                 sockets.push(format!(
@@ -553,6 +554,11 @@ impl SandboxPolicy {
             }
         }
         trailing.push(format!("(deny network-outbound {})", sockets.join(" ")));
+        // Those dirs sit in the writable temp roots: without this a `mv` of
+        // one gives its socket a name the connect deny doesn't match.
+        trailing.push(format!(
+            r#"(deny file-write* (regex #"{socket_dir}(/|$)"))"#
+        ));
 
         // Every session's MCP launcher files (`<tmp>/otto-mcp`, otto-sessions'
         // `mcp.rs`: tokens, Keychain-resolved env) sit under the writable temp
