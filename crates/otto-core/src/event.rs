@@ -705,6 +705,18 @@ pub enum Event {
         client_id: String,
         dirs: Vec<String>,
     },
+    /// A DB Watch (`otto-ide` `db_watch/watch.rs`) took checkpoint `seq`
+    /// (`reason`: start / stop / run_end / session_end / manual). A cue only:
+    /// the IDE refetches `GET /ide/db-watch/watches/{watch_id}`. Owner-only.
+    IdeDbWatchCheckpoint {
+        user_id: Id,
+        watch_id: String,
+        root: String,
+        seq: u32,
+        reason: String,
+        changed_rows: usize,
+        failed_items: usize,
+    },
     /// Live agent MCP database activity (`otto_db_query`, `otto_query_db`,
     /// `otto_db_schema`, `otto_db_children`, `otto_db_object`). Emitted on
     /// `"started"` and again on `"finished"` or `"error"` so the Database
@@ -817,6 +829,7 @@ impl Event {
             Event::ConnectionsChanged { .. } => "connections_changed",
             Event::NotificationsChanged { .. } => "notifications_changed",
             Event::IdeFsChanged { .. } => "ide_fs_changed",
+            Event::IdeDbWatchCheckpoint { .. } => "ide_db_watch_checkpoint",
             Event::DbMcpActivity { .. } => "db_mcp_activity",
         }
     }
@@ -939,6 +952,15 @@ mod tests {
                 user_id: "u".into(),
                 client_id: "c".into(),
                 dirs: vec!["/p/src".into()],
+            },
+            Event::IdeDbWatchCheckpoint {
+                user_id: "u".into(),
+                watch_id: "w".into(),
+                root: "/p".into(),
+                seq: 1,
+                reason: "stop".into(),
+                changed_rows: 2,
+                failed_items: 0,
             },
             Event::DesignSourceChanged {
                 workspace_id: "w".into(),

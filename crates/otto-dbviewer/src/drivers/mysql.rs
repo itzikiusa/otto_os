@@ -544,7 +544,8 @@ impl Driver for MysqlDriver {
         let pool = self.pool(cfg).await?;
         // `table_rows` is i64 in InnoDB statistics; treat negative/NULL as absent.
         let est: Option<i64> = sqlx::query_scalar(
-            "SELECT table_rows FROM information_schema.tables \
+            // MariaDB answers BIGINT UNSIGNED: cast, or the decode fails silently.
+            "SELECT CAST(table_rows AS SIGNED) FROM information_schema.tables \
              WHERE table_schema = ? AND table_name = ? AND table_type = 'BASE TABLE'",
         )
         .bind(&db)

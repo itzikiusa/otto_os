@@ -342,3 +342,36 @@ if __name__ == '__main__':
     assert_eq!(acks[2]["verified"], false);
     assert_eq!(acks[2]["message"], "No code on this line");
 }
+
+/// The DB Watch trigger: under an output flood the broadcast channel lags and
+/// drops snapshots (stops among them), while `stops_tx` always reads the
+/// newest stop and the end, and a frame selection (no stop) never wakes it.
+#[tokio::test]
+async fn the_stop_signal_never_lags_behind_output_and_coalesces_stops() {
+    let entry = entry_for("dbg_w", "/p", "go");
+    let mut events = entry.events_tx.subscribe();
+    let mut stops = entry.stops_tx.subscribe();
+    for i in 0..400u32 {
+        entry.mutate_and_broadcast(|s| {
+            if i % 40 == 39 {
+                s.state = IdeDebugState::Paused;
+                s.stop_seq += 1;
+            }
+        });
+    }
+    assert!(matches!(
+        events.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_))
+    ));
+    assert!(stops.has_changed().unwrap());
+    assert_eq!(
+        stops.borrow_and_update().stop_seq,
+        10,
+        "ten stops read as the newest"
+    );
+    // Selecting a frame / output: no stop, no wake-up.
+    entry.mutate_and_broadcast(|s| s.selected_frame_line = Some(3));
+    assert!(!stops.has_changed().unwrap());
+    entry.mutate_and_broadcast(|s| s.state = IdeDebugState::Terminated);
+    assert!(stops.borrow_and_update().ended);
+}
