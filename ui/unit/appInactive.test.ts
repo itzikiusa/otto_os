@@ -16,7 +16,7 @@ const anim = (iterations: number): Anim => {
   return a;
 };
 
-function fixture(opts: { hidden?: boolean; embedded?: boolean } = {}) {
+function fixture(opts: { hidden?: boolean; embedded?: boolean; nativePane?: boolean } = {}) {
   const on = new Map<string, (e?: unknown) => void>();
   const timers: (() => void)[] = [];
   const live: Anim[] = [];
@@ -33,7 +33,8 @@ function fixture(opts: { hidden?: boolean; embedded?: boolean } = {}) {
     setTimeout: (fn: () => void) => (timers.push(fn), timers.length),
     clearTimeout: () => void timers.splice(0),
   });
-  m.installAppInactive(doc, win);
+  if (opts.nativePane) m.installAppInactive(doc, win, true);
+  else m.installAppInactive(doc, win);
   return { doc, on, timers, live };
 }
 
@@ -48,6 +49,7 @@ test('a toast raised while unfocused plays; the pulses pause; focus resumes them
   // Raised while away: the toast's entrance runs, a new spinner pauses.
   const toast = anim(1);
   const spinner = anim(Infinity);
+  f.live.push(toast, spinner);
   f.on.get('doc:animationstart')!({ target: { getAnimations: () => [toast] } });
   f.on.get('doc:animationstart')!({ target: { getAnimations: () => [spinner] } });
   assert.equal(toast.playState, 'running', 'one-shot entrance never paused');
@@ -79,5 +81,26 @@ test('a window created hidden starts paused; an embedded pane pauses only while 
 
 test('no stylesheet rule pauses every animation, and main.ts installs the pause', () => {
   assert.doesNotMatch(readFileSync(new URL('../src/app.css', import.meta.url), 'utf8'), /app-inactive/);
-  assert.match(readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8'), /installAppInactive\(\);/);
+  assert.match(readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8'), /installAppInactive\(document, window, isEmbedded\);/);
+});
+
+test('the native side pane (window.parent is itself) pauses only while hidden, never on blur', () => {
+  const pane = fixture({ nativePane: true });
+  pane.doc.focus = false; pane.on.get('win:blur')!();
+  assert.equal(pane.timers.length, 0);
+  assert.ok(!pane.on.has('doc:animationstart'));
+});
+
+test('an animation that left the page while away is neither kept nor resumed', () => {
+  const f = fixture();
+  const kept = anim(Infinity);
+  const removed = anim(Infinity);
+  f.live.push(kept, removed);
+  f.doc.hidden = true; f.doc.focus = false; f.on.get('doc:visibilitychange')!();
+  assert.equal(removed.playState, 'paused');
+  f.live.splice(f.live.indexOf(removed), 1); // its dot unmounted meanwhile
+  f.doc.hidden = false; f.doc.focus = true; f.on.get('win:focus')!();
+  assert.equal(kept.playState, 'running');
+  assert.equal(removed.playState, 'paused', 'a detached animation is not revived');
+  assert.match(readFileSync(new URL('../src/lib/appInactive.ts', import.meta.url), 'utf8'), /paused = new WeakSet<Animation>\(\)/, 'no strong list of paused animations');
 });
