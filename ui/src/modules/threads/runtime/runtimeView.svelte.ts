@@ -216,7 +216,7 @@ export class RuntimeViews {
       const v = this.views.get(id);
       if (!v || --v.refs > 0) return;
       if (v.openSpan) {
-        v.openSpan.finish('cancelled');
+        v.openSpan.finish('canceled');
         v.openSpan = null;
       }
       if (v.retryTimer) clearTimeout(v.retryTimer);
