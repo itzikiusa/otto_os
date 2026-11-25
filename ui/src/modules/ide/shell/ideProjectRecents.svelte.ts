@@ -1,7 +1,7 @@
 // Every project you opened can be found again (review I3-05 / I3-07 / I3-06).
 //
-// - Recents: each local folder or SSH target the IDE opens is recorded here (MRU,
-//   bounded), with what is needed to reopen it — kind, root, connection id/name,
+// - Recents: each local folder or SSH target the IDE opens is recorded here (in the order
+//   first opened, never reordered by use; bounded, the least recently opened drops), with what is needed to reopen it — kind, root, connection id/name,
 //   workspace id. Never a secret: an SSH target is reopened through its saved
 //   connection, by id.
 // - The switcher's "Workspaces" list is registered workspaces + recent local folders
@@ -74,10 +74,15 @@ export function setRecentsExclusion(fn: (root: string) => boolean): void {
   excluded = fn;
 }
 
-/** Pure: the MRU list after opening `t`. Exported for tests. */
+/** Pure: the list after opening `t`. A known target keeps its place (the switcher and ⌘K never
+ *  reorder as you work), a new one goes last, and past `max` the least recently opened drops.
+ *  Exported for tests. */
 export function withRecent(list: readonly IdeRecentTarget[], t: IdeRecentTarget, max = MAX_RECENTS): IdeRecentTarget[] {
   const k = recentKey(t);
-  return [t, ...list.filter((r) => recentKey(r) !== k)].slice(0, max);
+  const next = list.some((r) => recentKey(r) === k) ? list.map((r) => (recentKey(r) === k ? t : r)) : [...list, t];
+  if (next.length <= max) return next;
+  const oldest = next.reduce((a, b) => (b.lastOpenedAt < a.lastOpenedAt ? b : a));
+  return next.filter((r) => r !== oldest);
 }
 
 class IdeProjectRecents {
