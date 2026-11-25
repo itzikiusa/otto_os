@@ -1179,13 +1179,19 @@ async fn clickhouse_native_read_survives_dropped_parked_connections() {
     let d = ClickhouseDriver::default();
     let path = NodePath::parse("db:analytics/table:events");
     d.object_detail(&cfg, &path).await.unwrap(); // parks several connections
-    // Right after the drop klickhouse may not have seen the sockets close
-    // yet (the race a retry covers); many rounds make that case certain.
+                                                 // Right after the drop klickhouse may not have seen the sockets close
+                                                 // yet (the race a retry covers); many rounds make that case certain.
     for round in 0..20 {
         drop_all();
         let test = d.test(&cfg).await.unwrap();
-        assert!(test.ok, "round {round}, right after a drop: {}", test.message);
+        assert!(
+            test.ok,
+            "round {round}, right after a drop: {}",
+            test.message
+        );
         d.object_detail(&cfg, &path).await.unwrap();
-        d.run(&cfg, &query("SELECT count() FROM events")).await.unwrap();
+        d.run(&cfg, &query("SELECT count() FROM events"))
+            .await
+            .unwrap();
     }
 }

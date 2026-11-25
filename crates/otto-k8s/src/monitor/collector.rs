@@ -70,6 +70,17 @@ async fn parse_off_runtime<T: Send + 'static>(
         .map_err(|e| Error::Internal(format!("k8s monitor parse task: {e}")))?
 }
 
+/// One namespace's pod list reduced to its snapshot on the blocking pool,
+/// typed to the fields the snapshot reads (no whole-list `Value`).
+async fn pod_snapshot_off_runtime(stdout: String) -> otto_core::Result<Snapshot> {
+    tokio::task::spawn_blocking(move || {
+        classify::snapshot_from_pod_json(&stdout)
+            .map_err(|e| Error::Upstream(format!("kubectl returned invalid JSON: {e}")))
+    })
+    .await
+    .map_err(|e| Error::Internal(format!("k8s monitor parse task: {e}")))?
+}
+
 /// Persist a cycle's status, rewriting the (large) snapshot column only when
 /// `cur` (this cycle's typed snapshot; `None` = the cycle never got one, keep
 /// what is stored) differs from `baseline` — what this loop last stored. The
@@ -791,14 +802,7 @@ pub async fn run_cycle_with<S: K8sCtx>(
                         .run(["get", "pods", "-n", ns.as_str(), "-o", "json"])
                         .await
                     {
-                        Ok(out) => tokio::task::spawn_blocking(move || {
-                            classify::snapshot_from_pod_json(&out.stdout).map_err(|e| {
-                                Error::Upstream(format!("kubectl returned invalid JSON: {e}"))
-                            })
-                        })
-                        .await
-                        .map_err(|e| Error::Internal(format!("k8s monitor parse task: {e}")))
-                        .and_then(|r| r),
+                        Ok(out) => pod_snapshot_off_runtime(out.stdout).await,
                         Err(e) => Err(e),
                     };
                     (ns, res)
