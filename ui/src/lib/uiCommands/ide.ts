@@ -17,6 +17,7 @@
 // name, capped) and redacted by the bridge before the agent sees them.
 
 import { api } from '../api/client';
+import { matchesEngine } from '../dbWatchMatch';
 import type { ApiResponse, IdeDbWatchDetectResp, IdeDebugPortResp, IdeDebugSessionSnapshot, IdeVariable } from '../api/types';
 import { agentName } from '../stores/uiControl.svelte';
 import { ws } from '../stores/workspace.svelte';
@@ -213,9 +214,18 @@ async function armDbWatch(
     target = t && ports.includes(t) ? { kind: 'ephemeral', ephemeral_id: t.ephemeral_id } : { kind: 'auto', engine: e };
     engine = e;
   }
-  const items = args.objects?.length
-    ? args.objects
-    : det.detected_objects.filter((o) => o.engine === engine).slice(0, local ? 8 : 3).map((o) => ({ object: o.object_name }));
+  let items = args.objects ?? [];
+  if (!items.length) {
+    // The names the code uses that THIS target really has (detection names any SQL `mysql`).
+    const ver = await api.post<IdeDbWatchDetectResp>('/ide/db-watch/detect', {
+      root,
+      active_file: snap.paused_file ?? null,
+      debug_session_id: snap.id,
+      target,
+    });
+    const names = ver.detected_objects.filter((o) => matchesEngine(o, engine ?? '') && o.verified !== false).map((o) => o.object_name);
+    items = [...new Set(names)].slice(0, local ? 8 : 3).map((object) => ({ object }));
+  }
   if (!items.length) throw new UiCommandError('not_found', 'No tables found in the code near this stop — pass `objects`.');
   if (!(await db.start({ target, items, bind: { debug_session_id: snap.id } }, { asker }))) {
     throw db.error ? new UiCommandError('failed', db.error) : declined('watching that database');

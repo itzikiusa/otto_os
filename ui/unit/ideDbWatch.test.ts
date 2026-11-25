@@ -367,17 +367,51 @@ test('C1-035: names detected as SQL (guessed mysql) count on any SQL target once
   assert.deepEqual(pickAutoItems([det('orders', 'mysql', null)], 'postgres', true), [], 'unverified cross-engine guesses stay out');
 });
 
-test('C1-036: a new debug session never re-binds a production watch silently: it asks the typed confirm and sends confirm_production', async () => {
-  for (const answer of [null, 'pr_bo prod']) {
-    const w = watchOf({ bind: { debug_session_id: 'd1' }, target: { kind: 'saved', connection_id: 'p', engine: 'mysql', label: 'pr_bo prod', environment: 'production', local: false } });
-    const h = harness({ prompt: () => answer, routes: (c) => (c.url.startsWith('/ide/db-watch/watches?root=') ? { watches: [w] } : c.method === 'PATCH' ? w : c.url.startsWith('/ide/db-watch/watches/w1') ? readOf(w) : undefined) });
+const prodW = (over: Partial<IdeDbWatch> = {}) => watchOf({ bind: { debug_session_id: 'd1' }, target: { kind: 'saved', connection_id: 'p', engine: 'mysql', label: 'pr_bo prod', environment: 'production', local: false }, ...over });
+
+test('C2-012: a new debug session or run never pops the prod confirm: the prod watch waits, and one click re-binds it after the typed confirm', async () => {
+  for (const follow of [{ debug: { id: 'd2', state: 'running', stop_seq: 0 } }, { run: { id: 'r2', status: 'running' } }]) {
+    const w = prodW();
+    const h = harness({ prompt: () => 'pr_bo prod', routes: (c) => (c.url.startsWith('/ide/db-watch/watches?root=') ? { watches: [w] } : c.method === 'PATCH' ? w : c.url.startsWith('/ide/db-watch/watches/w1') ? readOf(w) : undefined) });
     h.store.follow({ root: '/r' });
     await flush(); await flush();
-    h.store.follow({ root: '/r', debug: { id: 'd2', state: 'running', stop_seq: 0 } });
+    h.store.follow({ root: '/r', ...follow });
     for (let i = 0; i < 6; i++) await flush();
+    assert.equal(h.prompts.length, 0, 'no modal on a launch');
+    assert.equal(h.calls.filter((c) => c.method === 'PATCH').length, 0);
+    assert.ok(h.store.prodWaiting, 'the panel / strip offer "Production target — click to watch"');
+    await h.store.watchProd();
+    assert.match(h.prompts[0] ?? '', /Asked by: You/);
     const patches = h.calls.filter((c) => c.method === 'PATCH');
-    assert.match(h.prompts[0] ?? '', /PRODUCTION/);
-    assert.equal(patches.length, answer ? 1 : 0);
-    if (answer) assert.deepEqual(plain(patches[0].body), { bind: { debug_session_id: 'd2' }, confirm_production: true });
+    assert.deepEqual(plain(patches[0].body), { bind: 'debug' in follow ? { debug_session_id: 'd2' } : { run_id: 'r2' }, confirm_production: true });
+    assert.equal(h.store.prodWaiting, null);
   }
+});
+
+test('C2-012: a remembered connection now tagged prod stays un-armed on launch; the click starts it through the typed confirm', async () => {
+  const ls = new Map([[memoryKey('/r'), JSON.stringify({ target: { kind: 'saved', connection_id: 'p' }, items: [{ object: 'session_info' }] })]]);
+  const h = harness({ ls, prompt: () => 'pr_bo prod', routes: (c) => (c.url.startsWith('/ide/db-watch/watches?root=') ? { watches: [] } : c.url === '/ide/db-watch/detect' ? { detected_objects: [], saved_connections: [saved({ connection_id: 'p', name: 'pr_bo prod', environment: 'production' })], ephemeral_targets: [] } : c.url === '/ide/db-watch/watches' ? prodW() : c.url.startsWith('/ide/db-watch/watches/w1') ? readOf(prodW()) : undefined) });
+  h.store.follow({ root: '/r', debug: { id: 'd1', state: 'running', stop_seq: 0 } });
+  for (let i = 0; i < 6; i++) await flush();
+  assert.equal(h.prompts.length, 0);
+  assert.equal(h.calls.filter((c) => c.method === 'POST' && c.url === '/ide/db-watch/watches').length, 0);
+  assert.ok(h.store.prodWaiting);
+  await h.store.watchProd();
+  const starts = h.calls.filter((c) => c.method === 'POST' && c.url === '/ide/db-watch/watches');
+  assert.equal(h.prompts.length, 1);
+  assert.equal((starts[0]?.body as { confirm_production?: boolean })?.confirm_production, true);
+  assert.deepEqual(plain((starts[0].body as { bind: unknown }).bind), { debug_session_id: 'd1' });
+});
+
+test('C2-012: removing a table from a prod watch needs no typed confirm (it reads less); adding one still does', async () => {
+  const w = prodW({ items: [{ object: 'a', kind: 'table', primary_key: ['id'] }, { object: 'b', kind: 'table', primary_key: ['id'] }] });
+  const h = harness({ prompt: () => null, routes: (c) => (c.url.startsWith('/ide/db-watch/watches?root=') ? { watches: [w] } : c.method === 'PATCH' ? w : c.url.startsWith('/ide/db-watch/watches/w1') ? readOf(w) : undefined) });
+  h.store.follow({ root: '/r' });
+  await flush(); await flush();
+  await h.store.removeItem('b');
+  assert.equal(h.prompts.length, 0);
+  assert.deepEqual(plain(h.calls.find((c) => c.method === 'PATCH')?.body), { items: [{ object: 'a' }], confirm_production: true });
+  await h.store.addItem({ object: 'c' });
+  assert.equal(h.prompts.length, 1, 'adding a table to prod asks');
+  assert.equal(h.calls.filter((c) => c.method === 'PATCH').length, 1, 'cancelled: nothing sent');
 });

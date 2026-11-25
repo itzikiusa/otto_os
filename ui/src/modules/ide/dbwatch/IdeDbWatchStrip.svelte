@@ -21,7 +21,9 @@
 <div class="dbs" data-testid="ide-dbw-strip">
   <Icon name="db" size={12} />
   <span class="dbs-label">DB</span>
-  {#if waiting}
+  {#if ideDbWatch.prodWaiting}
+    <button type="button" class="dbs-item dbs-prod" onclick={() => void ideDbWatch.watchProd()} data-testid="ide-dbw-strip-prod">Production target — click to watch</button>
+  {:else if waiting}
     <span class="dbs-quiet">watching {plural(ideDbWatch.watch?.items.length ?? 0, 'table')}{ideDbWatch.watch?.busy ? '…' : ''}</span>
   {:else if changed.length === 0}
     <span class="dbs-quiet">no changes{ideDbWatch.compare === 'start' ? ' since the start' : ' since the last stop'}</span>
@@ -48,6 +50,6 @@
   .dbs-item { display: inline-flex; gap: var(--sp-2); border: 0; background: none; padding: 0; color: var(--text); font-size: var(--fs-xs); white-space: nowrap; cursor: pointer; }
   .dbs-item:hover { color: var(--accent-text); text-decoration: underline; }
   .dbs-counts { color: var(--warning); }
-  .dbs-err { color: var(--danger); }
+  .dbs-err, .dbs-prod { color: var(--danger); }
   .dbs-open { margin-inline-start: auto; block-size: 20px; flex-shrink: 0; }
 </style>

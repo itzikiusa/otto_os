@@ -184,6 +184,7 @@ function fakeIde() {
 }
 
 function load(detect: unknown = { detected_objects: [], saved_connections: [], ephemeral_targets: [] }) {
+  const detectCalls: any[] = [];
   const handlers: Record<string, (args: any, ctx: any) => Promise<any>> = {};
   const uiCommands = {
     UiCommandError,
@@ -198,7 +199,7 @@ function load(detect: unknown = { detected_objects: [], saved_connections: [], e
   const gets: string[] = [];
   const api = {
     get: async (path: string) => { gets.push(path); return { open: true }; },
-    post: async () => detect,
+    post: async (_path: string, body: any) => { detectCalls.push(body); return typeof detect === 'function' ? detect(body) : detect; },
     long: { post: (path: string, body: any, signal?: AbortSignal) => new Promise((resolve, reject) => {
       posts.push({ path, body, resolve, signal });
       signal?.addEventListener('abort', () => reject(new Error('aborted')));
@@ -206,6 +207,7 @@ function load(detect: unknown = { detected_objects: [], saved_connections: [], e
   };
   loadSource(new URL('../src/lib/uiCommands/ide.ts', import.meta.url), {
     '../api/client': { api },
+    '../dbWatchMatch': loadSource(new URL('../src/lib/dbWatchMatch.ts', import.meta.url), {}),
     '../stores/uiControl.svelte': { agentName: (a: { provider: string }) => (a.provider === 'claude' ? 'Claude' : a.provider) },
     '../stores/workspace.svelte': { ws: { currentId: 'w1' } },
     '../uiCommands': uiCommands,
@@ -216,7 +218,7 @@ function load(detect: unknown = { detected_objects: [], saved_connections: [], e
   });
   const ide = fakeIde();
   idePort.idePort.bind(ide);
-  return { handlers, ide, posts, gets, dbPort };
+  return { handlers, ide, posts, gets, dbPort, detectCalls };
 }
 
 function ctx(answer = true) {
@@ -604,4 +606,32 @@ test('C1-025: confirm text carries no control / bidi characters, hides nothing a
   assert.ok(text.includes(`condition ${' '.repeat(600)}os.Exit(1)\\u2066`), 'breakpoint code whole, invisible characters spelled out');
   assert.ok(!text.includes('more characters)'), 'nothing is cut');
   assert.equal(confirmSafe('a\u2066b', 10), 'a�b');
+});
+
+test('C1-035: on a Postgres container the agent watches the code’s SQL tables the TARGET verified (detection names SQL mysql), once each', async () => {
+  const pg = { ephemeral_id: 'tc:pg:5432', engine: 'postgres', port: 5432, source: 'testcontainers' };
+  const { handlers, ide, dbPort, detectCalls } = load((body: any) => ({
+    detected_objects: body.target
+      ? [{ engine: 'mysql', object_name: 'orders', verified: true }, { engine: 'mysql', object_name: 'orders', verified: true }, { engine: 'mysql', object_name: 'GetAllConfigs', verified: false }, { engine: 'mysql', object_name: 'guess', verified: null }]
+      : [{ engine: 'mysql', object_name: 'orders' }, { engine: 'mysql', object_name: 'GetAllConfigs' }],
+    saved_connections: [],
+    ephemeral_targets: [pg],
+  }));
+  const c = ctx();
+  const run = handlers.ide_debug_start({ target: { kind: 'main', file: 'main.go' }, wait_ms: 5_000 }, c);
+  later(() => ide.emit(paused(1, 5)));
+  await run;
+  const asked: any[] = [];
+  dbPort.ideDbWatchPort.bind({
+    watch: null,
+    error: null,
+    async start(req: unknown) { asked.push(req); return { id: 'w', target: { label: 'pg', local: true, engine: 'postgres' }, bind: null, busy: false }; },
+    async stop() {},
+    async diffSince() { return null; },
+  });
+  const out = await handlers.ide_debug_db({ action: 'watch' }, c);
+  assert.equal(out.watching, true);
+  eq(asked[0].target, { kind: 'auto', engine: 'postgres' });
+  eq(asked[0].items, [{ object: 'orders' }]);
+  eq(detectCalls.at(-1).target, { kind: 'auto', engine: 'postgres' }, 'the names are verified against the chosen target');
 });
