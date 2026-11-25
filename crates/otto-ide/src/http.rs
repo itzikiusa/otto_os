@@ -37,7 +37,10 @@ use self::collab_sse::{
     collab_guest_events, collab_guest_join, collab_guest_state, create_collab_room, install_plugin,
     list_collab_rooms, list_plugins, set_collab_role, toggle_plugin, uninstall_plugin,
 };
-use self::db_watch::{db_watch_detect, db_watch_snapshot};
+use self::db_watch::{
+    db_watch_delete, db_watch_detect, db_watch_list, db_watch_objects, db_watch_read,
+    db_watch_snapshot, db_watch_snapshot_now, db_watch_start, db_watch_update,
+};
 use self::intelligence::{
     fs_complete, history_entry, history_list, history_restore, history_snapshot, lsp_code_actions,
     lsp_definition, lsp_diagnostics, lsp_format, lsp_hover, lsp_implementation, lsp_references,
@@ -252,7 +255,22 @@ pub fn api_router<S: IdeCtx>() -> Router<S> {
             .route("/ide/plugins/{slug}", delete(uninstall_plugin::<S>))
             // G. Live Database Watch & Component-Test Watcher
             .route("/ide/db-watch/detect", post(db_watch_detect::<S>))
-            .route("/ide/db-watch/snapshot", post(db_watch_snapshot::<S>)),
+            .route("/ide/db-watch/snapshot", post(db_watch_snapshot::<S>))
+            .route("/ide/db-watch/objects", post(db_watch_objects::<S>))
+            .route(
+                "/ide/db-watch/watches",
+                post(db_watch_start::<S>).get(db_watch_list::<S>),
+            )
+            .route(
+                "/ide/db-watch/watches/{id}",
+                get(db_watch_read::<S>)
+                    .patch(db_watch_update::<S>)
+                    .delete(db_watch_delete::<S>),
+            )
+            .route(
+                "/ide/db-watch/watches/{id}/snapshot",
+                post(db_watch_snapshot_now::<S>),
+            ),
     )
 }
 

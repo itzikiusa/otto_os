@@ -14,6 +14,8 @@ export interface IdeDetectedDbAccess {
   line: number;
   /** Only when the detect request named a target: is it a real object there? */
   verified?: boolean | null;
+  /** Rank input: 100 paused frame's file, 60 other stack file, 40 the paused file's folder, 30 active file, 10 elsewhere. */
+  score: number;
 }
 
 export interface IdeSavedDbTarget {
@@ -135,8 +137,9 @@ export type IdeDbWatchTargetRef =
   | { kind: 'ephemeral'; ephemeral_id: string }
   | { kind: 'auto'; engine: IdeDbEngine };
 
-/** `column = value`, sent as a bound parameter (SQL) / an equality match (Mongo).
- *  Redis items have no filter: their `object` IS the key prefix or glob pattern. */
+/** `column = value` (SQL) / an equality match (Mongo). `value`: a number, true/false,
+ *  null (IS NULL) or text of letters, digits and _ . : @ - only (≤ 128) — anything else is
+ *  a 400. Redis items have no filter: their `object` IS the key prefix or glob pattern. */
 export interface IdeDbWatchFilter {
   column: string;
   value: string | number | boolean | null;

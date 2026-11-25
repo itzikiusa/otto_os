@@ -15,11 +15,14 @@ use otto_core::auth::RoleChecker;
 use otto_core::domain::{Capability, Connection, Feature, User, WorkspaceRole};
 use otto_core::{Error, Id, Result};
 use otto_state::{capability_for_role, GrantsRepo, SettingsRepo, WorkspacesRepo};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{ensure_read_only, force_read_only_execution, mcp_query_timeout_ms, DbViewerService};
 use crate::driver::Driver;
-use crate::types::{Engine, NodeKind, NodePath, QueryRequest, ResolvedConfig, TlsConfig};
+use crate::types::{
+    Engine, NodeKind, NodePath, QueryRequest, QueryResult, ResolvedConfig, SchemaNode, TlsConfig,
+};
 
 /// Max Redis keys enriched with full `TYPE` + `TTL` + preview per watch snapshot.
 const REDIS_WATCH_ENRICH_CAP: usize = 50;
@@ -34,10 +37,17 @@ pub struct SavedWatchTarget {
     pub port: u16,
     pub database: Option<String>,
     pub environment: String,
+    /// The real endpoint is on this Mac: a loopback host and no SSH tunnel.
+    pub local: bool,
 }
 
 /// Resolved target endpoint for an IDE DB Watch snapshot query.
-#[derive(Clone)]
+///
+/// [`WatchExecReq`] / [`WatchExecOutcome`] mirror `otto_ide::db_watch`'s
+/// `DbWatchQueryExec` / `DbWatchExecOutcome` field for field: the host
+/// converts one into the other through serde (the two crates share no types).
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum WatchEndpoint {
     Saved {
         connection_id: Id,
@@ -50,9 +60,23 @@ pub enum WatchEndpoint {
     },
 }
 
+/// What a [`WatchExecReq`] asks for.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WatchOp {
+    /// Run `statement` (rows → `columns` / `rows`).
+    #[default]
+    Read,
+    /// The target's watchable objects (names → `objects`).
+    ListObjects,
+    /// `object_name`'s primary key and row estimate.
+    Describe,
+}
+
 /// Read-only snapshot query request executed by [`DbViewerService::execute_watch_query`].
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct WatchExecReq {
+    #[serde(rename = "target")]
     pub endpoint: WatchEndpoint,
     pub engine: Engine,
     pub database: Option<String>,
@@ -60,15 +84,35 @@ pub struct WatchExecReq {
     pub statement: String,
     pub is_custom_query: bool,
     pub limit: usize,
+    #[serde(default)]
+    pub op: WatchOp,
 }
 
-/// Tabular snapshot result returned to `otto-ide`.
-#[derive(Debug, Clone)]
+/// Snapshot / listing / describe result returned to `otto-ide`. Rows are RAW:
+/// the watch diffs them and masks only what an agent reads.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WatchExecOutcome {
     pub target_label: String,
     pub columns: Vec<String>,
     pub rows: Vec<Vec<Value>>,
     pub duration_ms: u64,
+    /// `ListObjects`: names; `Describe`: unused.
+    pub objects: Vec<String>,
+    /// `ListObjects`: the database / schema the names belong to.
+    pub database: Option<String>,
+    /// `Describe`: the primary key (`[]` = none) and the engine's row estimate.
+    pub primary_key: Vec<String>,
+    pub row_estimate: Option<i64>,
+}
+
+/// Most objects one listing returns.
+const WATCH_LIST_CAP: usize = 500;
+
+/// Where a watch op runs: through the service (a saved connection: its pool,
+/// tunnel, access checks) or straight on a driver (a local ephemeral target).
+enum Via<'a> {
+    Saved { id: &'a Id, user: &'a Id },
+    Direct(Arc<dyn Driver>, Box<ResolvedConfig>),
 }
 
 impl DbViewerService {
@@ -140,15 +184,17 @@ impl DbViewerService {
                 let Ok(parsed) = crate::config::parse(&conn, None) else {
                     continue;
                 };
+                let host = if parsed.config.host.is_empty() {
+                    "127.0.0.1".to_string()
+                } else {
+                    parsed.config.host
+                };
                 out.push(SavedWatchTarget {
                     connection_id: conn.id.to_string(),
                     name: conn.name,
                     engine,
-                    host: if parsed.config.host.is_empty() {
-                        "127.0.0.1".into()
-                    } else {
-                        parsed.config.host
-                    },
+                    local: parsed.ssh.is_none() && is_loopback(&host),
+                    host,
                     port: parsed.config.port,
                     database: parsed.config.database,
                     environment: conn.environment.as_str().to_string(),
@@ -158,8 +204,9 @@ impl DbViewerService {
         Ok(out)
     }
 
-    /// Execute a strictly read-only IDE DB Watch snapshot against a saved or
-    /// local loopback ephemeral target.
+    /// Run one strictly read-only IDE DB Watch op against a saved or local
+    /// loopback ephemeral target. Reads never write a DB Explorer history row
+    /// and come back unmasked (the watch masks what an agent reads).
     pub async fn execute_watch_query(
         &self,
         roles: &Arc<dyn RoleChecker>,
@@ -168,192 +215,287 @@ impl DbViewerService {
     ) -> Result<WatchExecOutcome> {
         let started = Instant::now();
         let limit = req.limit.clamp(1, 150);
-        match req.endpoint {
+        let (via, label, default_db) = match &req.endpoint {
             WatchEndpoint::Saved { connection_id } => {
-                let pool = self.connections.pool();
-                if !user.is_root {
-                    GrantsRepo::new(pool.clone())
-                        .check_global(
-                            user,
-                            Feature::Database,
-                            Capability::View,
-                            "saved database watch requires the Database 'view' grant",
-                        )
-                        .await?;
-                }
-                let owner_private = SettingsRepo::new(pool)
-                    .get("connections.owner_private")
-                    .await?
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let conn = self.connections.get(&connection_id).await?;
-                self.check_watch_conn_access(roles, user, &conn, owner_private)
+                let conn = self
+                    .authorize_saved_watch(roles, user, connection_id)
                     .await?;
-                let conn_engine = Engine::from_kind(conn.kind).ok_or_else(|| {
+                let engine = Engine::from_kind(conn.kind).ok_or_else(|| {
                     Error::Invalid(format!(
                         "connection '{}' is not a queryable database",
                         conn.name
                     ))
                 })?;
-                if conn_engine != req.engine {
+                if engine != req.engine {
                     return Err(Error::Invalid(format!(
                         "connection '{}' uses engine '{}', not '{}'",
                         conn.name,
-                        conn_engine.as_str(),
+                        engine.as_str(),
                         req.engine.as_str()
                     )));
                 }
-                ensure_read_only(conn_engine, &req.statement)?;
-
-                if conn_engine == Engine::Redis && !req.is_custom_query {
-                    let redis_node = req
-                        .database
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(|d| {
-                            if d.starts_with("kdb:") {
-                                d.to_string()
-                            } else {
-                                format!("kdb:{d}")
-                            }
-                        })
-                        .unwrap_or_else(|| "kdb:0".to_string());
-                    let child = crate::access::child(Some(&redis_node));
-                    let mut r = self
-                        .resolve(&connection_id, &user.id, child.as_deref(), "db_browse")
-                        .await?;
-                    force_read_only_execution(&mut r.config.params);
-                    let (columns, mut rows) = enrich_redis_prefix(
-                        &*r.driver,
-                        &r.config,
-                        &redis_node,
-                        &req.object_name,
-                        limit,
-                    )
-                    .await?;
-                    self.authorize(&connection_id, &user.id, Some(&redis_node), "db_browse")
-                        .await?;
-                    redact_rows(&mut rows);
-                    return Ok(WatchExecOutcome {
-                        target_label: conn.name,
-                        columns,
-                        rows,
-                        duration_ms: started.elapsed().as_millis() as u64,
-                    });
-                }
-
-                let node = match conn_engine {
-                    Engine::Redis => Some("kdb:0".to_string()),
-                    _ => req
-                        .database
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(|d| format!("db:{d}")),
+                let default_db = crate::config::parse(&conn, None)?.config.database;
+                let via = Via::Saved {
+                    id: connection_id,
+                    user: &user.id,
                 };
-                let qreq = QueryRequest {
-                    statement: req.statement,
-                    max_rows: Some(limit),
-                    node,
-                    timeout_ms: Some(mcp_query_timeout_ms(Some(10_000))),
-                    ..QueryRequest::default()
-                };
-                let res = self.run_read_only(&connection_id, &user.id, &qreq).await?;
-                Ok(WatchExecOutcome {
-                    target_label: conn.name,
-                    columns: res.columns.into_iter().map(|c| c.name).collect(),
-                    rows: res.rows,
-                    duration_ms: res
-                        .stats
-                        .duration_ms
-                        .max(started.elapsed().as_millis() as u64),
-                })
+                (via, conn.name, default_db)
             }
             WatchEndpoint::EphemeralLoopback {
                 port,
                 user: db_user,
                 password,
-                database: target_db,
+                database,
             } => {
                 if !otto_core::auth::root_authority(user) {
                     return Err(otto_core::auth::root_refusal());
                 }
-                ensure_read_only(req.engine, &req.statement)?;
-                let effective_db = req
-                    .database
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
-                    .or_else(|| {
-                        target_db
-                            .as_deref()
-                            .map(str::trim)
-                            .filter(|s| !s.is_empty())
-                            .map(str::to_string)
-                    });
                 let mut cfg = ResolvedConfig {
                     lifecycle: None,
                     engine: req.engine,
                     host: "127.0.0.1".into(),
-                    port,
-                    user: db_user,
-                    password,
-                    database: effective_db.clone(),
+                    port: *port,
+                    user: db_user.clone(),
+                    password: password.clone(),
+                    database: database.clone(),
                     tls: TlsConfig::default(),
                     params: serde_json::json!({}),
                 };
-                force_read_only_execution(&mut cfg.params);
-                let driver = self.registry.get(req.engine);
-                let target_label = format!("{}@127.0.0.1:{port}", req.engine.as_str());
-
-                if req.engine == Engine::Redis && !req.is_custom_query {
-                    let redis_node = effective_db
-                        .as_deref()
-                        .map(|d| {
-                            if d.starts_with("kdb:") {
-                                d.to_string()
-                            } else {
-                                format!("kdb:{d}")
-                            }
-                        })
-                        .unwrap_or_else(|| "kdb:0".to_string());
-                    let (columns, rows) =
-                        enrich_redis_prefix(&*driver, &cfg, &redis_node, &req.object_name, limit)
-                            .await?;
-                    return Ok(WatchExecOutcome {
-                        target_label,
-                        columns,
-                        rows,
-                        duration_ms: started.elapsed().as_millis() as u64,
-                    });
+                // Postgres: the watch's `database` is the schema; the
+                // container's own database stays the connection's.
+                if req.engine != Engine::Postgres {
+                    if let Some(db) = trimmed(req.database.as_deref()) {
+                        cfg.database = Some(db.to_string());
+                    }
                 }
+                force_read_only_execution(&mut cfg.params);
+                let label = format!("{}@127.0.0.1:{port}", req.engine.as_str());
+                let default_db = database.clone();
+                (
+                    Via::Direct(self.registry.get(req.engine), Box::new(cfg)),
+                    label,
+                    default_db,
+                )
+            }
+        };
+        // Postgres: `database` is a schema (default `public`), never the
+        // connection's own database name.
+        let database = trimmed(req.database.as_deref())
+            .map(str::to_string)
+            .or(default_db.filter(|_| req.engine != Engine::Postgres));
+        let mut out = match req.op {
+            WatchOp::ListObjects => {
+                let (db, objects) = self.watch_list(&via, req.engine, database).await?;
+                WatchExecOutcome {
+                    objects,
+                    database: db,
+                    ..Default::default()
+                }
+            }
+            WatchOp::Describe => {
+                self.watch_describe(&via, req.engine, database.as_deref(), &req.object_name)
+                    .await?
+            }
+            WatchOp::Read => self.watch_read(&via, &req, database, limit).await?,
+        };
+        out.target_label = label;
+        out.duration_ms = out.duration_ms.max(started.elapsed().as_millis() as u64);
+        Ok(out)
+    }
 
-                let node = match req.engine {
-                    Engine::Redis => Some("kdb:0".to_string()),
-                    _ => effective_db,
-                };
-                let qreq = QueryRequest {
-                    statement: req.statement,
-                    max_rows: Some(limit),
-                    node,
-                    timeout_ms: Some(mcp_query_timeout_ms(Some(10_000))),
-                    read_only: true,
-                    ..QueryRequest::default()
-                };
-                let res = driver.run(&cfg, &qreq).await?;
-                Ok(WatchExecOutcome {
-                    target_label,
-                    columns: res.columns.into_iter().map(|c| c.name).collect(),
-                    rows: res.rows,
-                    duration_ms: res
-                        .stats
-                        .duration_ms
-                        .max(started.elapsed().as_millis() as u64),
-                })
+    /// Database grant + connection access for a saved watch target.
+    async fn authorize_saved_watch(
+        &self,
+        roles: &Arc<dyn RoleChecker>,
+        user: &User,
+        connection_id: &Id,
+    ) -> Result<Connection> {
+        let pool = self.connections.pool();
+        if !user.is_root {
+            GrantsRepo::new(pool.clone())
+                .check_global(
+                    user,
+                    Feature::Database,
+                    Capability::View,
+                    "saved database watch requires the Database 'view' grant",
+                )
+                .await?;
+        }
+        let owner_private = SettingsRepo::new(pool)
+            .get("connections.owner_private")
+            .await?
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let conn = self.connections.get(connection_id).await?;
+        self.check_watch_conn_access(roles, user, &conn, owner_private)
+            .await?;
+        Ok(conn)
+    }
+
+    async fn watch_read(
+        &self,
+        via: &Via<'_>,
+        req: &WatchExecReq,
+        database: Option<String>,
+        limit: usize,
+    ) -> Result<WatchExecOutcome> {
+        ensure_read_only(req.engine, &req.statement)?;
+        if req.engine == Engine::Redis && !req.is_custom_query {
+            let node = redis_node(database.as_deref());
+            let (columns, rows) = match via {
+                Via::Saved { id, user } => {
+                    // Authorize BEFORE touching the server (the key scan).
+                    self.authorize(id, user, Some(&node), "db_browse").await?;
+                    let child = crate::access::child(Some(&node));
+                    let mut r = self
+                        .resolve(id, user, child.as_deref(), "db_browse")
+                        .await?;
+                    force_read_only_execution(&mut r.config.params);
+                    enrich_redis_prefix(&*r.driver, &r.config, &node, &req.object_name, limit)
+                        .await?
+                }
+                Via::Direct(driver, cfg) => {
+                    enrich_redis_prefix(&**driver, cfg, &node, &req.object_name, limit).await?
+                }
+            };
+            return Ok(WatchExecOutcome {
+                columns,
+                rows,
+                ..Default::default()
+            });
+        }
+        let node = match req.engine {
+            Engine::Redis => Some(redis_node(database.as_deref())),
+            _ => database.map(|d| format!("db:{d}")),
+        };
+        let qreq = QueryRequest {
+            statement: req.statement.clone(),
+            max_rows: Some(limit),
+            node,
+            // MySQL carries its cap IN the statement (`MAX_EXECUTION_TIME`):
+            // a client-side deadline retires the pooled session after every
+            // read (`governed_read`), a fresh TCP/TLS/SSH connect per table
+            // per stop.
+            timeout_ms: (req.engine != Engine::Mysql).then(|| mcp_query_timeout_ms(Some(10_000))),
+            read_only: true,
+            ..QueryRequest::default()
+        };
+        let res: QueryResult = match via {
+            // Native read-only, never a history row (`record: false`).
+            Via::Saved { id, user } => self.run_with(id, user, &qreq, true, false).await?,
+            Via::Direct(driver, cfg) => driver.run(cfg, &qreq).await?,
+        };
+        Ok(WatchExecOutcome {
+            columns: res.columns.into_iter().map(|c| c.name).collect(),
+            rows: res.rows,
+            duration_ms: res.stats.duration_ms,
+            ..Default::default()
+        })
+    }
+
+    async fn watch_children(&self, via: &Via<'_>, path: &str) -> Result<Vec<SchemaNode>> {
+        match via {
+            Via::Saved { id, user } => self.schema_children(id, user, path, None).await,
+            Via::Direct(driver, cfg) => {
+                driver
+                    .schema_children(cfg, &NodePath::parse(path), None)
+                    .await
             }
         }
+    }
+
+    /// The target's watchable objects: MySQL / ClickHouse tables of the
+    /// database, Postgres tables of the schema (default `public`), Mongo
+    /// collections, Redis first-segment key prefixes (`session:`) that exist now.
+    async fn watch_list(
+        &self,
+        via: &Via<'_>,
+        engine: Engine,
+        database: Option<String>,
+    ) -> Result<(Option<String>, Vec<String>)> {
+        let db = match engine {
+            Engine::Postgres => Some(database.unwrap_or_else(|| "public".into())),
+            Engine::Redis => database,
+            _ => Some(
+                database
+                    .ok_or_else(|| Error::Invalid("choose a database to list its tables".into()))?,
+            ),
+        };
+        let path = match engine {
+            Engine::Mysql | Engine::Postgres => {
+                format!("db:{}/folder:tables", db.as_deref().unwrap_or_default())
+            }
+            Engine::Mongodb | Engine::Clickhouse => {
+                format!("db:{}", db.as_deref().unwrap_or_default())
+            }
+            Engine::Redis => redis_node(db.as_deref()),
+        };
+        let mut names: Vec<String> = self
+            .watch_children(via, &path)
+            .await?
+            .into_iter()
+            .filter_map(|n| match n.kind {
+                NodeKind::Table | NodeKind::Collection => Some(n.label),
+                // The namespace node reads `auth:*`; a watch item is the prefix.
+                NodeKind::KeyNamespace => Some(format!(
+                    "{}:",
+                    n.label.trim_end_matches('*').trim_end_matches(':')
+                )),
+                _ => None,
+            })
+            .collect();
+        names.sort();
+        names.dedup();
+        names.truncate(WATCH_LIST_CAP + 1);
+        Ok((db, names))
+    }
+
+    /// `object`'s primary key and the engine's row estimate (Redis: `key`).
+    async fn watch_describe(
+        &self,
+        via: &Via<'_>,
+        engine: Engine,
+        database: Option<&str>,
+        object: &str,
+    ) -> Result<WatchExecOutcome> {
+        if engine == Engine::Redis {
+            return Ok(WatchExecOutcome {
+                primary_key: vec!["key".into()],
+                ..Default::default()
+            });
+        }
+        let (db, name) = match object.split_once('.') {
+            Some((db, name)) => (Some(db), name),
+            None => (database, object),
+        };
+        let db = match (engine, db) {
+            (_, Some(db)) => db,
+            (Engine::Postgres, None) => "public",
+            _ => return Err(Error::Invalid("choose a database for this table".into())),
+        };
+        let leaf = if engine == Engine::Mongodb {
+            "coll"
+        } else {
+            "table"
+        };
+        let path = format!("db:{db}/{leaf}:{name}");
+        let detail = match via {
+            Via::Saved { id, user } => self.object_detail(id, user, &path, true).await?,
+            Via::Direct(driver, cfg) => {
+                driver
+                    .object_detail_with_opts(cfg, &NodePath::parse(&path), true)
+                    .await?
+            }
+        };
+        let primary_key = match engine {
+            Engine::Mongodb => vec!["_id".into()],
+            _ => detail.primary_key,
+        };
+        Ok(WatchExecOutcome {
+            primary_key,
+            row_estimate: detail.row_count,
+            ..Default::default()
+        })
     }
 
     async fn check_watch_conn_access(
@@ -444,10 +586,58 @@ async fn enrich_redis_prefix(
     ))
 }
 
-fn redact_rows(rows: &mut [Vec<Value>]) {
-    for row in rows {
-        for cell in row.iter_mut() {
-            *cell = otto_core::redact::redact_json(cell).value;
+fn trimmed(raw: Option<&str>) -> Option<&str> {
+    raw.map(str::trim).filter(|s| !s.is_empty())
+}
+
+/// `kdb:<n>` for a Redis keyspace given as `n` or `kdb:n` (default 0).
+fn redis_node(database: Option<&str>) -> String {
+    match trimmed(database) {
+        Some(d) if d.starts_with("kdb:") => d.to_string(),
+        Some(d) => format!("kdb:{d}"),
+        None => "kdb:0".into(),
+    }
+}
+
+/// A host name that can only mean this Mac.
+fn is_loopback(host: &str) -> bool {
+    let h = host.trim().trim_start_matches('[').trim_end_matches(']');
+    h.eq_ignore_ascii_case("localhost")
+        || h.parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_loopback_host_is_local() {
+        for h in ["127.0.0.1", "localhost", "::1", "[::1]", "127.0.0.2"] {
+            assert!(is_loopback(h), "{h}");
         }
+        for h in ["10.0.0.5", "db.internal", "0.0.0.0", "192.168.1.2"] {
+            assert!(!is_loopback(h), "{h}");
+        }
+    }
+
+    #[test]
+    fn a_mysql_watch_read_with_its_time_cap_hint_is_read_only() {
+        ensure_read_only(
+            Engine::Mysql,
+            "SELECT /*+ MAX_EXECUTION_TIME(10000) */ * FROM `pr_bo_1`.`session_info` ORDER BY `id` DESC LIMIT 150",
+        )
+        .expect("watch read passes the classifier");
+    }
+
+    #[test]
+    fn watch_types_round_trip_through_their_wire_shape() {
+        let req: WatchExecReq = serde_json::from_value(serde_json::json!({
+            "target": {"ephemeral_loopback": {"port": 1, "user": null, "password": null, "database": null}},
+            "engine": "mysql", "database": null, "object_name": "t", "statement": "SELECT 1",
+            "is_custom_query": false, "limit": 5, "op": "describe"
+        }))
+        .unwrap();
+        assert_eq!(req.op, WatchOp::Describe);
     }
 }

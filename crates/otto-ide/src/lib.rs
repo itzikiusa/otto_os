@@ -118,6 +118,8 @@ pub struct IdeEngine {
     pub projects: projects::ProjectStore,
     pub lsp_pool: Arc<lsp_host::pool::LspPool>,
     pub db_watch: db_watch::DbWatchRegistry,
+    /// Live DB Watches (`db_watch/watch.rs`).
+    pub watches: db_watch::WatchRegistry,
     pub fs_watch: fs_watch::FsWatchRegistry,
     pub netbridge: netbridge::NetBridgeManager,
 }
@@ -156,6 +158,7 @@ impl IdeEngine {
             projects,
             lsp_pool,
             db_watch: db_watch::DbWatchRegistry::new(),
+            watches: db_watch::WatchRegistry::new(),
             fs_watch: fs_watch::FsWatchRegistry::new(),
             netbridge: netbridge::NetBridgeManager::new(data_dir.clone()),
             data_dir,
