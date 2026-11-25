@@ -265,8 +265,15 @@ async fn resolve_watch_target<S: IdeCtx>(
 }
 
 /// A prod-tagged target needs a PERSON's `confirm_production` each time.
+/// A production tag, spelled the ways the UI shows as prod (`envTone` in
+/// ui/src/lib/status.ts): the person's typed confirm and this check agree.
+fn is_production(env: Option<&str>) -> bool {
+    let e = env.unwrap_or_default().trim().to_ascii_lowercase();
+    matches!(e.as_str(), "prod" | "production" | "prd" | "live")
+}
+
 fn check_production(target: &WatchTarget, confirm: bool) -> Result<()> {
-    let prod = target.info.environment.as_deref() == Some("prod");
+    let prod = is_production(target.info.environment.as_deref());
     if prod && !(confirm && !otto_core::auth::request_is_agent()) {
         return Err(Error::Forbidden(format!(
             "'{}' is a production database: a person signed in to Otto must confirm watching it",
@@ -445,4 +452,17 @@ pub(super) async fn db_watch_delete<S: IdeCtx>(
 ) -> ApiResult<Json<IdeOkResp>> {
     ctx.ide().watches.remove(&user, &id)?;
     Ok(Json(IdeOkResp { ok: true }))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn production_is_every_spelling_the_ui_shows_as_prod() {
+        for env in ["prod", "Production", " PRD ", "live"] {
+            assert!(super::is_production(Some(env)), "{env}");
+        }
+        for env in [None, Some("staging"), Some("dev"), Some("producer")] {
+            assert!(!super::is_production(env), "{env:?}");
+        }
+    }
 }

@@ -487,7 +487,9 @@ asks to drive Otto (one **Allow** for the session), then:
 
 Evaluating an expression can run code in the program, so each one asks, showing
 the exact expression; so does a breakpoint condition, hit count or log message
-(the start confirm lists them, and setting one later asks again). Reading a variable by path never asks. Values the agent
+(the start confirm lists them first, and setting one later asks again; a new start clears the
+agent's earlier breakpoints). An agent's start shows its arguments and environment whole — if they
+are too long to read (more than 8 KB together) the start is refused, as is a request body over 8 KB. Reading a variable by path never asks. Values the agent
 reads (locals, inspected paths, responses, DB rows) are redacted by name and
 shape before they reach it; what you see in the IDE is never redacted.
 Everything the agent reads goes to its model provider, as with any agent read.

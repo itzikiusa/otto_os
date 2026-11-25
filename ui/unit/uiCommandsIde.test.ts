@@ -2,8 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadSource } from './sourceHarness.ts';
 import {
-  changedNames, childNamed, confirmSafe, outputTail, pathSegments, shapeDbRead, shapeResponse, shapeResult, newMemory,
-  sensitiveName, startConfirmText, STOP_MAX_CHARS, userMoved,
+  changedNames, childNamed, outputTail, sensitiveName, pathSegments, shapeDbRead, shapeResponse, shapeResult, newMemory,
+  startConfirmText, STOP_MAX_CHARS, userMoved,
 } from '../src/lib/uiCommands/ideShape.ts';
 
 // IDE agent debugging (`otto.ui_ide_debug_*`, lib/uiCommands/ide.ts): the
@@ -183,8 +183,7 @@ function fakeIde() {
   return ide;
 }
 
-function load(detect: unknown = { detected_objects: [], saved_connections: [], ephemeral_targets: [] }) {
-  const detectCalls: any[] = [];
+function load(detect: unknown = { detected_objects: [], saved_connections: [], ephemeral_targets: [] }, detectFor?: (body: any) => unknown) {
   const handlers: Record<string, (args: any, ctx: any) => Promise<any>> = {};
   const uiCommands = {
     UiCommandError,
@@ -197,9 +196,10 @@ function load(detect: unknown = { detected_objects: [], saved_connections: [], e
   const shape = loadSource(new URL('../src/lib/uiCommands/ideShape.ts', import.meta.url), {});
   const posts: { path: string; body: any; resolve: (v: unknown) => void; signal?: AbortSignal }[] = [];
   const gets: string[] = [];
+  const detects: any[] = [];
   const api = {
     get: async (path: string) => { gets.push(path); return { open: true }; },
-    post: async (_path: string, body: any) => { detectCalls.push(body); return typeof detect === 'function' ? detect(body) : detect; },
+    post: async (_path: string, body: any) => (detects.push(body), detectFor?.(body) ?? (typeof detect === 'function' ? detect(body) : detect)),
     long: { post: (path: string, body: any, signal?: AbortSignal) => new Promise((resolve, reject) => {
       posts.push({ path, body, resolve, signal });
       signal?.addEventListener('abort', () => reject(new Error('aborted')));
@@ -210,6 +210,7 @@ function load(detect: unknown = { detected_objects: [], saved_connections: [], e
     '../dbWatchMatch': loadSource(new URL('../src/lib/dbWatchMatch.ts', import.meta.url), {}),
     '../stores/uiControl.svelte': { agentName: (a: { provider: string }) => (a.provider === 'claude' ? 'Claude' : a.provider) },
     '../stores/workspace.svelte': { ws: { currentId: 'w1' } },
+    '../status': loadSource(new URL('../src/lib/status.ts', import.meta.url), {}),
     '../uiCommands': uiCommands,
     './ideDbWatchPort': dbPort,
     './idePort': idePort,
@@ -218,7 +219,7 @@ function load(detect: unknown = { detected_objects: [], saved_connections: [], e
   });
   const ide = fakeIde();
   idePort.idePort.bind(ide);
-  return { handlers, ide, posts, gets, dbPort, detectCalls };
+  return { handlers, ide, posts, gets, dbPort, detects, detectCalls: detects };
 }
 
 function ctx(answer = true) {
@@ -397,7 +398,7 @@ test('request: a response before any stop is returned at once', async () => {
 test('db watch: the agent start names the agent; a declined prod confirm and a failed start come back as errors, never “watching”', async () => {
   const { handlers, ide, dbPort } = load({
     detected_objects: [{ engine: 'mysql', object_name: 'orders' }],
-    saved_connections: [{ connection_id: 'p', name: 'pr_bo prod', engine: 'mysql', local: false }],
+    saved_connections: [{ connection_id: 'p', name: 'pr_bo prod', engine: 'mysql', local: false, environment: 'Production' }],
     ephemeral_targets: [],
   });
   const c = ctx();
@@ -415,7 +416,8 @@ test('db watch: the agent start names the agent; a declined prod confirm and a f
     async diffSince() { return null; },
   });
   await rejectsWith(handlers.ide_debug_db({ action: 'watch', connection_id: 'p' }, c), 'cancelled_by_user');
-  eq(asked[0], { asker: 'Claude' });
+  eq(asked[0], { asker: 'Claude', persist: false }, 'an agent’s pick is never the project’s remembered target');
+  assert.equal(c.confirms.length, 1, 'prod: the store’s typed confirm asks, not a second dialog');
   error = 'connection refused';
   await rejectsWith(handlers.ide_debug_db({ action: 'watch', connection_id: 'p' }, c), 'failed');
   answer = { id: 'w', target: { label: 'pr_bo prod', local: false, engine: 'mysql' }, bind: { debug_session_id: 'dbg1' }, busy: false };
@@ -475,8 +477,8 @@ test('db watch without a launch hint: the engine the code uses, even when a newe
     detected_objects: [{ engine: 'mysql', object_name: 'orders' }],
     saved_connections: [],
     ephemeral_targets: [
-      { ephemeral_id: 'c:redis:3333', engine: 'redis', port: 3333, source: 'container' },
-      { ephemeral_id: 'c:maria:2222', engine: 'mysql', port: 2222, source: 'container' },
+      { ephemeral_id: 'c:redis:3333', engine: 'redis', port: 3333, source: 'testcontainers' },
+      { ephemeral_id: 'c:maria:2222', engine: 'mysql', port: 2222, source: 'testcontainers' },
     ],
   });
   const c = ctx();
@@ -536,12 +538,15 @@ test('C1-001: breakpoint code is shown verbatim — in the start confirm, and as
   assert.ok(!what.includes('c.go'), 'a plain breakpoint is just counted');
   // Later: a plain breakpoint asks nothing, one with code asks every time; a decline sets nothing.
   await handlers.ide_debug_breakpoints({ set: [{ file: 'd.go', line: 1 }] }, c);
-  assert.equal(c.confirms.length, 1);
+  assert.equal(c.confirms.length, 2, 'a plain breakpoint asks too…');
+  assert.equal(c.confirms[1].connId, 'ide-breakpoints:/w/app', '…and may be remembered for the project');
+  assert.equal(c.confirms[0].guarded, true, 'a start runs code: never remembered, no default button');
   const no = { ...c, confirmWrite: async (o: any) => (c.confirms.push(o), false) };
   const before = ide.calls.filter((x: unknown[]) => x[0] === 'bps').length;
   await rejectsWith(handlers.ide_debug_breakpoints({ set: [{ file: 'e.go', line: 2, hit_condition: '> 3' }] }, no), 'cancelled_by_user');
   assert.ok(c.confirms.at(-1).what.includes('e.go:2 — hit count > 3'));
   assert.equal(c.confirms.at(-1).connId, undefined, 'never remembered');
+  assert.equal(c.confirms.at(-1).guarded, true);
   assert.equal(ide.calls.filter((x: unknown[]) => x[0] === 'bps').length, before, 'nothing set after a decline');
 });
 
@@ -558,9 +563,9 @@ test('C1-020: inspect expands only a ref the agent was shown, never one under a 
   await rejectsWith(handlers.ide_debug_inspect({ ref: 12 }, c), 'forbidden');
   await rejectsWith(handlers.ide_debug_inspect({ ref: 13 }, c), 'forbidden');
   const cfg = await handlers.ide_debug_inspect({ ref: 11 }, c);
-  eq(cfg.children.DB, { value: 'DB{…}', ref: 21 });
+  eq(cfg.children['cfg.DB'], { value: 'DB{…}', ref: 21 }, 'keyed by the full path, so redaction judges every segment');
   const db = await handlers.ide_debug_inspect({ ref: 21 }, c); // a ref inspect just showed
-  assert.equal(db.children.Host.value, '"db"');
+  assert.equal(db.children['cfg.DB.Host'].value, '"db"');
   // The next stop starts a new list.
   const go = handlers.ide_debug_control({ action: 'continue', wait_ms: 5_000 }, c);
   later(() => ide.emit(paused(2, 6, [['n', '1']])));
@@ -605,7 +610,109 @@ test('C1-025: confirm text carries no control / bidi characters, hides nothing a
   assert.ok(command.includes('\\u202E\\n') && command.endsWith(tail), 'spelled out and whole: nothing pushed out of view');
   assert.ok(text.includes(`condition ${' '.repeat(600)}os.Exit(1)\\u2066`), 'breakpoint code whole, invisible characters spelled out');
   assert.ok(!text.includes('more characters)'), 'nothing is cut');
-  assert.equal(confirmSafe('a\u2066b', 10), 'a�b');
+  assert.ok(text.indexOf('Code the debugger runs') < text.indexOf('Command: '), 'breakpoint code before anything long');
+});
+
+// ── round 2 ────────────────────────────────────────────────────────────────
+
+test('C2-004: secret names are judged on every path segment and acronym hump; their children stay closed', async () => {
+  for (const n of ['DBPass', 'DBPwd', 'DBSalt', 'SQLDsn', 'cfg.user_pass.Value', 'dbPassword', 'api_key']) assert.ok(sensitiveName(n), n);
+  for (const n of ['Host', 'cfg.DB.Host', 'Passage', 'items[0]']) assert.ok(!sensitiveName(n), n);
+  const { handlers, ide } = load();
+  const c = ctx();
+  const run = handlers.ide_debug_start({ target: { kind: 'main', file: 'main.go' }, wait_ms: 5_000 }, c);
+  later(() => ide.emit(paused(1, 5, [['cfg', 'Config{…}', 11], ['DBPass', 'P{…}', 12]])));
+  await run;
+  await rejectsWith(handlers.ide_debug_inspect({ ref: 12 }, c), 'forbidden');
+  ide.children[11] = [{ name: 'user_pass', value: 'S{…}', variables_reference: 31 }];
+  ide.children[31] = [{ name: 'Value', value: '"s3cret"', variables_reference: 0 }];
+  const cfg = await handlers.ide_debug_inspect({ ref: 11 }, c);
+  assert.ok('cfg.user_pass' in cfg.children, 'keyed by the full path (the bridge masks it by name)');
+  await rejectsWith(handlers.ide_debug_inspect({ ref: 31 }, c), 'forbidden');
+});
+
+test('C2-006: a start lists exactly its breakpoints (an earlier run’s are cleared); a request confirm shows header values and the whole body', async () => {
+  const { handlers, ide } = load();
+  const c = ctx();
+  ide.bps = [{ id: 'old', file: '/w/app/old.go', line: 9, verified: true, condition: 'os.Exit(1)' }];
+  const run = handlers.ide_debug_start({ target: { kind: 'main', file: 'main.go' }, ready_pattern: 'up', breakpoints: [{ file: 'a.go', line: 3 }], wait_ms: 5_000 }, c);
+  later(() => ide.emit(snap({ state: 'running', output: [{ category: 'stdout', text: 'up\n', seq: 1 }] })));
+  await run;
+  eq(ide.bps.map((b: any) => b.file), ['/w/app/a.go'], 'the earlier run’s breakpoint (and its code) is gone');
+  const body = `{"items":[${'1,'.repeat(2000)}1]}`;
+  const req = handlers.ide_debug_request({ method: 'POST', url: 'http://localhost:8080/o', headers: { Authorization: 'Bearer t0k', 'X-Id': ' 7' }, body, wait_ms: 30 }, c);
+  await req;
+  const what = c.confirms.at(-1).what as string;
+  assert.ok(what.includes('Authorization: "Bearer t0k"') && what.includes('X-Id: " 7"'), what.slice(0, 300));
+  assert.ok(what.includes(body), 'the body whole (the daemon refuses one too long to read)');
+});
+
+test('C2-005: a saved connection the agent names asks the person every time, naming it and its environment; no unrelated container is ever picked', async () => {
+  const det = {
+    detected_objects: [{ engine: 'mysql', object_name: 'orders' }],
+    saved_connections: [{ connection_id: 's', name: 'orders-staging', engine: 'mysql', local: false, environment: 'staging' }],
+    ephemeral_targets: [{ ephemeral_id: 'c:other:2222', engine: 'mysql', port: 2222, source: 'container' }],
+  };
+  const { handlers, ide, dbPort } = load(det);
+  const c = ctx();
+  const run = handlers.ide_debug_start({ target: { kind: 'main', file: 'main.go' }, wait_ms: 5_000 }, c);
+  later(() => ide.emit(paused(1, 5)));
+  await run;
+  const started: unknown[] = [];
+  dbPort.ideDbWatchPort.bind({
+    watch: null, error: null,
+    async start(req: unknown) { started.push(req); return { id: 'w', target: { label: 'orders-staging', local: false, engine: 'mysql' }, bind: null, busy: false }; },
+    async stop() {}, async diffSince() { return null; },
+  });
+  // No connection named: another project's plain container is not this run's database.
+  await rejectsWith(handlers.ide_debug_db({ action: 'watch' }, c), 'not_found');
+  assert.equal(started.length, 0);
+  const no = { ...c, confirmWrite: async (o: any) => (c.confirms.push(o), false) };
+  await rejectsWith(handlers.ide_debug_db({ action: 'watch', connection_id: 'orders-staging' }, no), 'cancelled_by_user');
+  const asked = c.confirms.at(-1);
+  assert.ok(asked.what.includes('orders-staging') && asked.what.includes('staging') && asked.what.includes('orders'), asked.what);
+  assert.equal(asked.guarded, true, 'never remembered');
+  assert.equal(started.length, 0, 'nothing watched after a decline');
+  await handlers.ide_debug_db({ action: 'watch', connection_id: 's' }, c);
+  await handlers.ide_debug_db({ action: 'watch', connection_id: 's' }, c);
+  assert.equal(c.confirms.filter((x: any) => x.verb === 'Watch').length, 3, 'asked again every time');
+});
+
+test('C2-008: tables are the code’s names the chosen target really has (any SQL engine), deduplicated; the launch’s env pairs pick the run’s container later too', async () => {
+  const base = {
+    detected_objects: [
+      { engine: 'mysql', object_name: 'orders' }, { engine: 'mysql', object_name: 'orders' },
+      { engine: 'mysql', object_name: 'ghost' }, { engine: 'redis', object_name: 'session:' },
+    ],
+    saved_connections: [],
+    ephemeral_targets: [
+      { ephemeral_id: 'tc:pg:54321', engine: 'postgres', port: 54321, source: 'container' },
+      { ephemeral_id: 'tc:my:3306', engine: 'mysql', port: 3306, source: 'testcontainers' },
+    ],
+  };
+  // With the target named, the daemon verifies each name against it.
+  const verifiedFor = (body: any) => body.target ? {
+    ...base,
+    detected_objects: [
+      { engine: 'mysql', object_name: 'orders', verified: true }, { engine: 'mysql', object_name: 'orders', verified: true },
+      { engine: 'mysql', object_name: 'ghost', verified: false }, { engine: 'redis', object_name: 'session:', verified: null },
+    ],
+  } : undefined;
+  const { handlers, ide, dbPort, detects } = load(base, verifiedFor);
+  const c = ctx();
+  const run = handlers.ide_debug_start({ target: { kind: 'main', file: 'main.go' }, env: { DATABASE_URL: 'postgres://u@127.0.0.1:54321/app' }, wait_ms: 5_000 }, c);
+  later(() => ide.emit(paused(1, 5)));
+  await run;
+  const started: any[] = [];
+  dbPort.ideDbWatchPort.bind({
+    watch: null, error: null,
+    async start(req: unknown) { started.push(req); return { id: 'w', target: { label: 'pg', local: true, engine: 'postgres' }, bind: null, busy: false }; },
+    async stop() {}, async diffSince() { return null; },
+  });
+  await handlers.ide_debug_db({ action: 'watch' }, c);
+  eq(started[0].target, { kind: 'ephemeral', ephemeral_id: 'tc:pg:54321' }, 'the container the launch’s DATABASE_URL names');
+  eq(detects.at(-1).target, { kind: 'ephemeral', ephemeral_id: 'tc:pg:54321' }, 'detect checked the names against it');
+  eq(started[0].items, [{ object: 'orders' }], 'SQL names on a Postgres target, verified, once; ghost and redis prefixes dropped');
 });
 
 test('C1-035: on a Postgres container the agent watches the code’s SQL tables the TARGET verified (detection names SQL mysql), once each', async () => {

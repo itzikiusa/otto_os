@@ -658,8 +658,8 @@
         "keep_breakpoints": { "type": "boolean", "description": "stop: leave your breakpoints in the gutter." },
         "say": { "type": "string", "maxLength": 300 } },
         "additionalProperties": false } },
-    { "name": "ide_debug_breakpoints", "module": "ide", "route": "ide", "risk": "navigate", "timeout_ms": 15000,
-      "description": "Add or remove breakpoints in the debug session you started without moving execution. The user sees them in the gutter, marked as yours. Returns your breakpoints with `verified`, the line each bound to, and the debugger's message when one did not bind.",
+    { "name": "ide_debug_breakpoints", "module": "ide", "route": "ide", "risk": "local_write", "timeout_ms": 120000,
+      "description": "Add or remove breakpoints in the debug session you started without moving execution. The user sees them in the gutter, marked as yours. Returns your breakpoints with `verified`, the line each bound to, and the debugger's message when one did not bind. The user confirms new breakpoints; one with a condition, hit count or log message (code the debugger runs) every time.",
       "input_schema": { "type": "object", "properties": {
         "set": { "type": "array", "maxItems": 50, "items": { "type": "object", "required": ["file", "line"], "additionalProperties": false, "properties": {
           "file": { "type": "string", "maxLength": 4096 },
