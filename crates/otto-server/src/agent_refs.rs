@@ -35,6 +35,7 @@ use std::time::Duration;
 
 use axum::extract::{Query, State};
 use axum::Json;
+use futures_util::StreamExt;
 use otto_core::auth::AuthContext;
 use otto_core::Error;
 use serde::Deserialize;
@@ -808,9 +809,14 @@ pub(crate) async fn load_candidates(
             });
             let mut first_err: Option<Error> = None;
             let mut any_ok = false;
-            for (ws, name) in &wss {
-                let path = kind.list.replace("{ws}", &crate::mcp_outward::seg(ws));
-                match caller.get(&path).await {
+            // In order, up to 8 at a time: one list per workspace one after
+            // another was 20 x ~25 ms (refs/resolve p50 430 ms). A library
+            // stops at its first answer, so it still asks one at a time.
+            let width = if kind.scope == Scope::Library { 1 } else { 8 };
+            let lists = wss.iter().map(|(ws, name)| list_in(caller, kind, ws, name));
+            let mut lists = futures_util::stream::iter(lists.collect::<Vec<_>>()).buffered(width);
+            while let Some((ws, name, list)) = lists.next().await {
+                match list {
                     Ok(v) => {
                         any_ok = true;
                         let listing = (kind.scope == Scope::Workspace)
@@ -837,6 +843,17 @@ pub(crate) async fn load_candidates(
     let mut seen: HashSet<String> = HashSet::new();
     out.retain(|c| seen.insert(c.id.clone()));
     Ok(out)
+}
+
+/// One workspace's `kind.list`, tagged with the workspace it came from.
+async fn list_in<'a>(
+    caller: &SelfCaller,
+    kind: &RefKind,
+    ws: &'a String,
+    name: &'a String,
+) -> (&'a String, &'a String, Result<Value, Error>) {
+    let path = kind.list.replace("{ws}", &crate::mcp_outward::seg(ws));
+    (ws, name, caller.get(&path).await)
 }
 
 /// The token's workspace pin, if any.
