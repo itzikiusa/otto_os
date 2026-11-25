@@ -73,7 +73,7 @@ function sameBind(a: IdeDbWatchBind | null | undefined, b: IdeDbWatchBind | null
     : 'run_id' in a && 'run_id' in b && a.run_id === b.run_id;
 }
 
-function refOfWatch(w: IdeDbWatch): IdeDbWatchTargetRef {
+export function refOfWatch(w: IdeDbWatch): IdeDbWatchTargetRef {
   return w.target.kind === 'saved'
     ? { kind: 'saved', connection_id: w.target.connection_id ?? '' }
     : { kind: 'ephemeral', ephemeral_id: w.target.ephemeral_id ?? '' };
@@ -286,20 +286,21 @@ class IdeDbWatchController {
 
   /** Targets + ranked objects in code; with `target`, each object is verified
    *  against that target's real tables. */
-  async discover(opts: { debugSessionId?: string | null; target?: IdeDbWatchTarget | IdeDbWatchTargetRef | null } = {}): Promise<void> {
+  async discover(opts: { debugSessionId?: string | null; target?: IdeDbWatchTarget | IdeDbWatchTargetRef | null; database?: string | null } = {}): Promise<void> {
     if (!this.root) return;
     const gen = this.gen;
     this.detectLoading = true;
     this.detectError = null;
     const t = opts.target;
-    const target = t ? ('target_kind' in t ? targetRefOf(t) : t) : this.watch ? refOfWatch(this.watch) : null;
+    // Only a target the caller names (the person's act) reaches a database; never the watch by default.
+    const target = t ? ('target_kind' in t ? targetRefOf(t) : t) : null;
     try {
       const req: IdeDbWatchDetectReq = {
         root: this.root,
         active_file: this.activeFile,
         additional_roots: this.additionalRoots,
         target,
-        database: this.watch?.database ?? null,
+        database: opts.database ?? (t && 'target_kind' in t ? (t.database ?? null) : null),
         debug_session_id: opts.debugSessionId ?? (this.liveBind && 'debug_session_id' in this.liveBind ? this.liveBind.debug_session_id : null),
         // The panel's target is the person's own pick (or their watch).
         confirm_target: target ? true : undefined,
@@ -326,7 +327,7 @@ class IdeDbWatchController {
       const resp = await api.post<IdeDbWatchObjectsResp>('/ide/db-watch/objects', {
         root: this.root,
         target: ref,
-        database: this.watch?.database ?? this.pendingTarget?.database ?? null,
+        database: this.pendingTarget ? (this.pendingTarget.database ?? null) : (this.watch?.database ?? null),
         confirm_target: true, // the person's own pick (or their watch)
       });
       if (gen !== this.gen) return;
@@ -403,6 +404,7 @@ class IdeDbWatchController {
       this.pendingTarget = null;
       this.pendingItems = [];
       this.prodWaiting = null;
+      this.liveWatch = false; // never carried over to another target
       if (opts.persist !== false) this.remember(w);
       await this.refresh();
       return w;

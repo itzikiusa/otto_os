@@ -36,12 +36,12 @@
     targetPlace,
     unverifiedNames,
   } from './ideDbWatchModel';
-  import { ideDbWatch } from './ideDbWatchState.svelte';
+  import { ideDbWatch, refOfWatch } from './ideDbWatchState.svelte';
 
   const w = $derived(ideDbWatch.watch);
   const read = $derived(ideDbWatch.read);
   const pending = $derived(ideDbWatch.pendingTarget);
-  const engine = $derived(w?.target.engine ?? pending?.engine ?? null);
+  const engine = $derived(pending?.engine ?? w?.target.engine ?? null);
   const items = $derived<IdeDbWatchItemDiff[]>(read?.items ?? []);
   const changedItems = $derived(items.filter((i) => i.error || i.added_count + i.modified_count + i.removed_count > 0));
   const quietItems = $derived(items.filter((i) => !i.error && i.added_count + i.modified_count + i.removed_count === 0));
@@ -124,7 +124,8 @@
 
   async function openTablesMenu(): Promise<void> {
     if (!engine) return;
-    await ideDbWatch.discover({ target: pending ?? undefined });
+    // Tables ▾ names the target it lists (the picked one, else the watched one).
+    await ideDbWatch.discover(pending ? { target: pending } : w ? { target: refOfWatch(w), database: w.database } : {});
     showTablesMenu();
   }
 
@@ -146,7 +147,7 @@
       };
     });
     const missing = unverifiedNames(ideDbWatch.detected, engine);
-    const db = ideDbWatch.watch?.database ?? pending?.database ?? 'the target';
+    const db = (pending ? pending.database : ideDbWatch.watch?.database) ?? 'the target';
     const list: MenuItem[] = [
       { label: engine === 'redis' ? 'Add key prefix…' : engine === 'mongodb' ? 'Add collection…' : 'Add table…', icon: 'plus', pinned: true, disabled: full, action: () => void openObjectsMenu() },
       ...(engine === 'redis' ? [{ label: 'Key pattern…', icon: 'edit', pinned: true, disabled: full, action: () => void addPattern() } as MenuItem] : []),
