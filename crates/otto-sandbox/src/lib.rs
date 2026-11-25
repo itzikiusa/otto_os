@@ -537,9 +537,12 @@ impl SandboxPolicy {
         // `<data_dir>/pty-holders`, and their short-path fallbacks
         // `/tmp/otto-rth-<hash>` / `$TMPDIR/otto-ptyh-<hash>`): connecting to
         // one replays another session's output and types into it, and a file
-        // deny does not stop `connect()`. One `remote unix-socket` per filter.
+        // deny does not stop `connect()`. Otto's live OpenSSH ControlMaster
+        // sockets (IDE `/tmp/oi-<pid>-<n>/c.s`, SFTP `$TMPDIR/otto-sftp-*/ctl.sock`)
+        // too: a mux client rides the master's logged-in connection with no
+        // credential of its own. One `remote unix-socket` per filter.
         let mut sockets = vec![
-            r#"(remote unix-socket (path-regex #"/otto-(rth|ptyh)-[0-9a-f]+/[^/]+$"))"#.to_string(),
+            r#"(remote unix-socket (path-regex #"/(otto-(rth|ptyh)-[0-9a-f]+|oi-[0-9]+-[0-9]+|otto-sftp-[^/]+)/[^/]+$"))"#.to_string(),
         ];
         if data_dir_set {
             for d in ["runtime-holders", "pty-holders"] {
@@ -616,13 +619,6 @@ impl SandboxPolicy {
             "(deny file-read* file-write* {})",
             secrets.join(" ")
         ));
-        // Live OpenSSH ControlMaster sockets (IDE `/tmp/oi-<pid>-<n>/c.s`, SFTP
-        // `$TMPDIR/otto-sftp-*/ctl.sock`) would hand this session a logged-in
-        // shell on the remote host without the `~/.ssh` it is denied above.
-        pol.trailing_rules.push(
-            r#"(deny network-outbound (remote unix-socket (path-regex #"/(oi-[0-9]+-[0-9]+|otto-sftp-[^/]+)/[^/]+$")))"#
-                .to_string(),
-        );
         // Container engine sockets (Docker Desktop, Kiri, Otto, OrbStack,
         // Colima, Lima, Rancher Desktop, `/var/run/docker.sock`, plus any
         // active `DOCKER_HOST`/`KIRI_SOCKET` local Unix sockets): talking to a
@@ -1330,7 +1326,8 @@ mod tests {
                 sbpl[sockets..].contains(&format!("(remote unix-socket (subpath \"{data}/{d}\"))"))
             );
         }
-        assert!(sbpl[sockets..].contains(r#"/otto-(rth|ptyh)-[0-9a-f]+/[^/]+$"#));
+        assert!(sbpl[sockets..]
+            .contains(r#"/(otto-(rth|ptyh)-[0-9a-f]+|oi-[0-9]+-[0-9]+|otto-sftp-[^/]+)/[^/]+$"#));
     }
 
     /// Design-assist turns edit `<data>/design/<artifact>/work/**` in place:
