@@ -291,6 +291,8 @@ class IdeDbWatchController {
         target,
         database: this.watch?.database ?? null,
         debug_session_id: opts.debugSessionId ?? (this.liveBind && 'debug_session_id' in this.liveBind ? this.liveBind.debug_session_id : null),
+        // The panel's target is the person's own pick (or their watch).
+        confirm_target: target ? true : undefined,
       };
       const resp = await api.post<IdeDbWatchDetectResp>('/ide/db-watch/detect', req);
       if (gen !== this.gen) return;
@@ -315,6 +317,7 @@ class IdeDbWatchController {
         root: this.root,
         target: ref,
         database: this.watch?.database ?? this.pendingTarget?.database ?? null,
+        confirm_target: true, // the person's own pick (or their watch)
       });
       if (gen !== this.gen) return;
       this.objects = resp.objects ?? [];

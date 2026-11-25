@@ -115,6 +115,7 @@ pub(super) async fn db_watch_detect<S: IdeCtx>(
         .collect();
     if let Some(target_ref) = &req.target {
         let target = resolve_watch_target(&ctx, &user, target_ref).await?;
+        check_contact(&target, req.confirm_target)?;
         let listed = list_objects(&ctx, &user, &target, req.database.clone()).await?;
         for obj in &mut detected_objects {
             let a = &obj.access;
@@ -283,6 +284,19 @@ fn check_production(target: &WatchTarget, confirm: bool) -> Result<()> {
     Ok(())
 }
 
+/// Listing a saved database that is not on this Mac dials it (a production
+/// one may well be tagged "dev"): only after a person picked or confirmed that
+/// exact target (`confirm_target`), never on an agent credential's own say.
+fn check_contact(target: &WatchTarget, confirmed: bool) -> Result<()> {
+    if !target.info.local && !(confirmed && !otto_core::auth::request_is_agent()) {
+        return Err(Error::Forbidden(format!(
+            "'{}' is not on this Mac: a person must confirm connecting to it first",
+            target.info.label
+        )));
+    }
+    Ok(())
+}
+
 async fn list_objects<S: IdeCtx>(
     ctx: &S,
     user: &User,
@@ -311,6 +325,7 @@ pub(super) async fn db_watch_objects<S: IdeCtx>(
 ) -> ApiResult<Json<IdeDbWatchObjectsResp>> {
     authorize_root(&ctx, &user, &req.root).await?;
     let target = resolve_watch_target(&ctx, &user, &req.target).await?;
+    check_contact(&target, req.confirm_target)?;
     let mut out = list_objects(&ctx, &user, &target, req.database).await?;
     let truncated = out.objects.len() > 500;
     out.objects.truncate(500);
