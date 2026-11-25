@@ -9,11 +9,13 @@ import { api } from '../../../lib/api/client';
 import { confirmer } from '../../../lib/confirm.svelte';
 import { agentName, uiControl } from '../../../lib/stores/uiControl.svelte';
 import { UiCommandError } from '../../../lib/uiCommands';
+import { ideDbWatchPort } from '../../../lib/uiCommands/ideDbWatchPort';
 import { dismissOnAbort } from '../../../lib/uiCommands/pagePort';
 import {
   registerIdePort, type IdeAgent, type IdeAgentBreakpointSpec, type IdeDebugCommand, type IdePort, type IdeResolvedLaunch,
 } from '../../../lib/uiCommands/idePort';
 import { IDE_OPEN_THREAD_EVENT } from '../agent/ideAgentState.svelte';
+import { ideDbWatch } from '../dbwatch/ideDbWatchState.svelte';
 import { ide } from '../ideStore.svelte';
 import { mutatePathBreakpoints } from '../shell/ideProjectHelpers';
 import { ideDebugLaunch, isDebugLaunchedHere } from '../store/ideDebugLaunch.svelte';
@@ -268,9 +270,10 @@ const port: IdePort = {
   },
 };
 
-/** The IDE page binds the port while it is mounted (`$effect(() => bindIdeAgentPort())`). */
+/** The IDE page binds the ports (debugger, DB Watch) while it is mounted (`$effect(() => bindIdeAgentPort())`). */
 export function bindIdeAgentPort(): () => void {
   const unbind = registerIdePort(port);
+  const unbindDb = ideDbWatchPort.bind(ideDbWatch);
   const stop = $effect.root(() => {
     $effect(() => {
       const snap = ide.activeDebug;
@@ -284,5 +287,6 @@ export function bindIdeAgentPort(): () => void {
   return () => {
     stop();
     unbind();
+    unbindDb();
   };
 }

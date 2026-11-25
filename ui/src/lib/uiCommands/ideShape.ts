@@ -7,7 +7,7 @@
 // (ui/unit/uiCommandsIde.test.ts).
 
 import type { ApiResponse, IdeDebugOutput, IdeDebugSessionSnapshot, IdeVariable } from '../api/types';
-import type { AgentDbRead } from './ideDbWatchPort';
+import type { IdeDbWatchReadResp } from '../api/types/ide-db-watch';
 import type { IdeAgentBreakpoint } from './idePort';
 
 export const STOP_MAX_CHARS = 16 * 1024;
@@ -21,6 +21,7 @@ export const SOURCE_RADIUS = 6;
 export const INSPECT_VALUE_MAX = 2048;
 export const EVAL_MAX = 4096;
 export const BODY_MAX = 16 * 1024;
+const DLV_BANNER = "Type 'dlv help' for list of commands.";
 
 /** What the handlers remember per agent session between calls. */
 export interface DebugMemory {
@@ -97,7 +98,8 @@ export function outputTail(output: readonly IdeDebugOutput[], afterSeq: number):
     text += o.text;
   });
   if (text.length > TAIL_CHARS) text = `…${text.slice(text.length - TAIL_CHARS)}`;
-  const lines = text.split('\n');
+  // Delve's console banner is the debugger's, not the program's output.
+  const lines = text.split('\n').filter((l) => l !== DLV_BANNER);
   if (lines[lines.length - 1] === '') lines.pop();
   return { lines: lines.slice(-TAIL_LINES).map((l) => clip(l, LINE_MAX)), seq };
 }
@@ -274,7 +276,7 @@ export function startConfirmText(p: {
 /** DB Watch rows for the agent: per object the counts and ≤ `maxRows` rows,
  *  each row an object keyed by COLUMN (so it masks by name) — a changed row
  *  lists its changed cells only. */
-export function shapeDbRead(read: AgentDbRead | null, maxRows: number): Record<string, unknown> {
+export function shapeDbRead(read: IdeDbWatchReadResp | null, maxRows: number): Record<string, unknown> {
   if (!read) return { objects: [] };
   return {
     from_seq: read.from_seq,

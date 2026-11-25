@@ -78,6 +78,8 @@ test('shape: user_moved only when the person moved it, output tail by seq, chang
   assert.equal(userMoved(snap({ state: 'running', stop_seq: 2 }) as any, mem), true, 'the person continued');
   assert.equal(userMoved(paused(3, 6) as any, { ...mem, expectMove: true }), false, 'the agent moved it');
   assert.deepEqual(outputTail([{ category: 'stdout', text: 'a\nb', seq: 4 }, { category: 'stdout', text: 'c\n', seq: 5 }], 4), { lines: ['c'], seq: 5 });
+  // Delve's own console banner is not the program's output.
+  assert.deepEqual(outputTail([{ category: 'console', text: "Type 'dlv help' for list of commands.\n", seq: 1 }, { category: 'stdout', text: 'listening on :8080\n', seq: 2 }], 0).lines, ['listening on :8080']);
   assert.deepEqual(changedNames({}, { a: '1' }), []);
 });
 
@@ -103,9 +105,9 @@ test('shape: paths, children, responses, the start confirm and DB rows', () => {
     assert.ok(text.includes(part), `${part} missing from:\n${text}`);
   }
   const db = shapeDbRead({
-    from_seq: 1, to_seq: 2,
+    watch: null as never, compare: 'previous_stop', from_seq: 1, to_seq: 2,
     items: [{
-      object: 'orders', window_note: 'all 3 rows', columns: ['id', 'secret_key'], added_count: 1, modified_count: 1, removed_count: 0, more_count: 0,
+      object: 'orders', engine: 'mysql', executed_query: '', window_full: false, unchanged_count: 1, window_note: 'all 3 rows', columns: ['id', 'secret_key'], added_count: 1, modified_count: 1, removed_count: 0, more_count: 0,
       diffs: [
         { key: '1', kind: 'added', row: [1, '[redacted]'], changes: [] },
         { key: '2', kind: 'modified', row: [2, 'x'], changes: [{ column: 'secret_key', before: '[redacted]', after: '[redacted]', masked: true }] },
@@ -158,7 +160,7 @@ function fakeIde() {
   return ide;
 }
 
-function load() {
+function load(detect: unknown = { detected_objects: [], saved_connections: [], ephemeral_targets: [] }) {
   const handlers: Record<string, (args: any, ctx: any) => Promise<any>> = {};
   const uiCommands = {
     UiCommandError,
@@ -173,7 +175,7 @@ function load() {
   const gets: string[] = [];
   const api = {
     get: async (path: string) => { gets.push(path); return { open: true }; },
-    post: async () => ({ detected_objects: [], saved_connections: [], ephemeral_targets: [] }),
+    post: async () => detect,
     long: { post: (path: string, body: any) => new Promise((resolve) => posts.push({ path, body, resolve })) },
   };
   loadSource(new URL('../src/lib/uiCommands/ide.ts', import.meta.url), {
@@ -362,6 +364,81 @@ test('request: a response before any stop is returned at once', async () => {
   eq(r.request.headers, { 'x-token': 't' });
   assert.equal(r.state, 'running');
   assert.equal(r.stop, undefined);
+});
+
+test('db watch: the agent start names the agent; a declined prod confirm and a failed start come back as errors, never “watching”', async () => {
+  const { handlers, ide, dbPort } = load({
+    detected_objects: [{ engine: 'mysql', object_name: 'orders' }],
+    saved_connections: [{ connection_id: 'p', name: 'pr_bo prod', engine: 'mysql', local: false }],
+    ephemeral_targets: [],
+  });
+  const c = ctx();
+  const run = handlers.ide_debug_start({ target: { kind: 'main', file: 'main.go' }, wait_ms: 5_000 }, c);
+  later(() => ide.emit(paused(1, 5)));
+  await run;
+  const asked: unknown[] = [];
+  let answer: unknown = null;
+  let error: string | null = null;
+  dbPort.ideDbWatchPort.bind({
+    watch: null,
+    get error() { return error; },
+    async start(_req: unknown, opts: unknown) { asked.push(opts); return answer; },
+    async stop() {},
+    async diffSince() { return null; },
+  });
+  await rejectsWith(handlers.ide_debug_db({ action: 'watch', connection_id: 'p' }, c), 'cancelled_by_user');
+  eq(asked[0], { asker: 'Claude' });
+  error = 'connection refused';
+  await rejectsWith(handlers.ide_debug_db({ action: 'watch', connection_id: 'p' }, c), 'failed');
+  answer = { id: 'w', target: { label: 'pr_bo prod', local: false, engine: 'mysql' }, bind: { debug_session_id: 'dbg1' }, busy: false };
+  error = null;
+  const ok = await handlers.ide_debug_db({ action: 'watch', connection_id: 'p' }, c);
+  assert.equal(ok.watching, true);
+});
+
+test('say: a move without one clears the last stop’s narration; a status without one keeps it', async () => {
+  const { handlers, ide } = load();
+  const c = ctx();
+  const run = handlers.ide_debug_start({ target: { kind: 'main', file: 'main.go' }, wait_ms: 5_000 }, c);
+  later(() => ide.emit(paused(1, 5)));
+  await run;
+  const says = () => ide.calls.filter((x: unknown[]) => x[0] === 'say').map((x: unknown[]) => x[1]);
+  await handlers.ide_debug_control({ action: 'status', say: 'Paused before the write' }, c);
+  await handlers.ide_debug_control({ action: 'status' }, c);
+  eq(says(), ['Paused before the write']);
+  const go = handlers.ide_debug_control({ action: 'step_over', wait_ms: 5_000 }, c);
+  later(() => ide.emit(paused(2, 6)));
+  await go;
+  eq(says(), ['Paused before the write', '']);
+  await handlers.ide_debug_control({ action: 'status', say: 'The row is written' }, c);
+  const req = handlers.ide_debug_request({ url: 'http://localhost:8080/orders', wait_ms: 5_000 }, c);
+  later(() => ide.emit(paused(3, 5)));
+  await req;
+  eq(says(), ['Paused before the write', '', 'The row is written', ''], 'a request moves the program too');
+});
+
+test('db_watch on start: the container the launch names (its DSN port) is watched, not just the newest one', async () => {
+  const { handlers, ide, dbPort } = load({
+    detected_objects: [{ engine: 'mysql', object_name: 'orders' }],
+    saved_connections: [],
+    ephemeral_targets: [
+      { ephemeral_id: 'tc:new:1111', engine: 'mysql', port: 1111, source: 'testcontainers' },
+      { ephemeral_id: 'tc:mine:2222', engine: 'mysql', port: 2222, source: 'container' },
+    ],
+  });
+  const asked: any[] = [];
+  dbPort.ideDbWatchPort.bind({
+    watch: null,
+    error: null,
+    async start(req: unknown) { asked.push(req); return { id: 'w', target: { label: 'mine', local: true, engine: 'mysql' }, bind: null, busy: false }; },
+    async stop() {},
+    async diffSince() { return null; },
+  });
+  const run = handlers.ide_debug_start({ target: { kind: 'main', file: 'main.go' }, env: { ORDERS_DSN: 'root:pw@tcp(127.0.0.1:2222)/shop' }, db_watch: true, wait_ms: 5_000 }, ctx());
+  later(() => ide.emit(paused(1, 5)));
+  const r = await run;
+  assert.equal(r.db.watching, true);
+  eq(asked[0].target, { kind: 'ephemeral', ephemeral_id: 'tc:mine:2222' });
 });
 
 test('db: without the IDE’s DB Watch bound it says so; with it, a stop carries the masked diff of the bound watch', async () => {

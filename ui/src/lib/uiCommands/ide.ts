@@ -21,7 +21,8 @@ import type { ApiResponse, IdeDbWatchDetectResp, IdeDebugPortResp, IdeDebugSessi
 import { agentName } from '../stores/uiControl.svelte';
 import { ws } from '../stores/workspace.svelte';
 import { registerUiCommands, UiCommandError, type UiCommandCtx } from '../uiCommands';
-import { ideDbWatchPort, type AgentDbTargetRef, type IdeDbWatchAgentOps } from './ideDbWatchPort';
+import type { IdeDbWatch, IdeDbWatchTargetRef } from '../api/types/ide-db-watch';
+import { ideDbWatchPort, type IdeDbWatchAgentOps } from './ideDbWatchPort';
 import { idePort, type IdeAgentBreakpointSpec, type IdeDebugCommand, type IdeDebugTarget, type IdePort } from './idePort';
 import {
   childNamed, clip, EVAL_MAX, newMemory, pathSegments, relPath, shapeBreakpoints, shapeDbRead,
@@ -145,11 +146,15 @@ async function result(ide: IdePort, ctx: UiCommandCtx, snap: IdeDebugSessionSnap
   return shaped.result;
 }
 
+/** The debug session a watch follows, or null. */
+const boundTo = (w: IdeDbWatch | null | undefined): string | null =>
+  w?.bind && 'debug_session_id' in w.bind ? w.bind.debug_session_id : null;
+
 /** `Stop.db`: the bound watch's rows changed since the previous stop (≤ 5 per object). */
 async function stopDb(debugId: string): Promise<unknown> {
   const db = ideDbWatchPort.peek();
   const w = db?.watch;
-  if (!db || !w || w.bind?.debug_session_id !== debugId) return undefined;
+  if (!db || !w || boundTo(w) !== debugId) return undefined;
   try {
     // The daemon checkpoints on the stop itself; give a running one a moment.
     for (let i = 0; i < 30 && db.watch?.busy; i++) await new Promise((r) => setTimeout(r, 100));
@@ -164,14 +169,16 @@ async function armDbWatch(
   db: IdeDbWatchAgentOps,
   snap: IdeDebugSessionSnapshot,
   root: string,
+  asker: string,
   args: { objects?: { object: string; filter?: { column: string; value: string | number | boolean } }[]; connection_id?: string },
+  launchText = '',
 ): Promise<Record<string, unknown>> {
   const det = await api.post<IdeDbWatchDetectResp>('/ide/db-watch/detect', {
     root,
     active_file: snap.paused_file ?? null,
     debug_session_id: snap.id,
   });
-  let target: AgentDbTargetRef;
+  let target: IdeDbWatchTargetRef;
   let engine: string | undefined;
   let local = true;
   if (args.connection_id) {
@@ -184,20 +191,24 @@ async function armDbWatch(
     }
     target = { kind: 'saved', connection_id: c.connection_id };
     engine = c.engine;
-    local = (c as { local?: boolean }).local === true; // `local` ships with the watch engine
+    local = c.local;
   } else {
-    // The run's own local database (Testcontainers / a local process), never a saved one.
-    const t = det.ephemeral_targets.find((x) => x.source !== 'container') ?? det.ephemeral_targets[0];
+    // The run's own local database, never a saved one: the container whose port
+    // the launch names (a DSN in env / args), else the newest local one.
+    const named = det.ephemeral_targets.find((x) => new RegExp(`[:=]${x.port}(?!\\d)`).test(launchText));
+    const t = named ?? det.ephemeral_targets.find((x) => x.source !== 'container') ?? det.ephemeral_targets[0];
     const e = t?.engine ?? det.detected_objects[0]?.engine;
     if (!e) throw new UiCommandError('not_found', 'No local database found for this run — pass `connection_id` (a saved connection).');
-    target = { kind: 'auto', engine: e };
+    target = named ? { kind: 'ephemeral', ephemeral_id: named.ephemeral_id } : { kind: 'auto', engine: e };
     engine = e;
   }
   const items = args.objects?.length
     ? args.objects
     : det.detected_objects.filter((o) => o.engine === engine).slice(0, local ? 8 : 3).map((o) => ({ object: o.object_name }));
   if (!items.length) throw new UiCommandError('not_found', 'No tables found in the code near this stop — pass `objects`.');
-  await db.start({ target, items, bind: { debug_session_id: snap.id } });
+  if (!(await db.start({ target, items, bind: { debug_session_id: snap.id } }, { asker }))) {
+    throw db.error ? new UiCommandError('failed', db.error) : declined('watching that database');
+  }
   return { watching: true, target: db.watch?.target.label ?? null, objects: items.map((i) => i.object) };
 }
 
@@ -285,7 +296,7 @@ registerUiCommands('ide', {
     if (args.db_watch && !ended(now)) {
       const db = ideDbWatchPort.peek();
       if (!db) out.db = { error: 'DB Watch isn’t available in this Otto window.' };
-      else out.db = await armDbWatch(db, now, plan.root, {}).catch((e) => ({ error: errText(e) }));
+      else out.db = await armDbWatch(db, now, plan.root, agentName(ctx.agent), {}, [...Object.values(plan.env), ...(args.args ?? [])].join(' ')).catch((e) => ({ error: errText(e) }));
     }
     return out;
   },
@@ -297,7 +308,8 @@ registerUiCommands('ide', {
     const t0 = Date.now();
     const ide = await idePort.get(ctx.signal, 20_000);
     const { snap, mem } = mine(ide, ctx);
-    if (args.say) ide.say(ctx.agent, args.say);
+    // A move starts a new stop: the last stop's narration would be wrong there.
+    if (args.say || args.action !== 'status') ide.say(ctx.agent, args.say ?? '');
     const sid = ctx.agent.session_id;
     const wait = (): number => Math.min(args.wait_ms ?? 30_000, t0 + BUDGET_MS - Date.now());
     const a = args.action;
@@ -427,6 +439,7 @@ registerUiCommands('ide', {
     const sid = ctx.agent.session_id;
     ide.consoleNote(`→ ${method} ${url.host}${url.pathname}${url.search} (${agentName(ctx.agent)})`);
     memory.set(sid, { ...mem, expectMove: true });
+    ide.say(ctx.agent, '');
     let response: Record<string, unknown> | null = null;
     let returned = false;
     const sent = api.long
@@ -467,7 +480,7 @@ registerUiCommands('ide', {
     const db = await ideDbWatchPort.get(ctx.signal, 5_000).catch(() => {
       throw new UiCommandError('failed', 'DB Watch isn’t available in this Otto window.');
     });
-    const ours = db.watch?.bind?.debug_session_id === snap.id;
+    const ours = boundTo(db.watch) === snap.id;
     if (args.action === 'unwatch') {
       if (ours) await db.stop();
       return { watching: false };
@@ -476,7 +489,7 @@ registerUiCommands('ide', {
       if (!ours) throw new UiCommandError('not_found', 'Nothing is watched for your debug session — call ide_debug_db with action "watch" first.');
       return shapeDbRead(await db.diffSince(args.since ?? 'previous_stop', { forAgent: true }), 50);
     }
-    const armed = await armDbWatch(db, snap, mem.root, args);
+    const armed = await armDbWatch(db, snap, mem.root, agentName(ctx.agent), args);
     return { ...armed, ...shapeDbRead(await db.diffSince('start', { forAgent: true }), 50) };
   },
 });
