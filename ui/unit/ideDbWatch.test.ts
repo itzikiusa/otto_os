@@ -227,7 +227,7 @@ test('never auto-arms a saved connection nobody picked, even a local one', async
 test('a remembered saved pick arms at session start — unless that connection is now tagged prod', async () => {
   for (const [env, expected] of [['staging', 1], ['prod', 0]] as const) {
     const ls = new Map([[memoryKey('/r'), JSON.stringify({ target: { kind: 'saved', connection_id: 'stg' }, items: [{ object: 'session_info' }] })]]);
-    const h = harness({ ls, prompt: () => 'pr_bo staging', routes: (c) => (c.url.startsWith('/ide/db-watch/watches?root=') ? { watches: [] } : c.url === '/ide/db-watch/detect' ? { detected_objects: [], saved_connections: [saved({ environment: env })], ephemeral_targets: [] } : c.url === '/ide/db-watch/watches' ? watchOf() : undefined) });
+    const h = harness({ ls, prompt: () => 'pr_bo staging', routes: (c) => (c.url.startsWith('/ide/db-watch/watches?root=') ? { watches: [] } : c.url === '/ide/db-watch/detect' ? { detected_objects: [], saved_connections: [saved({ environment: env, local: true, host: '127.0.0.1' })], ephemeral_targets: [] } : c.url === '/ide/db-watch/watches' ? watchOf() : undefined) });
     h.store.follow({ root: '/r', debug: { id: 'd1', state: 'running', stop_seq: 0 } });
     for (let i = 0; i < 6; i++) await flush();
     const starts = h.calls.filter((c) => c.method === 'POST' && c.url === '/ide/db-watch/watches');
@@ -432,4 +432,63 @@ test('C3-003: starting another watch or stopping clears the "Production target �
     else await h.store.stop();
     assert.equal(h.store.prodWaiting, null, act);
   }
+});
+
+// ── Real-data finding: remote targets never re-arm on their own ────────────
+
+/** Requests that name a database target (anything that reaches the database). */
+const namesTarget = (c: { method: string; url: string; body?: unknown }) =>
+  (c.url === '/ide/db-watch/detect' && Boolean((c.body as { target?: unknown })?.target)) ||
+  c.url === '/ide/db-watch/objects' ||
+  (c.url === '/ide/db-watch/watches' && c.method === 'POST') ||
+  c.method === 'PATCH' ||
+  c.url.endsWith('/snapshot');
+
+test('G: a remembered saved connection that is not on this Mac (tagged dev) never arms itself: nothing reaches it, one line offers the click', async () => {
+  const ls = new Map([[memoryKey('/r'), JSON.stringify({ target: { kind: 'saved', connection_id: 'stg' }, items: [{ object: 'session_info' }] })]]);
+  const remote = saved({ environment: 'dev', local: false, name: 'pr_bo eu' });
+  const h = harness({ ls, prompt: () => null, routes: (c) => (c.url.startsWith('/ide/db-watch/watches?root=') ? { watches: [] } : c.url === '/ide/db-watch/detect' ? { detected_objects: [det('session_info')], saved_connections: [remote], ephemeral_targets: [] } : c.url === '/ide/db-watch/watches' ? watchOf() : c.url.startsWith('/ide/db-watch/watches/w1') ? readOf(watchOf()) : undefined) });
+  h.store.follow({ root: '/r', debug: { id: 'd1', state: 'running', stop_seq: 0 } });
+  for (let i = 0; i < 6; i++) await flush();
+  h.store.follow({ root: '/r', debug: { id: 'd1', state: 'paused', stop_seq: 1 } });
+  for (let i = 0; i < 6; i++) await flush();
+  assert.deepEqual(h.calls.filter(namesTarget), [], 'nothing names the remote target before the click');
+  assert.match(h.store.prodWaiting?.label ?? '', /^Remote database pr_bo eu — click to watch$/);
+  await h.store.watchProd();
+  assert.equal(h.prompts.length, 0, 'not prod-tagged: no typed confirm');
+  const starts = h.calls.filter((c) => c.method === 'POST' && c.url === '/ide/db-watch/watches');
+  assert.deepEqual(plain((starts[0]?.body as { bind?: unknown })?.bind), { debug_session_id: 'd1' });
+  assert.equal(h.store.prodWaiting, null);
+});
+
+test('G: a watch on a remote saved connection restored after a reload is not re-bound to a new session on its own', async () => {
+  const w = watchOf({ bind: { debug_session_id: 'd1' }, target: { kind: 'saved', connection_id: 'stg', engine: 'mysql', label: 'pr_bo eu', environment: 'dev', local: false } });
+  const h = harness({ routes: (c) => (c.url.startsWith('/ide/db-watch/watches?root=') ? { watches: [w] } : c.method === 'PATCH' ? w : c.url.startsWith('/ide/db-watch/watches/w1') ? readOf(w) : undefined) });
+  h.store.follow({ root: '/r' });
+  await flush(); await flush();
+  h.store.follow({ root: '/r', debug: { id: 'd2', state: 'running', stop_seq: 0 } });
+  for (let i = 0; i < 6; i++) await flush();
+  assert.deepEqual(h.calls.filter(namesTarget), []);
+  assert.match(h.store.prodWaiting?.label ?? '', /Remote database pr_bo eu/);
+  await h.store.watchProd();
+  assert.deepEqual(plain(h.calls.find((c) => c.method === 'PATCH')?.body), { bind: { debug_session_id: 'd2' } });
+});
+
+test('G: picking a target (and its tables) reads no rows; Start watching does', async () => {
+  const w = watchOf();
+  const remote = saved({ environment: 'dev', local: false, name: 'pr_bo eu' });
+  const h = harness({ routes: (c) => (c.url.startsWith('/ide/db-watch/watches?root=') ? { watches: [w] } : c.url === '/ide/db-watch/detect' ? { detected_objects: [det('session_info')], saved_connections: [remote], ephemeral_targets: [] } : c.method === 'POST' && c.url === '/ide/db-watch/watches' ? watchOf({ id: 'w2' }) : c.url.startsWith('/ide/db-watch/watches/') ? readOf(w) : undefined) });
+  h.store.follow({ root: '/r' });
+  await flush(); await flush();
+  await h.store.discover();
+  await h.store.setTarget(remote);
+  await h.store.addItem({ object: 'session_route' });
+  await h.store.removeItem('session_info');
+  const reads = () => h.calls.filter((c) => (c.method === 'POST' && c.url === '/ide/db-watch/watches') || c.method === 'PATCH' || c.url.endsWith('/snapshot'));
+  assert.equal(reads().length, 0, 'the pick and the table choices read no rows');
+  assert.equal(h.store.pendingTarget?.name, 'pr_bo eu');
+  assert.deepEqual(plain(h.store.pendingItems), [{ object: 'session_route' }]);
+  await h.store.startPending();
+  assert.deepEqual(plain(reads()[0]?.body), { target: { kind: 'saved', connection_id: 'stg' }, database: 'pr_bo_1', items: [{ object: 'session_route' }], bind: null, root: '/r', confirm_target: true });
+  assert.equal(h.store.pendingTarget, null);
 });

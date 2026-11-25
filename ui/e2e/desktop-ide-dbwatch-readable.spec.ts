@@ -90,7 +90,7 @@ function fixture(root: string, scenario: Scenario) {
   };
 }
 
-async function mockWatch(page: Page, root: string, scenario: Scenario): Promise<void> {
+async function mockWatch(page: Page, root: string, scenario: Scenario, sessionId = 'dbg1'): Promise<void> {
   const f = fixture(root, scenario);
   await page.route('**/api/v1/ide/db-watch/**', (r) => {
     const url = r.request().url();
@@ -105,8 +105,8 @@ async function mockWatch(page: Page, root: string, scenario: Scenario): Promise<
     return r.fulfill({ json: f.read });
   });
   // A paused debug session of this project, so the Debug panel shows its DB line.
-  const session = { id: 'dbg1', title: 'TestSessionDao', language: 'go', adapter: 'dlv', state: 'paused', stop_seq: 4, stopped_reason: 'breakpoint', paused_file: join(root, 'db', 'dao', 'session_dao.go'), paused_line: 135, threads: [], stack_frames: [], scopes: [], inline_values: [], breakpoints: [], output: [], target_root: root };
-  await page.route('**/api/v1/ide/debug/sessions**', (r) => r.fulfill({ json: r.request().url().includes('/sessions/dbg1') ? { session } : { sessions: [session] } }));
+  const session = { id: sessionId, title: 'TestSessionDao', language: 'go', adapter: 'dlv', state: 'paused', stop_seq: 4, stopped_reason: 'breakpoint', paused_file: join(root, 'db', 'dao', 'session_dao.go'), paused_line: 135, threads: [], stack_frames: [], scopes: [], inline_values: [], breakpoints: [], output: [], target_root: root };
+  await page.route('**/api/v1/ide/debug/sessions**', (r) => r.fulfill({ json: r.request().url().includes(`/sessions/${sessionId}`) ? { session } : { sessions: [session] } }));
 }
 
 function seedRoot(): string {
@@ -228,6 +228,19 @@ test.describe('DB Watch is readable at the dock’s real heights', () => {
     await expect(route.getByTestId('ide-dbw-diff-row')).toHaveCount(3);
     await expect(route.getByTestId('ide-dbw-diff-row').nth(1)).toContainText('400, gs-node-5');
     expect(errors).toEqual([]);
+  });
+
+  test('a remote saved watch does not re-arm on a new debug session: one line offers the click, nothing is sent', async ({ page }, info) => {
+    test.skip(info.project.name !== 'desktop-browser', 'desktop dock');
+    const sent: string[] = [];
+    page.on('request', (r) => {
+      if (/\/ide\/db-watch\/(watches\/|objects)/.test(r.url()) && r.method() !== 'GET') sent.push(`${r.method()} ${r.url()}`);
+    });
+    await mockWatch(page, root, 'mongo', 'dbg2');
+    await openIde(page, root, wsId, { height: 300, scheme: 'light', tab: 'debug' });
+    await expect(page.getByTestId('ide-dbw-strip-prod')).toHaveText('Remote database audit staging — click to watch');
+    expect(sent).toEqual([]);
+    await page.screenshot({ path: info.outputPath('dbwatch-after-remote-waiting-light.png') });
   });
 
   test('Target ▾ and Tables ▾ stay in the viewport with 60 entries', async ({ page }, info) => {

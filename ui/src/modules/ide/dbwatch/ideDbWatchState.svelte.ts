@@ -79,6 +79,11 @@ function refOfWatch(w: IdeDbWatch): IdeDbWatchTargetRef {
     : { kind: 'ephemeral', ephemeral_id: w.target.ephemeral_id ?? '' };
 }
 
+/** The one line a launch leaves when it must not reach the database on its own. */
+function waitingLabel(name: string, prod: boolean): string {
+  return `${prod ? 'Production' : 'Remote'} database ${name} — click to watch`;
+}
+
 class IdeDbWatchController {
   root = $state('');
   watch = $state<IdeDbWatch | null>(null);
@@ -106,7 +111,9 @@ class IdeDbWatchController {
   liveWatch = $state(false);
   /** A launch found a production target: nothing is armed or asked on its own;
    *  the panel / strip offer "Production target — click to watch". */
-  prodWaiting = $state<{ bind: IdeDbWatchBind; start?: Omit<IdeDbWatchStartReq, 'root'> } | null>(null);
+  prodWaiting = $state<{ bind: IdeDbWatchBind; start?: Omit<IdeDbWatchStartReq, 'root'>; label: string } | null>(null);
+  /** The tables picked for `pendingTarget`: read only once the person presses Start watching. */
+  pendingItems = $state<IdeDbWatchItemSpec[]>([]);
 
   private gen = 0;
   private readSeq = 0;
@@ -151,6 +158,7 @@ class IdeDbWatchController {
     this.focusObject = '';
     this.liveWatch = false;
     this.prodWaiting = null;
+    this.pendingItems = [];
     this.liveBind = null;
     this.seenDebug = '';
     this.stoppedDebug = '';
@@ -233,8 +241,9 @@ class IdeDbWatchController {
     const w = this.watch;
     if (w) {
       if (w.target.kind !== 'saved' || sameBind(w.bind, bind)) return;
-      // Never a modal on a launch: a prod watch waits for the person's click.
-      if (isProdTarget(w.target)) this.prodWaiting = { bind };
+      // Never a modal and never a remote read on a launch: a prod or remote
+      // watch waits for the person's click.
+      if (isProdTarget(w.target) || !w.target.local) this.prodWaiting = { bind, label: waitingLabel(w.target.label, isProdTarget(w.target)) };
       else await this.bind(bind);
       return;
     }
@@ -245,7 +254,8 @@ class IdeDbWatchController {
     const conn = this.savedConnections.find((c) => c.connection_id === id);
     if (!conn) return;
     const req = { target: mem.target, database: mem.database, items: mem.items, bind };
-    if (isProdTarget(conn)) this.prodWaiting = { bind, start: req };
+    // Only a database really on this Mac re-arms itself (most saved ones are tagged dev, prod or not).
+    if (isProdTarget(conn) || !conn.local) this.prodWaiting = { bind, start: req, label: waitingLabel(conn.name, isProdTarget(conn)) };
     else await this.start(req, { auto: true });
   }
 
@@ -308,7 +318,7 @@ class IdeDbWatchController {
 
   /** The target's real tables / collections / key prefixes ("Add table…"). */
   async loadObjects(): Promise<void> {
-    const ref = this.watch ? refOfWatch(this.watch) : this.pendingTarget ? targetRefOf(this.pendingTarget) : null;
+    const ref = this.pendingTarget ? targetRefOf(this.pendingTarget) : this.watch ? refOfWatch(this.watch) : null;
     if (!this.root || !ref) return;
     const key = JSON.stringify(ref);
     const gen = this.gen;
@@ -391,6 +401,7 @@ class IdeDbWatchController {
       this.watch = w;
       this.read = null;
       this.pendingTarget = null;
+      this.pendingItems = [];
       this.prodWaiting = null;
       if (opts.persist !== false) this.remember(w);
       await this.refresh();
@@ -408,14 +419,18 @@ class IdeDbWatchController {
   async setTarget(t: IdeDbWatchTargetRef | IdeDbWatchTarget, opts: DbWatchStartOpts = {}): Promise<void> {
     const ref = 'target_kind' in t ? targetRefOf(t) : t;
     const known = 'target_kind' in t ? t : this.targetOf(ref);
-    const items = this.watch?.items.map((i) => ({ object: i.object, filter: i.filter ?? null })) ?? [];
-    if (items.length === 0) {
-      this.pendingTarget = known;
-      this.error = null;
-      await this.discover({ target: ref });
-      return;
-    }
-    await this.start({ target: ref, database: known?.database ?? null, items }, opts);
+    // A pick reads no rows: it lists the target's tables; Start watching reads.
+    this.pendingItems = this.pendingTarget ? this.pendingItems : this.specs();
+    this.pendingTarget = known;
+    this.error = null;
+    await this.discover({ target: ref });
+  }
+
+  /** Start watching the picked target with the picked tables (the primary action). */
+  async startPending(opts: DbWatchStartOpts = {}): Promise<void> {
+    const t = this.pendingTarget;
+    if (!t || this.pendingItems.length === 0) return;
+    await this.start({ target: targetRefOf(t), database: t.database ?? null, items: this.pendingItems }, opts);
   }
 
   private async patch(body: { items?: IdeDbWatchItemSpec[]; bind?: IdeDbWatchBind }, opts: DbWatchStartOpts = {}): Promise<boolean> {
@@ -452,11 +467,12 @@ class IdeDbWatchController {
   }
 
   async addItem(item: IdeDbWatchItemSpec, opts: DbWatchStartOpts = {}): Promise<void> {
-    if (!this.watch) {
-      const t = this.pendingTarget;
-      if (t) await this.start({ target: targetRefOf(t), database: t.database ?? null, items: [item] }, opts);
+    if (this.pendingTarget) {
+      const rest = this.pendingItems.filter((i) => i.object !== item.object);
+      if (rest.length < MAX_WATCH_ITEMS) this.pendingItems = [...rest, item];
       return;
     }
+    if (!this.watch) return;
     const items = this.specs().filter((i) => i.object !== item.object);
     if (items.length >= MAX_WATCH_ITEMS) return;
     await this.patch({ items: [...items, item] }, opts);
@@ -468,6 +484,10 @@ class IdeDbWatchController {
   }
 
   async removeItem(object: string): Promise<void> {
+    if (this.pendingTarget) {
+      this.pendingItems = this.pendingItems.filter((i) => i.object !== object);
+      return;
+    }
     const w = this.watch;
     if (!w) return;
     const items = this.specs().filter((i) => i.object !== object);

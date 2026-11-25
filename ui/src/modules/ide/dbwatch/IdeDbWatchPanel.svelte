@@ -53,10 +53,12 @@
   let targetBtn: HTMLButtonElement | undefined = $state();
   let tablesBtn: HTMLButtonElement | undefined = $state();
 
-  const targetLabel = $derived(w?.target.label ?? pending?.name ?? 'Target');
-  const targetEnv = $derived(w?.target.environment ?? (pending?.target_kind === 'saved' ? pending.environment : null));
+  const targetLabel = $derived(pending?.name ?? w?.target.label ?? 'Target');
+  const targetEnv = $derived(pending ? (pending.target_kind === 'saved' ? pending.environment : null) : w?.target.environment);
+  /** The tables of what the toolbar shows: the picked target's (not read yet) or the watch's. */
+  const shownItems = $derived<{ object: string }[]>(pending ? ideDbWatch.pendingItems : (w?.items ?? []));
   const tablesLabel = $derived.by(() => {
-    const names = (w?.items ?? []).map((i) => i.object);
+    const names = shownItems.map((i) => i.object);
     if (names.length === 0) return 'Tables';
     return names.length <= 2 ? names.join(', ') : `${names.slice(0, 2).join(', ')} +${names.length - 2}`;
   });
@@ -102,7 +104,7 @@
 
   async function openTargetMenu(): Promise<void> {
     await ideDbWatch.discover();
-    const cur = w ? (w.target.kind === 'saved' ? `saved:${w.target.connection_id}` : `ephemeral:${w.target.ephemeral_id}`) : pending ? targetKeyOf(pending) : '';
+    const cur = pending ? targetKeyOf(pending) : w ? (w.target.kind === 'saved' ? `saved:${w.target.connection_id}` : `ephemeral:${w.target.ephemeral_id}`) : '';
     const row = (t: IdeDbWatchTarget): MenuItem => ({
       label: t.name,
       hint: targetHint(t),
@@ -128,7 +130,7 @@
 
   function showTablesMenu(): void {
     if (!engine) return;
-    const watched = new Set((ideDbWatch.watch?.items ?? []).map((i) => i.object));
+    const watched = new Set((ideDbWatch.pendingTarget ? ideDbWatch.pendingItems : (ideDbWatch.watch?.items ?? [])).map((i) => i.object));
     const full = watched.size >= MAX_WATCH_ITEMS;
     const ranked = pickAutoItems(ideDbWatch.detected, engine, true);
     const extra = [...watched].filter((o) => !ranked.some((r) => r.object === o)).map((object) => ({ object }));
@@ -160,7 +162,7 @@
 
   async function openObjectsMenu(): Promise<void> {
     await ideDbWatch.loadObjects();
-    const watched = new Set((ideDbWatch.watch?.items ?? []).map((i) => i.object));
+    const watched = new Set((ideDbWatch.pendingTarget ? ideDbWatch.pendingItems : (ideDbWatch.watch?.items ?? [])).map((i) => i.object));
     const list: MenuItem[] = ideDbWatch.objects
       .filter((o) => !watched.has(o.name))
       .map((o) => ({ label: o.name, action: () => void ideDbWatch.addItem({ object: o.name }) }));
@@ -222,7 +224,7 @@
   /** The primary when nothing is armed: the run's own database + the tables the
    *  code touches, else the menus that are missing a choice. */
   async function startWatching(): Promise<void> {
-    if (pending) return void openTablesMenu();
+    if (pending) return void (ideDbWatch.pendingItems.length > 0 ? ideDbWatch.startPending() : openTablesMenu());
     await ideDbWatch.discover();
     const t = pickAutoTarget(ideDbWatch.detected, ideDbWatch.ephemeralTargets);
     if (!t) return void openTargetMenu();
@@ -276,7 +278,7 @@
         <button type="button" class:active={ideDbWatch.compare === 'start'} aria-pressed={ideDbWatch.compare === 'start'} onclick={() => void ideDbWatch.setCompare('start')} data-testid="ide-dbw-since-start">Since start</button>
       </div>
     {/if}
-    {#if w}
+    {#if w && !pending}
       <button type="button" class="btn small primary" disabled={w.busy} title="Take a checkpoint now and compare" onclick={() => void ideDbWatch.snapshotNow()} data-testid="ide-dbw-snapshot">Snapshot</button>
     {:else}
       <button type="button" class="btn small primary" title="Watch the run’s database and the tables your code touches" onclick={() => void startWatching()} data-testid="ide-dbw-start">Start watching</button>
@@ -287,7 +289,7 @@
   </header>
 
   {#if ideDbWatch.prodWaiting}
-    <button type="button" class="dbw-prod" onclick={() => void ideDbWatch.watchProd()} data-testid="ide-dbw-prod-waiting">Production target — click to watch</button>
+    <button type="button" class="dbw-prod" class:is-prod={ideDbWatch.prodWaiting.label.startsWith('Production')} onclick={() => void ideDbWatch.watchProd()} data-testid="ide-dbw-prod-waiting">{ideDbWatch.prodWaiting.label}</button>
   {/if}
   <div class="dbw-body" bind:this={bodyEl}>
     <LoadState
@@ -295,7 +297,7 @@
       errorTitle={w ? `Couldn’t read ${w.target.label}` : 'Couldn’t start watching'}
       loading={ideDbWatch.loading && !read}
       error={ideDbWatch.error}
-      empty={!w}
+      empty={!w || Boolean(pending)}
       onretry={() => void (w ? ideDbWatch.snapshotNow() : startWatching())}
       rows={4}
     >
@@ -305,14 +307,16 @@
         {/if}
       {/snippet}
       {#snippet emptyView()}
-        {#if pending}
+        {#if pending && ideDbWatch.pendingItems.length > 0}
+          <EmptyState icon="db" title="Ready to watch {pending.name}" body="Start watching reads {ideDbWatch.pendingItems.map((i) => i.object).join(', ')} on {pending.host}{pending.target_kind === 'saved' ? ` (${pending.environment || 'dev'})` : ''} now and at every stop. Nothing is read before." />
+        {:else if pending}
           <EmptyState icon="db" title="Choose tables to watch" body="Pick the tables {pending.name} should compare at every stop." actionLabel="Tables" actionIcon="listBullet" actionKind="secondary" onaction={() => void openTablesMenu()} />
         {:else}
           <EmptyState icon="db" title="No database to watch" body="Debug or run a test that starts a Testcontainer, or pick a saved connection." actionLabel="Choose target" actionIcon="db" actionKind="secondary" onaction={() => void openTargetMenu()} />
         {/if}
       {/snippet}
 
-      {#if read && w}
+      {#if read && w && !pending}
         {#if waiting}
           <p class="dbw-note" data-testid="ide-dbw-armed">
             Watching {plural(w.items.length, 'table')} on {w.target.label}. Changes appear at the next stop.
@@ -359,7 +363,8 @@
   .dbw-body { flex: 1; min-block-size: 0; min-inline-size: 0; overflow: auto; }
   .dbw-note { margin: 0; padding-block: var(--sp-3); padding-inline: var(--sp-4); color: var(--text-dim); font-size: var(--fs-xs); border-block-end: 1px solid var(--separator); }
   .dbw-quiet { border-block-end: 0; }
-  .dbw-prod { flex-shrink: 0; padding-block: var(--sp-2); padding-inline: var(--sp-4); border: 0; border-block-end: 1px solid var(--separator); background: var(--danger-soft); color: var(--danger); font-size: var(--fs-xs); text-align: start; cursor: pointer; }
+  .dbw-prod { flex-shrink: 0; padding-block: var(--sp-2); padding-inline: var(--sp-4); border: 0; border-block-end: 1px solid var(--separator); background: var(--warning-soft); color: var(--text); font-size: var(--fs-xs); text-align: start; cursor: pointer; }
+  .dbw-prod.is-prod { background: var(--danger-soft); color: var(--danger); }
   .dbw-prod:hover { text-decoration: underline; }
   @container (max-width: 620px) { .dbw-caption { display: none; } }
   @container (max-width: 480px) { .dbw-seg { display: none; } }

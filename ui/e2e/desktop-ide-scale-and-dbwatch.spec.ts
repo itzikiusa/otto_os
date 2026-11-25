@@ -812,6 +812,9 @@ test.describe('Desktop IDE — Auto-Save, Modal Lifecycle, Live DB Watch & 7-Pro
     const prompt = page.locator('[role="dialog"]').last();
     await prompt.getByRole('textbox').fill('session:*');
     await prompt.getByRole('button', { name: 'Watch' }).click();
+    // Picking reads nothing; Start watching does.
+    await expect(dbPanel).toContainText('Ready to watch e2e-watch-redis');
+    await page.getByTestId('ide-dbw-start').click();
     // Watching takes the baseline (3 Redis keys: session:1001, session:1002, session:1003)
     await expect(page.getByTestId('ide-dbw-armed')).toContainText('Watching 1 table', { timeout: 10_000 });
 
