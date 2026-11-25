@@ -124,6 +124,10 @@ async fn spawn_budget_per_action() {
     let s = f.take_fg();
     assert!(s.len() <= 6, "warm refs ≤ 6 spawns: {s:?}");
 
+    f.git.pull_mode_default().await;
+    let s = f.take_fg();
+    assert!(s.len() <= 2, "pull mode ≤ 2 spawns: {s:?}");
+
     f.git.fetch(None).await.unwrap();
     let s = f.take_fg();
     assert!(s.len() <= 2, "fetch ≤ 2 spawns: {s:?}");
