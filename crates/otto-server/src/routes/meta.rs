@@ -30,6 +30,24 @@ pub fn machine_routes() -> axum::Router<ServerCtx> {
     )
 }
 
+/// `GET /api/v1/system/restart-impact` (root) — what a daemon restart keeps
+/// running and what it ends, counted by the crates that own the work (the
+/// update / restart dialog).
+pub async fn restart_impact(
+    State(ctx): State<ServerCtx>,
+) -> Json<otto_core::restart::RestartImpact> {
+    let mut items = ctx.manager.restart_impact().await;
+    items.extend(ctx.agent_runtime.restart_impact().await);
+    items.extend(ctx.ide.restart_impact());
+    items.extend(ctx.containers.restart_impact().await);
+    items.extend(ctx.brokers.restart_impact());
+    items.extend(ctx.rooms.restart_impact().await);
+    let live = ctx.browser.live_if_started();
+    items.extend(live.map(|l| l.restart_impact()).unwrap_or_default());
+    items.extend(otto_phone::restart_impact(&ctx.pool).await);
+    Json(items.into())
+}
+
 /// Whether the request carries a bearer that verifies as a full (unscoped,
 /// non-MCP) account credential. A share link — verified or still OTP-pending —
 /// and an MCP token are NOT "signed in" here (S8-308): a leaked share link
@@ -69,18 +87,7 @@ pub async fn meta(
             version: ctx.version.clone(),
             api_version: API_VERSION,
             needs_onboarding,
-            network_listener: false,
-            tools: Vec::new(),
-            providers: Vec::new(),
-            default_provider: None,
-            model_flags: Default::default(),
-            provider_models: Default::default(),
-            provider_models_provisional: false,
-            runtime_capabilities: Default::default(),
-            provider_families: Default::default(),
-            provider_resumable: Default::default(),
-            provider_terminal_effort: Default::default(),
-            alt_loopback_base: None,
+            ..Default::default()
         }));
     }
 
@@ -279,6 +286,20 @@ mod walkthrough_tests {
         assert!(caller_authenticated(&ctx, &headers(&login)).await);
         assert!(!caller_authenticated(&ctx, &headers(&share)).await);
         assert!(!caller_authenticated(&ctx, &headers(&mcp)).await);
+    }
+
+    /// D-016: every owner is asked and the JSON is the contract's shape; an
+    /// idle daemon ends (and keeps) nothing.
+    #[tokio::test]
+    async fn restart_impact_of_an_idle_daemon_is_empty() {
+        let pool = crate::test_support::mem_pool().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ServerCtx::for_tests(&pool, tmp.path()).await;
+        let Json(impact) = restart_impact(State(ctx)).await;
+        assert_eq!(
+            serde_json::to_value(impact).unwrap(),
+            json!({"keeps": [], "ends": []})
+        );
     }
 
     #[tokio::test]

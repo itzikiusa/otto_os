@@ -9,7 +9,7 @@ use super::*;
 // ---------------------------------------------------------------------------
 
 /// `GET /api/v1/meta`
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MetaResp {
     pub version: String,
     pub api_version: u32,

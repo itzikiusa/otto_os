@@ -135,6 +135,7 @@ pub fn public_routes() -> Router<ServerCtx> {
 /// of this router, together with any api_extras, by `build_router`).
 pub fn protected_routes() -> Router<ServerCtx> {
     meta::machine_routes() // GET /machine/status (the status-bar chip)
+        .route("/system/restart-impact", get(meta::restart_impact))
         .merge(provider_accounts::routes())
         .merge(projects::routes())
         .merge(network_profiles::routes())

@@ -3456,6 +3456,14 @@ The audit log is an **append-only** ledger written best-effort by the daemon at 
 
 Workspace-independent: one Mac, one daemon. `busy` = a background agent arriving now would queue (always false while `agent_admission_enabled` is off); `background_live` counts gated background agents running or admitted-and-starting against the `background_max_live` ceiling (`null` = no ceiling). Machine samples are cached 2 s and the settings 5 s, so polling it every few seconds costs a couple of syscalls. `disk_free_bytes` is what `df` calls "Avail" on the volume holding Otto's data dir; `low_disk` = below `machine_low_disk_gb` GiB (default 10; 0 = off). The read also notices low disk: the first read below the floor posts one `System` warning (`source_key` `machine:low_disk`) to the notification centre and the first read above it refreshes that row as an info notice. Types: `crates/otto-sessions/src/admission.rs`, mirrored in `ui/src/lib/api/types/machine.ts`.
 
+## Restart impact (what a daemon restart keeps and ends)
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /system/restart-impact | root (policy `Settings:Admin`) | — | RestartImpact `{keeps: RestartImpactItem[], ends: RestartImpactItem[]}`; `RestartImpactItem` = `{kind, label, count, detail?: string[]}` |
+
+Asked by the update dialog before "Restart to update" (and usable by any restart prompt), so it tells the truth about what ends. Each crate counts the work it owns, the way the daemon's shutdown treats it: PTY sessions in a holder (setting `session_persistence`, default on) and structured threads in a runtime-holder are `keeps` (`kind` `sessions` / `background_agents`); every other live session ends — `connection_terminals`, `background_agents` (`meta.source` in `BACKGROUND_SESSION_SOURCES`), unheld `sessions`. Also ending: running IDE runs and dev servers (`ide_runs`), live debug sessions (`debug_sessions`), Otto's own container runtime when it started it (`container_runtime`; an external Docker keeps running), Kafka tunnels (`broker_tunnels`), every session room (`session_rooms`, in memory), live browser sessions (`live_browser`), and phones used in the last 10 minutes (`phones`; a phone's last use is recorded at most every 5 minutes, so this is "recently", not "connected now"). `label` already agrees with `count`; `detail` holds up to 5 titles; kinds with a zero count are omitted. Types: `crates/otto-core/src/restart.rs`, mirrored in `ui/src/lib/api/types/machine.ts`.
+
 ## Database maintenance
 
 | Method & path | Auth | Request | Response |

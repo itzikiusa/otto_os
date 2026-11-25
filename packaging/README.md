@@ -7,11 +7,13 @@ are the real, chained steps; the full gated checklist lives in
 
 | File | What it does |
 |------|--------------|
-| `make-cert.sh` | One-time: create the long-lived self-signed code-signing cert **"Otto Dev Signing"** in your login keychain and **trust it for code signing**. |
-| `sign.sh` | Sign `ottod` + `Otto.app` with that cert. **Also re-asserts code-signing trust** (idempotent) so it can't silently drift. |
+| `make-cert.sh` | One-time: create the long-lived self-signed code-signing cert **"Otto Dev Signing"** in your login keychain and **trust it for code signing**. `--export DIR` (with `OTTO_SIGN_IDENTITY`) writes the release certificate as `.p12` + `.cer` files instead ([docs/RELEASE.md](../docs/RELEASE.md)). |
+| `sign.sh` | Sign `ottod` + `Otto.app` with that cert. **Also re-asserts code-signing trust** (idempotent) so it can't silently drift. `OTTO_SIGN_IDENTITY` / `OTTO_SIGN_KEYCHAIN` pick another identity from a keychain file (CI). |
 | `deploy.sh` | One command: rebuild → bundle → sign → replace `/Applications/Otto.app` → relaunch → verify. |
 | `prune-target.sh` | Preview older hashed dependency artifacts under `target/*/deps/`; `--apply` opts into eviction. Deploy step 5 invokes it only with `PRUNE=1`. |
 | `dmg.sh` | Package a signed `Otto.app` into a `.dmg`. |
+| `release-artifacts.sh` | CI's release packaging: sign, verify each binary, updater archive + signature, DMG, `latest.json` (`.github/workflows/release.yml`). |
+| `release-manifest.py` | Release metadata for it: tag vs version files, README notes, `latest.json`, the accepted-certificate requirement. |
 | `publish-walkthroughs.sh` | Re-encode `marketing/videos/out/*.mp4` to 720p and upload them (`--clobber`) to the rolling `walkthroughs` GitHub release the in-app Walkthroughs page streams from. Not part of the DMG. |
 | `com.otto.daemon.plist` | `launchd` user-agent template for the daemon (port `7700`). |
 
