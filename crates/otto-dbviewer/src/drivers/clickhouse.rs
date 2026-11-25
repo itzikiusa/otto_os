@@ -52,6 +52,12 @@ pub struct ClickhouseDriver {
     clients: ResourceCache<reqwest::Client>,
     map_arrays: ResourceCache<bool>,
     native: ResourceCache<Arc<klickhouse::Client>>,
+    /// Idle native connections for standalone reads, under the profile's
+    /// [`ResolvedConfig::cache_key`]. A read checks one out for itself (no
+    /// shared queue: a cancelled read must never run later) and only a read
+    /// that finished cleanly puts it back, so each read skips the TCP/TLS,
+    /// hello and session setup round trips (~4 of 5 on a remote server).
+    native_idle: std::sync::Mutex<HashMap<String, Vec<IdleNative>>>,
     /// Per-connection schema snapshot cache backing smart completion.
     completions: crate::complete::CompletionCache,
     /// Per-cache-key "this server refuses `readonly=2`" memo (DB-02). A user
@@ -60,6 +66,21 @@ pub struct ClickhouseDriver {
     /// request skips the param instead of paying a failed round trip first.
     readonly_refused: std::sync::Mutex<HashMap<String, Arc<AtomicBool>>>,
 }
+
+/// A parked native connection and the session it was set up for.
+struct IdleNative {
+    database: Option<String>,
+    readonly: bool,
+    client: Arc<klickhouse::Client>,
+    at: Instant,
+}
+
+/// Idle native connections kept per profile; more concurrent reads than this
+/// just open (and then drop) their own.
+const NATIVE_IDLE_MAX: usize = 4;
+/// A parked connection older than this is dropped rather than reused, so a
+/// socket that died quietly (VPN drop, server idle timeout) is not handed out.
+const NATIVE_IDLE_TTL: Duration = Duration::from_secs(5 * 60);
 
 // --- Transport selection ----------------------------------------------------
 
@@ -616,6 +637,51 @@ impl ClickhouseDriver {
             .await
     }
 
+    /// A parked connection for this profile + session, if one is still fresh.
+    fn take_idle_native(
+        &self,
+        cfg: &ResolvedConfig,
+        database: Option<&str>,
+        readonly: bool,
+    ) -> Option<Arc<klickhouse::Client>> {
+        let mut idle = self.native_idle.lock().unwrap_or_else(|e| e.into_inner());
+        let list = idle.get_mut(&cfg.cache_key())?;
+        list.retain(|c| c.at.elapsed() < NATIVE_IDLE_TTL && !c.client.is_closed());
+        let at = list
+            .iter()
+            .rposition(|c| c.readonly == readonly && c.database.as_deref() == database)?;
+        Some(list.swap_remove(at).client)
+    }
+
+    fn drop_idle_native(&self, cache_key: &str) {
+        self.native_idle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(cache_key);
+    }
+
+    fn park_idle_native(
+        &self,
+        cfg: &ResolvedConfig,
+        database: Option<String>,
+        readonly: bool,
+        client: Arc<klickhouse::Client>,
+    ) {
+        if cfg.lifecycle.as_ref().is_some_and(|l| l.check().is_err()) {
+            return;
+        }
+        let mut idle = self.native_idle.lock().unwrap_or_else(|e| e.into_inner());
+        let list = idle.entry(cfg.cache_key()).or_default();
+        if list.len() < NATIVE_IDLE_MAX {
+            list.push(IdleNative {
+                database,
+                readonly,
+                client,
+                at: Instant::now(),
+            });
+        }
+    }
+
     /// Decode native blocks within interactive row/byte budgets.
     async fn native_query_scoped(
         &self,
@@ -638,6 +704,7 @@ impl ClickhouseDriver {
         // cancelled while queued could otherwise execute after its caller exits.
         // Only an explicit sequential batch owns/reuses one session connection.
         let standalone = cfg.param_str("__ch_session").is_none();
+        let mut owned = None;
         let client = if readonly
             || standalone
             || active_db.is_some_and(|db| Some(db) != cfg.database.as_deref())
@@ -646,7 +713,12 @@ impl ClickhouseDriver {
             scoped.database = active_db
                 .map(str::to_string)
                 .or_else(|| cfg.database.clone());
-            Arc::new(native_connect(&scoped).await?)
+            let client = match self.take_idle_native(cfg, scoped.database.as_deref(), readonly) {
+                Some(client) => client,
+                None => Arc::new(native_connect(&scoped).await?),
+            };
+            owned = Some(scoped.database);
+            client
         } else {
             self.native_client(cfg).await?
         };
@@ -712,6 +784,11 @@ impl ClickhouseDriver {
         // without forwarding that error. Never present that as an empty result.
         if !partial && client.is_closed() {
             return Err(native_closed_error());
+        }
+        // Only a fully read result of a read statement leaves the session as
+        // it was set up (a write/session statement may `USE` or `SET`).
+        if let Some(database) = owned.filter(|_| !partial && returns_rows(sql)) {
+            self.park_idle_native(cfg, database, readonly, client);
         }
         Ok(RawRows {
             meta,
@@ -2820,6 +2897,7 @@ impl Driver for ClickhouseDriver {
         for (key, value) in self.native.take_where(|key| key == cache_key) {
             captured.native.insert_ready(key, value);
         }
+        self.drop_idle_native(cache_key);
         self.map_arrays.remove(cache_key);
         self.completions.invalidate(cache_key);
         Some(std::sync::Arc::new(captured))
@@ -2829,6 +2907,7 @@ impl Driver for ClickhouseDriver {
         self.clients.remove(cache_key);
         self.map_arrays.remove(cache_key);
         self.native.remove(cache_key);
+        self.drop_idle_native(cache_key);
         self.completions.invalidate(cache_key);
         self.readonly_refused
             .lock()
@@ -2844,6 +2923,13 @@ impl Driver for ClickhouseDriver {
         self.completions.sweep();
         let http = self.clients.take_idle(idle);
         let native = self.native.take_idle(idle);
+        self.native_idle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|_, list| {
+                list.retain(|c| c.at.elapsed() < NATIVE_IDLE_TTL);
+                !list.is_empty()
+            });
         let mut memo = self
             .readonly_refused
             .lock()
