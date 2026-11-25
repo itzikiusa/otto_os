@@ -100,8 +100,11 @@ export interface IdePort {
    *  id; rejects `cancelled_by_user` (a gate declined) or `failed` (the
    *  daemon refused / the build failed: the message is the IDE's start error).
    *  The session is recorded as driven by `agent` (driving bar, Proceed,
-   *  "stopped driving"). Call it only after your own start confirm. */
-  launch(agent: IdeAgent, plan: IdeResolvedLaunch): Promise<{ debug_id: string }>;
+   *  "stopped driving"). Call it only after your own start confirm.
+   *  `break_on_exceptions: true` turns on the debugger's own "Break on
+   *  exceptions" switch (visible; the person can turn it off); false/absent
+   *  leaves the person's setting as it is. */
+  launch(agent: IdeAgent, plan: IdeResolvedLaunch, opts?: { break_on_exceptions?: boolean }): Promise<{ debug_id: string }>;
 
   /** A debugger action on the CURRENT session (the store's `debugCommand`);
    *  resolves the snapshot after it. `run_to_cursor` takes `path` + `line`. */

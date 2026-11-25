@@ -155,9 +155,11 @@ async function resolveTarget(
   };
 }
 
-async function launch(agent: IdeAgent, resolved: IdeResolvedLaunch): Promise<{ debug_id: string }> {
+async function launch(agent: IdeAgent, resolved: IdeResolvedLaunch, opts: { break_on_exceptions?: boolean } = {}): Promise<{ debug_id: string }> {
   const p = resolved.plan as Plan | undefined;
   if (!p || (!p.configId && !p.launch)) throw new UiCommandError('invalid_args', 'Resolve the target first');
+  // The debugger's visible switch, as the person would flip it; never turned off for them.
+  if (opts.break_on_exceptions) ide.breakOnExceptions = true;
   const before = ide.activeDebug?.id ?? null;
   // The store's own path: prod gate, "Stop and debug again", autosave, Debug tab.
   await ide.startDebug(p.configId ? { configId: p.configId } : { language: p.language, launch: p.launch });

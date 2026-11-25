@@ -265,16 +265,18 @@ for (const look of [{ name: 'light', key: 'otto_scheme', value: 'light' }, { nam
     await expect(page.locator('.cm-editor:visible .cm-content').first()).toContainText('return s');
     await clickBreakpointGutter(page, 5);
 
+    const startReq = page.waitForRequest((r) => r.method() === 'POST' && /\/api\/v1\/ide\/debug\/sessions(\?|$)/.test(r.url()));
     const first = await page.evaluate(async ({ agent, root }) => {
       const { port, uiControl } = (window as any).__agentDbg;
       uiControl.begin('p-start', agent, 'ide_debug_start', 'ide');
       await port.openProject(agent, root);
       await port.setAgentBreakpoints(agent, [{ file: 'app.py', line: 4 }]);
       const plan = await port.resolveTarget({ kind: 'main', file: 'app.py' });
-      await port.launch(agent, plan);
+      await port.launch(agent, plan, { break_on_exceptions: true });
       return plan.command;
     }, { agent: AGENT, root });
     expect(first).toBe('python app.py');
+    expect((await startReq).postDataJSON().break_on_exceptions, 'the agent asked to break on exceptions').toBe(true);
     const s1 = await waitPaused(page, 0);
     expect(s1.paused_line).toBe(4);
 
