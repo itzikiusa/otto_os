@@ -157,6 +157,9 @@ pub struct DiffOpts {
     /// rows): a previous row older than the window's oldest key left the
     /// window, it was not deleted.
     pub window_full: bool,
+    /// `previous` was a full window: a row older than ITS oldest key entered
+    /// the window (a newer row was deleted), it was not added.
+    pub previous_full: bool,
 }
 
 /// Compute structured row & cell differences between `previous` and `current`.
@@ -234,6 +237,22 @@ pub fn diff_snapshots(
         })
         .flatten();
 
+    let prev_floor = (opts.previous_full && !opts.primary_key.is_empty())
+        .then(|| {
+            previous
+                .rows
+                .iter()
+                .filter_map(|r| r.get(key_indices[0]))
+                .min_by(|a, b| cmp_key(a, b))
+        })
+        .flatten();
+    let entered_window = |row: &[Value]| {
+        prev_floor.is_some_and(|floor| {
+            row.get(key_indices[0])
+                .is_some_and(|v| cmp_key(v, floor).is_lt())
+        })
+    };
+
     let mut prev_occ = BTreeMap::new();
     let mut prev_map: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     for row in &previous.rows {
@@ -252,6 +271,7 @@ pub fn diff_snapshots(
         let k = row_key(row, columns, &key_indices, &mut curr_occ);
         curr_keys_seen.insert(k.clone());
         match prev_map.get(&k) {
+            None if entered_window(row) => {}
             None => {
                 added_count += 1;
                 if diffs.len() < MAX_DIFF_ROWS_EMITTED {
@@ -407,6 +427,7 @@ mod tests {
             &DiffOpts {
                 primary_key: vec!["key".into()],
                 window_full: false,
+                previous_full: false,
             },
         );
         assert_eq!(
@@ -440,11 +461,38 @@ mod tests {
         let opts = DiffOpts {
             primary_key: vec!["id".into()],
             window_full: true,
+            previous_full: false,
         };
         let d = diff_snapshots(&prev, &curr, &opts);
         assert_eq!(
             (d.added_count, d.removed_count, d.unchanged_count),
             (1, 0, 2)
+        );
+        // A delete pulls an older row into a full window: it is not new.
+        let five = snap(
+            &["id", "v"],
+            vec![
+                vec![json!(5), json!("e")],
+                vec![json!(4), json!("d")],
+                vec![json!(3), json!("c")],
+            ],
+        );
+        let after_delete = snap(
+            &["id", "v"],
+            vec![
+                vec![json!(5), json!("e")],
+                vec![json!(3), json!("c")],
+                vec![json!(2), json!("b")],
+            ],
+        );
+        let both_full = DiffOpts {
+            previous_full: true,
+            ..opts.clone()
+        };
+        let d = diff_snapshots(&five, &after_delete, &both_full);
+        assert_eq!(
+            (d.added_count, d.removed_count, d.unchanged_count),
+            (0, 1, 2)
         );
         // A real delete inside the window still counts.
         let curr = snap(
@@ -486,6 +534,7 @@ mod tests {
         let opts = DiffOpts {
             primary_key: vec!["game_id".into(), "account_id".into()],
             window_full: false,
+            previous_full: false,
         };
         let d = diff_snapshots(&prev, &curr, &opts);
         assert_eq!(d.modified_count, 1);
