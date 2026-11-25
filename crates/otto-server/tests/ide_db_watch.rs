@@ -731,6 +731,48 @@ async fn a_watch_checkpoints_diffs_masks_for_agents_and_belongs_to_its_owner() {
     assert_eq!(token["changes"][0]["masked"], true);
     assert!(!a.to_string().contains("hunter"), "{a}");
 
+    // An agent session's own credential never reaches a watch directly (the
+    // agent-debug tools go through the person's UI bridge, with for_agent).
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO sessions (id, workspace_id, kind, provider, title, status, cwd, created_by, created_at, last_active_at)
+         VALUES ('dbw-agent', 'ws1', 'agent', 'claude', 't', 'idle', '/tmp', 'root', ?, ?)",
+    )
+    .bind(&now)
+    .bind(&now)
+    .execute(&env.pool)
+    .await
+    .unwrap();
+    let agent_tok = AuthRepo::new(env.pool.clone())
+        .issue_session_api_token(&"root".to_string(), &"dbw-agent".to_string())
+        .await
+        .unwrap()
+        .0;
+    let (s, a) = call(
+        reqwest::Method::GET,
+        url(&format!("/watches/{id}")),
+        &agent_tok,
+        None,
+    )
+    .await;
+    assert_eq!(s, 403, "{a}");
+    assert!(!a.to_string().contains("hunter"), "{a}");
+    let (s, _) = call(
+        reqwest::Method::POST,
+        url("/watches"),
+        &agent_tok,
+        Some(json!({
+            "root": root,
+            "target": {"kind": "ephemeral", "ephemeral_id": "miniredis:test"},
+            "items": [{"object": "wallet:"}],
+        })),
+    )
+    .await;
+    assert_ne!(
+        s, 200,
+        "an agent credential cannot arm a watch on an ephemeral target"
+    );
+
     // Owner only.
     let (s, _) = call(
         reqwest::Method::GET,
