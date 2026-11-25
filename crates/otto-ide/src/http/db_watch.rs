@@ -1,7 +1,6 @@
 //! Axum handlers for IDE Live Database Watch & Component-Test Watcher
-//! (`/api/v1/ide/db-watch/detect`, the deprecated stateless `…/snapshot`, and
-//! the watch engine: `…/objects` and `…/watches`; engine in
-//! `db_watch/watch.rs`).
+//! (`/api/v1/ide/db-watch/detect` and the watch engine: `…/objects` and
+//! `…/watches`; engine in `db_watch/watch.rs`).
 
 use std::sync::Arc;
 
@@ -14,16 +13,14 @@ use otto_core::{Error, Id, Result};
 
 use super::{require_root_user, ApiResult};
 use crate::db_watch::detect::detect_project_db_access;
-use crate::db_watch::diff::compute_snapshot_diff;
 use crate::db_watch::watch::{bind_debug, bind_run, Checkpoint, Watch, WatchHost, WatchTarget};
 use crate::db_watch::{
-    build_default_watch_query, clamp_watch_limit, DbWatchExecOutcome, DbWatchOp, DbWatchQueryExec,
-    DbWatchQueryTarget, IdeDbEngine, IdeDbWatch, IdeDbWatchBind, IdeDbWatchCheckpointReason,
-    IdeDbWatchDetectReq, IdeDbWatchDetectResp, IdeDbWatchListQuery, IdeDbWatchListResp,
-    IdeDbWatchObject, IdeDbWatchObjectsReq, IdeDbWatchObjectsResp, IdeDbWatchReadQuery,
-    IdeDbWatchReadResp, IdeDbWatchSnapshotItem, IdeDbWatchSnapshotNowReq, IdeDbWatchSnapshotReq,
-    IdeDbWatchSnapshotResp, IdeDbWatchStartReq, IdeDbWatchTargetInfo, IdeDbWatchTargetRef,
-    IdeDbWatchUpdateReq, IdeDetectedDbObject, IdeEphemeralSource,
+    DbWatchExecOutcome, DbWatchOp, DbWatchQueryExec, DbWatchQueryTarget, IdeDbEngine, IdeDbWatch,
+    IdeDbWatchBind, IdeDbWatchCheckpointReason, IdeDbWatchDetectReq, IdeDbWatchDetectResp,
+    IdeDbWatchListQuery, IdeDbWatchListResp, IdeDbWatchObject, IdeDbWatchObjectsReq,
+    IdeDbWatchObjectsResp, IdeDbWatchReadQuery, IdeDbWatchReadResp, IdeDbWatchSnapshotNowReq,
+    IdeDbWatchStartReq, IdeDbWatchTargetInfo, IdeDbWatchTargetRef, IdeDbWatchUpdateReq,
+    IdeDetectedDbObject, IdeEphemeralSource,
 };
 use crate::target::ResolvedTarget;
 use crate::types::{IdeOkResp, IdeTargetKind, IdeTargetSpec};
@@ -140,105 +137,6 @@ pub(super) async fn db_watch_detect<S: IdeCtx>(
         detected_objects,
         saved_connections,
         ephemeral_targets,
-    }))
-}
-
-pub(super) async fn db_watch_snapshot<S: IdeCtx>(
-    State(ctx): State<S>,
-    Extension(AuthUser(user)): Extension<AuthUser>,
-    Json(req): Json<IdeDbWatchSnapshotReq>,
-) -> ApiResult<Json<IdeDbWatchSnapshotResp>> {
-    let limit = clamp_watch_limit(req.limit);
-    let (eph_label, target) = match req.target_kind.trim() {
-        "saved" => {
-            let raw_id = req
-                .connection_id
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| {
-                    Error::Invalid("connection_id is required for saved target".into())
-                })?;
-            (
-                None,
-                DbWatchQueryTarget::Saved {
-                    connection_id: Id::from(raw_id),
-                },
-            )
-        }
-        "ephemeral" => {
-            require_root_user(&user)?;
-            let eph_id = req
-                .ephemeral_id
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| {
-                    Error::Invalid("ephemeral_id is required for ephemeral target".into())
-                })?;
-            let (label, resolved) = ctx.ide().db_watch.resolve_target(eph_id, req.engine)?;
-            (Some(label), resolved)
-        }
-        other => {
-            return Err(Error::Invalid(format!(
-                "unsupported target_kind '{other}' (expected 'saved' or 'ephemeral')"
-            ))
-            .into());
-        }
-    };
-
-    let custom = req
-        .custom_query
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-    let (statement, is_custom_query) = match custom {
-        Some(q) => (q.to_string(), true),
-        None => (
-            build_default_watch_query(
-                req.engine,
-                req.database.as_deref(),
-                &req.object_name,
-                limit,
-            )?,
-            false,
-        ),
-    };
-
-    let outcome = ctx
-        .execute_db_watch_query(
-            &user,
-            DbWatchQueryExec {
-                target,
-                engine: req.engine,
-                database: req.database,
-                object_name: req.object_name.clone(),
-                statement: statement.clone(),
-                is_custom_query,
-                limit,
-                op: DbWatchOp::Read,
-            },
-        )
-        .await?;
-
-    let snapshot = IdeDbWatchSnapshotItem {
-        columns: outcome.columns,
-        rows: outcome.rows,
-    };
-    let diff = req
-        .previous
-        .as_ref()
-        .map(|prev| compute_snapshot_diff(prev, &snapshot));
-
-    Ok(Json(IdeDbWatchSnapshotResp {
-        engine: req.engine,
-        target_label: eph_label.unwrap_or(outcome.target_label),
-        object_name: req.object_name,
-        executed_query: statement,
-        captured_at_ms: chrono::Utc::now().timestamp_millis(),
-        duration_ms: outcome.duration_ms,
-        snapshot,
-        diff,
     }))
 }
 
@@ -392,7 +290,6 @@ async fn list_objects<S: IdeCtx>(
             database,
             object_name: String::new(),
             statement: String::new(),
-            is_custom_query: false,
             limit: 1,
             op: DbWatchOp::ListObjects,
         },

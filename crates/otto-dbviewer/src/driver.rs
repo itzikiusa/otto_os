@@ -100,6 +100,21 @@ pub trait Driver: Send + Sync {
         self.object_detail(cfg, path).await
     }
 
+    /// DB Watch rows `[key, type, value preview, ttl]` for the keys matching
+    /// `object` (a key prefix, or a glob such as `session:*:route`), at most
+    /// `cap`, in a few pipelined round trips. Only Redis has keys.
+    async fn watch_keys(
+        &self,
+        _cfg: &ResolvedConfig,
+        _keyspace: &NodePath,
+        _object: &str,
+        _cap: usize,
+    ) -> Result<Vec<Vec<serde_json::Value>>> {
+        Err(otto_core::Error::Invalid(
+            "only a Redis connection has keys to watch".into(),
+        ))
+    }
+
     /// Execute a query / command and return a tabular result.
     async fn run(&self, cfg: &ResolvedConfig, req: &QueryRequest) -> Result<QueryResult>;
 
