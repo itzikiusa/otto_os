@@ -3134,20 +3134,19 @@ async fn pr_diff<S: GitCtx>(
                         .run(&nk, || {
                             let nk = nk.clone();
                             async move {
-                                let got = match path.as_deref().filter(|p| !p.is_empty()) {
-                                    Some(p) => {
-                                        provider
-                                            .get_pr_file_diff(
-                                                &remote,
-                                                number,
-                                                p,
-                                                old_path.as_deref(),
-                                            )
-                                            .await?
+                                let got = async {
+                                    match path.as_deref().filter(|p| !p.is_empty()) {
+                                        Some(p) => {
+                                            let old = old_path.as_deref();
+                                            provider.get_pr_file_diff(&remote, number, p, old).await
+                                        }
+                                        None => provider.get_pr_diff_summary(&remote, number).await,
                                     }
-                                    None => provider.get_pr_diff_summary(&remote, number).await?,
                                 };
-                                let ttl = ttl_for(&*provider, &remote, number, &rev).await;
+                                // The TTL is a second forge read: side by side.
+                                let ttl = ttl_for(&*provider, &remote, number, &rev);
+                                let (got, ttl) = tokio::join!(got, ttl);
+                                let got = got?;
                                 Ok(got.map(|mut d| {
                                     for f in &mut d.files {
                                         crate::parse::fill_counts(f);
@@ -3176,8 +3175,11 @@ async fn pr_diff<S: GitCtx>(
                 .run(&key, || {
                     let key = key.clone();
                     async move {
-                        let mut d = provider.get_pr_diff(&remote, number).await?;
-                        let ttl = ttl_for(&*provider, &remote, number, &rev_owned).await;
+                        let (d, ttl) = tokio::join!(
+                            provider.get_pr_diff(&remote, number),
+                            ttl_for(&*provider, &remote, number, &rev_owned)
+                        );
+                        let mut d = d?;
                         for f in &mut d.files {
                             crate::parse::fill_counts(f);
                         }

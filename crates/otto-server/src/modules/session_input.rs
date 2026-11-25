@@ -201,15 +201,23 @@ pub(crate) async fn broadcast_sessions(
     text: &str,
     targets: Option<&[Id]>,
 ) -> Result<Vec<Id>> {
-    let mut sent = Vec::new();
-    for session in input_agents(ctx, who, ws_id).await? {
-        if targets.is_none_or(|ids| ids.contains(&session.id))
-            && submit_session_text(ctx, who, &session, text).await.is_ok()
-        {
-            sent.push(session.id);
-        }
-    }
-    Ok(sent)
+    let live = input_agents(ctx, who, ws_id).await?;
+    let picked = live
+        .iter()
+        .filter(|s| targets.is_none_or(|t| t.contains(&s.id)));
+    Ok(submit_all(ctx, who, picked, text).await)
+}
+
+/// Submit into every session AT ONCE (own submit locks): one 200 ms pause, not N.
+pub(crate) async fn submit_all<'s>(
+    ctx: &ServerCtx,
+    who: Typist<'_>,
+    sessions: impl Iterator<Item = &'s Session>,
+    text: &str,
+) -> Vec<Id> {
+    let sent = sessions.map(|s| async move { (s, submit_session_text(ctx, who, s, text).await) });
+    let sent = futures_util::future::join_all(sent).await.into_iter();
+    sent.flat_map(|(s, r)| r.map(|()| s.id.clone())).collect()
 }
 
 pub(crate) fn delay_session_input(

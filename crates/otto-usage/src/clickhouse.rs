@@ -613,10 +613,10 @@ impl ClickHouse {
     /// rows carry RFC3339 timestamps (e.g. `UsageEvent.ts`) in `DateTime64`
     /// columns; rows that omit them still get the column DEFAULTs.
     ///
-    /// `async_insert=1&wait_for_async_insert=1` lets the server coalesce
-    /// inserts from several writers (the usage flusher, the metrics sampler,
-    /// the rebuild) into fewer parts, while the call still returns only once
-    /// the rows are durable — so failure handling is unchanged.
+    /// Synchronous (`async_insert=0`, which ClickHouse 26 no longer defaults
+    /// to): each table has one writer, so the server's async buffer merged
+    /// nothing, yet every insert waited out its `>= 50 ms` busy timeout — and
+    /// a usage read waits for the flush it requests (P1-037: 63 ms → 4 ms).
     pub async fn insert_ndjson(&self, table: &str, ndjson: &str) -> Result<()> {
         if ndjson.trim().is_empty() {
             return Ok(());
@@ -878,8 +878,7 @@ impl Drop for ClickHouse {
 /// split a statement mid-way. Safe for our controlled DDL (no `--` or `;` inside
 /// string literals).
 /// URL settings appended to every insert (see [`ClickHouse::insert_ndjson`]).
-const INSERT_SETTINGS: &str =
-    "&async_insert=1&wait_for_async_insert=1&async_insert_busy_timeout_ms=10000";
+const INSERT_SETTINGS: &str = "&async_insert=0";
 
 fn split_statements(sql: &str) -> Vec<String> {
     let no_comments: String = sql
