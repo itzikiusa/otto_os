@@ -325,6 +325,9 @@ impl LocalGit {
             .filter(|s| !s.is_empty())
             .map(str::to_string)
             .collect();
+        if commits.is_empty() {
+            return Ok(PushPreflightResp::empty()); // a bare `git show` would read HEAD
+        }
 
         let mut secrets = Vec::new();
         let mut secret_seen = HashSet::new();
@@ -340,30 +343,42 @@ impl LocalGit {
         // line, which no diff line can start with.
         let revs: String = commits.iter().map(|s| format!("{s}\n")).collect();
         let raw_cmd = GitCmd::read(&["diff-tree", "--stdin", "--root", "-r", "--raw", "-z"]);
-        let (dt_ok, dt_out, _, _) = self.exec(&raw_cmd, Some(revs.as_bytes())).await?;
+        let (dt_ok, dt_out, dt_err, code) = self.exec(&raw_cmd, Some(revs.as_bytes())).await?;
         let dt_out = String::from_utf8_lossy(&dt_out);
+        if !dt_ok {
+            return Err(crate::local::upstream_err(&dt_err, &dt_out, code));
+        }
         let mut raw_by_commit: HashMap<String, Vec<(String, String, String)>> = HashMap::new();
-        for (commit, status, dst_oid, path) in
-            parse_raw_diff_tree_z(if dt_ok { &dt_out } else { "" })
-        {
+        for (commit, status, dst_oid, path) in parse_raw_diff_tree_z(&dt_out) {
             raw_by_commit
                 .entry(commit)
                 .or_default()
                 .push((status, dst_oid, path));
         }
-        let mut show = vec!["show", "--format=%x1e%H", "--unified=0", "--no-color"];
-        show.extend(["--no-ext-diff", "--no-textconv"]);
+        // `--no-show-signature`: a user's `log.showSignature=true` prints the
+        // signature check ahead of a signed commit's record, which hid every
+        // patch from the scan. A record we cannot read fails the preflight
+        // instead of passing it unscanned.
+        let mut show = vec!["show", "--no-show-signature", "--format=%x1e%H"];
+        show.extend([
+            "--unified=0",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+        ]);
         show.extend(commits.iter().map(String::as_str));
-        let (show_ok, show_out, _, _) = self
-            .run_raw_class(&show, &[], SpawnClass::LocalRead)
-            .await?;
+        let show_out = self.run_read(&show).await?;
         let patches: HashMap<&str, &str> = show_out
             .strip_prefix('\u{1e}')
-            .filter(|_| show_ok)
             .unwrap_or("")
             .split("\n\u{1e}")
             .filter_map(|c| c.split_once('\n'))
             .collect();
+        if commits.iter().any(|c| !patches.contains_key(c.as_str())) {
+            return Err(Error::Upstream(
+                "push preflight could not read the outgoing commits' patches".into(),
+            ));
+        }
 
         for sha in &commits {
             let short = &sha[..sha.len().min(7)];
@@ -687,5 +702,50 @@ mod tests {
         assert_eq!(resp.large_blobs.len(), 1, "{resp:?}");
         assert_eq!(resp.large_blobs[0].path, "big.bin");
         assert!(resp.large_blobs[0].bytes.unwrap() > LARGE_BLOB_THRESHOLD_BYTES);
+    }
+
+    /// `log.showSignature=true` prints the signature check ahead of a signed
+    /// commit's `git show` record: the scan must still see every patch.
+    #[tokio::test]
+    async fn push_preflight_scans_signed_commits_under_show_signature() {
+        let td = tempfile::tempdir().unwrap();
+        let bare = td.path().join("remote.git");
+        let work = td.path().join("work");
+        std::fs::create_dir_all(&bare).unwrap();
+        std::fs::create_dir_all(&work).unwrap();
+        run_git(&bare, &["init", "--bare", "-b", "main"]);
+        run_git(&work, &["init", "-b", "main"]);
+        run_git(&work, &["remote", "add", "origin", bare.to_str().unwrap()]);
+        std::fs::write(work.join("README.md"), "# demo\n").unwrap();
+        run_git(&work, &["add", "README.md"]);
+        run_git(&work, &["commit", "-m", "initial"]);
+        run_git(&work, &["push", "-u", "origin", "main"]);
+        let key = td.path().join("sigkey");
+        let made = Command::new("ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+            .arg(&key)
+            .output();
+        if !made.is_ok_and(|o| o.status.success()) {
+            eprintln!("ssh-keygen unavailable — skipping");
+            return;
+        }
+        run_git(&work, &["config", "gpg.format", "ssh"]);
+        run_git(&work, &["config", "user.signingkey", key.to_str().unwrap()]);
+        let tok = format!("ghp_{}", "D".repeat(36));
+        std::fs::write(work.join("a.txt"), format!("token={tok}\n")).unwrap();
+        run_git(&work, &["add", "."]);
+        run_git(&work, &["commit", "-S", "-m", "signed with a secret"]);
+        std::fs::write(work.join("b.txt"), "plain\n").unwrap();
+        run_git(&work, &["add", "."]);
+        run_git(&work, &["commit", "-S", "-m", "signed"]);
+        run_git(&work, &["config", "log.showSignature", "true"]);
+
+        let resp = LocalGit::new(&work)
+            .push_preflight(&PushPreflightReq::default())
+            .await
+            .unwrap();
+        assert_eq!(resp.commits_ahead, 2);
+        assert_eq!(resp.secrets.len(), 1, "{resp:?}");
+        assert_eq!(resp.secrets[0].path, "a.txt");
     }
 }
