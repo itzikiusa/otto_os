@@ -373,6 +373,8 @@ test('A+C+D: an agent debugs a Go service end to end — request, stops, DB rows
       // The person sees the agent's breakpoints in the gutter, marked as its own.
       await expect(ideIn(page).locator('.cm-editor:visible [title*="orders-agent"]').first()).toBeVisible({ timeout: 20_000 });
       await expect(ideIn(page).getByTestId('agent-driving-bar')).toContainText('orders-agent');
+      // The start's own narration is on the bar while the service runs (C1-023).
+      await expect(ideIn(page).getByTestId('agent-driving-say')).toContainText('Starting the orders service');
     });
 
     await test.step('D: a request to a host that is not this Mac is refused', async () => {
@@ -479,6 +481,32 @@ test('A+C+D: an agent debugs a Go service end to end — request, stops, DB rows
       console.log(`[after continue] ${json(r).slice(0, 1500)}`);
       expect(r.request?.status, json(r)).toBe(201);
       expect(r.request.in_flight).toBe(false);
+    });
+
+    await test.step('A: ide_debug_db — diff since the start, watch with a filter, unwatch, watch again', async () => {
+      console.log(`[step] ${new Date().toISOString()} ide_debug_db`);
+      const diff = await mcp.call('ide_debug_db', { action: 'diff', since: 'start' });
+      expect(diff.isError, diff.text).toBeFalsy();
+      const orders = diff.r.objects.find((o: { object: string }) => o.object === 'orders');
+      expect(orders.added, json(diff.r)).toBe(1);
+      expect(orders.rows[0].row).toMatchObject({ customer: 'ava', status: 'paid' });
+      expect(json(diff.r)).not.toContain('tok-ava-42');
+      const watched = await mcp.call('ide_debug_db', { action: 'watch', objects: [{ object: 'orders', filter: { column: 'customer', value: 'ava' } }] });
+      expect(watched.isError, watched.text).toBeFalsy();
+      expect(watched.r.watching).toBe(true);
+      // The watch's first read (objects with their counts) comes with it.
+      expect(watched.r.objects.map((o: { object: string }) => o.object)).toEqual(['orders']);
+      await showDebugDock(page);
+      await expect(ideIn(page).getByTestId('ide-dbw-strip')).toBeVisible();
+      const off = await mcp.call('ide_debug_db', { action: 'unwatch' });
+      expect(off.r.watching).toBe(false);
+      await expect(ideIn(page).getByTestId('ide-dbw-strip')).toHaveCount(0);
+      const nothing = await mcp.call('ide_debug_db', { action: 'diff' });
+      expect(nothing.isError).toBe(true);
+      expect(nothing.text).toMatch(/Nothing is watched/);
+      const again = await mcp.call('ide_debug_db', { action: 'watch' });
+      expect(again.isError, again.text).toBeFalsy();
+      expect(again.r.objects.map((o: { object: string }) => o.object)).toContain('orders');
     });
 
     await test.step('A: the agent stops — its breakpoints go, the session ends', async () => {
