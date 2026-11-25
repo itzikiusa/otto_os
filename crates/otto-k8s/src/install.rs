@@ -571,10 +571,12 @@ async fn cached_verify(tool: Tool, path: &Path) -> Option<String> {
     type Seen = Mutex<HashMap<(PathBuf, std::time::SystemTime), String>>;
     static SEEN: OnceLock<Seen> = OnceLock::new();
     let seen = SEEN.get_or_init(Default::default);
-    let key = std::fs::metadata(path)
-        .and_then(|m| m.modified())
+    // Keyed on the RESOLVED path: a Nix upgrade swaps the profile symlink to
+    // a new store path whose files all carry the same epoch mtime.
+    let key = std::fs::canonicalize(path)
+        .and_then(|p| Ok((std::fs::metadata(&p)?.modified()?, p)))
         .ok()
-        .map(|t| (path.to_path_buf(), t));
+        .map(|(t, p)| (p, t));
     if let Some(v) = key.as_ref().and_then(|k| seen.lock().ok()?.get(k).cloned()) {
         return Some(v);
     }
@@ -767,5 +769,35 @@ mod tests {
         assert!(matches!(ev, Event::K8sInstallUpdated { state, .. } if state == "done"));
         assert_eq!(inst.job(Tool::Kubectl).state, InstallState::Done);
         assert_eq!(serde_json::to_value(&first).unwrap()["tool"], "kubectl");
+    }
+
+    /// A Nix upgrade swaps the profile symlink to a new store path whose
+    /// files all carry the same epoch mtime: the cache must see the new binary.
+    #[tokio::test]
+    async fn cached_verify_follows_a_symlink_swap_with_equal_mtimes() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        for (dir, v) in [("a", "v0.1.0"), ("b", "v0.2.0")] {
+            let bin = tmp.path().join(dir).join("k9s");
+            std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+            std::fs::write(&bin, format!("#!/bin/sh\necho 'Version {v}'\n")).unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let epoch = std::fs::File::options().write(true).open(&bin).unwrap();
+            epoch
+                .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1))
+                .unwrap();
+        }
+        let link = tmp.path().join("k9s");
+        std::os::unix::fs::symlink(tmp.path().join("a/k9s"), &link).unwrap();
+        assert_eq!(
+            cached_verify(Tool::K9s, &link).await.as_deref(),
+            Some("v0.1.0")
+        );
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(tmp.path().join("b/k9s"), &link).unwrap();
+        assert_eq!(
+            cached_verify(Tool::K9s, &link).await.as_deref(),
+            Some("v0.2.0")
+        );
     }
 }
