@@ -492,3 +492,48 @@ test('G: picking a target (and its tables) reads no rows; Start watching does', 
   assert.deepEqual(plain(reads()[0]?.body), { target: { kind: 'saved', connection_id: 'stg' }, database: 'pr_bo_1', items: [{ object: 'session_route' }], bind: null, root: '/r', confirm_target: true });
   assert.equal(h.store.pendingTarget, null);
 });
+
+// ── Post-review CP-001 / CP-002 ────────────────────────────────────────────
+
+test('CP-001: switching to another target lists ITS tables in ITS database, not the old watch’s', async () => {
+  const w = watchOf(); // mysql, database pr_bo_1
+  const redis: IdeEphemeralDbTarget = { ...tc, ephemeral_id: 'mr', name: 'miniredis', engine: 'redis', database: null, source: 'process' };
+  const h = harness({ routes: (c) => (c.url.startsWith('/ide/db-watch/watches?root=') ? { watches: [w] } : c.url === '/ide/db-watch/detect' ? { detected_objects: [], saved_connections: [], ephemeral_targets: [tc, redis] } : c.url === '/ide/db-watch/objects' ? { objects: [], truncated: false } : c.url.startsWith('/ide/db-watch/watches/w1') ? readOf(w) : undefined) });
+  h.store.follow({ root: '/r' });
+  await flush(); await flush();
+  await h.store.setTarget(redis);
+  await h.store.loadObjects();
+  const det = h.calls.filter((c) => c.url === '/ide/db-watch/detect').at(-1)?.body as { target?: unknown; database?: unknown };
+  assert.deepEqual(plain(det.target), { kind: 'ephemeral', ephemeral_id: 'mr' });
+  assert.equal(det.database, null, 'not the old watch’s pr_bo_1');
+  const obj = h.calls.find((c) => c.url === '/ide/db-watch/objects')?.body as { target?: unknown; database?: unknown };
+  assert.deepEqual(plain(obj.target), { kind: 'ephemeral', ephemeral_id: 'mr' });
+  assert.equal(obj.database, null);
+});
+
+test('CP-002: a restored remote watch is not contacted by Target ▾, a project switch or a lookup — only the click reaches it', async () => {
+  const w = watchOf({ bind: { debug_session_id: 'd1' }, target: { kind: 'saved', connection_id: 'stg', engine: 'mysql', label: 'pr_bo eu', environment: 'dev', local: false } });
+  const h = harness({ routes: (c) => (c.url === '/ide/db-watch/watches?root=%2Fr' ? { watches: [w] } : c.url.startsWith('/ide/db-watch/watches?root=') ? { watches: [] } : c.url === '/ide/db-watch/detect' ? { detected_objects: [det('session_info')], saved_connections: [saved({ local: false })], ephemeral_targets: [] } : c.method === 'PATCH' ? w : c.url.startsWith('/ide/db-watch/watches/w1') ? readOf(w) : undefined) });
+  h.store.follow({ root: '/r' }); // a reload restores it
+  await flush(); await flush();
+  await h.store.discover(); // Target ▾ opens (and closes)
+  h.store.follow({ root: '/other' });
+  await flush(); await flush();
+  h.store.follow({ root: '/r' }); // and back
+  await flush(); await flush();
+  h.store.follow({ root: '/r', debug: { id: 'd2', state: 'running', stop_seq: 0 } });
+  for (let i = 0; i < 6; i++) await flush();
+  assert.deepEqual(h.calls.filter(namesTarget), [], 'no request names the remote target');
+  assert.ok(h.store.prodWaiting);
+  await h.store.watchProd();
+  assert.equal(h.calls.filter(namesTarget).length, 1, 'the click does');
+});
+
+test('CP-002: live poll never carries over to the next target', async () => {
+  const h = harness({ routes: (c) => (c.method === 'POST' && c.url === '/ide/db-watch/watches' ? watchOf({ id: 'w2' }) : c.url.startsWith('/ide/db-watch/watches/') ? readOf(watchOf({ id: 'w2' })) : c.url.startsWith('/ide/db-watch/watches?') ? { watches: [] } : undefined) });
+  h.store.follow({ root: '/r' });
+  await flush();
+  h.store.liveWatch = true;
+  await h.store.start({ target: { kind: 'saved', connection_id: 'stg' }, items: [{ object: 'session_info' }] });
+  assert.equal(h.store.liveWatch, false);
+});
