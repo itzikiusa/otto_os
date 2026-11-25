@@ -578,6 +578,45 @@ mod tests {
     }
 
     #[test]
+    fn otto_debug_skill_is_bundled_and_opt_in() {
+        let s = list_bundled()
+            .into_iter()
+            .find(|s| s.name == "otto-debug")
+            .expect("otto-debug bundled");
+        assert_eq!(s.category, "development");
+        assert!(s.version >= 1);
+        // It triggers only on an explicit ask, and names what it is not for.
+        assert!(
+            s.description.contains("explicitly asks"),
+            "{}",
+            s.description
+        );
+        assert!(s.description.contains("Do not use"), "{}", s.description);
+        let body = bundled_body("otto-debug").expect("body");
+        // Every tool it names exists in the UI-command catalog.
+        let catalog: serde_json::Value =
+            serde_json::from_str(include_str!("../../../docs/contracts/ui-commands.json")).unwrap();
+        let names: Vec<&str> = catalog["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|c| c["name"].as_str())
+            .collect();
+        for tool in [
+            "ide_debug_start",
+            "ide_debug_control",
+            "ide_debug_inspect",
+            "ide_debug_evaluate",
+            "ide_debug_request",
+        ] {
+            assert!(body.contains(tool), "{tool} not explained");
+            assert!(names.contains(&tool), "{tool} not in the catalog");
+        }
+        // Explain each stop briefly and hand the turn back.
+        assert!(body.contains("at most 3 sentences") && body.contains("end"));
+    }
+
+    #[test]
     fn reviewer_skills_are_complete_packages() {
         let names = [
             "vault-docs-review",
