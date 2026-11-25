@@ -645,6 +645,18 @@ export type OttoEvent =
       dirs: string[];
     }
   | {
+      /** A DB Watch took a checkpoint (or one failed) — owner-only; the IDE
+       *  refetches `GET /ide/db-watch/watches/{watch_id}`. */
+      type: 'ide_db_watch_checkpoint';
+      user_id: Id;
+      watch_id: string;
+      root: string;
+      seq: number;
+      reason: 'start' | 'stop' | 'run_end' | 'session_end' | 'manual';
+      changed_rows: number;
+      failed_items: number;
+    }
+  | {
       type: 'db_mcp_activity';
       workspace_id: Id;
       connection_id: Id;
