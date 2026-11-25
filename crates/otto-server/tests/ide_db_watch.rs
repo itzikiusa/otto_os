@@ -1150,3 +1150,72 @@ fn maria_connections() -> i64 {
         .parse()
         .unwrap()
 }
+
+/// Real Redis (OTTO_DBW_E2E=1, redis:8.8 on 26379): a glob item reads the
+/// keys it matches, with types, previews and TTLs from pipelined reads.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore]
+async fn real_redis_glob_items_and_pipelined_values() {
+    if std::env::var("OTTO_DBW_E2E").is_err() {
+        return;
+    }
+    let env = watch_env(1).await;
+    env.ctx_ide.db_watch.register_loopback_target(
+        "e:redis",
+        "redis",
+        IdeDbEngine::Redis,
+        26379,
+        None,
+        None,
+        Some("0".into()),
+    );
+    let root = env
+        .root_dir
+        .path()
+        .join("proj")
+        .to_string_lossy()
+        .to_string();
+    let url = |p: &str| format!("{}/api/v1/ide/db-watch{p}", env.base);
+    let (s, w) = call(
+        reqwest::Method::POST,
+        url("/watches"),
+        &env.root_tok,
+        Some(json!({
+            "root": root,
+            "target": {"kind": "ephemeral", "ephemeral_id": "e:redis"},
+            "items": [{"object": "glob:*:route"}, {"object": "glob:"}],
+        })),
+    )
+    .await;
+    assert_eq!(s, 200, "{w}");
+    let (_, r) = call(
+        reqwest::Method::GET,
+        url(&format!("/watches/{}?rows=1", w["id"].as_str().unwrap())),
+        &env.root_tok,
+        None,
+    )
+    .await;
+    let mut keys: Vec<String> = r["items"][0]["current"]["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row[0].as_str().unwrap().to_string())
+        .collect();
+    keys.sort();
+    assert_eq!(keys, vec!["glob:1:route", "glob:2:route"], "{r}");
+    let rows = r["items"][1]["current"]["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 4, "{r}");
+    let by_key = |k: &str| rows.iter().find(|row| row[0] == k).unwrap().clone();
+    assert_eq!(
+        by_key("glob:1:route"),
+        json!(["glob:1:route", "string", "a", -1])
+    );
+    let h = by_key("glob:h");
+    assert_eq!(
+        (h[1].clone(), h[2].clone()),
+        (json!("hash"), json!({"f": "v"})),
+        "{h}"
+    );
+    assert!(h[3].as_i64().unwrap() > 0, "TTL read: {h}");
+    assert_eq!(by_key("glob:l")[2], json!(["x", "y"]));
+}

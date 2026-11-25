@@ -543,6 +543,8 @@ impl DbViewerService {
     }
 }
 
+/// Rows `key, type, value, ttl` of the keys matching `object` (a prefix or
+/// a glob), pipelined by the driver.
 async fn enrich_redis_prefix(
     driver: &dyn Driver,
     cfg: &ResolvedConfig,
@@ -550,38 +552,10 @@ async fn enrich_redis_prefix(
     object_name: &str,
     limit: usize,
 ) -> Result<(Vec<String>, Vec<Vec<Value>>)> {
-    let cleaned = object_name.trim().trim_end_matches('*');
-    let parent = NodePath::parse(redis_node);
-    let nodes = driver.schema_children(cfg, &parent, Some(cleaned)).await?;
     let cap = limit.min(REDIS_WATCH_ENRICH_CAP);
-    let mut rows = Vec::new();
-    for node in nodes
-        .into_iter()
-        .filter(|n| n.kind == NodeKind::Key)
-        .take(cap)
-    {
-        let key_path = NodePath::parse(&node.id);
-        match driver.object_detail(cfg, &key_path).await {
-            Ok(detail) => {
-                let ty = detail
-                    .extra
-                    .get("type")
-                    .cloned()
-                    .unwrap_or_else(|| Value::String(node.detail.unwrap_or_default()));
-                let preview = detail.extra.get("preview").cloned().unwrap_or(Value::Null);
-                let ttl = detail.extra.get("ttl").cloned().unwrap_or(Value::Null);
-                rows.push(vec![Value::String(node.label), ty, preview, ttl]);
-            }
-            Err(_) => {
-                rows.push(vec![
-                    Value::String(node.label),
-                    Value::String(node.detail.unwrap_or_else(|| "unknown".into())),
-                    Value::Null,
-                    Value::Null,
-                ]);
-            }
-        }
-    }
+    let rows = driver
+        .watch_keys(cfg, &NodePath::parse(redis_node), object_name, cap)
+        .await?;
     Ok((
         vec!["key".into(), "type".into(), "value".into(), "ttl".into()],
         rows,
