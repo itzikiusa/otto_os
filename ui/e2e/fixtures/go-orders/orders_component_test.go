@@ -3,46 +3,27 @@
 package main
 
 import (
-	"context"
-	"fmt"
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/suite"
-	"github.com/testcontainers/testcontainers-go"
-	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-// OrdersSuite runs against its own MariaDB Testcontainer.
+// OrdersSuite runs against the run's own database: ORDERS_TEST_DSN names a
+// container started for this run (the e2e starts it with Testcontainers'
+// labels, which is how Otto recognises a run's own database).
 type OrdersSuite struct {
 	suite.Suite
-	ctr testcontainers.Container
 }
 
 func (s *OrdersSuite) SetupSuite() {
-	ctx := context.Background()
-	ctr, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: testcontainers.ContainerRequest{
-			Image:        "mariadb:11.8.9",
-			Env:          map[string]string{"MARIADB_ROOT_PASSWORD": "secret", "MARIADB_DATABASE": "shop"},
-			ExposedPorts: []string{"3306/tcp"},
-			WaitingFor:   wait.ForListeningPort("3306/tcp"),
-		},
-		Started: true,
-	})
-	s.Require().NoError(err)
-	s.ctr = ctr
-	host, err := ctr.Host(ctx)
-	s.Require().NoError(err)
-	port, err := ctr.MappedPort(ctx, "3306/tcp")
-	s.Require().NoError(err)
-	db, err = openDB(fmt.Sprintf("root:secret@tcp(%s:%s)/shop", host, port.Port()))
-	s.Require().NoError(err)
-}
-
-func (s *OrdersSuite) TearDownSuite() {
-	if s.ctr != nil {
-		_ = s.ctr.Terminate(context.Background())
+	dsn := os.Getenv("ORDERS_TEST_DSN")
+	if dsn == "" {
+		s.T().Skip("ORDERS_TEST_DSN is not set")
 	}
+	var err error
+	db, err = openDB(dsn)
+	s.Require().NoError(err)
 }
 
 func (s *OrdersSuite) TestCreate() {
