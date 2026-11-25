@@ -6,8 +6,9 @@ import { bootWriteIde, openTreeFile } from './ide-write-fixtures';
 // configuration rebuilds per mount, ~20 ms of the WebKit page transition, and each mount added
 // a new copy of a theme's rules to the page. A new editor now starts with its final configuration.
 
+// CodeMirror's rules only (scoped by its generated "ͼ" classes): pages load their own CSS lazily.
 const cssRules = (page: Page): Promise<number> => page.evaluate(() =>
-  [...Array.from(document.styleSheets), ...document.adoptedStyleSheets].reduce((n, s) => n + s.cssRules.length, 0));
+  [...Array.from(document.styleSheets), ...document.adoptedStyleSheets].reduce((n, s) => n + Array.from(s.cssRules).filter((r) => r.cssText.includes('ͼ')).length, 0));
 
 /** Count the transactions that reconfigure the live editor from now on. */
 async function countUpdates(page: Page): Promise<void> {
