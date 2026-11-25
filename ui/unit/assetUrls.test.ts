@@ -29,3 +29,11 @@ test('a URL that lands after the block is gone is revoked too; a failed fetch re
   await new Promise((r) => setTimeout(r, 0));
   assert.deepEqual(revoked, ['blob:late']);
 });
+
+test('a failed fetch is tried again on the next render (P3-012)', async () => {
+  let calls = 0;
+  const a = assetUrls(async (p) => { calls++; if (calls === 1) throw new Error('503'); return `blob:${p}`; }, () => {});
+  await a.get('/w/a.png').catch(() => {});
+  assert.equal(await a.get('/w/a.png'), 'blob:/w/a.png');
+  assert.equal(calls, 2);
+});

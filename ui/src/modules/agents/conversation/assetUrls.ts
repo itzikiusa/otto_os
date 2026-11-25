@@ -7,7 +7,14 @@ export function assetUrls(fetchUrl: (path: string) => Promise<string>, revoke: (
   return {
     get(path: string): Promise<string> {
       let u = urls.get(path);
-      if (!u) urls.set(path, (u = fetchUrl(path)));
+      if (!u) {
+        const p = fetchUrl(path);
+        urls.set(path, (u = p));
+        // A failed fetch is not kept: the next render tries again.
+        p.catch(() => {
+          if (urls.get(path) === p) urls.delete(path);
+        });
+      }
       return u;
     },
     revokeAll(): void {

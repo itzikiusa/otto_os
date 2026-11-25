@@ -8,8 +8,9 @@ const REF_DEF_OR_FOOTNOTE_RE = /(?:^\s*\[[^\]^]+\]:|\[\^[^\]]+\])/m;
 // fence's info string holds no backtick (``` ```foo``` ``` is inline code).
 const FENCE_RE = /^ {0,3}(```+|~~~+)(.*)$/;
 // Container HTML blocks a person writes across blank lines (<details>, <div>…):
-// counted on lines that start with a tag, so a `<div>` in prose never counts.
-const HTML_OPEN_RE = /<(?:details|div|section|table|blockquote|figure|dl)\b[^>]*>/gi;
+// opened on lines that start with a tag (so a `<div>` in prose never counts; a
+// self-closing `<div />` opens nothing), closed by a closing tag anywhere on a line.
+const HTML_OPEN_RE = /<(?:details|div|section|table|blockquote|figure|dl)\b[^>]*(?<!\/)>/gi;
 const HTML_CLOSE_RE = /<\/(?:details|div|section|table|blockquote|figure|dl)\s*>/gi;
 
 export interface StreamingMdSplit {
@@ -44,8 +45,9 @@ export function splitStreamingMarkdown(md: string): StreamingMdSplit {
       } else if (marker[0] === openFence[0] && marker.length >= openFence.length && fence[2].trim() === '') {
         openFence = null;
       }
-    } else if (!openFence && /^ {0,3}</.test(rawLine)) {
-      htmlDepth = Math.max(0, htmlDepth + (rawLine.match(HTML_OPEN_RE)?.length ?? 0) - (rawLine.match(HTML_CLOSE_RE)?.length ?? 0));
+    } else if (!openFence && (htmlDepth > 0 || /^ {0,3}</.test(rawLine))) {
+      const opens = /^ {0,3}</.test(rawLine) ? (rawLine.match(HTML_OPEN_RE)?.length ?? 0) : 0;
+      htmlDepth = Math.max(0, htmlDepth + opens - (rawLine.match(HTML_CLOSE_RE)?.length ?? 0));
     } else if (!openFence && !htmlDepth && trimmed === '' && pos > 0) {
       // Blank line outside any open fence: no cut when the next line continues
       // a list (an indented line, or the next item of a loose list) or a table.
@@ -65,12 +67,19 @@ export function splitStreamingMarkdown(md: string): StreamingMdSplit {
   return { blocks, tail: md.slice(lastCut) };
 }
 
+export interface StreamingBlocksRenderer {
+  (md: string): string[];
+  /** The answer is done: its streamed blocks when together they are `whole`
+   *  (so their DOM stays), else `[whole]`. The memo is let go either way. */
+  finish(md: string, whole: string): string[];
+}
+
 /** Per-block html for one streaming answer: a settled block renders once (and
  *  keeps the same html string while its source is unchanged), the open tail
  *  on every call. */
-export function streamingBlocksRenderer(render: (md: string) => string): (md: string) => string[] {
+export function streamingBlocksRenderer(render: (md: string) => string): StreamingBlocksRenderer {
   let memo: { md: string; html: string }[] = [];
-  return (md) => {
+  const next = ((md: string): string[] => {
     const { blocks, tail } = splitStreamingMarkdown(md);
     const out = blocks.map((b, i) => {
       if (memo[i]?.md !== b) memo[i] = { md: b, html: render(b) };
@@ -79,5 +88,11 @@ export function streamingBlocksRenderer(render: (md: string) => string): (md: st
     memo = memo.slice(0, blocks.length);
     if (tail) out.push(render(tail));
     return out;
+  }) as StreamingBlocksRenderer;
+  next.finish = (md, whole) => {
+    const parts = next(md);
+    memo = [];
+    return parts.join('') === whole ? parts : [whole];
   };
+  return next;
 }
