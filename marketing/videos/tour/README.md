@@ -1,6 +1,6 @@
 # Otto product tour film
 
-One music-led film (2:52, 1920×1080, 30 fps, H.264 + AAC) that walks through
+One music-led film (3:00, 1920×1080, 30 fps, H.264 + AAC) that walks through
 every main area of the app, chaptered by sidebar section. The Help →
 Walkthroughs page plays it from `ui/src/lib/walkthroughs/film.json`.
 
@@ -19,6 +19,8 @@ script/chapters.json      the edit plan: chapters → Help sections, length in b
 scripts/timing.mjs        chapters.json → src/generated/timing.json + otto-tour-<edition>.vtt (bar grid)
 scripts/soundtrack.mjs    the score + UI accents, arranged from timing.json → public/audio/
 scripts/capture.mjs       isolated daemon + demo DBs + seed + Playwright → public/capture/
+scripts/capture-agent-debug.mjs an agent debugging a real Go service (real delve, MariaDB, Redis) + DB Watch → public/capture/dbg/
+scripts/agent-debug/film.ts  the film's test, appended to the helpers of ui/e2e/desktop-ide-agent-debug-real.spec.ts
 scripts/capture-rooms.mjs genuine two-person Rooms footage → public/capture/rooms/
 scripts/reuse-rooms.mjs   the same genuine Rooms clips, cut from the published (hash-checked) capture
 scripts/lib/demo-codex.mjs scripted `codex app-server` for Threads / Personal Agents on the structured runtime
@@ -41,12 +43,12 @@ and is arranged from the edit's music sections in `chapters.json`:
 | Section | Chapters | What plays |
 |---|---|---|
 | Intro build | Meet Otto | The filter opens on a supersaw pad, the pluck arp comes in, then the kick from bar 3, a snare roll, a riser and half a beat of silence |
-| Drop / chorus | Home → Council | Four-on-the-floor kick, clap with a short room, swung 16th hats with open off-beats, pumping 8th bass, side-chained pad, arp and the lead hook. The last 4 bars are a post-chorus. |
+| Drop / chorus | Home → Threads | Four-on-the-floor kick, clap with a short room, swung 16th hats with open off-beats, pumping 8th bass, side-chained pad, arp and the lead hook. The last 4 bars are a post-chorus. |
 | Verse | Goal Loops, Workflows, Personal Agents | Lighter hats, a syncopated bass, a darker pad and a prominent arp, with the hook's figure answered on the pluck |
-| Chorus | IDE (Beta) → Vault and Skills Lab | Riser and impact in, then the hook again. The last 4 bars are a post-chorus. |
+| Chorus | IDE (Beta) → Vault and Skills Lab (incl. Debug with an agent, DB Watch, Git) | Riser and impact in, then the hook again. The last 4 bars are a post-chorus. |
 | Verse | Database Explorer, Connections and cloud | As the first verse |
 | Breakdown | Insights | Drums out, a resonant pad sweep, the hook on the pluck, then a 2-bar riser and snare roll |
-| Final chorus | Rooms, Phone access | Full energy, with the hook harmonised a third below |
+| Final chorus | Rooms, Phone access, Updates | Full energy, with the hook harmonised a third below |
 | Outro | Everywhere | vi–IV–V resolves to I under the logo lockup, followed by a tonic hit and the hook's tag. The track then rings out. |
 
 Sound design (all in code):
@@ -134,6 +136,11 @@ cd marketing/videos/tour
 OTTO_E2E_BIN=/path/to/ottod OTTO_E2E_PORT=7811 OTTO_E2E_PW_PORT=5211 \
   nice -n 10 node scripts/capture.mjs
 node scripts/contact.mjs public/capture            # optional: contact sheets in .cache/cs/ to eyeball
+
+# 1b. Agent debugging + DB Watch (needs dlv, Go and Docker with mariadb:11.8.9 and redis:7-alpine;
+#     an ottod built with the test-util feature, as the e2e uses).
+OTTO_E2E_BIN=/path/to/ottod OTTO_E2E_GO_DIR=/dir/with/dlv \
+  nice -n 10 node scripts/capture-agent-debug.mjs
 
 # 2. Rooms footage: re-capture, OR reuse a previous genuine capture verbatim.
 OTTO_E2E_BIN=/path/to/ottod OTTO_E2E_PORT=7831 OTTO_E2E_PW_PORT=5231 \
@@ -234,6 +241,23 @@ basename.
   and the phone browser reaches the UI through a local proxy that adds what
   `tailscale serve` adds (the ts.net Host and a 100.x `X-Forwarded-For`). The
   real tailnet, hostname and device tokens never appear on screen.
+
+## Debug with an agent, DB Watch and Updates: what is staged
+
+- **Debug with an agent** runs the real-debugger e2e path
+  (`ui/e2e/desktop-ide-agent-debug-real.spec.ts` and its `go-orders`
+  fixture): real delve, a real Go service, real MariaDB and Redis containers,
+  the production UI bridge and the real confirms. Only the agent is a
+  stand-in: a `shell` session that makes the agent's `otto.ui_ide_debug_*`
+  calls through `ottod mcp-tools` with its own session token, and whose
+  narration ("say") is scripted. The IDE opens beside the agent's session (the
+  browser's stand-in for its own window), so those shots frame the right half.
+- **DB Watch** is the same run: the rows the request wrote, read from the
+  run's MariaDB at each stop.
+- **Updates** mocks the desktop shell's update commands and events exactly as
+  `ui/e2e/desktop-updates.spec.ts` does (no app bundle is built, launched or
+  replaced; the version and notes are fictional). The restart dialog's "keeps
+  running" list is the capture daemon's real answer.
 
 ## Rooms footage: what is genuine
 
