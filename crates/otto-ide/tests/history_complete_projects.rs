@@ -1187,4 +1187,31 @@ async fn fs_tree_lists_the_requested_folders_in_one_call() {
     )
     .await;
     assert!(one.get("listings").is_none());
+
+    // Relative paths work too, and a repeated folder is listed once.
+    let rel = serde_json::to_string(&["a", "a", "a/b"]).unwrap();
+    let uri = format!(
+        "/ide/fs/tree?root={}&path=&paths={}",
+        urlencode(&ws_str),
+        urlencode(&rel)
+    );
+    let (st, body) = send_json(&app, Method::GET, &uri, None).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let got: Vec<&str> = body["listings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(got, ["a", "a/b"]);
+
+    // Past the cap the call is refused (the UI splits a bigger restore), never run.
+    let many: Vec<String> = (0..201).map(|i| format!("d{i}")).collect();
+    let uri = format!(
+        "/ide/fs/tree?root={}&path=&paths={}",
+        urlencode(&ws_str),
+        urlencode(&serde_json::to_string(&many).unwrap())
+    );
+    let (st, body) = send_json(&app, Method::GET, &uri, None).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
 }

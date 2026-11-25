@@ -27,7 +27,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Extension, Json, Router};
-use futures_util::StreamExt;
+use futures_util::{StreamExt, TryStreamExt};
 use otto_core::api::Problem;
 use otto_core::auth::AuthUser;
 use otto_core::{Error, Result};
@@ -285,6 +285,9 @@ pub fn public_router<S: IdeCtx>() -> Router<S> {
         )
 }
 
+/// Most folders one tree read lists (`paths`); the UI sends at most this many per call.
+const MAX_TREE_PATHS: usize = 200;
+
 async fn fs_tree<S: IdeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
@@ -297,28 +300,45 @@ async fn fs_tree<S: IdeCtx>(
         let mut resp = targets
             .list_tree(&resolved, q.path.as_deref(), q.show_hidden)
             .await?;
-        let more: Vec<String> = match q.paths.as_deref() {
+        let mut more: Vec<String> = match q.paths.as_deref() {
             Some(raw) => serde_json::from_str(raw)
                 .map_err(|e| Error::Invalid(format!("paths: not a JSON array of strings: {e}")))?,
             None => Vec::new(),
         };
+        let mut seen = std::collections::HashSet::new();
+        more.retain(|p| seen.insert(p.clone()));
+        if more.len() > MAX_TREE_PATHS {
+            Err(Error::Invalid(format!(
+                "paths: at most {MAX_TREE_PATHS} folders per call, got {}",
+                more.len()
+            )))?;
+        }
         resp.listings = futures_util::stream::iter(more)
             .map(|path| {
                 let resolved = &resolved;
                 async move {
-                    let listing = targets
+                    match targets
                         .list_tree(resolved, Some(&path), q.show_hidden)
-                        .await;
-                    listing.ok().map(|l| IdeFsTreeListing {
-                        path,
-                        entries: l.entries,
-                    })
+                        .await
+                    {
+                        Ok(l) => Ok(Some(IdeFsTreeListing {
+                            path,
+                            entries: l.entries,
+                        })),
+                        // This folder is gone, no longer a folder or not readable: left out (the
+                        // UI reads it on its own and shows why). The target failing (an SSH
+                        // drop) fails the call: it is not "every folder deleted".
+                        Err(Error::NotFound(_) | Error::Invalid(_) | Error::Forbidden(_)) => {
+                            Ok(None)
+                        }
+                        Err(e) => Err(e),
+                    }
                 }
             })
             .buffered(8)
-            .filter_map(std::future::ready)
-            .collect()
-            .await;
+            .try_filter_map(|l| std::future::ready(Ok(l)))
+            .try_collect()
+            .await?;
         let entries = resp
             .entries
             .iter_mut()
