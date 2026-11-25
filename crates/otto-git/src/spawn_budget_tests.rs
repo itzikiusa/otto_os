@@ -129,6 +129,16 @@ async fn spawn_budget_per_action() {
     assert!(s.len() <= 2, "fetch ≤ 2 spawns: {s:?}");
 }
 
+/// Every repo open paid for `git submodule status` (a shell script, ~80 ms)
+/// in a repo without submodules.
+#[tokio::test]
+async fn submodule_list_without_gitmodules_spawns_nothing() {
+    let f = Fixture::new();
+    assert!(f.git.submodule_list().await.unwrap().is_empty());
+    let s = f.take_fg();
+    assert!(s.is_empty(), "no .gitmodules = no spawn: {s:?}");
+}
+
 #[tokio::test]
 async fn commit_graph_seed_runs_once_while_in_flight() {
     let f = Fixture::new();

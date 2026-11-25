@@ -2125,6 +2125,15 @@ impl LocalGit {
     /// `git submodule status` → parsed entries enriched with `.gitmodules`
     /// url/branch. Empty list when the repo has no submodules.
     pub async fn submodule_list(&self) -> Result<Vec<SubmoduleInfo>> {
+        // `git submodule` is a shell script (~80 ms of sh and helper spawns
+        // per call, the slowest read of a repo open); with no `.gitmodules`
+        // it can only print nothing or fail on an unmapped gitlink.
+        if !tokio::fs::try_exists(self.path().join(".gitmodules"))
+            .await
+            .unwrap_or(true)
+        {
+            return Ok(Vec::new());
+        }
         let out = self.run_read(&["submodule", "status"]).await?;
         let mut subs = crate::parse::parse_submodule_status(&out);
         if subs.is_empty() {
