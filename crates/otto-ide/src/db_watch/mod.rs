@@ -64,6 +64,10 @@ pub struct IdeDetectedDbAccess {
     pub database_hint: Option<String>,
     pub source_file: String,
     pub line: u32,
+    /// Rank input: 100 paused frame's file, 60 other stack file, 40 the paused
+    /// file's folder, 30 active file, 10 anywhere else (see `db_watch::detect`).
+    #[serde(default)]
+    pub score: u32,
 }
 
 /// A saved Otto database connection profile visible to the caller.
