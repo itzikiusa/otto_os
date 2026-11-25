@@ -54,7 +54,9 @@
   function more(e: MouseEvent): void {
     const v = s?.version;
     ctxMenu.showAt(e.currentTarget as Element, [
-      { label: 'Skip this version', icon: 'x', disabled: !v, action: () => void updates.skip(v ?? null) },
+      v && s?.skipped === v
+        ? { label: 'Unskip this version', icon: 'undo', action: () => void updates.skip(null) }
+        : { label: 'Skip this version', icon: 'x', disabled: !v, action: () => void updates.skip(v ?? null) },
       { label: 'View release on GitHub', icon: 'external', disabled: !s?.release_url, action: () => void openExternal(s?.release_url) },
       { separator: true },
       { label: 'Install updates automatically', checked: !!s?.auto_install, title: 'Downloads in the background; you choose when to restart', action: () => void updates.setAuto(!s?.auto_install) },

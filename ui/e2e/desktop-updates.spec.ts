@@ -13,7 +13,6 @@ const shot = async (page: Page, name: string) => {
 type Fx = {
   calls: { command: string; args: Record<string, unknown> }[];
   state: Record<string, unknown>;
-  checkFails: string | null;
   emit: (event: string, payload: unknown) => void;
 };
 
@@ -39,7 +38,6 @@ async function shell(page: Page, init: { state: Record<string, unknown>; rail?: 
     const fx: Fx = {
       calls: [],
       state: init.state,
-      checkFails: null,
       emit(event, payload) {
         for (const h of listeners.get(event) ?? []) callbacks.get(h)?.({ event, id: 0, payload });
       },
@@ -65,11 +63,7 @@ async function shell(page: Page, init: { state: Record<string, unknown>; rail?: 
           if (command === 'update_skip') return (fx.state = { ...fx.state, skipped: args.version ?? null });
           if (command === 'update_set_auto') return (fx.state = { ...fx.state, auto_install: !!args.on });
           if (command === 'update_download') return fx.state;
-          if (command === 'update_check') {
-            // The shell answers a failed check with an error state (it never throws).
-            if (fx.checkFails) return { ...fx.state, phase: 'error', error: fx.checkFails, error_kind: 'offline', version: null };
-            return fx.state;
-          }
+          if (command === 'update_check') return fx.state;
           return null;
         },
       },
@@ -81,7 +75,7 @@ const fx = (page: Page) => ({
   emit: (payload: unknown) => page.evaluate((p) => (window as unknown as { __upd: Fx }).__upd.emit('otto://update', p), payload),
   menu: (id: string) => page.evaluate((m) => (window as unknown as { __upd: Fx }).__upd.emit('otto://menu', m), id),
   calls: (command: string) => page.evaluate((c) => (window as unknown as { __upd: Fx }).__upd.calls.filter((x) => x.command === c), command),
-  set: (patch: Partial<Pick<Fx, 'state' | 'checkFails'>>) => page.evaluate((p) => Object.assign((window as unknown as { __upd: Fx }).__upd, p), patch),
+  set: (patch: Partial<Pick<Fx, 'state'>>) => page.evaluate((p) => Object.assign((window as unknown as { __upd: Fx }).__upd, p), patch),
 });
 
 const AVAILABLE = {
@@ -96,7 +90,7 @@ for (const scheme of ['light', 'dark'] as const) {
     let impactCalls = 0;
     await page.route('**/api/v1/system/restart-impact', (r) => {
       impactCalls++;
-      return r.fulfill({ json: { keeps: [{ label: 'agent sessions', count: 4 }], ends: [{ label: 'connection terminals', count: 2, detail: ['prod-db', 'k8s exec'] }] } });
+      return r.fulfill({ json: { keeps: [{ kind: 'sessions', label: 'agent and shell sessions', count: 4 }], ends: [{ kind: 'connection_terminals', label: 'connection terminals', count: 2, detail: ['prod-db', 'k8s exec'] }] } });
     });
     await page.goto('/#/agents');
     const row = page.locator('.navigator [data-testid="update-row"]');
@@ -130,7 +124,7 @@ for (const scheme of ['light', 'dark'] as const) {
     await shot(page, `dialog-downloading-${scheme}`);
 
     await fx(page).emit({ ...AVAILABLE, phase: 'staged' });
-    await expect(page.getByTestId('restart-impact')).toContainText('Keeps running: 4 agent sessions.');
+    await expect(page.getByTestId('restart-impact')).toContainText('Keeps running: 4 agent and shell sessions.');
     await expect(page.getByTestId('restart-impact')).toContainText('Ends: 2 connection terminals (prod-db, k8s exec).');
     await expect(page.getByTestId('update-primary')).toHaveText('Restart and end 2');
     await expect(row).toHaveText(/Restart to update/);
@@ -150,36 +144,44 @@ for (const scheme of ['light', 'dark'] as const) {
     await expect(page.getByTestId('update-primary')).toHaveText('Restarting…');
   });
 
-  test(`Check for Updates… menu: up to date, offline with Retry, source build (${scheme})`, async ({ page }) => {
-    await shell(page, { state: { phase: 'up_to_date', current: '0.5.3', channel: 'release', last_check: 1_795_600_000 }, scheme });
+  test(`Check for Updates… menu: checking, up to date, offline with Retry, source build (${scheme})`, async ({ page }) => {
+    const UP = { phase: 'up_to_date', current: '0.5.3', channel: 'release', last_check: 1_795_600_000 };
+    await shell(page, { state: UP, scheme });
     await page.goto('/#/agents');
     await expect(page.locator('.navigator')).toBeVisible({ timeout: 30_000 });
     await expect(page.getByTestId('update-row')).toHaveCount(0);
     await expect.poll(async () => (await fx(page).calls('plugin:event|listen')).some((c) => c.args.event === 'otto://menu')).toBe(true);
+    // The shell answers the menu item: it starts the check and tells the window.
+    await fx(page).emit({ ...UP, phase: 'checking' });
     await fx(page).menu('check-updates');
+    await expect(page.getByRole('dialog', { name: 'Checking for updates…' })).toBeVisible();
+    await expect(page.getByTestId('update-primary')).toBeDisabled();
+    await shot(page, `checking-${scheme}`);
+    await fx(page).emit(UP);
     await expect(page.getByRole('dialog', { name: 'You’re up to date' })).toContainText('Otto 0.5.3 is the newest version.');
-    expect(await fx(page).calls('update_check')).toHaveLength(1);
+    expect(await fx(page).calls('update_check'), 'the shell already checks; the menu does not check twice').toHaveLength(0);
     await shot(page, `uptodate-${scheme}`);
     await page.getByTestId('update-primary').click();
     await expect(page.getByTestId('update-dialog')).toHaveCount(0);
 
-    await fx(page).set({ checkFails: 'You’re offline — Otto couldn’t reach github.com' });
     await fx(page).menu('check-updates');
+    await fx(page).emit({ ...UP, phase: 'error', error: 'You’re offline — Otto couldn’t reach github.com', error_kind: 'offline' });
     const dialog = page.getByTestId('update-dialog');
     await expect(dialog).toContainText('Couldn’t check for updates');
     await expect(dialog).toContainText('You’re offline');
     await shot(page, `offline-${scheme}`);
-    await fx(page).set({ checkFails: null, state: AVAILABLE });
+    await fx(page).set({ state: AVAILABLE });
     await dialog.getByRole('button', { name: 'Retry' }).click();
     await expect(page.getByRole('dialog', { name: 'Otto 0.5.4' })).toBeVisible();
+    expect(await fx(page).calls('update_check')).toHaveLength(1);
     await page.getByRole('button', { name: 'Later' }).click();
 
-    await fx(page).set({ state: { phase: 'idle', current: '0.5.3', channel: 'source' } });
     await fx(page).menu('check-updates');
+    await fx(page).emit({ phase: 'idle', current: '0.5.3', channel: 'source' });
     await expect(page.getByTestId('update-dialog')).toContainText('This is a source build — updates come from git.');
     await shot(page, `source-${scheme}`);
     await expect(page.getByTestId('update-row')).toHaveCount(0);
-  });
+  });;
 }
 
 test('⋯ skips the version (row hides), Settings ▸ Updates unskips it and toggles automatic download', async ({ page }) => {

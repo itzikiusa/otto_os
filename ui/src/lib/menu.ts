@@ -105,8 +105,9 @@ export function handleMenu(id: string): void {
       router.go('walkthroughs');
       break;
     case 'check-updates':
-      // Otto ▸ Check for Updates… (the shell brings the main window forward).
-      updates.openDialog(true);
+      // Otto ▸ Check for Updates…: the shell brought the main window forward
+      // and started the check; its result arrives as `otto://update`.
+      updates.openDialog();
       break;
   }
 }

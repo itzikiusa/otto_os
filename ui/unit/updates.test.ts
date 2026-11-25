@@ -77,11 +77,11 @@ test('the dialog has one primary that follows the state', () => {
 
 test('the restart step lists what keeps running and what ends; confirm only when something ends', () => {
   const { mod } = load();
-  const quiet = mod.restartPlan({ keeps: [{ label: 'sessions', count: 4 }], ends: [{ label: 'connection terminals', count: 0 }] });
+  const quiet = mod.restartPlan({ keeps: [{ kind: 'sessions', label: 'sessions', count: 4 }], ends: [{ kind: 'connection_terminals', label: 'connection terminals', count: 0 }] });
   assert.equal(json(quiet), json({ keeps: ['4 sessions'], ends: [], endCount: 0, label: 'Restart now', confirm: false }));
   const loud = mod.restartPlan({
-    keeps: [{ label: 'sessions', count: 4 }],
-    ends: [{ label: 'connection terminals', count: 2, detail: ['prod-db', 'k8s exec'] }, { label: 'debug session', count: 1 }],
+    keeps: [{ kind: 'sessions', label: 'sessions', count: 4 }],
+    ends: [{ kind: 'connection_terminals', label: 'connection terminals', count: 2, detail: ['prod-db', 'k8s exec'] }, { kind: 'debug_sessions', label: 'debug session', count: 1 }],
   });
   assert.deepEqual([...loud.ends], ['2 connection terminals (prod-db, k8s exec)', '1 debug session']);
   assert.equal(loud.label, 'Restart and end 3');

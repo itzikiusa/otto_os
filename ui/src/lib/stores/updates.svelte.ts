@@ -15,6 +15,7 @@ import { api } from '../api/client';
 import { confirmer } from '../confirm.svelte';
 import { toasts } from '../toast.svelte';
 import { loadErrorText } from '../loadError';
+import type { RestartImpact, RestartImpactItem } from '../api/types';
 
 export type UpdatePhase = 'idle' | 'checking' | 'up_to_date' | 'available' | 'downloading' | 'staged' | 'restarting' | 'error';
 
@@ -55,16 +56,6 @@ export interface UpdateState {
   release_url?: string | null;
 }
 
-/** One kind of work a restart keeps or ends ("2 connection terminals"). */
-export interface ImpactLine {
-  label: string;
-  count: number;
-  detail?: string[];
-}
-export interface RestartImpact {
-  keeps: ImpactLine[];
-  ends: ImpactLine[];
-}
 
 /** "Downloading… 42 %" (no percentage while the size is unknown). */
 export function progressText(s: UpdateState): string {
@@ -119,12 +110,12 @@ export function dialogView(
   }
 }
 
-const line = (l: ImpactLine): string => `${l.count} ${l.label}${l.detail?.length ? ` (${l.detail.join(', ')})` : ''}`;
+const line = (l: RestartImpactItem): string => `${l.count} ${l.label}${l.detail?.length ? ` (${l.detail.join(', ')})` : ''}`;
 
 /** The restart step: what keeps running, what ends, and the button. An
  *  unknown impact (the count failed) is treated as "something may end". */
 export function restartPlan(impact: RestartImpact | null): { keeps: string[]; ends: string[]; endCount: number; label: string; confirm: boolean } {
-  const live = (ls: ImpactLine[] | undefined) => (ls ?? []).filter((l) => l.count > 0);
+  const live = (ls: RestartImpactItem[] | undefined) => (ls ?? []).filter((l) => l.count > 0);
   const ends = live(impact?.ends);
   const endCount = ends.reduce((n, l) => n + l.count, 0);
   return {
@@ -185,11 +176,12 @@ class UpdatesStore {
     return rowLabel(this.state, this.failed);
   }
 
-  /** `manual`: Otto ▸ Check for Updates… — check now and say the outcome. */
-  openDialog(manual = false): void {
+  /** `check`: check now and say the outcome (Settings' button). Otto ▸ Check
+   *  for Updates… opens it without: the shell already started that check. */
+  openDialog(check = false): void {
     this.open = true;
     this.actionError = null;
-    if (manual) void this.check();
+    if (check) void this.check();
     if (this.state?.phase === 'staged') void this.loadImpact();
   }
 
