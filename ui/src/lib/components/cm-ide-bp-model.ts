@@ -95,13 +95,16 @@ export function applyBreakpointMoves(list: IdeBreakpoint[], moves: IdeBreakpoint
   return out.sort((a, b) => a.line - b.line);
 }
 
+const agentOf = (b: IdeBreakpoint & { agent?: { name: string } }): string | null => b.agent?.name ?? null;
+
 /** Whether `list` is what the gutter already shows (the store echoing a move back). */
 export function sameBreakpointLines(map: Map<number, IdeBreakpoint>, list: IdeBreakpoint[]): boolean {
   if (map.size !== list.length) return false;
   for (const bp of list) {
     const m = map.get(bp.line);
     if (!m || m.enabled !== bp.enabled || (m.condition ?? null) !== (bp.condition ?? null) || (m.hit_condition ?? null) !== (bp.hit_condition ?? null)
-      || (m.log_message ?? null) !== (bp.log_message ?? null) || m.verified !== bp.verified || (m.message ?? null) !== (bp.message ?? null)) return false;
+      || (m.log_message ?? null) !== (bp.log_message ?? null) || m.verified !== bp.verified || (m.message ?? null) !== (bp.message ?? null)
+      || agentOf(m) !== agentOf(bp)) return false;
   }
   return true;
 }
@@ -111,7 +114,17 @@ export type BpVisualKind = 'enabled' | 'disabled' | 'muted' | 'conditional' | 'l
 /** How one breakpoint renders. `verified` (the check mark) comes only from the debugger's
  *  own answer for this breakpoint; `verified === false` is a hollow muted circle saying why;
  *  no answer yet (no live session) is the normal pending dot. */
-export function breakpointAppearance(bp: IdeBreakpoint, ln: number, muted: boolean): { kind: BpVisualKind; tooltip: string; verified: boolean } {
+export function breakpointAppearance(
+  bp: IdeBreakpoint & { agent?: { name: string } },
+  ln: number,
+  muted: boolean,
+): { kind: BpVisualKind; tooltip: string; verified: boolean } {
+  const look = plainBreakpointAppearance(bp, ln, muted);
+  // An agent's breakpoint (`otto.ui_ide_debug_*`) says who set it.
+  return bp.agent?.name ? { ...look, tooltip: `${look.tooltip} · Set by ${bp.agent.name}` } : look;
+}
+
+function plainBreakpointAppearance(bp: IdeBreakpoint, ln: number, muted: boolean): { kind: BpVisualKind; tooltip: string; verified: boolean } {
   if (muted) return { kind: 'muted', tooltip: `Muted breakpoint at line ${ln}`, verified: false };
   if (!bp.enabled) return { kind: 'disabled', tooltip: `Disabled breakpoint at line ${ln}`, verified: false };
   if (bp.verified === false) {

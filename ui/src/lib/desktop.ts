@@ -78,12 +78,12 @@ export function currentRoute(): string {
 }
 
 /** Open `route` (e.g. `database/<id>`, `agents/<sid>`) in its own native
- *  window. One window per route: asking again focuses it. Resolves false
- *  outside the desktop app (the caller can fall back to `router.go`). */
-export async function openPopout(route: string, title?: string): Promise<boolean> {
-  if (!isTauri) return false;
-  await call<string>('open_popout', { route, title: title ?? null });
-  return true;
+ *  window. One window per route: asking again focuses it. Resolves the
+ *  window's label (its `window_id`), or null outside the desktop app (the
+ *  caller can fall back to `router.go`). */
+export async function openPopout(route: string, title?: string): Promise<string | null> {
+  if (!isTauri) return null;
+  return call<string>('open_popout', { route, title: title ?? null });
 }
 
 /** Bring the main Otto window forward (activating the app), optionally at a

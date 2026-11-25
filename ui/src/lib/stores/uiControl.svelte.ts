@@ -59,6 +59,22 @@ export interface UiRecentAction {
   error?: string;
 }
 
+/** A debug session an agent started in this document (`ui_ide_debug_*`): the
+ *  bar stays up while it lives, keeps the agent's last narration while it is
+ *  paused, and offers Proceed. `released` = the agent stopped driving (Stop,
+ *  grant off, session gone) — the session is the person's now. */
+export interface UiAgentDebug {
+  /** `runtime` (on the ui_command frame): `structured` = a Threads thread. */
+  agent: UiAgentRef & { runtime?: string };
+  debugId: string;
+  say: string;
+  /** `stop_seq` while paused, null while running. */
+  pausedSeq: number | null;
+  /** The stop Proceed was sent for (hides the button until the next stop). */
+  proceededSeq: number | null;
+  released: boolean;
+}
+
 export interface UiDriving {
   agent: UiAgentRef;
   module: string;
@@ -127,6 +143,8 @@ class UiControlStore {
   driving: UiDriving | null = $state(null);
   /** This document's recent agent actions, newest first. */
   recent: UiRecentAction[] = $state([]);
+  /** The agent-driven debug session in this document, if any. */
+  agentDebug: UiAgentDebug | null = $state(null);
 
   /** Rows that can host the driving bar (every PageHeader registers); the
    *  first in document order shows it, directly under the page's toolbar. */
@@ -306,6 +324,7 @@ class UiControlStore {
         this.dropRequest(ev.session_id);
         this.setDenied(ev.session_id, false);
       } else {
+        this.releaseDebug(ev.session_id);
         // Revoked (here, on another device, or by an admin): forget the
         // remembered writes and stop anything still running for it here.
         const had = this.recent.some((r) => r.agent.session_id === ev.session_id && r.ok === null);
@@ -313,6 +332,7 @@ class UiControlStore {
         if (had) this.abortSession?.(ev.session_id, 'UI control turned off');
       }
     } else if (ev.type === 'session_removed') {
+      this.releaseDebug(ev.session_id);
       this.dropRequest(ev.session_id);
       this.setDenied(ev.session_id, false);
       this.forgetWrites(ev.session_id);
@@ -394,7 +414,56 @@ class UiControlStore {
    *  the shared clock (`now()`) so a template re-evaluates as it ticks. */
   visible(nowMs: number): boolean {
     const d = this.driving;
-    return !!d && (d.running > 0 || nowMs - d.lastAt < DRIVING_LINGER_MS);
+    const a = this.agentDebug;
+    // An agent's debuggee holds the bar (Proceed, Stop) for as long as it lives.
+    const debugging = !!a && !a.released && !!d && a.agent.session_id === d.agent.session_id;
+    return !!d && (d.running > 0 || nowMs - d.lastAt < DRIVING_LINGER_MS || debugging);
+  }
+
+  // ── agent-driven debug session (the IDE port reports it) ─────────────────
+
+  startDebug(agent: UiAgentDebug['agent'], debugId: string): void {
+    this.agentDebug = { agent, debugId, say: '', pausedSeq: null, proceededSeq: null, released: false };
+  }
+
+  /** The agent's one-line narration (`say`) for its debug session. */
+  debugSay(sessionId: Id, text: string): void {
+    const a = this.agentDebug;
+    if (a && a.agent.session_id === sessionId) this.agentDebug = { ...a, say: text.trim().slice(0, 300) };
+  }
+
+  /** The IDE's snapshot of the session: paused at `stop_seq`, running, or over (null). */
+  debugState(debugId: string, pausedSeq: number | null, ended: boolean): void {
+    const a = this.agentDebug;
+    if (!a || a.debugId !== debugId) return;
+    if (ended) this.agentDebug = null;
+    else if (a.pausedSeq !== pausedSeq) this.agentDebug = { ...a, pausedSeq };
+  }
+
+  private releaseDebug(sessionId: Id): void {
+    const a = this.agentDebug;
+    if (a && a.agent.session_id === sessionId && !a.released) this.agentDebug = { ...a, released: true };
+  }
+
+  /** The person took the session over ("stopped driving" line closed it). */
+  forgetDebug(): void {
+    this.agentDebug = null;
+  }
+
+  /** Proceed: one "proceed" turn to the agent's session — a Threads thread
+   *  gets it queued, a terminal session typed in. */
+  async proceed(): Promise<void> {
+    const a = this.agentDebug;
+    if (!a || a.released || a.pausedSeq === null || a.proceededSeq === a.pausedSeq) return;
+    const sid = encodeURIComponent(a.agent.session_id);
+    this.agentDebug = { ...a, proceededSeq: a.pausedSeq };
+    try {
+      if (a.agent.runtime === 'structured') await api.post(`/runtime-sessions/${sid}/prompt`, { text: 'proceed', delivery: 'queue' });
+      else await api.post(`/sessions/${sid}/message`, { text: 'proceed' });
+    } catch (e) {
+      if (this.agentDebug?.debugId === a.debugId) this.agentDebug = { ...this.agentDebug, proceededSeq: null };
+      toastError(`Couldn’t tell ${providerName(a.agent.provider)} to proceed`, e);
+    }
   }
 
   /** Stop: revoke the grant (the daemon cancels what's pending) and abort
@@ -404,6 +473,7 @@ class UiControlStore {
     if (!d) return;
     const sid = d.agent.session_id;
     this.abortSession?.(sid, 'Stopped by you');
+    this.releaseDebug(sid);
     this.driving = null;
     const ok = await this.setGrant(sid, false);
     if (ok) {
