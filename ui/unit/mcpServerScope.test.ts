@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { scopeBadge, scopeBody, scopeConfirm, scopeMode, scopeOf, widens } from '../src/modules/mcp/serverScope.ts';
+import { homeMember, scopeBadge, scopeBody, scopeConfirm, scopeMode, scopeOf, widens } from '../src/modules/mcp/serverScope.ts';
 
 const names = (id: string) => ({ a: 'Alpha', b: 'Beta', c: 'Gamma' })[id] ?? id;
 const server = (over: Partial<{ workspace_id: string; all_workspaces: boolean; shared_workspace_ids: string[] }> = {}) => ({
@@ -44,4 +44,12 @@ test('the badge names the home of a shared-in server and the reach of an own one
   assert.equal(scopeBadge(server({ all_workspaces: true }), 'a', names), 'All workspaces');
   assert.equal(scopeBadge(server({ shared_workspace_ids: ['b'] }), 'a', names), 'Shared with Beta');
   assert.equal(scopeBadge(server({ shared_workspace_ids: ['b', 'c'] }), 'a', names), 'Shared with 2 workspaces');
+});
+
+test('settings controls need the home workspace: root, or a member of it', () => {
+  const s = server();
+  assert.ok(homeMember(s, 'a', false, []), 'viewing from the home');
+  assert.ok(homeMember(s, 'b', false, [{ id: 'a' }]), 'a member of the home, elsewhere');
+  assert.ok(homeMember(s, 'b', true, []), 'root, even if the home is archived');
+  assert.ok(!homeMember(s, 'b', false, [{ id: 'b' }]), 'shared-only member');
 });

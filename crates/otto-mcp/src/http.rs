@@ -1517,22 +1517,28 @@ async fn decide_approval<S: McpCtx>(
             Error::Forbidden("requester cannot approve through impersonation".into()).into(),
         );
     }
-    // IDOR: the decider must have a role in the approval's workspace — also
-    // for a server-bound one (a shared server reaches other workspaces).
-    if let Some(ws) = &appr.workspace_id {
-        require_ws(&ctx, &user, ws, WorkspaceRole::Editor).await?;
-    }
-    if let Some(server_id) = &appr.server_id {
-        let server = ctx.mcp().registry().get(server_id).await?;
-        require_resource(
-            &ctx,
-            &user,
-            &server,
-            "approve",
-            appr.tool.as_deref(),
-            WorkspaceRole::Editor,
-        )
-        .await?;
+    // IDOR: the decider must have a role in the approval's workspace. For a
+    // server-bound one that is the role `approve` needs THERE (an Enforced
+    // grant suffices for a viewer, as in 0.5.1) — a shared server reaches
+    // other workspaces, so reaching it from elsewhere isn't enough.
+    match (&appr.server_id, &appr.workspace_id) {
+        (Some(server_id), ws) => {
+            let server = ctx.mcp().registry().get(server_id).await?;
+            let ws = ws.clone().unwrap_or_else(|| server.workspace_id.clone());
+            let tool = appr.tool.as_deref();
+            require_resource_in(
+                &ctx,
+                &user,
+                &server,
+                &ws,
+                "approve",
+                tool,
+                WorkspaceRole::Editor,
+            )
+            .await?;
+        }
+        (None, Some(ws)) => require_ws(&ctx, &user, ws, WorkspaceRole::Editor).await?,
+        (None, None) => {}
     }
     // Repo enforces approver != requester (separation of duties).
     ctx.mcp()

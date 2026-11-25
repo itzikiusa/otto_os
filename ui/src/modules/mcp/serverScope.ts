@@ -65,3 +65,10 @@ export function scopeBadge(s: Scoped, wsId: string, names: (id: string) => strin
   if (s.shared_workspace_ids.length) return `Shared with ${s.shared_workspace_ids.length === 1 ? names(s.shared_workspace_ids[0]) : `${s.shared_workspace_ids.length} workspaces`}`;
   return null;
 }
+
+/** Whether the caller can reach a server's settings or access at all: they
+ *  stay with its home workspace (the daemon's `configure` / `manage_access`
+ *  rule). Root reaches every workspace, an archived home included. */
+export function homeMember(s: { workspace_id: string }, wsId: string, isRoot: boolean, memberOf: readonly { id: string }[]): boolean {
+  return isRoot || s.workspace_id === wsId || memberOf.some((w) => w.id === s.workspace_id);
+}
