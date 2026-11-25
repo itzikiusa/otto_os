@@ -184,6 +184,7 @@ impl otto_ide::IdeCtx for ServerCtx {
                     port: t.port,
                     database: t.database,
                     environment: Some(t.environment),
+                    local: t.local,
                 })
                 .collect())
         })
@@ -193,45 +194,14 @@ impl otto_ide::IdeCtx for ServerCtx {
         user: &'a User,
         exec: otto_ide::db_watch::DbWatchQueryExec,
     ) -> BoxFuture<'a, Result<otto_ide::db_watch::DbWatchExecOutcome>> {
+        // The two crates mirror one shape field for field (no shared crate).
+        fn convert<T: serde::Serialize, U: serde::de::DeserializeOwned>(v: T) -> Result<U> {
+            Ok(serde_json::from_value(serde_json::to_value(v)?)?)
+        }
         Box::pin(async move {
-            let endpoint = match exec.target {
-                otto_ide::db_watch::DbWatchQueryTarget::Saved { connection_id } => {
-                    otto_dbviewer::WatchEndpoint::Saved { connection_id }
-                }
-                otto_ide::db_watch::DbWatchQueryTarget::EphemeralLoopback {
-                    port,
-                    user,
-                    password,
-                    database,
-                } => otto_dbviewer::WatchEndpoint::EphemeralLoopback {
-                    port,
-                    user,
-                    password,
-                    database,
-                },
-            };
-            let res = self
-                .db_explorer
-                .execute_watch_query(
-                    &self.roles,
-                    user,
-                    otto_dbviewer::WatchExecReq {
-                        endpoint,
-                        engine: map_ide_db_engine(exec.engine),
-                        database: exec.database,
-                        object_name: exec.object_name,
-                        statement: exec.statement,
-                        is_custom_query: exec.is_custom_query,
-                        limit: exec.limit,
-                    },
-                )
-                .await?;
-            Ok(otto_ide::db_watch::DbWatchExecOutcome {
-                target_label: res.target_label,
-                columns: res.columns,
-                rows: res.rows,
-                duration_ms: res.duration_ms,
-            })
+            let req = convert(exec)?;
+            let res = self.db_explorer.execute_watch_query(&self.roles, user, req);
+            convert(res.await?)
         })
     }
 
@@ -301,16 +271,6 @@ fn map_dbviewer_engine(e: otto_dbviewer::Engine) -> otto_ide::db_watch::IdeDbEng
         otto_dbviewer::Engine::Mongodb => otto_ide::db_watch::IdeDbEngine::Mongodb,
         otto_dbviewer::Engine::Redis => otto_ide::db_watch::IdeDbEngine::Redis,
         otto_dbviewer::Engine::Clickhouse => otto_ide::db_watch::IdeDbEngine::Clickhouse,
-    }
-}
-
-fn map_ide_db_engine(e: otto_ide::db_watch::IdeDbEngine) -> otto_dbviewer::Engine {
-    match e {
-        otto_ide::db_watch::IdeDbEngine::Mysql => otto_dbviewer::Engine::Mysql,
-        otto_ide::db_watch::IdeDbEngine::Postgres => otto_dbviewer::Engine::Postgres,
-        otto_ide::db_watch::IdeDbEngine::Mongodb => otto_dbviewer::Engine::Mongodb,
-        otto_ide::db_watch::IdeDbEngine::Redis => otto_dbviewer::Engine::Redis,
-        otto_ide::db_watch::IdeDbEngine::Clickhouse => otto_dbviewer::Engine::Clickhouse,
     }
 }
 
