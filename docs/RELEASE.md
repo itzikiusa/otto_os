@@ -15,27 +15,34 @@ Two ways to make an Otto build (macOS only; there is no Makefile):
 
 ### What the workflow does
 
-1. **ci-gate.** The tagged commit must be on `main` with a green `ci.yml` run.
+1. **ci-gate.** The tag must be `v<semver>` and exist. Its commit must be on
+   `main`, with a green `ci.yml` push run there.
 2. **build** (no secrets in this job: it runs the npm and cargo build).
    - The tag must equal the version in the root `Cargo.toml`,
      `apps/desktop/src-tauri/Cargo.toml` and `tauri.conf.json`.
    - `README.md` must have a `### What's new in <version>` section.
    - Then UI → `ottod --release --features embed-ui` → sidecar → `tauri build
-     --bundles app`, as `deploy.sh` does.
+     --bundles app`, as `deploy.sh` does. Kiri is not embedded; a default
+     `deploy.sh` build doesn't embed it either.
+   - The Tauri CLI comes from `packaging/signer`'s committed lockfile
+     (`npm ci --ignore-scripts`), here and in the sign job.
 3. **sign** runs in the GitHub Environment `release`. It waits for your approval
    and is the only job that sees the secrets.
-   - It imports the release `.p12` into a throwaway keychain.
-   - [`packaging/release-artifacts.sh`](../packaging/release-artifacts.sh) then
-     does the packaging:
+   - It installs the signer before any secret is on the runner. It imports the
+     release `.p12` into a throwaway keychain.
+   - `release-artifacts.sh bundle`
+     ([source](../packaging/release-artifacts.sh)):
      1. signs with `sign.sh`;
      2. checks the app, `ottod` (and `kiri`) each against its own identifier and
         the accepted certificates in
         `apps/desktop/src-tauri/release-identity.json`;
      3. packs `Otto_<v>_aarch64.app.tar.gz` with no AppleDouble files, and
         proves its signature survives a literal extraction;
-     4. signs the archive with the update key, bound to `<v>`;
-     5. makes the DMG and its `.sha256`;
-     6. writes `latest.json` and the notes.
+     4. makes the DMG and its `.sha256`, and the notes.
+   - It deletes the keychain and the `.p12`, also on failure.
+   - `release-artifacts.sh update` signs the archive with the update key,
+     bound to `<v>`, and writes `latest.json`. The two private keys are never
+     on the runner at the same time.
    - It creates a **draft** release with those five files. A `-rc` version
      becomes a prerelease draft.
 
@@ -74,8 +81,12 @@ Run these on your Mac. The private files never go into the repository.
    values that exist only on the machine that made them:
    - `apps/desktop/src-tauri/tauri.conf.json` → `plugins.updater.pubkey` = the
      content of `~/otto-release/otto-update.key.pub`.
-   - `apps/desktop/src-tauri/release-identity.json` → `"signingIdentity":
-     "Otto Release Signing"`, `"acceptedLeaves": ["<leaf hash from step 1>"]`.
+   - `apps/desktop/src-tauri/release-identity.json` → `"test": false`,
+     `"signingIdentity": "Otto Release Signing"`,
+     `"acceptedLeaves": ["<leaf hash from step 1>"]`.
+   - Until both are replaced, every release job stops at once
+     (`release-manifest.py check-release-config`), and an app built from the TEST
+     values stays on the source channel and never installs an update.
      Installed apps refuse an update signed by any other certificate. To move
      to another certificate later (for example Developer ID), first ship a
      release that lists both.

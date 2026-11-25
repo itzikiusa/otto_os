@@ -115,15 +115,88 @@ class ReleaseManifest(unittest.TestCase):
                              'identifier "ottod" and (certificate leaf = H"aa11" or certificate leaf = H"bb22")')
             self.assertEqual(run("identity", cwd=d).stdout.strip(), "Otto Release Signing")
 
+    def test_sign_job_runs_no_fetched_code_and_pins_actions(self):
+        wf = (REPO / ".github/workflows/release.yml").read_text()
+        sign = wf.split("\n  sign:\n")[1]
+        self.assertNotIn("npx", sign)
+        self.assertNotIn("setup-node", sign)
+        self.assertNotIn("npx", (REPO / "packaging/release-artifacts.sh").read_text())
+        self.assertIn("npm ci --ignore-scripts", sign)
+        for uses in re.findall(r"uses: (\S+)", wf):
+            self.assertRegex(uses, r"@[0-9a-f]{40}$", uses)
+        # The signer comes from a committed lockfile, pinned to one version.
+        lock = json.loads((REPO / "packaging/signer/package-lock.json").read_text())
+        self.assertTrue(all("integrity" in p for k, p in lock["packages"].items() if k))
+
+    def test_release_workflow_gates_tag_ci_and_cleans_secrets(self):
+        wf = (REPO / ".github/workflows/release.yml").read_text()
+        gate, rest = wf.split("\n  build:\n")
+        self.assertIn("--branch main --event push", gate)
+        self.assertIn("git/ref/tags/$TAG", gate)
+        self.assertIn(r"^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$", gate)
+        build, sign = rest.split("\n  sign:\n")
+        self.assertIn("check-release-config", build)
+        self.assertIn("check-release-config", sign)
+        self.assertIn("umask 077", sign)
+        cleanup = sign.split("if: always()")[1]
+        self.assertIn("release.p12", cleanup.split("- name:")[0])
+        # The keychain is gone before the update key is used.
+        self.assertLess(sign.index("delete-keychain"), sign.index("TAURI_SIGNING_PRIVATE_KEY"))
+
     def test_release_workflow_keeps_secrets_in_the_approved_sign_job(self):
         wf = (REPO / ".github/workflows/release.yml").read_text()
         before, sign = wf.split("\n  sign:\n")
         self.assertNotIn("secrets.", before, "the build job runs npm/cargo code: no secrets there")
         self.assertIn("environment: release", sign)
         self.assertNotIn("environment:", before)
-        # One pinned Tauri CLI everywhere (--app-version needs >= 2.12).
-        pins = set(re.findall(r"@tauri-apps/cli@([0-9.]+)", wf + (REPO / "packaging/release-artifacts.sh").read_text()))
-        self.assertEqual(len(pins), 1, pins)
+        # One Tauri CLI, pinned exactly in packaging/signer (--app-version needs >= 2.12).
+        self.assertNotIn("@tauri-apps/cli@", wf)
+        pkg = json.loads((REPO / "packaging/signer/package.json").read_text())
+        self.assertRegex(pkg["dependencies"]["@tauri-apps/cli"], r"^2\.(1[2-9]|[2-9]\d)\.\d+$")
+
+    def release_config(self, root, test=False, pubkey_id="0123456789ABCDEF"):
+        import base64
+        pub = base64.b64encode(f"untrusted comment: minisign public key: {pubkey_id}\nRWQ=\n".encode()).decode()
+        (root / "apps/desktop/src-tauri/tauri.conf.json").write_text(json.dumps(
+            {"version": "0.5.4", "plugins": {"updater": {"pubkey": pub}}}))
+        (root / "apps/desktop/src-tauri/release-identity.json").write_text(json.dumps(
+            {"test": test, "signingIdentity": "Otto Release Signing", "acceptedLeaves": ["aa" * 20]}))
+
+    def test_release_config_with_real_values_passes(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.tree(Path(d))
+            self.release_config(Path(d))
+            r = run("check-release-config", cwd=d)
+            self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_a_test_identity_can_never_be_released(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.tree(Path(d))
+            self.release_config(Path(d), test=True)
+            r = run("check-release-config", cwd=d)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("TEST", r.stderr)
+
+    def test_the_test_update_key_can_never_be_released(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.tree(Path(d))
+            self.release_config(Path(d), pubkey_id="287DEA2ED05D88F2")
+            r = run("check-release-config", cwd=d)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("TEST update key", r.stderr)
+
+    def test_the_repo_config_today_is_refused(self):
+        # Until the owner's real identity and key replace the TEST ones.
+        r = run("check-release-config", cwd=REPO)
+        self.assertNotEqual(r.returncode, 0)
+
+    def test_release_artifacts_refuses_a_test_config_before_signing_anything(self):
+        r = subprocess.run(["bash", str(REPO / "packaging/release-artifacts.sh"), "bundle",
+                            "/nonexistent/Otto.app", "0.5.4", "/nonexistent/out"],
+                           capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("release-manifest:", r.stderr)
+        self.assertNotIn("codesign", r.stderr)
 
     def test_the_repo_identity_file_is_well_formed(self):
         ident = json.loads((REPO / "apps/desktop/src-tauri/release-identity.json").read_text())

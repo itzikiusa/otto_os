@@ -140,13 +140,17 @@ struct Inner {
 static INNER: OnceLock<Mutex<Inner>> = OnceLock::new();
 
 /// Release builds only: the release workflow compiles with
-/// `OTTO_UPDATE_CHANNEL=release`; a debug build never counts.
+/// `OTTO_UPDATE_CHANNEL=release`; a debug build, or one built from the TEST
+/// release identity, never counts.
 pub fn channel() -> Channel {
-    release_channel(cfg!(debug_assertions), option_env!("OTTO_UPDATE_CHANNEL"))
+    release_channel(
+        cfg!(debug_assertions) || test_identity(RELEASE_IDENTITY),
+        option_env!("OTTO_UPDATE_CHANNEL"),
+    )
 }
 
-fn release_channel(debug: bool, flag: Option<&str>) -> Channel {
-    if !debug && flag == Some("release") {
+fn release_channel(not_release: bool, flag: Option<&str>) -> Channel {
+    if !not_release && flag == Some("release") {
         Channel::Release
     } else {
         Channel::Source
@@ -225,6 +229,12 @@ fn endpoint(cfg: &serde_json::Value) -> Option<reqwest::Url> {
 /// identity (a new certificate, Developer ID) is added there next to the old
 /// one for at least one release.
 const RELEASE_IDENTITY: &str = include_str!("../../release-identity.json");
+
+/// `"test": false` is the only way out of TEST (as release-manifest.py checks).
+fn test_identity(identity: &str) -> bool {
+    let v: serde_json::Value = serde_json::from_str(identity).unwrap_or_default();
+    v.get("test").and_then(|t| t.as_bool()) != Some(false)
+}
 
 fn signers(identity: &str) -> Vec<String> {
     let v: serde_json::Value = serde_json::from_str(identity).unwrap_or_default();
@@ -683,6 +693,19 @@ pub fn update_result_seen(app: AppHandle) -> UpdateState {
 mod tests {
     use super::*;
     use testkit::{temp_dir, Kit, Minisign, Server};
+
+    #[test]
+    fn the_test_identity_is_never_the_release_channel() {
+        assert!(test_identity(r#"{"test": true, "acceptedLeaves": []}"#));
+        assert!(test_identity("{}"), "no marker counts as TEST");
+        assert!(!test_identity(r#"{"test": false}"#));
+        // The repo carries the TEST identity until the owner's replaces it.
+        assert!(test_identity(RELEASE_IDENTITY));
+        assert_eq!(
+            release_channel(test_identity(RELEASE_IDENTITY), Some("release")),
+            Channel::Source
+        );
+    }
 
     #[test]
     fn only_a_release_compile_is_on_the_release_channel() {
