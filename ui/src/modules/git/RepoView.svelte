@@ -23,6 +23,8 @@
   import { focusAppContent } from '../../lib/announce.svelte';
   import { remoteHost } from './gitUiHelpers';
   import { readOverview } from '../../lib/api/gitOverview';
+  import { prefetchFirstPage } from './graph/graphData.svelte';
+  import { untrack } from 'svelte';
 
   // Views only some visits open stay out of the Git chunk (perf R7): the PR
   // list (+ CreatePr), the local review, the merge dialog and the conflict
@@ -114,7 +116,11 @@
     mergeReq = null;
     // Status lives in the store; (re)load it for this repo. The auto-fetch loop
     // keeps it fresh thereafter, and the tab strip shares the same value.
-    loadStatus(id);  });
+    loadStatus(id);
+    // History mounts once the status is in: its first log page starts now,
+    // beside the overview (a known status mounts the graph at once).
+    if (untrack(() => effTab === 'graph' && !git.statusById[id])) prefetchFirstPage(id);
+  });
 
   // Unmerged paths as the status reports them. A merge in progress ALWAYS shows
   // up here (kind="conflicted"), whoever started it — the merge modal, a pull

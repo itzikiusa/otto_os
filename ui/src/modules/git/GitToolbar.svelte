@@ -23,6 +23,7 @@
   import { runPull } from './pullFlow';
   import { runPush } from './pushFlow';
   import { gitBridge } from '../../lib/diff/gitBridge.svelte';
+  import { recentOverview } from '../../lib/api/gitOverview';
   import { registry } from '../../lib/commands.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
@@ -116,7 +117,15 @@
   }
   $effect(() => {
     const id = repoId;
-    if (variant !== 'sync' && showVerbs && gitBridge.stashCount[id] === undefined) untrack(() => void loadStashes(id).catch(() => {}));
+    if (variant !== 'sync' && showVerbs && gitBridge.stashCount[id] === undefined) {
+      // Opening a repo reads its overview, which carries the stash list.
+      untrack(() => void (recentOverview(id)?.then((o) => o.stashes) ?? Promise.resolve(null)).then((list) => {
+        if (!list) return loadStashes(id);
+        if (id !== repoId) return;
+        stashes = list;
+        gitBridge.stashCount[id] = list.length;
+      }).catch(() => {}));
+    }
   });
   /** The stash browser is open (files + patch, Apply / Pop / Drop). */
   let stashesOpen = $state(false);

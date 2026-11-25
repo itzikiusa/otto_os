@@ -48,6 +48,22 @@ export const FIRST_PAGE = 200;
 /** What one scroll to the end adds. */
 export const SCROLL_PAGE = 1000;
 
+/** A cold mount's first page, asked for while the repo's overview (which the
+ *  graph waits on to mount) is still in flight: log and overview in parallel,
+ *  not one after the other. Taken once, within a few seconds. */
+const firstPages = new Map<string, { p: Promise<CommitInfo[]>; at: number }>();
+export function prefetchFirstPage(repoId: string): void {
+  if (graphCache.get(repoId) || firstPages.has(repoId)) return;
+  const p = api.get<CommitInfo[]>(`/repos/${repoId}/log?all=true&limit=${FIRST_PAGE}&skip=0`);
+  p.catch(() => {});
+  firstPages.set(repoId, { p, at: Date.now() });
+}
+function takeFirstPage(repoId: string): Promise<CommitInfo[]> | null {
+  const hit = firstPages.get(repoId);
+  firstPages.delete(repoId);
+  return hit && Date.now() - hit.at < 3000 ? hit.p : null;
+}
+
 export interface GraphFetch {
   gen: number;
   want: number;
@@ -254,9 +270,8 @@ export function createGraphData(h: GraphDataHost) {
     try {
       // Only a sha is a valid target (the daemon 400s anything else).
       const to = until && /^[0-9a-f]{4,64}$/i.test(until) ? `&until=${until}` : '';
-      const page = await api.get<CommitInfo[]>(
-        `/repos/${h.repoId}/log?all=true&limit=${limit}&skip=${skipCursor}${to}`,
-      );
+      const page = await ((skipCursor === 0 && !to && limit === FIRST_PAGE && takeFirstPage(h.repoId)) ||
+        api.get<CommitInfo[]>(`/repos/${h.repoId}/log?all=true&limit=${limit}&skip=${skipCursor}${to}`));
       if (gen !== loadGen) return false; // repo changed under us — drop it
       commitsError = null;
       skipCursor += page.length;
