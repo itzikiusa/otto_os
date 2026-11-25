@@ -18,7 +18,8 @@ export interface IdeDbWatchAgentOps {
    *  here. Null = declined, or failed (then `error` says why). */
   start(
     req: { target: IdeDbWatchTargetRef; items: IdeDbWatchItemSpec[]; bind?: { debug_session_id: string } | null },
-    opts?: { asker?: string },
+    /** `persist: false`: an agent's choice is not remembered as the project's target. */
+    opts?: { asker?: string; persist?: boolean },
   ): Promise<IdeDbWatch | null>;
   stop(): Promise<unknown>;
   /** Rows changed since the previous stop / the start, MASKED with `forAgent`. */

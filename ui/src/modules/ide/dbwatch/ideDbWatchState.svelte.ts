@@ -62,6 +62,8 @@ export interface DbWatchStartOpts {
   auto?: boolean;
   /** Who asks, for the prod confirm ("Agent Messi"); default the person. */
   asker?: string;
+  /** false: not remembered as the project's target (an agent's choice). */
+  persist?: boolean;
 }
 
 function sameBind(a: IdeDbWatchBind | null | undefined, b: IdeDbWatchBind | null | undefined): boolean {
@@ -375,7 +377,7 @@ class IdeDbWatchController {
       this.watch = w;
       this.read = null;
       this.pendingTarget = null;
-      this.remember(w);
+      if (opts.persist !== false) this.remember(w);
       await this.refresh();
       return w;
     } catch (e) {

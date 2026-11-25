@@ -40,9 +40,12 @@ export interface DebugMemory {
   expectMove: boolean;
   /** A debug request's response that arrived after that call returned. */
   late?: Record<string, unknown> | null;
-  /** The variable refs this agent was shown at the current stop (not under a
-   *  secret-looking name): the only ones `inspect {ref}` expands. */
-  refs?: number[];
+  /** The variable refs this agent was shown at the current stop, each with
+   *  the full path it was shown under (`cfg.DB`), none under a secret-looking
+   *  name: the only ones `inspect {ref}` expands. */
+  refs?: Record<string, string>;
+  /** The launch's env pairs and args (`DB_URL=…:54321`): which container is the run's. */
+  launchText?: string;
 }
 
 export function newMemory(debugId: string, root: string, outSeq = 0): DebugMemory {
@@ -257,12 +260,6 @@ export function shapeResponse(resp: ApiResponse): Record<string, unknown> {
   };
 }
 
-/** Text the person reads in a confirm: no control or bidi characters (a
- *  newline or an RLO could disguise what runs), and a cut that says so. */
-export function confirmSafe(s: string, max: number): string {
-  const t = s.replace(/[\u0000-\u001f\u007f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '�');
-  return t.length > max ? `${t.slice(0, max)}… (+${t.length - max} more characters)` : t;
-}
 
 export interface BreakpointCode {
   file: string;
@@ -314,6 +311,8 @@ export function startConfirmText(p: {
   return [
     `Debug ${spelledOut(p.label)}`,
     'It runs on your Mac as you, outside the agent’s sandbox.',
+    // Code first: nothing long (args, env) can push it below the fold.
+    ...(code.length ? ['Code the debugger runs at these breakpoints:', ...code] : []),
     `Command: ${spelledOut(p.command)}`,
     `Working directory: ${spelledOut(relPath(p.root, p.cwd) || '.')}`,
     p.build_flags.length ? `Build flags: ${spelledOut(p.build_flags.join(' '))}` : '',
@@ -321,17 +320,48 @@ export function startConfirmText(p: {
       ? ['Extra environment:', ...env.map(([k, v]) => `  ${spelledOut(k)}=${visibleValue(v)}`)]
       : ['Environment: the project environment']),
     `Breakpoints: ${p.breakpoints.length}`,
-    ...(code.length ? ['Code the debugger runs at these breakpoints:', ...code] : []),
   ]
     .filter(Boolean)
     .join('\n');
 }
 
 /** A name a secret is kept under (mirrors `otto_core::redact::sensitive_name_kind`). */
+/** A name a secret is kept under (mirrors `otto_core::redact::sensitive_name_kind`),
+ *  checked on every segment of a path (`cfg.user_pass.Value`) and at camel
+ *  and acronym humps (`dbPass`, `DBPass`, `SQLDsn`). */
 export function sensitiveName(name: string): boolean {
   const compact = name.toLowerCase().replace(/[^a-z0-9]/g, '');
   if (/password|passwd|passphrase|apikey|accesskey|privatekey|signingkey|secret|authorization|credential|cookie|token|authcode|connectionstring|connstr/.test(compact)) return true;
-  return name.split(/[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])/).some((seg) => ['pwd', 'pass', 'dsn', 'salt'].includes(seg.toLowerCase()));
+  return name
+    .split(/[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])/)
+    .some((seg) => ['pwd', 'pass', 'dsn', 'salt'].includes(seg.toLowerCase()));
+}
+
+/** A child's full path under `parent` (`cfg` + `DB` → `cfg.DB`, `items` + `[0]` → `items[0]`). */
+export function childPath(parent: string, name: string): string {
+  return name.startsWith('[') ? `${parent}${name}` : `${parent}.${name}`;
+}
+
+const SQL_ENGINES = new Set(['mysql', 'postgres', 'clickhouse']);
+
+/** The tables to watch on a target of `engine`: the code's names that the
+ *  target has (`verified` false = it does not), deduplicated, capped — the
+ *  rule the DB Watch panel uses (modules/ide/dbwatch `pickAutoItems`); SQL
+ *  strings name tables of any SQL engine once the target verified them. */
+export function autoItems(
+  detected: readonly { engine: string; object_name: string; verified?: boolean | null }[],
+  engine: string,
+  local: boolean,
+): { object: string }[] {
+  const seen = new Set<string>();
+  const out: { object: string }[] = [];
+  for (const d of detected) {
+    const same = d.engine === engine || (SQL_ENGINES.has(d.engine) && SQL_ENGINES.has(engine) && d.verified != null);
+    if (!same || d.verified === false || seen.has(d.object_name)) continue;
+    seen.add(d.object_name);
+    out.push({ object: d.object_name });
+  }
+  return out.slice(0, local ? 8 : 3);
 }
 
 /** DB Watch rows for the agent: per object the counts and ≤ `maxRows` rows,

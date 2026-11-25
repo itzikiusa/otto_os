@@ -18,6 +18,7 @@
 
 import { api } from '../api/client';
 import type { ApiResponse, IdeDbWatchDetectResp, IdeDebugPortResp, IdeDebugSessionSnapshot, IdeVariable } from '../api/types';
+import { envTone } from '../status';
 import { agentName } from '../stores/uiControl.svelte';
 import { ws } from '../stores/workspace.svelte';
 import { registerUiCommands, UiCommandError, type UiCommandCtx } from '../uiCommands';
@@ -25,7 +26,7 @@ import type { IdeDbWatch, IdeDbWatchTargetRef } from '../api/types/ide-db-watch'
 import { ideDbWatchPort, type IdeDbWatchAgentOps } from './ideDbWatchPort';
 import { idePort, type IdeAgentBreakpointSpec, type IdeDebugCommand, type IdeDebugTarget, type IdePort } from './idePort';
 import {
-  breakpointCode, childNamed, clip, confirmSafe, EVAL_MAX, sensitiveName, newMemory, pathSegments, relPath, shapeBreakpoints, shapeDbRead,
+  autoItems, breakpointCode, childNamed, childPath, clip, EVAL_MAX, sensitiveName, spelledOut, visibleValue, newMemory, pathSegments, relPath, shapeBreakpoints, shapeDbRead,
   shapeResponse, shapeResult, shapeVariable, SOURCE_RADIUS, startConfirmText, uniqueKey, userMoved, type DebugMemory,
 } from './ideShape';
 import { errText } from './pagePort';
@@ -147,8 +148,8 @@ async function result(ide: IdePort, ctx: UiCommandCtx, snap: IdeDebugSessionSnap
   // The refs shown at this stop (none under a secret-looking name) are the
   // only ones inspect may expand: guessed neighbours stay closed.
   const same = (snap.stop_seq ?? 0) === mem.stopSeq && snap.state === mem.state;
-  const shown = Object.entries((shaped.result.refs ?? {}) as Record<string, number>).filter(([n]) => !sensitiveName(n)).map(([, r]) => r);
-  const refs = snap.state === 'paused' ? [...(same ? (mem.refs ?? []) : []), ...shown] : [];
+  const shown = Object.entries((shaped.result.refs ?? {}) as Record<string, number>).filter(([n]) => !sensitiveName(n)).map(([n, r]) => [String(r), n]);
+  const refs = snap.state === 'paused' ? { ...(same ? mem.refs : {}), ...Object.fromEntries(shown) } : {};
   // A late response rides on this result unless the call brought its own.
   memory.set(ctx.agent.session_id, { ...shaped.mem, refs, late: request ? mem.late : null });
   return shaped.result;
@@ -172,23 +173,33 @@ async function stopDb(debugId: string): Promise<unknown> {
   }
 }
 
-/** Start (or replace) the project's DB Watch for the agent's session. */
+/** Start (or replace) the project's DB Watch for the agent's session. With
+ *  no `connection_id` only the run's own database is used (its container,
+ *  by the port the launch names, else this run's newest local one) — never a
+ *  saved connection, never another project's container. A saved connection
+ *  the agent names asks the person every time, naming it and its environment
+ *  (prod: the store's typed confirm), and is never remembered as the project's
+ *  target. */
 async function armDbWatch(
   db: IdeDbWatchAgentOps,
   snap: IdeDebugSessionSnapshot,
   root: string,
-  asker: string,
+  ctx: UiCommandCtx,
   args: { objects?: { object: string; filter?: { column: string; value: string | number | boolean } }[]; connection_id?: string },
   launchText = '',
 ): Promise<Record<string, unknown>> {
-  const det = await api.post<IdeDbWatchDetectResp>('/ide/db-watch/detect', {
-    root,
-    active_file: snap.paused_file ?? null,
-    debug_session_id: snap.id,
-  });
+  const detect = (target?: IdeDbWatchTargetRef) =>
+    api.post<IdeDbWatchDetectResp>('/ide/db-watch/detect', {
+      root,
+      active_file: snap.paused_file ?? null,
+      debug_session_id: snap.id,
+      ...(target ? { target } : {}),
+    });
+  const det = await detect();
   let target: IdeDbWatchTargetRef;
   let engine: string | undefined;
   let local = true;
+  let saved: { name: string; environment?: string | null } | null = null;
   if (args.connection_id) {
     const key = args.connection_id.trim();
     const c = det.saved_connections.find((x) => x.connection_id === key) ??
@@ -200,24 +211,31 @@ async function armDbWatch(
     target = { kind: 'saved', connection_id: c.connection_id };
     engine = c.engine;
     local = c.local;
+    saved = c;
   } else {
-    // The run's own local database, never a saved one, of the engine the code
-    // uses first: a container whose port the launch names (a DSN in env /
-    // args), else the newest local one of that engine (`auto`).
     const ports = det.ephemeral_targets.filter((x) => new RegExp(`[:=]${x.port}(?!\\d)`).test(launchText));
-    const own = det.ephemeral_targets.filter((x) => x.source !== 'container');
-    const pool = ports.length ? ports : own.length ? own : det.ephemeral_targets;
+    const pool = ports.length ? ports : det.ephemeral_targets.filter((x) => x.source !== 'container');
     const t = det.detected_objects.map((o) => pool.find((x) => x.engine === o.engine)).find(Boolean) ?? pool[0];
-    const e = t?.engine ?? det.detected_objects[0]?.engine;
-    if (!e) throw new UiCommandError('not_found', 'No local database found for this run — pass `connection_id` (a saved connection).');
-    target = t && ports.includes(t) ? { kind: 'ephemeral', ephemeral_id: t.ephemeral_id } : { kind: 'auto', engine: e };
-    engine = e;
+    if (!t) throw new UiCommandError('not_found', 'No database of this run found (its container or local process) — pass `connection_id` (a saved connection; the user confirms).');
+    target = ports.includes(t) ? { kind: 'ephemeral', ephemeral_id: t.ephemeral_id } : { kind: 'auto', engine: t.engine };
+    engine = t.engine;
   }
-  const items = args.objects?.length
-    ? args.objects
-    : det.detected_objects.filter((o) => o.engine === engine).slice(0, local ? 8 : 3).map((o) => ({ object: o.object_name }));
-  if (!items.length) throw new UiCommandError('not_found', 'No tables found in the code near this stop — pass `objects`.');
-  if (!(await db.start({ target, items, bind: { debug_session_id: snap.id } }, { asker }))) {
+  // The code's names, checked against the target's real objects.
+  const items = args.objects?.length ? args.objects : autoItems((await detect(target)).detected_objects, engine, local);
+  if (!items.length) throw new UiCommandError('not_found', 'No tables of that database found in the code near this stop — pass `objects`.');
+  if (saved && envTone(saved.environment).key !== 'prod') {
+    const ok = await ctx.confirmWrite({
+      what: [
+        `Watch the saved connection ${spelledOut(saved.name)} (${spelledOut(saved.environment || 'no environment')}) at every debugger stop, read-only:`,
+        ...items.map((i) => `• ${spelledOut(i.object)}`),
+      ].join('\n'),
+      where: spelledOut(saved.name),
+      verb: 'Watch',
+      guarded: true, // never remembered: the agent picked this database
+    });
+    if (!ok) throw declined('watching that database');
+  }
+  if (!(await db.start({ target, items, bind: { debug_session_id: snap.id } }, { asker: agentName(ctx.agent), persist: false }))) {
     throw db.error ? new UiCommandError('failed', db.error) : declined('watching that database');
   }
   return { watching: true, target: db.watch?.target.label ?? null, objects: items.map((i) => i.object) };
@@ -270,8 +288,9 @@ registerUiCommands('ide', {
     const askedAt = Date.now();
     const ok = await ctx.confirmWrite({
       what: startConfirmText({ ...plan, breakpoints: bps }),
-      where: confirmSafe(basename(plan.root), 100),
+      where: spelledOut(basename(plan.root)),
       verb: 'Debug',
+      guarded: true, // runs code: never remembered, and Return does not confirm
     });
     if (!ok) throw declined('the debug run');
     inflight.get(ctx.agent.session_id)?.abort();
@@ -282,6 +301,8 @@ registerUiCommands('ide', {
       await ide.command('stop').catch(() => null);
       await waitFor(ide, 5_000, ctx.signal, (s) => s.id === prev && ended(s), { poll: gone(ide, prev) });
     }
+    // Exactly the breakpoints this confirm listed: an earlier run's stay off.
+    await ide.clearAgentBreakpoints(ctx.agent, 'all');
     if (bps.length) await ide.setAgentBreakpoints(ctx.agent, bps);
     ctx.progress(`Debugging ${plan.label}`);
     const { debug_id } = await ide.launch(ctx.agent, plan, { break_on_exceptions: args.break_on_exceptions }).catch(async (e: unknown) => {
@@ -296,7 +317,8 @@ registerUiCommands('ide', {
     }
     if (args.say) ide.say(ctx.agent, args.say); // the driving bar knows the session only now
     ide.consoleNote(`▶ ${plan.command} (${agentName(ctx.agent)})`);
-    memory.set(ctx.agent.session_id, newMemory(debug_id, plan.root));
+    const launchText = [...Object.entries(plan.env).map(([k, v]) => `${k}=${v}`), ...(args.args ?? [])].join(' ');
+    memory.set(ctx.agent.session_id, { ...newMemory(debug_id, plan.root), launchText });
     let ready = false;
     const pattern = args.ready_pattern;
     const probe = args.ready_port
@@ -313,9 +335,9 @@ registerUiCommands('ide', {
     const out = await result(ide, ctx, now);
     if (now.state === 'running' || now.state === 'starting') out.ready = ready;
     if (args.db_watch && !ended(now)) {
-      const db = ideDbWatchPort.peek();
+      const db = await ideDbWatchPort.get(ctx.signal, 5_000).catch(() => null); // the dock may still be mounting
       if (!db) out.db = { error: 'DB Watch isn’t available in this Otto window.' };
-      else out.db = await armDbWatch(db, now, plan.root, agentName(ctx.agent), {}, [...Object.values(plan.env), ...(args.args ?? [])].join(' ')).catch((e) => ({ error: errText(e) }));
+      else out.db = await armDbWatch(db, now, plan.root, ctx, {}, launchText).catch((e) => ({ error: errText(e) }));
     }
     return out;
   },
@@ -369,14 +391,19 @@ registerUiCommands('ide', {
     const root = args.set?.length ? mine(ide, ctx).mem.root : (memory.get(ctx.agent.session_id)?.root ?? ide.root);
     // A condition, hit count or log message is code the debugger runs in the
     // program: like evaluate, each one is the person's call, never remembered.
+    // A plain one may be remembered for this project; one with code never.
     const code = breakpointCode(args.set ?? []);
-    if (code.length) {
+    if (args.set?.length) {
+      const plain = args.set.map((b) => `• ${spelledOut(b.file)}:${b.line}`);
       const ok = await ctx.confirmWrite({
-        what: `Set breakpoints whose code the debugger runs in the program, on your Mac as you:\n\n${code.join('\n')}`,
-        where: confirmSafe(basename(root), 100),
+        what: code.length
+          ? `Set breakpoints whose code the debugger runs in the program, on your Mac as you:\n\n${code.join('\n')}`
+          : `Set breakpoints:\n\n${plain.join('\n')}`,
+        where: spelledOut(basename(root)),
         verb: 'Set',
+        ...(code.length ? { guarded: true } : { connId: `ide-breakpoints:${root}` }),
       });
-      if (!ok) throw declined('the breakpoint code');
+      if (!ok) throw declined(code.length ? 'the breakpoint code' : 'the breakpoints');
     }
     let removed = 0;
     if (args.clear_mine) removed = await ide.clearAgentBreakpoints(ctx.agent, 'all');
@@ -400,21 +427,25 @@ registerUiCommands('ide', {
     if ((args.frame_id != null && args.frame_id !== snap.active_frame_id) || (args.thread_id != null && args.thread_id !== snap.active_thread_id)) {
       cur = (await ide.command('select_frame', { frame_id: args.frame_id, thread_id: args.thread_id })) ?? snap;
     }
-    const allowed = new Set(mem.refs ?? []);
-    if (args.ref && !allowed.has(args.ref)) {
+    const allowed = mem.refs ?? {};
+    const parent = args.ref ? allowed[String(args.ref)] : undefined;
+    if (args.ref && parent === undefined) {
       throw new UiCommandError('forbidden', 'Expand only a `ref` from your latest stop or inspect (one under a secret-looking name stays closed).');
     }
     const out: Record<string, unknown> = {};
-    const shown: number[] = [];
-    const open = (name: string, v: IdeVariable): void => {
-      if (v.variables_reference > 0 && !sensitiveName(name)) shown.push(v.variables_reference);
+    // Everything is keyed and judged by its FULL path (`cfg.user_pass.Value`):
+    // a child of a secret-looking parent is never opened for the agent.
+    const shown: Record<string, string> = {};
+    const open = (path: string, v: IdeVariable): void => {
+      if (v.variables_reference > 0 && !sensitiveName(path)) shown[String(v.variables_reference)] = path;
     };
-    if (args.ref) {
+    if (args.ref && parent !== undefined) {
       const kids = await ide.variables(args.ref, { start: args.start, count: args.count ?? 100 });
       const taken = new Set<string>();
       out.children = Object.fromEntries(kids.slice(0, 100).map((k) => {
-        open(k.name, k);
-        return [uniqueKey(taken, k.name), shapeVariable(k, 200)];
+        const path = uniqueKey(taken, childPath(parent, k.name));
+        open(path, k);
+        return [path, shapeVariable(k, 200)];
       }));
     }
     if (args.paths?.length) {
@@ -426,7 +457,7 @@ registerUiCommands('ide', {
       out.values = values;
     }
     const m = memory.get(ctx.agent.session_id);
-    if (m) memory.set(ctx.agent.session_id, { ...m, refs: [...allowed, ...shown] });
+    if (m) memory.set(ctx.agent.session_id, { ...m, refs: { ...allowed, ...shown } });
     return out;
   },
 
@@ -439,8 +470,9 @@ registerUiCommands('ide', {
     const frame = snap.stack_frames.find((f) => f.id === (args.frame_id ?? snap.active_frame_id)) ?? snap.stack_frames[0];
     const where = frame ? `${frame.name} (${relPath(mem.root, frame.path)}:${frame.line})` : 'the paused frame';
     const ok = await ctx.confirmWrite({
-      what: `Evaluate in ${confirmSafe(where, 400)}:\n\n${confirmSafe(expr, 2000)}\n\nAn expression can call functions and change the program’s state, on your Mac as you.`,
-      where: confirmSafe(basename(mem.root), 100),
+      what: `Evaluate in ${spelledOut(where)}:\n\n${spelledOut(expr)}\n\nAn expression can call functions and change the program’s state, on your Mac as you.`,
+      where: spelledOut(basename(mem.root)),
+      guarded: true,
       verb: 'Evaluate',
     });
     if (!ok) throw declined('the expression');
@@ -471,9 +503,10 @@ registerUiCommands('ide', {
     const method = args.method ?? 'GET';
     const headers = Object.entries(args.headers ?? {}).map(([key, value]) => ({ key, value: String(value), enabled: true }));
     const what = [
-      `${method} ${confirmSafe(args.url, 2000)}`,
-      headers.length ? `Headers: ${confirmSafe(headers.map((h) => h.key).join(', '), 1000)}` : '',
-      args.body?.trim() ? `Body: ${confirmSafe(args.body.trim(), 300)}` : '',
+      `${method} ${spelledOut(args.url)}`,
+      // Whole: the daemon refuses a body too long to read here (never clipped).
+      headers.length ? ['Headers:', ...headers.map((h) => `  ${spelledOut(h.key)}: ${visibleValue(h.value)}`)].join('\n') : '',
+      args.body ? `Body:\n${spelledOut(args.body)}` : '',
       `It goes to the app you are debugging, on this Mac (${url.host}).`,
     ].filter(Boolean).join('\n\n');
     // Remembered per host AND port, apart from the API client's own sends.
@@ -539,7 +572,7 @@ registerUiCommands('ide', {
       if (!ours) throw new UiCommandError('not_found', 'Nothing is watched for your debug session — call ide_debug_db with action "watch" first.');
       return shapeDbRead(await db.diffSince(args.since ?? 'previous_stop', { forAgent: true }), 50);
     }
-    const armed = await armDbWatch(db, snap, mem.root, agentName(ctx.agent), args);
+    const armed = await armDbWatch(db, snap, mem.root, ctx, args, mem.launchText);
     return { ...armed, ...shapeDbRead(await db.diffSince('start', { forAgent: true }), 50) };
   },
 });
