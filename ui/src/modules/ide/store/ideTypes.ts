@@ -93,6 +93,8 @@ export interface IdeFsEntry {
 export interface IdeFsTreeResp {
   root: string; path: string; parent?: string | null;
   target_os?: string; target_arch?: string; entries: IdeFsEntry[];
+  /** The listings of the request's `paths` (its open folders, read in the same call). */
+  listings?: { path: string; entries: IdeFsEntry[] }[];
 }
 
 export interface IdeFileReadResp {

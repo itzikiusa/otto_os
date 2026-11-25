@@ -393,8 +393,9 @@ export async function fetchIdeWorkspaceTree(
   host: IdeTreeTabsHost,
   dirPath: string | undefined,
   onProbeBuildTool: () => void,
-  // `listingOnly`: a live refresh (ideTreeLive) — re-read this one listing in place, nothing else.
-  opts: { deferTabRestore?: boolean; listingOnly?: boolean } = {},
+  // `listingOnly`: a live refresh (ideTreeLive) — re-read this one listing in place, nothing else
+  // (`paths`: and these folders of the primary root, in the same call).
+  opts: { deferTabRestore?: boolean; listingOnly?: boolean; paths?: string[] } = {},
 ): Promise<void> {
   if (!host.target.root || host.collabIsGuest) return;
   const live = opts.listingOnly === true;
@@ -415,11 +416,19 @@ export async function fetchIdeWorkspaceTree(
     host.treeError = null;
     ideTreeDirErrors.reset();
   }
+  // A root load reads the open folders of the primary root in the same call: the tree comes
+  // back whole in one paint, not level by level.
+  const open = !isRoot ? [] : live ? (opts.paths ?? []) : Object.keys(host.expandedDirs).filter((d) => host.expandedDirs[d] && d.startsWith(`${primary}/`));
+  const canon = (raw: IdeFsEntry[] = []): IdeFsEntry[] =>
+    host.target.kind === 'local' ? raw.map((e) => ({ ...e, path: canonicalizeLocalProjectPath(e.path, host.projectRoots) })) : raw;
+  // An unchanged listing keeps its array: a refresh of what is shown repaints nothing.
+  const same = (prev: IdeFsEntry[] | undefined, next: IdeFsEntry[]): IdeFsEntry[] => (sameListing(prev, next) ? prev! : next);
   try {
-    const query =
+    let query =
       attachedParent && !attachedParent.isPrimary && host.target.kind === 'local'
         ? new URLSearchParams({ kind: 'local', root: attachedParent.path, path: normDir, show_hidden: String(host.showHidden) }).toString()
         : host.targetQuery({ path: isRoot ? '' : normDir, show_hidden: host.showHidden });
+    if (open.length > 0) query += `&paths=${encodeURIComponent(JSON.stringify(open))}`;
     const resp = await api.get<IdeFsTreeResp>(`/ide/fs/tree?${query}`);
     if (stale()) return;
     if (resp.target_os) host.targetOs = resp.target_os;
@@ -429,25 +438,22 @@ export async function fetchIdeWorkspaceTree(
         host.target = { ...host.target, root: resp.root };
         host.expandedDirs = { ...host.expandedDirs, [normalizeRootPath(resp.root)]: true };
       }
-      const rawEntries = resp.entries ?? [];
-      const entries = host.target.kind === 'local'
-        ? rawEntries.map((e) => ({ ...e, path: canonicalizeLocalProjectPath(e.path, host.projectRoots) }))
-        : rawEntries;
+      const entries = canon(resp.entries);
       const rootKey = normalizeRootPath(host.target.root);
+      host.treeRootEntries = same(host.treeRootEntries, entries);
       if (live) {
-        if (!sameListing(host.treeRootEntries, entries)) {
-          host.treeRootEntries = entries;
-          host.childrenByDir = { ...host.childrenByDir, [rootKey]: entries };
-        }
+        const next = { ...host.childrenByDir, [rootKey]: host.treeRootEntries };
+        for (const l of resp.listings ?? []) next[l.path] = same(next[l.path], canon(l.entries));
+        if (Object.keys(next).some((d) => next[d] !== host.childrenByDir[d])) host.childrenByDir = next;
         return;
       }
-      host.treeRootEntries = entries;
       ideProjectHealth.clear();
-      // A root load is a refresh: expanded folders refetch, and collapsed ones drop their
-      // cached listing so the next expand reads the disk instead of a stale snapshot.
-      const kept: typeof host.childrenByDir = { [rootKey]: entries };
+      // A root load is a refresh: expanded folders refetch (the primary root's came with it),
+      // and collapsed ones drop their cached listing so the next expand reads the disk.
+      const kept: typeof host.childrenByDir = { [rootKey]: host.treeRootEntries };
+      for (const l of resp.listings ?? []) kept[l.path] = same(host.childrenByDir[l.path], canon(l.entries));
       for (const [dir, children] of Object.entries(host.childrenByDir)) {
-        if (dir === rootKey || !host.expandedDirs[dir]) continue;
+        if (dir === rootKey || !host.expandedDirs[dir] || kept[dir]) continue;
         kept[dir] = children;
         if (!host.additionalRoots.includes(dir)) void fetchIdeWorkspaceTree(host, dir, onProbeBuildTool);
       }
@@ -465,10 +471,7 @@ export async function fetchIdeWorkspaceTree(
       onProbeBuildTool();
       if (!opts.deferTabRestore) void restoreWorkspaceTabsOrInitial(host);
     } else if (normDir) {
-      const rawEntries = resp.entries ?? [];
-      const entries = host.target.kind === 'local'
-        ? rawEntries.map((e) => ({ ...e, path: canonicalizeLocalProjectPath(e.path, host.projectRoots) }))
-        : rawEntries;
+      const entries = canon(resp.entries);
       if (live && sameListing(host.childrenByDir[normDir], entries)) return;
       host.childrenByDir = { ...host.childrenByDir, [normDir]: entries };
       ideTreeDirErrors.clear(normDir);
@@ -497,6 +500,29 @@ export function loadIdeWorkspaceTree(host: IdeTreeTabsHost, dirPath: string | un
   const p = fetchIdeWorkspaceTree(host, dirPath, onProbeBuildTool).finally(() => dirLoads.delete(key));
   dirLoads.set(key, p);
   return p;
+}
+
+let relistBatch: { dirs: Set<string>; done: Promise<void> } | null = null;
+
+/** A live re-read of `dir` (ideTreeLive). The ones asked for in the same tick go out together:
+ *  the primary root's folders ride on one root listing, an attached root's are read on their own. */
+export function relistIdeTreeDir(host: IdeTreeTabsHost, dir: string): Promise<void> {
+  if (!relistBatch) {
+    const batch: { dirs: Set<string>; done: Promise<void> } = { dirs: new Set(), done: Promise.resolve() };
+    batch.done = Promise.resolve().then(async () => {
+      relistBatch = null;
+      const primary = normalizeRootPath(host.target.root);
+      const dirs = [...batch.dirs];
+      const own = dirs.filter((d) => d === primary || d.startsWith(`${primary}/`));
+      await Promise.all([
+        own.length > 0 ? fetchIdeWorkspaceTree(host, undefined, () => {}, { listingOnly: true, paths: own.filter((d) => d !== primary) }) : null,
+        ...dirs.filter((d) => !own.includes(d)).map((d) => fetchIdeWorkspaceTree(host, d, () => {}, { listingOnly: true })),
+      ]);
+    });
+    relistBatch = batch;
+  }
+  relistBatch.dirs.add(normalizeRootPath(dir));
+  return relistBatch.done;
 }
 
 /** The open folders after `dir` is toggled to `open`: collapsing folds everything under it,

@@ -120,6 +120,7 @@ impl TargetManager {
                     target_os: platform.os,
                     target_arch: platform.arch,
                     entries,
+                    listings: Vec::new(),
                 })
             }
             ResolvedTarget::Ssh {
@@ -145,6 +146,7 @@ impl TargetManager {
                     target_os: platform.os,
                     target_arch: platform.arch,
                     entries,
+                    listings: Vec::new(),
                 })
             }
         }

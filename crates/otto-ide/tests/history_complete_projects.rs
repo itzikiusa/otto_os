@@ -1138,3 +1138,53 @@ async fn project_list_keeps_added_order_after_a_project_is_touched_and_a_restart
     let (_, list) = send_json(&app2, Method::GET, "/ide/projects", None).await;
     assert_eq!(names(&list), ["Alpha 2", "Beta", "Gamma"]);
 }
+
+/// The tree restores its open folders in one call: `paths` lists each one alongside the
+/// root listing, in request order, and a folder that is gone is left out.
+#[tokio::test]
+async fn fs_tree_lists_the_requested_folders_in_one_call() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(ws.join("a/b")).unwrap();
+    std::fs::write(ws.join("a/b/deep.ts"), "x").unwrap();
+    std::fs::write(ws.join("top.md"), "x").unwrap();
+    let (_ctx, app) =
+        build_test_app(tmp.path().join("otto-data"), &tmp.path().join("state.db")).await;
+    let ws_str = ws.to_string_lossy().into_owned();
+    let (a, b, gone) = (
+        format!("{ws_str}/a"),
+        format!("{ws_str}/a/b"),
+        format!("{ws_str}/gone"),
+    );
+    let paths = serde_json::to_string(&[&a, &gone, &b]).unwrap();
+    let uri = format!(
+        "/ide/fs/tree?root={}&path=&paths={}",
+        urlencode(&ws_str),
+        urlencode(&paths)
+    );
+    let (st, body) = send_json(&app, Method::GET, &uri, None).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let names = |v: &serde_json::Value| -> Vec<String> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(names(&body["entries"]), ["a", "top.md"]);
+    let listings = body["listings"].as_array().unwrap();
+    assert_eq!(listings.len(), 2, "{listings:?}");
+    assert_eq!(listings[0]["path"], a.as_str());
+    assert_eq!(names(&listings[0]["entries"]), ["b"]);
+    assert_eq!(listings[1]["path"], b.as_str());
+    assert_eq!(names(&listings[1]["entries"]), ["deep.ts"]);
+    // Without `paths` the response is the single listing it always was.
+    let (_, one) = send_json(
+        &app,
+        Method::GET,
+        &format!("/ide/fs/tree?root={}", urlencode(&ws_str)),
+        None,
+    )
+    .await;
+    assert!(one.get("listings").is_none());
+}

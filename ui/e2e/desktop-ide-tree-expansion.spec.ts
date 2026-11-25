@@ -68,6 +68,8 @@ test.describe('Desktop IDE tree: folders stay as the person left them', () => {
     writeFileSync(join(root, 'a', 'a2', 'x.ts'), 'export {};\n');
     writeFileSync(join(root, 'b', 'b1', 'b1x', 'y.ts'), 'export {};\n');
     writeFileSync(join(root, 'c', 'c1', 'z.ts'), 'export {};\n');
+    mkdirSync(join(root, 'many'));
+    for (let i = 0; i < 150; i++) writeFileSync(join(root, 'many', `f${String(i).padStart(3, '0')}.ts`), 'export {};\n');
     other = realpathSync(mkdtempSync(join(tmpdir(), 'otto-e2e-ide-exp-other-')));
     writeFileSync(join(other, 'README.md'), '# other\n');
   });
@@ -134,6 +136,26 @@ test.describe('Desktop IDE tree: folders stay as the person left them', () => {
     await page.evaluate((p) => { location.hash = `#/ide?root=${encodeURIComponent(p)}`; }, root);
     await settle(page);
     expect(await openFolders(page)).toEqual(['c']);
+  });
+
+  test('the tree keeps its scroll position when you leave and come back, and across a project switch', async ({ page }) => {
+    await bootIde(page);
+    await toggle(page, 'many', true);
+    const scroller = page.getByTestId('ide-project-tree').locator('.tree-scroll');
+    const scrollTop = (): Promise<number> => scroller.evaluate((el) => Math.round(el.scrollTop));
+    await scroller.evaluate((el) => { el.scrollTop = 600; });
+    await expect.poll(scrollTop).toBe(600);
+    await page.evaluate(() => { location.hash = '#/home'; });
+    await expect(page.getByTestId('ide-project-tree')).toHaveCount(0, { timeout: 10_000 });
+    await page.evaluate(() => { location.hash = '#/ide'; });
+    await expect(row(page, 'many')).toHaveAttribute('aria-expanded', 'true', { timeout: 20_000 });
+    await expect.poll(scrollTop).toBe(600);
+    await page.evaluate((p) => { location.hash = `#/ide?root=${encodeURIComponent(p)}`; }, other);
+    await expect(row(page, 'README.md', other)).toBeVisible({ timeout: 20_000 });
+    await expect.poll(scrollTop).toBe(0);
+    await page.evaluate((p) => { location.hash = `#/ide?root=${encodeURIComponent(p)}`; }, root);
+    await expect(row(page, 'many')).toHaveAttribute('aria-expanded', 'true', { timeout: 20_000 });
+    await expect.poll(scrollTop).toBe(600);
   });
 
   test('typing then clearing the filter', async ({ page }) => {
