@@ -7,7 +7,7 @@
   import { ensureHljs } from '../../../lib/hl';
   import { createMdCache } from './mdCache';
   import { renderChatMarkdown } from './chatMarkdown';
-  import { splitStreamingMarkdown } from './streamingMd';
+  import { streamingBlocksRenderer } from './streamingMd';
 
   // Shared across every mounted block: a re-derived block with an unchanged
   // string is a Map lookup, not marked + hljs + DOMParser (mdCache.ts).
@@ -85,19 +85,26 @@
       hlReady = true;
     });
   }
-  const html = $derived.by(() => {
+  // Streaming: one {@html} per settled block, each rendered once; only the open
+  // tail re-renders per delta, so a settled block keeps its DOM (a drawn
+  // diagram, a loaded image, a toggled code block) until the answer ends.
+  let streamRender: ((md: string) => string[]) | null = null;
+  let streamKey = '';
+  const parts = $derived.by((): string[] => {
     const fenced = FENCE.test(md);
     const cacheable = !fenced || hlReady;
     const withEmoji = emoji && agentEmojiFor(md);
-    const c = withEmoji ? emojiCache : cache;
     if (streaming) {
-      const { settled, tail } = splitStreamingMarkdown(md);
-      const settledHtml = settled ? c.get(settled, cacheable) : '';
-      const tailHtml = tail ? renderChatMarkdown(tail, withEmoji) : '';
-      return settledHtml + tailHtml;
+      const key = `${withEmoji} ${cacheable}`;
+      if (!streamRender || key !== streamKey) {
+        streamKey = key;
+        streamRender = streamingBlocksRenderer((b) => renderChatMarkdown(b, withEmoji));
+      }
+      return streamRender(md);
     }
+    streamRender = null;
     // Read hlReady only when it matters, so fence-free blocks never re-render.
-    return c.get(md, cacheable);
+    return [(withEmoji ? emojiCache : cache).get(md, cacheable)];
   });
 
   // Mermaid / D2 fences render as diagrams (lazy libs, like the vault's reading
@@ -105,10 +112,9 @@
   // whose html has one pay for the DOM query.
   let rootEl = $state<HTMLDivElement | null>(null);
   $effect(() => {
-    const h = html;
     const host = rootEl;
     const scheme = ui.resolvedScheme;
-    if (!host || !h.includes('diagram-block')) return;
+    if (!host || !parts.some((p) => p.includes('diagram-block'))) return;
     const dark = scheme === 'dark';
     for (const el of Array.from(host.querySelectorAll<HTMLElement>('div.diagram-block'))) {
       if (el.dataset.renderedScheme === scheme) continue;
@@ -144,12 +150,15 @@
   let lightboxImg = $state<{ src: string; alt: string; path: string | null } | null>(null);
 
   // Hydrate inline `file://` / local workspace `<img data-asset="...">` thumbnails via `/fs/raw`.
+  // The blob URLs live as long as this block: a streaming answer re-runs the
+  // effect per delta while the images it already hydrated stay on screen.
+  const blobs: string[] = [];
+  $effect(() => () => {
+    for (const u of blobs) URL.revokeObjectURL(u);
+  });
   $effect(() => {
-    const h = html;
     const host = rootEl;
-    if (!host || !h.includes('data-asset')) return;
-    let alive = true;
-    const blobs: string[] = [];
+    if (!host || !parts.some((p) => p.includes('data-asset'))) return;
     for (const img of Array.from(host.querySelectorAll<HTMLImageElement>('img[data-asset]:not([data-hydrated])'))) {
       img.setAttribute('data-hydrated', '1');
       const raw = img.getAttribute('data-asset') ?? '';
@@ -158,7 +167,7 @@
       img.dataset.resolvedPath = resolved;
       void authedBlobUrl(`/fs/raw?path=${encodeURIComponent(resolved)}`)
         .then((u) => {
-          if (!alive || !img.isConnected) {
+          if (!img.isConnected) {
             URL.revokeObjectURL(u);
             return;
           }
@@ -166,13 +175,9 @@
           img.src = u;
         })
         .catch(() => {
-          if (alive && img.isConnected) img.classList.add('asset-missing');
+          if (img.isConnected) img.classList.add('asset-missing');
         });
     }
-    return () => {
-      alive = false;
-      for (const u of blobs) URL.revokeObjectURL(u);
-    };
   });
 
   const host: CodeActionHost = {
@@ -271,7 +276,7 @@
 <!-- Code-block buttons are real <button>s inside the html; one delegated
      handler drives them (keyboard activation bubbles as a click too). File
      references / issue chips are `a[tabindex][role=link]` (⏎ opens them). -->
-<div class="md md-body" class:small bind:this={rootEl} use:bindMdSurface>{@html html}</div>
+<div class="md md-body" class:small bind:this={rootEl} use:bindMdSurface>{#each parts as part}{@html part}{/each}</div>
 {#if lightboxImg}
   <Lightbox src={lightboxImg.src} alt={lightboxImg.alt} path={lightboxImg.path} onclose={() => (lightboxImg = null)} />
 {/if}

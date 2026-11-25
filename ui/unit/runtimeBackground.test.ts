@@ -63,6 +63,21 @@ test("a subagent's activity renders inside its card, not in the timeline", () =>
   assert.equal(workLabel(card), 'PR sweep');
 });
 
+test('two streaming threads keep their own subagent Map across flushes (P1-017)', () => {
+  const thread = (k: string) => [
+    it(`${k}u`, 1, 't1', { type: 'user_message', text: 'sweep' }),
+    it(`${k}:tool:a`, 2, 't1', { type: 'subagent', tool_name: 'Agent', description: 'PR sweep', background: true, tool_uses: 1 }),
+    it(`${k}:sub`, 3, 't1', { type: 'assistant_message', message_id: `${k}s`, text: 'Looking', streaming: false }, { parent_item_id: `${k}:tool:a` }),
+  ];
+  const a = thread('A');
+  const b = thread('B');
+  const mapA = subagentChildren(a);
+  const mapB = subagentChildren(b);
+  const delta = (k: string) => it(`${k}m`, 4, 't1', { type: 'assistant_message', message_id: `${k}m`, text: 'more', streaming: true });
+  assert.equal(subagentChildren([...a, delta('A')]), mapA);
+  assert.equal(subagentChildren([...b, delta('B')]), mapB);
+});
+
 test('a finished turn: stopped is neutral, a failed step with an answer is partly done', () => {
   const stopped = fold([turnEv(1, { id: 't1', ordinal: 1, status: 'interrupted' })]);
   assert.deepEqual(turnOutcome(stopped, latestTurn(stopped)), { kind: 'stopped' });
