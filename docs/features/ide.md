@@ -420,11 +420,18 @@ line, for example `DB · session_info +1 · session_route ~1 · Open`, and the
 DB Watch tab shows the changed-row count.
 
 **It never watches a database you did not pick.** A saved connection is only
-watched after you choose it in **Target ▾** (an SSH-tunnelled `127.0.0.1` is
-remote). A connection tagged production asks you to type its name every time
-(the confirm says who asks, which tables and that it reads at every stop) and
-is never remembered. Another project's plain Docker container is listed but
-never chosen for you.
+watched after you choose it in **Target ▾**, which shows each one's host and
+environment. Picking a target (and its tables) reads no rows: reading starts when
+you press **Start watching**. Only a database really on this Mac re-arms by
+itself when a debug session or run starts: this run's container, or a saved
+connection on a loopback host with no SSH tunnel (an SSH-tunnelled `127.0.0.1`
+is remote). A remembered remote connection, whatever its environment tag, is
+not contacted on its own: the panel and the Debug strip show "Remote database
+‹name› — click to watch", and the click watches it for this session. A
+connection tagged production asks you to type its name every time (the confirm
+says who asks, which tables and that it reads at every stop) and is never
+remembered. Another project's plain Docker container is listed but never
+chosen for you.
 
 **The panel, one row:**
 
