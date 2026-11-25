@@ -620,3 +620,28 @@ fn build_menu(app: &tauri::App) -> tauri::Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod release_config_tests {
+    /// The updater plugin deserializes `plugins.updater` when it starts, so a
+    /// bad value there stops the app from launching: prove it parses here.
+    #[test]
+    fn updater_config_parses_and_points_at_github_releases() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let cfg: tauri_plugin_updater::Config =
+            serde_json::from_value(conf["plugins"]["updater"].clone()).unwrap();
+        assert!(cfg.require_signed_version);
+        assert!(!cfg.allow_downgrades && !cfg.dangerous_insecure_transport_protocol);
+        assert!(!cfg.pubkey.is_empty());
+        assert_eq!(cfg.endpoints.len(), 1);
+        let url = &cfg.endpoints[0];
+        assert_eq!(
+            (url.scheme(), url.host_str()),
+            ("https", Some("github.com"))
+        );
+        assert!(url
+            .path()
+            .ends_with("/releases/latest/download/latest.json"));
+    }
+}

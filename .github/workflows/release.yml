@@ -1,0 +1,207 @@
+name: Release
+
+# Push a tag v<version> (or run on demand with an existing tag) to build a signed
+# Otto release as a DRAFT GitHub Release:
+#
+#   ci-gate  the tagged commit is on main and its CI run succeeded
+#   build    tag == the three version files → UI → ottod (embed-ui) → Otto.app
+#            (unsigned; no secrets in this job — it runs the npm/cargo build)
+#   sign     environment `release` (owner approval; the only job with secrets):
+#            sign with the release identity from a temporary keychain, then
+#            packaging/release-artifacts.sh writes the updater archive + its
+#            minisign signature, the DMG + sha256, latest.json and the notes
+#            (README "### What's new in <version>"), and the draft is created.
+#
+# Nothing reaches users until the owner publishes the draft: the in-app updater
+# reads https://github.com/<repo>/releases/latest/download/latest.json, which
+# only resolves to a published, non-prerelease release. A -rc tag makes a
+# prerelease draft. Setup and the one-step release: docs/RELEASE.md.
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to release (e.g. v0.5.4 or v0.5.4-rc.1)
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ci-gate:
+    name: Tagged commit is on main with green CI
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      sha: ${{ steps.sha.outputs.sha }}
+    steps:
+      - name: Resolve the tag
+        id: sha
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha)
+          on_main=$(gh api "repos/$GITHUB_REPOSITORY/compare/main...$sha" --jq .status)
+          case "$on_main" in
+            identical|behind) ;;
+            *) echo "::error::$TAG ($sha) is not on main ($on_main)"; exit 1 ;;
+          esac
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - name: Require a successful CI run for the tagged commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.sha.outputs.sha }}
+        run: |
+          for i in $(seq 1 60); do
+            state=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow=ci.yml \
+              --commit "$SHA" --json status,conclusion \
+              -q '.[0] | .status + " " + (.conclusion // "")' 2>/dev/null || true)
+            echo "CI for $SHA: ${state:-no run found} (poll $i)"
+            case "$state" in
+              "completed success") exit 0 ;;
+              completed*) echo "::error::CI concluded '${state#completed }' — not releasing"; exit 1 ;;
+              "") if [ "$i" -ge 5 ]; then echo "::error::no CI run found for $SHA"; exit 1; fi ;;
+            esac
+            sleep 60
+          done
+          echo "::error::timed out waiting for CI on $SHA"
+          exit 1
+
+  build:
+    name: Build Otto.app (arm64, unsigned)
+    needs: ci-gate
+    runs-on: macos-latest # Apple Silicon
+    timeout-minutes: 120
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ needs.ci-gate.outputs.sha }}
+
+      - name: Tag matches the version files
+        id: ver
+        run: echo "version=$(python3 packaging/release-manifest.py check-version "$TAG")" >> "$GITHUB_OUTPUT"
+
+      - name: Release notes exist
+        run: python3 packaging/release-manifest.py notes "${{ steps.ver.outputs.version }}" > /dev/null
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@1.99.1
+
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: 26.13.0
+
+      # otto-brokers compiles librdkafka from source via CMake.
+      - name: Ensure cmake
+        run: command -v cmake || brew install cmake
+
+      # Same order as packaging/deploy.sh: ui/dist first (embed-ui bakes it in).
+      - name: Build UI
+        run: cd ui && npm ci && npm run build
+
+      - name: Build ottod (release, embed-ui)
+        run: cargo build --release -p ottod --features embed-ui
+
+      - name: Stage sidecar (target-triple name)
+        run: |
+          triple=$(rustc -vV | sed -n 's/host: //p')
+          mkdir -p apps/desktop/src-tauri/binaries
+          cp target/release/ottod "apps/desktop/src-tauri/binaries/ottod-${triple}"
+
+      # App only: the sign job signs it and makes the DMG from the signed app.
+      - name: Build desktop app (Tauri)
+        working-directory: apps/desktop/src-tauri
+        run: npx --yes @tauri-apps/cli@2.12.6 build --bundles app
+
+      # A tarball keeps the bundle's modes and symlinks through the artifact store.
+      - name: Pack the unsigned app
+        run: tar -czf "$RUNNER_TEMP/otto-unsigned.tar.gz" -C apps/desktop/src-tauri/target/release/bundle/macos Otto.app
+
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: otto-unsigned
+          path: ${{ runner.temp }}/otto-unsigned.tar.gz
+          retention-days: 1
+
+  sign:
+    name: Sign, package, draft release
+    needs: [ci-gate, build]
+    runs-on: macos-latest
+    timeout-minutes: 30
+    environment: release
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ needs.ci-gate.outputs.sha }}
+
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: 26.13.0
+
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: otto-unsigned
+          path: ${{ runner.temp }}
+
+      - name: Unpack the app
+        run: mkdir -p "$RUNNER_TEMP/app" && tar -xzf "$RUNNER_TEMP/otto-unsigned.tar.gz" -C "$RUNNER_TEMP/app"
+
+      # A throwaway keychain that is never in the search list: sign.sh passes
+      # it to codesign with --keychain. The partition list lets codesign use the
+      # key without a (headless, hanging) access prompt.
+      - name: Import the release certificate
+        env:
+          P12_BASE64: ${{ secrets.OTTO_SIGN_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.OTTO_SIGN_P12_PASSWORD }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/otto-release.keychain-db"
+          kc_pw=$(openssl rand -hex 24)
+          echo "$P12_BASE64" | base64 --decode > "$RUNNER_TEMP/release.p12"
+          security create-keychain -p "$kc_pw" "$KEYCHAIN"
+          security set-keychain-settings "$KEYCHAIN"
+          security unlock-keychain -p "$kc_pw" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/release.p12" -k "$KEYCHAIN" -P "$P12_PASSWORD" -f pkcs12 -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$kc_pw" "$KEYCHAIN" > /dev/null
+          rm -f "$RUNNER_TEMP/release.p12"
+
+      - name: Sign and package
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          OTTO_SIGN_KEYCHAIN="$RUNNER_TEMP/otto-release.keychain-db" packaging/release-artifacts.sh "$RUNNER_TEMP/app/Otto.app" "$VERSION" "$RUNNER_TEMP/dist" \
+            "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
+
+      - name: Remove the keychain
+        if: always()
+        run: security delete-keychain "$RUNNER_TEMP/otto-release.keychain-db" || true
+
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pre=""; case "$VERSION" in *-*) pre="--prerelease" ;; esac
+          cd "$RUNNER_TEMP/dist"
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag $pre \
+            --title "Otto $VERSION" --notes-file notes.md \
+            "Otto_${VERSION}_aarch64.dmg" "Otto_${VERSION}_aarch64.dmg.sha256" \
+            "Otto_${VERSION}_aarch64.app.tar.gz" "Otto_${VERSION}_aarch64.app.tar.gz.sig" latest.json
