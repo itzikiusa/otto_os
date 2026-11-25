@@ -415,3 +415,19 @@ test('C2-012: removing a table from a prod watch needs no typed confirm (it read
   assert.equal(h.prompts.length, 1, 'adding a table to prod asks');
   assert.equal(h.calls.filter((c) => c.method === 'PATCH').length, 1, 'cancelled: nothing sent');
 });
+
+test('C3-003: starting another watch or stopping clears the "Production target — click to watch" line', async () => {
+  for (const act of ['start', 'stop'] as const) {
+    const w = prodW();
+    const local = watchOf({ id: 'w2' });
+    const h = harness({ routes: (c) => (c.url.startsWith('/ide/db-watch/watches?root=') ? { watches: [w] } : c.method === 'POST' && c.url === '/ide/db-watch/watches' ? local : c.url.startsWith('/ide/db-watch/watches/') ? readOf(c.url.includes('w2') ? local : w) : undefined) });
+    h.store.follow({ root: '/r' });
+    await flush(); await flush();
+    h.store.follow({ root: '/r', debug: { id: 'd2', state: 'running', stop_seq: 0 } });
+    for (let i = 0; i < 6; i++) await flush();
+    assert.ok(h.store.prodWaiting, act);
+    if (act === 'start') await h.store.start({ target: { kind: 'ephemeral', ephemeral_id: 'tc1' }, items: [{ object: 'session_info' }] });
+    else await h.store.stop();
+    assert.equal(h.store.prodWaiting, null, act);
+  }
+});
