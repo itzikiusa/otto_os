@@ -67,6 +67,18 @@ pub(super) async fn db_watch_detect<S: IdeCtx>(
         IdeDbEngine::Mysql
     };
 
+    // The paused session's frames (top first) rank the code path.
+    let stack_files: Vec<String> = match req.debug_session_id.as_deref() {
+        Some(id) => {
+            ctx.ide().authorize_debug_session(&user, id)?;
+            let snap = ctx.ide().dap.get_session(id)?;
+            snap.stack_frames
+                .into_iter()
+                .filter_map(|f| f.path)
+                .collect()
+        }
+        None => Vec::new(),
+    };
     let (detected_objects, ephemeral_targets) = match resolved {
         ResolvedTarget::Local {
             root,
@@ -79,6 +91,7 @@ pub(super) async fn db_watch_detect<S: IdeCtx>(
                     &root,
                     &additional_roots,
                     active_file.as_deref(),
+                    &stack_files,
                     default_sql,
                 )
             })
@@ -108,7 +121,15 @@ pub(super) async fn db_watch_detect<S: IdeCtx>(
         let listed = list_objects(&ctx, &user, &target, req.database.clone()).await?;
         for obj in &mut detected_objects {
             let a = &obj.access;
-            if a.engine == target.info.engine && a.engine != IdeDbEngine::Redis {
+            // The SQL engine of a name is a guess (DAOs mix MySQL and
+            // ClickHouse): check every SQL name against a SQL target.
+            let sql = |e: IdeDbEngine| !matches!(e, IdeDbEngine::Mongodb | IdeDbEngine::Redis);
+            let comparable =
+                a.engine == target.info.engine || (sql(a.engine) && sql(target.info.engine));
+            if comparable
+                && a.engine != IdeDbEngine::Redis
+                && target.info.engine != IdeDbEngine::Redis
+            {
                 let name = a.object_name.trim();
                 obj.verified = Some(listed.objects.iter().any(|o| o.eq_ignore_ascii_case(name)));
             }

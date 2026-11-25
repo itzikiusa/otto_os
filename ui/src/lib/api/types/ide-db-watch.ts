@@ -14,6 +14,8 @@ export interface IdeDetectedDbAccess {
   line: number;
   /** Only when the detect request named a target: is it a real object there? */
   verified?: boolean | null;
+  /** Rank input: 100 paused frame's file, 60 other stack file, 40 the paused file's folder, 30 active file, 10 elsewhere. */
+  score: number;
 }
 
 export interface IdeSavedDbTarget {

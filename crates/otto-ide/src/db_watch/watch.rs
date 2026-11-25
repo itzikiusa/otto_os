@@ -733,74 +733,33 @@ fn item_diff(
 }
 
 // ── Masking (what an agent reads) ────────────────────────────────────────────
-// Seam over the shared redaction package: a cell is masked when its COLUMN
-// name is sensitive or its value looks like a secret; a Redis `value` is
-// masked when its KEY names a secret (`auth:token:42`).
+// Through the shared redaction (`otto_core::redact`): a cell is masked when
+// the NAME it is stored under is sensitive (its column; a Redis `value`'s
+// key, `auth:token:42`) or its value looks like a secret.
 
-const PLACEHOLDER: &str = "[redacted]";
-
-fn sensitive_name(name: &str) -> bool {
-    let n: String = name
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .collect::<String>()
-        .to_ascii_lowercase();
-    [
-        "password",
-        "passwd",
-        "pwd",
-        "secret",
-        "token",
-        "apikey",
-        "privatekey",
-        "dsn",
-        "connstr",
-        "connectionstring",
-        "salt",
-        "authcode",
-        "signingkey",
-        "credential",
-        "cookie",
-        "session_key",
-        "otp",
-        "pin",
-    ]
-    .iter()
-    .any(|k| n.contains(&k.replace('_', "")))
-        && n != "pinned"
+/// The name a cell is stored under: its column, or a Redis value's key.
+fn cell_name<'a>(columns: &'a [String], row: &'a [Value], i: usize) -> &'a str {
+    let redis = columns.len() == 4 && columns[0] == "key" && columns[2] == "value";
+    match row.first().and_then(Value::as_str) {
+        Some(key) if redis && i == 2 => key,
+        _ => columns.get(i).map(String::as_str).unwrap_or(""),
+    }
 }
 
 /// `(masked value, was masked)`.
-fn mask_cell(column: &str, v: &Value) -> (Value, bool) {
-    if v.is_null() {
-        return (Value::Null, false);
-    }
-    if sensitive_name(column) {
-        return (Value::String(PLACEHOLDER.into()), true);
-    }
-    let r = otto_core::redact::redact_json(v);
+fn mask_cell(name: &str, v: &Value) -> (Value, bool) {
+    let r = otto_core::redact::redact_named(name, v);
     let hit = !r.hits.is_empty();
     (r.value, hit)
 }
 
 fn mask_row(columns: &[String], row: &[Value]) -> (Vec<Value>, bool) {
-    let redis_secret = columns.len() == 4
-        && columns[0] == "key"
-        && row
-            .first()
-            .and_then(Value::as_str)
-            .is_some_and(sensitive_name);
     let mut any = false;
     let out = row
         .iter()
         .enumerate()
         .map(|(i, v)| {
-            let col = columns.get(i).map(String::as_str).unwrap_or("");
-            let (m, hit) = if redis_secret && i == 2 && !v.is_null() {
-                (Value::String(PLACEHOLDER.into()), true)
-            } else {
-                mask_cell(col, v)
-            };
+            let (m, hit) = mask_cell(cell_name(columns, row, i), v);
             any |= hit;
             m
         })
@@ -821,8 +780,8 @@ fn mask_for_agent(out: &mut IdeDbWatchItemDiff) {
 }
 
 fn mask_diff(columns: &[String], d: &mut IdeDbRowDiff) {
+    let raw = d.row.clone();
     let (row, mut any) = mask_row(columns, &d.row);
-    let redis_secret = row.get(2).is_some_and(|v| v == PLACEHOLDER) && columns.len() == 4;
     d.row = row;
     if let Some(prev) = &d.previous_row {
         let (p, hit) = mask_row(columns, prev);
@@ -830,23 +789,19 @@ fn mask_diff(columns: &[String], d: &mut IdeDbRowDiff) {
         d.previous_row = Some(p);
     }
     for c in &mut d.changes {
-        let force = redis_secret && c.column == "value";
+        let i = columns
+            .iter()
+            .position(|col| *col == c.column)
+            .unwrap_or(usize::MAX);
+        let name = cell_name(columns, &raw, i).to_string();
         let IdeDbFieldChange {
-            column,
             before,
             after,
             masked,
+            ..
         } = c;
-        let (b, bh) = if force {
-            (Value::String(PLACEHOLDER.into()), true)
-        } else {
-            mask_cell(column, before)
-        };
-        let (a, ah) = if force {
-            (Value::String(PLACEHOLDER.into()), true)
-        } else {
-            mask_cell(column, after)
-        };
+        let (b, bh) = mask_cell(&name, before);
+        let (a, ah) = mask_cell(&name, after);
         *masked = bh || ah;
         any |= *masked;
         *before = b;
