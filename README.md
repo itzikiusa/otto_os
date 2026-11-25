@@ -13,6 +13,45 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
 🎬 **[Watch the product tour](https://github.com/itzikiusa/otto_os/releases/download/v0.3.0/otto-tour-20261116.mp4)**
 (also in the app under **Help → Walkthroughs**).
 
+### What's new in 0.5.2
+
+A performance pass driven by real telemetry and three independent review
+rounds, plus three things asked for on the way.
+
+- **IDE.** Projects keep the order they were added in; nothing moves when
+  you open, rename or switch. The file tree comes back exactly as it was
+  (open folders and scroll position) in one paint and one request. A project
+  with many open tabs shows the active file first and reads the hidden ones
+  afterwards; unsaved drafts of tabs not read yet are kept. Typing in a large
+  file no longer re-lays out the gutters or rebuilds the semantic model on
+  every key.
+- **Git lands on History.** The separate Changes view is gone: uncommitted
+  changes are the top row of History, with the same staging, hunk picking,
+  commit card and AI draft. Opening a repository reads its log beside its
+  status. A pull request on a phone no longer draws its description under
+  the Edit button, its actions fill one row, and **Commits** is a tab.
+- **MCP servers for several workspaces or all of them.** A server that runs
+  through Otto can be available in this workspace, in chosen workspaces, or
+  in all of them, including ones added later. It stays one server with one
+  set of credentials, which members of the other workspaces can use but not
+  read. Only the owner can widen where a server is available.
+- **Conversations.** A streaming answer renders each finished block once and
+  keeps it on screen: no flicker, no re-drawn diagrams, no re-fetched images,
+  and several threads can stream at once without long frames.
+- **A lighter daemon.** The usage journal writes only what changed instead of
+  rebuilding its whole checkpoint every two seconds. Kubernetes monitoring
+  stores histogram buckets once, not per series. Threads nobody is using
+  leave memory after a minute.
+- **Less work while idle.** Pulsing indicators pause when the window is
+  hidden or not in front, an unfocused window polls less, and background
+  reads on slow routes no longer hold up the fast ones.
+- **Faster round trips.** Push checks read the outgoing range in two git
+  calls instead of two per commit and still scan signed commits. Database
+  reads reuse their connection and recover from one that dropped while idle.
+  Hover in the IDE, a pull request's diff, the permissions batch, and
+  sending to several sessions at once all wait less.
+- **Safer.** A sandboxed session cannot reach Otto's own SSH control sockets.
+
 ### What's new in 0.5.1
 
 Fixes from the first day of real use of 0.5.0, then three independent review
