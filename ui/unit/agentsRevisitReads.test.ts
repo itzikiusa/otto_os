@@ -46,3 +46,29 @@ test('usage limits: a remount inside the cadence waits for it instead of reading
   assert.equal(polls[1].immediate, false, 'a fresh answer is not re-read');
   off();
 });
+
+test('an unfocused window re-reads usage limits and machine status at a slow pace, not every tick', async () => {
+  let focused = false;
+  const document = { hasFocus: () => focused };
+  const make = (url: string, imports: Record<string, unknown>) => {
+    let run: ((s: AbortSignal) => Promise<unknown>) | null = null;
+    let calls = 0;
+    const m = loadSource(new URL(url, import.meta.url), {
+      ...imports,
+      [Object.keys(imports).find((k) => k.endsWith('/poll'))!]: { pollWhileVisible: (fn: typeof run) => { run = fn; return { stop() {}, now() {} }; } },
+      [Object.keys(imports).find((k) => k.endsWith('api/client'))!]: { api: { get: async () => (calls++, { accounts: [], stale_after_secs: 600 }) } },
+    }, { document });
+    return { m, tick: () => run!(new AbortController().signal), calls: () => calls };
+  };
+  const lim = make('../src/lib/stores/usageLimits.svelte.ts', { '../api/client': 0, '../loadError': { loadErrorText: String }, '../poll': 0 });
+  const mac = make('../src/modules/settings/machineStatus.svelte.ts', { '../../lib/api/client': 0, '../../lib/loadError': { loadErrorText: String }, '../../lib/poll': 0, svelte: { untrack: (f: () => unknown) => f() } });
+  lim.m.limits.mount(); mac.m.machineStatus.watch();
+  for (const p of [lim, mac]) {
+    await p.tick();
+    assert.equal(p.calls(), 1, 'the first read always goes out');
+    await p.tick(); await p.tick();
+    assert.equal(p.calls(), 1, 'unfocused ticks inside the slow window read nothing');
+  }
+  focused = true;
+  for (const p of [lim, mac]) { await p.tick(); assert.equal(p.calls(), 2, 'focused: the normal cadence'); }
+});

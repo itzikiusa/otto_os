@@ -5,6 +5,7 @@ import { appLive } from '../live';
 import { runtimeDrafts } from './runtimeDrafts.svelte';
 import { DraftPersistence, composerContent } from './runtimeDraftPersistence';
 
+const DRAFT_SYNC_SETTLE_MS = 1_000;
 const DRAFT_SYNC_EVENTS: ReadonlySet<string> = new Set([
   'provider_turn.updated',
   'turn.terminal',
@@ -85,9 +86,16 @@ export function installRuntimeDraftRecovery(): void {
     return {
       activate: () => {
         if (typeof window !== 'undefined') window.addEventListener('focus', sync);
+        // A turn's events come in bursts (session + turn + queue updates at its
+        // start, every tool step, its end): one re-read once the burst settles,
+        // not a GET per event.
+        let soon: ReturnType<typeof setTimeout> | undefined;
         const offRuntime = appLive.on(['agent_runtime_event'], (ev) => {
           const rt = ev.event as { session_id?: string; type?: string } | undefined;
-          if (rt?.session_id === id && (!rt.type || DRAFT_SYNC_EVENTS.has(rt.type))) sync();
+          if (rt?.session_id === id && (!rt.type || DRAFT_SYNC_EVENTS.has(rt.type))) {
+            clearTimeout(soon);
+            soon = setTimeout(sync, DRAFT_SYNC_SETTLE_MS);
+          }
         });
         const offResync = appLive.onResync(sync);
         const offConn = appLive.onConnection((up) => {
@@ -96,6 +104,7 @@ export function installRuntimeDraftRecovery(): void {
         // Back on a thread: pick up what another window did meanwhile.
         sync();
         return () => {
+          clearTimeout(soon);
           offRuntime(); offResync(); offConn();
           if (typeof window !== 'undefined') window.removeEventListener('focus', sync);
         };

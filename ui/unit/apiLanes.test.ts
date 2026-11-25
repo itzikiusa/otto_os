@@ -49,3 +49,28 @@ test('the DB keep-alive ping rides the long lane, not a background slot', () => 
   assert.match(tick, /api\.long\.post<DbTestResult>\(`\$\{this\.db\.connBase\(id\)\}\/test`/);
   assert.doesNotMatch(tick, /api\.bg\./);
 });
+
+test('a slow background read on a long path never holds the fast polls\' two slots', async () => {
+  // A poll tick inherits the bg lane; a long path in it (a usage summary, a
+  // k8s / Kafka read, repo status) took ~1 s and held one of the two slots.
+  const lane = loadSource(new URL('../src/lib/api/lane.ts', import.meta.url), {});
+  const fetched: string[] = [];
+  const c = loadSource(new URL('../src/lib/api/client.ts', import.meta.url), {
+    '../stores/serviceHealth.svelte': { serviceHealth: { report() {} } },
+    './lane': lane,
+  }, {
+    location: { port: '7700', origin: 'http://localhost:7700' },
+    fetch: (url: string) => {
+      fetched.push(String(url));
+      return /\/usage\//.test(String(url)) ? new Promise(() => {}) : Promise.resolve(new Response('{}'));
+    },
+  });
+  lane.inLane('bg', () => {
+    void c.api.get('/usage/summary?days=7').catch(() => {});
+    void c.api.get('/usage/status').catch(() => {});
+  });
+  const fast = lane.inLane('bg', () => c.api.get('/notifications'));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.ok(fetched.some((u) => u.includes('/notifications')), 'the fast poll went out: ' + fetched.join(' '));
+  await fast;
+});

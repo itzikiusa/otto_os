@@ -359,3 +359,31 @@ test('an abandoned thread open is dropped as canceled, not recorded as an error'
   assert.doesNotMatch(src, /finish\('cancelled'\)/);
   assert.match(src, /openSpan\.finish\('canceled'\)/);
 });
+
+test('a failed config read retries only once the hidden window shows', async () => {
+  let calls = 0;
+  const timers: (() => void)[] = [];
+  let onVisible: (() => void) | undefined;
+  const doc = { hidden: true, addEventListener: (_: string, fn: () => void) => { onVisible = fn; }, removeEventListener: () => { onVisible = undefined; } };
+  const boot = loadSource(new URL('../src/lib/telemetryBoot.ts', import.meta.url), {
+    './telemetryRuntime': {},
+    './api/client': { api: { get: async () => { calls++; throw new Error('daemon down'); } }, baseUrl: () => '', getToken: () => 'fixture' },
+    './telemetry': { configureTelemetry() {}, beginNavigation: () => () => {} },
+  }, {
+    document: doc,
+    window: { addEventListener() {}, removeEventListener() {} },
+    requestAnimationFrame: (fn: () => void) => fn(),
+    setTimeout: (fn: () => void) => (timers.push(fn), timers.length),
+    clearTimeout: () => {},
+  });
+  const stop = boot.bootTelemetry('tray');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls, 1);
+  timers.at(-1)!();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls, 1, 'no retry while hidden');
+  doc.hidden = false; onVisible?.();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls, 2);
+  stop();
+});

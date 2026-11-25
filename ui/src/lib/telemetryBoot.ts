@@ -47,7 +47,7 @@ export function bootTelemetry(module: string): () => void {
     } catch {
       if (!stopped && seq === generation) {
         configureTelemetry(false);
-        timer = setTimeout(() => void update(), retryMs);
+        timer = setTimeout(recheck, retryMs);
         retryMs = Math.min(60000, retryMs * 2);
       }
     }
