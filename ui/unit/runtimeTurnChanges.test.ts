@@ -58,3 +58,10 @@ test('two threads streaming side by side keep their own changes Map (P1-017)', (
   assert.equal(turnChangesByTurn([...b, msg('bm2')], '/repo'), outB);
   assert.notEqual(outA, outB);
 });
+
+test('a thread without finished edits (an empty one too) always gets the same empty Map', () => {
+  assert.equal(turnChangesByTurn([], '/repo'), turnChangesByTurn([], '/repo'));
+  const msg = { id: 'm', turn_id: 't1', ordinal: 0, status: 'completed', title: null, started_at: null, completed_at: null, updated_at: '', type: 'assistant_message', text: 'x' } as never;
+  assert.equal(turnChangesByTurn([msg], '/repo'), turnChangesByTurn([], '/repo'));
+  assert.equal(turnChangesByTurn([], '/repo').size, 0);
+});
