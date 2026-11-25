@@ -1,11 +1,11 @@
 # Kimodo runtime for forge-motion (Apple Silicon). Kimodo itself is installed --no-deps from
 # engines/kimodo at the pinned commit; this list replaces its pyproject dependencies without the
 # demo/web pieces (gradio, gradio_client, scenepic, av, boto3, viser) that generation does not import.
-torch==2.9.1
+torch==2.13.0
 numpy==1.26.4
 scipy==1.15.3
-transformers==5.1.0
-peft==0.18.1
+transformers==5.10.1
+peft==0.19.1
 hydra-core>=1.3
 omegaconf>=2.3
 einops>=0.7
