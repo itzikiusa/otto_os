@@ -45,6 +45,13 @@ pub struct CreateServerReq {
     pub default_tool_access: String,
     #[serde(default)]
     pub enabled: bool,
+    /// Where it is available besides its home (owner only): every workspace,
+    /// including ones added later …
+    #[serde(default)]
+    pub all_workspaces: bool,
+    /// … or these other workspaces.
+    #[serde(default)]
+    pub shared_workspace_ids: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -63,6 +70,10 @@ pub struct UpdateServerReq {
     pub enabled: Option<bool>,
     /// Native ⇄ governed (`"native"` | `"governed"`): owner only.
     pub runs: Option<crate::RunMode>,
+    /// Where it is available (owner only; see [`CreateServerReq`]). Either
+    /// one given replaces the scope; the omitted one keeps its value.
+    pub all_workspaces: Option<bool>,
+    pub shared_workspace_ids: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize)]

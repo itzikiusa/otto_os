@@ -115,6 +115,7 @@ pub fn excluded_table(name: &str, portable: bool) -> bool {
             | "user_feature_grants"
             | "plugin_feature_grants"
             | "mcp_allowlist"
+            | "mcp_server_workspaces"
             | "mcp_policies"
             | "auth_sessions"
             | "phone_devices"
@@ -657,6 +658,11 @@ pub fn inert_with(
     ) && row.contains_key("enabled")
     {
         row.insert("enabled".into(), json!(0));
+    }
+    // Where a server is shared is access, like `mcp_allowlist` (not
+    // archived): a restored server is back in its home workspace only.
+    if table == "mcp_servers" && row.contains_key("all_workspaces") {
+        row.insert("all_workspaces".into(), json!(0));
     }
     if table == "sessions" {
         row.insert("status".into(), json!("exited"));

@@ -996,6 +996,63 @@ the Activity audit covers governed calls only.
 
 ---
 
+### 3.1.2 Available in — one server for several workspaces, or all
+
+A server belongs to one **home** workspace (where it was added, and where its
+settings live), and can also be available elsewhere. The add form and
+**⋯ → Available in…** (owner only) offer:
+
+| Available in | Where it is | Stored as |
+|---|---|---|
+| **This workspace** (default; every server from before) | its home only | — |
+| **Selected workspaces…** | its home + the ticked workspaces | `mcp_server_workspaces` rows |
+| **All workspaces** | every workspace, **also every workspace added later** | `mcp_servers.all_workspaces = 1`, read at query time |
+
+It stays ONE row: one place to edit it, one Keychain secret blob (`mcp-{id}`),
+one OAuth token set, one health state — never a copy per workspace. A wider
+scope confirms first (what is shared, who can use it). A server shared into the
+workspace you are in shows a **Shared from <home>** badge; one of yours shared
+out shows **All workspaces** / **Shared with …**.
+
+- **One query.** Every "which servers does workspace W have" read goes through
+  `otto_state::mcp_scope::available_in`: the Servers list
+  (`McpRegistryRepo::list_for_ws`), the gateway's tool list for a session
+  (`GET /mcp/gateway/tools`), the native `.mcp.json` set written at spawn
+  (`list_native_enabled`) and the reverse `workspaces_with` (which sessions'
+  launcher files a governed switch retires). A session in a workspace the server
+  is shared to gets it exactly like a home-workspace session (Enabled, run mode,
+  per-workspace allowlist, Enforced-policy rules all apply as before). Narrowing
+  the scope takes it out of the next spawn there; running sessions keep it until
+  they restart.
+- **Name clash.** Agents key servers by name (`.mcp.json`, `mcp__<server>__*`):
+  a workspace's own server wins over a same-named shared one, then the oldest
+  shared one; the others are not available there.
+- **Access.** Sharing hands the server's credentials to other workspaces'
+  members, so:
+  - only the owner (root authority, the same rule as attaching credentials or
+    commands) changes where a server is available (**403** "only the owner can
+    change where an MCP server is available");
+  - its settings — edit, enable, health, discover, sign-in, delete — stay with
+    members of its home workspace who may `configure` it; elsewhere the row is
+    read-only ("Shared from …: only its members can change it");
+  - using it (`discover` / `invoke` / `approve`) needs the same role in ANY
+    workspace it is available in that the home would need (Legacy: viewer to
+    see, editor to invoke); a user in none of them can't see it, even when its
+    access policy names them;
+  - an Enforced access policy still decides who may use it;
+  - a member of a workspace it was shared into sees that it exists and its tools,
+    never its command, env, URL, headers, secret key names or where else it is
+    shared.
+  "All workspaces" includes Scratch, which every user can open.
+- **Deleting a workspace.** Workspaces are archived, not deleted, so nothing
+  disappears. A direct `DELETE` of the home workspace row is refused while the
+  server is shared (it would cascade the server away); deleting another
+  workspace drops only its link.
+- **Archive / restore.** The links are access data (like the allowlist) and are
+  not archived; a restored server is home-only.
+- **Rollback.** The previous build ignores the new column and table: every server
+  is simply in its home workspace again.
+
 ## 10. Security & permissions
 
 - **Restricted outward token.** The outward server authenticates with a **`kind='mcp'`
@@ -1049,7 +1106,7 @@ the workspace role.
 | `GET /workspaces/{wid}/mcp/servers` | List a workspace's servers (`McpServerDetail[]`) | View |
 | `POST /workspaces/{wid}/mcp/servers` | Register a server | Edit (stdio → **Admin**) |
 | `GET /mcp/servers/{id}` | Server + its tools | View |
-| `PATCH /mcp/servers/{id}` | Update server config; `runs: "native" \| "governed"` switches the run mode (§3.1.1) | Edit (stdio command → Admin; `runs` → owner) |
+| `PATCH /mcp/servers/{id}` | Update server config; `runs: "native" \| "governed"` switches the run mode (§3.1.1); `all_workspaces` / `shared_workspace_ids` set where it is available (§3.1.2) | Edit (stdio command → Admin; `runs`, scope → owner) |
 | `DELETE /mcp/servers/{id}` | Delete a server (+ keychain secret) | Edit |
 | `POST /mcp/servers/{id}/health` | Probe health now | Edit |
 | `POST /mcp/servers/{id}/discover` | Re-discover the tool catalog | Edit |

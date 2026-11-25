@@ -143,9 +143,11 @@ impl AccessCtx for ServerCtx {
     ) -> otto_core::auth::BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             let server = self.mcp.registry().get(id).await?;
-            let sessions = self.manager.list_by_workspace(&server.workspace_id).await?;
-            let mut roots =
-                BTreeSet::from([self.workspaces.get(&server.workspace_id).await?.root_path]);
+            let (mut roots, mut sessions) = (BTreeSet::new(), Vec::new());
+            for ws in self.mcp.registry().workspaces_with(id).await? {
+                roots.insert(self.workspaces.get(&ws).await?.root_path);
+                sessions.extend(self.manager.list_by_workspace(&ws).await?);
+            }
             for session in &sessions {
                 roots.insert(session.cwd.clone());
                 if self.manager.is_live(&session.id) {
