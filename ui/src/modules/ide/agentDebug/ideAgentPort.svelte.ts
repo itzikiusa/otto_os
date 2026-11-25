@@ -147,7 +147,7 @@ async function resolveTarget(
     root: ide.target.root,
     label: launch.test_name || ide.relativePath(launch.program),
     language: l.language,
-    command: launchPreview({ language: l.language, ...launch }),
+    command: launchPreview({ language: l.language, ...launch, root: ide.target.root }),
     cwd: launch.cwd,
     build_flags: launch.build_flags,
     env: launch.env,
