@@ -4587,6 +4587,128 @@ async fn confined_profiles_enforce_the_mcp_launcher_dir_live() {
     assert_eq!(got, "own=no other=no launch=no write=no");
 }
 
+/// P2-019, live: Otto's own OpenSSH ControlMaster sockets (IDE remote
+/// targets `/tmp/oi-<pid>-<n>/c.s`, SFTP `<tmp>/otto-sftp-<token>/ctl.sock`)
+/// are unreachable from EVERY confined profile — an ordinary session, a
+/// read-only one and a scheduled task — while an unrelated Unix socket stays
+/// reachable (the probe works and nothing else is closed). A mux client on one
+/// rides the master's authenticated login without any credential of its own.
+#[tokio::test]
+#[allow(clippy::disallowed_methods)] // blocking listeners + probe processes in a test
+async fn confined_profiles_cannot_reach_otto_ssh_control_sockets_live() {
+    if !otto_sandbox::is_supported() {
+        return;
+    }
+    let (mgr0, repo, ws, user) = test_manager().await;
+    let settings = otto_state::SettingsRepo::new(repo.pool());
+    settings
+        .put("process_sandbox", &serde_json::json!({"enabled": true}))
+        .await
+        .unwrap();
+    let mgr = Arc::try_unwrap(mgr0)
+        .ok()
+        .expect("sole owner")
+        .with_settings_repo(settings);
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().canonicalize().unwrap();
+    let cwd_s = cwd.to_string_lossy().into_owned();
+    // Where Otto puts them (otto-ide `SshControlSocket::new`, otto-ssh
+    // `SftpSession::with_program`), plus a control dir no rule names.
+    let tmp = std::env::temp_dir();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .subsec_nanos();
+    let socks = [
+        (
+            "oi",
+            std::path::PathBuf::from(format!("/tmp/oi-{}-{}", std::process::id(), nanos))
+                .join("c.s"),
+        ),
+        (
+            "sftp",
+            tmp.join(format!("otto-sftp-{}", new_id())).join("ctl.sock"),
+        ),
+        (
+            "other",
+            tmp.join(format!("otto-sockprobe-{}", new_id())).join("c.s"),
+        ),
+    ];
+    for (_, path) in &socks {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let l = std::os::unix::net::UnixListener::bind(path).unwrap();
+        std::thread::spawn(move || l.incoming().for_each(drop));
+    }
+    let probe: String = socks
+        .iter()
+        .map(|(name, p)| {
+            format!(
+                "nc -U '{}' </dev/null >/dev/null 2>&1 && printf '{name}=ok ' || printf '{name}=no '; ",
+                p.display()
+            )
+        })
+        .collect();
+    let run = |(program, args): (String, Vec<String>)| {
+        let out = std::process::Command::new(program)
+            .args(args)
+            .current_dir(&cwd)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    // Unconfined, all three answer.
+    assert_eq!(
+        run(("/bin/sh".into(), vec!["-c".into(), probe.clone()])),
+        "oi=ok sftp=ok other=ok"
+    );
+    let want = "oi=no sftp=no other=ok";
+    let mut got = Vec::new();
+    for read_only in [false, true] {
+        let session = repo
+            .create(NewSession {
+                workspace_id: ws.id.clone(),
+                kind: SessionKind::Agent,
+                provider: "claude".into(),
+                title: "ssh socket probe".into(),
+                cwd: cwd_s.clone(),
+                provider_session_id: None,
+                connection_id: None,
+                created_by: user.clone(),
+                meta: serde_json::json!({ "read_only": read_only }),
+            })
+            .await
+            .unwrap();
+        let mut spec = CommandSpec {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), probe.clone()],
+            cwd: Some(cwd_s.clone()),
+            env: Vec::new(),
+        };
+        mgr.apply_sandbox(&mut spec, &session).await;
+        assert_eq!(spec.program, "/usr/bin/sandbox-exec");
+        got.push((
+            format!("read_only={read_only}"),
+            run((spec.program, spec.args)),
+        ));
+    }
+    let task = mgr
+        .process_sandbox_policy("shell", &cwd)
+        .await
+        .expect("confined");
+    got.push((
+        "task".into(),
+        run(task.wrap("/bin/sh", &["-c".to_string(), probe.clone()])),
+    ));
+    for (_, p) in &socks {
+        let _ = std::fs::remove_dir_all(p.parent().unwrap());
+    }
+    let want: Vec<(String, String)> = ["read_only=false", "read_only=true", "task"]
+        .into_iter()
+        .map(|who| (who.to_string(), want.to_string()))
+        .collect();
+    assert_eq!(got, want);
+}
+
 /// Re-sweep NEW-1: a shell session (a Threads terminal dock too) has no agent
 /// CLI to serve, yet its start and every resume (the same MCP sync) wrote
 /// Otto's `.mcp.json` into the repository. Start it, sync again as a resume
