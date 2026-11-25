@@ -12,9 +12,10 @@ import { openPage } from './helpers';
 // owner pays, not a three-commit fixture's. Both open on History: a clean
 // clone on its checked-out commit, a dirty one on its WIP row.
 //
-// Budget: 6 requests for either — the overview, the opening fetch, the first
+// Budget: 7 requests for either — the overview, the opening fetch, the first
 // log page (asked beside the overview, not after it), what the landing shows
-// (a dirty clone's first WIP file diff, a clean one's HEAD commit summary),
+// (a dirty clone's first WIP file diff, a clean one's HEAD commit summary and,
+// for a small commit, its patch),
 // the pull mode, and the cheap /refs check a fetch's refs bump asks for (the
 // only way the graph learns what the fetch brought). The overview carries
 // refs, stashes, worktrees and submodules: none is read again. The first log
@@ -69,7 +70,7 @@ async function openAndCount(page: Page, name: string): Promise<string[]> {
 }
 
 for (const name of [CLEAN, DIRTY]) {
-  const budget = 6;
+  const budget = 7;
   test(`opening a repository (${name === CLEAN ? 'clean → History, HEAD' : 'dirty → History, WIP'}): ≤ ${budget} requests, first log page ≤ 200`, async ({ page }, info) => {
     test.skip(info.project.name !== 'desktop-browser', 'request counts are engine-independent');
     const seen = await openAndCount(page, name);

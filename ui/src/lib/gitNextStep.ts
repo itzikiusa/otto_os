@@ -41,6 +41,13 @@ export function gitAction(s: GitActionState): GitAction {
   return { kind: 'none', label: 'Nothing to commit' };
 }
 
+/** History's step card (Create / Open pull request over the checked-out
+ *  commit) is worth mounting — each mount asks the forge — only on a clean,
+ *  pushed branch of a forge repo that isn't the default one. */
+export function prStepPossible(s: GitActionState): boolean {
+  return s.changes === 0 && !!s.branch && !!s.upstream && s.ahead === 0 && s.forge && !DEFAULT_BRANCHES.has(s.branch);
+}
+
 /** The commit card's one primary, in words: with work to commit it commits
  *  AND pushes when there is somewhere to push (Commit only is the secondary),
  *  then "Push (↑N)" → "Create pull request" → "Open pull request". */

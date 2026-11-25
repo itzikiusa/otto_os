@@ -70,16 +70,18 @@ async function openWipFile(page: Page, name: string, path: string) {
   }
   await expect(page.locator('.rv-tabs')).toBeVisible();
   // A dirty repository opens on History with its WIP row selected and every
-  // change virtually included; hunk tools need the index written, so leave
-  // them all out first (the Included header's Unstage all).
+  // change virtually included; the open diff says how to get hunk tools
+  // (Pick hunks leaves every file out, so single hunks can be staged).
   const wipRow = page.locator('.wip-row');
   await expect(wipRow).toHaveAttribute('aria-pressed', 'true', { timeout: 15_000 });
   const panel = page.locator('.wip-panel');
   await expect(panel).toBeVisible();
-  await panel.locator('[data-wp-section="staged"]').getByRole('button', { name: /^Unstage / }).click();
-  await expect(panel.getByTestId('commit-card-included')).toHaveText(/^0 of /);
   // The first file's diff opened with the panel (each seed has one file).
   await expect(panel.locator('.wp-diff')).toContainText(path);
+  await expect(panel.locator('.hunk-header').getByRole('button', { name: 'Stage hunk' })).toHaveCount(0);
+  await panel.locator('.wp-diff').getByRole('button', { name: 'Pick hunks' }).click();
+  await expect(panel.getByTestId('commit-card-included')).toHaveText(/^0 of /);
+  await expect(panel.locator('.wp-diff').getByRole('button', { name: 'Pick hunks' })).toHaveCount(0);
   return panel;
 }
 

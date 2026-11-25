@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { execFileSync } from 'node:child_process';
 import { expectFullyInViewport, openPage } from './helpers';
 import { expectWipFirst, remoteSubject, seedCardRepo, stubForge, type CardRepo } from './git-commit-card-fixture';
 
@@ -87,4 +88,54 @@ test('dirty repo: History on the WIP row → Commit and push → Create pull req
   await expect(next).toHaveText(/Open pull request/);
   await next.click();
   await expect(page.locator('.rv-tab[aria-selected="true"]')).toContainText('Pull requests');
+});
+
+// A clean default branch has no pull-request step: History must not mount
+// the step card there (each mount asks the forge for accounts and open PRs).
+test('clean main: History opens on HEAD without asking the forge', async ({ page }, info) => {
+  test.skip(info.project.name !== 'desktop-browser', 'desktop-browser project only');
+  const r = await seedCardRepo('e2e-card-clean-main');
+  execFileSync('git', ['-C', r.dir, 'stash', 'push', '-q', '-u']);
+  execFileSync('git', ['-C', r.dir, 'checkout', '-q', 'main']);
+  await stubForge(page);
+  const forge: string[] = [];
+  page.on('request', (q) => { if (/\/api\/v1\/(git\/accounts|repos\/[^/]+\/prs\?)/.test(q.url())) forge.push(q.url()); });
+  await openPage(page, 'git/' + r.id);
+  await expect(page.locator('.detail-subject')).toHaveText('init', { timeout: 20_000 });
+  await page.waitForTimeout(1500); // ui-guards: allow — a step card would ask the forge now
+  expect(forge).toEqual([]);
+  await expect(page.getByTestId('commit-card-next')).toHaveCount(0);
+});
+
+// "Commit only" on a branch with no upstream: Publish is the next step, so
+// the header's Publish carries the accent (it stayed a plain verb).
+test('unpublished branch: after Commit only, Publish is the primary', async ({ page }, info) => {
+  test.skip(info.project.name !== 'desktop-browser', 'desktop-browser project only');
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const r = await seedCardRepo('e2e-card-unpublished');
+  execFileSync('git', ['-C', r.dir, 'branch', '--unset-upstream']);
+  await stubForge(page);
+  await openPage(page, 'git/' + r.id);
+  await expectWipFirst(page);
+  await page.getByTestId('commit-card').locator('.wc-commit-only').click();
+  await expect(page.locator('.wip-row')).toHaveCount(0, { timeout: 15_000 });
+  await expect(page.locator('.git-header .ph-actions').getByRole('button', { name: /^Publish/ })).toHaveClass(/primary/, { timeout: 15_000 });
+});
+
+// 1100 px with the right panel open: the diff's layout switch wraps into
+// view, and the branches stay one click away while the refs column steps aside.
+test('narrow pane: the diff toolbar fits and the branches peek in', async ({ page }, info) => {
+  test.skip(info.project.name !== 'desktop-browser', 'desktop-browser project only');
+  await page.addInitScript(() => { localStorage.setItem('otto_right_open', '1'); localStorage.setItem('otto_right_tab', 'git'); localStorage.setItem('otto_right_width', '300'); });
+  await page.setViewportSize({ width: 1100, height: 900 });
+  const r = await seedCardRepo('e2e-card-narrow');
+  await stubForge(page);
+  await openPage(page, 'git/' + r.id);
+  await expect(page.locator('.wip-row')).toHaveAttribute('aria-pressed', 'true', { timeout: 20_000 });
+  await expect(page.locator('.wp-diff')).toBeVisible({ timeout: 15_000 });
+  await expectFullyInViewport(page, page.locator('.wp-diff').getByRole('button', { name: 'Side by side' }), 'diff layout switch');
+  await expect(page.locator('.refs-panel')).toBeHidden();
+  await page.getByRole('button', { name: 'Branches & tags' }).click();
+  await expect(page.locator('.refs-panel')).toBeVisible();
+  await expect(page.locator('.refs-panel')).toContainText(r.branch.split('/').pop()!);
 });

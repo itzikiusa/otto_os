@@ -53,7 +53,11 @@ test('phone: WIP first → one tap commits and pushes', async ({ page }, info) =
     const b = (await t.boundingBox())!;
     expect(Math.min(b.width, b.height), await t.evaluate((el) => el.className)).toBeGreaterThanOrEqual(44);
   }
+  // One ✕ on a phone: the section header closes the panel, not a second one inside.
+  await expect(page.getByRole('button', { name: 'Close the changes panel' })).toHaveCount(0);
   await primary.tap();
   await expect.poll(() => remoteSubject(repo), { timeout: 20_000 }).toBe('feat: ship the commit card');
   await expect(page.getByTestId('commit-card-primary')).toHaveAttribute('data-kind', 'create-pr', { timeout: 15_000 });
+  await expect(page.locator('.detail-close')).toHaveCount(0);
+  await expect(page.locator('.mob-diff-head')).toBeVisible();
 });
