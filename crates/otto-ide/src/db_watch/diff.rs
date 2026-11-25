@@ -237,7 +237,8 @@ pub fn diff_snapshots(
         })
         .flatten();
 
-    let prev_floor = (opts.previous_full && !opts.primary_key.is_empty())
+    // Redis reads are SCANs, not ordered windows: a key below the oldest is new.
+    let prev_floor = (opts.previous_full && !opts.primary_key.is_empty() && !is_redis)
         .then(|| {
             previous
                 .rows
@@ -494,6 +495,26 @@ mod tests {
             (d.added_count, d.removed_count, d.unchanged_count),
             (0, 1, 2)
         );
+        // A Redis read is an unordered SCAN: a new key that sorts first is new.
+        let keys = |ks: &[&str]| {
+            snap(
+                &["key", "type", "value", "ttl"],
+                ks.iter()
+                    .map(|k| vec![json!(k), json!("string"), json!("v"), json!(-1)])
+                    .collect(),
+            )
+        };
+        let redis = DiffOpts {
+            primary_key: vec!["key".into()],
+            window_full: true,
+            previous_full: true,
+        };
+        let d = diff_snapshots(
+            &keys(&["s:5", "s:4"]),
+            &keys(&["s:5", "s:4", "s:0"]),
+            &redis,
+        );
+        assert_eq!(d.added_count, 1);
         // A real delete inside the window still counts.
         let curr = snap(
             &["id", "v"],
