@@ -234,7 +234,7 @@ impl DbViewerService {
                     .await?;
                     self.authorize(&connection_id, &user.id, Some(&redis_node), "db_browse")
                         .await?;
-                    redact_rows(&mut rows);
+                    redact_redis_rows(&mut rows);
                     return Ok(WatchExecOutcome {
                         target_label: conn.name,
                         columns,
@@ -444,10 +444,43 @@ async fn enrich_redis_prefix(
     ))
 }
 
-fn redact_rows(rows: &mut [Vec<Value>]) {
+/// Mask enriched Redis rows (`key, type, value, ttl`): a value is stored
+/// under its KEY (`auth:token:42`), so the key names the value cell.
+fn redact_redis_rows(rows: &mut [Vec<Value>]) {
     for row in rows {
-        for cell in row.iter_mut() {
-            *cell = otto_core::redact::redact_json(cell).value;
-        }
+        let key = row
+            .first()
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        otto_core::redact::redact_row(&["key", "type", key.as_str(), "ttl"], row);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn redis_values_are_masked_by_their_key_name() {
+        let mut rows = vec![
+            vec![
+                json!("auth:token:42"),
+                json!("string"),
+                json!("abc"),
+                json!(30),
+            ],
+            vec![
+                json!("page:home"),
+                json!("string"),
+                json!("<p>hi</p>"),
+                json!(-1),
+            ],
+        ];
+        redact_redis_rows(&mut rows);
+        assert_eq!(rows[0][2], json!("[redacted]"));
+        assert_eq!(rows[0][0], json!("auth:token:42"));
+        assert_eq!(rows[1][2], json!("<p>hi</p>"));
     }
 }
