@@ -207,8 +207,7 @@ fn save_prefs(path: &Path, prefs: &Prefs) {
 }
 
 /// `plugins.updater` of tauri.conf.json: the plugin reads `pubkey` from it;
-/// Otto reads the first of `endpoints` and `signers` (accepted
-/// code-signing identities as requirement fragments, OR-ed).
+/// Otto fetches the first of its `endpoints`.
 fn plugin_config<R: Runtime>(app: &AppHandle<R>) -> serde_json::Value {
     app.config()
         .plugins
@@ -222,12 +221,22 @@ fn endpoint(cfg: &serde_json::Value) -> Option<reqwest::Url> {
     cfg.get("endpoints")?.get(0)?.as_str()?.parse().ok()
 }
 
-fn signers(cfg: &serde_json::Value) -> Vec<String> {
-    cfg.get("signers")
-        .and_then(|v| v.as_array())
+/// The accepted code-signing identities: `acceptedLeaves` (SHA-1 of each
+/// leaf certificate) of the file packaging/release-artifacts.sh signs and
+/// checks with, so the TEST identity is replaced in that one place. A later
+/// identity (a new certificate, Developer ID) is added there next to the old
+/// one for at least one release.
+const RELEASE_IDENTITY: &str = include_str!("../../release-identity.json");
+
+fn signers(identity: &str) -> Vec<String> {
+    let v: serde_json::Value = serde_json::from_str(identity).unwrap_or_default();
+    v.get("acceptedLeaves")
+        .and_then(|a| a.as_array())
         .map(|a| {
             a.iter()
-                .filter_map(|s| s.as_str().map(String::from))
+                .filter_map(|s| s.as_str())
+                .filter(|s| s.len() == 40 && s.chars().all(|c| c.is_ascii_hexdigit()))
+                .map(|leaf| format!("certificate leaf = H\"{}\"", leaf.to_ascii_lowercase()))
                 .collect()
         })
         .unwrap_or_default()
@@ -362,7 +371,6 @@ pub fn init(app: &AppHandle) {
         prefs.skipped = Some(r.to.clone());
         save_prefs(&paths.prefs(), &prefs);
     }
-    let cfg = plugin_config(app);
     let channel = channel();
     let blocked = match running_bundle() {
         Some(b) => install_blocker(&b, &paths.app),
@@ -383,7 +391,7 @@ pub fn init(app: &AppHandle) {
         update: None,
         prefs,
         paths,
-        signers: signers(&cfg),
+        signers: signers(RELEASE_IDENTITY),
     }));
     if channel != Channel::Release {
         return;
@@ -717,22 +725,35 @@ mod tests {
     }
 
     #[test]
-    fn config_gives_the_endpoint_signers_and_release_page() {
+    fn config_gives_the_endpoint_the_signers_and_the_release_page() {
         let cfg = serde_json::json!({
             "pubkey": "x",
             "endpoints": ["https://github.com/acme/otto/releases/latest/download/latest.json"],
-            "signers": ["certificate leaf = H\"ab\"", "certificate leaf = H\"cd\""],
         });
         let url = endpoint(&cfg).unwrap();
-        assert_eq!(signers(&cfg).len(), 2);
+        let leaf = "E2FD4736E55446F39C4151E258A6F260B1AE40CC";
+        let two = format!(
+            r#"{{"acceptedLeaves": ["{leaf}", "{}", "not-a-hash\" or anchor apple"]}}"#,
+            "a".repeat(40)
+        );
+        assert_eq!(
+            signers(&two),
+            [
+                format!("certificate leaf = H\"{}\"", leaf.to_lowercase()),
+                format!("certificate leaf = H\"{}\"", "a".repeat(40))
+            ],
+            "hex leaves only — nothing else reaches the requirement"
+        );
+        assert_eq!(
+            signers(RELEASE_IDENTITY).len(),
+            1,
+            "the shipped file parses"
+        );
         assert_eq!(
             release_url(&url, "0.5.5").unwrap(),
             "https://github.com/acme/otto/releases/tag/v0.5.5"
         );
-        assert!(
-            signers(&serde_json::json!({})).is_empty(),
-            "missing = none = fail closed"
-        );
+        assert!(signers("{}").is_empty(), "missing = none = fail closed");
         assert!(release_url(&"https://example.com/a/b/releases/x".parse().unwrap(), "1").is_none());
     }
 
