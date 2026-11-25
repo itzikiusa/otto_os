@@ -757,15 +757,15 @@ mod tests {
         assert!(release_url(&"https://example.com/a/b/releases/x".parse().unwrap(), "1").is_none());
     }
 
-    /// A mock Tauri app hosting the updater plugin with a TEST public key at
-    /// version 1.2.2.
-    fn mock_app(pubkey: &str) -> tauri::App<tauri::test::MockRuntime> {
+    /// A mock Tauri app hosting the updater plugin with `pubkey`, running
+    /// `version`.
+    fn mock_app(pubkey: &str, version: &str) -> tauri::App<tauri::test::MockRuntime> {
         let mut ctx = tauri::test::mock_context(tauri::test::noop_assets());
         ctx.config_mut().plugins.0.insert(
             "updater".into(),
             serde_json::json!({"pubkey": pubkey, "endpoints": ["https://github.com/o/r/releases/latest/download/latest.json"]}),
         );
-        ctx.package_info_mut().version = "1.2.2".parse().unwrap();
+        ctx.package_info_mut().version = version.parse().unwrap();
         tauri::test::mock_builder()
             .plugin(tauri_plugin_updater::Builder::new().build())
             .build(ctx)
@@ -794,7 +794,7 @@ mod tests {
         let archive = kit.archive(&kit.bundle("v123", "1.2.3", "Otto Updater TEST E2E", false));
         let srv = Server::start(vec![("/Otto.app.tar.gz", 200, archive.clone(), None)]);
         let archive_url = srv.url("/Otto.app.tar.gz").to_string();
-        let app = mock_app(&keys.pubkey());
+        let app = mock_app(&keys.pubkey(), "1.2.2");
         let handle = app.handle().clone();
         let latest = srv.url("/latest.json");
         let updates = temp_dir("e2e-updates");
@@ -914,6 +914,54 @@ mod tests {
             panic!("huge manifest parsed")
         };
         assert!(msg.contains("larger"), "{msg}");
+        let _ = std::fs::remove_dir_all(&updates);
+    }
+
+    /// Interop with the real release pipeline: the archive, .sig and
+    /// latest.json that packaging/release-artifacts.sh made (TEST update key,
+    /// TEST release certificate), checked with the pubkey in tauri.conf.json
+    /// and the signers in release-identity.json. Not committed fixtures:
+    /// `OTTO_UPDATE_FIXTURE_DIR=<its dist dir> cargo test -- --ignored release_artifacts`.
+    #[tokio::test]
+    #[ignore]
+    async fn release_artifacts_from_the_pipeline_verify_and_stage() {
+        let dir = PathBuf::from(
+            std::env::var("OTTO_UPDATE_FIXTURE_DIR").expect("set OTTO_UPDATE_FIXTURE_DIR"),
+        );
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("latest.json")).unwrap()).unwrap();
+        let version = manifest["version"].as_str().unwrap().to_string();
+        let url = manifest["platforms"]["darwin-aarch64"]["url"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            fetch::allowed(&url.parse().unwrap()),
+            "the pipeline's URL is an allowed host: {url}"
+        );
+        let archive = std::fs::read(dir.join(url.rsplit('/').next().unwrap())).unwrap();
+        let srv = Server::start(vec![("/a.tar.gz", 200, archive, None)]);
+        manifest["platforms"]["darwin-aarch64"]["url"] = srv.url("/a.tar.gz").to_string().into();
+        srv.set("/latest.json", 200, serde_json::to_vec(&manifest).unwrap());
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../../tauri.conf.json")).unwrap();
+        let app = mock_app(
+            conf["plugins"]["updater"]["pubkey"].as_str().unwrap(),
+            "0.0.1",
+        );
+        let u = find_update(app.handle(), &srv.url("/latest.json"))
+            .await
+            .ok()
+            .unwrap()
+            .expect("newer");
+        assert_eq!(u.version, version);
+        let updates = temp_dir("interop");
+        let staged =
+            download_and_stage(&u, updates.clone(), signers(RELEASE_IDENTITY), |_, _| {}).await;
+        let staged = staged
+            .map_err(|Fail(_, m)| m)
+            .expect("the real release artifact stages");
+        assert_eq!(stage::bundle_version(&staged).unwrap(), version);
         let _ = std::fs::remove_dir_all(&updates);
     }
 }
