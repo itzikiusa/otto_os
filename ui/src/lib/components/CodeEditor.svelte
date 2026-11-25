@@ -7,6 +7,7 @@
   let coreThemeMod: typeof CmIdeThemeType | null = null;
   let coreHistMod: typeof CmIdeHistType | null = null;
   let coreSmartMod: typeof CmEditorSmartType | null = null;
+  let loadedIdeMod: typeof import('./cm-ide-extensions') | null = null; // once loaded, every new editor builds its IDE extensions in its FIRST state
   export function registerIdeEditorCore(
     themeMod: typeof CmIdeThemeType,
     histMod?: typeof CmIdeHistType | null,
@@ -141,13 +142,11 @@
       () => langExtOf(forPath ?? (livePath || path), language),
     );
 
-  let ideMod: typeof CmIdeMod | null = null;
-  let ideModPromise: Promise<typeof CmIdeMod> | null = null;
+  let ideMod: typeof CmIdeMod | null = loadedIdeMod, ideModPromise: Promise<typeof CmIdeMod> | null = null;
   let ideMounted = false, appliedIdePath = '', appliedManifestDepsPath = '';
   let appliedKeymapPreset: 'jetbrains' | 'standard' = 'jetbrains';
 
-  const ensureIdeMod = (): Promise<typeof CmIdeMod> =>
-    ideMod ? Promise.resolve(ideMod) : (ideModPromise ??= import('./cm-ide-extensions').then((m) => ((ideMod = m), m)));
+  const ensureIdeMod = (): Promise<typeof CmIdeMod> => ideMod ? Promise.resolve(ideMod) : (ideModPromise ??= import('./cm-ide-extensions').then((m) => ((ideMod = loadedIdeMod = m), m)));
 
   function isIdeActive(): boolean {
     return Boolean(
@@ -223,7 +222,7 @@
         })
       : [];
 
-  let appliedPlain = false;
+  let appliedPlain = false, appliedThemeKey = '', freshIdeState = false;
   const plainWatcher = createPlainLineWatch({
     getLimit: () => highlightLineLimit,
     isPlain: () => appliedPlain,
@@ -457,7 +456,7 @@
     const hk = readOnly ? null : (historyKey?.(filePath) ?? null), limit = highlightLineLimit;
     const doc = limit > 0 ? Text.of(fileContent.split(/\r\n?|\n/)) : null;
     appliedPlain = !!doc && hasLongLine(doc, limit);
-    appliedLanguage = language;
+    appliedLanguage = language; appliedThemeKey = untrack(() => `${ui.resolvedScheme}|${effectiveIdeScheme}`);
     const langExt = cmLangFor(filePath, language);
     appliedLangReady = langExt != null || !cmLangPending(langExtOf(filePath, language));
 
@@ -487,6 +486,7 @@
       ...(hk || (ideMode && !readOnly) ? [historySaver] : []),
       ...(oncopy || ideMode ? [copyRecorder] : []),
     ];
+    if (ideMounted && !freshIdeState) { freshIdeState = true; queueMicrotask(() => { freshIdeState = false; }); } // built from the current props: this flush's prop effects would only re-send them
 
     const restored = restoreOrCreateEditorState({
       filePath, fileContent, doc, savedContent, baseExtensions, ideMode, readOnly, hk, coreHistMod,
@@ -711,7 +711,7 @@
     untrack(() => {
       if (!view) return;
       if (!ideMounted && needMount) mountIdeExtensions(view);
-      else if (ideMod && ideMounted) view.dispatch({ effects: makeEffect(ideMod) });
+      else if (ideMod && ideMounted && !freshIdeState) view.dispatch({ effects: makeEffect(ideMod) });
     });
   }
   $effect(() => {
@@ -800,8 +800,8 @@
     appliedPlaceholder = text; view.dispatch({ effects: placeholderCompartment.reconfigure(placeholderExt(text)) });
   });
   $effect(() => {
-    const scheme = ui.resolvedScheme, _eff = effectiveIdeScheme; void _eff;
-    if (view) view.dispatch({ effects: themeCompartment.reconfigure(themeExt(scheme, appliedPlain)) });
+    const scheme = ui.resolvedScheme, key = `${scheme}|${effectiveIdeScheme}`; // a new view's first state has this theme
+    if (view && key !== appliedThemeKey) { appliedThemeKey = key; view.dispatch({ effects: themeCompartment.reconfigure(themeExt(scheme, appliedPlain)) }); }
   });
   let prevGoto: string | null = null;
   $effect(() => {

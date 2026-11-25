@@ -409,6 +409,9 @@ export { applyClientQuickFix };
 
 const setLineQuickFixesEffect = StateEffect.define<Map<number, ClientDiagQuickFix[]>>();
 const setServerUnresolvedEffect = StateEffect.define<Set<string>>();
+const semanticRefreshEffect = StateEffect.define<null>();
+/** Typing maps the semantic marks and rebuilds the full-file model once the keys pause. */
+export const SEMANTIC_REFRESH_MS = 150;
 
 const lineQuickFixesField = StateField.define<Map<number, ClientDiagQuickFix[]>>({
   create: () => new Map(),
@@ -462,6 +465,7 @@ export function createIdeSemanticExtensions(opts: CreateIdeSemanticOptions): Ext
     class {
       decorations: DecorationSet = Decoration.none;
       private timer: ReturnType<typeof setTimeout> | null = null;
+      private refreshTimer: ReturnType<typeof setTimeout> | null = null;
       private abort: AbortController | null = null;
       private didAutoFold = false;
       private hadSemanticDiags = false;
@@ -477,15 +481,29 @@ export function createIdeSemanticExtensions(opts: CreateIdeSemanticOptions): Ext
       }
 
       update(u: ViewUpdate) {
-        const unresChanged = u.transactions.some((t) => t.effects.some((e) => e.is(setServerUnresolvedEffect)));
-        if (u.docChanged || u.viewportChanged || u.selectionSet || unresChanged) {
+        const has = (t: typeof semanticRefreshEffect | typeof setServerUnresolvedEffect): boolean =>
+          u.transactions.some((tr) => tr.effects.some((e) => e.is(t)));
+        if (u.docChanged) {
+          // compute() rebuilds the whole-file model (doc.toString, symbols, brackets, identifier
+          // counts) for every new doc: per keystroke that is O(file). Shift the marks instead.
+          this.decorations = this.decorations.map(u.changes);
+          if (this.refreshTimer) clearTimeout(this.refreshTimer);
+          const view = u.view;
+          this.refreshTimer = setTimeout(() => {
+            this.refreshTimer = null;
+            view.dispatch({ effects: semanticRefreshEffect.of(null) });
+          }, SEMANTIC_REFRESH_MS);
+          this.scheduleDiagnostics(u.view, 250);
+        } else if (has(semanticRefreshEffect) || u.viewportChanged || has(setServerUnresolvedEffect) || (u.selectionSet && !this.refreshTimer)) {
+          if (this.refreshTimer) clearTimeout(this.refreshTimer);
+          this.refreshTimer = null;
           this.decorations = this.compute(u.view);
         }
-        if (u.docChanged) this.scheduleDiagnostics(u.view, 250);
       }
 
       destroy() {
         if (this.timer) clearTimeout(this.timer);
+        if (this.refreshTimer) clearTimeout(this.refreshTimer);
         this.abort?.abort();
       }
 
