@@ -142,15 +142,15 @@ pub fn mcp_query_timeout_ms(requested: Option<u64>) -> u64 {
     }
 }
 
-/// Recursively PII-mask a result's cells in place (via `otto_core::redact`) and
+/// Recursively PII-mask a result's cells in place (by column name, then each
+/// cell's own text — `otto_core::redact::redact_row`) and
 /// flag it `masked`, including every later result set in a multi-statement
 /// batch's `more_results` — so an unmasked cell never leaks just because it was
 /// produced by the 2nd+ statement.
 fn mask_result(res: &mut QueryResult) {
+    let names: Vec<&str> = res.columns.iter().map(|c| c.name.as_str()).collect();
     for row in &mut res.rows {
-        for cell in row.iter_mut() {
-            *cell = redact::redact_json(cell).value;
-        }
+        redact::redact_row(&names, row);
     }
     res.masked = true;
     for more in &mut res.more_results {
@@ -3895,6 +3895,43 @@ mod tests {
     //! query leaves no stale entry a later cancel could hit.
 
     use super::*;
+
+    /// "Mask PII" (and every agent read) masks a secret COLUMN, not only
+    /// secret shapes — in every result set of a batch.
+    #[test]
+    fn mask_result_masks_by_column_name_in_every_result_set() {
+        let result = |rows: Vec<Vec<Value>>| {
+            let mut r = QueryResult::empty();
+            r.columns = ["id", "password_hash"]
+                .iter()
+                .map(|n| crate::types::Column {
+                    name: n.to_string(),
+                    type_hint: None,
+                    binary: false,
+                })
+                .collect();
+            r.rows = rows;
+            r
+        };
+        let mut res = result(vec![vec![
+            serde_json::json!(1),
+            serde_json::json!("$2b$12$x"),
+        ]]);
+        res.more_results.push(result(vec![vec![
+            serde_json::json!(2),
+            serde_json::json!("$2b$12$y"),
+        ]]));
+        mask_result(&mut res);
+        assert!(res.masked);
+        assert_eq!(
+            res.rows[0],
+            vec![serde_json::json!(1), serde_json::json!("[redacted]")]
+        );
+        assert_eq!(
+            res.more_results[0].rows[0][1],
+            serde_json::json!("[redacted]")
+        );
+    }
 
     /// S16-08: widgets re-run unattended, so they always run read-only and a
     /// write/DDL statement is refused when saved.
