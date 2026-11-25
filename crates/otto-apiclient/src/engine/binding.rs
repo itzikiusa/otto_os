@@ -132,11 +132,30 @@ pub fn collect_secrets(
 /// restricted MCP token. Such callers can't confirm a new-host secret send.
 pub fn is_agent_caller(headers: &HeaderMap, auth: &AuthContext) -> bool {
     let (source, _) = caller_source(headers);
-    source.get("kind").and_then(Value::as_str) == Some("agent")
-        || auth.managed_session_id.is_some()
+    source.get("kind").and_then(Value::as_str) == Some("agent") || is_agent_credential(auth)
+}
+
+/// The credential itself is an agent's (whatever headers it sends).
+pub fn is_agent_credential(auth: &AuthContext) -> bool {
+    auth.managed_session_id.is_some()
         || auth.mcp_only
         || auth.mcp_internal
         || auth.mcp_session_id.is_some()
+}
+
+/// `url` targets this Mac: `localhost`, 127.0.0.0/8 or [::1].
+pub fn is_loopback_url(url: &str) -> bool {
+    let Some(host) = reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+    else {
+        return false;
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host == "localhost"
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 /// `Some(session)` when the caller is an agent ([`is_agent_caller`]), with the

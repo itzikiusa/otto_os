@@ -14,10 +14,10 @@ use super::ApiResult;
 use crate::dap::DapStartContext;
 use crate::types::{
     IdeCreatePythonVenvReq, IdeCreatePythonVenvResp, IdeDebugCommandReq, IdeDebugEvaluateReq,
-    IdeDebugEvaluateResp, IdeDebugSessionResp, IdeDebugSessionsResp, IdeDebugVariablesReq,
-    IdeDebugVariablesResp, IdeOkResp, IdeRunConfigResp, IdeRunConfigsResp, IdeRunResp,
-    IdeSetBreakpointsReq, IdeStartDebugReq, IdeStartRunReq, IdeTargetKind, IdeTargetQuery,
-    IdeTargetSpec, IdeUpsertRunConfigReq,
+    IdeDebugEvaluateResp, IdeDebugPortQuery, IdeDebugPortResp, IdeDebugSessionResp,
+    IdeDebugSessionsResp, IdeDebugVariablesReq, IdeDebugVariablesResp, IdeOkResp, IdeRunConfigResp,
+    IdeRunConfigsResp, IdeRunResp, IdeSetBreakpointsReq, IdeStartDebugReq, IdeStartRunReq,
+    IdeTargetKind, IdeTargetQuery, IdeTargetSpec, IdeUpsertRunConfigReq,
 };
 use crate::IdeCtx;
 
@@ -527,6 +527,27 @@ pub(super) async fn debug_variables<S: IdeCtx>(
         .expand_variables(&id, req.variables_reference)
         .await?;
     Ok(Json(IdeDebugVariablesResp { variables }))
+}
+
+/// Whether the debuggee listens on `port` yet (a TCP connect to loopback,
+/// nothing sent): an agent's start returns as soon as the app is up.
+pub(super) async fn debug_port<S: IdeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<String>,
+    Query(q): Query<IdeDebugPortQuery>,
+) -> ApiResult<Json<IdeDebugPortResp>> {
+    ctx.ide().authorize_debug_session(&user, &id)?;
+    ctx.ide().dap.get_session(&id)?;
+    let connect = |host: &'static str| async move {
+        let dial = tokio::net::TcpStream::connect((host, q.port));
+        matches!(
+            tokio::time::timeout(std::time::Duration::from_millis(300), dial).await,
+            Ok(Ok(_))
+        )
+    };
+    let open = connect("127.0.0.1").await || connect("::1").await;
+    Ok(Json(IdeDebugPortResp { open }))
 }
 
 pub(super) async fn debug_evaluate<S: IdeCtx>(

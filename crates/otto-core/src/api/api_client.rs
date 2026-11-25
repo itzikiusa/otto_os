@@ -116,6 +116,14 @@ pub struct ExecuteApiReq {
     /// agent callers can never self-confirm.
     #[serde(default)]
     pub confirm_new_host: bool,
+    /// An agent's IDE debug request (`otto.ui_ide_debug_request`) the person
+    /// confirmed, naming that agent session. The URL must be on this Mac
+    /// (localhost / 127.0.0.0/8 / [::1]); a PERSON's credential may then reach
+    /// it for this one call without the workspace's `allow_local`. The send
+    /// counts as that agent's: no new-host self-confirm, the response scrubbed
+    /// of resolved secrets, history attributed to the session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub debug_session_id: Option<Id>,
 }
 
 /// Response of `POST .../api-client/execute`.

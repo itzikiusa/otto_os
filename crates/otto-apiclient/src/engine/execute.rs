@@ -394,7 +394,14 @@ pub async fn execute_service<C: ApiClientCtx>(
     // resolved for a host it isn't bound to without a PERSON's confirmation —
     // before anything is resolved or sent. A person's send records where
     // each `$secret` marker is bound (see `record_person_bindings`).
-    let agent = is_agent_caller(headers, auth);
+    // An IDE debug request: this Mac only, and it counts as the agent's send.
+    let debug = req.debug_session_id.clone();
+    if debug.is_some() && !is_loopback_url(&substitute(&req.url, &vars)) {
+        return Err(EngineError::Invalid(
+            "a debug request goes to this Mac only (localhost, 127.0.0.1, [::1])".into(),
+        ));
+    }
+    let agent = is_agent_caller(headers, auth) || debug.is_some();
     let secret_keys: &[String] = environment
         .as_ref()
         .map(|env| env.secret_keys.as_slice())
@@ -427,7 +434,13 @@ pub async fn execute_service<C: ApiClientCtx>(
 
     // Snapshot of the request as executed. Secret auth members are REDACTED —
     // history must never become the plaintext copy that defeats the Keychain.
-    let (source, session_id) = caller_source(headers);
+    let (source, session_id) = match &debug {
+        Some(sid) => (
+            json!({"kind": "agent", "session_id": sid, "via": "ide_debug"}),
+            Some(sid.clone()),
+        ),
+        None => caller_source(headers),
+    };
     let request_snapshot = json!({
         "method": req.method,
         "url": req.url,
@@ -472,7 +485,9 @@ pub async fn execute_service<C: ApiClientCtx>(
     // the same error/history path as a network failure below.
     let send = match resolve_socks_proxy(ctx, wid, req.ssh_connection_id.as_ref(), &user.id).await {
         Ok(proxy) => {
-            let allow_local = workspace_allows_local(ctx, wid).await;
+            // A person confirmed this debug request: loopback for this call only.
+            let allow_local = (debug.is_some() && !is_agent_credential(auth))
+                || workspace_allows_local(ctx, wid).await;
             build_and_send_with(
                 &jar_scope(wid, &user.id),
                 &exec_req,
@@ -521,7 +536,7 @@ pub async fn execute_service<C: ApiClientCtx>(
                 None,
             )
             .await;
-            if is_agent_caller(headers, auth) {
+            if agent {
                 // An agent reads the response too: a bound host that echoes
                 // the request (a `/debug/headers` endpoint) must not hand it
                 // the Keychain value. No raw bytes either — neither inline

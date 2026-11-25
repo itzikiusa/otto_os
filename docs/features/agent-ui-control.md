@@ -273,26 +273,38 @@ The Personal Agents page belongs to the Scheduled Tasks pane, so these commands 
 
 ### IDE debugging: `ide` (route `#/ide`)
 
-Only when you ask the agent to debug with Otto ("use Otto to debug …"). The
-agent then drives the IDE's own debugger: you see its breakpoints in the
-gutter, every stop, the variables and DB Watch, and you can step yourself at
-any time. The commands act only on the debug session that agent started.
+Only when you ask for it ("use Otto to debug why `POST /orders` returns 500",
+"debug `TestFlowComponent` with Otto, build tag component"). The agent drives
+the IDE's own debugger in your window — the gutter Debug launch, the
+breakpoints gutter, the step buttons — so you watch it happen. When the
+conversation is elsewhere, the IDE opens in its own window; in the IDE's agent
+dock nothing new opens. See [IDE → Debugging with an agent](./ide.md#debugging-with-an-agent).
 
 | Command | Risk | Args | What you see |
 |---------|------|------|--------------|
-| `ide_debug_start` | execute | `target` (`test` file + name, `main` file, or a run `config` name), `root?` (default: the agent's folder), `build_tags?`, `args?`, `env?`, `breakpoints?`, `break_on_exceptions?`, `ready_pattern?`, `ready_port?`, `db_watch?`, `wait_ms?`, `say?` | The IDE opens in its own window (or beside the conversation in the IDE's agent dock), the breakpoints appear, then one confirm naming what runs. Starting again while it runs is a restart and asks again. |
-| `ide_debug_control` | navigate | `action` (`continue`/`step_over`/`step_into`/`step_out`/`pause`/`run_to_line`/`wait`/`status`/`stop`), `file?`, `line?`, `thread_id?`, `frame_id?`, `wait_ms?`, `keep_breakpoints?`, `say?` | The debugger moves as if you clicked. `stop` ends the run and removes the agent's breakpoints. |
-| `ide_debug_breakpoints` | navigate | `set?`, `clear?`, `clear_mine?` | Breakpoints appear or go; yours are never touched by `clear_mine`. |
-| `ide_debug_inspect` | read | `paths?`, `ref?`, `start?`, `count?`, `frame_id?`, `thread_id?`, `threads?` | Nothing changes: it reads values without running code. |
-| `ide_debug_evaluate` | execute | `expression`, `frame_id?` | A confirm with the exact expression, then its result in the debug console. |
-| `ide_debug_request` | local_write | `url` (localhost / 127.0.0.1 / [::1] only), `method?`, `headers?`, `body?`, `wait_ms?` | A confirm (you can allow that host and port for the session), then the request in the debug console. |
-| `ide_debug_db` | read | `action` (`watch`/`unwatch`/`diff`), `objects?`, `connection_id?`, `since?` | DB Watch on the run's tables. A production connection always asks. |
+| `ide_debug_start` | execute | `target` (`test` file + name, `main` file, or a run `config`), `root?` (default: the session's folder; only it or a folder inside it), `build_tags?`, `args?`, `env?`, `breakpoints?`, `break_on_exceptions?`, `ready_pattern?` / `ready_port?`, `db_watch?`, `wait_ms?`, `say?` | The project opens, a confirm shows the command line, working directory, build flags, extra env and the breakpoint count. After **Debug**, the agent's breakpoints appear in the gutter and the Debug tab runs. Returns at the first stop, as soon as the app is ready (the output contains `ready_pattern`, or `ready_port` accepts connections), or near the call's deadline with `state: running`. Every result lists the agent's breakpoints with `verified` and the bound line. |
+| `ide_debug_control` | navigate | `action` (`continue`/`step_over`/`step_into`/`step_out`/`pause`/`run_to_line`/`wait`/`status`/`stop`), `file?`/`line?`, `thread_id?`, `frame_id?`, `wait_ms?`, `keep_breakpoints?`, `say?` | The debugger moves; returns the next stop. `stop` ends the session and removes the agent's breakpoints. |
+| `ide_debug_breakpoints` | navigate | `set?`, `clear?`, `clear_mine?` | Red dots appear or go, marked as the agent's. Yours are never touched. |
+| `ide_debug_inspect` | read | `paths?` (`req.Header`, `cfg.DB.Host`), `ref?` + `start?`/`count?`, `frame_id?`, `thread_id?`, `threads?` | Nothing changes (a `frame_id` selects that frame). Reads values without running code. |
+| `ide_debug_evaluate` | execute | `expression`, `frame_id?` | A confirm shows the exact expression, every time. The result shows in the Debug console. |
+| `ide_debug_request` | local_write | `method?`, `url` (localhost / 127.0.0.1 / [::1] only), `headers?`, `body?`, `wait_ms?` | A confirm (you may allow that host for the session); the console shows `→ POST localhost:8080/orders (Claude)`. Returns when the debugger stops or the response arrives, whichever is first; a response that arrives while the app is paused comes with the next result. |
+| `ide_debug_db` | read | `action` (`watch`/`unwatch`/`diff`), `objects?`, `connection_id?`, `since?` | DB Watch shows the watched tables; each later stop carries what changed. A production connection always asks. |
 
-What the agent gets back is redacted: secret-looking names and values, DB
-cells and response bodies are masked. What you see in the IDE is not. The
-daemon refuses an `env` that names a loader, shell or toolchain variable
-(`PATH`, `LD_*`, `DYLD_*`, `GOFLAGS`, `NODE_OPTIONS`, `PYTHONPATH`,
-`JAVA_TOOL_OPTIONS`, …) and any request that leaves this Mac.
+**A stop** returns `{debug_id, state, stop_seq, reason, user_moved, location,
+source (±6 lines), frames (≤ 10), locals ({name: value}, ≤ 40, values ≤ 200
+chars), refs, changed, threads, output_tail (new lines, ≤ 40), breakpoints,
+breakpoints_hit, db?, request?}`, at most 16 KB. Locals are keyed by **name** and
+inspected values by **path**, so a `password`, `token` or `dsn` comes back
+redacted, as do secret-looking values, DB cells and response secrets; you see the
+real values in the IDE. The daemon refuses an `env` that names a loader, shell or
+toolchain variable (`PATH`, `LD_*`, `DYLD_*`, `GOFLAGS`, `NODE_OPTIONS`,
+`PYTHONPATH`, `JAVA_TOOL_OPTIONS`, …) and any request that leaves this Mac.
+
+**Scope.** The commands act only on the debug session that agent session
+started. If you step, continue or restart yourself, the agent's next result says
+`user_moved: true` and a moving action is not done — it describes the new stop
+and asks. **Stop** on the driving bar ends its control; the debug session stays
+yours.
 
 ## 6. No Otto window, other devices
 

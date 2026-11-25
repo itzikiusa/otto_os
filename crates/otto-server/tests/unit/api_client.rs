@@ -198,6 +198,7 @@ async fn resolve_exec_auth_resolves_own_and_rejects_foreign() {
         vars: None,
         ssh_connection_id: None,
         confirm_new_host: false,
+        debug_session_id: None,
     };
     // Same-workspace marker resolves in-memory only.
     let resolved = resolve_exec_auth(
@@ -466,6 +467,7 @@ fn exec_req(url: &str) -> ExecuteApiReq {
         vars: None,
         ssh_connection_id: None,
         confirm_new_host: false,
+        debug_session_id: None,
     }
 }
 
@@ -1380,4 +1382,63 @@ async fn oauth_token_fetch_keeps_metadata_and_the_daemon_blocked_with_private_al
         assert!(text.contains("SSRF guard"), "{token_url}: {text}");
         assert!(!text.contains("s3cret-value"), "{token_url}: {text}");
     }
+}
+
+/// `debug_session_id`: an agent's IDE debug request the person confirmed
+/// reaches this Mac without the workspace's `allow_local` — for a person's
+/// credential and a loopback URL only.
+#[tokio::test]
+async fn debug_request_reaches_loopback_for_a_person_only() {
+    use axum::{routing::get, Router};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let app = Router::new().route("/orders", get(|| async { "ok" }));
+        axum::serve(listener, app).await.unwrap();
+    });
+    let (_tmp, ctx, wid) = engine_fixture("ws-debug-request").await;
+    let user = crate::routes::browser::tests::root_user();
+    let url = format!("http://{addr}/orders");
+    let send = |auth: AuthContext, body: Value| {
+        let (ctx, wid, user) = (ctx.clone(), wid.clone(), user.clone());
+        async move {
+            let req = Json(serde_json::from_value(body).unwrap());
+            let auth = CurrentAuthContext(auth);
+            execute(
+                Path(wid),
+                State(ctx),
+                CurrentUser(user),
+                auth,
+                HeaderMap::new(),
+                req,
+            )
+            .await
+        }
+    };
+    // allow_local is off: a plain send to loopback is refused…
+    let plain = send(auth_for(&user), json!({"method": "GET", "url": url})).await;
+    let Err(refused) = plain else {
+        panic!("loopback must be refused")
+    };
+    assert!(wire(refused).await.1.to_string().contains("SSRF guard"));
+    // …a person-confirmed debug request reaches it…
+    let debug = json!({"method": "GET", "url": url, "debug_session_id": "sess-debug"});
+    let Json(resp) = send(auth_for(&user), debug.clone()).await.unwrap();
+    assert_eq!((resp.status, resp.body.as_str()), (200, "ok"));
+    // …an agent credential never opens loopback, flag or not…
+    let mut agent = auth_for(&user);
+    agent.managed_session_id = Some("sess-debug".into());
+    let Err(refused) = send(agent, debug).await else {
+        panic!("agent must be refused")
+    };
+    assert!(wire(refused).await.1.to_string().contains("SSRF guard"));
+    // …and the flag opens nothing but this Mac.
+    let lan = json!({"method": "GET", "url": "http://10.0.0.1/", "debug_session_id": "s"});
+    let Err(refused) = send(auth_for(&user), lan).await else {
+        panic!("LAN must be refused")
+    };
+    let (status, body) = wire(refused).await;
+    assert_eq!(status, 400, "{body}");
+    assert!(body.to_string().contains("this Mac only"), "{body}");
+    server.abort();
 }

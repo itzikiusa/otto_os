@@ -140,6 +140,7 @@ fn apply_extras_settings_maps_onto_exec() {
         vars: None,
         ssh_connection_id: None,
         confirm_new_host: false,
+        debug_session_id: None,
     };
     apply_extras_settings(
         &json!({"settings": {"timeout_ms": 1500, "follow_redirects": false, "tls_verify": false}}),
@@ -375,6 +376,7 @@ fn exec_req(url: &str) -> ExecuteApiReq {
         vars: None,
         ssh_connection_id: None,
         confirm_new_host: false,
+        debug_session_id: None,
     }
 }
 
