@@ -14,7 +14,7 @@ import { api } from '../api/client';
 import type { Connection, ConnectionSection, Id } from '../api/types';
 import { ws } from './workspace.svelte';
 import { loadErrorText } from '../loadError';
-import { appLive } from '../live';
+import { appLive, type LiveEvent } from '../live';
 import { lsGet, lsSet } from '../storage';
 
 /** What the UI last learned about a connection's health. */
@@ -166,7 +166,16 @@ class ConnectionListStore {
 
 export const connectionList = new ConnectionListStore();
 
+/** Can this cue change the list? An access write on another kind of resource
+ *  (an MCP server, an AWS account…) cannot; one without a `kind` (a group,
+ *  role or grant change) can. */
+export function changesConnectionList(ev: LiveEvent): boolean {
+  return ev.type !== 'resource_access_changed' || ev.kind === undefined || ev.kind === 'connection';
+}
+
 if (typeof window !== 'undefined') {
-  appLive.on(['connections_changed', 'resource_access_changed'], () => connectionList.invalidate(true));
+  appLive.on(['connections_changed', 'resource_access_changed'], (ev) => {
+    if (changesConnectionList(ev)) connectionList.invalidate(true);
+  });
   appLive.onResync(() => connectionList.invalidate());
 }
