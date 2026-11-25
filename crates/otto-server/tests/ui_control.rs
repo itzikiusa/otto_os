@@ -718,6 +718,79 @@ async fn only_session_credentials_drive_and_only_their_owners_windows() {
     assert!(!gets(&mut bobs, "ui_command", Duration::from_millis(300)).await);
 }
 
+/// Agent debugging: `ide_debug_start` (open_placement `window`) passes over a
+/// HIDDEN IDE document, auto-opens the IDE with `placement: window`, and the
+/// frame names the session's cwd + runtime. A loader variable in `env` never
+/// leaves the daemon.
+#[tokio::test]
+async fn debug_start_opens_the_ide_in_a_window_past_a_hidden_one() {
+    let d = boot().await;
+    let mut main = d.ws(&d.human).await;
+    let main_conn = hello(&mut main, "w1", "main", "agents", &["open", "state"]).await;
+    // An IDE side pane the person has hidden (still alive, not on screen).
+    let mut hidden = d.ws(&d.human).await;
+    hidden
+        .send(Message::Text(
+            json!({"type":"hello","client_id":"dev1","window_id":"w0","pane":"side",
+                   "host_window_id":"w0","route":"ide","module":"ide","focused":false,
+                   "visible":false,"capabilities":["ide_debug_start"]})
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+    let _ = next_of(&mut hidden, "hello_ack").await;
+    d.grant(true).await;
+
+    let target = json!({"kind": "test", "file": "flow_test.go", "name": "TestFlow"});
+    let out = d
+        .invoke(
+            "ui_ide_debug_start",
+            json!({"target": target, "env": {"GOFLAGS": "-toolexec=/bin/sh"}}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(out["code"], "invalid_args", "{out}");
+    assert!(!gets(&mut main, "ui_command", Duration::from_millis(300)).await);
+
+    let call = d.invoke("ui_ide_debug_start", json!({"target": target}));
+    let open = next_of(&mut main, "ui_command").await;
+    assert_eq!(open["command"], "open");
+    assert_eq!(open["args"]["placement"], "window");
+    assert_eq!(open["agent"]["cwd"], "/tmp");
+    assert_eq!(open["agent"]["runtime"], "pty");
+    assert_eq!(
+        open["args"]["fallback"], "side",
+        "web / phone: the side pane instead"
+    );
+    // A NEW pop-out window (its own window id, a main document) runs it.
+    let mut win = d.ws(&d.human).await;
+    let win_conn = hello(&mut win, "pop-1", "main", "ide", &["ide_debug_start"]).await;
+    let (st, _) = d
+        .post(
+            &d.human,
+            &format!("/ui/commands/{}/result", open["id"].as_str().unwrap()),
+            json!({"ok": true, "result": {"pane": "window", "window_id": "pop-1"}}),
+            Some(&main_conn),
+        )
+        .await;
+    assert_eq!(st, 204);
+    let cmd = next_of(&mut win, "ui_command").await;
+    assert_eq!(cmd["command"], "ide_debug_start");
+    assert!(!gets(&mut hidden, "ui_command", Duration::from_millis(200)).await);
+    let (st, _) = d
+        .post(
+            &d.human,
+            &format!("/ui/commands/{}/result", cmd["id"].as_str().unwrap()),
+            json!({"ok": true, "result": {"state": "running"}}),
+            Some(&win_conn),
+        )
+        .await;
+    assert_eq!(st, 204);
+    let out = call.await.unwrap();
+    assert_eq!(out["content"]["state"], "running", "{out}");
+}
+
 /// S8-302: the same, with the daemon's auth cache ENABLED and primed. Logout
 /// revokes through a cache-less repo; the shared cache must still be evicted,
 /// so REST refuses the token at once and the socket closes within ~2 s (not

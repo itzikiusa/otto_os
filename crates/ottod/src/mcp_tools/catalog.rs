@@ -825,7 +825,7 @@ pub(super) fn governed_tools_for_session(info: &EnabledInfo) -> Vec<Value> {
         out.push(json!({
             "name": UI_REQUEST_CONTROL_TOOL,
             "description": "Ask the person to let you drive the Otto app's UI (open pages, \
-                run queries, use the API client, browser, git…) for this session. Otto shows \
+                run queries, use the API client, browser, git, the IDE debugger…) for this session. Otto shows \
                 them an Allow prompt; once they allow it, the full set of otto_ui_* tools \
                 appears in your tool list. Call it only when the task needs the Otto UI.",
             "inputSchema": { "type": "object", "properties": {} },

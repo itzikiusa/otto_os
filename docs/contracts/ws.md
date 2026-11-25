@@ -602,7 +602,7 @@ Server → that ONE connection:
 
 ```json
 {"type":"hello_ack","conn_id":"01J…","boot_id":"01J…","boot_restore":{"kept_running":5,"suspended":2}}
-{"type":"ui_command","id":"01J…","session_id":"…","agent":{"session_id":"…","title":"Fix the report","provider":"claude"},"command":"db_run_query","args":{"tab_id":"…"},"deadline_ms":45000}
+{"type":"ui_command","id":"01J…","session_id":"…","agent":{"session_id":"…","title":"Fix the report","provider":"claude","cwd":"/Users/me/orders-svc","runtime":"pty"},"command":"db_run_query","args":{"tab_id":"…"},"deadline_ms":45000}
 {"type":"ui_command_cancel","id":"01J…","reason":"timeout"}
 ```
 
@@ -626,6 +626,11 @@ Server → that ONE connection:
   are validated against the entry's schema, with `connection_id` already
   resolved to the canonical id; `deadline_ms` is the DURATION (ms) the daemon
   waits before cancelling (extendable by `progress {awaiting_human:true}`).
+  `agent` (additive `cwd`, `runtime`): the calling session's working directory
+  (a debug handler's default project) and `runtime` — `structured` for a
+  Threads conversation (reply with `POST /runtime-sessions/{id}/prompt`), `pty`
+  for a terminal agent session (`POST /sessions/{id}/message`). An older daemon
+  omits both; the UI reads them as `''` / `pty`.
 - `ui_command_cancel` — stop the command and post nothing. `reason`:
   `timeout`, `revoked` (Stop / Deny — `POST /sessions/{id}/ui-control
   {enabled:false}`), `session_removed`, `caller_gone` (the agent's call ended).

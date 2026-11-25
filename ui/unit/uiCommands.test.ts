@@ -117,7 +117,7 @@ test('catalog: well-formed, unique names, known risks, headless only on reads', 
     assert.match(c.name, /^[a-z][a-z0-9_]*$/, `bad name ${c.name}`);
     assert.ok(!seen.has(c.name), `duplicate catalog name ${c.name}`);
     seen.add(c.name);
-    assert.ok(['read', 'navigate', 'local_write', 'outward'].includes(c.risk), `${c.name}: risk ${c.risk}`);
+    assert.ok(['read', 'navigate', 'local_write', 'outward', 'execute'].includes(c.risk), `${c.name}: risk ${c.risk}`);
     if (c.headless !== undefined) assert.equal(c.risk, 'read', `${c.name}: headless on a ${c.risk} command`);
     assert.equal(c.input_schema.type, 'object', `${c.name}: input_schema.type`);
     assert.equal(c.input_schema.additionalProperties, false, `${c.name}: additionalProperties must be false`);
@@ -179,17 +179,22 @@ test('frames: commands are normalised and validated', () => {
   assert.equal(readServerFrame({ type: 'hello_ack' }), null);
   const f = readServerFrame({
     type: 'ui_command', id: 'k1', session_id: 's1', command: 'otto.ui_db_run_query',
-    agent: { session_id: 's1', title: 'Fix billing', provider: 'claude' }, args: { tab_id: 't' }, deadline_ms: 45_000,
+    agent: { session_id: 's1', title: 'Fix billing', provider: 'claude', cwd: '/w/app', runtime: 'structured' },
+    args: { tab_id: 't' }, deadline_ms: 45_000,
   });
   assert.deepEqual(f, {
     type: 'ui_command', id: 'k1', session_id: 's1', command: 'db_run_query',
-    agent: { session_id: 's1', title: 'Fix billing', provider: 'claude' }, args: { tab_id: 't' }, deadline_ms: 45_000,
+    agent: { session_id: 's1', title: 'Fix billing', provider: 'claude', cwd: '/w/app', runtime: 'structured' },
+    args: { tab_id: 't' }, deadline_ms: 45_000,
   });
   // Missing agent / args / deadline degrade to safe defaults; arrays aren't args.
   const g = readServerFrame({ type: 'ui_command', id: 'k2', session_id: 's2', command: 'state', args: [1] });
   assert.ok(g && g.type === 'ui_command');
   assert.deepEqual(g.args, {});
   assert.equal(g.agent.session_id, 's2');
+  // An older daemon sends no cwd / runtime: no project default, a terminal session.
+  assert.equal(g.agent.cwd, '');
+  assert.equal(g.agent.runtime, 'pty');
   assert.equal(g.deadline_ms, 30_000);
   assert.equal(readServerFrame({ type: 'ui_command', id: 'k3', command: 'state' }), null);
   assert.deepEqual(readServerFrame({ type: 'ui_command_cancel', id: 'k1', reason: 'Stopped' }), {
@@ -210,6 +215,7 @@ test('frames: deadlines, labels, provider names, result cap', () => {
   assert.equal(commandLabel('db_run_query'), 'Run query');
   assert.equal(commandLabel('otto.ui_open'), 'Open a module');
   assert.equal(commandLabel('k8s_select'), 'Select');
+  assert.equal(commandLabel('ide_debug_start'), 'Debug start');
   assert.equal(commandLabel('state'), 'Look at the window');
   assert.equal(commandLabel('wf_list_runs'), 'List runs');
 

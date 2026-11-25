@@ -35,7 +35,10 @@ pub const MIN_TIMEOUT_MS: u64 = 1_000;
 
 /// How much a command may do. `read` / `navigate` run once the session is
 /// granted; `local_write` / `outward` additionally confirm in the UI every
-/// time (and count as mutating for a read-only MCP token scope).
+/// time; `execute` runs code on the user's Mac outside the agent's sandbox
+/// (a debug launch, an evaluated expression) and confirms every time with no
+/// "allow for this session" memory. All three count as mutating for a
+/// read-only MCP token scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Risk {
@@ -43,14 +46,19 @@ pub enum Risk {
     Navigate,
     LocalWrite,
     Outward,
+    Execute,
 }
 
 impl Risk {
     /// Mutating tiers — denied to an MCP token whose scope is read-only.
     pub fn mutating(self) -> bool {
-        matches!(self, Risk::LocalWrite | Risk::Outward)
+        matches!(self, Risk::LocalWrite | Risk::Outward | Risk::Execute)
     }
 }
+
+/// How the daemon may open a command's module when no document shows it
+/// (`open_placement`; default `side`).
+pub const OPEN_PLACEMENTS: &[&str] = &["side", "window"];
 
 /// Daemon-side fallbacks a `read` command may run when no Otto window can.
 pub const HEADLESS: &[&str] = &["presence", "db_list_connections", "db_mcp_query"];
@@ -95,6 +103,10 @@ pub struct UiCommandSpec {
     pub timeout_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub headless: Option<String>,
+    /// Where the bridge's auto-open shows the module (`side` | `window`);
+    /// `None` = `side`. A `window` command also skips hidden documents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_placement: Option<String>,
     pub description: String,
     pub input_schema: Value,
     /// Block marker / note — ignored.
@@ -186,6 +198,7 @@ fn risk_label(r: Risk) -> &'static str {
         Risk::Navigate => "navigate",
         Risk::LocalWrite => "local write — the user confirms each one",
         Risk::Outward => "outward — the user confirms each one",
+        Risk::Execute => "runs code on the user's Mac — the user confirms each one",
     }
 }
 
@@ -211,6 +224,126 @@ pub fn pane_key(route: &str) -> String {
 // ===========================================================================
 // Argument validation — the subset of JSON Schema the catalog uses.
 // ===========================================================================
+
+/// Environment variables an agent may not pass to a process it launches (an
+/// `env` argument): each one makes a loader, shell, toolchain or runtime run
+/// other code (`GOFLAGS=-toolexec=…`, `DYLD_INSERT_LIBRARIES`,
+/// `NODE_OPTIONS=--require …`). Names compare case-insensitively.
+const DENIED_ENV: &[&str] = &[
+    "PATH",
+    "ENV",
+    "BASH_ENV",
+    "ZDOTDIR",
+    "SHELL",
+    "PS4",
+    "PROMPT_COMMAND",
+    "IFS",
+    "CC",
+    "CXX",
+    "GOFLAGS",
+    "GOROOT",
+    "GOPATH",
+    "GOTOOLCHAIN",
+    "GOENV",
+    "GOPROXY",
+    "GOWORK",
+    "GOBIN",
+    "GOEXPERIMENT",
+    "GOINSECURE",
+    "GONOSUMDB",
+    "GONOPROXY",
+    "GOPRIVATE",
+    "GOSUMDB",
+    "GOVCS",
+    "RUSTFLAGS",
+    "RUSTC",
+    "RUSTC_WRAPPER",
+    "RUSTDOCFLAGS",
+    "PERL5OPT",
+    "PERL5LIB",
+    "RUBYOPT",
+    "RUBYLIB",
+    "MAVEN_OPTS",
+    "GRADLE_OPTS",
+    "JAVA_HOME",
+    "CLASSPATH",
+];
+/// Prefixes of the same (`LD_PRELOAD`, `PYTHONSTARTUP`, `JAVA_TOOL_OPTIONS`, …).
+const DENIED_ENV_PREFIXES: &[&str] = &[
+    "LD_",
+    "DYLD_",
+    "DLV_",
+    "CGO_",
+    "PYTHON",
+    "NODE_",
+    "NPM_CONFIG_",
+    "JAVA_",
+    "_JAVA_",
+    "JDK_",
+    "CARGO_",
+    "GIT_",
+    "BUN_",
+    "DENO_",
+];
+
+/// The catalog command's own rules on top of its schema: an `env` argument
+/// carries no loader / toolchain variable ([`DENIED_ENV`]), and
+/// `ide_debug_request` only reaches this Mac (loopback http/https). Pure.
+pub fn validate_command(spec: &UiCommandSpec, args: &Value) -> Result<(), String> {
+    validate_args(&spec.input_schema, args)?;
+    if let Some(env) = args.get("env").and_then(Value::as_object) {
+        for (k, v) in env {
+            let up = k.to_ascii_uppercase();
+            if DENIED_ENV.contains(&up.as_str())
+                || DENIED_ENV_PREFIXES.iter().any(|p| up.starts_with(p))
+            {
+                return Err(format!(
+                    "env '{k}' is refused: it changes which code the loader, shell or toolchain \
+                     runs. Set it in the project's run configuration if the user wants it"
+                ));
+            }
+            if !v.is_string() {
+                return Err(format!("env '{k}' must be a string"));
+            }
+        }
+    }
+    if spec.name == "ide_debug_request" {
+        let url = args.get("url").and_then(Value::as_str).unwrap_or_default();
+        if !is_loopback_url(url) {
+            return Err(format!(
+                "'{url}' is not on this Mac: ide_debug_request only reaches localhost, \
+                 127.0.0.1 or [::1] over http(s)"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn is_loopback_url(url: &str) -> bool {
+    let Ok(u) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    let host = u.host_str().unwrap_or_default();
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    matches!(u.scheme(), "http" | "https")
+        && (host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback()))
+}
+
+/// The deadline the daemon gives the UI for `spec` with these arguments:
+/// the catalog default, or for a statement carrying `timeout_ms` that + 15 s;
+/// capped at [`MAX_TIMEOUT_MS`].
+pub fn deadline_for(spec: &UiCommandSpec, args: &Value) -> std::time::Duration {
+    let ms = match args.get("timeout_ms").and_then(Value::as_u64) {
+        Some(t) if spec.input_schema["properties"].get("timeout_ms").is_some() => {
+            t.saturating_add(15_000).max(spec.timeout_ms)
+        }
+        _ => spec.timeout_ms,
+    };
+    std::time::Duration::from_millis(ms.min(MAX_TIMEOUT_MS))
+}
 
 /// Validate `args` against a catalog `input_schema`. Supports what the catalog
 /// uses: `type` (object/string/integer/number/boolean/array), `required`,
@@ -373,6 +506,14 @@ pub fn catalog_problems(version: u32, cmds: &[UiCommandSpec]) -> Vec<String> {
                 out.push(format!("{n}: unknown headless fallback '{h}'"));
             }
         }
+        if let Some(p) = &c.open_placement {
+            if !OPEN_PLACEMENTS.contains(&p.as_str()) {
+                out.push(format!("{n}: unknown open_placement '{p}'"));
+            }
+            if c.module == "shell" {
+                out.push(format!("{n}: a shell command is never auto-opened"));
+            }
+        }
         if c.description.trim().len() < 20 {
             out.push(format!("{n}: description too short"));
         }
@@ -513,6 +654,7 @@ mod tests {
             risk,
             timeout_ms: 10_000,
             headless: headless.map(str::to_string),
+            open_placement: None,
             description: "A long enough description for the check.".into(),
             input_schema: json!({"type":"object","properties":{},"additionalProperties":false}),
             comment: None,
@@ -647,6 +789,135 @@ mod tests {
         assert!(!Risk::Navigate.mutating());
         assert!(Risk::LocalWrite.mutating());
         assert!(Risk::Outward.mutating());
+        assert!(Risk::Execute.mutating());
         assert!(get("db_export").unwrap().risk.mutating());
+    }
+
+    #[test]
+    fn ide_debug_commands_have_their_tiers() {
+        let risk = |n: &str| get(n).unwrap_or_else(|| panic!("missing {n}")).risk;
+        // Anything that runs code outside the agent's sandbox is its own tier.
+        assert_eq!(risk("ide_debug_start"), Risk::Execute);
+        assert_eq!(risk("ide_debug_evaluate"), Risk::Execute);
+        assert_eq!(risk("ide_debug_control"), Risk::Navigate);
+        assert_eq!(risk("ide_debug_breakpoints"), Risk::Navigate);
+        assert_eq!(risk("ide_debug_inspect"), Risk::Read);
+        assert_eq!(risk("ide_debug_request"), Risk::LocalWrite);
+        assert_eq!(risk("ide_debug_db"), Risk::Read);
+        // Restart is a new launch: only start can do it, so it always confirms.
+        let control = &get("ide_debug_control").unwrap().input_schema;
+        let e = validate_args(control, &json!({"action": "restart"})).unwrap_err();
+        assert!(e.contains("must be one of"), "{e}");
+        // Evaluating is not a read: inspect takes no expression.
+        let inspect = &get("ide_debug_inspect").unwrap().input_schema;
+        let e = validate_args(inspect, &json!({"expression": "os.Exit(1)"})).unwrap_err();
+        assert!(e.contains("unknown argument 'expression'"), "{e}");
+        // Every ide_debug_* call fits the bridge's cap, and start opens a window.
+        for c in catalog()
+            .iter()
+            .filter(|c| c.name.starts_with("ide_debug_"))
+        {
+            assert_eq!(c.module, "ide", "{}", c.name);
+            assert!(c.timeout_ms <= MAX_TIMEOUT_MS, "{}", c.name);
+            let wait = c.input_schema["properties"]["wait_ms"]["maximum"].as_u64();
+            assert!(
+                wait.is_none_or(|w| w + 15_000 <= c.timeout_ms),
+                "{}",
+                c.name
+            );
+        }
+        assert_eq!(
+            get("ide_debug_start").unwrap().open_placement.as_deref(),
+            Some("window")
+        );
+        assert!(specs()
+            .iter()
+            .find(|s| s["name"] == "otto.ui_ide_debug_evaluate")
+            .unwrap()["description"]
+            .as_str()
+            .unwrap()
+            .contains("runs code on the user's Mac"));
+    }
+
+    #[test]
+    fn open_placement_is_checked() {
+        let mut s = spec("x", "ide", "ide", Risk::Read, None);
+        s.open_placement = Some("window".into());
+        assert!(catalog_problems(1, std::slice::from_ref(&s)).is_empty());
+        s.open_placement = Some("main".into());
+        let p = catalog_problems(1, std::slice::from_ref(&s));
+        assert!(
+            p.iter().any(|m| m.contains("unknown open_placement")),
+            "{p:?}"
+        );
+        let mut s = spec("x", "shell", "", Risk::Read, None);
+        s.open_placement = Some("side".into());
+        let p = catalog_problems(1, std::slice::from_ref(&s));
+        assert!(p.iter().any(|m| m.contains("never auto-opened")), "{p:?}");
+    }
+
+    #[test]
+    fn debug_start_refuses_loader_and_toolchain_env() {
+        let start = get("ide_debug_start").unwrap();
+        let ok = json!({"target": {"kind": "test", "file": "a_test.go", "name": "TestA"},
+            "env": {"LOG_LEVEL": "debug", "APP_ENV": "test", "GOOGLE_CLOUD_PROJECT": "p"}});
+        assert_eq!(validate_command(start, &ok), Ok(()));
+        for bad in [
+            "GOFLAGS",
+            "goflags",
+            "DYLD_INSERT_LIBRARIES",
+            "LD_PRELOAD",
+            "NODE_OPTIONS",
+            "PYTHONPATH",
+            "PYTHONSTARTUP",
+            "JAVA_TOOL_OPTIONS",
+            "_JAVA_OPTIONS",
+            "BASH_ENV",
+            "PATH",
+            "DLV_LISTEN",
+            "CGO_LDFLAGS",
+            "RUSTC_WRAPPER",
+            "GIT_SSH_COMMAND",
+        ] {
+            let args = json!({"target": {"kind": "main", "file": "main.go"}, "env": {bad: "x"}});
+            let e = validate_command(start, &args).unwrap_err();
+            assert!(e.contains("is refused"), "{bad}: {e}");
+        }
+        let e = validate_command(start, &json!({"target": {"kind": "main"}, "env": {"A": 1}}))
+            .unwrap_err();
+        assert!(e.contains("must be a string"), "{e}");
+        // The schema still runs first.
+        let e = validate_command(start, &json!({"target": {"kind": "attach"}})).unwrap_err();
+        assert!(e.contains("must be one of"), "{e}");
+    }
+
+    #[test]
+    fn debug_request_only_reaches_this_mac() {
+        let req = get("ide_debug_request").unwrap();
+        for ok in [
+            "http://localhost:8080/orders",
+            "https://LOCALHOST/x",
+            "http://127.0.0.1:3000",
+            "http://127.0.0.2:3000",
+            "http://[::1]:8080/a?b=c",
+        ] {
+            assert_eq!(validate_command(req, &json!({"url": ok})), Ok(()), "{ok}");
+        }
+        for bad in [
+            "http://example.com/",
+            "http://localhost.evil.com/",
+            "http://10.0.0.5:8080/",
+            "http://169.254.169.254/latest/meta-data",
+            "file:///etc/passwd",
+            "ftp://localhost/",
+            "localhost:8080/orders",
+            "http://user@0x7f.example/",
+        ] {
+            let e = validate_command(req, &json!({"url": bad})).unwrap_err();
+            assert!(e.contains("not on this Mac"), "{bad}: {e}");
+        }
+        // Other commands are untouched by the URL rule.
+        let send = get("api_send").unwrap();
+        assert_eq!(validate_command(send, &json!({})), Ok(()));
     }
 }

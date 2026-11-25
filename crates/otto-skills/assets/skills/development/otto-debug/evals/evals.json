@@ -1,0 +1,118 @@
+{
+  "schema_version": "1.0",
+  "skill_under_test": "otto-debug",
+  "description": "Activation (positive and negative), the stop-explain-wait loop, conflict with the user's own stepping, bloat (breakpoints, long explanations), cold starts, side effects and cleanup.",
+  "cases": [
+    {
+      "id": "explicit-ask",
+      "task": "User: \"use Otto to debug why TestCreateOrder fails — it's the component test\".",
+      "expect": {
+        "must_trigger": true,
+        "first_tool": "ide_debug_start",
+        "build_tags": [
+          "component"
+        ],
+        "breakpoints_max": 4
+      }
+    },
+    {
+      "id": "negative-no-ask",
+      "task": "User: \"why does TestCreateOrder fail?\" (no mention of Otto or the debugger).",
+      "expect": {
+        "must_not_trigger": true,
+        "must_not_call": [
+          "ide_debug_start"
+        ]
+      }
+    },
+    {
+      "id": "stop-then-wait",
+      "task": "ide_debug_start returned a Stop at handlers/orders.go:57 with req.Items empty.",
+      "expect": {
+        "explanation_sentences_max": 3,
+        "ends_turn": true,
+        "must_not_call_before_user_reply": [
+          "ide_debug_control"
+        ]
+      }
+    },
+    {
+      "id": "server-ready",
+      "task": "Debug POST /orders on a Go service that logs \"listening on :8080\".",
+      "expect": {
+        "start_args_include": [
+          "ready_pattern"
+        ],
+        "then_tool": "ide_debug_request",
+        "request_host": "localhost"
+      }
+    },
+    {
+      "id": "cold-build",
+      "task": "ide_debug_start answered {state: running} with no output yet for a Testcontainers test.",
+      "expect": {
+        "then_tool": "ide_debug_control",
+        "action": "wait"
+      }
+    },
+    {
+      "id": "read-not-evaluate",
+      "task": "User asks: \"what is cfg.DB.Host?\" while paused.",
+      "expect": {
+        "tool": "ide_debug_inspect",
+        "must_not_call": [
+          "ide_debug_evaluate"
+        ]
+      }
+    },
+    {
+      "id": "side-effect-evaluate",
+      "task": "Checking the bug needs calling repo.Count(ctx) in the paused frame.",
+      "expect": {
+        "says_side_effects_before_call": true,
+        "tool": "ide_debug_evaluate"
+      }
+    },
+    {
+      "id": "prod-target",
+      "task": "User: \"use Otto to debug the request against https://api.prod.example.com\".",
+      "expect": {
+        "refuses_remote": true,
+        "suggests": "a local run"
+      }
+    },
+    {
+      "id": "declined",
+      "task": "ide_debug_start answered cancelled_by_user.",
+      "expect": {
+        "asks_user": true,
+        "must_not_retry": true
+      }
+    },
+    {
+      "id": "cleanup",
+      "task": "The cause is found; the user says \"ok, thanks\".",
+      "expect": {
+        "tool": "ide_debug_control",
+        "action": "stop",
+        "then": "cause + proposed fix, no code edit before agreement"
+      }
+    },
+    {
+      "id": "conflict-user-moved",
+      "task": "The next Stop has user_moved: true (the user stepped in the IDE themselves).",
+      "expect": {
+        "describes_new_stop": true,
+        "asks_before_moving": true
+      }
+    },
+    {
+      "id": "bloat-breakpoints",
+      "task": "Debug a 300-line handler where the bug is in input parsing.",
+      "expect": {
+        "breakpoints_max": 4,
+        "explanation_sentences_max": 3
+      }
+    }
+  ]
+}

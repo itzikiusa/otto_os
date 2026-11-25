@@ -47,6 +47,7 @@ use tokio::sync::{mpsc, oneshot, Notify};
 use tokio::time::Instant;
 
 use crate::state::ServerCtx;
+pub use crate::ui_commands::deadline_for;
 use crate::ui_commands::{self, UiCommandSpec};
 
 /// Largest client→server text frame accepted on `/ws/events`.
@@ -407,19 +408,6 @@ fn with_visibility(v: Value, visible: bool) -> Value {
     }
 }
 
-/// The deadline the daemon gives the UI for `spec` with these arguments:
-/// the catalog default, or for a statement carrying `timeout_ms` that + 15 s;
-/// capped at [`ui_commands::MAX_TIMEOUT_MS`].
-pub fn deadline_for(spec: &UiCommandSpec, args: &Value) -> Duration {
-    let ms = match args.get("timeout_ms").and_then(Value::as_u64) {
-        Some(t) if spec.input_schema["properties"].get("timeout_ms").is_some() => {
-            t.saturating_add(15_000).max(spec.timeout_ms)
-        }
-        _ => spec.timeout_ms,
-    };
-    Duration::from_millis(ms.min(ui_commands::MAX_TIMEOUT_MS))
-}
-
 /// The deadline after a `progress {awaiting_human}` at `now`: now + 120 s,
 /// never past dispatch + 150 s, never earlier than the current one. Pure.
 fn extended_deadline(now: Instant, dispatched: Instant, current: Instant) -> Instant {
@@ -608,6 +596,8 @@ impl UiBridge {
                 "session_id": session.id,
                 "title": session.title,
                 "provider": session.provider,
+                "cwd": session.cwd,
+                "runtime": session.meta["runtime"].as_str().unwrap_or("pty"),
             },
             "command": command,
             "args": args,
@@ -1002,8 +992,7 @@ pub async fn run(
     } else {
         args.clone()
     };
-    ui_commands::validate_args(&spec.input_schema, &args)
-        .map_err(|m| UiError::new("invalid_args", m))?;
+    ui_commands::validate_command(spec, &args).map_err(|m| UiError::new("invalid_args", m))?;
 
     let session = ensure_grant(ctx, session, spec).await?;
     let args = resolve_refs(ctx, auth, &session, args).await?;
@@ -1015,8 +1004,11 @@ pub async fn run(
         .and_then(Value::as_str)
         .map(str::to_string);
     let budget = deadline_for(spec, &args);
+    let window = spec.open_placement.as_deref() == Some("window");
+    let mut docs = bridge.docs(); // a `window` command is for the person to watch: no hidden doc
+    docs.retain(|d| !window || d.visible || d.module != spec.module);
     let target = match pick(
-        &bridge.docs(),
+        &docs,
         &session.created_by,
         device.as_deref(),
         &spec.module,
@@ -1024,14 +1016,21 @@ pub async fn run(
     ) {
         Pick::Direct(conn) => Some(conn),
         Pick::Open { via, window_id } => {
-            let open_args =
-                json!({"module": spec.module, "route": spec.route, "placement": "side"});
+            let open_args = if window {
+                json!({"module": spec.module, "route": spec.route, "placement": "window", "fallback": "side"})
+            } else {
+                json!({"module": spec.module, "route": spec.route, "placement": "side"})
+            };
             let open_budget = ui_commands::get("open")
                 .map(|o| Duration::from_millis(o.timeout_ms))
                 .unwrap_or(Duration::from_secs(15));
-            bridge
+            let opened = bridge
                 .dispatch(&via, &session, "open", &open_args, open_budget)
                 .await?;
+            // A new pop-out window reports its own id (not the opener's).
+            let window_id = opened["window_id"]
+                .as_str()
+                .map_or(window_id, str::to_string);
             let (user, module, command) = (
                 session.created_by.clone(),
                 spec.module.clone(),
@@ -1868,8 +1867,22 @@ mod tests {
         assert_eq!(f["session_id"], "s1");
         assert_eq!(
             f["agent"],
-            json!({"session_id":"s1","title":"Fix the report","provider":"claude"})
+            json!({"session_id":"s1","title":"Fix the report","provider":"claude",
+                   "cwd":"/tmp","runtime":"pty"})
         );
+        // A Threads conversation says so: Proceed then queues a runtime prompt.
+        let mut thread = session("s2", "u");
+        thread.meta = json!({"runtime": "structured"});
+        let _ = b
+            .send_command(
+                &conn,
+                &thread,
+                "db_run_query",
+                &json!({}),
+                Duration::from_secs(5),
+            )
+            .unwrap();
+        assert_eq!(next_frame(&mut rx)["agent"]["runtime"], "structured");
         assert_eq!(f["command"], "db_run_query");
         assert_eq!(f["args"], json!({"tab_id":"t"}));
         assert_eq!(f["deadline_ms"], 5000);

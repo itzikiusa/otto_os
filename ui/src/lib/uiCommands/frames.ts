@@ -31,6 +31,8 @@ function readAgent(v: unknown, sessionId: string): UiAgentRef {
     session_id: str(a.session_id, 128) ? a.session_id : sessionId,
     title: typeof a.title === 'string' ? a.title.slice(0, 200) : '',
     provider: typeof a.provider === 'string' ? a.provider.slice(0, 64) : '',
+    cwd: typeof a.cwd === 'string' ? a.cwd.slice(0, 4096) : '',
+    runtime: a.runtime === 'structured' ? 'structured' : 'pty',
   };
 }
 

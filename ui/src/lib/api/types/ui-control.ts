@@ -13,8 +13,10 @@ import type {
 
 /** How much a UI command can change: `read` and `navigate` run once the session
  *  is granted; `local_write` confirms every time (with an "allow for this
- *  session" memory); `outward` always confirms and is never remembered. */
-export type UiCommandRisk = 'read' | 'navigate' | 'local_write' | 'outward';
+ *  session" memory); `outward` always confirms and is never remembered;
+ *  `execute` runs code on the user's Mac outside the agent's sandbox (a debug
+ *  launch, an evaluated expression) and also always confirms, never remembered. */
+export type UiCommandRisk = 'read' | 'navigate' | 'local_write' | 'outward' | 'execute';
 
 /** One `docs/contracts/ui-commands.json` entry (also `GET /ui/commands/catalog`). */
 export interface UiCommandSpec {
@@ -29,6 +31,8 @@ export interface UiCommandSpec {
   timeout_ms: number;
   /** Daemon-side fallback when no Otto window can run it (`read` only). */
   headless?: 'presence' | 'db_list_connections' | 'db_mcp_query';
+  /** How the daemon opens `module` when no visible document shows it (default `side`). */
+  open_placement?: 'side' | 'window';
   description: string;
   input_schema: Record<string, unknown>;
 }
@@ -60,6 +64,11 @@ export interface UiAgentRef {
   session_id: Id;
   title: string;
   provider: string;
+  /** The agent session's working directory (a debug handler's default project). '' when unknown. */
+  cwd: string;
+  /** `structured` = a Threads conversation (reply via POST /runtime-sessions/{id}/prompt);
+   *  `pty` = a terminal agent session (POST /sessions/{id}/message). */
+  runtime: 'structured' | 'pty';
 }
 
 /** Logical pane identity: native child webview on desktop, iframe in browsers.

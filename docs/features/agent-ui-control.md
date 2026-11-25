@@ -105,6 +105,7 @@ Every command has a fixed `risk` in the catalog:
 | `navigate` | open a workspace, select a row, switch a tab | Runs once granted. |
 | `local_write` | k8s restart / scale, Kafka produce, save a vault note, pause a scheduled task, run a swarm task, start a goal loop, add a Home box, git commit | An **attributed confirm** every time. It has an **"Allow writes on ‹target› for this session"** checkbox, and once you tick it, later writes to the same target in the same session don't ask again. |
 | `outward` | SQS send, run a workflow, API send, git push | **Always** confirms (where it goes, what is sent, who sees it). It is **never remembered**. |
+| `execute` | start a debug session, evaluate an expression in the debugger | It runs code on your Mac, as you, outside the agent's sandbox. **Always** confirms, showing exactly what runs (the command line, folder, build tags, extra environment, or the expression). It is **never remembered**. |
 
 On top of the tiers, some targets always ask regardless of the checkbox:
 
@@ -142,7 +143,7 @@ secrets from results before the agent sees them.
 | Command | Risk | What it does |
 |---------|------|--------------|
 | `state` | read | What each open Otto document shows (main pane / side pane, route, module, focus) plus the current module's view state. Works with no window (headless). |
-| `open` | navigate | Open a module / route, in the side pane by default (`placement: side|main|window` — `window` detaches the pane into its own desktop window). |
+| `open` | navigate | Open a module / route, in the side pane by default (`placement: side|main|window` — `window` shows it in its own desktop window: a new one, or the side pane already showing it detaches; it returns that window's `window_id`; `fallback: side` uses the side pane where windows aren't available). |
 | `focus` | navigate | Bring the window forward and focus a pane. |
 
 ### Database Explorer, API client, Git, Browser
@@ -269,6 +270,29 @@ The Personal Agents page belongs to the Scheduled Tasks pane, so these commands 
 | `loops_list` | read | none | The Goal Loops list. |
 | `loops_open` | navigate | `loop` | The loop's detail. Returns the definition and the last 10 iterations. |
 | `loops_control` | local_write | `loop`, `action` (`start`/`pause`/`resume`/`stop`) | Confirm (Stop always asks), then the loop changes state. |
+
+### IDE debugging: `ide` (route `#/ide`)
+
+Only when you ask the agent to debug with Otto ("use Otto to debug …"). The
+agent then drives the IDE's own debugger: you see its breakpoints in the
+gutter, every stop, the variables and DB Watch, and you can step yourself at
+any time. The commands act only on the debug session that agent started.
+
+| Command | Risk | Args | What you see |
+|---------|------|------|--------------|
+| `ide_debug_start` | execute | `target` (`test` file + name, `main` file, or a run `config` name), `root?` (default: the agent's folder), `build_tags?`, `args?`, `env?`, `breakpoints?`, `break_on_exceptions?`, `ready_pattern?`, `ready_port?`, `db_watch?`, `wait_ms?`, `say?` | The IDE opens in its own window (or beside the conversation in the IDE's agent dock), the breakpoints appear, then one confirm naming what runs. Starting again while it runs is a restart and asks again. |
+| `ide_debug_control` | navigate | `action` (`continue`/`step_over`/`step_into`/`step_out`/`pause`/`run_to_line`/`wait`/`status`/`stop`), `file?`, `line?`, `thread_id?`, `frame_id?`, `wait_ms?`, `keep_breakpoints?`, `say?` | The debugger moves as if you clicked. `stop` ends the run and removes the agent's breakpoints. |
+| `ide_debug_breakpoints` | navigate | `set?`, `clear?`, `clear_mine?` | Breakpoints appear or go; yours are never touched by `clear_mine`. |
+| `ide_debug_inspect` | read | `paths?`, `ref?`, `start?`, `count?`, `frame_id?`, `thread_id?`, `threads?` | Nothing changes: it reads values without running code. |
+| `ide_debug_evaluate` | execute | `expression`, `frame_id?` | A confirm with the exact expression, then its result in the debug console. |
+| `ide_debug_request` | local_write | `url` (localhost / 127.0.0.1 / [::1] only), `method?`, `headers?`, `body?`, `wait_ms?` | A confirm (you can allow that host and port for the session), then the request in the debug console. |
+| `ide_debug_db` | read | `action` (`watch`/`unwatch`/`diff`), `objects?`, `connection_id?`, `since?` | DB Watch on the run's tables. A production connection always asks. |
+
+What the agent gets back is redacted: secret-looking names and values, DB
+cells and response bodies are masked. What you see in the IDE is not. The
+daemon refuses an `env` that names a loader, shell or toolchain variable
+(`PATH`, `LD_*`, `DYLD_*`, `GOFLAGS`, `NODE_OPTIONS`, `PYTHONPATH`,
+`JAVA_TOOL_OPTIONS`, …) and any request that leaves this Mac.
 
 ## 6. No Otto window, other devices
 
