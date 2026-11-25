@@ -52,7 +52,7 @@ export function nextTabAccessStamp(): number {
   return lruAccessClock;
 }
 
-export function saveWorkspaceOpenTabs(root: string, tabs: readonly (string | Pick<IdeOpenTab, 'path' | 'projectScoped'>)[], activePath: string | null, splitPath: string | null): void {
+export function saveWorkspaceOpenTabs(root: string, tabs: readonly (string | Pick<IdeOpenTab, 'path' | 'projectScoped' | 'pinned'>)[], activePath: string | null, splitPath: string | null): void {
   if (!root) return;
   try {
     if (typeof localStorage === 'undefined') return;
@@ -62,20 +62,20 @@ export function saveWorkspaceOpenTabs(root: string, tabs: readonly (string | Pic
     const projectScoped = open.flatMap((tab) => typeof tab !== 'string' && tab.projectScoped ? [tab.path] : []);
     localStorage.setItem(
       `${OPEN_TABS_KEY_PREFIX}${root}`,
-      JSON.stringify({ paths, activePath, splitPath, projectScoped }),
+      JSON.stringify({ paths, activePath, splitPath, projectScoped, pinned: open.flatMap((tab) => typeof tab !== 'string' && tab.pinned ? [tab.path] : []) }),
     );
   } catch { /* ignore */ }
 }
 
-export function loadWorkspaceOpenTabs(root: string): { paths: string[]; activePath: string | null; splitPath: string | null; projectScoped: string[] } | null {
+export function loadWorkspaceOpenTabs(root: string): { paths: string[]; activePath: string | null; splitPath: string | null; projectScoped: string[]; pinned: string[] } | null {
   if (!root) return null;
   try {
     if (typeof localStorage === 'undefined') return null;
     const raw = localStorage.getItem(`${OPEN_TABS_KEY_PREFIX}${root}`);
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as { paths?: string[]; activePath?: string | null; splitPath?: string | null; projectScoped?: string[] };
+    const parsed = JSON.parse(raw) as { paths?: string[]; activePath?: string | null; splitPath?: string | null; projectScoped?: string[]; pinned?: string[] };
     if (!Array.isArray(parsed.paths) || parsed.paths.length === 0) return null;
-    return { paths: parsed.paths, activePath: parsed.activePath ?? null, splitPath: parsed.splitPath ?? null, projectScoped: Array.isArray(parsed.projectScoped) ? parsed.projectScoped : [] };
+    return { paths: parsed.paths, activePath: parsed.activePath ?? null, splitPath: parsed.splitPath ?? null, projectScoped: Array.isArray(parsed.projectScoped) ? parsed.projectScoped : [], pinned: Array.isArray(parsed.pinned) ? parsed.pinned : [] };
   } catch {
     return null;
   }

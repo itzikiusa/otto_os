@@ -85,6 +85,18 @@ test('restore shows the whole strip at once and reads the active tab first, alon
   assert.equal(h.activePath, '/repo/c.ts');
 });
 
+test('the saved strip keeps its pinned tabs and its split (one copy per project root)', async () => {
+  const { buf, helpers } = modules({ get: async () => fileResp('x'), bg: { get: async () => fileResp('x') } });
+  const tab = (path: string, pinned = false) => ({ path, pinned, projectScoped: false });
+  buf.saveWorkspaceOpenTabs('/repo', [tab('/repo/a.ts'), tab('/repo/b.ts', true), tab('/repo/c.ts')], '/repo/c.ts', '/repo/a.ts');
+  const { h } = storeHost(buf);
+  await helpers.restoreWorkspaceTabsOrInitial(h);
+  assert.deepEqual([...h.tabs.map((t) => t.path)], ['/repo/a.ts', '/repo/b.ts', '/repo/c.ts']);
+  assert.deepEqual([...h.tabs.filter((t) => t.pinned).map((t) => t.path)], ['/repo/b.ts']);
+  assert.equal(h.activePath, '/repo/c.ts');
+  assert.equal(h.splitPath, '/repo/a.ts');
+});
+
 test('a restored tab read later still gets the unsaved draft a reload left behind', async () => {
   const { buf, helpers } = modules(
     { get: async () => fileResp('disk'), bg: { get: async () => fileResp('disk') } },

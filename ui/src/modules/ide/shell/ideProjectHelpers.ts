@@ -744,11 +744,11 @@ type TabRestoreHost = {
 export async function reopenSavedTabs(
   host: TabRestoreHost,
   paths: readonly string[],
-  o: { activePath?: string | null; splitPath?: string | null; projectScoped?: readonly string[]; pinned?: ReadonlySet<string> } = {},
+  o: { activePath?: string | null; splitPath?: string | null; projectScoped?: readonly string[]; pinned?: readonly string[] } = {},
 ): Promise<void> {
   if (paths.length === 0) return;
   for (const p of paths) void host.openFile(p, { preview: false, background: true, defer: true, projectScoped: o.projectScoped?.includes(p) });
-  if (o.pinned) for (const t of host.tabs) if (o.pinned.has(t.path)) t.pinned = true;
+  if (o.pinned) for (const t of host.tabs) if (o.pinned.includes(t.path)) t.pinned = true;
   const open = (p?: string | null): p is string => !!p && host.tabs.some((t) => t.path === p);
   if (open(o.splitPath)) host.openInSplit?.(o.splitPath, 'right');
   await host.openFile(open(o.activePath) ? o.activePath : paths[0], { preview: false });

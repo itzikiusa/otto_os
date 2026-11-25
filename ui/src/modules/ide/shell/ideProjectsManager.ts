@@ -12,7 +12,6 @@ import {
   fetchNamedIdeProjectsFromServer,
   parseNamedIdeProject,
 } from '../../../lib/ideProjectsModel';
-import { lsGet, lsRemove, lsSet } from '../../../lib/storage';
 import { toasts } from '../../../lib/toast.svelte';
 import { toastError } from '../../../lib/toastError';
 import {
@@ -36,9 +35,7 @@ import {
   loadBuildToolPrefsLocal,
   loadNamedProjectsLocal,
   normalizeRootPath,
-  prefetchSavedTabs,
   type ProjectHelperHost,
-  reopenSavedTabs,
   restoreWorkspaceTabsOrInitial,
   saveActiveProjectIdLocal,
   saveAdditionalRootsLocal,
@@ -65,7 +62,6 @@ export {
   type WorkspaceBuildToolPrefs,
 };
 
-const PROJECT_TABS_PREFIX = 'otto.ide.projectTabs:';
 const GRADLE_FILES = new Set(['build.gradle', 'build.gradle.kts', 'settings.gradle', 'settings.gradle.kts', 'gradlew']);
 
 export interface NamedProjectsHost extends ProjectHelperHost {
@@ -79,36 +75,6 @@ export interface NamedProjectsHost extends ProjectHelperHost {
     workspaceId?: string | null,
     opts?: { additionalRoots?: string[]; projectId?: string | null; skipAutoOpen?: boolean; discardConfirmed?: boolean },
   ): Promise<boolean>;
-}
-
-interface SavedProjectTabs {
-  paths: string[];
-  activePath: string | null;
-  pinnedPaths?: string[];
-}
-
-export function snapshotProjectTabs(projectId: string | null, tabs: IdeOpenTab[], activePath: string | null): void {
-  if (!projectId) return;
-  try {
-    const cap = Math.max(15, Math.min(40, readIdePreferences().maxOpenTabs || 20));
-    const payload: SavedProjectTabs = {
-      paths: tabs.slice(0, cap).map((t) => t.path),
-      activePath,
-      pinnedPaths: tabs.filter((t) => t.pinned).map((t) => t.path),
-    };
-    lsSet(`${PROJECT_TABS_PREFIX}${projectId}`, JSON.stringify(payload));
-  } catch { /* quota */ }
-}
-
-export function readProjectTabsSnapshot(projectId: string): SavedProjectTabs | null {
-  try {
-    const raw = lsGet(`${PROJECT_TABS_PREFIX}${projectId}`);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as SavedProjectTabs;
-    return parsed && Array.isArray(parsed.paths) ? parsed : null;
-  } catch {
-    return null;
-  }
 }
 
 export async function syncNamedProjectsFromBackend(host: NamedProjectsHost): Promise<void> {
@@ -187,7 +153,6 @@ export async function removeNamedProject(host: NamedProjectsHost, projectId: str
     toastError('Couldn’t delete project', e);
     return;
   }
-  lsRemove(`${PROJECT_TABS_PREFIX}${projectId}`);
   const next = host.namedProjects.filter((p) => p.id !== projectId);
   host.namedProjects = next;
   if (host.activeProjectId === projectId) {
@@ -206,16 +171,26 @@ export async function removeNamedProject(host: NamedProjectsHost, projectId: str
   }
 }
 
-/** Going to an SSH host: it is no named project, so the project keeps its own local
- *  tabs and stops being Active; a reload reopens the host. */
+/** Going to an SSH host: it is no named project, so the project stops being Active (its
+ *  strip stays saved under its root); a reload reopens the host. */
 export function leaveProjectForSsh(host: NamedProjectsHost, ssh: SavedSshTarget): void {
-  if (host.activeProjectId) snapshotProjectTabs(host.activeProjectId, host.tabs, host.activePath);
   host.activeProjectId = null;
   saveActiveProjectIdLocal(null, host.namedProjects);
   saveLastSshTarget(ssh);
 }
 
-export async function activateNamedProject(host: NamedProjectsHost, projectId: string): Promise<void> {
+let activating: { id: string; done: Promise<void> } | null = null;
+/** One activation per project at a time. The IDE page asks again on every workspace-list
+ *  change while a boot activation is still loading; a second run reset the target under the
+ *  first, saving its empty strip over the saved one (a reload came back as README only). */
+export function activateNamedProject(host: NamedProjectsHost, projectId: string): Promise<void> {
+  if (activating?.id === projectId) return activating.done;
+  const done = activateNow(host, projectId).finally(() => { if (activating?.done === done) activating = null; });
+  activating = { id: projectId, done };
+  return done;
+}
+
+async function activateNow(host: NamedProjectsHost, projectId: string): Promise<void> {
   const proj = host.namedProjects.find((p) => p.id === projectId);
   if (!proj) return;
   const primaryKey = canonicalRootKey(proj.primary_root);
@@ -230,27 +205,11 @@ export async function activateNamedProject(host: NamedProjectsHost, projectId: s
     return;
   }
   if (!(await host.confirmDiscardUnsaved())) return;
-  if (host.activeProjectId) {
-    snapshotProjectTabs(host.activeProjectId, host.tabs, host.activePath);
-  }
   void import('../../../lib/components/cm-ide-lsp')
     .then((m) => m.disposePooledLspClients({ forceAll: true }))
     .catch(() => {});
-  const savedTabs = readProjectTabsSnapshot(proj.id);
-  const cap = Math.max(15, Math.min(40, readIdePreferences().maxOpenTabs || 20));
-  const boundedPaths = savedTabs?.paths.slice(0, cap) ?? [];
-  const pinnedSet = new Set(savedTabs?.pinnedPaths ?? []);
-  const hasSavedTabs = boundedPaths.length > 0;
-  await host.setLocalTarget(proj.primary_root, null, {
-    additionalRoots: extraRoots,
-    projectId: proj.id,
-    skipAutoOpen: hasSavedTabs,
-    discardConfirmed: true,
-  });
-  if (hasSavedTabs) {
-    await reopenSavedTabs(host, boundedPaths, { activePath: savedTabs?.activePath, pinned: pinnedSet });
-    void prefetchSavedTabs(host);
-  }
+  // Its strip is restored like any folder's, from the one copy saved under its root.
+  await host.setLocalTarget(proj.primary_root, null, { additionalRoots: extraRoots, projectId: proj.id, discardConfirmed: true });
 }
 
 export async function attachProjectFoldersBatch(
