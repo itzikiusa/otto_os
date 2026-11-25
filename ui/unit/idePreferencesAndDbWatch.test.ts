@@ -169,6 +169,7 @@ describe('IDE Live DB Watch target prioritization and cell formatting', () => {
     port: 3306,
     environment: 'dev',
     database: 'pr_bo_1',
+    local: true,
   };
   const ephemeralMysql: IdeEphemeralDbTarget = {
     target_kind: 'ephemeral',
