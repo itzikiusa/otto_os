@@ -372,7 +372,9 @@ impl LocalGit {
             .strip_prefix('\u{1e}')
             .unwrap_or("")
             .split("\n\u{1e}")
-            .filter_map(|c| c.split_once('\n'))
+            // An empty commit's record is its sha alone: when it is not the
+            // last one, the split took its only newline.
+            .map(|c| c.split_once('\n').unwrap_or((c, "")))
             .collect();
         if commits.iter().any(|c| !patches.contains_key(c.as_str())) {
             return Err(Error::Upstream(
@@ -747,5 +749,51 @@ mod tests {
         assert_eq!(resp.commits_ahead, 2);
         assert_eq!(resp.secrets.len(), 1, "{resp:?}");
         assert_eq!(resp.secrets[0].path, "a.txt");
+    }
+
+    /// An empty commit's `git show` record is its sha line alone: one that is
+    /// not the last record must not read as missing (every push with an
+    /// `--allow-empty` commit ahead of another failed).
+    #[tokio::test]
+    async fn push_preflight_reads_ranges_with_empty_commits() {
+        let td = tempfile::tempdir().unwrap();
+        let bare = td.path().join("remote.git");
+        let work = td.path().join("work");
+        std::fs::create_dir_all(&bare).unwrap();
+        std::fs::create_dir_all(&work).unwrap();
+        run_git(&bare, &["init", "--bare", "-b", "main"]);
+        run_git(&work, &["init", "-b", "main"]);
+        run_git(&work, &["remote", "add", "origin", bare.to_str().unwrap()]);
+        std::fs::write(work.join("README.md"), "# demo\n").unwrap();
+        run_git(&work, &["add", "README.md"]);
+        run_git(&work, &["commit", "-m", "initial"]);
+        run_git(&work, &["push", "-u", "origin", "main"]);
+        let git = LocalGit::new(&work);
+
+        // Only empty commits.
+        run_git(&work, &["commit", "--allow-empty", "-m", "e1"]);
+        run_git(&work, &["commit", "--allow-empty", "-m", "e2"]);
+        let only = git
+            .push_preflight(&PushPreflightReq::default())
+            .await
+            .unwrap();
+        assert_eq!((only.commits_ahead, only.ok), (2, true), "{only:?}");
+
+        // An empty commit between two real ones, the secret in the oldest.
+        let tok = format!("ghp_{}", "E".repeat(36));
+        std::fs::write(work.join("a.txt"), format!("token={tok}\n")).unwrap();
+        run_git(&work, &["add", "."]);
+        run_git(&work, &["commit", "-m", "secret"]);
+        run_git(&work, &["commit", "--allow-empty", "-m", "e3"]);
+        std::fs::write(work.join("b.txt"), "plain\n").unwrap();
+        run_git(&work, &["add", "."]);
+        run_git(&work, &["commit", "-m", "plain"]);
+        let mixed = git
+            .push_preflight(&PushPreflightReq::default())
+            .await
+            .unwrap();
+        assert_eq!(mixed.commits_ahead, 5);
+        assert_eq!(mixed.secrets.len(), 1, "{mixed:?}");
+        assert_eq!(mixed.secrets[0].path, "a.txt");
     }
 }
