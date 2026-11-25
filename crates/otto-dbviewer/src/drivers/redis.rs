@@ -274,43 +274,51 @@ impl Driver for RedisDriver {
             .and_then(parse_db_index)
             .ok_or_else(|| types::invalid("redis: expected a keyspace node (kdb:<n>)"))?;
         let mut conn = self.connect(cfg, db).await?;
-        let keys = scan_keys(&mut conn, Some(&watch_pattern(object)), cap)
+        let mut keys = scan_keys(&mut conn, Some(&watch_pattern(object)), cap)
             .await?
             .keys;
-        // Trip 2: TYPE + TTL of every key. Trip 3: every preview.
+        // SCAN may return a key twice.
+        let mut seen = std::collections::HashSet::new();
+        keys.retain(|k| seen.insert(k.clone()));
+        // Trip 2: TYPE + TTL + MEMORY USAGE of every key. Trip 3: every
+        // preview small enough that the reply stays far under the framing cap.
         let mut pipe = redis::pipe();
         pipe.ignore_errors();
         for key in &keys {
             pipe.cmd("TYPE").arg(key).cmd("TTL").arg(key);
+            pipe.cmd("MEMORY")
+                .arg("USAGE")
+                .arg(key)
+                .arg("SAMPLES")
+                .arg(0);
         }
         let header: Vec<RedisValue> = if keys.is_empty() {
             Vec::new()
         } else {
             pipe.query_async(&mut conn).await.map_err(types::upstream)?
         };
-        let mut header = header.into_iter();
-        let mut rows: Vec<(String, String, i64)> = Vec::with_capacity(keys.len());
-        for key in keys {
-            let ty = header
-                .next()
-                .and_then(|v| redis::from_redis_value::<String>(v).ok())
-                .unwrap_or_else(|| "unknown".into());
-            let ttl = header
-                .next()
-                .and_then(|v| redis::from_redis_value::<i64>(v).ok())
-                .unwrap_or(-2);
-            rows.push((key, ty, ttl));
-        }
+        let rows = watch_headers(keys, header);
         let mut pipe = redis::pipe();
         pipe.ignore_errors();
+        let mut previews: Vec<JsonValue> = rows.iter().map(|_| JsonValue::Null).collect();
         let mut previewed = Vec::new();
-        for (i, (key, ty, _)) in rows.iter().enumerate() {
-            match ty.as_str() {
+        for (i, row) in rows.iter().enumerate() {
+            let key = &row.key;
+            // Range commands bound the element COUNT, not the element size:
+            // a value over the byte gate shows its size instead.
+            let bounded = row.ty == "string" || row.bytes.is_some_and(|b| b <= WATCH_VALUE_BYTES);
+            if !bounded {
+                if let Some(b) = row.bytes {
+                    previews[i] = json!(format!("({b} bytes, too large to preview)"));
+                }
+                continue;
+            }
+            match row.ty.as_str() {
                 "string" => {
                     pipe.cmd("GETRANGE")
                         .arg(key)
                         .arg(0)
-                        .arg(PREVIEW_STRING_BYTES);
+                        .arg(WATCH_STRING_BYTES - 1);
                 }
                 "list" => {
                     pipe.cmd("LRANGE").arg(key).arg(0).arg(PREVIEW_LIMIT);
@@ -355,30 +363,17 @@ impl Driver for RedisDriver {
             }
             previewed.push(i);
         }
-        let mut previews = vec![JsonValue::Null; rows.len()];
         if !previewed.is_empty() {
             let replies: Vec<RedisValue> =
                 pipe.query_async(&mut conn).await.map_err(types::upstream)?;
             for (i, reply) in previewed.into_iter().zip(replies) {
-                previews[i] = match rows[i].1.as_str() {
-                    "hash" | "set" => match reply {
-                        RedisValue::Array(mut parts) if parts.len() == 2 => match parts.pop() {
-                            Some(RedisValue::Array(items)) => {
-                                items_preview(items, rows[i].1 == "hash")
-                            }
-                            _ => JsonValue::Null,
-                        },
-                        _ => JsonValue::Null,
-                    },
-                    "ReJSON-RL" => types::cap_cell(value_to_json(reply)),
-                    _ => value_to_json(reply),
-                };
+                previews[i] = watch_preview(&rows[i].ty, reply);
             }
         }
         Ok(rows
             .into_iter()
             .zip(previews)
-            .map(|((key, ty, ttl), preview)| vec![json!(key), json!(ty), preview, json!(ttl)])
+            .map(|(row, preview)| vec![json!(row.key), json!(row.ty), preview, json!(row.ttl)])
             .collect())
     }
 
@@ -792,6 +787,61 @@ fn truncation_hint(db: i64, msg: &str) -> SchemaNode {
         format!("⋯ {msg}"),
         NodeKind::Folder,
     )
+}
+
+/// A DB Watch string preview's bytes (the watch keeps 4 KiB cells anyway).
+const WATCH_STRING_BYTES: isize = 16 * 1024;
+/// A non-string value previews only under this `MEMORY USAGE`: 50 keys at
+/// most stay a few MiB, far under the 32 MiB reply cap of the connection.
+const WATCH_VALUE_BYTES: i64 = 64 * 1024;
+
+/// One watched key after the header trip.
+struct WatchKeyHeader {
+    key: String,
+    ty: String,
+    ttl: i64,
+    bytes: Option<i64>,
+}
+
+/// Pair every key with its `TYPE, TTL, MEMORY USAGE` replies, dropping keys
+/// that were gone by then (`none` / TTL -2): no ghost rows.
+fn watch_headers(keys: Vec<String>, header: Vec<RedisValue>) -> Vec<WatchKeyHeader> {
+    let mut header = header.into_iter();
+    let mut out = Vec::with_capacity(keys.len());
+    for key in keys {
+        let mut next = || header.next();
+        let ty = next()
+            .and_then(|v| redis::from_redis_value::<String>(v).ok())
+            .unwrap_or_else(|| "unknown".into());
+        let ttl = next()
+            .and_then(|v| redis::from_redis_value::<i64>(v).ok())
+            .unwrap_or(-2);
+        let bytes = next().and_then(|v| redis::from_redis_value::<i64>(v).ok());
+        if ty != "none" && ttl != -2 {
+            out.push(WatchKeyHeader {
+                key,
+                ty,
+                ttl,
+                bytes,
+            });
+        }
+    }
+    out
+}
+
+/// A watched key's preview; a per-command error (the key changed type
+/// between trips) is no value, never the error text.
+fn watch_preview(ty: &str, reply: RedisValue) -> JsonValue {
+    match (ty, reply) {
+        (_, RedisValue::ServerError(_)) => JsonValue::Null,
+        ("hash" | "set", RedisValue::Array(mut parts)) if parts.len() == 2 => match parts.pop() {
+            Some(RedisValue::Array(items)) => items_preview(items, ty == "hash"),
+            _ => JsonValue::Null,
+        },
+        ("hash" | "set", _) => JsonValue::Null,
+        ("ReJSON-RL", reply) => types::cap_cell(value_to_json(reply)),
+        (_, reply) => value_to_json(reply),
+    }
 }
 
 /// The `SCAN MATCH` pattern of a DB Watch item: a glob (`session:*:route`)
@@ -2474,6 +2524,47 @@ mod tests {
 #[cfg(test)]
 mod perf_tests {
     use super::*;
+
+    #[test]
+    fn watched_keys_gone_before_their_header_are_not_rows() {
+        let keys = vec!["a".to_string(), "gone".to_string(), "b".to_string()];
+        let header = vec![
+            RedisValue::SimpleString("string".into()),
+            RedisValue::Int(-1),
+            RedisValue::Int(56),
+            RedisValue::SimpleString("none".into()),
+            RedisValue::Int(-2),
+            RedisValue::Nil,
+            RedisValue::SimpleString("hash".into()),
+            RedisValue::Int(30),
+            RedisValue::Int(900_000),
+        ];
+        let rows = watch_headers(keys, header);
+        let got: Vec<_> = rows
+            .iter()
+            .map(|r| (r.key.as_str(), r.ty.as_str(), r.ttl, r.bytes))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("a", "string", -1, Some(56)),
+                ("b", "hash", 30, Some(900_000))
+            ]
+        );
+    }
+
+    #[test]
+    fn a_watch_preview_error_is_no_value() {
+        let err = redis::parse_redis_value(
+            b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n",
+        )
+        .unwrap();
+        assert_eq!(watch_preview("string", err), JsonValue::Null);
+        assert_eq!(
+            watch_preview("string", RedisValue::BulkString(b"v".to_vec())),
+            json!("v")
+        );
+    }
 
     #[test]
     fn a_watch_item_is_a_prefix_or_a_glob() {

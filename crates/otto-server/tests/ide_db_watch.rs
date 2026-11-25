@@ -1218,4 +1218,37 @@ async fn real_redis_glob_items_and_pipelined_values() {
     );
     assert!(h[3].as_i64().unwrap() > 0, "TTL read: {h}");
     assert_eq!(by_key("glob:l")[2], json!(["x", "y"]));
+
+    // Big values never make one huge reply: a 2 MiB string previews its
+    // first 16 KiB (the watch keeps a 4 KiB prefix + a hash of it), a 1 MiB
+    // hash says its size.
+    let (s, w) = call(
+        reqwest::Method::POST,
+        url("/watches"),
+        &env.root_tok,
+        Some(json!({
+            "root": root,
+            "target": {"kind": "ephemeral", "ephemeral_id": "e:redis"},
+            "items": [{"object": "big:"}],
+        })),
+    )
+    .await;
+    assert_eq!(s, 200, "{w}");
+    let (_, r) = call(
+        reqwest::Method::GET,
+        url(&format!("/watches/{}?rows=1", w["id"].as_str().unwrap())),
+        &env.root_tok,
+        None,
+    )
+    .await;
+    let rows = r["items"][0]["current"]["rows"].as_array().unwrap();
+    let by_key = |k: &str| rows.iter().find(|row| row[0] == k).unwrap().clone();
+    let s = by_key("big:s")[2].as_str().unwrap().to_string();
+    assert!(
+        s.contains("(16384 bytes, #"),
+        "{}",
+        &s[s.len().saturating_sub(60)..]
+    );
+    let h = by_key("big:h")[2].as_str().unwrap().to_string();
+    assert!(h.ends_with("bytes, too large to preview)"), "{h}");
 }
