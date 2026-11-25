@@ -197,15 +197,15 @@ fn ts(t: DateTime<Utc>) -> String {
 }
 
 /// One NDJSON line per sample for `k8s_samples`.
-pub fn samples_ndjson(
+pub fn samples_ndjson<'a>(
     cluster_id: &str,
     at: DateTime<Utc>,
     pod: &PodSnap,
     container: &str,
-    samples: &[Sample],
+    samples: impl IntoIterator<Item = &'a Sample>,
     extra_labels: &BTreeMap<String, String>,
 ) -> String {
-    let mut out = String::with_capacity(samples.len() * 160);
+    let mut out = String::new();
     let at = ts(at);
     for smp in samples {
         let mut labels = extra_labels.clone();
@@ -510,13 +510,19 @@ async fn scrape_pod(
         }
     }
     let container = pod.containers.keys().next().cloned().unwrap_or_default();
+    // Histogram buckets go to the wide row's `hist` only (`samples` below):
+    // one row per `le` per label set, they were ~84 % of every raw and
+    // per-series tier row, and nothing reads them there.
     for (_, parsed) in &per_probe {
         ndjson.push_str(&samples_ndjson(
             cluster_id,
             now,
             pod,
             &container,
-            &parsed.samples,
+            parsed
+                .samples
+                .iter()
+                .filter(|s| !s.metric.ends_with("_bucket")),
             &pod_labels,
         ));
     }

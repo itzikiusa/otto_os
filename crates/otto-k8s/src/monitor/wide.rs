@@ -12,7 +12,9 @@
 //! under-counts the window the way the per-series `max − min` did. A series
 //! seen for the first time contributes 0 (its history is unknown); after a
 //! daemon restart the map is re-seeded once from `k8s_latest` ([`seed_sql`])
-//! so a restart costs no interval.
+//! so a restart costs no interval — except for the histogram: bucket series
+//! are not written per series (`collector::scrape_pod`), so the first cycle
+//! after a restart adds no `hist` counts.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Mutex, OnceLock};
@@ -110,7 +112,6 @@ pub fn seed_sql(cluster_id: &str) -> String {
     let mut metrics: Vec<&str> = Vec::new();
     for m in REQUEST_COUNTERS
         .iter()
-        .chain(LATENCY_BUCKETS.iter())
         .chain(LATENCY_SUMS.iter())
         .chain(LATENCY_COUNTS.iter())
     {
@@ -416,6 +417,7 @@ mod tests {
         assert!(q.contains("cluster_id = 'c\\'1'"));
         assert!(q.contains("'http_requests_total'"));
         assert!(!q.contains("mem_"));
+        assert!(!q.contains("_bucket"), "buckets never reach k8s_latest");
         let mut c = Counters::default();
         seed_from_rows(
             &mut c,
