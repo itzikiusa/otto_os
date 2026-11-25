@@ -425,7 +425,11 @@ pub fn confine_paths(spec: &UiCommandSpec, mut args: Value, cwd: &str) -> Result
                 home.display()
             ));
         }
-        args["root"] = json!(root.to_string_lossy());
+        // Checked canonically, handed on as the session spells its folder: the
+        // IDE showing `/var/…` must not ask to "open" `/private/var/…`.
+        let inside = root.strip_prefix(&home).unwrap_or(std::path::Path::new(""));
+        let shown = std::path::Path::new(cwd.trim_end_matches('/')).join(inside);
+        args["root"] = json!(shown.to_string_lossy().trim_end_matches('/'));
         Some(root)
     } else {
         None
@@ -1207,15 +1211,20 @@ mod tests {
         std::os::unix::fs::symlink(other.join("evil.go"), home.join("svc/evil.go")).unwrap();
         let cwd = home.to_string_lossy().into_owned();
         let start = get("ide_debug_start").unwrap();
-        let canon = std::fs::canonicalize(&home).unwrap();
+        assert_ne!(
+            std::fs::canonicalize(&home).unwrap(),
+            home,
+            "macOS: /var is /private/var"
+        );
         let run = |args: Value| confine_paths(start, args, &cwd);
-        // Default root = the canonical session folder; a sub-folder is fine.
+        // Default root = the session folder, spelled as the session (and the
+        // IDE showing it) spells it, though checked canonically; a sub-folder is fine.
         let ok = run(json!({"target": {"kind": "main", "file": "main.go"}})).unwrap();
-        assert_eq!(ok["root"], json!(canon.to_string_lossy()));
+        assert_eq!(ok["root"], json!(cwd));
+        let canon_sub = std::fs::canonicalize(home.join("svc")).unwrap();
         let sub =
-            run(json!({"root": home.join("svc"), "target": {"kind": "main", "file": "main.go"}}))
-                .unwrap();
-        assert_eq!(sub["root"], json!(canon.join("svc").to_string_lossy()));
+            run(json!({"root": canon_sub, "target": {"kind": "main", "file": "main.go"}})).unwrap();
+        assert_eq!(sub["root"], json!(home.join("svc").to_string_lossy()));
         // A symlinked root, another folder, absolute / .. / symlinked-out files: refused.
         for bad in [
             json!({"root": home.join("link"), "target": {"kind": "main", "file": "main.go"}}),
