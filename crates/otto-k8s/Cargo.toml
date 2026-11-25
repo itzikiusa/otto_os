@@ -11,6 +11,8 @@ otto-state = { workspace = true }
 otto-pty = { workspace = true }
 otto-connections = { workspace = true }
 tokio = { workspace = true }
+# CLI runs (`kubectl`, …) are `k8s.cli.exec` spans.
+otto-telemetry = { workspace = true }
 axum = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

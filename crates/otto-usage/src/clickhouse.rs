@@ -543,13 +543,13 @@ impl ClickHouse {
 
     /// Run a `SELECT` and return each row as a JSON object.
     pub async fn query_rows(&self, sql: &str) -> Result<Vec<serde_json::Value>> {
-        let body = self
-            .post(
-                format!("{sql}\nFORMAT JSONEachRow"),
-                QUERY_SETTINGS,
-                Duration::from_secs(120),
-            )
-            .await?;
+        let post = self.post(
+            format!("{sql}\nFORMAT JSONEachRow"),
+            QUERY_SETTINGS,
+            Duration::from_secs(120),
+        );
+        // A request's ClickHouse read (incl. an unpark): its own span, no SQL.
+        let body = otto_telemetry::context::measure_result("clickhouse.query", post).await?;
         parse_rows(&body)
     }
 

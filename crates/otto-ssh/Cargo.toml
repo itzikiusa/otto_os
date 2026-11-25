@@ -9,6 +9,8 @@ otto-core = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 tracing = { workspace = true }
+# Tunnel launches are `ssh.tunnel.open` spans.
+otto-telemetry = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

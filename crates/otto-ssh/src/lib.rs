@@ -224,10 +224,10 @@ impl SshTunnel {
                 "ssh tunnel remote host '{remote_host}' is not a valid hostname or IP address"
             )));
         }
-        Self::launch_with_retry(|local_port| {
+        let launch = Self::launch_with_retry(|local_port| {
             local_forward_args(cfg, local_port, remote_host, remote_port)
-        })
-        .await
+        });
+        otto_telemetry::context::measure_result("ssh.tunnel.open", launch).await
     }
 
     /// Open a dynamic SOCKS5 forward (`ssh -D`) on an ephemeral local port
@@ -236,7 +236,8 @@ impl SshTunnel {
     /// local SOCKS port accepts a TCP connection.
     pub async fn open_socks(cfg: &SshTunnelConfig) -> Result<SshTunnel> {
         cfg.validate()?;
-        Self::launch_with_retry(|local_port| socks_forward_args(cfg, local_port)).await
+        let launch = Self::launch_with_retry(|local_port| socks_forward_args(cfg, local_port));
+        otto_telemetry::context::measure_result("ssh.tunnel.open", launch).await
     }
 
     /// Reserve a port + launch, retrying (with a fresh port) when ssh loses the
