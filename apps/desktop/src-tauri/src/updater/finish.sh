@@ -9,11 +9,12 @@
 # The journal (finish.state: "<pid> <phase> <from> <to>") lets the next app
 # launch finish an interrupted run (finish.rs `recover`).
 # Never quits an app by name: only the pid it was given and the process whose
-# executable is this exact bundle.
+# executable is exactly $OTTO_APP_EXE. `open` comes only from $OTTO_OPEN (the
+# job sets /usr/bin/open; tests pass a stub) — there is no default.
 set -u
 APP="$OTTO_APP"; SLOT="$OTTO_SLOT"; PREV="$OTTO_PREVIOUS"; FROM="$OTTO_FROM"; TO="$OTTO_TO"
 STATE="$OTTO_UPDATES/finish.state"; RESULT="$OTTO_UPDATES/last-result.json"
-OPEN="${OTTO_OPEN:-/usr/bin/open}"; QUIT_SECS="${OTTO_QUIT_SECS:-30}"; VERIFY_SECS="${OTTO_VERIFY_SECS:-120}"
+OPEN="$OTTO_OPEN"; EXE="$OTTO_APP_EXE"; QUIT_SECS="${OTTO_QUIT_SECS:-30}"; VERIFY_SECS="${OTTO_VERIFY_SECS:-120}"
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*"; }
 journal() { printf '%s %s %s %s\n' "$$" "$1" "$FROM" "$TO" > "$STATE.tmp" && mv -f "$STATE.tmp" "$STATE"; }
@@ -28,8 +29,8 @@ swap() {
     [ "$(/usr/bin/osascript -l JavaScript -e 'function run(a){ObjC.import("stdio");return $.renamex_np(a[0],a[1],2)===0?"swapped":"failed"}' "$1" "$2" 2>&1)" = swapped ]
 }
 app_pid() {
-    for p in $(pgrep -x otto-desktop); do
-        [ "$(ps -p "$p" -o comm= | sed 's/^ *//')" = "$APP/Contents/MacOS/otto-desktop" ] && { echo "$p"; return 0; }
+    for p in $(pgrep -x "$(basename "$EXE")"); do
+        [ "$(ps -p "$p" -o comm= | sed 's/^ *//')" = "$EXE" ] && { echo "$p"; return 0; }
     done
     return 1
 }
