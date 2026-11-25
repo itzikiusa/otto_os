@@ -369,8 +369,9 @@ pub use otto_core::ui_grant::{grant_decided_at, grant_record, grant_state, META_
 // ===========================================================================
 
 /// Cap every array at [`MAX_AGENT_ROWS`] (marking `<key>_truncated: <n>` on the
-/// parent object), then redact. What the agent sees of any UI result.
-pub fn shape_result(v: Value) -> Value {
+/// parent object), then redact (`data`: the data rules too — debugger values,
+/// console output, responses). What the agent sees of any UI result.
+pub fn shape_result(v: Value, data: bool) -> Value {
     fn cap(v: Value) -> Value {
         match v {
             Value::Array(a) => Value::Array(a.into_iter().take(MAX_AGENT_ROWS).map(cap).collect()),
@@ -393,7 +394,12 @@ pub fn shape_result(v: Value) -> Value {
             other => other,
         }
     }
-    otto_core::redact::redact_json(&cap(v)).value
+    let redact = if data {
+        otto_core::redact::redact_data_json
+    } else {
+        otto_core::redact::redact_json
+    };
+    redact(&cap(v)).value
 }
 
 /// `{ui_visible, …result}` — the result object with the visibility flag
@@ -1053,12 +1059,12 @@ pub async fn run(
             let v = bridge
                 .dispatch(&conn, &session, &spec.name, &args, budget)
                 .await?;
-            Ok(with_visibility(shape_result(v), true))
+            Ok(with_visibility(shape_result(v, spec.module == "ide"), true))
         }
         None => match spec.headless.as_deref() {
             Some(h) => {
                 let v = headless(ctx, auth, &session, h, &args).await?;
-                let mut v = with_visibility(shape_result(v), false);
+                let mut v = with_visibility(shape_result(v, false), false);
                 v["note"] =
                     json!("no Otto window can show this right now — ran it in the daemon instead");
                 Ok(v)
@@ -1717,14 +1723,25 @@ mod tests {
     #[test]
     fn results_are_row_capped_and_redacted() {
         let rows: Vec<Value> = (0..250).map(|i| json!([i])).collect();
-        let v = shape_result(json!({"rows": rows, "note": "key AKIAIOSFODNN7EXAMPLE"}));
+        let v = shape_result(
+            json!({"rows": rows, "note": "key AKIAIOSFODNN7EXAMPLE"}),
+            false,
+        );
         assert_eq!(v["rows"].as_array().unwrap().len(), MAX_AGENT_ROWS);
         assert_eq!(v["rows_truncated"], json!(250));
         assert!(
             !v["note"].as_str().unwrap().contains("AKIAIOSFODNN7EXAMPLE"),
             "{v}"
         );
-        let small = shape_result(json!({"rows": [[1]]}));
+        let small = shape_result(json!({"rows": [[1]]}), false);
+        // IDE debugging results get the data rules: env pairs, DSNs, struct text.
+        let stop = json!({"locals": {"cfg": "Config{Password: \"hunter2\"}"},
+            "output_tail": ["DB_PASSWORD=s3cret", "dial mysql://root:pw9@127.0.0.1/app"]});
+        let masked = shape_result(stop.clone(), true).to_string();
+        for secret in ["hunter2", "s3cret", "pw9"] {
+            assert!(!masked.contains(secret), "{masked}");
+        }
+        assert!(shape_result(stop, false).to_string().contains("s3cret"));
         assert!(small.get("rows_truncated").is_none());
         assert_eq!(
             with_visibility(json!({"a":1}), true),
