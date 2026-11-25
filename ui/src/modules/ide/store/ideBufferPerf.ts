@@ -252,7 +252,8 @@ export class IdeBufferPerfController {
       this.scheduleDraftPersist(tab.path, tab.savedContent, text);
     }
   }
-  isTabDirty(tab: IdeOpenTab): boolean { return (this.liveBuffers.get(tab.path) ?? tab.content) !== tab.savedContent; }
+  // A tab not read yet holds an empty placeholder: its saved draft (from before a reload) is what it holds.
+  isTabDirty(tab: IdeOpenTab): boolean { return tab.loading ? readIdeUndoDraft(tab.path) !== null : (this.liveBuffers.get(tab.path) ?? tab.content) !== tab.savedContent; }
   getBuffer(host: IdeBufferHost, fullPath: string): string {
     return this.liveBuffers.get(fullPath) ?? host.tabs.find((t) => t.path === fullPath)?.content ?? '';
   }
@@ -292,7 +293,7 @@ export class IdeBufferPerfController {
     const live = this.liveBuffers.get(target);
     if (live !== undefined) { this.liveBuffers.delete(target); if (tab) this.syncTab(tab, live, true); return live; }
     if (!tab) return '';
-    this.syncTab(tab, tab.content, true);
+    if (!tab.loading) this.syncTab(tab, tab.content, true); // a placeholder would erase the saved draft
     return tab.content;
   }
   flushAll(host: IdeBufferHost): void {
@@ -600,7 +601,8 @@ export async function performOpenFile(
   };
   host.tabs = [...host.tabs, placeholder];
   if (opts.inSplit) host.openInSplit(fullPath, host.splitDirection ?? 'right'); else if (!opts.background) host.activePath = fullPath;
-  await enforceTabCap(host, perf, readIdePreferences().maxOpenTabs, [fullPath]);
+  // A restored strip was capped when saved; a cap lowered since applies on the next open.
+  if (!opts.defer) await enforceTabCap(host, perf, readIdePreferences().maxOpenTabs, [fullPath]);
   if (!opts.background && !isNavigatingHistory) host.pushNavLocation(fullPath, opts.line ?? 1, opts.col ?? 1);
   if (isGuest) { if (!opts.background && opts.line) host.jumpTo(fullPath, opts.line, opts.col ?? 1); return; }
   if (opts.defer) return;

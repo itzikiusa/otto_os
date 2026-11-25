@@ -9,9 +9,9 @@ import { deferred, loadSource } from './sourceHarness.ts';
 
 type Draft = { savedContent: string; draftContent: string };
 
-function modules(api: Record<string, unknown>, drafts: Record<string, Draft> = {}) {
+function modules(api: Record<string, unknown>, drafts: Record<string, Draft> = {}, maxOpenTabs = 20) {
   const draftCalls: string[] = [];
-  const prefs = { autoSave: false, localHistoryEnabled: false, localHistoryRetentionDays: 7, maxOpenTabs: 20 };
+  const prefs = { autoSave: false, localHistoryEnabled: false, localHistoryRetentionDays: 7, maxOpenTabs };
   const imports = {
     svelte: { tick: async () => {} },
     '../../../lib/api/client': { api, ApiError: Error, getToken: () => '', laneFetch: () => { throw new Error('unused'); } },
@@ -33,7 +33,7 @@ function modules(api: Record<string, unknown>, drafts: Record<string, Draft> = {
   const g = { TextEncoder };
   const buf = loadSource(new URL('../src/modules/ide/store/ideBufferPerf.ts', import.meta.url), imports, g, { relative: true }, cache);
   const helpers = loadSource(new URL('../src/modules/ide/shell/ideProjectHelpers.ts', import.meta.url), imports, g, { relative: true }, cache);
-  return { buf, helpers, draftCalls };
+  return { buf, helpers, draftCalls, prefs };
 }
 
 /** A store-shaped host whose openFile is the real performOpenFile. */
@@ -110,4 +110,32 @@ test('leaving the page before a tab is read keeps its saved draft', () => {
   perf.flushAndSnapshotAll(h);
   assert.ok(!draftCalls.some((c) => c.endsWith('/repo/a.ts')), 'the placeholder must not overwrite or remove its draft');
   assert.ok(draftCalls.includes('write:/repo/b.ts'));
+});
+
+const unread = (path: string) => ({ path, name: path.split('/').pop(), content: '', savedContent: '', loading: true, deferred: true, error: null, readOnly: false, truncated: false });
+
+test('flushing a tab not read yet leaves its saved draft alone (close, rename, Replace in Path all flush first)', () => {
+  const { buf, draftCalls } = modules({}, { '/repo/a.ts': { savedContent: 'disk', draftContent: 'mine' } });
+  const { h, perf } = storeHost(buf);
+  h.tabs = [unread('/repo/a.ts')];
+  perf.flush(h, '/repo/a.ts');
+  assert.deepEqual([...draftCalls], [], 'the empty placeholder must not be written over (= remove) the draft');
+});
+
+test('a tab not read yet that has a saved draft counts as unsaved, so close / Close Others / switch ask first', () => {
+  const { buf } = modules({}, { '/repo/a.ts': { savedContent: 'disk', draftContent: 'mine' } });
+  const { perf } = storeHost(buf);
+  assert.equal(perf.isTabDirty(unread('/repo/a.ts')), true);
+  assert.equal(perf.isTabDirty(unread('/repo/b.ts')), false, 'no draft: nothing to lose');
+});
+
+test('restoring more saved tabs than the tab cap keeps the active tab and opens nothing twice', async () => {
+  const paths = Array.from({ length: 17 }, (_, i) => `/repo/f${i}.ts`);
+  const { buf, helpers, prefs } = modules({ get: async () => fileResp('x'), bg: { get: async () => fileResp('x') } }, {}, 20);
+  buf.saveWorkspaceOpenTabs('/repo', paths, paths[0], null);
+  prefs.maxOpenTabs = 15; // lowered since the strip was saved
+  const { h } = storeHost(buf);
+  await helpers.restoreWorkspaceTabsOrInitial(h);
+  assert.equal(h.activePath, paths[0]);
+  assert.deepEqual([...h.tabs.map((x) => x.path)], paths, 'no tab (least of all the active one) evicted or reordered by the restore itself');
 });
