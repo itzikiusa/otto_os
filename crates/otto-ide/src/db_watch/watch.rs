@@ -321,7 +321,9 @@ impl Watch {
         let (target, database, plan, parallel) = {
             let mut st = lock(&self.state);
             st.busy = true;
-            let parallel = if st.target.info.local {
+            // A saved connection's pool is shared with DB Explorer, also on loopback.
+            let ephemeral = matches!(st.target.exec, DbWatchQueryTarget::EphemeralLoopback { .. });
+            let parallel = if ephemeral {
                 LOCAL_PARALLEL
             } else {
                 SAVED_PARALLEL
@@ -335,6 +337,8 @@ impl Watch {
                 .collect();
             (st.target.clone(), st.database.clone(), plan, parallel)
         };
+        // Cleared however this ends, also when a binder task is aborted mid-read.
+        let _busy = Busy(&self.state);
         let engine = target.info.engine;
         let user = &self.user;
         let reads: Vec<(usize, ItemRead)> = with_request_credential(
@@ -354,7 +358,6 @@ impl Watch {
         .await;
 
         let mut st = lock(&self.state);
-        st.busy = false;
         st.last_used = Instant::now();
         let seq = match &ck {
             Some(_) => st.checkpoint_count,
@@ -508,6 +511,15 @@ impl Watch {
             to_seq,
             items,
         }
+    }
+}
+
+/// Clears `busy` on drop.
+struct Busy<'a>(&'a Mutex<State>);
+
+impl Drop for Busy<'_> {
+    fn drop(&mut self) {
+        lock(self.0).busy = false;
     }
 }
 

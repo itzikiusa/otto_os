@@ -643,3 +643,61 @@ async fn an_agent_never_reads_a_secret_through_a_row_key_a_filter_or_an_error() 
         json!("[redacted]")
     );
 }
+
+/// A saved connection's pool is shared with DB Explorer even on loopback
+/// (Postgres has 4 sessions): never more than 2 reads in flight.
+#[tokio::test]
+async fn a_saved_loopback_target_reads_two_at_a_time() {
+    let fake = Arc::new(Fake {
+        latency: Duration::from_millis(100),
+        ..Fake::default()
+    });
+    for t in ["a", "b", "c", "d"] {
+        fake.set(t, &["id"], vec![]);
+    }
+    let host = as_host(&fake);
+    let w = Watch::new(
+        &user("u"),
+        "/p",
+        target(true),
+        None,
+        items(&["a", "b", "c", "d"]),
+    )
+    .unwrap();
+    w.checkpoint(
+        &host,
+        Checkpoint::new(IdeDbWatchCheckpointReason::Start),
+        true,
+    )
+    .await;
+    assert_eq!(fake.max_in_flight.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn stopping_a_binding_mid_checkpoint_does_not_leave_the_watch_busy() {
+    let fake = Arc::new(Fake {
+        latency: Duration::from_millis(500),
+        ..Fake::default()
+    });
+    fake.set("a", &["id"], vec![]);
+    let host = as_host(&fake);
+    let w = Watch::new(&user("u"), "/p", target(true), None, items(&["a"])).unwrap();
+    w.checkpoint(
+        &host,
+        Checkpoint::new(IdeDbWatchCheckpointReason::Start),
+        true,
+    )
+    .await;
+    let (tx, rx) = watch::channel(DapStopSignal::default());
+    let task = bind_debug(&w, Arc::clone(&host), rx, || (None, None));
+    w.set_binding(None, Some(task));
+    tx.send_replace(DapStopSignal {
+        stop_seq: 1,
+        ended: false,
+    });
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(w.view().busy, "the stop's checkpoint is reading");
+    w.set_binding(None, None); // aborts the binder mid-read
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!w.view().busy);
+}
