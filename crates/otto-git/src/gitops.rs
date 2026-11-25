@@ -16,7 +16,16 @@ use std::path::{Path, PathBuf};
 use otto_core::api::{StashDetail, StashFile, StashInfo, WorktreeInfo};
 use otto_core::{Error, Result};
 
+use futures_util::StreamExt;
+
 use crate::local::{worktree_round_trips, GitCmd, LocalGit, SpawnClass, STATUS_IGNORE_SUBMODULES};
+
+/// Branch tracking (name → upstream, track), remote branches, default branch.
+type WorktreeRefs = (
+    HashMap<String, (String, String)>,
+    Vec<String>,
+    Option<String>,
+);
 
 /// Cap on a stash patch returned to the UI.
 const STASH_PATCH_CAP: usize = 400 * 1024;
@@ -209,8 +218,10 @@ impl LocalGit {
 
     /// `git worktree list` + status counts + branch/commit details + risks.
     pub async fn worktree_list_detailed(&self) -> Result<Vec<WorktreeInfo>> {
-        let mut rows = self.worktree_list().await?;
-        self.enrich_worktrees(&mut rows).await;
+        // The ref reads don't need the rows: they run beside the list + probes.
+        let (rows, refs) = tokio::join!(self.worktree_list(), self.worktree_refs());
+        let mut rows = rows?;
+        self.enrich_with(&mut rows, refs).await;
         Ok(rows)
     }
 
@@ -218,16 +229,24 @@ impl LocalGit {
     /// and `risks` for every row. Best-effort: a failed count stays `None`
     /// (unknown), which never reads as "safe".
     pub(crate) async fn enrich_worktrees(&self, rows: &mut [WorktreeInfo]) {
-        let heads = self
-            .run_read(&[
+        let refs = self.worktree_refs().await;
+        self.enrich_with(rows, refs).await;
+    }
+
+    /// The three independent ref reads [`Self::enrich_worktrees`] needs, in
+    /// one round: local branch tracking, remote branches, the default branch.
+    async fn worktree_refs(&self) -> WorktreeRefs {
+        let (heads, remotes, base_name) = tokio::join!(
+            self.run_read(&[
                 "for-each-ref",
                 "--format=%(refname)%00%(upstream:short)%00%(upstream:track,nobracket)",
                 "refs/heads",
-            ])
-            .await
-            .unwrap_or_default();
+            ]),
+            self.run_read(&["for-each-ref", "--format=%(refname)", "refs/remotes"]),
+            self.default_branch(),
+        );
         let mut tracking: HashMap<String, (String, String)> = HashMap::new();
-        for line in heads.lines() {
+        for line in heads.unwrap_or_default().lines() {
             let mut it = line.split('\0');
             let (Some(r), Some(up), Some(track)) = (it.next(), it.next(), it.next()) else {
                 continue;
@@ -236,16 +255,18 @@ impl LocalGit {
                 tracking.insert(name.to_string(), (up.to_string(), track.to_string()));
             }
         }
-        let remote_refs: Vec<String> = self
-            .run_read(&["for-each-ref", "--format=%(refname)", "refs/remotes"])
-            .await
+        let remote_refs: Vec<String> = remotes
             .unwrap_or_default()
             .lines()
             .filter_map(|l| l.strip_prefix("refs/remotes/"))
             .filter(|l| !l.ends_with("/HEAD"))
             .map(str::to_string)
             .collect();
-        let base_name = self.default_branch().await;
+        (tracking, remote_refs, base_name)
+    }
+
+    async fn enrich_with(&self, rows: &mut [WorktreeInfo], refs: WorktreeRefs) {
+        let (tracking, remote_refs, base_name) = refs;
         let base_ref = base_name.as_ref().and_then(|b| {
             let remote = format!("origin/{b}");
             if remote_refs.contains(&remote) {
@@ -259,7 +280,6 @@ impl LocalGit {
         for w in rows.iter_mut() {
             w.base = base_ref.clone();
             if w.prunable || w.head.is_empty() {
-                w.risks = removal_risks(w);
                 continue;
             }
             if let Some(branch) = w.branch.clone() {
@@ -275,28 +295,54 @@ impl LocalGit {
                 w.on_remote = (w.upstream.is_some() && !w.upstream_gone)
                     || remote_refs.iter().any(|r| r.ends_with(&suffix));
             }
-            let is_base = match (&w.branch, &base_name) {
-                (Some(b), Some(base)) => b == base,
-                _ => false,
-            };
-            if let Some(base) = base_ref.as_deref().filter(|_| !is_base) {
-                let range = format!("{base}..{}", w.head);
-                w.unmerged = self.count(&["rev-list", "--count", &range]).await;
-            } else if is_base {
-                w.unmerged = Some(0);
+        }
+        // Two counts per tree, a few trees at a time instead of one spawn
+        // after another (2 x N serial spawns were most of this route's time).
+        let base_ref = base_ref.as_deref();
+        let counts: Vec<_> = futures_util::stream::iter(
+            rows.iter()
+                .map(|w| self.worktree_counts(w, base_ref, base_name.as_deref()))
+                .collect::<Vec<_>>(),
+        )
+        .buffered(4)
+        .collect()
+        .await;
+        for (w, c) in rows.iter_mut().zip(counts) {
+            if let Some((unmerged, unpushed)) = c {
+                (w.unmerged, w.unpushed) = (unmerged, unpushed);
             }
-            // Commits on this HEAD nothing else holds: not on a remote, not
-            // in the base; a detached HEAD must also be off every branch.
-            let mut args = vec!["rev-list", "--count", w.head.as_str(), "--not", "--remotes"];
-            if let Some(base) = base_ref.as_deref() {
-                args.push(base);
-            }
-            if w.branch.is_none() {
-                args.push("--branches");
-            }
-            w.unpushed = self.count(&args).await;
             w.risks = removal_risks(w);
         }
+    }
+
+    /// `(unmerged, unpushed)` of one tree; `None` for a pruned/unborn one.
+    async fn worktree_counts(
+        &self,
+        w: &WorktreeInfo,
+        base_ref: Option<&str>,
+        base_name: Option<&str>,
+    ) -> Option<(Option<u32>, Option<u32>)> {
+        if w.prunable || w.head.is_empty() {
+            return None;
+        }
+        let is_base = w.branch.is_some() && w.branch.as_deref() == base_name;
+        let unmerged = async {
+            match base_ref.filter(|_| !is_base) {
+                Some(base) => {
+                    let range = format!("{base}..{}", w.head);
+                    self.count(&["rev-list", "--count", &range]).await
+                }
+                None => is_base.then_some(0),
+            }
+        };
+        // Commits on this HEAD nothing else holds: not on a remote, not
+        // in the base; a detached HEAD must also be off every branch.
+        let mut args = vec!["rev-list", "--count", w.head.as_str(), "--not", "--remotes"];
+        args.extend(base_ref);
+        if w.branch.is_none() {
+            args.push("--branches");
+        }
+        Some(tokio::join!(unmerged, self.count(&args)))
     }
 
     async fn count(&self, args: &[&str]) -> Option<u32> {
