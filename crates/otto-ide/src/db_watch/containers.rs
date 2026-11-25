@@ -108,6 +108,12 @@ impl DbWatchRegistry {
         ))
     }
 
+    /// The public view of a known, unexpired ephemeral target.
+    pub fn public_target(&self, ephemeral_id: &str) -> Option<IdeEphemeralDbTarget> {
+        self.evict_expired();
+        self.entries.get(ephemeral_id).map(|e| e.public.clone())
+    }
+
     /// Register a verified `127.0.0.1` loopback target (used by integration tests).
     #[allow(clippy::too_many_arguments)]
     pub fn register_loopback_target(

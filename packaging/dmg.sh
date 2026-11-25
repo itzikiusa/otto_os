@@ -8,7 +8,7 @@ OUT="${2:-Otto.dmg}"
 
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
-cp -R "$APP" "$STAGE/"
+ditto "$APP" "$STAGE/$(basename "$APP")"
 ln -s /Applications "$STAGE/Applications"
 
 hdiutil create -volname "Otto" -srcfolder "$STAGE" -ov -format UDZO "$OUT"

@@ -28,6 +28,7 @@ mod snip;
 mod supervisor;
 mod throttle;
 mod tray;
+mod updater;
 mod windows;
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
@@ -66,6 +67,7 @@ fn main() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         // Forward native menu-bar clicks to the SPA (which owns all behavior).
         // Registered on the Builder — the reliable place in Tauri v2 for an
         // app-wide menu set via `app.set_menu`. Window-lifecycle items
@@ -113,13 +115,8 @@ fn main() {
                             let _ = win.reload();
                         }
                     }
-                    "quit" => {
-                        lifecycle::durable("exit: menu quit");
-                        quit::arm("menu quit");
-                        windows::mark_quitting();
-                        windows::snapshot_all(app);
-                        app.exit(0);
-                    }
+                    "quit" => quit::quit_app(app, "menu quit"),
+                    updater::MENU_ID => updater::on_menu(app),
                     "emoji-palette" => {
                         #[cfg(target_os = "macos")]
                         {
@@ -262,6 +259,13 @@ fn main() {
             rooms::open_room_window,
             host_rooms::open_host_room_window,
             host_rooms::get_host_room_context,
+            updater::update_state,
+            updater::update_check,
+            updater::update_download,
+            updater::update_restart,
+            updater::update_set_auto,
+            updater::update_skip,
+            updater::update_result_seen,
         ])
         .setup(|app| {
             let window = app.get_webview_window("main").expect("main window");
@@ -304,6 +308,10 @@ fn main() {
             // from the shortcuts registry; a chord another app holds only
             // disables that one global trigger.
             shortcuts::init(app.handle());
+
+            // Updates: finish an interrupted install, then (release builds
+            // only) check 60 s after launch and every 6 h.
+            updater::init(app.handle());
 
             // Ensure the daemon is up in the background; the SPA polls /health
             // and surfaces state, so failures here are non-fatal.
@@ -420,6 +428,13 @@ fn build_menu(app: &tauri::App) -> tauri::Result<()> {
         true,
         &[
             &PredefinedMenuItem::about(handle, Some("About Otto"), None)?,
+            &MenuItem::with_id(
+                handle,
+                updater::MENU_ID,
+                "Check for Updates…",
+                true,
+                None::<&str>,
+            )?,
             &PredefinedMenuItem::separator(handle)?,
             &MenuItem::with_id(handle, "settings", "Settings…", true, Some("Cmd+,"))?,
             &PredefinedMenuItem::separator(handle)?,
@@ -604,4 +619,29 @@ fn build_menu(app: &tauri::App) -> tauri::Result<()> {
     // Menu-event forwarding is registered on the Builder (see main()).
 
     Ok(())
+}
+
+#[cfg(test)]
+mod release_config_tests {
+    /// The updater plugin deserializes `plugins.updater` when it starts, so a
+    /// bad value there stops the app from launching: prove it parses here.
+    #[test]
+    fn updater_config_parses_and_points_at_github_releases() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let cfg: tauri_plugin_updater::Config =
+            serde_json::from_value(conf["plugins"]["updater"].clone()).unwrap();
+        assert!(cfg.require_signed_version);
+        assert!(!cfg.allow_downgrades && !cfg.dangerous_insecure_transport_protocol);
+        assert!(!cfg.pubkey.is_empty());
+        assert_eq!(cfg.endpoints.len(), 1);
+        let url = &cfg.endpoints[0];
+        assert_eq!(
+            (url.scheme(), url.host_str()),
+            ("https", Some("github.com"))
+        );
+        assert!(url
+            .path()
+            .ends_with("/releases/latest/download/latest.json"));
+    }
 }

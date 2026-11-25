@@ -205,6 +205,9 @@ pub(super) struct SessionEntry {
     pub(super) break_on_exceptions: Mutex<bool>,
     pub(super) conn: RwLock<Option<Arc<ActiveConnection>>>,
     pub(super) events_tx: broadcast::Sender<IdeDebugSessionSnapshot>,
+    /// The latest stop / end, apart from `events_tx`: a `watch` never lags
+    /// behind output chunks and coalesces rapid stops (the DB Watch engine).
+    pub(super) stops_tx: watch::Sender<super::session::DapStopSignal>,
     pub(super) initialized_notify: Arc<Notify>,
     pub(super) halted_notify: Arc<Notify>,
     pub(super) suppress_transient_pause: AtomicBool,
@@ -282,6 +285,7 @@ impl SessionEntry {
             break_on_exceptions: Mutex::new(initial_break_exc),
             conn: RwLock::new(None),
             events_tx,
+            stops_tx: watch::channel(super::session::DapStopSignal::default()).0,
             initialized_notify: Arc::new(Notify::new()),
             halted_notify: Arc::new(Notify::new()),
             suppress_transient_pause: AtomicBool::new(false),
@@ -463,6 +467,15 @@ impl SessionEntry {
             snap.clone()
         };
         updated.output = self.snapshot_output();
+        let signal = super::session::DapStopSignal {
+            stop_seq: updated.stop_seq,
+            ended: matches!(
+                updated.state,
+                IdeDebugState::Terminated | IdeDebugState::Error
+            ),
+        };
+        self.stops_tx
+            .send_if_modified(|s| std::mem::replace(s, signal) != signal);
         let _ = self.events_tx.send(updated.clone());
         updated
     }

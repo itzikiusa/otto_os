@@ -563,6 +563,17 @@ impl EnvironmentManager {
         self.shell_env.reload().await
     }
 
+    /// Titles of the runs still running (tests, programs, dev servers) — a
+    /// daemon restart stops them.
+    pub fn running_titles(&self) -> Vec<String> {
+        self.runs
+            .iter()
+            .map(|e| e.value().snapshot())
+            .filter(|s| s.status == crate::types::IdeRunStatus::Running)
+            .map(|s| s.title)
+            .collect()
+    }
+
     pub fn active_local_pids(&self) -> Vec<u32> {
         self.runs
             .iter()

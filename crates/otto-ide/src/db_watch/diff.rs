@@ -148,17 +148,91 @@ fn row_key(
     }
 }
 
+/// How [`diff_snapshots`] keys and compares rows.
+#[derive(Debug, Clone, Default)]
+pub struct DiffOpts {
+    /// The table's primary key (column names); empty = guess a unique column.
+    pub primary_key: Vec<String>,
+    /// `current` is a full window (`ORDER BY pk DESC LIMIT n` returned n
+    /// rows): a previous row older than the window's oldest key left the
+    /// window, it was not deleted.
+    pub window_full: bool,
+}
+
 /// Compute structured row & cell differences between `previous` and `current`.
 pub fn compute_snapshot_diff(
     previous: &IdeDbWatchSnapshotItem,
     current: &IdeDbWatchSnapshotItem,
+) -> IdeDbWatchDiffSummary {
+    diff_snapshots(previous, current, &DiffOpts::default())
+}
+
+/// A Redis `ttl` counts down on its own: only a TTL that appears, goes away
+/// or goes UP (re-set) is a change (`-1` / `-2` / null = no TTL).
+fn ttl_changed(before: &Value, after: &Value) -> bool {
+    let ttl = |v: &Value| v.as_i64().filter(|n| *n >= 0);
+    match (ttl(before), ttl(after)) {
+        (Some(b), Some(a)) => a > b,
+        (b, a) => b.is_some() != a.is_some(),
+    }
+}
+
+fn cell_changed(ttl_col: Option<usize>, i: usize, before: &Value, after: &Value) -> bool {
+    if Some(i) == ttl_col {
+        ttl_changed(before, after)
+    } else {
+        before != after
+    }
+}
+
+/// Order two key values: numbers numerically, everything else as text.
+fn cmp_key(a: &Value, b: &Value) -> std::cmp::Ordering {
+    match (a.as_f64(), b.as_f64()) {
+        (Some(x), Some(y)) => x.total_cmp(&y),
+        _ => compact_value_key(a).cmp(&compact_value_key(b)),
+    }
+}
+
+/// [`compute_snapshot_diff`] with the watch's real primary key and window.
+pub fn diff_snapshots(
+    previous: &IdeDbWatchSnapshotItem,
+    current: &IdeDbWatchSnapshotItem,
+    opts: &DiffOpts,
 ) -> IdeDbWatchDiffSummary {
     let columns = if !current.columns.is_empty() {
         &current.columns
     } else {
         &previous.columns
     };
-    let key_indices = choose_key_columns(columns, &previous.rows, &current.rows);
+    let pk: Vec<usize> = opts
+        .primary_key
+        .iter()
+        .filter_map(|k| columns.iter().position(|c| c == k))
+        .collect();
+    let key_indices = if !pk.is_empty() && pk.len() == opts.primary_key.len() {
+        pk
+    } else {
+        choose_key_columns(columns, &previous.rows, &current.rows)
+    };
+    let is_redis = columns.len() == 4 && columns[0] == "key" && columns[3] == "ttl";
+    let ttl_col = is_redis.then_some(3);
+    let same = |a: &[Value], b: &[Value]| {
+        a.len() == b.len()
+            && a.iter()
+                .zip(b)
+                .enumerate()
+                .all(|(i, (x, y))| !cell_changed(ttl_col, i, x, y))
+    };
+    // The oldest key still inside a full window (first pk column).
+    let window_floor = (opts.window_full && !opts.primary_key.is_empty())
+        .then(|| {
+            current
+                .rows
+                .iter()
+                .filter_map(|r| r.get(key_indices[0]))
+                .min_by(|a, b| cmp_key(a, b))
+        })
+        .flatten();
 
     let mut prev_occ = BTreeMap::new();
     let mut prev_map: BTreeMap<String, Vec<Value>> = BTreeMap::new();
@@ -187,10 +261,11 @@ pub fn compute_snapshot_diff(
                         row: row.clone(),
                         previous_row: None,
                         changes: Vec::new(),
+                        masked: false,
                     });
                 }
             }
-            Some(prev_row) if prev_row == row => {
+            Some(prev_row) if same(prev_row, row) => {
                 unchanged_count += 1;
             }
             Some(prev_row) => {
@@ -201,7 +276,7 @@ pub fn compute_snapshot_diff(
                     for i in 0..max_cols {
                         let before = prev_row.get(i).cloned().unwrap_or(Value::Null);
                         let after = row.get(i).cloned().unwrap_or(Value::Null);
-                        if before != after {
+                        if cell_changed(ttl_col, i, &before, &after) {
                             let col_name = columns
                                 .get(i)
                                 .cloned()
@@ -210,6 +285,7 @@ pub fn compute_snapshot_diff(
                                 column: col_name,
                                 before,
                                 after,
+                                masked: false,
                             });
                         }
                     }
@@ -219,6 +295,7 @@ pub fn compute_snapshot_diff(
                         row: row.clone(),
                         previous_row: Some(prev_row.clone()),
                         changes,
+                        masked: false,
                     });
                 }
             }
@@ -228,6 +305,14 @@ pub fn compute_snapshot_diff(
     let mut removed_count = 0usize;
     for (k, prev_row) in prev_map {
         if !curr_keys_seen.contains(&k) {
+            let left_window = window_floor.is_some_and(|floor| {
+                prev_row
+                    .get(key_indices[0])
+                    .is_some_and(|v| cmp_key(v, floor).is_lt())
+            });
+            if left_window {
+                continue;
+            }
             removed_count += 1;
             if diffs.len() < MAX_DIFF_ROWS_EMITTED {
                 diffs.push(IdeDbRowDiff {
@@ -236,6 +321,7 @@ pub fn compute_snapshot_diff(
                     row: prev_row,
                     previous_row: None,
                     changes: Vec::new(),
+                    masked: false,
                 });
             }
         }
@@ -287,5 +373,124 @@ mod tests {
         assert_eq!(modified.changes[0].column, "balance");
         assert_eq!(modified.changes[0].before, json!("100.00"));
         assert_eq!(modified.changes[0].after, json!("175.50"));
+    }
+
+    fn snap(columns: &[&str], rows: Vec<Vec<Value>>) -> IdeDbWatchSnapshotItem {
+        IdeDbWatchSnapshotItem {
+            columns: columns.iter().map(|c| c.to_string()).collect(),
+            rows,
+        }
+    }
+
+    #[test]
+    fn a_redis_ttl_counting_down_is_not_a_change_but_a_reset_is() {
+        let cols = ["key", "type", "value", "ttl"];
+        let prev = snap(
+            &cols,
+            vec![
+                vec![json!("s:1"), json!("string"), json!("a"), json!(300)],
+                vec![json!("s:2"), json!("string"), json!("b"), json!(300)],
+                vec![json!("s:3"), json!("string"), json!("c"), json!(-1)],
+            ],
+        );
+        let curr = snap(
+            &cols,
+            vec![
+                vec![json!("s:1"), json!("string"), json!("a"), json!(297)],
+                vec![json!("s:2"), json!("string"), json!("b"), json!(600)],
+                vec![json!("s:3"), json!("string"), json!("c"), json!(60)],
+            ],
+        );
+        let d = diff_snapshots(
+            &prev,
+            &curr,
+            &DiffOpts {
+                primary_key: vec!["key".into()],
+                window_full: false,
+            },
+        );
+        assert_eq!(
+            (d.unchanged_count, d.modified_count),
+            (1, 2),
+            "{:?}",
+            d.diffs
+        );
+        assert!(d.diffs.iter().all(|r| r.key != "s:1"));
+    }
+
+    #[test]
+    fn a_row_pushed_out_of_a_full_window_is_not_a_delete() {
+        // ORDER BY id DESC LIMIT 3: an INSERT of id 4 pushes id 1 out.
+        let prev = snap(
+            &["id", "v"],
+            vec![
+                vec![json!(3), json!("c")],
+                vec![json!(2), json!("b")],
+                vec![json!(1), json!("a")],
+            ],
+        );
+        let curr = snap(
+            &["id", "v"],
+            vec![
+                vec![json!(4), json!("d")],
+                vec![json!(3), json!("c")],
+                vec![json!(2), json!("b")],
+            ],
+        );
+        let opts = DiffOpts {
+            primary_key: vec!["id".into()],
+            window_full: true,
+        };
+        let d = diff_snapshots(&prev, &curr, &opts);
+        assert_eq!(
+            (d.added_count, d.removed_count, d.unchanged_count),
+            (1, 0, 2)
+        );
+        // A real delete inside the window still counts.
+        let curr = snap(
+            &["id", "v"],
+            vec![
+                vec![json!(4), json!("d")],
+                vec![json!(3), json!("c")],
+                vec![json!(1), json!("a")],
+            ],
+        );
+        let d = diff_snapshots(&prev, &curr, &opts);
+        assert_eq!(d.removed_count, 1);
+        assert_eq!(
+            d.diffs
+                .iter()
+                .find(|r| r.kind == IdeDbDiffKind::Removed)
+                .unwrap()
+                .key,
+            "2"
+        );
+    }
+
+    #[test]
+    fn the_real_composite_primary_key_keys_the_rows() {
+        let prev = snap(
+            &["game_id", "account_id", "status"],
+            vec![
+                vec![json!(1), json!(7), json!("open")],
+                vec![json!(1), json!(8), json!("open")],
+            ],
+        );
+        let curr = snap(
+            &["game_id", "account_id", "status"],
+            vec![
+                vec![json!(1), json!(7), json!("closed")],
+                vec![json!(1), json!(8), json!("open")],
+            ],
+        );
+        let opts = DiffOpts {
+            primary_key: vec!["game_id".into(), "account_id".into()],
+            window_full: false,
+        };
+        let d = diff_snapshots(&prev, &curr, &opts);
+        assert_eq!(d.modified_count, 1);
+        assert_eq!(d.diffs[0].key, "game_id=1, account_id=7");
+        assert_eq!(d.diffs[0].changes.len(), 1);
+        assert_eq!(d.diffs[0].changes[0].column, "status");
     }
 }

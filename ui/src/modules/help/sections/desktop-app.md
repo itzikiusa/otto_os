@@ -58,8 +58,16 @@ The app also keeps the Otto daemon running. It installs `ottod` as a background 
 - Each page has at most one pop-out: asking again brings the open one forward.
 - Pop-outs remember their size and position per page, but aren't reopened at launch.
 
+**Updates**
+- A release build checks for a new Otto a minute after it starts and every six hours. When one is out, a quiet **Update to <version>** row appears above **Help** in the sidebar (an icon with a dot in the collapsed rail). Only the root account sees it, and only in the desktop app.
+- Click it for the release notes, date and size, and one button: **Download and install** → **Downloading… 42 %** → **Restart to finish**. Before restarting, Otto lists what keeps running and what ends (connection terminals, background agents, debug runs…), and asks once more only when something ends.
+- **⋯** in the dialog: **Skip this version**, **View release on GitHub**, **Install updates automatically** (downloads in the background; Otto never restarts on its own).
+- **Otto → Check for Updates…** checks now and says so when you're up to date or offline. **Settings → Updates** shows the version, the last check, automatic download and a skipped version (**Unskip**).
+- After the restart a toast says **Updated to <version>**. If the new version doesn't start, Otto puts the old one back and the row says **Update failed and was undone · Details**.
+- A copy built from source says "This is a source build — updates come from git": pull and run `packaging/deploy.sh`.
+
 **Menus**
-- **Otto**: About Otto, Settings… (`⌘,`), Hide, Quit Otto (`⌘Q`).
+- **Otto**: About Otto, Check for Updates…, Settings… (`⌘,`), Hide, Quit Otto (`⌘Q`).
 - **File**: New Window (`⌘⇧N`), New Session (`⌘T`), New Workspace…, Take Snip, Close Tab (`⌘W`).
 - **Edit**: Undo, Redo, Cut, Copy, Paste, Select All.
 - **View**: Toggle Navigator (`⌘1`), Toggle Right Panel (`⌘J`), Zoom In, Zoom Out, Actual Size, full screen.

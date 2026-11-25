@@ -86,38 +86,7 @@ test('S-38 #3: isDbWatchPanelVisible enables live polling in phone stacked Tools
   );
 });
 
-test('S-38 #3: ideDbWatchState maps detect and snapshot failures through loadErrorText', async () => {
-  const mod = loadSource(
-    new URL('../src/modules/ide/dbwatch/ideDbWatchState.svelte.ts', import.meta.url),
-    {
-      '../../../lib/api/client': {
-        api: {
-          post: async (url: string) => {
-            if (url.includes('/detect')) throw new ApiError(404, 'not found');
-            throw new ApiError(401, 'unauthorized');
-          },
-        },
-      },
-      '../store/ideStateSlices.svelte': { onIdeTargetReset: () => {} },
-    },
-    {},
-    { relative: true },
-  );
-  const watch = mod.ideDbWatch;
-
-  await watch.detect({ root: '/repo' });
-  assert.equal(watch.detectError, 'It no longer exists, or this daemon doesn’t serve it.');
-
-  watch.savedConnections = [
-    { target_kind: 'saved', connection_id: 'c1', name: 'MySQL', engine: 'mysql', host: '127.0.0.1', port: 3306, environment: 'dev', database: 'app' },
-  ];
-  watch.selectedTargetKey = 'saved:c1';
-  watch.selectedObjectName = 'users';
-
-  const ok = await watch.captureSnapshot('/repo', 'baseline');
-  assert.equal(ok, false);
-  assert.equal(watch.snapshotError, 'Your session expired. Sign in again, then retry.');
-});
+// S-38 #3 (DB Watch failures read as people text): unit/ideDbWatch.test.ts.
 
 // ---------------------------------------------------------------------------
 // 3. Build Tools recursive module/goal/plugin/dependency filtering

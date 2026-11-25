@@ -47,9 +47,24 @@ test('access gates: ungated for members, admin sections for settings admins, roo
   assert.ok(ua.includes('users') && ua.includes('sessions'));
   assert.ok(!ua.includes('access-groups'), 'groups are root-only even for users admins');
 
-  // Every section except the ones that moved out of Settings (Skills Lab).
-  assert.equal(availableSections(root).length, SETTINGS_SECTIONS.filter((s) => !('movedTo' in s)).length);
+  // Every section except the ones that moved out of Settings (Skills Lab) and,
+  // outside the desktop app, the desktop-only ones.
+  assert.equal(availableSections(root).length, SETTINGS_SECTIONS.filter((s) => !('movedTo' in s) && !('desktopOnly' in s)).length);
   assert.equal(canOpenSection(findSection('access-groups')!, root), true);
+});
+
+test('Updates is root-only and only in the desktop app (never the phone or the remote web)', () => {
+  const updates = findSection('updates')!;
+  assert.equal(canOpenSection(updates, root), false, 'not in a plain browser');
+  const g = globalThis as { window?: unknown };
+  g.window = { __TAURI_INTERNALS__: {} };
+  try {
+    assert.equal(canOpenSection(updates, root), true);
+    assert.equal(canOpenSection(updates, usersAdmin), false);
+    assert.ok(availableSections(root).some((s) => s.id === 'updates'));
+  } finally {
+    delete g.window;
+  }
 });
 
 test('filter matches label, keywords and group, ranking label prefixes first', () => {

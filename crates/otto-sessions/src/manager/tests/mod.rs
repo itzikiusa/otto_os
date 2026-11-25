@@ -4859,3 +4859,51 @@ async fn a_sandboxed_session_cannot_read_or_plant_other_sessions_mcp_files() {
         let _ = std::fs::remove_file(f);
     }
 }
+
+/// D-016: the restart dialog's session counts, by the sidebar's buckets —
+/// without PTY holders (persistence off) every live session ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restart_impact_counts_live_sessions_by_bucket() {
+    let (manager, _repo, workspace, user) = test_manager().await;
+    for (title, meta) in [
+        ("Fix the login bug", None),
+        (
+            "nightly workflow",
+            Some(serde_json::json!({"source": "workflow"})),
+        ),
+    ] {
+        manager
+            .create(
+                &workspace,
+                &user,
+                CreateSessionReq {
+                    kind: SessionKind::Agent,
+                    provider: Some("shell".into()),
+                    title: Some(title.into()),
+                    cwd: Some("/tmp".into()),
+                    connection_id: None,
+                    model: None,
+                    meta,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+    }
+    let impact = otto_core::restart::RestartImpact::from(manager.restart_impact().await);
+    assert!(impact.keeps.is_empty(), "{impact:?}");
+    let mut ends: Vec<_> = impact
+        .ends
+        .iter()
+        .map(|i| (i.kind, i.count, i.detail.clone()))
+        .collect();
+    ends.sort();
+    assert_eq!(
+        ends,
+        [
+            ("background_agents", 1, vec!["nightly workflow".to_string()]),
+            ("sessions", 1, vec!["Fix the login bug".to_string()]),
+        ]
+    );
+    manager.shutdown_all().await;
+}

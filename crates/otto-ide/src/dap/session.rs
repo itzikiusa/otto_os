@@ -143,6 +143,14 @@ pub struct DapSessionResourceMetrics {
     pub fd_count: Option<u32>,
 }
 
+/// A debug session's newest stop (`stop_seq`, bumped on every stop and never
+/// on selecting a frame) and whether it ended ([`DapManager::watch_stops`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DapStopSignal {
+    pub stop_seq: u32,
+    pub ended: bool,
+}
+
 /// Multi-session Debug Adapter Protocol engine mounted on `IdeEngine`.
 pub struct DapManager {
     pub(super) data_dir: PathBuf,
@@ -402,6 +410,13 @@ impl DapManager {
     /// Return the current snapshot for debug session `id`.
     pub fn get_session(&self, id: &str) -> Result<IdeDebugSessionSnapshot> {
         Ok(self.get_entry(id)?.read_snapshot())
+    }
+
+    /// The session's latest stop and end, for the DB Watch engine. Unlike
+    /// [`Self::subscribe_events`] it never lags (output chunks do not ride
+    /// it) and a burst of stops reads as the newest one.
+    pub fn watch_stops(&self, id: &str) -> Result<tokio::sync::watch::Receiver<DapStopSignal>> {
+        Ok(self.get_entry(id)?.stops_tx.subscribe())
     }
 
     /// Subscribe to real-time [`IdeDebugSessionSnapshot`] updates for SSE streaming.
