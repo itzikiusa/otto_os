@@ -780,7 +780,8 @@ pub async fn run_cycle_with<S: K8sCtx>(
 
     // 1. Sweep. Up to SWEEP_CONCURRENCY namespaces at once (was one at a
     // time); each pod list — tens of MB of JSON on a big namespace — is parsed
-    // and reduced to its snapshot on the blocking pool, not a runtime worker.
+    // and reduced to its snapshot on the blocking pool, not a runtime worker,
+    // typed to the fields the snapshot reads (no whole-list `Value`).
     let swept: Vec<(String, otto_core::Result<Snapshot>)> =
         stream::iter(namespaces.iter().cloned())
             .map(|ns| {
@@ -790,12 +791,14 @@ pub async fn run_cycle_with<S: K8sCtx>(
                         .run(["get", "pods", "-n", ns.as_str(), "-o", "json"])
                         .await
                     {
-                        Ok(out) => {
-                            parse_off_runtime(out.stdout, |list| {
-                                classify::snapshot_from_pod_list(&list)
+                        Ok(out) => tokio::task::spawn_blocking(move || {
+                            classify::snapshot_from_pod_json(&out.stdout).map_err(|e| {
+                                Error::Upstream(format!("kubectl returned invalid JSON: {e}"))
                             })
-                            .await
-                        }
+                        })
+                        .await
+                        .map_err(|e| Error::Internal(format!("k8s monitor parse task: {e}")))
+                        .and_then(|r| r),
                         Err(e) => Err(e),
                     };
                     (ns, res)
