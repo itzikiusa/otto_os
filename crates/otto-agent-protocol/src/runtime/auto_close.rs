@@ -19,10 +19,10 @@
 //! plus nothing starting or queued.
 //!
 //! The same minute drops every loaded thread nothing holds any more: what
-//! [`super::is_evictable_dead`] lets go (a rename or a selection change
-//! loads one without evicting it after), and any thread with no agent
-//! process quiet for a minute (never spawned in this daemon life, or its
-//! agent exited cleanly), its pending DB writes flushed first.
+//! [`super::evictable`] lets go (no read drops one: a write it queued could
+//! land after the next load), and any thread with no agent process quiet for
+//! a minute (never spawned in this daemon life, or its agent exited
+//! cleanly), its pending DB writes flushed first.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -133,7 +133,7 @@ impl AgentRuntime {
         released
     }
 
-    /// Evict every loaded thread [`super::is_evictable_dead`] lets go, and
+    /// Evict every loaded thread [`super::evictable`] lets go, and
     /// every one with no agent process that emitted nothing for `quiet`.
     pub async fn evict_dead(&self, quiet: Duration) {
         let ids: Vec<Id> = self.inner.live.iter().map(|e| e.key().clone()).collect();
@@ -203,8 +203,6 @@ impl AgentRuntime {
         };
         if closed {
             super::evict_if_dead_after_flush(&self.inner, id).await;
-        } else {
-            super::try_evict_dead(&self.inner, id);
         }
         Ok(closed)
     }
