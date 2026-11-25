@@ -119,7 +119,7 @@ test('shape: paths, children, responses, the start confirm and DB rows', () => {
 // ── handlers against a fake IDE port ──────────────────────────────────────
 
 /** Values from the loaded sources live in another realm: compare as JSON. */
-const eq = (a: unknown, b: unknown, m?: string) => assert.deepEqual(JSON.parse(JSON.stringify(a)), b, m);
+const eq = (a: unknown, b: unknown, m = '') => assert.deepEqual(JSON.parse(JSON.stringify(a)), b, m);
 
 class UiCommandError extends Error {
   code: string;
@@ -275,6 +275,25 @@ test('scope rule: no session of its own → forbidden; the person’s step is re
   assert.equal(stop.stop_seq, 3);
   eq(stop.changed, ['n']);
   eq(ide.calls.find((x: unknown[]) => x[0] === 'command')?.[1], 'continue');
+});
+
+test('end: a run that finished is reported with its exit code, and stop still cleans up the agent’s breakpoints', async () => {
+  const { handlers, ide } = load();
+  const c = ctx();
+  const run = handlers.ide_debug_start({ target: { kind: 'test', file: 'a_test.go', name: 'TestA' }, breakpoints: [{ file: 'a.go', line: 3 }], wait_ms: 5_000 }, c);
+  later(() => ide.emit(paused(1, 3)));
+  await run;
+  const go = handlers.ide_debug_control({ action: 'continue', wait_ms: 5_000 }, c);
+  later(() => {
+    ide.mine = null; // the IDE lets go of an ended session
+    ide.emit(snap({ state: 'terminated', stop_seq: 1, output: [{ category: 'console', text: 'Process exited with code 1\n', seq: 1 }] }));
+  });
+  const end = await go;
+  assert.equal(end.state, 'terminated');
+  assert.equal(end.exit_code, 1);
+  const stopped = await handlers.ide_debug_control({ action: 'stop' }, c);
+  assert.equal(stopped.breakpoints_removed, 1);
+  assert.ok(!ide.calls.some((x: unknown[]) => x[0] === 'command' && x[1] === 'stop'), 'nothing left to stop');
 });
 
 test('evaluate: every expression confirms, showing it exactly; inspect reads by path, keyed by the path', async () => {

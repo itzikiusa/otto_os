@@ -56,8 +56,10 @@ export function checkRoot(raw: unknown, cwd: string): string {
 
 /** The debug session this agent started and still drives (the scope rule). */
 function mine(ide: IdePort, ctx: UiCommandCtx): { snap: IdeDebugSessionSnapshot; mem: DebugMemory } {
-  const id = ide.agentDebugId(ctx.agent);
   const snap = ide.debug;
+  // The IDE lets go of a session once it ends; its last result is still the agent's.
+  const last = memory.get(ctx.agent.session_id)?.debugId;
+  const id = ide.agentDebugId(ctx.agent) ?? (snap && snap.id === last && ended(snap) ? last : null);
   if (!id || !snap || snap.id !== id) {
     throw new UiCommandError(
       'forbidden',
@@ -241,7 +243,7 @@ registerUiCommands('ide', {
     const ide = await idePort.get(ctx.signal, 20_000);
     if (args.say) ide.say(ctx.agent, args.say);
     ctx.progress(`Opening ${basename(root)} in the IDE`);
-    await ide.openProject(ctx.agent, root);
+    await ide.openProject(ctx.agent, root, ctx.signal);
     const plan = await ide.resolveTarget(args.target, { build_tags: args.build_tags, args: args.args, env: args.env });
     const bps = args.breakpoints ?? [];
     const ok = await ctx.confirmWrite({
@@ -253,10 +255,13 @@ registerUiCommands('ide', {
     // Restarting: the agent's own earlier session ends first (a session the
     // person started asks "Stop and debug again" in the IDE).
     const prev = ide.agentDebugId(ctx.agent);
-    if (prev && ide.debug?.id === prev && !ended(ide.debug)) await ide.command('stop').catch(() => null);
+    if (prev && ide.debug?.id === prev && !ended(ide.debug)) {
+      await ide.command('stop').catch(() => null);
+      await waitFor(ide, 5_000, ctx.signal, (s) => s.id === prev && ended(s), { poll: gone(ide, prev) });
+    }
     if (bps.length) await ide.setAgentBreakpoints(ctx.agent, bps);
     ctx.progress(`Debugging ${plan.label}`);
-    const { debug_id } = await ide.launch(ctx.agent, plan, { break_on_exceptions: args.break_on_exceptions }).catch(async (e: unknown) => {
+    const { debug_id } = await ide.launch(ctx.agent, plan).catch(async (e: unknown) => {
       if (bps.length) await ide.clearAgentBreakpoints(ctx.agent, 'all').catch(() => 0); // nothing ran: leave no red dots
       throw e;
     });
