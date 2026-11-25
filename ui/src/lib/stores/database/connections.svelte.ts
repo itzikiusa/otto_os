@@ -557,7 +557,10 @@ export class DbConnectionsStore {
 
   /** One keep-alive round: `db/test` (acquires from the cached pool and
    *  refreshes the tunnel's last-used) for each ready connection, 2 at a time.
-   *  A failed ping turns the dot red before the user's next query. */
+   *  A failed ping turns the dot red before the user's next query. On the
+   *  long lane: a ping over a tunnel takes ~1 s (up to 10 s), and on `bg` the
+   *  two of them held both of the window's background slots, so every poll
+   *  behind them waited. */
   async keepAliveTick(): Promise<void> {
     if (!this.keepAlive || this.db.openConnIds.length === 0) return;
     // Nobody here for half an hour: stop pinging (it ran every 4 min all
@@ -567,7 +570,7 @@ export class DbConnectionsStore {
     await mapLimit(ids, 2, async (id) => {
       const epoch = this.db.epochs.of(id);
       try {
-        const res = await api.bg.post<DbTestResult>(`${this.db.connBase(id)}/test`, {});
+        const res = await api.long.post<DbTestResult>(`${this.db.connBase(id)}/test`, {});
         if (!this.db.epochs.live(id, epoch)) return;
         if (!res.ok) {
           this.setConnStatus(id, { phase: 'error', error: res.message || 'Connection lost' });
