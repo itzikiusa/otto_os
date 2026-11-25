@@ -157,6 +157,9 @@ pub struct DiffOpts {
     /// rows): a previous row older than the window's oldest key left the
     /// window, it was not deleted.
     pub window_full: bool,
+    /// `previous` was a full window: a row older than ITS oldest key entered
+    /// the window (a newer row was deleted), it was not added.
+    pub previous_full: bool,
 }
 
 /// A Redis `ttl` counts down on its own: only a TTL that appears, goes away
@@ -251,6 +254,23 @@ pub fn diff_snapshots(
         })
         .flatten();
 
+    // The same for the previous read: a row older than ITS oldest key entered
+    // the window (a newer row was deleted), it was not added.
+    let prev_floor = (opts.previous_full && !is_redis && pk_ok)
+        .then(|| {
+            previous
+                .rows
+                .iter()
+                .map(|r| pk_tuple(r))
+                .min_by(|a, b| cmp_tuple(a, b))
+        })
+        .flatten();
+    let entered_window = |row: &[Value]| {
+        prev_floor
+            .as_ref()
+            .is_some_and(|floor| cmp_tuple(&pk_tuple(row), floor).is_lt())
+    };
+
     let mut prev_occ = BTreeMap::new();
     let mut prev_map: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     for row in &previous.rows {
@@ -269,6 +289,7 @@ pub fn diff_snapshots(
         let k = row_key(row, columns, &key_indices, &mut curr_occ);
         curr_keys_seen.insert(k.clone());
         match prev_map.get(&k) {
+            None if entered_window(row) => {}
             None => {
                 added_count += 1;
                 if diffs.len() < MAX_DIFF_ROWS_EMITTED {
@@ -422,6 +443,7 @@ mod tests {
             &DiffOpts {
                 primary_key: vec!["key".into()],
                 window_full: false,
+                previous_full: false,
             },
         );
         assert_eq!(
@@ -455,12 +477,59 @@ mod tests {
         let opts = DiffOpts {
             primary_key: vec!["id".into()],
             window_full: true,
+            previous_full: false,
         };
         let d = diff_snapshots(&prev, &curr, &opts);
         assert_eq!(
             (d.added_count, d.removed_count, d.unchanged_count),
             (1, 0, 2)
         );
+        // A delete pulls an older row into a full window: it is not new.
+        let five = snap(
+            &["id", "v"],
+            vec![
+                vec![json!(5), json!("e")],
+                vec![json!(4), json!("d")],
+                vec![json!(3), json!("c")],
+            ],
+        );
+        let after_delete = snap(
+            &["id", "v"],
+            vec![
+                vec![json!(5), json!("e")],
+                vec![json!(3), json!("c")],
+                vec![json!(2), json!("b")],
+            ],
+        );
+        let both_full = DiffOpts {
+            previous_full: true,
+            ..opts.clone()
+        };
+        let d = diff_snapshots(&five, &after_delete, &both_full);
+        assert_eq!(
+            (d.added_count, d.removed_count, d.unchanged_count),
+            (0, 1, 2)
+        );
+        // A Redis read is an unordered SCAN: a new key that sorts first is new.
+        let keys = |ks: &[&str]| {
+            snap(
+                &["key", "type", "value", "ttl"],
+                ks.iter()
+                    .map(|k| vec![json!(k), json!("string"), json!("v"), json!(-1)])
+                    .collect(),
+            )
+        };
+        let redis = DiffOpts {
+            primary_key: vec!["key".into()],
+            window_full: true,
+            previous_full: true,
+        };
+        let d = diff_snapshots(
+            &keys(&["s:5", "s:4"]),
+            &keys(&["s:5", "s:4", "s:0"]),
+            &redis,
+        );
+        assert_eq!(d.added_count, 1);
         // A real delete inside the window still counts.
         let curr = snap(
             &["id", "v"],
@@ -501,6 +570,7 @@ mod tests {
         let opts = DiffOpts {
             primary_key: vec!["game_id".into(), "account_id".into()],
             window_full: false,
+            previous_full: false,
         };
         let d = diff_snapshots(&prev, &curr, &opts);
         assert_eq!(d.modified_count, 1);
@@ -516,6 +586,7 @@ mod tests {
         let opts = DiffOpts {
             primary_key: vec!["id".into()],
             window_full: true,
+            previous_full: true,
         };
         let d = diff_snapshots(&prev, &curr, &opts);
         assert_eq!(d.added_count + d.removed_count, 2);
@@ -530,6 +601,7 @@ mod tests {
         let opts = DiffOpts {
             primary_key: vec!["key".into()],
             window_full: true,
+            previous_full: true,
         };
         assert_eq!(
             diff_snapshots(&prev, &curr, &opts).removed_count,
@@ -547,6 +619,7 @@ mod tests {
         let opts = DiffOpts {
             primary_key: vec!["game_id".into(), "account_id".into()],
             window_full: true,
+            previous_full: true,
         };
         let d = diff_snapshots(&prev, &curr, &opts);
         assert_eq!((d.added_count, d.removed_count), (1, 0));
@@ -561,6 +634,7 @@ mod tests {
         let opts = DiffOpts {
             primary_key: vec!["id".into()],
             window_full: true,
+            previous_full: true,
         };
         let d = diff_snapshots(&prev, &curr, &opts);
         assert_eq!((d.added_count, d.removed_count), (1, 0), "{:?}", d.diffs);

@@ -962,13 +962,7 @@ pub async fn store_grant(ctx: &ServerCtx, id: &Id, record: Value) -> otto_core::
         .into_session();
     // Every Otto window learns of it (a revoke from the Threads window must
     // clear the driving bar and the write memory in the IDE window too).
-    let _ = ctx
-        .events
-        .send(otto_core::event::Event::SessionMetaUpdated {
-            session_id: session.id.clone(),
-            workspace_id: session.workspace_id.clone(),
-            meta: session.meta.clone(),
-        });
+    ctx.manager.announce_meta(&session);
     Ok(session)
 }
 
@@ -1089,11 +1083,8 @@ pub async fn run(
                 .dispatch(&conn, &session, &spec.name, &args, budget)
                 .await?;
             if spec.name == "ide_debug_start" {
-                bridge
-                    .debug_doc
-                    .lock()
-                    .unwrap()
-                    .insert(session.id.clone(), conn);
+                let mut pins = bridge.debug_doc.lock().unwrap();
+                pins.insert(session.id.clone(), conn);
             }
             Ok(with_visibility(shape_result(v, spec.module == "ide"), true))
         }

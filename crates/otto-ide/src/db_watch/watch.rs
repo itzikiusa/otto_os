@@ -397,7 +397,11 @@ impl Watch {
                     }
                     let prev = item.latest.replace(snap);
                     if let (Some(prev), Some(latest)) = (&prev, &item.latest) {
-                        let d = diff_snapshots(&prev.data, &latest.data, &item_opts(item, latest));
+                        let d = diff_snapshots(
+                            &prev.data,
+                            &latest.data,
+                            &item_opts(item, prev, latest),
+                        );
                         let n = d.added_count + d.modified_count + d.removed_count;
                         changed_rows += n;
                         changed_items += usize::from(n > 0);
@@ -523,10 +527,11 @@ impl Drop for Busy<'_> {
     }
 }
 
-fn item_opts(item: &Item, latest: &Snap) -> DiffOpts {
+fn item_opts(item: &Item, prev: &Snap, latest: &Snap) -> DiffOpts {
     DiffOpts {
         primary_key: item.info.primary_key.clone(),
         window_full: latest.window_full,
+        previous_full: prev.window_full,
     }
 }
 
@@ -729,6 +734,7 @@ fn item_diff(
         let opts = DiffOpts {
             primary_key: info.primary_key.clone(),
             window_full: l.window_full,
+            previous_full: from.window_full,
         };
         let d = diff_snapshots(&from.data, &l.data, &opts);
         out.added_count = d.added_count;

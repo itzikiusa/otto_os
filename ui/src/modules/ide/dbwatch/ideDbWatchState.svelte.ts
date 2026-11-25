@@ -106,6 +106,8 @@ class IdeDbWatchController {
   private gen = 0;
   private readSeq = 0;
   private restoring: Promise<void> = Promise.resolve();
+  /** Starts run one at a time: the agent's and the first stop's auto-arm can race. */
+  private starting: Promise<unknown> = Promise.resolve();
   private activeFile: string | null = null;
   private additionalRoots: string[] = [];
   /** The live debug session / run this root is following, and the ones armed. */
@@ -339,9 +341,17 @@ class IdeDbWatchController {
     return v === name;
   }
 
-  async start(req: Omit<IdeDbWatchStartReq, 'root'> & { root?: string }, opts: DbWatchStartOpts = {}): Promise<IdeDbWatch | null> {
+  start(req: Omit<IdeDbWatchStartReq, 'root'> & { root?: string }, opts: DbWatchStartOpts = {}): Promise<IdeDbWatch | null> {
+    const turn = this.starting.then(() => this.startNow(req, opts));
+    this.starting = turn.catch(() => null);
+    return turn;
+  }
+
+  private async startNow(req: Omit<IdeDbWatchStartReq, 'root'> & { root?: string }, opts: DbWatchStartOpts): Promise<IdeDbWatch | null> {
     const root = req.root ?? this.root;
     if (!root || req.items.length === 0) return null;
+    // The auto-arm never replaces a watch the agent (or the person) armed for this run.
+    if (opts.auto && this.watch && sameBind(this.watch.bind, req.bind)) return this.watch;
     const gen = this.gen;
     const body: IdeDbWatchStartReq = {
       ...req,
@@ -349,6 +359,8 @@ class IdeDbWatchController {
       items: req.items.slice(0, MAX_WATCH_ITEMS),
       bind: req.bind === undefined ? this.liveBind : req.bind,
     };
+    // An agent can name a saved connection the panel never listed: look it up, so prod still confirms.
+    if (req.target.kind === 'saved' && !this.targetOf(req.target)) await this.discover();
     const conn = req.target.kind === 'saved' ? this.targetOf(req.target) : null;
     if (conn && isProdTarget(conn)) {
       if (opts.auto) return null;

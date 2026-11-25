@@ -7,7 +7,7 @@
 // (ui/unit/uiCommandsIde.test.ts).
 
 import type { ApiResponse, IdeDebugOutput, IdeDebugSessionSnapshot, IdeVariable } from '../api/types';
-import type { AgentDbRead } from './ideDbWatchPort';
+import type { IdeDbWatchReadResp } from '../api/types/ide-db-watch';
 import type { IdeAgentBreakpoint } from './idePort';
 
 export const STOP_MAX_CHARS = 16 * 1024;
@@ -21,6 +21,7 @@ export const SOURCE_RADIUS = 6;
 export const INSPECT_VALUE_MAX = 2048;
 export const EVAL_MAX = 4096;
 export const BODY_MAX = 16 * 1024;
+const DLV_BANNER = "Type 'dlv help' for list of commands.";
 
 /** What the handlers remember per agent session between calls. */
 export interface DebugMemory {
@@ -100,7 +101,8 @@ export function outputTail(output: readonly IdeDebugOutput[], afterSeq: number):
     text += o.text;
   });
   if (text.length > TAIL_CHARS) text = `…${text.slice(text.length - TAIL_CHARS)}`;
-  const lines = text.split('\n');
+  // Delve's console banner is the debugger's, not the program's output.
+  const lines = text.split('\n').filter((l) => l !== DLV_BANNER);
   if (lines[lines.length - 1] === '') lines.pop();
   return { lines: lines.slice(-TAIL_LINES).map((l) => clip(l, LINE_MAX)), seq };
 }
@@ -271,29 +273,38 @@ export interface BreakpointCode {
 }
 
 /** Breakpoints whose condition / hit count / log message the debugger
- *  evaluates in the program — code, so the person sees each one verbatim. */
+ *  evaluates in the program — code, so the person sees each one verbatim,
+ *  whole (never clipped) and with nothing invisible in it. */
 export function breakpointCode(bps: readonly BreakpointCode[]): string[] {
   const out: string[] = [];
   for (const b of bps) {
     const parts = [
-      b.condition ? `condition ${confirmSafe(b.condition, 500)}` : '',
-      b.hit_condition ? `hit count ${confirmSafe(b.hit_condition, 100)}` : '',
-      b.log_message ? `logs ${confirmSafe(b.log_message, 500)}` : '',
+      b.condition ? `condition ${spelledOut(b.condition)}` : '',
+      b.hit_condition ? `hit count ${spelledOut(b.hit_condition)}` : '',
+      b.log_message ? `logs ${spelledOut(b.log_message)}` : '',
     ].filter(Boolean);
-    if (parts.length) out.push(`${confirmSafe(b.file, 300)}:${b.line} — ${parts.join(' · ')}`);
+    if (parts.length) out.push(`• ${spelledOut(b.file)}:${b.line} — ${parts.join(' · ')}`);
   }
   return out;
 }
 
-/** The start confirm's text: exactly what will run. */
-/** A value as the person must see it before approving a run: quoted (so
- *  leading / trailing spaces show), control, BiDi and zero-width characters
- *  spelled out, never clipped (the daemon caps values at 4096 chars). */
-export function visibleValue(v: string): string {
-  return JSON.stringify(v).replace(/[\u061C\u200B-\u200F\u2028-\u202E\u2066-\u2069\uFEFF]/g, (c) =>
-    `\\u${c.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}`);
+const INVISIBLE = /[\u0000-\u001f\u007f\u061c\u200b-\u200f\u2028-\u202e\u2066-\u2069\ufeff]/g;
+
+/** What an agent wrote, as the person must see it before approving a run:
+ *  control, BiDi and zero-width characters spelled out (`\n`, `\u202E`), so
+ *  nothing reorders or hides the text. Never clipped: a cut could hide the
+ *  payload (the daemon already caps every argument). */
+export function spelledOut(s: string): string {
+  return s.replace(INVISIBLE, (c) => (c === '\n' ? '\\n' : `\\u${c.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}`));
 }
 
+/** A value: quoted (so leading / trailing spaces show) and spelled out. */
+export function visibleValue(v: string): string {
+  return spelledOut(JSON.stringify(v));
+}
+
+/** The start confirm's text: exactly what will run, the warning first so no
+ *  long value can push it out of view; every agent-written part whole. */
 export function startConfirmText(p: {
   label: string; command: string; cwd: string; build_flags: readonly string[];
   env: Record<string, string>; breakpoints: readonly BreakpointCode[]; root: string;
@@ -301,16 +312,16 @@ export function startConfirmText(p: {
   const env = Object.entries(p.env);
   const code = breakpointCode(p.breakpoints);
   return [
-    `Debug ${confirmSafe(p.label, 200)}`,
-    `Command: ${confirmSafe(p.command, 2000)}`,
-    `Working directory: ${confirmSafe(relPath(p.root, p.cwd) || '.', 500)}`,
-    p.build_flags.length ? `Build flags: ${confirmSafe(p.build_flags.join(' '), 1000)}` : '',
-    env.length
-      ? `Extra environment: ${env.map(([k, v]) => `${confirmSafe(k, 100)}=${confirmSafe(visibleValue(v), 500)}`).join(', ')}`
-      : 'Environment: the project environment',
+    `Debug ${spelledOut(p.label)}`,
+    'It runs on your Mac as you, outside the agent’s sandbox.',
+    `Command: ${spelledOut(p.command)}`,
+    `Working directory: ${spelledOut(relPath(p.root, p.cwd) || '.')}`,
+    p.build_flags.length ? `Build flags: ${spelledOut(p.build_flags.join(' '))}` : '',
+    ...(env.length
+      ? ['Extra environment:', ...env.map(([k, v]) => `  ${spelledOut(k)}=${visibleValue(v)}`)]
+      : ['Environment: the project environment']),
     `Breakpoints: ${p.breakpoints.length}`,
     ...(code.length ? ['Code the debugger runs at these breakpoints:', ...code] : []),
-    'It runs on your Mac as you, outside the agent’s sandbox.',
   ]
     .filter(Boolean)
     .join('\n');
@@ -326,7 +337,7 @@ export function sensitiveName(name: string): boolean {
 /** DB Watch rows for the agent: per object the counts and ≤ `maxRows` rows,
  *  each row an object keyed by COLUMN (so it masks by name) — a changed row
  *  lists its changed cells only. */
-export function shapeDbRead(read: AgentDbRead | null, maxRows: number): Record<string, unknown> {
+export function shapeDbRead(read: IdeDbWatchReadResp | null, maxRows: number): Record<string, unknown> {
   if (!read) return { objects: [] };
   return {
     from_seq: read.from_seq,

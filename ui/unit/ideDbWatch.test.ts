@@ -293,6 +293,37 @@ test('Stop watching drops the watch and this project stops re-arming at the next
   assert.equal(h.calls.filter((c) => c.method === 'POST' && c.url === '/ide/db-watch/watches').length, 0);
 });
 
+test('agent + auto-arm at the same first stop: starts run one after the other and the auto-arm never replaces a watch already bound to that session', async () => {
+  const w = watchOf({ bind: { debug_session_id: 'd1' } });
+  const gate = deferred<unknown>();
+  let posts = 0;
+  const h = harness({ routes: (c) => {
+    if (c.method === 'POST' && c.url === '/ide/db-watch/watches') { posts += 1; return gate.promise; }
+    if (c.method === 'GET' && c.url.startsWith('/ide/db-watch/watches/w1')) return readOf(w);
+    return undefined;
+  } });
+  h.store.follow({ root: '/r' });
+  const agent = h.store.start({ target: { kind: 'auto', engine: 'mysql' }, items: [{ object: 'orders' }], bind: { debug_session_id: 'd1' } }, { asker: 'Claude · Fix orders' });
+  const auto = h.store.start({ target: { kind: 'ephemeral', ephemeral_id: 'tc1' }, items: [{ object: 'session_info' }], bind: { debug_session_id: 'd1' } }, { auto: true });
+  await flush(); await flush();
+  assert.equal(posts, 1, 'the second start waits for the first');
+  gate.resolve(w);
+  assert.equal((await agent)?.id, 'w1');
+  assert.equal((await auto)?.id, 'w1');
+  assert.equal(posts, 1, 'the auto-arm saw the session already watched');
+});
+
+test('an agent start on a saved prod connection the panel never listed still asks the typed confirm, naming the agent', async () => {
+  const prodWatch = watchOf({ target: { kind: 'saved', connection_id: 'p', engine: 'mysql', label: 'pr_bo prod', environment: 'production', local: false } });
+  const h = harness({ prompt: () => null, routes: (c) => (c.url === '/ide/db-watch/detect' ? { detected_objects: [], saved_connections: [saved({ connection_id: 'p', name: 'pr_bo prod', environment: 'production' })], ephemeral_targets: [] } : c.url === '/ide/db-watch/watches' ? prodWatch : c.url.startsWith('/ide/db-watch/watches?') ? { watches: [] } : undefined) });
+  h.store.follow({ root: '/r' });
+  await flush();
+  const r = await h.store.start({ target: { kind: 'saved', connection_id: 'p' }, items: [{ object: 'session_info' }] }, { asker: 'Claude · Fix orders' });
+  assert.equal(r, null);
+  assert.match(h.prompts[0] ?? '', /Asked by: Claude · Fix orders/);
+  assert.equal(h.calls.filter((c) => c.method === 'POST' && c.url === '/ide/db-watch/watches').length, 0);
+});
+
 test('switching the IDE target drops in-flight reads; failures read as people text', async () => {
   const w = watchOf();
   const gate = deferred<unknown>();

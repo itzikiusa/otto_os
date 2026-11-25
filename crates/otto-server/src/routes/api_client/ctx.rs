@@ -27,10 +27,7 @@ impl ApiClientCtx for ServerCtx {
     }
 
     fn live_debug_session(&self, user: &User, debug_id: &str) -> bool {
-        use otto_ide::types::IdeDebugState::{Error, Terminated};
-        self.ide.authorize_debug_session(user, debug_id).is_ok()
-            && (self.ide.dap.get_session(debug_id))
-                .is_ok_and(|s| !matches!(s.state, Terminated | Error))
+        self.ide.live_debug_session(user, debug_id)
     }
 
     async fn workspace_settings(&self, wid: &Id) -> Option<Value> {

@@ -53,12 +53,10 @@ pub async fn restart_impact(
     let docs = ctx.vault_docs_runs.lock().map_or(0, |r| {
         r.values().filter(|e| e.run.finished_at.is_none()).count()
     });
+    let renders = crate::design_blender::running_jobs(&ctx.design_jobs);
     items.push(otto_core::restart::ImpactItem::jobs(&[
         ("Goal Loop", ctx.goal_loops.lock().map_or(0, |h| h.len())),
-        (
-            "Blender render",
-            crate::design_blender::running_jobs(&ctx.design_jobs),
-        ),
+        ("Blender render", renders),
         ("docs run", docs),
     ]));
     Ok(Json(items.into()))

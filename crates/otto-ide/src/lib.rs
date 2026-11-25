@@ -212,6 +212,14 @@ impl IdeEngine {
         self.dap.authorize_session(user, debug_id)
     }
 
+    /// `user` may use debug session `debug_id` and it is still running.
+    pub fn live_debug_session(&self, user: &User, debug_id: &str) -> bool {
+        use types::IdeDebugState::{Error, Terminated};
+        self.authorize_debug_session(user, debug_id).is_ok()
+            && (self.dap.get_session(debug_id))
+                .is_ok_and(|s| !matches!(s.state, Terminated | Error))
+    }
+
     pub fn filter_debug_sessions(
         &self,
         user: &User,
