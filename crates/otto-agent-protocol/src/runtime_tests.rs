@@ -878,9 +878,10 @@ async fn closed_and_failed_sessions_evict_from_live_map_after_persistence() {
     .expect("closed session must be evicted from AgentRuntime::live");
 
     let _ = rt.replay(&s_closed.id, 0).await.unwrap();
+    rt.evict_dead(Duration::from_secs(60)).await;
     assert!(
         !rt.inner.live.contains_key(&s_closed.id),
-        "reading closed session history must not re-pin it in AgentRuntime::live"
+        "reading closed session history must not re-pin it past the sweep"
     );
 
     // 2. Failed session whose child exits non-zero evicts once persisted and tasks exit.
@@ -1284,6 +1285,28 @@ async fn evictions_never_lose_a_queued_write() {
             "round {i}"
         );
     }
+}
+
+/// The same for a closed thread, which every rule lets go: no read drops it
+/// before its queued writes landed.
+#[tokio::test]
+async fn reads_of_a_closed_thread_never_lose_a_queued_write() {
+    let (_dir, _host, rt, s) = dormant_thread().await;
+    rt.close(&s.id).await.unwrap();
+    for i in 0..40 {
+        let effort = if i % 2 == 0 { "high" } else { "low" };
+        rt.set_effort(&s.id, Some(effort)).await.unwrap();
+        rt.replay_paged_opts(&s.id, 0, Some(1), None, None, true, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            rt.get(&s.id).await.unwrap().effort.as_deref(),
+            Some(effort),
+            "round {i}"
+        );
+    }
+    rt.evict_dead(Duration::ZERO).await;
+    assert!(!rt.inner.live.contains_key(&s.id), "the sweep lets it go");
 }
 
 /// A value given through a private secret request is masked only while its

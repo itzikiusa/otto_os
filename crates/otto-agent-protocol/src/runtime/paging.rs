@@ -635,7 +635,6 @@ impl AgentRuntime {
         })
         .await;
         drop(live);
-        super::try_evict_dead(&self.inner, id);
         res
     }
 }

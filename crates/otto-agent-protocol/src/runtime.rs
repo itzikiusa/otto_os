@@ -1732,7 +1732,6 @@ impl AgentRuntime {
             });
             found
         };
-        try_evict_dead(&self.inner, id);
         let mime = mime.ok_or_else(|| Error::NotFound("no such attachment".into()))?;
         let bytes = tokio::fs::read(self.attachments(id).join(attachment_id))
             .await
@@ -1966,7 +1965,6 @@ impl AgentRuntime {
                 .ok_or_else(|| Error::NotFound(format!("turn item '{item_id}' not found")))
         })
         .await;
-        try_evict_dead(&self.inner, id);
         res
     }
 
@@ -2127,7 +2125,6 @@ impl AgentRuntime {
                 },
             }
         };
-        try_evict_dead(&self.inner, id);
         Ok(out)
     }
 
@@ -3562,11 +3559,9 @@ pub(super) fn dispatch_child_stdout(
     apply_step_opts(inner, live, st, step, false, sync_checkpoint);
 }
 
-pub(super) fn is_evictable_dead(st: &State) -> bool {
-    evictable(st, None)
-}
-
-/// [`is_evictable_dead`]; with `quiet` (the minute's sweep) also any entry
+/// Whether a loaded thread may leave memory: nothing runs, starts, waits on
+/// the person, streams or is queued, no secret is masked, and it is closed,
+/// released or failed — or, with `quiet` (the minute's sweep), any entry
 /// with no agent process that emitted nothing for that long: one no process
 /// ran for in this daemon life (a read or a rename after a restart) or whose
 /// agent exited cleanly. Never one holding a secret to mask.
@@ -3592,12 +3587,6 @@ fn evictable(st: &State, quiet: Option<Duration>) -> bool {
             }))
 }
 
-pub(super) fn try_evict_dead(inner: &Inner, id: &Id) {
-    inner.live.remove_if(id, |_, l| {
-        Arc::strong_count(l) == 1 && is_evictable_dead(&l.lock())
-    });
-}
-
 pub(super) async fn evict_if_dead_after_flush(inner: &Arc<Inner>, id: &Id) {
     evict_after_flush(inner, id, None).await;
 }
@@ -3605,7 +3594,7 @@ pub(super) async fn evict_if_dead_after_flush(inner: &Arc<Inner>, id: &Id) {
 /// Drop `id` when [`evictable`] and nothing else holds it (so nothing can
 /// queue a write after the check), then wait for its queued DB writes under
 /// its load lock: nobody loads it again (with a second DB writer) before
-/// they landed.
+/// they landed. The one way an entry leaves the live map.
 pub(super) async fn evict_after_flush(inner: &Arc<Inner>, id: &Id, quiet: Option<Duration>) {
     async fn flush(persist: &mpsc::UnboundedSender<PersistOp>) {
         let (tx, rx) = oneshot::channel();
@@ -3613,8 +3602,9 @@ pub(super) async fn evict_after_flush(inner: &Arc<Inner>, id: &Id, quiet: Option
             let _ = rx.await;
         }
     }
-    // Flushed first even when a holder keeps it loaded: a later read's
-    // `try_evict_dead` drops it without waiting.
+    // Flushed first even when a holder keeps it loaded: a list reads the DB
+    // row once another evictor (the pump's end) dropped the entry, so a Close
+    // must have landed by the time it returns.
     let Some(persist) = inner.live.get(id).and_then(|e| {
         let l = e.value();
         evictable(&l.lock(), quiet).then(|| l.persist.clone())
