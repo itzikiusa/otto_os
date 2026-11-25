@@ -802,14 +802,16 @@ test.describe('Desktop IDE — Auto-Save, Modal Lifecycle, Live DB Watch & 7-Pro
     const dbPanel = page.getByTestId('ide-dbwatch-panel');
     await expect(dbPanel).toBeVisible({ timeout: 10_000 });
 
-    // A saved connection is never picked for you: choose it in Target ▾, then the
-    // detected `session:*` prefix in Tables ▾ (ranked from the code).
+    // A saved connection is never picked for you: choose it in Target ▾, then a
+    // Redis key pattern in Tables ▾.
     await page.getByTestId('ide-dbw-target').click();
     await page.locator('.ctx-menu').getByRole('menuitemcheckbox', { name: /e2e-watch-redis/ }).click();
     await expect(dbPanel).toContainText('Choose tables to watch');
     await page.getByTestId('ide-dbw-tables').click();
-    await page.locator('.ctx-menu').getByText('session:*', { exact: true }).first().click();
-    await page.keyboard.press('Escape');
+    await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Key pattern…' }).click();
+    const prompt = page.locator('[role="dialog"]').last();
+    await prompt.getByRole('textbox').fill('session:*');
+    await prompt.getByRole('button', { name: 'Watch' }).click();
     // Watching takes the baseline (3 Redis keys: session:1001, session:1002, session:1003)
     await expect(page.getByTestId('ide-dbw-armed')).toContainText('Watching 1 table', { timeout: 10_000 });
 
