@@ -52,6 +52,8 @@ mod mcp_auto_approve;
 mod mcp_db_execute;
 #[path = "mcp_profiles_edges.rs"]
 mod mcp_profiles_edges;
+#[path = "mcp_server_scope.rs"]
+mod mcp_server_scope;
 #[path = "personal_agent_policy.rs"]
 mod personal_agent_policy;
 #[path = "personal_agents_owner.rs"]

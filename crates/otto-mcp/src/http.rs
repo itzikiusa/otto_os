@@ -94,7 +94,7 @@ async fn require_resource<S: McpCtx>(
     } else {
         WorkspaceRole::Viewer
     };
-    require_ws(ctx, user, &server.workspace_id, min).await?;
+    require_reach(ctx, user, server, operation, min).await?;
     if !ctx
         .mcp()
         .resource_allowed(server, user, "discover", child)
@@ -112,6 +112,35 @@ async fn require_resource<S: McpCtx>(
         )));
     }
     Ok(())
+}
+
+/// `min` role in a workspace that reaches `server`. Its settings
+/// (`configure`) stay with its home workspace; using it is open to a member
+/// of any workspace it is available in (`otto_state::mcp_scope`).
+async fn require_reach<S: McpCtx>(
+    ctx: &S,
+    user: &User,
+    server: &McpServerDetail,
+    operation: &str,
+    min: WorkspaceRole,
+) -> Result<(), ApiErr> {
+    let home = require_ws(ctx, user, &server.workspace_id, min).await;
+    if home.is_ok() || operation == "configure" {
+        return home;
+    }
+    let others = if server.all_workspaces {
+        let mut ws = accessible_ws(ctx, user).await?.unwrap_or_default();
+        ws.push(otto_core::domain::SCRATCH_WORKSPACE_ID.to_string());
+        ws
+    } else {
+        server.shared_workspace_ids.clone()
+    };
+    for ws in &others {
+        if require_ws(ctx, user, ws, min).await.is_ok() {
+            return Ok(());
+        }
+    }
+    home
 }
 
 async fn public_server<S: McpCtx>(
@@ -135,11 +164,18 @@ async fn public_server_with<S: McpCtx>(
     policy: &otto_core::access::AccessPolicy,
     access: &mut crate::service::CallerAccess,
 ) -> Result<McpServerDetail, ApiErr> {
-    if !ctx
+    // A member of a workspace the server was only shared with sees that it
+    // exists and its tools, never its configuration (`require_reach`).
+    let configurer = ctx
         .mcp()
-        .resource_allowed_with(access, policy, &server, user, &[("configure", None)])
-        .await?[0]
-    {
+        .member_of(access, user, &server.workspace_id)
+        .await?
+        && ctx
+            .mcp()
+            .resource_allowed_with(access, policy, &server, user, &[("configure", None)])
+            .await?[0];
+    if !configurer {
+        server.shared_workspace_ids.clear();
         server.command.clear();
         server.args.clear();
         server.env.clear();
@@ -396,6 +432,19 @@ async fn create_server<S: McpCtx>(
         })
         .await
         .map_err(ApiErr)?;
+    // Where else it is available (the owner check above covers sharing):
+    // a bad workspace id leaves no half-created server behind.
+    if req.all_workspaces || !req.shared_workspace_ids.is_empty() {
+        let scoped = ctx
+            .mcp()
+            .registry()
+            .set_scope(&server.id, req.all_workspaces, &req.shared_workspace_ids)
+            .await;
+        if let Err(e) = scoped {
+            let _ = ctx.mcp().registry().delete(&server.id).await;
+            return Err(ApiErr(e));
+        }
+    }
     // Persist secret values to the keychain (never to the row).
     if !req.secret_env.is_empty() || !req.secret_headers.is_empty() {
         let blob = json!({ "env": req.secret_env, "headers": req.secret_headers }).to_string();
@@ -511,6 +560,22 @@ async fn update_server<S: McpCtx>(
         };
         ctx.mcp().set_run_mode(&id, mode, &actor).await?;
     }
+    // Sharing hands the server's credentials to other workspaces' members:
+    // owner only, like the credentials themselves.
+    let all = req.all_workspaces.unwrap_or(server.all_workspaces);
+    let mut shared = req
+        .shared_workspace_ids
+        .clone()
+        .unwrap_or_else(|| server.shared_workspace_ids.clone());
+    shared.retain(|w| *w != server.workspace_id);
+    shared.sort();
+    shared.dedup();
+    let rescope = all != server.all_workspaces || shared != server.shared_workspace_ids;
+    if rescope && !otto_core::auth::root_authority(&user) {
+        return Err(ApiErr(Error::Forbidden(
+            "only the owner can change where an MCP server is available".into(),
+        )));
+    }
     // Only the maps this save supplies are checked: a stored key is never a
     // reason to refuse an unrelated edit.
     let supplied_env = req.env.iter().chain(req.secret_env.iter());
@@ -546,6 +611,9 @@ async fn update_server<S: McpCtx>(
             .set_secret_meta(&id, Some(&sref), &ek, &hk)
             .await
             .map_err(ApiErr)?;
+    }
+    if rescope {
+        ctx.mcp().registry().set_scope(&id, all, &shared).await?;
     }
     // Any edit (config, secrets, enabled) retires the pooled session.
     ctx.mcp().evict_client(&id);
@@ -930,9 +998,9 @@ async fn set_allowlist<S: McpCtx>(
             .get(&e.server_id)
             .await
             .map_err(ApiErr)?;
-        if s.workspace_id != wid {
+        if !s.is_available_in(&wid) {
             return Err(ApiErr(Error::Invalid(format!(
-                "server {} is not in this workspace",
+                "server {} is not available in this workspace",
                 e.server_id
             ))));
         }
@@ -1235,7 +1303,7 @@ async fn evaluate_policy<S: McpCtx>(
         .get(&req.server_id)
         .await
         .map_err(ApiErr)?;
-    require_ws(&ctx, &user, &server.workspace_id, WorkspaceRole::Viewer).await?;
+    require_reach(&ctx, &user, &server, "discover", WorkspaceRole::Viewer).await?;
     ctx.mcp()
         .evaluate_preview(&req.server_id, &req.tool, req.workspace_id.as_deref())
         .await

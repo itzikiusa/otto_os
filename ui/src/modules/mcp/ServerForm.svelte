@@ -20,6 +20,10 @@
     McpTransport,
   } from '../../lib/api/types';
   import { MCP_SERVER_TEMPLATES, type McpServerTemplate } from './templates';
+  import AvailableIn from './AvailableIn.svelte';
+  import { scopeBody, scopeConfirm, widens, type Scope } from './serverScope';
+  import { confirmer } from '../../lib/confirm.svelte';
+  import { ws } from '../../lib/stores/workspace.svelte';
 
   interface Props {
     wsId: string;
@@ -48,6 +52,8 @@
   let defaultToolAccess = $state<McpToolAccess>('allow');
   let enabled = $state(false);
   let advancedOpen = $state(false);
+  let scope = $state<Scope>({ all: false, shared: [] });
+  const wsName = (id: string) => ws.workspaces.find((w) => w.id === id)?.name ?? id;
 
   let saving = $state(false);
 
@@ -111,7 +117,9 @@
     saving = true;
     try {
       const body = { name: name.trim(), command: command.trim(), args: parseLines(argsText), env: parseKv(envText), secret_env, enabled };
-      await mcpApi.create(wsId, body);
+      const created = await mcpApi.create(wsId, body);
+      // The native-config route has no scope: the shared row takes it here.
+      if (widens({ all: false, shared: [] }, scope)) await mcpCpApi.cpUpdate(created.id, scopeBody(scope));
       toasts.success('Native MCP server added', name.trim());
       onsaved();
       onclose();
@@ -140,6 +148,10 @@
       announce(invalid, { assertive: true });
       return;
     }
+    if (widens({ all: false, shared: [] }, scope)) {
+      const c = scopeConfirm(name.trim(), scope, wsName);
+      if (!(await confirmer.ask(c.message, { title: c.title, confirmLabel: c.confirmLabel }))) return;
+    }
     if (runs === 'native') return saveNative();
     const body: CreateMcpControlServerReq = {
       name: name.trim(),
@@ -148,6 +160,7 @@
       injection_risk: injectionRisk,
       default_tool_access: defaultToolAccess,
       enabled,
+      ...scopeBody(scope),
     };
     if (transport === 'stdio') {
       body.command = command.trim();
@@ -303,6 +316,8 @@
       </div>
     {/if}
     {/if}
+
+    <AvailableIn home={wsId} bind:scope />
 
     <label class="check">
       <input type="checkbox" bind:checked={enabled} />

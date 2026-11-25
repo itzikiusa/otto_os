@@ -27,6 +27,9 @@
   import ServerForm from './ServerForm.svelte';
   import ToolsTab from './ToolsTab.svelte';
   import { signIn, signOut } from './mcpOAuth';
+  import AvailableIn from './AvailableIn.svelte';
+  import { scopeBadge, scopeBody, scopeConfirm, scopeOf, widens, type Scope } from './serverScope';
+  import { ws } from '../../lib/stores/workspace.svelte';
   import { onDestroy } from 'svelte';
 
   interface Props {
@@ -44,6 +47,12 @@
 
   let accessId = $state<string | null>(null);
   const can = (id: string, op: string) => resourceAccess.can('mcp_server',id,op,'mcp','admin');
+  // A server shared from another workspace keeps its settings there: only
+  // that workspace's members change it (the daemon's `require_reach`).
+  const wsName = (id: string) => ws.workspaces.find((w) => w.id === id)?.name ?? 'another workspace';
+  const homeMember = (s: McpServerDetail) => s.workspace_id === wsId || ws.workspaces.some((w) => w.id === s.workspace_id);
+  const configurable = (s: McpServerDetail) => homeMember(s) && can(s.id, 'configure');
+  const noConfigure = (s: McpServerDetail) => (homeMember(s) ? NO_CONFIGURE : `Shared from ${wsName(s.workspace_id)}: only its members can change it`);
   const loadedAccessIds = new Set<string>();
   $effect(() => {
     for (const server of servers) {
@@ -165,7 +174,7 @@
 
   function rowMenu(e: MouseEvent, s: McpServerDetail): void {
     onSelect(s.id);
-    const configure = can(s.id, 'configure');
+    const configure = configurable(s);
     const to: McpRunMode = serverRuns(s) === 'native' ? 'governed' : 'native';
     const blocked = !auth.isRoot ? 'Only the owner can change how a server runs' : switchBlocked(s, to);
     const items: MenuItem[] = serverRuns(s) === 'native'
@@ -184,6 +193,16 @@
       title: blocked ?? undefined,
       action: () => void switchMode(s, to),
     });
+    items.push({
+      label: 'Available in…',
+      icon: 'share',
+      disabled: !auth.isRoot || !homeMember(s),
+      title: !auth.isRoot ? 'Only the owner can change where a server is available' : homeMember(s) ? undefined : noConfigure(s),
+      action: () => {
+        scopeDraft = scopeOf(s);
+        scoping = s;
+      },
+    });
     if (auth.isRoot || can(s.id, 'manage_access')) items.push({ label: 'Manage access…', icon: 'key', action: () => (accessId = s.id) });
     items.push({ separator: true }, { label: 'Delete…', icon: 'trash', danger: true, disabled: !configure, action: () => void remove(s) });
     ctxMenu.show(e, items);
@@ -196,6 +215,29 @@
     setBusy(s.id, 'oauth');
     try {
       if (await run(s, gone.signal)) await onReload();
+    } finally {
+      setBusy(s.id, null);
+    }
+  }
+
+  let scoping = $state<McpServerDetail | null>(null);
+  let scopeDraft = $state<Scope>({ all: false, shared: [] });
+  /** Save where `scoping` is available; a wider scope confirms first. */
+  async function saveScope(): Promise<void> {
+    const s = scoping;
+    if (!s) return;
+    if (widens(scopeOf(s), scopeDraft)) {
+      const c = scopeConfirm(s.name, scopeDraft, wsName);
+      if (!(await confirmer.ask(c.message, { title: c.title, confirmLabel: c.confirmLabel }))) return;
+    }
+    setBusy(s.id, 'scope');
+    try {
+      await mcpCpApi.cpUpdate(s.id, scopeBody(scopeDraft));
+      scoping = null;
+      toasts.success('Availability saved', s.name);
+      await onReload();
+    } catch (e) {
+      toastError('Couldn’t change where the server is available', e);
     } finally {
       setBusy(s.id, null);
     }
@@ -260,12 +302,12 @@
             <button
               class="name"
               aria-current={isSelected ? 'true' : undefined}
-              disabled={!can(s.id, 'configure')}
+              disabled={!configurable(s)}
               onclick={() => {
                 onSelect(s.id);
                 editing = s;
               }}
-              title={can(s.id, 'configure') ? `Edit ${s.name}` : NO_CONFIGURE}
+              title={configurable(s) ? `Edit ${s.name}` : noConfigure(s)}
             >
               <span class="nm">{s.name}</span>
               <span class="endpoint mono" title={endpoint}>{endpoint}</span>
@@ -286,6 +328,7 @@
           {/if}
             <span class="runs" data-testid="mcp-server-runs-badge">
               <span class="runs-mode">Runs: {RUNS_LABEL[serverRuns(s)]}</span>
+              {#if scopeBadge(s, wsId, wsName)}<span class="scope" data-testid="mcp-server-scope">{scopeBadge(s, wsId, wsName)}</span>{/if}
               {#if native}
                 <span class="ungoverned" title={NOT_GOVERNED_NOTE}>No policy or audit</span>
                 <span class="runs-note">{NOT_GOVERNED_NOTE}</span>
@@ -302,7 +345,7 @@
           <span class="cell" data-label="Health">
             {#if needsSignIn(s)}
               <span class="needs">Needs sign-in</span>
-              <button class="btn small" data-testid="mcp-server-sign-in" disabled={!!busy[s.id] || !can(s.id, 'configure')} title={can(s.id, 'configure') ? `Sign in to ${s.name}` : NO_CONFIGURE} onclick={() => void oauth(s, signIn)}>{busy[s.id] === 'oauth' ? 'Signing in…' : 'Sign in'}</button>
+              <button class="btn small" data-testid="mcp-server-sign-in" disabled={!!busy[s.id] || !configurable(s)} title={configurable(s) ? `Sign in to ${s.name}` : noConfigure(s)} onclick={() => void oauth(s, signIn)}>{busy[s.id] === 'oauth' ? 'Signing in…' : 'Sign in'}</button>
             {:else}
             <McpPill kind="health" value={s.health_status} small />
             {/if}
@@ -314,17 +357,17 @@
           <span class="cell" data-label="Enabled">
             <Switch
               checked={s.enabled}
-              disabled={busy[s.id] === 'toggle' || !can(s.id, 'configure')}
+              disabled={busy[s.id] === 'toggle' || !configurable(s)}
               onchange={() => void toggleEnabled(s)}
               label={`Enable ${s.name}`}
-              title={!can(s.id, 'configure') ? NO_CONFIGURE : native ? (s.enabled ? 'Written to .mcp.json for new sessions — click to stop' : 'Not written to .mcp.json — click to enable') : s.enabled ? 'Enabled — click to disable' : 'Disabled — click to enable'}
+              title={!configurable(s) ? noConfigure(s) : native ? (s.enabled ? 'Written to .mcp.json for new sessions — click to stop' : 'Not written to .mcp.json — click to enable') : s.enabled ? 'Enabled — click to disable' : 'Disabled — click to enable'}
             />
           </span>
           <span class="cell actions">
             {#if native}
-              <button class="btn small" disabled={!!busy[s.id] || !can(s.id,'configure')} title={can(s.id,'configure') ? `Edit ${s.name}` : NO_CONFIGURE} onclick={() => { onSelect(s.id); editing = s; }}>Edit</button>
+              <button class="btn small" disabled={!!busy[s.id] || !configurable(s)} title={configurable(s) ? `Edit ${s.name}` : noConfigure(s)} onclick={() => { onSelect(s.id); editing = s; }}>Edit</button>
             {:else}
-            <button class="btn small" disabled={!!busy[s.id] || !can(s.id,'configure')} title={can(s.id,'configure') ? 'Fetch the tool list from this server' : NO_CONFIGURE} onclick={() => { onSelect(s.id); void discover(s); }}>
+            <button class="btn small" disabled={!!busy[s.id] || !configurable(s)} title={configurable(s) ? 'Fetch the tool list from this server' : noConfigure(s)} onclick={() => { onSelect(s.id); void discover(s); }}>
               {busy[s.id] === 'discover' ? 'Discovering…' : 'Discover'}
             </button>
             {/if}
@@ -350,6 +393,16 @@
 </div>
 
 {#if accessId}<Modal title="MCP server access" width={820} onclose={() => accessId=null}><ResourceAccess kind="mcp_server" resourceId={accessId} /></Modal>{/if}
+
+{#if scoping}
+  <Modal title={`Where “${scoping.name}” is available`} width={460} onclose={() => (scoping = null)}>
+    <AvailableIn home={scoping.workspace_id} bind:scope={scopeDraft} disabled={busy[scoping.id] === 'scope'} />
+    {#snippet footer()}
+      <button class="btn" onclick={() => (scoping = null)}>Cancel</button>
+      <button class="btn primary" data-testid="mcp-scope-save" disabled={busy[scoping!.id] === 'scope'} onclick={() => void saveScope()}>Save</button>
+    {/snippet}
+  </Modal>
+{/if}
 
 {#if editing}
   <NativeServerForm server={editing} onclose={() => (editing = null)} onsaved={() => void onReload()} />
@@ -459,6 +512,12 @@
     background: var(--warning-soft);
     color: var(--text);
     font-weight: 600;
+  }
+  .scope {
+    padding: 1px 6px;
+    border-radius: var(--radius-s);
+    background: var(--info-soft);
+    color: var(--text);
   }
   .runs-note {
     flex-basis: 100%;

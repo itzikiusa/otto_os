@@ -37,6 +37,7 @@ pub mod mcp_audit;
 pub mod mcp_auto_approve;
 pub mod mcp_control;
 pub mod mcp_profiles;
+pub mod mcp_scope;
 pub mod mcp_servers;
 pub mod memory;
 pub mod name_themes;

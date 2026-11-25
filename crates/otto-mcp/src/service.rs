@@ -277,18 +277,7 @@ impl McpService {
         if feature < otto_core::domain::Capability::View {
             return Ok(vec![false; checks.len()]);
         }
-        let member = match access.member_of.get(&server.workspace_id) {
-            Some(m) => *m,
-            None => {
-                let m = otto_state::WorkspacesRepo::new(self.pool.clone())
-                    .role_of(user, &server.workspace_id)
-                    .await?
-                    .is_some();
-                access.member_of.insert(server.workspace_id.clone(), m);
-                m
-            }
-        };
-        if !member {
+        if !self.reaches(access, user, server).await? {
             return Ok(vec![false; checks.len()]);
         }
         if access.groups.is_none() {
@@ -345,6 +334,44 @@ impl McpService {
             out.push(allowed);
         }
         Ok(out)
+    }
+
+    /// Whether `user` belongs to workspace `ws` (cached in `access`).
+    pub async fn member_of(
+        &self,
+        access: &mut CallerAccess,
+        user: &otto_core::domain::User,
+        ws: &str,
+    ) -> Result<bool> {
+        if let Some(m) = access.member_of.get(ws) {
+            return Ok(*m);
+        }
+        let m = otto_state::WorkspacesRepo::new(self.pool.clone())
+            .role_of(user, &ws.to_string())
+            .await?
+            .is_some();
+        access.member_of.insert(ws.to_string(), m);
+        Ok(m)
+    }
+
+    /// Whether `user` is a member of a workspace `server` is available in
+    /// (`otto_state::mcp_scope`): its home, one it was shared with, or any
+    /// for an all-workspaces server (Scratch, open to everyone, is one).
+    pub async fn reaches(
+        &self,
+        access: &mut CallerAccess,
+        user: &otto_core::domain::User,
+        server: &otto_state::McpServerDetail,
+    ) -> Result<bool> {
+        if server.all_workspaces || self.member_of(access, user, &server.workspace_id).await? {
+            return Ok(true);
+        }
+        for ws in &server.shared_workspace_ids {
+            if self.member_of(access, user, ws).await? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     pub async fn visible_tools(
