@@ -19,7 +19,6 @@
 import { api } from '../api/client';
 import { matchesEngine } from '../dbWatchMatch';
 import type { ApiResponse, IdeDbWatchDetectResp, IdeDetectedDbAccess, IdeDebugPortResp, IdeDebugSessionSnapshot, IdeVariable } from '../api/types';
-import { envTone } from '../status';
 import { agentName } from '../stores/uiControl.svelte';
 import { ws } from '../stores/workspace.svelte';
 import { registerUiCommands, UiCommandError, type UiCommandCtx } from '../uiCommands';
@@ -196,9 +195,9 @@ function autoItems(
  *  no `connection_id` only the run's own database is used (its container,
  *  by the port the launch names, else this run's newest local one) — never a
  *  saved connection, never another project's container. A saved connection
- *  the agent names asks the person every time, naming it and its environment
- *  (prod: the store's typed confirm), and is never remembered as the project's
- *  target. */
+ *  the agent names asks the person FIRST, every time, naming it, its
+ *  environment and what is read — before anything contacts it — and is never
+ *  remembered as the project's target (prod: the store's typed confirm too). */
 async function armDbWatch(
   db: IdeDbWatchAgentOps,
   snap: IdeDebugSessionSnapshot,
@@ -212,13 +211,13 @@ async function armDbWatch(
       root,
       active_file: snap.paused_file ?? null,
       debug_session_id: snap.id,
-      ...(target ? { target } : {}),
+      // A target is only ever named here after the person confirmed it (or it is the run's own).
+      ...(target ? { target, confirm_target: true } : {}),
     });
-  const det = await detect();
+  const det = await detect(); // reads the code and lists connections: contacts no database
   let target: IdeDbWatchTargetRef;
   let engine: string | undefined;
   let local = true;
-  let saved: { name: string; environment?: string | null } | null = null;
   if (args.connection_id) {
     const key = args.connection_id.trim();
     const c = det.saved_connections.find((x) => x.connection_id === key) ??
@@ -230,7 +229,20 @@ async function armDbWatch(
     target = { kind: 'saved', connection_id: c.connection_id };
     engine = c.engine;
     local = c.local;
-    saved = c;
+    // Ask FIRST: nothing reaches a saved database before the person confirmed
+    // this one (its tag says little — a production database may be tagged dev).
+    const family = (o: IdeDetectedDbAccess): boolean => matchesEngine({ engine: o.engine, verified: false }, c.engine);
+    const names = args.objects?.length ? args.objects.map((o) => o.object) : [...new Set(det.detected_objects.filter(family).map((o) => o.object_name))];
+    const ok = await ctx.confirmWrite({
+      what: [
+        `Connect to the saved connection ${spelledOut(c.name)} (${spelledOut(c.environment || 'no environment')}, ${c.local ? 'on this Mac' : 'not on this Mac'}) and read, at every debugger stop, read-only:`,
+        ...(names.length ? names.slice(0, 20).map((n) => `• ${spelledOut(n)}`) : ['• the tables of the code near this stop it has']),
+      ].join('\n'),
+      where: spelledOut(c.name),
+      verb: 'Watch',
+      guarded: true, // never remembered: the agent picked this database
+    });
+    if (!ok) throw declined('watching that database');
   } else {
     const ports = det.ephemeral_targets.filter((x) => new RegExp(`[:=]${x.port}(?!\\d)`).test(launchText));
     const pool = ports.length ? ports : det.ephemeral_targets.filter((x) => x.source !== 'container');
@@ -242,18 +254,6 @@ async function armDbWatch(
   // The code's names, checked against the target's real objects.
   const items = args.objects?.length ? args.objects : autoItems((await detect(target)).detected_objects, engine, local);
   if (!items.length) throw new UiCommandError('not_found', 'No tables of that database found in the code near this stop — pass `objects`.');
-  if (saved && envTone(saved.environment).key !== 'prod') {
-    const ok = await ctx.confirmWrite({
-      what: [
-        `Watch the saved connection ${spelledOut(saved.name)} (${spelledOut(saved.environment || 'no environment')}) at every debugger stop, read-only:`,
-        ...items.map((i) => `• ${spelledOut(i.object)}`),
-      ].join('\n'),
-      where: spelledOut(saved.name),
-      verb: 'Watch',
-      guarded: true, // never remembered: the agent picked this database
-    });
-    if (!ok) throw declined('watching that database');
-  }
   if (!(await db.start({ target, items, bind: { debug_session_id: snap.id } }, { asker: agentName(ctx.agent), persist: false }))) {
     throw db.error ? new UiCommandError('failed', db.error) : declined('watching that database');
   }

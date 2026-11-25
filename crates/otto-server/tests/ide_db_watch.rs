@@ -877,6 +877,77 @@ async fn a_production_target_needs_a_person_confirm_and_never_a_remembered_one()
     assert_eq!(s, 403);
 }
 
+/// C3-001: listing a saved database that is not on this Mac dials it, so
+/// detect / objects with such a target need `confirm_target` from a person;
+/// without it the daemon refuses before any connection is made. A saved
+/// loopback target lists as before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn listing_a_remote_saved_target_needs_the_persons_confirm_first() {
+    let data = Arc::new(Mutex::new(BTreeMap::from([(
+        "k:1".to_string(),
+        "v".to_string(),
+    )])));
+    let port = spawn_mini_resp_server(data).await;
+    let env = watch_env(port).await;
+    let root_user = UsersRepo::new(env.pool.clone())
+        .get(&"root".to_string())
+        .await
+        .unwrap();
+    let conns = ConnectionsRepo::new(env.pool.clone());
+    let saved = |name: &str, host: &str| NewConnection {
+        workspace_id: Some("ws1".into()),
+        name: name.into(),
+        kind: ConnectionKind::Redis,
+        params: json!({"host": host, "port": port}),
+        secret_ref: None,
+        first_command: None,
+        section_id: None,
+        environment: Environment::Dev,
+        read_only: false,
+        created_by: root_user.id.clone(),
+    };
+    // Tagged dev, yet not on this Mac (a blackhole address: a dial would hang).
+    let remote = conns
+        .create(saved("Orders (dev tag)", "10.255.255.1"))
+        .await
+        .unwrap();
+    let local = conns
+        .create(saved("Local Redis", "127.0.0.1"))
+        .await
+        .unwrap();
+    let root = env
+        .root_dir
+        .path()
+        .join("proj")
+        .to_string_lossy()
+        .to_string();
+    let target = |id: &str| json!({"kind": "saved", "connection_id": id});
+    for route in ["detect", "objects"] {
+        let url = format!("{}/api/v1/ide/db-watch/{route}", env.base);
+        let body = json!({"root": root, "target": target(&remote.id)});
+        let started = std::time::Instant::now();
+        let (s, e) = call(
+            reqwest::Method::POST,
+            url.clone(),
+            &env.root_tok,
+            Some(body),
+        )
+        .await;
+        assert_eq!(s, 403, "{route}: {e}");
+        assert!(e.to_string().contains("confirm connecting"), "{route}: {e}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "{route}: refused before dialing"
+        );
+        let body = json!({"root": root, "target": target(&local.id)});
+        let (s, e) = call(reqwest::Method::POST, url, &env.root_tok, Some(body)).await;
+        assert_eq!(
+            s, 200,
+            "{route}: a loopback saved target lists without a confirm: {e}"
+        );
+    }
+}
+
 /// Real engines (OTTO_DBW_E2E=1, containers from the dbw-engine report):
 /// MariaDB 23306 (user nopw, db pr_bo_1), Postgres 25432, Mongo 27717,
 /// ClickHouse 28123, Redis 26379.

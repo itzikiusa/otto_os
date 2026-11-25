@@ -57,6 +57,9 @@ export interface IdeDbWatchDetectReq {
   database?: string | null;
   /** Rank by the paused frame's file and the other stack files of this session. */
   debug_session_id?: string | null;
+  /** A person picked / confirmed `target`: required for a saved target that is
+   *  not on this Mac (listing it dials it); else 403. */
+  confirm_target?: boolean;
 }
 
 export interface IdeDbWatchDetectResp {
@@ -259,6 +262,8 @@ export interface IdeDbWatchObjectsReq {
   root: string;
   target: IdeDbWatchTargetRef;
   database?: string | null;
+  /** As on detect: required for a saved target that is not on this Mac. */
+  confirm_target?: boolean;
 }
 
 export interface IdeDbWatchObject {

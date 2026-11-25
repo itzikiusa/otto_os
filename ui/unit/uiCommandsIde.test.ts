@@ -417,7 +417,8 @@ test('db watch: the agent start names the agent; a declined prod confirm and a f
   });
   await rejectsWith(handlers.ide_debug_db({ action: 'watch', connection_id: 'p' }, c), 'cancelled_by_user');
   eq(asked[0], { asker: 'Claude', persist: false }, 'an agent’s pick is never the project’s remembered target');
-  assert.equal(c.confirms.length, 1, 'prod: the store’s typed confirm asks, not a second dialog');
+  assert.equal(c.confirms.length, 2, 'the start, then the agent’s pick asks first (prod: the store’s typed confirm follows at the start)');
+  assert.ok(c.confirms[1].what.includes('pr_bo prod') && c.confirms[1].what.includes('Production'), c.confirms[1].what);
   error = 'connection refused';
   await rejectsWith(handlers.ide_debug_db({ action: 'watch', connection_id: 'p' }, c), 'failed');
   answer = { id: 'w', target: { label: 'pr_bo prod', local: false, engine: 'mysql' }, bind: { debug_session_id: 'dbg1' }, busy: false };
@@ -741,4 +742,44 @@ test('C1-035: on a Postgres container the agent watches the code’s SQL tables 
   eq(asked[0].target, { kind: 'auto', engine: 'postgres' });
   eq(asked[0].items, [{ object: 'orders' }]);
   eq(detectCalls.at(-1).target, { kind: 'auto', engine: 'postgres' }, 'the names are verified against the chosen target');
+});
+
+// ── closing review ─────────────────────────────────────────────────────────
+
+test('C3-001: a saved connection is asked about BEFORE anything contacts it; declined → nothing reaches it', async () => {
+  const det = {
+    detected_objects: [{ engine: 'mysql', object_name: 'orders' }],
+    // Tagged dev, yet not on this Mac — the tag decides nothing.
+    saved_connections: [{ connection_id: 's', name: 'orders', engine: 'mysql', local: false, environment: 'dev' }],
+    ephemeral_targets: [],
+  };
+  const { handlers, ide, dbPort, detects } = load(det);
+  const c = ctx();
+  const run = handlers.ide_debug_start({ target: { kind: 'main', file: 'main.go' }, wait_ms: 5_000 }, c);
+  later(() => ide.emit(paused(1, 5)));
+  await run;
+  const started: unknown[] = [];
+  dbPort.ideDbWatchPort.bind({
+    watch: null, error: null,
+    async start(req: unknown) { started.push(req); return { id: 'w', target: { label: 'orders', local: false, engine: 'mysql' }, bind: null, busy: false }; },
+    async stop() {}, async diffSince() { return null; },
+  });
+  const before = detects.length;
+  const seenAtConfirm: any[] = [];
+  const ask = (answer: boolean) => ({ ...c, confirmWrite: async (o: any) => {
+    seenAtConfirm.push({ targeted: detects.slice(before).filter((d) => d.target).length, started: started.length, what: o.what, guarded: o.guarded });
+    return answer;
+  } });
+  await rejectsWith(handlers.ide_debug_db({ action: 'watch', connection_id: 's' }, ask(false)), 'cancelled_by_user');
+  eq(seenAtConfirm[0].targeted, 0, 'no detect named the target before the person answered');
+  assert.equal(seenAtConfirm[0].started, 0);
+  assert.ok(seenAtConfirm[0].what.includes('orders') && seenAtConfirm[0].what.includes('dev') && seenAtConfirm[0].what.includes('not on this Mac'), seenAtConfirm[0].what);
+  assert.equal(seenAtConfirm[0].guarded, true);
+  assert.equal(detects.slice(before).filter((d) => d.target).length, 0, 'declined: nothing reached the database');
+  assert.equal(started.length, 0);
+  await handlers.ide_debug_db({ action: 'watch', connection_id: 's' }, ask(true));
+  const targeted = detects.slice(before).filter((d) => d.target);
+  assert.equal(targeted.length, 1);
+  assert.equal(targeted[0].confirm_target, true, 'the daemon sees the person confirmed this target');
+  assert.equal(started.length, 1);
 });

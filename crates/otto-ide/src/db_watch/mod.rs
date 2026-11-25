@@ -143,6 +143,10 @@ pub struct IdeDbWatchDetectReq {
     pub database: Option<String>,
     #[serde(default)]
     pub debug_session_id: Option<String>,
+    /// A person picked / confirmed `target`: required to list a saved target
+    /// that is not on this Mac (that dials it).
+    #[serde(default)]
+    pub confirm_target: bool,
 }
 
 /// `POST /api/v1/ide/db-watch/detect` response body.
@@ -558,6 +562,9 @@ pub struct IdeDbWatchObjectsReq {
     pub target: IdeDbWatchTargetRef,
     #[serde(default)]
     pub database: Option<String>,
+    /// As on detect: required for a saved target that is not on this Mac.
+    #[serde(default)]
+    pub confirm_target: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
