@@ -389,6 +389,7 @@ class IdeDbWatchController {
       this.watch = w;
       this.read = null;
       this.pendingTarget = null;
+      this.prodWaiting = null;
       if (opts.persist !== false) this.remember(w);
       await this.refresh();
       return w;
@@ -580,6 +581,7 @@ class IdeDbWatchController {
     this.watch = null;
     this.read = null;
     this.liveWatch = false;
+    this.prodWaiting = null;
   }
 }
 
