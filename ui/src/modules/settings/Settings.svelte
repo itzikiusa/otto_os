@@ -98,6 +98,7 @@
     'skill-eval': lazyComponent(() => import('./SkillEvalSettings.svelte')),
     'context-library': lazyComponent(() => import('./ContextLibrary.svelte')),
     daemon: lazyComponent(() => import('./Daemon.svelte')),
+    updates: lazyComponent(() => import('./UpdatesSettings.svelte')),
     plugins: lazyComponent(() => import('./PluginsSettings.svelte')),
     'trust-safety': lazyComponent(() => import('./TrustSafety.svelte')),
     logs: lazyComponent(() => import('./Logs.svelte')),

@@ -21,6 +21,7 @@ function menu(closedTab: boolean) {
     './embedGuest': { postToHost() {} },
     './keys': { dismissTopDialog() {}, modalKeyVerdict: () => 'run', keyContext: { terminalFocused: false }, pageClaimsAlias: () => false },
     './stores/sessionScope': { sessionVerbsApply: () => true },
+    './stores/updates.svelte': { updates: { openDialog: (manual: boolean) => calls.push(`updates:${manual}`) } },
   });
   return { handleMenu, calls };
 }
@@ -35,6 +36,12 @@ test('Close Tab that closed a session tab leaves the window alone', () => {
   const m = menu(true);
   m.handleMenu('close-tab');
   assert.deepEqual(m.calls, ['tab']);
+});
+
+test('Otto ▸ Check for Updates… opens the Update dialog and checks now', () => {
+  const m = menu(true);
+  m.handleMenu('check-updates');
+  assert.deepEqual(m.calls, ['updates:true']);
 });
 
 test('closePopoutWindow never closes the main window or a pane', () => {

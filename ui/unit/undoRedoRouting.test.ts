@@ -121,6 +121,7 @@ test('menu.ts routes the undo/redo ids', () => {
     './embedGuest': { postToHost() {} },
     './keys': { dismissTopDialog() {}, modalKeyVerdict: () => 'run' },
     './stores/sessionScope': { sessionVerbsApply: () => true },
+    './stores/updates.svelte': { updates: { openDialog() {} } },
   });
   handleMenu('undo');
   handleMenu('redo');

@@ -25,6 +25,7 @@
     type SidebarModule,
   } from '../lib/sidebar';
   import SidebarMore from './SidebarMore.svelte';
+  import UpdateRow from './UpdateRow.svelte';
   import { navUsage } from '../lib/stores/navUsage.svelte';
 
   // The collapsed rail mirrors the same resolved module list as the Navigator
@@ -201,6 +202,7 @@
         <Icon name={lightMode.active ? 'maximize' : 'minimize'} />
       </button>
     {/if}
+    <UpdateRow rail />
     <button
       class="rail-btn"
       class:active={router.module === 'walkthroughs'}

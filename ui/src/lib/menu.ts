@@ -14,6 +14,7 @@ import { isEmbedded, closePopoutWindow } from './desktop';
 import { postToHost } from './embedGuest';
 import { dismissTopDialog, keyContext, modalKeyVerdict, pageClaimsAlias } from './keys';
 import { sessionVerbsApply } from './stores/sessionScope';
+import { updates } from './stores/updates.svelte';
 
 export function handleMenu(id: string): void {
   // A dialog is up in this window: Close Tab closes it, and New Session /
@@ -102,6 +103,10 @@ export function handleMenu(id: string): void {
       break;
     case 'walkthroughs':
       router.go('walkthroughs');
+      break;
+    case 'check-updates':
+      // Otto ▸ Check for Updates… (the shell brings the main window forward).
+      updates.openDialog(true);
       break;
   }
 }
