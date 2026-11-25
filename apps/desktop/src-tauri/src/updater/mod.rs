@@ -158,7 +158,7 @@ fn release_channel(not_release: bool, flag: Option<&str>) -> Channel {
 }
 
 /// Why the bundle at `bundle` can't replace itself, if it can't.
-fn install_blocker(bundle: &Path, install_path: &Path) -> Option<String> {
+fn install_blocker(bundle: &Path, install_path: &Path, staging: &Path) -> Option<String> {
     if bundle != install_path {
         return Some(format!(
             "Move Otto to the Applications folder to get updates (it runs from {}).",
@@ -178,7 +178,70 @@ fn install_blocker(bundle: &Path, install_path: &Path) -> Option<String> {
             parent.display()
         ));
     }
+    // The swap is one rename(2): the staging dir must be on the same volume.
+    use std::os::unix::fs::MetadataExt;
+    let dev = |p: &Path| {
+        p.ancestors()
+            .find_map(|a| std::fs::metadata(a).ok())
+            .map(|m| m.dev())
+    };
+    if dev(parent) != dev(staging) {
+        return Some(format!(
+            "Otto can't update itself: {} is on another disk than its data folder. Install the new version from the DMG.",
+            parent.display()
+        ));
+    }
     None
+}
+
+/// Apply the last install's outcome: show it, and skip a version that failed
+/// (persisted, so automatic checks stop offering it). True when `prefs` changed.
+fn apply_result(state: &mut UpdateState, prefs: &mut Prefs, r: Option<LastResult>) -> bool {
+    let skip = r.as_ref().filter(|r| !r.ok && r.skip).map(|r| r.to.clone());
+    state.last_result = r;
+    if skip.is_none() || prefs.skipped == skip {
+        return false;
+    }
+    prefs.skipped = skip.clone();
+    state.skipped = skip;
+    true
+}
+
+/// Skip `version` (or unskip with None). Skipping the offered version hides
+/// it; unskipping while an update is known offers it again.
+fn apply_skip(state: &mut UpdateState, prefs: &mut Prefs, version: Option<String>, known: bool) {
+    prefs.skipped = version.clone();
+    state.skipped = version;
+    if state.phase == Phase::Available && state.skipped == state.version {
+        state.phase = Phase::Idle;
+    } else if state.phase == Phase::Idle && state.skipped.is_none() && known {
+        state.phase = Phase::Available;
+    }
+}
+
+/// Staged → Restarting in ONE step under the lock, so a second Restart click
+/// finds it taken. Returns the version to install.
+fn begin_restart(state: &mut UpdateState) -> Option<String> {
+    let to = state
+        .version
+        .clone()
+        .filter(|_| state.phase == Phase::Staged)?;
+    state.phase = Phase::Restarting;
+    Some(to)
+}
+
+impl UpdateState {
+    /// Forget the offered release (a check found none, or failed).
+    fn forget_release(&mut self) {
+        (
+            self.version,
+            self.notes,
+            self.date,
+            self.size,
+            self.release_url,
+        ) = (None, None, None, None, None);
+        self.received = 0;
+    }
 }
 
 /// `…/Otto.app` of the running executable (`…/Otto.app/Contents/MacOS/x`).
@@ -373,25 +436,23 @@ pub fn init(app: &AppHandle) {
         finish::prune_logs(&updates);
     }
     let mut prefs = load_prefs(&paths.prefs());
-    let last_result = finish::read_result(&updates);
-    if let Some(r) = last_result.as_ref().filter(|r| !r.ok && r.skip) {
-        prefs.skipped = Some(r.to.clone());
+    let mut state = UpdateState::default();
+    if apply_result(&mut state, &mut prefs, finish::read_result(&updates)) {
         save_prefs(&paths.prefs(), &prefs);
     }
     let channel = channel();
     let blocked = match running_bundle() {
-        Some(b) => install_blocker(&b, &paths.app),
+        Some(b) => install_blocker(&b, &paths.app, &paths.data),
         None => Some("Otto could not tell where it is installed.".into()),
     };
     let state = UpdateState {
         channel,
-        current,
+        current: current.clone(),
         blocked,
         skipped: prefs.skipped.clone(),
         auto_install: prefs.auto_install,
         last_check: prefs.last_check,
-        last_result,
-        ..Default::default()
+        ..state
     };
     let _ = INNER.set(Mutex::new(Inner {
         state,
@@ -411,8 +472,20 @@ pub fn init(app: &AppHandle) {
             for _ in 0..120 {
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 if !finish::in_flight(&updates) {
+                    // A finisher that died here left only its journal.
+                    if finish::read_result(&updates).is_none() {
+                        let (slot, prev) = (
+                            updates.join("staging").join(stage::BUNDLE),
+                            updates.join("previous").join(stage::BUNDLE),
+                        );
+                        finish::recover(&updates, &slot, &prev, &current);
+                    }
                     let r = finish::read_result(&updates);
-                    with(|i| i.state.last_result = r);
+                    with(|i| {
+                        if apply_result(&mut i.state, &mut i.prefs, r) {
+                            save_prefs(&i.paths.prefs(), &i.prefs);
+                        }
+                    });
                     publish(&handle);
                     break;
                 }
@@ -481,10 +554,15 @@ async fn check(app: &AppHandle, manual: bool) {
             }
             Ok(_) => {
                 i.state.phase = Phase::UpToDate;
+                i.state.forget_release();
                 i.update = None;
                 false
             }
-            Err(_) => false,
+            Err(_) => {
+                i.state.forget_release();
+                i.update = None;
+                false
+            }
         }
     })
     .unwrap_or(false);
@@ -569,12 +647,7 @@ fn download(app: &AppHandle) {
 /// person's click.
 fn restart(app: &AppHandle) -> Result<(), String> {
     let job = with(|i| {
-        let to = i
-            .state
-            .version
-            .clone()
-            .filter(|_| i.state.phase == Phase::Staged);
-        to.map(|to| (i.paths.clone(), i.state.current.clone(), to))
+        begin_restart(&mut i.state).map(|to| (i.paths.clone(), i.state.current.clone(), to))
     })
     .flatten();
     let Some((paths, from, to)) = job else {
@@ -603,7 +676,6 @@ fn restart(app: &AppHandle) -> Result<(), String> {
         publish(app);
         return Err(e);
     }
-    with(|i| i.state.phase = Phase::Restarting);
     publish(app);
     crate::quit::quit_app(app, &format!("update restart {from} → {to}"));
     Ok(())
@@ -667,12 +739,9 @@ pub fn update_set_auto(app: AppHandle, on: bool) -> UpdateState {
 #[tauri::command]
 pub fn update_skip(app: AppHandle, version: Option<String>) -> UpdateState {
     with(|i| {
-        i.prefs.skipped = version.clone();
-        i.state.skipped = version;
+        let known = i.update.is_some();
+        apply_skip(&mut i.state, &mut i.prefs, version, known);
         save_prefs(&i.paths.prefs(), &i.prefs);
-        if i.state.phase == Phase::Available && i.state.skipped == i.state.version {
-            i.state.phase = Phase::Idle;
-        }
     });
     publish(&app);
     snapshot()
@@ -731,14 +800,18 @@ mod tests {
         let apps = dir.join("apps");
         let app = apps.join("X.app");
         std::fs::create_dir_all(&app).unwrap();
-        assert_eq!(install_blocker(&app, &app), None);
+        assert_eq!(install_blocker(&app, &app, &dir), None);
+        // C1-026: the staging dir on another volume would make the swap fail (EXDEV).
+        assert!(install_blocker(&app, &app, Path::new("/dev"))
+            .unwrap()
+            .contains("another disk"));
         let elsewhere = dir.join("Downloads/X.app");
-        assert!(install_blocker(&elsewhere, &app)
+        assert!(install_blocker(&elsewhere, &app, &dir)
             .unwrap()
             .contains("Move Otto to the Applications folder"));
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&apps, std::fs::Permissions::from_mode(0o555)).unwrap();
-        let why = install_blocker(&app, &app).unwrap();
+        let why = install_blocker(&app, &app, &dir).unwrap();
         assert!(
             why.contains("can't replace apps") && why.contains("DMG"),
             "{why}"
@@ -938,5 +1011,71 @@ mod tests {
         };
         assert!(msg.contains("larger"), "{msg}");
         let _ = std::fs::remove_dir_all(&updates);
+    }
+
+    /// C1-012: a version that failed is skipped persistently the moment its
+    /// result is applied — at launch or when an in-flight finisher's lands.
+    #[test]
+    fn a_failed_version_is_skipped_once_its_result_is_applied() {
+        let (mut st, mut prefs) = (UpdateState::default(), Prefs::default());
+        let r = |ok, skip| LastResult {
+            ok,
+            skip,
+            from: "1.0.0".into(),
+            to: "1.0.1".into(),
+            reason: String::new(),
+            log: String::new(),
+        };
+        assert!(!apply_result(&mut st, &mut prefs, Some(r(true, false))));
+        assert_eq!(prefs.skipped, None);
+        assert!(
+            !apply_result(&mut st, &mut prefs, Some(r(false, false))),
+            "interrupted: not skipped"
+        );
+        assert!(apply_result(&mut st, &mut prefs, Some(r(false, true))));
+        assert_eq!(
+            (prefs.skipped.as_deref(), st.skipped.as_deref()),
+            (Some("1.0.1"), Some("1.0.1"))
+        );
+        assert!(st.last_result.is_some());
+        assert!(
+            !apply_result(&mut st, &mut prefs, Some(r(false, true))),
+            "already skipped: nothing to save"
+        );
+    }
+
+    /// C1-029: Unskip brings a known update back; skip hides it; a check
+    /// that finds nothing forgets the stale release.
+    #[test]
+    fn skip_and_unskip_move_the_offer_and_stale_releases_are_forgotten() {
+        let (mut st, mut prefs) = (UpdateState::default(), Prefs::default());
+        st.phase = Phase::Available;
+        st.version = Some("1.0.1".into());
+        st.notes = Some("n".into());
+        apply_skip(&mut st, &mut prefs, Some("1.0.1".into()), true);
+        assert_eq!(st.phase, Phase::Idle);
+        apply_skip(&mut st, &mut prefs, None, true);
+        assert_eq!((st.phase, prefs.skipped.clone()), (Phase::Available, None));
+        st.forget_release();
+        assert_eq!(
+            (st.version.clone(), st.notes.clone(), st.release_url.clone()),
+            (None, None, None)
+        );
+        st.phase = Phase::Idle;
+        apply_skip(&mut st, &mut prefs, None, false);
+        assert_eq!(st.phase, Phase::Idle, "nothing known: stays idle");
+    }
+
+    /// C1-026: two Restart clicks cannot both start a finisher.
+    #[test]
+    fn only_the_first_restart_click_begins_one() {
+        let mut st = UpdateState {
+            phase: Phase::Staged,
+            version: Some("1.0.1".into()),
+            ..Default::default()
+        };
+        assert_eq!(begin_restart(&mut st).as_deref(), Some("1.0.1"));
+        assert_eq!(st.phase, Phase::Restarting);
+        assert_eq!(begin_restart(&mut st), None);
     }
 }

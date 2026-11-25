@@ -60,7 +60,8 @@ pub fn stage(
         .map_err(|e| format!("could not create {}: {e}", root.display()))?;
     let app = staged_app(updates);
     let res = extract(archive, &root).and_then(|_| {
-        if app.is_dir() {
+        // Not `is_dir()`: that follows a top-level link.
+        if fs::symlink_metadata(&app).is_ok_and(|m| m.is_dir()) {
             verify(&app, version, signers)
         } else {
             Err(format!("the archive has no {BUNDLE} at its top"))
@@ -80,7 +81,16 @@ pub fn stage(
 /// leaves the bundle. No xattrs are written (so no quarantine either), and
 /// setuid/setgid bits are dropped.
 pub fn extract(archive: &[u8], dest: &Path) -> Result<(), String> {
-    let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(archive));
+    extract_within(archive, dest, UNPACKED_MAX)
+}
+
+/// [`extract`] with `max` unpacked bytes. The decompressed stream itself is
+/// bounded too (contents + one header block per entry), so a bomb stops
+/// there even before an entry claims its size.
+fn extract_within(archive: &[u8], dest: &Path, max: u64) -> Result<(), String> {
+    use std::io::Read;
+    let stream_max = max + (ENTRIES_MAX as u64 + 2) * 1024;
+    let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(archive).take(stream_max));
     let (mut total, mut count) = (0u64, 0usize);
     for entry in ar
         .entries()
@@ -101,6 +111,15 @@ pub fn extract(archive: &[u8], dest: &Path) -> Result<(), String> {
                 path.display()
             ));
         }
+        if kind.is_symlink()
+            && path
+                .components()
+                .filter(|c| !matches!(c, Component::CurDir))
+                .count()
+                == 1
+        {
+            return Err(format!("the archive's {BUNDLE} is a link"));
+        }
         if kind.is_symlink() {
             let target = entry
                 .link_name()
@@ -119,9 +138,9 @@ pub fn extract(archive: &[u8], dest: &Path) -> Result<(), String> {
                 path.display()
             ));
         }
-        total += entry.size();
+        total = total.saturating_add(entry.size());
         count += 1;
-        if total > UNPACKED_MAX || count > ENTRIES_MAX {
+        if total > max || count > ENTRIES_MAX {
             return Err("the archive unpacks to more than Otto can be".into());
         }
         match entry.unpack_in(dest) {
@@ -150,7 +169,11 @@ fn link_stays_inside(link: &Path, target: &Path) -> bool {
     }
     let mut depth: Vec<_> = link
         .parent()
-        .map(|p| p.components().collect())
+        .map(|p| {
+            p.components()
+                .filter(|c| !matches!(c, Component::CurDir))
+                .collect()
+        })
         .unwrap_or_default();
     for c in target.components() {
         match c {
@@ -296,6 +319,21 @@ mod tests {
     #[test]
     fn hostile_archives_are_refused_and_leave_nothing() {
         let cases: Vec<(&str, Vec<TarEntry>, &str)> = vec![
+            // C1-028: a "./"-prefixed link climbing to the bundle's parent,
+            // and the bundle itself as a link.
+            (
+                "dot-link",
+                vec![
+                    TarEntry::dir("./OttoUpdateTest.app"),
+                    TarEntry::link("./OttoUpdateTest.app/l", ".."),
+                ],
+                "link leaving",
+            ),
+            (
+                "top-link",
+                vec![TarEntry::link("OttoUpdateTest.app", "elsewhere")],
+                "is a link",
+            ),
             (
                 "dotdot",
                 vec![TarEntry::file("OttoUpdateTest.app/../../evil", b"x")],
@@ -341,6 +379,20 @@ mod tests {
             assert!(!std::env::temp_dir().join("evil").exists());
             let _ = fs::remove_dir_all(&dir);
         }
+    }
+
+    /// C1-028: the unpacked-size ceiling holds for one big entry and for
+    /// the decompressed stream (tested with a small ceiling).
+    #[test]
+    fn an_archive_bigger_than_the_ceiling_is_refused() {
+        let dir = tmp("bomb");
+        let big = tar_gz(&[TarEntry::file(
+            "OttoUpdateTest.app/big",
+            &vec![0u8; 256 * 1024],
+        )]);
+        assert!(extract_within(&big, &dir, 64 * 1024).is_err());
+        assert!(extract_within(&big, &dir, 1024 * 1024).is_ok());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

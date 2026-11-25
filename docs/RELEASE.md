@@ -156,6 +156,39 @@ A failed or wrong draft:
 The first release that contains the updater is 0.5.4. The first real update is
 therefore 0.5.4 → 0.5.5.
 
+### Before relying on updates: the clean-Mac check (owner, once)
+
+The updater's unit tests run on throwaway bundles in temp folders; these steps
+need a Mac (or a macOS VM) that has never had Otto, under a normal user
+account. Use two consecutive release candidates built by the workflow, e.g.
+`0.5.4-rc.1` and `0.5.4-rc.2`, published as pre-releases.
+
+1. Download the rc.1 DMG with Safari, drag Otto to /Applications, open it:
+   Privacy & Security ▸ **Open Anyway** must be the only Gatekeeper step.
+2. Use what needs a permission once: paste from the clipboard history
+   (Accessibility), take a snip (Screen Recording), dictate (Microphone), save a
+   secret (one Keychain "Always Allow" for `ottod`).
+3. Start a shell session, a Threads conversation mid-turn and an SSH terminal.
+4. Publish rc.2. Within 6 h (or Otto ▸ Check for Updates…) the sidebar shows
+   the update. Download it; the restart dialog must list the SSH terminal as
+   ending and the shell and thread as kept.
+5. Restart to update. Check:
+   - no "Background Items Added" banner blocks it, and no App Management
+     prompt ("Otto wants to modify apps") appears;
+   - Otto comes back on rc.2 (Otto ▸ About) within about 2 minutes, the shell
+     and thread are still there, the turn continued;
+   - no permission is asked again, and at most one Keychain prompt (none if
+     the release certificate was trusted);
+   - `~/Library/Application Support/Otto/updates/previous/Otto.app` is rc.1 and
+     `xattr -l /Applications/Otto.app` shows no `com.apple.quarantine`.
+6. Failure path: publish an rc.3 whose daemon exits at start. The update must
+   roll back to rc.2 by itself, say "failed and was undone", and not offer
+   rc.3 again.
+7. A standard (non-admin) account: the update row says the account can't
+   replace apps in /Applications and offers the DMG; nothing is downloaded.
+8. Leave the Keychain prompt of step 2 unanswered during an update: the
+   finisher must still see the new version (it reads only `/api/v1/meta`).
+
 ## Local build
 
 > Prerequisites: macOS (Apple Silicon or Intel), Rust stable, Node 20+, and a
