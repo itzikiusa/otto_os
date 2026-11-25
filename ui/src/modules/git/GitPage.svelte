@@ -304,12 +304,8 @@
           <RepoView
             repo={activeRepo}
             tab={git.subTabFor(activeRepo.id)}
-            embedded
-            hostActions
             bind:this={repoView}
             onTab={(t) => git.setSubTab(activeRepo.id, t)}
-            onopenrepo={openRepo}
-            onaddrepo={(mode) => { addMode = mode; addOpen = true; }}
           />
           {:else}
             <LoadState what={activeRepo.name} variant="page" loading={!RepoViewLazy.error} error={RepoViewLazy.error} rows={5} onretry={() => RepoViewLazy.retry()} />

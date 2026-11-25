@@ -99,8 +99,9 @@
   const noRemote = $derived(remoteCount === 0);
   const NO_REMOTE = 'Add a remote first (⋯ → Remotes…)';
   const syncWhy = $derived(detached ? 'HEAD is detached — check out a branch first' : noRemote ? NO_REMOTE : undefined);
-  // Push is the accent only with something to push and nothing to commit.
-  const pushPrimary = $derived(header && accent && clean && status.upstream != null && status.ahead > 0 && !detached);
+  // Push is the accent only with something to push and nothing to commit:
+  // commits ahead of the upstream, or an unpublished branch with a remote.
+  const pushPrimary = $derived(header && accent && clean && !detached && (status.upstream != null ? status.ahead > 0 : (remoteCount ?? 0) > 0));
 
   // The stash list: the graph reports its count (gitBridge); where the graph
   // isn't loaded (Pull requests, Review) the toolbar reads it once, and after its own ops.
@@ -119,7 +120,7 @@
     const id = repoId;
     if (variant !== 'sync' && showVerbs && gitBridge.stashCount[id] === undefined) {
       // Opening a repo reads its overview, which carries the stash list.
-      untrack(() => void (recentOverview(id)?.then((o) => o.stashes) ?? Promise.resolve(null)).then((list) => {
+      untrack(() => void (recentOverview(id)?.then((o) => o.stashes, () => null) ?? Promise.resolve(null)).then((list) => {
         if (!list) return loadStashes(id);
         if (id !== repoId) return;
         stashes = list;

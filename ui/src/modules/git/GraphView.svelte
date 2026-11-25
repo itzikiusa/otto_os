@@ -62,9 +62,8 @@
     onresolveconflicts,
   }: Props = $props();
 
-  // Which phone accordion sections are expanded. The refs (branches) tree
-  // starts collapsed — the commit graph is what users want first — and the
-  // diff opens on select.
+  // Phone accordion sections (refs start collapsed, the diff opens on select);
+  // `secRefsOpen` also peeks the refs over a narrow desktop pane.
   let secRefsOpen = $state(false);
   let secCommitsOpen = $state(true);
 
@@ -236,7 +235,7 @@
   />
 {/snippet}
 
-<div class="graphview" class:mobile={vp.isMobile}>
+<div class="graphview" class:mobile={vp.isMobile} class:peek={secRefsOpen && !vp.isMobile}>
   <!-- ── LEFT: refs tree ───────────────────────────────────────────────────── -->
   {#if vp.isMobile}
     <!-- Mobile accordion header for the branches/refs tree. -->
@@ -252,6 +251,7 @@
       <span class="grow"></span>
       {#if data.refs}<span class="mob-sec-count">{data.refs.local.length + data.refs.remote.length + data.refs.tags.length}</span>{/if}
     </button>
+  {:else if sel.detailOpen}<button class="icon-btn refs-peek" aria-pressed={secRefsOpen} title="Branches & tags" aria-label="Branches & tags" onclick={() => (secRefsOpen = !secRefsOpen)}><Icon name="branch" size={13} /></button>
   {/if}
   <RefSidebar {repoId}
     refs={data.refs}

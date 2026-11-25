@@ -930,7 +930,7 @@
       <LazyMount lazy={DiffPane} what="the diff" variant="panel">{#snippet children(Pane)}
         <Pane {path} id={diffId} both={partial.has(path)} bind:stagedView {diff} loading={diffLoading} error={diffError} {repoId}
           loadFile={loadWipFile} wip={selTarget === 'working' || virtualAll ? undefined : { target: selTarget, onapplied }} sheet={viewport.isPhone}
-          onretry={() => diffRetry++} onclose={() => (selectedPath = null)} />
+          onretry={() => diffRetry++} onclose={() => (selectedPath = null)} onpickhunks={virtualAll && selTarget !== 'working' ? () => (materialized = true) : undefined} />
       {/snippet}</LazyMount>
     {/if}
 

@@ -106,6 +106,8 @@ async function openRepo(page: Page): Promise<void> {
   }
   await expect(page.locator('.refs-panel')).toBeVisible({ timeout: 30_000 });
   await expect(page.locator('.graph-row[data-sha]').first()).toBeVisible({ timeout: 30_000 });
+  // History lands on HEAD: let its diff load before measuring anything.
+  await expect(page.locator('.detail-subject')).toBeVisible({ timeout: 30_000 });
   // Let the first history page's layout settle before measuring anything.
   await page.waitForLoadState('networkidle').catch(() => {});
 }
