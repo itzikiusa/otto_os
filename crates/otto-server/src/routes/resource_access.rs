@@ -143,11 +143,9 @@ impl AccessCtx for ServerCtx {
     ) -> otto_core::auth::BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             let server = self.mcp.registry().get(id).await?;
-            let (mut roots, mut sessions) = (BTreeSet::new(), Vec::new());
-            for ws in self.mcp.registry().workspaces_with(id).await? {
-                roots.insert(self.workspaces.get(&ws).await?.root_path);
-                sessions.extend(self.manager.list_by_workspace(&ws).await?);
-            }
+            let sessions = self.manager.list_by_workspace(&server.workspace_id).await?;
+            let mut roots =
+                BTreeSet::from([self.workspaces.get(&server.workspace_id).await?.root_path]);
             for session in &sessions {
                 roots.insert(session.cwd.clone());
                 if self.manager.is_live(&session.id) {
@@ -237,12 +235,7 @@ async fn workspace(pool: &DbPool, kind: ResourceKind, id: &Id) -> Result<Option<
             .get(id)
             .await?
             .workspace_id),
-        ResourceKind::McpServer => Ok(Some(
-            McpRegistryRepo::new(pool.clone())
-                .get(id)
-                .await?
-                .workspace_id,
-        )),
+        ResourceKind::McpServer => Ok(None), // resolved by `page_member`
         ResourceKind::AwsAccount => {
             AwsAccountsRepo::new(pool.clone()).get(id).await?;
             Ok(None)
@@ -274,6 +267,13 @@ async fn page_access(
             "page access is disabled",
         )
         .await?;
+    if kind == ResourceKind::McpServer
+        && !McpRegistryRepo::new(pool.clone())
+            .page_member(id, user, operation)
+            .await?
+    {
+        return Err(Error::NotFound("resource".into()));
+    }
     if kind == ResourceKind::AwsAccount {
         grants
             .check_global(
@@ -459,17 +459,19 @@ async fn decisions_batch(
     groups: &[Id],
 ) -> Result<Vec<EffectiveAccess>> {
     let mut ceilings = BTreeMap::new();
-    let mut pages: Vec<(Feature, Option<String>)> = Vec::new();
+    let mut pages: Vec<((Feature, bool), Option<String>)> = Vec::new();
     for op in operations_for(policy.kind) {
         let feature = feature_for(policy.kind, op);
-        let mut reason = match pages.iter().find(|(f, _)| *f == feature) {
+        // A shared MCP server's settings gate on its home (`page_member`).
+        let key = (feature, matches!(*op, "configure" | "manage_access"));
+        let mut reason = match pages.iter().find(|(k, _)| *k == key) {
             Some((_, page)) => page.clone(),
             None => page_access(pool, user, policy.kind, &policy.resource_id, op)
                 .await
                 .err()
                 .map(|e| e.to_string()),
         };
-        pages.push((feature, reason.clone()));
+        pages.push((key, reason.clone()));
         if reason.is_none() && policy.mode == AccessMode::Legacy && !user.is_root {
             let cap = GrantsRepo::new(pool.clone())
                 .capability_of(user, feature)

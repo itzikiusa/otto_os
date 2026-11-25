@@ -28,7 +28,7 @@
   import ToolsTab from './ToolsTab.svelte';
   import { signIn, signOut } from './mcpOAuth';
   import AvailableIn from './AvailableIn.svelte';
-  import { scopeBadge, scopeBody, scopeConfirm, scopeOf, widens, type Scope } from './serverScope';
+  import { scopeBadge, scopeBody, scopeConfirm, scopeMode, scopeOf, widens, type Scope, type ScopeMode } from './serverScope';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { onDestroy } from 'svelte';
 
@@ -50,7 +50,7 @@
   // A server shared from another workspace keeps its settings there: only
   // that workspace's members change it (the daemon's `require_reach`).
   const wsName = (id: string) => ws.workspaces.find((w) => w.id === id)?.name ?? 'another workspace';
-  const homeMember = (s: McpServerDetail) => s.workspace_id === wsId || ws.workspaces.some((w) => w.id === s.workspace_id);
+  const homeMember = (s: McpServerDetail) => auth.isRoot || s.workspace_id === wsId || ws.workspaces.some((w) => w.id === s.workspace_id);
   const configurable = (s: McpServerDetail) => homeMember(s) && can(s.id, 'configure');
   const noConfigure = (s: McpServerDetail) => (homeMember(s) ? NO_CONFIGURE : `Shared from ${wsName(s.workspace_id)}: only its members can change it`);
   const loadedAccessIds = new Set<string>();
@@ -200,6 +200,7 @@
       title: !auth.isRoot ? 'Only the owner can change where a server is available' : homeMember(s) ? undefined : noConfigure(s),
       action: () => {
         scopeDraft = scopeOf(s);
+        scopeDraftMode = scopeMode(scopeDraft);
         scoping = s;
       },
     });
@@ -222,6 +223,7 @@
 
   let scoping = $state<McpServerDetail | null>(null);
   let scopeDraft = $state<Scope>({ all: false, shared: [] });
+  let scopeDraftMode = $state<ScopeMode>('this');
   /** Save where `scoping` is available; a wider scope confirms first. */
   async function saveScope(): Promise<void> {
     const s = scoping;
@@ -396,10 +398,20 @@
 
 {#if scoping}
   <Modal title={`Where “${scoping.name}” is available`} width={460} onclose={() => (scoping = null)}>
-    <AvailableIn home={scoping.workspace_id} bind:scope={scopeDraft} disabled={busy[scoping.id] === 'scope'} />
+    {@const native = serverRuns(scoping) === 'native'}
+    <AvailableIn home={scoping.workspace_id} bind:scope={scopeDraft} bind:mode={scopeDraftMode} {native} disabled={busy[scoping.id] === 'scope'} />
     {#snippet footer()}
       <button class="btn" onclick={() => (scoping = null)}>Cancel</button>
-      <button class="btn primary" data-testid="mcp-scope-save" disabled={busy[scoping!.id] === 'scope'} onclick={() => void saveScope()}>Save</button>
+      {#if serverRuns(scoping!) === 'native'}
+        <button class="btn primary" onclick={() => { const s = scoping!; scoping = null; void switchMode(s, 'governed'); }}>Run through Otto…</button>
+      {:else}
+        <button
+          class="btn primary"
+          data-testid="mcp-scope-save"
+          disabled={busy[scoping!.id] === 'scope' || (scopeDraftMode === 'selected' && scopeDraft.shared.length === 0)}
+          onclick={() => void saveScope()}>Save</button
+        >
+      {/if}
     {/snippet}
   </Modal>
 {/if}

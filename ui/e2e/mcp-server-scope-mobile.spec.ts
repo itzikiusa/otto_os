@@ -36,7 +36,8 @@ test('a shared-in server and its Available in… dialog fit a phone', async ({ p
   if (SHOTS) {
     for (const scheme of ['light', 'dark'] as const) {
       await page.emulateMedia({ colorScheme: scheme });
-      await page.screenshot({ path: join(SHOTS, `phone-scope-dialog-${info.project.name}-${scheme}.png`) });
+      await page.waitForFunction((s) => document.documentElement.dataset.scheme === s, scheme, { timeout: 5_000 }).catch(() => {});
+      await page.screenshot({ path: join(SHOTS, `r2-phone-scope-dialog-${info.project.name}-${scheme}.png`), animations: 'disabled' });
     }
   }
   await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();

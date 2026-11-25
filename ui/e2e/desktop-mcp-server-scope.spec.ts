@@ -6,14 +6,15 @@ import { fileURLToPath } from 'node:url';
 import { apiCtx } from './seed';
 import { expectNoHorizontalOverflow } from './helpers';
 
-// "Available in": an MCP server added in workspace A as "All workspaces" is in
-// a workspace C created AFTERWARDS — its list and a new session's MCP servers
-// there — and narrowing it to "Selected: A, B" takes it out of C. One server
-// row, shared (otto_state::mcp_scope). Real daemon, real PATCHes, the
-// otto-fake-claude agent reporting the servers its --mcp-config gave it.
+// "Available in": a governed MCP server added in workspace A as "All
+// workspaces" is in a workspace C created AFTERWARDS — its list and the tools
+// a new session there gets (the gateway list, "What my sessions see") — and
+// narrowing it to "Selected: A, B" takes it out of C. A direct (native)
+// server is never shared: the control says so and the API refuses. One
+// server row, shared (otto_state::mcp_scope). Real daemon, real PATCHes.
 
 const PROBE = fileURLToPath(new URL('./fixtures/mcp-probe.mjs', import.meta.url));
-// Review screenshots (light + dark, per project) go here when it exists.
+// Review screenshots (light + dark, per project) go here when it is set.
 const SHOTS = process.env.OTTO_E2E_SHOTS ?? '';
 
 let ctx: APIRequestContext;
@@ -35,8 +36,8 @@ async function workspace(name: string): Promise<{ id: string; dir: string }> {
   return { id: (await r.json()).id as string, dir };
 }
 
-async function openServers(page: Page, wsId: string): Promise<void> {
-  await page.goto('/#/mcp/servers');
+async function open(page: Page, wsId: string, route = 'mcp/servers'): Promise<void> {
+  await page.goto(`/#/${route}`);
   await page.evaluate((id) => localStorage.setItem('otto_workspace', id), wsId);
   await page.reload();
 }
@@ -47,35 +48,18 @@ async function shot(page: Page, name: string): Promise<void> {
   if (!SHOTS) return;
   for (const scheme of ['light', 'dark'] as const) {
     await page.emulateMedia({ colorScheme: scheme });
-    await page.screenshot({ path: join(SHOTS, `${name}-${test.info().project.name}-${scheme}.png`) });
+    await page.waitForFunction((s) => document.documentElement.dataset.scheme === s, scheme, { timeout: 5_000 }).catch(() => {});
+    await page.screenshot({ path: join(SHOTS, `r2-${name}-${test.info().project.name}-${scheme}.png`), animations: 'disabled' });
   }
   await page.emulateMedia({ colorScheme: 'light' });
 }
 
-/** The MCP servers a new Claude thread in `ws` reports (`system init`). */
-async function sessionServers(page: Page, ws: { id: string; dir: string }, title: string): Promise<string[]> {
-  const created = await ctx.post(`${base}/api/v1/workspaces/${ws.id}/runtime-sessions`, { data: { provider: 'claude', cwd: ws.dir, title } });
-  expect(created.ok(), await created.text()).toBeTruthy();
-  const id = (await created.json()).id as string;
-  await page.goto(`/#/threads/${id}`);
-  const thread = page.getByTestId(`runtime-thread-${id}`);
-  await expect(thread).toBeVisible({ timeout: 30_000 });
-  await thread.getByTestId('runtime-composer').fill('hello');
-  await thread.getByRole('button', { name: 'Send message' }).click();
-  await expect(thread.getByText('echo: hello')).toBeVisible({ timeout: 30_000 });
-  // ⌘K › "MCP servers for this thread": what the agent has.
-  const bar = page.getByTestId('floating-bar');
-  await expect(async () => {
-    await page.keyboard.press('Meta+k');
-    await expect(bar.getByRole('combobox')).toBeVisible({ timeout: 1_000 });
-  }).toPass({ timeout: 15_000 });
-  await bar.getByRole('combobox').fill('MCP servers for this thread');
-  await bar.getByRole('option').filter({ hasText: 'MCP servers for this thread' }).first().click();
-  const sheet = page.getByTestId('runtime-mcp-servers');
-  await expect(sheet.locator('[data-testid="runtime-mcp-server"][data-name="otto"]')).toBeVisible({ timeout: 30_000 });
-  const names = await sheet.locator('[data-testid="runtime-mcp-server"]').evaluateAll((els) => els.map((e) => e.getAttribute('data-name') ?? ''));
-  await ctx.post(`${base}/api/v1/runtime-sessions/${id}/close`).catch(() => {});
-  return names;
+/** The governed tools a new session in the current workspace gets. */
+async function sessionTools(page: Page, wsId: string): Promise<string> {
+  await open(page, wsId, 'mcp/otto');
+  const panel = page.getByTestId('mcp-sessions-panel');
+  await expect(panel).toContainText('Gateway tools from governed external servers', { timeout: 30_000 });
+  return (await panel.textContent()) ?? '';
 }
 
 test('an all-workspaces server reaches a workspace added later until it is narrowed', async ({ page }, info) => {
@@ -83,49 +67,74 @@ test('an all-workspaces server reaches a workspace added later until it is narro
   const a = await workspace(`Scope A ${info.project.name}`);
   const b = await workspace(`Scope B ${info.project.name}`);
 
-  // Add it in A as "All workspaces": a wider scope asks first.
-  await openServers(page, a.id);
+  // Add it in A as "All workspaces": a wider scope asks first, naming what
+  // is shared and who can use it.
+  await open(page, a.id);
   await page.getByRole('button', { name: 'Add server' }).first().click();
   const form = page.getByRole('dialog').filter({ hasText: 'Add MCP server' });
   await form.getByLabel('Name', { exact: true }).fill(name);
-  await form.getByTestId('mcp-server-runs').selectOption('native');
   await form.getByPlaceholder('npx').fill(process.execPath);
   await form.locator('textarea').first().fill(PROBE);
+  await form.getByLabel('Available in').selectOption('selected');
+  await expect(form.getByRole('button', { name: 'Add server', exact: true })).toBeDisabled();
   await form.getByLabel('Available in').selectOption('all');
-  await expect(form).toContainText('Also every workspace added later.');
+  await expect(form).toContainText('Also every workspace added later (not Scratch).');
   await form.getByRole('checkbox', { name: /Enable now/ }).check();
   await shot(page, 'add-form-all');
   await form.getByRole('button', { name: 'Add server', exact: true }).click();
   const confirm = page.getByRole('dialog').filter({ hasText: 'Share MCP server' });
-  await expect(confirm).toContainText('every workspace, including ones added later');
-  await expect(confirm).toContainText('never its credentials or settings');
+  await expect(confirm).toContainText('every workspace except Scratch — also ones added later —');
+  await expect(confirm).toContainText('can’t read or change them');
+  await shot(page, 'share-confirm');
   await confirm.getByRole('button', { name: 'Share', exact: true }).click();
-  await expect(row(page, name).getByTestId('mcp-server-scope')).toHaveText('All workspaces', { timeout: 30_000 });
+  const own = row(page, name);
+  await expect(own.getByTestId('mcp-server-scope')).toHaveText('All workspaces', { timeout: 30_000 });
+  await own.getByRole('button', { name: 'Discover', exact: true }).click();
+  await expect(own.locator('[data-label="Tools"]')).not.toHaveText('0', { timeout: 30_000 });
 
-  // C is created AFTER the server: it has it, from A.
+  // C is created AFTER the server: it has it, from A — and so do its sessions.
   const c = await workspace(`Scope C ${info.project.name}`);
-  await openServers(page, c.id);
+  await open(page, c.id);
   await expect(row(page, name).getByTestId('mcp-server-scope')).toHaveText(`Shared from Scope A ${info.project.name}`, { timeout: 30_000 });
   await expectNoHorizontalOverflow(page);
   await shot(page, 'list-shared-from');
-  if (info.project.name === 'desktop-browser') {
-    expect(await sessionServers(page, c, 'Scope C before')).toContain(name);
-    await openServers(page, c.id);
-  }
+  expect(await sessionTools(page, c.id)).toContain(`mcp__${name}__probe_link`);
 
   // Narrow to "Selected: A, B" (from C — the owner may): gone from C.
+  await open(page, c.id);
   await row(page, name).getByRole('button', { name: `More actions for ${name}` }).click();
   await page.getByRole('menuitem', { name: 'Available in…' }).click();
   const scope = page.getByRole('dialog').filter({ hasText: 'is available' });
   await scope.getByLabel('Available in').selectOption('selected');
+  await expect(scope.getByTestId('mcp-scope-save')).toBeDisabled();
   await scope.getByRole('checkbox', { name: `Scope B ${info.project.name}` }).check();
   await shot(page, 'scope-dialog-selected');
   await scope.getByTestId('mcp-scope-save').click();
   await expect(row(page, name)).toHaveCount(0, { timeout: 30_000 });
-  if (info.project.name === 'desktop-browser') {
-    expect(await sessionServers(page, c, 'Scope C after')).not.toContain(name);
-  }
+  expect(await sessionTools(page, c.id)).not.toContain(`mcp__${name}__`);
   // …and still in B, shared from A.
-  await openServers(page, b.id);
+  await open(page, b.id);
   await expect(row(page, name).getByTestId('mcp-server-scope')).toHaveText(`Shared from Scope A ${info.project.name}`, { timeout: 30_000 });
+});
+
+test('a direct server stays in its home: the control says why, the API refuses', async ({ page }, info) => {
+  const a = await workspace(`Native A ${info.project.name}`);
+  await open(page, a.id);
+  await page.getByRole('button', { name: 'Add server' }).first().click();
+  const form = page.getByRole('dialog').filter({ hasText: 'Add MCP server' });
+  await form.getByTestId('mcp-server-runs').selectOption('native');
+  const control = form.getByLabel('Available in');
+  await expect(control).toBeDisabled();
+  await expect(control).toHaveValue('this');
+  await expect(form).toContainText('A direct server stays in its home workspace. Run it through Otto to share it.');
+  await control.scrollIntoViewIfNeeded();
+  await shot(page, 'native-add-form');
+  await form.getByRole('button', { name: 'Cancel', exact: true }).click();
+
+  const made = await ctx.post(`${base}/api/v1/workspaces/${a.id}/mcp-servers`, { data: { name: `native-${info.project.name}`, command: 'true', enabled: true } });
+  expect(made.ok(), await made.text()).toBeTruthy();
+  const id = (await made.json()).id as string;
+  const share = await ctx.patch(`${base}/api/v1/mcp/servers/${id}`, { data: { all_workspaces: true } });
+  expect(share.status()).toBe(400);
+  expect(await share.text()).toContain('run it through Otto');
 });

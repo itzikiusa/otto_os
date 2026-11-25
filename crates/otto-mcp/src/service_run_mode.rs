@@ -51,6 +51,13 @@ impl McpService {
         let policy = access.get_policy(ResourceKind::McpServer, &id).await?;
         match mode {
             RunMode::Native => {
+                // A native server's command and secrets go into agent config
+                // files: it is never shared (`otto_state::mcp_scope`).
+                if server.is_shared() {
+                    return Err(Error::Invalid(
+                        "a server available in other workspaces can't run natively: make it available in this workspace only first".into(),
+                    ));
+                }
                 if server.transport != "stdio" {
                     return Err(Error::Invalid(
                         "only a stdio server can run natively: the agent CLI launches its command"
