@@ -7,7 +7,7 @@
   import { ensureHljs } from '../../../lib/hl';
   import { createMdCache } from './mdCache';
   import { renderChatMarkdown } from './chatMarkdown';
-  import { streamingBlocksRenderer } from './streamingMd';
+  import { streamingBlocksRenderer, type StreamingBlocksRenderer } from './streamingMd';
   import { assetUrls } from './assetUrls';
 
   // Shared across every mounted block: a re-derived block with an unchanged
@@ -92,7 +92,7 @@
   // Streaming: one {@html} per settled block, each rendered once; only the open
   // tail re-renders per delta, so a settled block keeps its DOM (a drawn
   // diagram, a loaded image, a toggled code block) until the answer ends.
-  let streamRender: ((md: string) => string[]) | null = null;
+  let streamRender: StreamingBlocksRenderer | null = null;
   let streamKey = '';
   const parts = $derived.by((): string[] => {
     const fenced = FENCE.test(md);
@@ -111,12 +111,9 @@
     // The answer just finished: when its blocks put together are the very same
     // html, keep them, so its DOM (drawn diagrams, loaded images, an expanded
     // code block) stays as it streamed.
-    if (streamRender && key === streamKey) {
-      const kept = streamRender(md);
-      if (kept.join('') === whole) return kept;
-    }
+    const done = streamRender && key === streamKey ? streamRender.finish(md, whole) : [whole];
     streamRender = null;
-    return [whole];
+    return done;
   });
 
   // Mermaid / D2 fences render as diagrams (lazy libs, like the vault's reading

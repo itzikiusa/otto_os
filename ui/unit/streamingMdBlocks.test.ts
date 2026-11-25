@@ -75,3 +75,28 @@ test('blank lines inside a <details> / <div> block are not cuts', () => {
   assert.deepEqual(blocks, [lead, html, 'After.\n\n']);
   assert.equal(tail, 'Tail');
 });
+
+// P3-012: a self-closing tag opens nothing, and a closing tag after text on
+// its line still closes the block.
+test('<div /> and a text-led </details> leave the stream cutting after them', () => {
+  for (const html of ['<div />\n\n', '<details>\n<summary>More</summary>\n\nBody text.</details>\n\n']) {
+    const md = `${lead}${html}Next paragraph.\n\nThird paragraph.\n\nTail`;
+    const { blocks, tail } = splitStreamingMarkdown(md);
+    assert.equal(blocks.join('') + tail, md);
+    assert.equal(tail, 'Tail', JSON.stringify(html));
+    assert.ok(blocks.includes('Third paragraph.\n\n'), JSON.stringify(blocks));
+  }
+});
+
+test('finishing a stream releases the per-block memo', () => {
+  let renders = 0;
+  const next = streamingBlocksRenderer((md) => (renders++, `<x>${md.length}</x>`));
+  const md = `${lead}Second.\n\nTail`;
+  const parts = next(md);
+  // The blocks put together are the whole document's html: they are kept.
+  assert.deepEqual(next.finish(md, parts.join('')), parts);
+  assert.deepEqual(next.finish(md, '<whole/>'), ['<whole/>']);
+  renders = 0;
+  next(md);
+  assert.equal(renders, 3, 'every block renders again: nothing was kept');
+});
