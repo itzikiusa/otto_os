@@ -15,7 +15,7 @@ use crate::IdeCtx;
 
 pub(crate) use super::hover_doc::extract_hover_from_definition;
 use super::navigation::{
-    extract_symbol_and_qualifier, find_definitions_in_content, goto_definition,
+    extract_symbol_and_qualifier, find_definitions_in_content, goto_definition_upto,
 };
 use super::{extract_identifier_at, is_ident_char, resolve_language};
 
@@ -75,7 +75,7 @@ pub async fn hover<S: IdeCtx>(ctx: &S, user: &User, req: IdeHoverReq) -> Result<
     let mut def_target: Option<(String, u32, String, String)> = None;
 
     if let (Some(spec), Some(ref resolved)) = (target_spec_opt.clone(), &resolved_opt) {
-        if let Ok(def_resp) = goto_definition(
+        if let Ok(def_resp) = goto_definition_upto(
             ctx,
             user,
             IdeReferencesReq {
@@ -88,6 +88,7 @@ pub async fn hover<S: IdeCtx>(ctx: &S, user: &User, req: IdeHoverReq) -> Result<
                 content: Some(content.clone()),
                 project_folders: req.project_folders.clone(),
             },
+            1,
         )
         .await
         {
