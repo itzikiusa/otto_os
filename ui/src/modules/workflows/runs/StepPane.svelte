@@ -15,6 +15,8 @@
   import type { ChildThread, Criterion, NodeRunState, RunState, StepThread, WorkflowRun } from '../../../lib/api/types';
   import RunFinalOutput from '../RunFinalOutput.svelte';
   import type { RunSync } from '../runSync.svelte';
+  import CriteriaTable from '../goal/CriteriaTable.svelte';
+  import { criterionRows, latestCheck } from '../goal/goalCheck';
   import GoalCard from './GoalCard.svelte';
   import StepConversation from './StepConversation.svelte';
   import StepFiles from './StepFiles.svelte';
@@ -57,7 +59,7 @@
   let detail = $state<NodeRunState | null>(null);
   let detailError = $state<string | null>(null);
   let lastFetch = 0;
-  const needsBody = $derived(!!node && !child && ['output', 'log', 'summary', 'preview', 'conversation'].includes(tab));
+  const needsBody = $derived(!!node && !child && (['output', 'log', 'summary', 'preview', 'conversation'].includes(tab) || (tab === 'criteria' && step?.kind === 'check')));
   $effect(() => {
     const id = node?.node_id;
     void node?.detail_version;
@@ -160,7 +162,9 @@
         <p class="none">The run has no result{run.status === 'running' || run.status === 'pending' ? ' yet' : ''}.</p>
       {/if}
     {:else if tab === 'criteria'}
-      {#if run.overview?.goal}<GoalCard goal={run.overview.goal} {run} {criteria} />{/if}
+      {#if step?.kind === 'check'}
+        <CriteriaTable rows={criterionRows(criteria, latestCheck(body ? [body] : []), node?.attention?.criterion_id ? [node.attention.criterion_id] : [])} />
+      {:else if run.overview?.goal}<GoalCard goal={run.overview.goal} {run} {criteria} />{/if}
     {:else if tab === 'input'}
       {#if attachments.length}
         <h4>Files sent with the run</h4>

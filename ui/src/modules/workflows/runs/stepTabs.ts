@@ -19,6 +19,8 @@ export function paneTabs(what: { result?: boolean; goal?: boolean; child?: boole
   const kind = what.kind ?? '';
   if (kind.endsWith('_trigger')) return ['input'];
   if (kind === 'review_run') return ['summary', 'summarizer', 'log', 'files'];
+  // A check, and a goal's loop: the criteria with their evidence first.
+  if (kind === 'check' || (kind === 'loop' && what.goal)) return ['criteria', 'log', 'output'];
   if (kind === 'human_approval' || what.node?.attention?.kind === 'approval') return ['preview', 'log'];
   if (AGENT_KINDS.has(kind) || what.node?.thread) return ['conversation', 'output', 'files'];
   return ['log', 'output'];

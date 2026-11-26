@@ -14,6 +14,9 @@ test('each kind of step opens on its own first tab', () => {
   assert.deepEqual(paneTabs({ kind: 'manual_trigger' }), ['input']);
   assert.deepEqual(paneTabs({ result: true }), ['result', 'files', 'input']);
   assert.deepEqual(paneTabs({ result: true, goal: true }), ['result', 'criteria', 'files', 'input']);
+  assert.deepEqual(paneTabs({ kind: 'check' }), ['criteria', 'log', 'output']);
+  assert.deepEqual(paneTabs({ kind: 'loop', goal: true }), ['criteria', 'log', 'output']);
+  assert.deepEqual(paneTabs({ kind: 'loop' }), ['log', 'output']);
   // A deterministic kind that still ran an agent (a thread) shows its conversation.
   assert.equal(paneTabs({ kind: 'git_checkout', node: node('a', 'success', 0, 1, { thread: { thread_id: 't', runner: 'threads', provider: 'claude', turns: 1, usage: {} as never } }) })[0], 'conversation');
 });
