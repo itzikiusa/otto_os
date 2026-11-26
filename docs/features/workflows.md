@@ -1004,8 +1004,8 @@ rest of the graph — and replies in-thread with where the run landed:
 A name that only matched after normalisation adds *"ℹ️ No workflow is named
 exactly "…" — matched **X**."*. The run's page in Otto
 (`#/workflows/<workflow id>/runs/<run id>`, **Copy link** in the run header)
-says who started it and where ("Started from Slack", or the person and the
-channel), and keeps the run input under **Result → Input**.
+says who started it and where (the sender and the chat as the channel sent
+them, and "(Slack)") and keeps the run input under **Result → Input**.
 
 `Name:` is matched case-insensitively first (`name = ? COLLATE NOCASE`), then
 after normalising both sides (dash variants — a typed `-` finds an em dash —
@@ -1060,14 +1060,14 @@ accepted in the run input and on a chat binding's spec):
 - **One live message, plus each step's file** (the default, `live`). The run
   keeps **one status message** and edits it in place (at most one edit every
   3 s). Its first line reads
-  `*<workflow>* · <working|reviewing|…> · 5 of 9 steps · 6m 40s (usually 12m)`,
+  `*<workflow>* · <working|reviewing|…> · 5 of 9 steps · 6m 40s`,
   then one line per step: `◻ <step>` (not started), `▶ <step> · 2m 10s`
   (running, with what it is doing), `⏳ <step> — <why it waits> since 10:42`,
   `⚠️ <step> — <what it asks>`, `✅ <step> · 14s — <one line of what it
   did>`, `❌ <step> failed — <error>`, `⏭ <step> — skipped (<why>)`,
   `⏹ <step> — stopped`. Past 3,000 characters the finished steps fold into
   `✅ N steps done`. A run still queued for a run slot already has its message
-  (`*<workflow>* · queued` / `⏳ Queued — 2nd in line`), and one canceled
+  (`*<workflow>* · queued`), and one canceled
   there is edited to `⏹ *<workflow>* — canceled while queued`. The message's
   id is stored on the run, so a restart, a Resume or a retry edits the same
   message. **Every step's file is still posted** to the thread, captioned
@@ -1228,10 +1228,10 @@ blocked: <workflow>* — that opens the workflow. A message that is no workflow
 trigger, or names a workflow that has no binding on that chat, stamps
 nothing (an explicit one is still logged at warn).
 
-**Queue in the app.** A queued run's word on the Runs tab is its place —
-**Queued · 2nd** — and its run page says "Both run slots are busy" (or "All N
-run slots are busy"), with **Cancel run**; the place comes from
-`GET /workspaces/{wid}/workflow-runs/queue`.
+**Queue in the app.** A queued run's word is **Queued** and its run page says
+"Every run slot is busy", with **Cancel run**. The app does not show the place
+in line; `GET /workspaces/{wid}/workflow-runs/queue` returns it, and the chat
+acknowledgement above says how many runs are ahead.
 
 **Loop guard.** Slack drops any event carrying a `bot_id` (including the nested
 `message` of a `message_changed` edit) before it reaches the bridge; Telegram's
@@ -1429,7 +1429,7 @@ runs exhausted the daemon's file descriptors and starved interactive work.
 Every trigger path (manual run, retry-node, webhook, schedule/event trigger,
 chat, scheduled task) shares one FIFO gate (`workflow_engine::spawn_run`):
 
-- A run beyond the cap keeps its `pending` status — shown as **Queued · 2nd** —
+- A run beyond the cap keeps its `pending` status — shown as **Queued** —
   and starts automatically, in creation order, when a slot frees.
 - The queue is **persistent** with no extra table: the still-`pending`
   `workflow_runs` row *is* the queue entry. On daemon restart, queued runs
@@ -1674,7 +1674,7 @@ hold.
 
 | `overview.state` | The run's word | When |
 |---|---|---|
-| `queued` | **Queued · 2nd** | waiting for a run slot |
+| `queued` | **Queued** | waiting for a run slot |
 | `running` | **Working 12m** | at least one step works |
 | `waiting` | **Waiting** | every running step waits for a step slot or the machine |
 | `needs_you` | **Approval** · **Question** · **Verify** · **Limited** | a step waits on a person, or on a usage-limit reset (the oldest wait names it) |
@@ -1730,14 +1730,14 @@ start), when a step starts or stops **waiting on a person**, on the
 - **Needs you** — runs waiting on a person (an approval, a question, a
   criterion you check, a usage limit) and goals held **Blocked** or **Out of
   budget**, the oldest wait first. The tab shows how many.
-- **Running** — working, waiting and paused runs; queued ones last, by place.
+- **Running** — working, waiting and paused runs; queued ones last.
 - **Recent** — finished runs, unread failures first, with **Search runs…**
   (the workflow's name, the ask, repository, branch, PR, step names and
   errors), a **Failed** chip and a workflow filter ("Runs of this workflow"
   sets it).
 
-Each row says in words what the run is doing, what it is about (the PR or
-ticket, else the branch or the ask) and who started it. A row's menu: **Copy
+Each row says in words what the run is doing and what it is about (the PR or
+ticket, else the branch or the ask). A row's menu: **Copy
 link**, **Open workflow**, **Run again with these inputs…**, **Stop run…**.
 The **Workflows** tab (`#/workflows/all`) lists the definitions with their
 last run's word and **New workflow** (describe it and **Generate**, a
@@ -1747,10 +1747,10 @@ template, or **Start blank**); goals fold under **Goals**. **Older goal loops
 A run has its own page, `#/workflows/<wf>/runs/<run>` (the address notices,
 chat links and **Copy link** hand out):
 - **The top**: a ring of the steps with the elapsed time, one sentence — the
-  engine's headline — and a sub line that ticks ("Usually about 12m · 2
-  waiting", "Waiting 4m · the run continues when you decide", "Otto continues
-  it at 14:02", "Both run slots are busy", "Finished at 14:20 · 2m faster
-  than usual").
+  engine's headline — and a sub line that ticks ("2 waiting", "Waiting 4m ·
+  the run continues when you decide", "Otto continues it at 14:02", "Every
+  run slot is busy", "Finished at 14:20", "After 12m · 4m of it waiting for
+  the machine").
 - **One card** for the run's state: the failing step's **own** error; an
   approval ("<step> asks to go ahead", where it goes and who sees it,
   **Approve** / **Deny…**); a question (**Answer in the conversation**); a
@@ -1758,9 +1758,10 @@ chat links and **Copy link** hand out):
   resume…**); what was **Delivered** (each outward result: Posted · Partly
   posted · Not posted: why · Waiting for approval · Not confirmed); or a
   goal's criteria.
-- **The facts** in names: who started it and where, the PR or branch, the
-  ticket, when, which version, notes waiting for the next step, "Resumed
-  after Otto restarted".
+- **The facts**: who started it and where (for a chat run the sender and the
+  chat as the channel sent them — ids, not names — and "(Slack)"), the PR or
+  branch, the ticket, when, which version, notes waiting for the next step,
+  "Resumed after Otto restarted".
 - **The steps in execution order** with their numbers, words and times;
   steps that ran side by side are grouped under **In parallel**; reviewers,
   the summarizer, sub-threads and a loop's iterations are named rows under
@@ -2170,6 +2171,12 @@ are **append-only** — never edit or renumber an existing one.
   another, and says so on each waiting step.
 - **Two steps with no path between them may run together.** Order outward
   steps with an edge.
+- **Not shown yet: the place in line and the usual duration.** The run page
+  and the chat message have words for them ("Queued · 2nd", "usually 12m"),
+  but the engine does not fill `overview.queue` or `overview.typical_ms`, so
+  a queued run reads **Queued** and no run says how long it usually takes.
+  A chat run's origin shows the sender's and the chat's ids as the channel
+  sent them, not their names.
 - **`game_engine` / `verifier` are scaffolds** — real, runnable, useful for the
   game-pipeline templates, but they emit canned specs / scaffold reports awaiting
   a real external game engine + certifier (see footnote ¹ in §4).

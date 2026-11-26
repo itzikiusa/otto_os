@@ -523,8 +523,8 @@ channel binding — see [Workflows § Triggers](./workflows.md#5-triggers)) turn
 the thread into that run's thread. What the bot posts there:
 
 - **One live status message** (the default). The bot posts one message for
-  the run — already while the run waits for a run slot ("⏳ Queued — 2nd in
-  line") — and **edits it in place** as the run moves: a first line with the
+  the run — already while the run waits for a run slot — and **edits it in
+  place** as the run moves: a first line with the
   workflow's name, its state, "5 of 9 steps" and the elapsed time, then one
   line per step. Edits come at most every 3 seconds and do not notify. Slack
   edits with `chat.update`, Telegram with `editMessageText`; if the message
