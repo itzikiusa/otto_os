@@ -402,6 +402,8 @@ fn detect(
                     .into_iter()
                     .filter(|f| g.nodes.iter().any(|w| w.id != n.id && io(w).writes.iter().any(|x| glob_eq(x, f))))
                     .filter(|f| !f.contains('*'))
+                    // The run's registries are engine data, not summary text.
+                    .filter(|f| !matches!(f.as_str(), "repos.json" | "prs.json"))
                     .collect();
                 let mut params = json!({"review_from": review, "summary_files": files});
                 if p.contains("no info") {
