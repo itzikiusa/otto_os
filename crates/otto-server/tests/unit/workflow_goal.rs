@@ -1906,9 +1906,9 @@ async fn a_siblings_publish_does_not_notify_the_approval_again() {
     assert!(notices[0].ends_with(":gate"), "{notices:?}");
 }
 
-/// CR1-024: a step that starts again drops the error class its earlier
-/// execution left — a canceled run's step, retried, must not stay
-/// "canceled" once it succeeded.
+/// CR1-024: a step that starts again from its kept state (a restart caught
+/// it after an attempt that failed) drops the error class that attempt left:
+/// once it succeeded it must not still read as a provider failure.
 #[tokio::test]
 async fn a_step_that_starts_again_drops_its_old_error_class() {
     let graph = WorkflowGraph {
@@ -1924,11 +1924,13 @@ async fn a_step_that_starts_again_drops_its_old_error_class() {
             output: Some(json!({})),
             ..Default::default()
         },
+        // A step caught mid-flight re-enters with its state kept (DR-006).
         NodeRunState {
             node_id: "a".into(),
             status: NodeStatus::Pending,
             step_no: Some(2),
-            error_class: Some("canceled".into()),
+            started_at: Some(chrono::Utc::now() - chrono::Duration::seconds(60)),
+            error_class: Some("provider".into()),
             ..Default::default()
         },
     ];
