@@ -19,17 +19,10 @@ const MAX_DELIVERABLES: usize = 12;
 const MAX_HEADLINE: usize = 160;
 const MAX_TEXT: usize = 300;
 
-/// A stored hold counts only when the stored status matches its kind:
-/// paused ↔ canceled, blocked / exhausted ↔ error (DR-105). A hold the
-/// previous build left behind on a retried row is ignored.
+/// The hold that counts for a run with this status (DR-105): the one rule,
+/// [`RunHold::is_effective`] (`otto_state`'s `HOLD_SQL` is its SQL twin).
 pub fn effective_hold(status: RunStatus, hold: Option<&RunHold>) -> Option<&RunHold> {
-    hold.filter(|h| {
-        matches!(
-            (h.kind, status),
-            (HoldKind::Paused, RunStatus::Canceled)
-                | (HoldKind::Blocked | HoldKind::Exhausted, RunStatus::Error)
-        )
-    })
+    hold.filter(|h| h.is_effective(status))
 }
 
 /// Compute the run's overview.

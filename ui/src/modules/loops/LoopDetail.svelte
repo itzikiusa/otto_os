@@ -1,10 +1,13 @@
 <script lang="ts">
+  // One older goal loop, read-only (goal.md §5.2): its progress, criteria and
+  // evidence per iteration, the graph of a graph loop, the kept work and its
+  // diff. The only actions: Continue as a goal (an unfinished loop) and
+  // Delete history. Goal Loops are now goals in Workflows.
   import { announceShown } from '../../lib/announce.svelte';
   import { scrollBehavior } from '../../lib/motion';
   import { loops } from '../../lib/stores/loops.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { toastError } from '../../lib/toastError';
-  import { loadErrorText } from '../../lib/loadError';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
@@ -12,42 +15,25 @@
   import IterationRow from './IterationRow.svelte';
   import GoalGraphView from './GoalGraphView.svelte';
   import IterationDiagram from './IterationDiagram.svelte';
+  import LoopChanges from './LoopChanges.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { PHASE_LABEL, progressFill, criterionMark } from './loopPresentation';
   import LoadState from '../../lib/components/LoadState.svelte';
-  import { humanVerification } from './verification';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
-  import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
-  import { formatSeconds, formatUsd } from '../../lib/metric-format';
-  import { now } from '../../lib/stores/now.svelte';
-  import Modal from '../../lib/components/Modal.svelte';
-  import type { GoalLoop } from '../../lib/api/types';
-  import { budgetCap, extendBlocker, extendDefaults, hasBudgetLeft } from './budget';
-  import { loopStatusOf, pausedByRestart } from './loopSafety';
-  import LoopSafetyNotes from './LoopSafetyNotes.svelte';
-  import LoopOpsDrawer from './LoopOpsDrawer.svelte';
+  import type { MenuItem } from '../../lib/contextmenu.svelte';
+  import { formatSeconds } from '../../lib/metric-format';
+  import type { AcceptanceCriterion, GoalLoop, GoalLoopLedger } from '../../lib/api/types';
+  import { router } from '../../lib/router.svelte';
+  import { canContinue, loopStatusOf, pausedByRestart } from './loopStatus';
   import { tick } from 'svelte';
 
   // The embedded session (terminal + xterm) loads on a click on an agent.
   const SessionViewLazy = lazyComponent(() => import('../agents/SessionView.svelte'));
 
-  /** ⌘K verbs registered by the detail page (or bound via optional actions prop). */
-  export interface LoopActions {
-    pause: () => void;
-    resume: () => void;
-    stop: () => void;
-    extend: () => void;
-  }
-
-  let { id, onback, actions }: { id: string; onback: () => void; actions?: LoopActions } = $props();
-
-  let answers = $state<Record<string, string>>({});
-  let evidence = $state<Record<string, string>>({});
-  /** Lifecycle call in flight (Pause / Resume / Stop) — disables the header verbs. */
-  let acting = $state(false);
+  let { id, onback }: { id: string; onback: () => void } = $props();
 
   let openSessionId = $state<string | null>(null);
   let sessEl = $state<HTMLElement | null>(null);
@@ -69,17 +55,11 @@
     if (!(next instanceof Node) || !sessEl?.contains(next)) sessFocused = false;
   }
 
-  // Load + poll the open detail; stop polling when this view goes away.
   $effect(() => {
     void loops.loadDetail(id);
-    loops.startPoll(id);
-    return () => loops.stopPoll();
   });
 
   const detail = $derived(loops.detail && loops.detail.loop.id === id ? loops.detail : null);
-  const detailOps = $derived(detail as (typeof detail & { spent_usd?: number | null; steering_notes?: string[] }) | null);
-  const spentUsd = $derived(detailOps?.spent_usd ?? null);
-  const queuedSteering = $derived(detailOps?.steering_notes ?? []);
   const loop = $derived<GoalLoop | null>(detail?.loop ?? null);
   // Newest iteration first.
   const iterations = $derived([...(detail?.iterations ?? [])].reverse());
@@ -92,222 +72,68 @@
     const ev = iterations.find((it) => it.evaluation)?.evaluation;
     return Object.fromEntries((ev?.criteria ?? []).map((c) => [c.id, c.met])) as Record<string, boolean>;
   });
+  const questions = $derived(loop?.ledger?.questions ?? []);
+  const cap = $derived(!loop ? null : loop.iterations_started >= loop.limits.max_iterations ? 'iterations' : loop.elapsed_secs >= loop.limits.max_runtime_secs ? 'runtime' : null);
+  const continuable = $derived(!!loop && canContinue(loop));
 
-  function elapsedSecs(l: GoalLoop): number {
-    let s = l.elapsed_secs;
-    if (l.status === 'running' && l.run_started_at) {
-      s += Math.max(0, (now() - new Date(l.run_started_at).getTime()) / 1000);
-    }
-    return s;
+  /** A person's recorded verification, only while it matches the criterion as written. */
+  function humanVerification(c: AcceptanceCriterion, ledger?: GoalLoopLedger) {
+    return ledger?.verifications.find((v) => {
+      if (v.criterion_id !== c.id || !v.evidence.trim()) return false;
+      try {
+        const prior = JSON.parse(v.criterion_revision) as AcceptanceCriterion;
+        return prior.text === c.text && prior.verify === c.verify && prior.verify_kind === c.verify_kind && (prior.verify_cmd ?? null) === (c.verify_cmd ?? null);
+      } catch {
+        return false;
+      }
+    });
   }
 
-  /** Run a lifecycle/ledger call; a failure toasts with a human title and cause. */
-  async function act(fn: () => Promise<void>, failTitle: string): Promise<void> {
-    acting = true;
+  /** Continue as a goal: the Workflows page opens the Goal form filled from
+   *  this loop (workflows/goal/goalDraft.ts takes the staged id). */
+  function continueAsGoal(): void {
     try {
-      await fn();
-    } catch (e) {
-      toastError(failTitle, e);
-    } finally {
-      acting = false;
+      sessionStorage.setItem('otto:automation-draft', JSON.stringify({ target: 'goal', loop_id: id }));
+    } catch {
+      /* private storage: the page still opens */
     }
+    router.go('workflows');
   }
-  // Irreversible: confirm first, and only leave the page once the delete landed
-  // (a failed delete keeps the user on the loop with the error toast).
+
+  // Irreversible: confirm first, and only leave the page once the delete landed.
   async function del(): Promise<void> {
     const loopId = id;
     const name = loop?.name ?? 'this goal loop';
-    if (!(await confirmer.ask(`Delete “${name}” and its iteration history? Retained work on disk is kept.`, { title: 'Delete goal loop', confirmLabel: 'Delete', danger: true }))) return;
+    if (!(await confirmer.ask(`Delete the history of “${name}”? Its kept work on disk stays.`, { title: 'Delete history', confirmLabel: 'Delete', danger: true }))) return;
     try {
       await loops.remove(loopId);
     } catch (e) {
-      toastError('Couldn’t delete the goal loop', e);
+      toastError('Couldn’t delete the history', e);
       return;
     }
-    toasts.success('Goal loop deleted', name);
+    toasts.success('History deleted', name);
     if (id === loopId) onback();
   }
-  // Stop is terminal (a stopped loop can't be resumed), unlike Pause.
-  async function stop(): Promise<void> {
-    const loopId = id;
-    if (!(await confirmer.ask('Stop this goal loop? A stopped loop can’t be resumed — use Pause to continue later.', { title: 'Stop goal loop', danger: true, confirmLabel: 'Stop loop' }))) return;
-    await act(() => loops.stop(loopId), 'Couldn’t stop the goal loop');
+  function more(): MenuItem[] {
+    return loop ? [{ label: 'Delete history…', icon: 'trash', danger: true, action: () => void del() }] : [];
   }
-  /** ⋯ next to the primary verb. A draft’s Delete lives here so Start is the only header button. */
-  function moreMenu(e: MouseEvent): void {
-    const status = loop?.status;
-    const items: MenuItem[] = [];
-    if (status && status !== 'draft') {
-      items.push({ label: 'Stop loop…', icon: 'stop' as const, danger: true, action: () => void stop() });
-    }
-    if (status !== 'running') {
-      items.push({ label: 'Delete loop…', icon: 'trash' as const, danger: true, action: () => void del() });
-    }
-    ctxMenu.show(e, items);
-  }
-  // ---- Extend budget (L1): an exhausted loop re-exhausts on a plain Resume,
-  // so raise its caps (PATCH limits) and then resume, in one step.
-  let extendOpen = $state(false);
-  let extIters = $state(0);
-  let extMinutes = $state(0);
-  let extCostUsd = $state('');
-  let extError = $state('');
-  let savedExtension = $state('');
-  const cap = $derived(loop ? budgetCap(loop, elapsedSecs(loop)) : null);
-  const budgetLeft = $derived(!!loop && hasBudgetLeft(loop, elapsedSecs(loop)));
-  const unanswered = $derived(loop?.ledger?.questions.some((q) => !q.answer) ?? false);
-  function openExtend(): void {
-    if (!loop || acting || unanswered) return;
-    if (loop.status !== 'paused' && loop.status !== 'blocked' && loop.status !== 'exhausted') return;
-    const d = extendDefaults(loop, elapsedSecs(loop));
-    extIters = d.max_iterations;
-    extMinutes = d.runtime_minutes;
-    extCostUsd = loop.limits.max_cost_usd != null ? String(loop.limits.max_cost_usd) : '';
-    extError = '';
-    savedExtension = '';
-    extendOpen = true;
-  }
-  async function extendAndResume(): Promise<void> {
-    if (!loop || acting) return;
-    const loopId = id;
-    const iters = Math.floor(Number(extIters));
-    const mins = Math.floor(Number(extMinutes));
-    const rawCost = extCostUsd.trim();
-    let parsedCost: number | null = null;
-    if (rawCost !== '') {
-      const n = Number(rawCost);
-      if (!Number.isFinite(n) || n <= 0) {
-        extError = 'Max cost must be greater than $0 (or leave blank for no cap).';
-        return;
-      }
-      parsedCost = n;
-    }
-    // Name the limit still without room (the engine refuses it the same way).
-    const blocker = extendBlocker(loop, elapsedSecs(loop), iters, mins);
-    if (blocker) {
-      extError = blocker;
-      return;
-    }
-    extError = '';
-    acting = true;
-    const signature = `${loopId}:${iters}:${mins}:${parsedCost ?? ''}`;
-    try {
-      if (savedExtension !== signature) {
-        await loops.updateLimits(loopId, {
-          ...loop.limits,
-          max_iterations: iters,
-          max_runtime_secs: mins * 60,
-          max_cost_usd: parsedCost,
-        });
-        savedExtension = signature;
-      }
-      await loops.resume(loopId);
-      if (id === loopId) extendOpen = false;
-    } catch (e) {
-      const detail = loadErrorText(e);
-      const message = savedExtension === signature
-        ? `Budget saved, but the loop did not resume. Retry to resume with the saved budget. ${detail}`
-        : detail;
-      if (id === loopId && extendOpen) extError = message;
-      else toasts.error('Couldn’t resume the goal loop', message);
-    } finally {
-      acting = false;
-    }
-  }
-  const openQuestions = $derived((loop?.ledger?.questions ?? []).filter((q) => !q.answer));
-  const answeredQuestions = $derived((loop?.ledger?.questions ?? []).filter((q) => !!q.answer));
-  const canVerify = $derived(!!loop && ['paused', 'blocked', 'exhausted'].includes(loop.status));
-  const canResume = $derived(!!loop && (loop.status === 'paused' || loop.status === 'blocked' || loop.status === 'exhausted'));
-  /** The restart banner's Resume: the header verb's rules (no budget → Extend). */
-  function resumeNow(): void {
-    if (!loop || acting || unanswered) return;
-    if (!budgetLeft) return openExtend();
-    void act(() => loops.resume(id), 'Couldn’t resume the goal loop');
-  }
-
-  $effect(() => {
-    const loopId = id;
-    const current = loop;
-    const busy = acting;
-    const blocked = unanswered;
-    const resumable = canResume;
-    const pauseFn = () => {
-      if (busy || current?.status !== 'running') return;
-      void act(() => loops.pause(loopId), 'Couldn’t pause the goal loop');
-    };
-    const resumeFn = () => {
-      if (busy || blocked || !resumable || !current) return;
-      if (!hasBudgetLeft(current, elapsedSecs(current))) {
-        openExtend();
-        return;
-      }
-      void act(() => loops.resume(loopId), 'Couldn’t resume the goal loop');
-    };
-    const stopFn = () => {
-      if (!current || current.status === 'draft') return;
-      void stop();
-    };
-    const extendFn = () => {
-      openExtend();
-    };
-    if (!actions) return;
-    actions.pause = pauseFn;
-    actions.resume = resumeFn;
-    actions.stop = stopFn;
-    actions.extend = extendFn;
-    return () => {
-      actions.pause = () => {};
-      actions.resume = () => {};
-      actions.stop = () => {};
-      actions.extend = () => {};
-    };
-  });
 </script>
 
 <div class="detail-page">
-<PageHeader class="loop-header" title={loop?.name ?? 'Goal loop'} subtitle={loop ? (loop.config.graph ? 'Engineering graph' : 'Goal loop') : undefined}>
+<PageHeader class="loop-header" title={loop?.name ?? 'Goal loop'} subtitle={loop ? (loop.config.graph ? 'Older engineering graph' : 'Older goal loop') : undefined} {more}>
   {#snippet leading()}
-    <button class="icon-btn" title="Back to Goal Loops" aria-label="Back to Goal Loops" onclick={onback}>
+    <button class="icon-btn" title="Back to older goal loops" aria-label="Back to older goal loops" onclick={onback}>
       <Icon name="chevronLeft" size={14} />
     </button>
   {/snippet}
   {#snippet badge()}
-    {#if loop}<StatusBadge status={loopStatusOf(loop)} />{/if}
+    {#if loop && !viewport.isPhone}<StatusBadge status={loopStatusOf(loop)} />{/if}
   {/snippet}
   {#snippet actions()}
-    {#if loop}
-      {#if loop.status === 'running'}
-        <button class="btn small" data-icon="pause" disabled={acting} onclick={() => act(() => loops.pause(id), 'Couldn’t pause the goal loop')}><Icon name="pause" size={12} /> Pause</button>
-        <button class="icon-btn" data-overflow="-10" data-icon="more" data-label="More actions" onclick={moreMenu}
-          aria-label="More actions" title="More actions" aria-haspopup="menu">
-          <Icon name="more" size={14} />
-        </button>
-      {:else if loop.status === 'paused' || loop.status === 'blocked' || loop.status === 'exhausted'}
-        {#if budgetLeft}
-          <button class="btn small" data-overflow="-1" data-icon="plus" disabled={unanswered || acting} onclick={openExtend}
-            title={unanswered ? 'Resume stays off until this answer is recorded.' : 'Raise the iteration and runtime caps'}>Extend budget…</button>
-          <button class="btn small" class:primary={!unanswered} disabled={unanswered || acting} title={unanswered ? 'Resume stays off until this answer is recorded.' : 'Continue iterating toward the goal'}
-            onclick={() => act(() => loops.resume(id), 'Couldn’t resume the goal loop')}><Icon name="play" size={12} /> Resume</button>
-        {:else}
-          <!-- No budget left: a plain Resume would re-exhaust at once. -->
-          <button class="btn small" class:primary={!unanswered} disabled={unanswered || acting} title={unanswered ? 'Resume stays off until this answer is recorded.' : 'Raise the caps, then continue iterating'}
-            onclick={openExtend}><Icon name="play" size={12} /> Extend &amp; resume…</button>
-        {/if}
-        <button class="icon-btn" data-overflow="-10" data-icon="more" data-label="More actions" onclick={moreMenu}
-          aria-label="More actions" title="More actions" aria-haspopup="menu">
-          <Icon name="more" size={14} />
-        </button>
-      {:else if loop.status === 'draft'}
-        <button class="btn small primary" disabled={acting} title="Start iterating toward the goal"
-          onclick={() => act(() => loops.start(id), 'Couldn’t start the goal loop')}><Icon name="play" size={12} /> Start</button>
-        <button class="icon-btn" data-overflow="-10" data-icon="more" data-label="More actions" onclick={moreMenu}
-          aria-label="More actions" title="More actions" aria-haspopup="menu">
-          <Icon name="more" size={14} />
-        </button>
-      {:else}
-        <button class="icon-btn" data-overflow="-2" data-icon="trash" data-label="Delete loop" onclick={del}
-          aria-label="Delete goal loop" title="Delete goal loop"><Icon name="trash" size={14} /></button>
-      {/if}
+    {#if continuable}
+      <button class="btn small primary" data-testid="loop-continue" title="Go on in this loop’s kept work, as a goal in Workflows" onclick={continueAsGoal}>
+        <Icon name="play" size={12} /> {viewport.isPhone ? 'Continue' : 'Continue as a goal'}
+      </button>
     {/if}
   {/snippet}
 </PageHeader>
@@ -337,21 +163,11 @@
 
       <dl class="stats">
         <div><dt>Iteration</dt><dd>{loop.current_iteration} <span class="of" class:cap-hit={cap === 'iterations'}>/ {loop.limits.max_iterations}</span>{#if cap === 'iterations'} <span class="cap-hit">cap reached</span>{/if}</dd></div>
-        <div><dt>Time used</dt><dd>{formatSeconds(Math.round(elapsedSecs(loop)))} <span class="of" class:cap-hit={cap === 'runtime'}>/ {formatSeconds(loop.limits.max_runtime_secs)}</span>{#if cap === 'runtime'} <span class="cap-hit">cap reached</span>{/if}</dd></div>
-        {#if spentUsd != null || loop.limits.max_cost_usd != null}
-          {@const costHit = spentUsd != null && loop.limits.max_cost_usd != null && spentUsd >= loop.limits.max_cost_usd}
-          <div>
-            <dt>{spentUsd != null ? 'Spend' : 'Max cost'}</dt>
-            <dd>
-              {#if spentUsd != null}{formatUsd(spentUsd)}{#if loop.limits.max_cost_usd != null} <span class="of" class:cap-hit={costHit}>/ {formatUsd(loop.limits.max_cost_usd)}</span>{/if}{#if costHit} <span class="cap-hit">cap reached</span>{/if}
-              {:else}{formatUsd(loop.limits.max_cost_usd)}{/if}
-            </dd>
-          </div>
-        {/if}
+        <div><dt>Time used</dt><dd>{formatSeconds(Math.round(loop.elapsed_secs))} <span class="of" class:cap-hit={cap === 'runtime'}>/ {formatSeconds(loop.limits.max_runtime_secs)}</span>{#if cap === 'runtime'} <span class="cap-hit">cap reached</span>{/if}</dd></div>
         <div><dt>Work type</dt><dd>{loop.config.mode === 'research' ? 'Research' : 'Build'}</dd></div>
         {#if loop.branch}<div class="wide"><dt>Branch</dt><dd class="mono" title={loop.branch}>{loop.branch}</dd></div>{/if}
       </dl>
-      <LoopSafetyNotes {loop} elapsedSecs={elapsedSecs(loop)} busy={acting} blocked={unanswered} onresume={resumeNow} />
+      {#if pausedByRestart(loop)}<p class="summary">Otto restarted while this loop ran; its work is kept. Continue it as a goal to go on.</p>{/if}
 
       {#if loop.summary}<p class="summary">{loop.summary}</p>{/if}
       {#if loop.error && !pausedByRestart(loop)}<p class="errline" use:announceShown={{ text: loop.error, assertive: true }}><Icon name="warning" size={13} /> <span>{loop.error}</span></p>{/if}
@@ -361,7 +177,7 @@
       {/if}
     </section>
 
-    <LoopOpsDrawer loopId={id} status={loop.status} hasWorktree={!!loop.worktree_path || loop.config.mode === 'build'} queuedNotes={queuedSteering} />
+    {#if loop.worktree_path}<LoopChanges loopId={id} />{/if}
 
     {#if loop.config.graph}
       <div class="card-box">
@@ -369,19 +185,6 @@
       </div>
     {/if}
 
-    {#each openQuestions as q (q.id)}
-      <section class="decision" aria-label="Decision needed">
-        <h3 class="section-title"><Icon name="warning" size={12} /> Decision needed</h3>
-        <p class="q">{q.question}</p>
-        <p class="resume-hint">Resume stays off until this answer is recorded.</p>
-        <textarea dir="auto" class="input answer" rows="2" aria-label="Answer question" placeholder="Your answer — the agents read it on Resume" bind:value={answers[q.id]}></textarea>
-        <div class="row-end">
-          <button class="btn small primary" disabled={!answers[q.id]?.trim() || loop.status !== 'blocked' || acting}
-            title={loop.status !== 'blocked' ? 'Answers are recorded while the loop is blocked' : undefined}
-            onclick={() => act(() => loops.answerQuestion(id, q.id, answers[q.id]), 'Couldn’t record the answer')}>Record answer</button>
-        </div>
-      </section>
-    {/each}
 
     {#if loop.ledger?.review_summary}
       <details class="review">
@@ -409,15 +212,7 @@
               <span class="crit-how">Verified by {c.verify_kind === 'human' ? 'a person' : c.verify_kind === 'command' ? 'a shell command' : 'an agent'} — {c.verify}</span>
               {#if c.verify_kind === 'human'}
                 {@const approval = humanVerification(c, loop.ledger)}
-                {#if approval}<p class="verified"><Icon name="userCheck" size={12} /> Verified by {approval.verified_by}: {approval.evidence}</p>
-                {:else}
-                  <textarea dir="auto" class="input answer" rows="2" aria-label={`Evidence for ${c.text}`} aria-describedby={`crit-text-${c.id}`} placeholder="What did you verify?" bind:value={evidence[c.id]}></textarea>
-                  <div class="row-end">
-                    <button class="btn small" disabled={!evidence[c.id]?.trim() || !canVerify || acting}
-                      title={canVerify ? undefined : 'Record verification while the loop is paused, blocked or exhausted'}
-                      onclick={() => act(() => loops.verifyCriterion(id, c.id, evidence[c.id]), 'Couldn’t record the verification')}>Record verification</button>
-                  </div>
-                {/if}
+                {#if approval}<p class="verified"><Icon name="userCheck" size={12} /> Verified by {approval.verified_by}: {approval.evidence}</p>{:else}<p class="dim">No person recorded this.</p>{/if}
               {/if}
             </div>
           </li>
@@ -425,11 +220,11 @@
       </ul>
     </section>
 
-    {#if answeredQuestions.length}
+    {#if questions.length}
       <section class="goal">
         <h3 class="section-title">Decisions</h3>
-        {#each answeredQuestions as q (q.id)}
-          <p class="q-done"><span class="dim">{q.question}</span><br />{q.answer} <span class="dim">— {q.answered_by}</span></p>
+        {#each questions as q (q.id)}
+          <p class="q-done"><span class="dim">{q.question}</span><br />{#if q.answer}{q.answer} <span class="dim">— {q.answered_by}</span>{:else}<span class="dim">Not answered</span>{/if}</p>
         {/each}
       </section>
     {/if}
@@ -465,9 +260,6 @@
           <IterationRow
             iter={it}
             loopId={id}
-            loopStatus={loop.status}
-            executorCount={loop.config.executors.length}
-            hasGraph={!!loop.config.graph}
             criteria={critText}
             open={i === 0}
             onopensession={(sid) => void openSession(sid)}
@@ -481,38 +273,11 @@
 </PageBody>
 </div>
 
-{#if extendOpen && loop}
-  <Modal title="Extend budget" onclose={() => { if (!acting) extendOpen = false; }}>
-    <form class="extend" id="gl-extend-form" onsubmit={(e) => { e.preventDefault(); void extendAndResume(); }}>
-      <p class="extend-lede">
-        {#if cap === 'iterations'}The iteration cap was reached.{:else if cap === 'runtime'}The time cap was reached.{:else}Raise the caps to give the loop more room.{/if}
-        Used so far: {loop.iterations_started} iterations, {formatSeconds(Math.round(elapsedSecs(loop)))}.
-      </p>
-      <label class="extend-lbl" for="gl-ext-iters">Max iterations</label>
-      <input id="gl-ext-iters" class="input" type="number" min={loop.iterations_started + 1} step="1" bind:value={extIters} />
-      <label class="extend-lbl" for="gl-ext-mins">Max runtime (minutes)</label>
-      <input id="gl-ext-mins" class="input" type="number" min="1" step="1" bind:value={extMinutes} />
-      <label class="extend-lbl" for="gl-ext-cost">Max cost (USD, optional)</label>
-      <input id="gl-ext-cost" class="input" type="number" min="0.5" step="0.5" placeholder="No cap" bind:value={extCostUsd} />
-      {#if extError}<p class="errline" use:announceShown={{ text: extError, assertive: true }}><Icon name="warning" size={13} /> <span>{extError}</span></p>{/if}
-    </form>
-    {#snippet footer()}
-      <button class="btn" disabled={acting} onclick={() => (extendOpen = false)}>Cancel</button>
-      <button class="btn primary" type="submit" form="gl-extend-form" disabled={acting || unanswered}
-        title={unanswered ? 'Resume stays off until this answer is recorded.' : undefined}>{acting ? 'Resuming…' : 'Extend & resume'}</button>
-    {/snippet}
-  </Modal>
-{/if}
-
 <style>
   /* Keep Resume and the overflow menu reachable beside a long goal name. */
   @media (max-width: 640px) {
     .detail-page :global(.loop-header .ph-title-block) { min-width: 0; max-width: 45%; }
   }
-  .extend { display: grid; gap: 6px; }
-  .extend-lede { margin: 0 0 6px; color: var(--text-dim); font-size: var(--fs-s); }
-  .extend-lbl { font-size: var(--fs-s); font-weight: 600; margin-block-start: 6px; }
-  .extend input { inline-size: 100%; }
   .cap-hit { color: var(--warning); }
   pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--fs-s); margin: 8px 0 0; }
   .detail-page {
@@ -646,19 +411,6 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     min-width: 0;
-  }
-  .decision {
-    border: 1px solid color-mix(in srgb, var(--warning) 40%, transparent);
-    background: var(--warning-soft);
-    border-radius: var(--radius-m);
-    padding: 12px 16px;
-  }
-  .decision .section-title {
-    margin-top: 0;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    color: var(--warning);
   }
   .q {
     font-size: var(--fs-m);

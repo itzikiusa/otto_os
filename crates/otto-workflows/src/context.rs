@@ -456,6 +456,9 @@ pub struct RunContextFiles {
     /// `write_final_output`: the run's deliverable is the latest substantive,
     /// successful step in run order — whichever finished last.
     content_step: Mutex<Option<(u32, String)>>,
+    /// Per step number, the step numbers whose files it is told to read
+    /// ([`RunContextFiles::set_listed_steps`]); a step not in it lists all.
+    listed: Mutex<std::collections::HashMap<usize, std::collections::HashSet<u32>>>,
 }
 
 /// Unique suffix for atomic writes' temp names (several writers per process).
@@ -472,6 +475,7 @@ impl RunContextFiles {
                 run_id: run_id.to_string(),
                 repos: Mutex::new(vec![]),
                 content_step: Mutex::new(None),
+                listed: Mutex::default(),
             },
             Err(e) => {
                 tracing::warn!("workflow-context: create {} failed: {e}", dir.display());
@@ -486,6 +490,7 @@ impl RunContextFiles {
             run_id: run_id.to_string(),
             repos: Mutex::new(vec![]),
             content_step: Mutex::new(None),
+            listed: Mutex::default(),
         }
     }
 
@@ -803,13 +808,25 @@ impl RunContextFiles {
         iter: Option<u64>,
         inner_idx: Option<usize>,
     ) -> String {
-        self.preamble_listing(
-            step_no,
-            display_name,
-            iter,
-            inner_idx,
-            &self.list_step_mds(),
-        )
+        let listed = self
+            .listed
+            .lock()
+            .ok()
+            .and_then(|m| m.get(&step_no).cloned());
+        let prior = match listed {
+            Some(set) => self.list_step_mds_of(&set),
+            None => self.list_step_mds(),
+        };
+        self.preamble_listing(step_no, display_name, iter, inner_idx, &prior)
+    }
+
+    /// Under parallelism the engine names, before step `step_no` starts, the
+    /// step numbers whose files its preamble lists: its settled ancestors'
+    /// (and its own, for a loop's earlier iterations), engine.md §5.2.
+    pub fn set_listed_steps(&self, step_no: usize, step_nos: std::collections::HashSet<u32>) {
+        if let Ok(mut m) = self.listed.lock() {
+            m.insert(step_no, step_nos);
+        }
     }
 
     /// [`RunContextFiles::preamble_for`] with the prior step files given by

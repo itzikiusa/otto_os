@@ -92,8 +92,7 @@ export const SIDEBAR_MODULES: SidebarModuleDef[] = [
   { id: 'threads', icon: 'threads', label: 'Threads', group: 'work', feature: 'agents', keywords: 'threads chat conversational agents v2 pandacode t3code multi-session split pins history files' },
   { id: 'rooms', icon: 'people', label: 'Rooms', group: 'work', feature: 'agents', keywords: 'collaborate join invite session room chat voice' },
   // ── Automate ──
-  { id: 'loops', icon: 'refresh', label: 'Goal Loops', group: 'automate', keywords: 'goal loop iterate autonomous objective plan execute evaluate' },
-  { id: 'workflows', icon: 'split', label: 'Workflows', group: 'automate', feature: 'workflows', keywords: 'pipeline steps runs pr review automation' },
+  { id: 'workflows', icon: 'split', label: 'Workflows', group: 'automate', feature: 'workflows', keywords: 'pipeline steps runs pr review automation goal loop objective criteria iterate' },
   {
     id: 'scheduled-tasks',
     icon: 'user',
@@ -232,6 +231,8 @@ export function navIdForModule(routerModule: string): string {
   if (routerModule === 'design' || routerModule === 'canvas') return 'product';
   if (routerModule === 'personal-agents') return 'scheduled-tasks';
   if (routerModule === 'workbench') return 'ide';
+  // The older goal loops' history lives under Workflows (goal.md §5.2).
+  if (routerModule === 'loops') return 'workflows';
   return routerModule;
 }
 

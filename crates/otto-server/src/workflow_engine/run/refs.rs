@@ -85,6 +85,9 @@ pub(in crate::workflow_engine) async fn lookup_run_prs(
                     base: d.summary.target_branch,
                     head_sha: d.summary.head_sha,
                     head_ref: None,
+                    state: Some(d.summary.state),
+                    url: Some(d.summary.url),
+                    title: Some(d.summary.title),
                 })
             }
             Err(e) => tracing::warn!(repo = %repo.name, "wf PR #{number}: lookup failed: {e}"),

@@ -4,7 +4,7 @@ import { expectNoHorizontalOverflow } from './helpers';
 
 test.use({ serviceWorkers: 'block' });
 
-test.describe('Workflows & Goal Loops UX closure (phone + tablet, light + dark)', () => {
+test.describe('Workflows & older goal loops UX closure (phone + tablet, light + dark)', () => {
   for (const scheme of ['light', 'dark'] as const) {
     test(`Workflows phone layout ignores persisted dockSide, keeps single primary CTA on Run…, and keeps step zoom button outside summary (${scheme})`, async ({ page }) => {
       const { ctx, base } = await apiCtx();
@@ -79,7 +79,7 @@ test.describe('Workflows & Goal Loops UX closure (phone + tablet, light + dark)'
       expect(await page.locator('summary button').count()).toBe(0);
     });
 
-    test(`Goal Loops detail stepper, progress bar status colour, criteria labels, decision primary button, draft ⋯ menu, and phone session navigation (${scheme})`, async ({ page }) => {
+    test(`Older goal loop detail: stepper, progress bar status colour, criteria labels, read-only decision, Continue as a goal (${scheme})`, async ({ page }) => {
       const { ctx, base } = await apiCtx();
       const workspace = await seedWorkspace(ctx, base);
       await ctx.dispose();
@@ -188,10 +188,11 @@ test.describe('Workflows & Goal Loops UX closure (phone + tablet, light + dark)'
       await expect(page.locator('.crit-state.unmet', { hasText: 'Not met' })).toBeVisible();
       await expect(page.locator('.crit-state.unchecked', { hasText: 'Not checked' })).toBeVisible();
 
-      // 02-GL-04: Record answer is .primary while Resume is not .primary when unanswered; hint is visible
-      await expect(page.locator('.resume-hint')).toContainText('Resume stays off until this answer is recorded.');
-      await expect(page.getByRole('button', { name: 'Record answer', exact: true })).toHaveClass(/primary/);
-      await expect(page.getByRole('button', { name: 'Resume', exact: true })).not.toHaveClass(/primary/);
+      // Read-only history (goal.md §5.2): the open question is shown, nothing resumes; Continue as a goal is the one primary.
+      await expect(page.getByText('Should token TTL stay 24h?')).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Record answer', exact: true })).toHaveCount(0);
+      await expect(page.getByRole('button', { name: 'Resume', exact: true })).toHaveCount(0);
+      await expect(page.getByTestId('loop-continue')).toHaveClass(/primary/);
 
       // 02-GL-09: IterationRow renders human status label ("Failed") instead of raw "error"
       await expect(page.locator('.agent', { hasText: 'Failed' })).toBeVisible();
@@ -200,12 +201,12 @@ test.describe('Workflows & Goal Loops UX closure (phone + tablet, light + dark)'
       await page.setViewportSize({ width: 390, height: 844 });
       await expectNoHorizontalOverflow(page);
 
-      // 02-GL-06: Draft loop header has Start + More actions (⋯), no standalone Delete goal loop icon button
+      // A draft loop: Continue as a goal and ⋯ (Delete history), nothing starts it here.
       await page.evaluate((id) => { location.hash = `#/loops/${id}`; }, draftLoop.id);
       await expect(page.getByRole('heading', { name: 'Draft Goal Loop', exact: true })).toBeVisible();
-      await expect(page.getByRole('button', { name: 'Start', exact: true })).toBeVisible();
+      await expect(page.getByTestId('loop-continue')).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Start', exact: true })).toHaveCount(0);
       await expect(page.getByRole('button', { name: 'More actions', exact: true })).toBeVisible();
-      await expect(page.getByRole('button', { name: 'Delete goal loop', exact: true })).toHaveCount(0);
     });
   }
 });

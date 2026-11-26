@@ -25,18 +25,20 @@ function guideModule(): Record<string, any> {
   return exports;
 }
 const plain = <T>(x: T): T => JSON.parse(JSON.stringify(x));
-const ALL = ['scheduled-tasks', 'workflows', 'loops', 'personal-agents'];
+const ALL = ['scheduled-tasks', 'workflows', 'goal', 'personal-agents'];
+/** The pages the guide sits on (the goal row opens the Goal form on Workflows). */
+const PAGES = ['scheduled-tasks', 'workflows', 'personal-agents'];
 
 test('the chooser has four rows that lead with the job and end with the place', () => {
   const g = guideModule();
   const rows = plain(g.AUTOMATE_GUIDE) as { id: string; route: string; label: string; job: string }[];
   assert.deepEqual(rows.map((r) => r.id), ALL);
-  assert.deepEqual(rows.map((r) => r.label), ['Scheduled tasks', 'Workflows', 'Goal Loops', 'Personal Agents']);
+  assert.deepEqual(rows.map((r) => r.label), ['Scheduled tasks', 'Workflows', 'Goal', 'Personal Agents']);
   assert.match(rows[0].job, /one prompt or command on a schedule/i);
   assert.match(rows[1].job, /several steps/i);
-  assert.match(rows[2].job, /until a goal is met or the budget runs out/i);
+  assert.match(rows[2].job, /until your criteria are met or the budget runs out/i);
   assert.match(rows[3].job, /named assistant with memory/i);
-  for (const r of rows) assert.equal(r.route, r.id, `${r.id} opens its own place`);
+  for (const r of rows) assert.equal(r.route, r.id === 'goal' ? 'workflows' : r.id, `${r.id} opens its own place`);
   assert.match(g.AUTOMATE_GUIDE_FOOTER, /^Every morning\? One prompt → a Scheduled task\. Several steps → a Workflow with a Schedule trigger\.$/);
   // Every route lands on a real sidebar module (personal-agents is the hub home).
   const side = src('../src/lib/sidebar.ts');
@@ -48,7 +50,7 @@ test('every row passes the sidebar role check for a person who can open everythi
   for (const r of plain(g.AUTOMATE_GUIDE) as { route: string }[]) {
     assert.equal(sidebar.routeAllowed(r.route, () => true), true, r.route);
   }
-  for (const current of ALL) {
+  for (const current of PAGES) {
     assert.deepEqual(plain(g.automateGuideEntries(current, () => true)).map((r: any) => r.id), ALL);
   }
 });
@@ -56,20 +58,19 @@ test('every row passes the sidebar role check for a person who can open everythi
 test('rows the person cannot open are hidden; the current page always stays (S20-307)', () => {
   const g = guideModule();
   const none = () => false;
-  // Only the ungated place (Goal Loops) survives with no grants…
-  assert.deepEqual(plain(g.automateGuideEntries('loops', none)).map((r: any) => r.id), ['loops']);
-  // …and the current page is kept even when its feature reads as off.
-  assert.deepEqual(plain(g.automateGuideEntries('workflows', none)).map((r: any) => r.id), ['workflows', 'loops']);
+  // The current page is kept even when its feature reads as off; a goal needs Workflows.
+  assert.deepEqual(plain(g.automateGuideEntries('workflows', none)).map((r: any) => r.id), ['workflows']);
+  assert.deepEqual(plain(g.automateGuideEntries('personal-agents', (f: string) => f === 'workflows')).map((r: any) => r.id), ['workflows', 'goal', 'personal-agents']);
   // The scheduled_tasks grant opens both Scheduled tasks and Personal Agents.
   assert.deepEqual(
-    plain(g.automateGuideEntries('loops', (f: string) => f === 'scheduled_tasks')).map((r: any) => r.id),
-    ['scheduled-tasks', 'loops', 'personal-agents'],
+    plain(g.automateGuideEntries('personal-agents', (f: string) => f === 'scheduled_tasks')).map((r: any) => r.id),
+    ['scheduled-tasks', 'personal-agents'],
   );
 });
 
-test('`current` marks exactly one row as this page, for each of the four pages', () => {
+test('`current` marks exactly one row as this page, for each of the three pages', () => {
   const g = guideModule();
-  for (const current of ALL) {
+  for (const current of PAGES) {
     const here = plain(g.automateGuideEntries(current, () => true)).filter((r: any) => r.here).map((r: any) => r.id);
     assert.deepEqual(here, [current]);
   }
@@ -80,7 +81,6 @@ test('every Automate page passes its own `current`, opens the chooser on its emp
     ['scheduled-tasks/ScheduledTasksPage', 'scheduled-tasks'],
     ['personal-agents/PersonalAgentsPage', 'personal-agents'],
     ['workflows/WorkflowsPage', 'workflows'],
-    ['loops/LoopsPage', 'loops'],
   ]) {
     const page = src(`../src/modules/${file}.svelte`);
     assert.match(page, new RegExp(`<AutomateGuideButton current="${current}" />`), `${file} header must carry the chooser`);

@@ -1,7 +1,7 @@
 // A Workflows-tab row's words (ux.md §8): its last run's word (Needs you,
 // Failed, Working) else when the last run ended, and the dim third line.
 // Pure; unit-tested in ui/unit/workflowRows.test.ts.
-import type { Workflow } from '../../../lib/api/types';
+import type { RunState, Workflow } from '../../../lib/api/types';
 import { ago, fallbackState, inboxFold, runWord, stepDuration, type Word } from '../runs/runWords.ts';
 
 export interface WorkflowRowWords {
@@ -14,7 +14,7 @@ export interface WorkflowRowWords {
 export function workflowRow(w: Pick<Workflow, 'graph' | 'description' | 'last_run' | 'running_count'>, now: number): WorkflowRowWords {
   const last = w.last_run ?? null;
   const running = w.running_count ?? 0;
-  const state = last ? (last.overview_state ?? fallbackState(last.status)) : null;
+  const state = last ? ((last.overview_state as RunState | null) ?? fallbackState(last.status)) : null;
   let word: Word | null = null;
   if (state && (last?.attention || inboxFold(state) === 'needs')) word = runWord({ state: inboxFold(state) === 'needs' ? state : 'needs_you', attention: [] });
   else if (running > 0) word = { word: running > 1 ? `${running} running` : 'Working', tone: '' };

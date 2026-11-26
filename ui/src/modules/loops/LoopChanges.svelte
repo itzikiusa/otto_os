@@ -1,21 +1,12 @@
 <script lang="ts">
-  // Goal Loop operator controls (E-01):
-  //   1. Mid-loop steering ("Steer next iteration") via POST /goal-loops/{id}/steer
-  //   2. Collapsible "Changes so far" worktree diff via GET /goal-loops/{id}/diff
+  // An older goal loop's kept work: "Changes so far", the diff of its retained
+  // worktree (GET /goal-loops/{id}/diff), read-only.
   import { api } from '../../lib/api/client';
   import { copyWithToast } from '../../lib/clipboard';
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
-  import { toasts } from '../../lib/toast.svelte';
-  import { toastError } from '../../lib/toastError';
-  import type { GoalLoopStatus } from '../../lib/api/types';
 
-  interface SteerResp {
-    loop_id: string;
-    note: string;
-    queued_notes: string[];
-  }
   interface GoalLoopDiffResp {
     loop_id: string;
     available: boolean;
@@ -26,45 +17,7 @@
     untracked: string[];
   }
 
-  interface Props {
-    loopId: string;
-    status: GoalLoopStatus;
-    hasWorktree: boolean;
-    queuedNotes?: readonly string[];
-  }
-  let { loopId, status, hasWorktree, queuedNotes = [] }: Props = $props();
-
-  const terminal = $derived(status === 'succeeded' || status === 'failed' || status === 'stopped');
-
-  // ---- Mid-loop steering ----
-  let note = $state('');
-  let sending = $state(false);
-  let localQueued = $state<string[] | null>(null);
-  const shownNotes = $derived(localQueued ?? [...queuedNotes]);
-
-  $effect(() => {
-    void loopId;
-    void queuedNotes;
-    localQueued = null;
-  });
-
-  async function queueSteering(): Promise<void> {
-    const trimmed = note.trim();
-    if (!trimmed || sending || terminal) return;
-    const id = loopId;
-    sending = true;
-    try {
-      const resp = await api.post<SteerResp>(`/goal-loops/${encodeURIComponent(id)}/steer`, { note: trimmed });
-      if (loopId !== id) return;
-      note = '';
-      localQueued = resp.queued_notes ?? [...shownNotes, trimmed];
-      toasts.success('Steering note queued', 'Planner and executors will read it on the next iteration.');
-    } catch (e) {
-      if (loopId === id) toastError('Couldn’t queue steering note', e);
-    } finally {
-      if (loopId === id) sending = false;
-    }
-  }
+  let { loopId }: { loopId: string } = $props();
 
   // ---- Worktree diff ("Changes so far") ----
   let diffOpen = $state(false);
@@ -104,41 +57,7 @@
   }
 </script>
 
-{#if !terminal || hasWorktree}
-  <section class="ops card-box" aria-label="Loop steering and worktree changes" data-testid="loop-ops-drawer">
-    {#if !terminal}
-      <div class="steer">
-        <div class="ops-head">
-          <Icon name="send" size={12} />
-          <h3>Steer next iteration</h3>
-          <span class="dim">Consumed automatically by the next iteration without pausing.</span>
-        </div>
-        <form class="steer-row" onsubmit={(e) => { e.preventDefault(); void queueSteering(); }}>
-          <input
-            class="input steer-in"
-            dir="auto"
-            maxlength="4000"
-            bind:value={note}
-            disabled={sending}
-            aria-label="Steering note for next iteration"
-            placeholder="e.g. Focus on edge cases in parser.rs and skip docs for now"
-            data-testid="loop-steer-input"
-          />
-          <button type="submit" class="btn small" disabled={sending || !note.trim()} data-testid="loop-steer-submit">
-            {sending ? 'Queuing…' : 'Queue note'}
-          </button>
-        </form>
-        {#if shownNotes.length > 0}
-          <ul class="steer-list" aria-label="Queued steering notes" data-testid="loop-steer-queued">
-            {#each shownNotes as item, i (`${i}:${item}`)}
-              <li><span class="steer-badge">Queued</span> <span dir="auto">{item}</span></li>
-            {/each}
-          </ul>
-        {/if}
-      </div>
-    {/if}
-
-    {#if hasWorktree}
+<section class="ops card-box" aria-label="Changes in the kept work" data-testid="loop-ops-drawer">
       <div class="diff-wrap">
         <div class="diff-bar">
           <button type="button" class="diff-toggle" aria-expanded={diffOpen} onclick={toggleDiff} data-testid="loop-diff-toggle">
@@ -191,9 +110,7 @@
           </LoadState>
         {/if}
       </div>
-    {/if}
-  </section>
-{/if}
+</section>
 
 <style>
   .ops {
@@ -205,41 +122,7 @@
     background: var(--surface);
     padding: 12px 14px;
   }
-  .ops-head {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    flex-wrap: wrap;
-    margin-block-end: 6px;
-    color: var(--text-dim);
-  }
-  .ops-head h3 {
-    margin: 0;
-    font-size: var(--fs-s);
-    font-weight: 600;
-    color: var(--text);
-  }
   .dim { color: var(--text-dim); font-size: var(--fs-xs); }
-  .steer-row { display: flex; gap: 8px; align-items: center; }
-  .steer-in { flex: 1; min-width: 0; }
-  .steer-list {
-    list-style: none;
-    margin: 8px 0 0;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    font-size: var(--fs-s);
-  }
-  .steer-badge {
-    display: inline-block;
-    padding: 0 6px;
-    border-radius: var(--radius-s);
-    background: var(--accent-soft);
-    color: var(--accent-text);
-    font-size: var(--fs-xs);
-    font-weight: 600;
-  }
   .diff-wrap {
     display: flex;
     flex-direction: column;

@@ -19,9 +19,10 @@
   import { loadErrorText } from '../../../lib/loadError';
   import { now as clockNow } from '../../../lib/stores/now.svelte';
   import { viewport } from '../../../lib/stores/viewport.svelte';
-  import type { Criterion, Workflow, WorkflowGraph, WorkflowRun, WorkflowVersion } from '../../../lib/api/types';
+  import type { Workflow, WorkflowGraph, WorkflowRun, WorkflowVersion } from '../../../lib/api/types';
   import { runDeepLink } from '../runRoute';
   import { RunSync } from '../runSync.svelte';
+  import { graphCriteria } from '../goal/goalCheck';
   import RunOverview from './RunOverview.svelte';
   import StepList from './StepList.svelte';
   import StepPane from './StepPane.svelte';
@@ -117,7 +118,7 @@
   const wide = $derived(width >= 880);
   const pushed = $derived(!wide && !!nodeId);
   const nodeName = (id: string) => steps.find((s) => s.id === id)?.name ?? id;
-  const criteria = $derived(graph.nodes.filter((n) => n.kind === 'check').flatMap((n) => ((n.params as { criteria?: Criterion[] } | null)?.criteria ?? [])));
+  const criteria = $derived(graphCriteria(graph));
   const failedNode = $derived(run?.overview?.failed_step?.node_id ?? run?.nodes.find((n) => n.status === 'error')?.node_id ?? null);
   const title = $derived(run ? runTitle({ overview: run.overview ?? null, message: null, branch: null, repo: null, pr: null, workflowName: workflowName || 'Workflow' }) : 'Run');
 

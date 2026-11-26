@@ -107,6 +107,10 @@ pub async fn spawn_background(ctx: &ServerCtx, root_user_id: Option<String>) -> 
     // Embedded threads (PR / connection pages) close after their idle hours.
     ctx.agent_runtime
         .spawn_embedded_auto_close(SettingsRepo::new(ctx.pool.clone()));
+    // Closed workflow / review threads go once past their retain_until.
+    bg.keep(AbortOnDrop(
+        ctx.agent_runtime.spawn_retention_sweep(ctx.manager.clone()),
+    ));
     // Hold off idle sleep while any agent turn runs.
     ctx.agent_runtime
         .spawn_keep_awake(otto_state::SessionsRepo::new(ctx.pool.clone()));

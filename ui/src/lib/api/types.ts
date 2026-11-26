@@ -51,6 +51,7 @@ export * from './types/usage-limits';
 export * from './types/worktree-ready';
 export * from './types/vault';
 export * from './types/workflows';
+export * from './types/optimize';
 export * from './types/ws-term';
 
 export type * from './room-types';

@@ -4,7 +4,7 @@
   // status plus the tail of what it printed (kept on the iteration record).
   import type { EvalCriterion } from '../../lib/api/types';
   import Icon from '../../lib/components/Icon.svelte';
-  import { splitEvidence } from './loopSafety';
+  import { splitEvidence } from './loopStatus';
 
   let { criteria, names = {} }: {
     criteria: EvalCriterion[];

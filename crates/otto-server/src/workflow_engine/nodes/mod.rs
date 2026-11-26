@@ -21,13 +21,16 @@ pub(super) mod canvas;
 pub(super) mod channel_notify;
 pub(super) mod db_query;
 pub(super) mod game_engine;
+pub(super) mod git_checkout;
 pub(super) mod git_pr;
 pub(super) mod http_request;
 pub(super) mod human_approval;
 pub(super) mod loop_node;
+pub(super) mod post_review_comments;
 pub(super) mod prepare_context;
 pub(super) mod product;
 pub(super) mod review_run;
+pub(super) mod script;
 pub(super) mod self_improve;
 pub(super) mod verifier;
 
@@ -163,7 +166,9 @@ pub(in crate::workflow_engine) async fn dispatch(
         "condition" => {
             let expr = p.get("expr").and_then(Value::as_str).unwrap_or("true");
             let input = call.input;
-            let value = otto_core::expr::eval(expr, &input)
+            let run = super::run::state::run_data(&call.env.files, &call.env.run_input);
+            let root = otto_workflows::graph::condition_root(&input, &run);
+            let value = otto_core::expr::eval(expr, &root)
                 .map_err(|e| otto_core::Error::Invalid(format!("condition: {e}")))?;
             let result = otto_core::expr::truthy(&value);
             let mut out = match &input {
@@ -207,6 +212,11 @@ pub(in crate::workflow_engine) async fn dispatch(
         // repositories opens them all, each on its own base branch. The PR never
         // needs the repo/base re-typed; it inherits them.
         "git_pr" => git_pr::execute(call).await,
+
+        // --- Deterministic steps (engine.md §7) ------------------------------
+        "git_checkout" => git_checkout::execute(call).await,
+        "script" => script::execute(call).await,
+        "post_review_comments" => post_review_comments::execute(call).await,
 
         // --- Self-improvement (offer-only) ----------------------------------
         // Reflect on the workspace's recent sessions and OFFER skill/memory

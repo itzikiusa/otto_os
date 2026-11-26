@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import { loadErrorText } from '../src/lib/loadError.ts';
-import { extendBlocker } from '../src/modules/loops/budget.ts';
 import { loadSource } from './sourceHarness.ts';
 
 function methods(file: string, names: string[]) {
@@ -30,20 +29,6 @@ test('replacement import fetches global scope, confirms empty visible workspace,
   await state.doImport(); assert.match(prompts[0], /2 existing rules across every workspace/); assert.equal(imports.length, 0);
   reject = true; approve = true; await state.doImport(); assert.equal(imports.length, 0);
   reject = false; await state.doImport(); assert.equal(imports.length, 1);
-});
-test('extended budget survives Resume failure and retry skips repeat PATCH', async () => {
-  let updates = 0, resumes = 0;
-  const state = compile(`let loop={iterations_started:1,limits:{}}, id='loop', acting=false, extIters=5, extMinutes=10, extCostUsd='';
-    let extError='', savedExtension='', extendOpen=true;
-    ${methods('modules/loops/LoopDetail.svelte', ['extendAndResume'])}
-    return {extendAndResume, read(){return {extError,extendOpen,acting}}};`, {
-    loops: { updateLimits: async () => { updates++; }, resume: async () => { if (++resumes === 1) throw Error('offline'); } },
-    elapsedSecs: () => 1, formatSeconds: String, errText: String, extendBlocker,
-    loadErrorText,
-    toasts: toast,
-  });
-  await state.extendAndResume(); assert.match(state.read().extError, /Budget saved/); assert.equal(state.read().extendOpen, true);
-  await state.extendAndResume(); assert.equal(updates, 1); assert.equal(resumes, 2); assert.equal(state.read().extendOpen, false);
 });
 test('mounted tool catalogue batches 1000 decisions and releases refresh work', async () => {
   let batches = 0, singles = 0;

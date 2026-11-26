@@ -1,19 +1,16 @@
-// Agent UI control — Goal Loops handlers (`otto.ui_loops_*`). The list and
-// the open detail come from the loops store; LoopsPage binds a port so the
-// agent opens a loop's detail in the user's pane. Lifecycle changes (start /
-// pause / resume / stop) spawn or halt agents that change a repo worktree →
-// `local_write`: the attributed, rememberable confirm — except Stop, which
-// can't be undone (a new run must be started) and always asks.
+// Agent UI control — older goal loops (`otto.ui_loops_*`, read-only since
+// goals moved into Workflows; an agent pauses or resumes a goal run with
+// `otto.control_workflow_run`). The list and the open detail come from the
+// loops store; LoopsPage binds a port so the agent opens a loop in the
+// user's pane.
 
 import { registerUiCommands, registerUiState, UiCommandError, type UiCommandCtx } from '../uiCommands';
 import { router } from '../router.svelte';
 import { loops } from '../stores/loops.svelte';
 import { mapLimit } from '../poll';
 import { ws } from '../stores/workspace.svelte';
-import { confirmer } from '../confirm.svelte';
-import { toasts } from '../toast.svelte';
 import type { GoalLoop } from '../api/types';
-import { agentLabel, asUiError, createPagePort, dismissOnAbort, highlightWhenReady, resolveByIdOrName, waitFor } from './pagePort';
+import { createPagePort, highlightWhenReady, resolveByIdOrName, waitFor } from './pagePort';
 
 export const loopsPagePort = createPagePort<{
   open(id: string): void;
@@ -54,9 +51,6 @@ async function openLoop(key: string, ctx: UiCommandCtx): Promise<GoalLoop> {
   return l;
 }
 
-const ACTIONS = ['start', 'pause', 'resume', 'stop'] as const;
-type LoopAction = (typeof ACTIONS)[number];
-
 registerUiCommands('loops', {
   async loops_list(_args, ctx) {
     await showList(ctx);
@@ -83,43 +77,6 @@ registerUiCommands('loops', {
         evaluation: it.evaluation ?? null,
       })),
     };
-  },
-
-  async loops_control(args: { loop: string; action: LoopAction }, ctx) {
-    if (!ACTIONS.includes(args.action)) {
-      throw new UiCommandError('invalid_args', `Unknown action “${args.action}” (one of ${ACTIONS.join(', ')}).`);
-    }
-    const l = await openLoop(args.loop, ctx);
-    const who = agentLabel(ctx.agent);
-    const verb = args.action.charAt(0).toUpperCase() + args.action.slice(1);
-    let ok: boolean;
-    if (args.action === 'stop') {
-      ctx.progress(`Waiting for you to confirm: Stop “${l.name}”`, true);
-      ok = await dismissOnAbort(
-        ctx.signal,
-        confirmer.ask(`${who} wants to stop the goal loop “${l.name}”. It can’t be resumed — a new run must be started.`, {
-          title: 'Stop goal loop',
-          confirmLabel: 'Stop loop',
-          danger: true,
-        }),
-      );
-    } else {
-      ok = await ctx.confirmWrite({
-        what: `${verb} the goal loop “${l.name}”`,
-        where: `Goal Loops · ${l.repo_path}`,
-        connId: `loops:${l.workspace_id}`,
-        verb,
-      });
-    }
-    if (!ok) throw new UiCommandError('cancelled_by_user', `The user declined: ${verb}.`);
-    try {
-      await loops[args.action](l.id);
-    } catch (e) {
-      throw asUiError(e);
-    }
-    toasts.success(`${verb} · ${l.name}`, who);
-    const now = loops.list.find((x) => x.id === l.id) ?? l;
-    return { loop: summary(now) };
   },
 });
 

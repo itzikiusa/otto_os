@@ -19,7 +19,7 @@ const CHECKOUT: &str = "Read run-brief.md and repos.json in the run context, plu
 const CONTEXT: &str = "Read repos.json and the jira-<KEY>.md file in the run context. Write a short context brief: the flows this change touches.";
 const CROSS: &str = "Read repos.json in the run context. If the run declares only one repo, write a one-line note that the check was skipped and stop. Otherwise check the interactions between the repos, using the context brief (step4) as a map.";
 const GATES: &str = "Read repos.json in the run context. For every entry with Go changes run once: ~/.claude/skills/otto-go-gates/scripts/pr_gates.sh \"<worktree>\" \"<base>\" --main \"<repo>\" --out \"<run context dir>/go-standards-evals.md\" and reply with its table verbatim.";
-const POST: &str = "Fetch the review's full findings first. Post every bug and warn finding as an inline comment with otto.comment_pr at its path and line; all info findings in one combined comment. Then post one summary comment with the score, the reviewed HEAD and a 'Gotchas' section, plus the gate table from go-standards-evals.md. The checkout table is in step3.";
+const POST: &str = "Fetch the review's full findings first. Post every bug and warn finding as an inline comment with otto.comment_pr at its path and line; all info findings in one combined comment. Then post one summary comment with the score, the reviewed HEAD and a 'Gotchas' section, plus the gate table from go-standards-evals.md. The checkout table is in step3; the repos are listed in repos.json.";
 
 fn reviewer() -> Workflow {
     wf(
@@ -239,7 +239,8 @@ fn checks_files_reads_writes_reads_added() {
     let post = row("n6");
     assert_eq!(post.reads, ["go-standards-evals.md", "prs.json"]);
     assert_eq!(post.reads_added, ["prs.json"]);
-    assert!(post.reads_lost.is_empty());
+    // The registry the old prompt read is not summary text (and not read).
+    assert_eq!(post.reads_lost, ["repos.json"]);
     let gates = row("n12");
     assert_eq!(gates.reads, ["repos.json"]);
     assert!(

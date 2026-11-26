@@ -98,7 +98,7 @@ registerLazyUiCommands(
 );
 registerLazyUiCommands(
   'loops',
-  ['loops_list', 'loops_open', 'loops_control'],
+  ['loops_list', 'loops_open'],
   () => import('./loops'),
   'loops',
 );

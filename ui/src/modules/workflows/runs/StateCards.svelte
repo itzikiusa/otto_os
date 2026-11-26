@@ -40,7 +40,10 @@
   import Modal from '../../../lib/components/Modal.svelte';
   import { elapsed } from '../../../lib/statusWords';
   import type { RunSync } from '../runSync.svelte';
-  import { answerRequest, resumeRun, verifyCriterion } from './runActions';
+  import { announceShown } from '../../../lib/announce.svelte';
+  import { confirmer } from '../../../lib/confirm.svelte';
+  import { extendProblem, extendProposal } from '../goal/goalExtend';
+  import { answerRequest, resumeRun, steerRun, verifyCriterion } from './runActions';
   import { clockTime, deliverablesInOrder, deliverableWord, errorParts } from './runWords';
   import GoalCard from './GoalCard.svelte';
 
@@ -88,26 +91,26 @@
     return s?.repo ?? null;
   });
 
-  // Hold: Extend and resume… (caps +50 %).
+  // Hold: Extend and resume… (caps +50 %, never at or below what is used).
   let extending = $state(false);
   let iterations = $state(0);
   let minutes = $state(0);
+  const extendBlocked = $derived(extendProblem(run.overview?.goal, iterations, minutes));
   function openExtend(): void {
-    const g = run.overview?.goal;
-    iterations = Math.ceil((g?.max_iterations ?? 4) * 1.5);
-    minutes = Math.ceil(((g?.max_active_ms ?? 3_600_000) * 1.5) / 60_000);
+    ({ iterations, minutes } = extendProposal(run.overview?.goal));
     extending = true;
   }
   async function extend(): Promise<void> {
-    if (await resumeRun(run.id, { iterations, active_s: minutes * 60 })) extending = false;
+    if (!extendBlocked && (await resumeRun(run.id, { iterations, active_s: minutes * 60 }))) extending = false;
   }
 
-  // Verify: record what you checked.
+  // Verify: record what you checked; "Not met…" asks for a note.
   let evidence = $state('');
-  const criterionId = $derived((wait as (AttentionRef & { criterion_id?: string }) | null)?.criterion_id ?? '');
   async function record(met: boolean): Promise<void> {
-    if (!wait) return;
-    if (await verifyCriterion(run.id, wait.node_id, criterionId, met, evidence.trim())) evidence = '';
+    if (!wait?.criterion_id) return;
+    const note = evidence.trim() || (met ? '' : ((await confirmer.promptText('The next iteration reads your note as the reason.', { title: 'Not met', confirmLabel: 'Record as not met', placeholder: 'What is still wrong' })) ?? '').trim());
+    if (!note) return;
+    if (await verifyCriterion(run.id, wait.node_id, wait.criterion_id, met, note)) evidence = '';
   }
 </script>
 
@@ -158,9 +161,9 @@
       <h3 class="title"><Icon name="pause" size={13} /><span dir="auto">{run.overview?.hold?.reason ?? run.hold?.reason ?? 'The run is held.'}</span></h3>
       <div class="actions">
         {#if runState === 'exhausted'}
-          <button type="button" class="btn" data-testid="wf-hold-resume" onclick={() => resumeRun(run.id)}>Resume</button>
           <button type="button" class="btn primary" data-testid="wf-hold-extend" onclick={openExtend}>Extend and resume…</button>
         {:else}
+          <button type="button" class="link" data-testid="wf-hold-note" onclick={() => steerRun(run.id)}>Add a note first</button>
           <button type="button" class="btn primary" data-testid="wf-hold-resume" onclick={() => resumeRun(run.id)}>Resume</button>
         {/if}
       </div>
@@ -184,12 +187,13 @@
 
 {#if extending}
   <Modal title="Extend and resume" onclose={() => (extending = false)} bottom>
-    <label class="field">Iterations<input class="input" type="number" min="1" max="50" bind:value={iterations} /></label>
+    <label class="field">Iterations<input class="input" type="number" min={(run.overview?.goal?.iteration ?? 0) + 1} max="50" bind:value={iterations} /></label>
     <label class="field">Active time (minutes)<input class="input" type="number" min="15" max="480" bind:value={minutes} /></label>
     <p class="meta">New totals for the loop that ran out{run.overview?.goal ? `: it used ${run.overview.goal.iteration} iterations and ${elapsed(run.overview.goal.active_ms)}` : ''}.</p>
+    {#if extendBlocked}<p class="meta warn" use:announceShown={{ text: extendBlocked, assertive: true }}>{extendBlocked}</p>{/if}
     {#snippet footer()}
       <button type="button" class="btn" onclick={() => (extending = false)}>Cancel</button>
-      <button type="button" class="btn primary" onclick={extend}>Extend and resume</button>
+      <button type="button" class="btn primary" disabled={!!extendBlocked} onclick={extend}>Extend and resume</button>
     {/snippet}
   </Modal>
 {/if}
@@ -297,6 +301,9 @@
   }
   .deliv a {
     color: var(--accent-text);
+  }
+  .meta.warn {
+    color: var(--warning);
   }
   .field {
     display: flex;

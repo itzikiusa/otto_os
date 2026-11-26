@@ -154,7 +154,7 @@ pub(in crate::workflow_engine) async fn execute(
                 run_id,
                 checkpoint,
                 &resolve_retry(&sub),
-                sub.kind == "loop" || is_restart_resumable_kind(&sub.kind),
+                sub.kind == "loop" || otto_workflows::resume::is_restart_resumable(&sub),
                 || {
                     Box::pin(execute_inner_attempt(
                         ctx,

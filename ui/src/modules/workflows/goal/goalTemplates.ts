@@ -1,4 +1,7 @@
-import type { AcceptanceCriterion, GoalLoopDraft, GoalLoopRoleCfg } from '../../lib/api/types';
+// The Goal form's "Start from…" chips (goal.md §3.3): seven kinds of goal,
+// each a set of criteria an agent checks and a budget. The text is the Goal
+// Loops templates' (modules/loops/templates.ts), unchanged.
+import type { Criterion } from '../../../lib/api/types';
 
 export type GoalTemplateId = 'angular' | 'go' | 'general' | 'research' | 'poc' | 'rewrite' | 'performance';
 export type PocScope = 'backend' | 'frontend' | 'both';
@@ -48,38 +51,14 @@ function pocStages(scope: PocScope): Stage[] {
   ];
 }
 
-/** Local draft: no provider call, provider-specific aliases or shared mutable data. */
-export function templateDraft(id: GoalTemplateId, provider: string, pocScope: PocScope = 'both'): GoalLoopDraft {
-  const template = goalTemplates.find(item => item.id === id)!;
+/** A template's criteria (each checked by an agent) and its budget. */
+export function templateGoal(id: GoalTemplateId, pocScope: PocScope = 'both'): { criteria: Criterion[]; iterations: number; activeS: number; research: boolean } {
+  const template = goalTemplates.find((item) => item.id === id)!;
   const stages = id === 'poc' ? pocStages(pocScope) : template.stages;
-  const criteria: AcceptanceCriterion[] = stages.map((stage, i) => ({ id: `c${i + 1}`, text: stage.criterion, verify: stage.verify, verify_kind: 'agent', verify_cmd: null }));
-  if (id === 'research') criteria.push({ id: 'otto-research-report', text: 'The research report is retained on disk.', verify: 'Inspect findings.md in the research directory.', verify_kind: 'agent', verify_cmd: null });
-  const role = (prompt: string): GoalLoopRoleCfg => ({ provider, model: '', prompt });
   return {
-    definition: { title: template.title, summary: template.description, objectives: [], acceptance_criteria: criteria,
-      constraints: ['Work only within the concrete goal and its stated scope.', 'Follow the configured execution policy. Keep changes local; publishing and messages require separate authorization.', 'Missing material evidence or exhausted budget means incomplete, never success.'],
-      out_of_scope: ['Unrelated cleanup, forced review scores and invented finding quotas.'], success_signal: 'All acceptance criteria are independently verified with concrete evidence.' },
-    suggested_limits: { max_iterations: stages.length + 2, max_runtime_secs: template.minutes * 60, per_phase_timeout_secs: 20 * 60, max_attempts_per_executor: 3, max_cost_usd: null },
-    suggested_config: {
-      allow_commits: false, mode: id === 'research' ? 'research' : 'build', require_review: true, source_links: [], skills: [],
-      executors: [{ name: 'Executor', provider, model: '', prompt_extra: 'Follow the current graph task and preserve concrete verification evidence.' }],
-      planner: role('Plan the current task from the goal, current code and prior feedback. Choose a cohesive, bounded change and explicit verification steps.'),
-      evaluator: role('Independently verify each requested criterion against current artifacts and actual checks. Return met=false for missing evidence, material limitations or unresolved concrete defects. Never infer execution from a source trace.'),
-      digester: role('Summarize completed work, evidence, decisions, unresolved findings and next actions. Preserve criterion IDs and do not turn uncertain claims into facts.'),
-      definer: role('Refine the concrete user goal into bounded, evidence-based criteria. Preserve the requested scope and meaningful failure checks.'),
-      graph: { nodes: stages.map((stage, i) => ({ id: `task-${i + 1}`, title: stage.title, instructions: stage.instructions, depends_on: i ? [`task-${i}`] : [], criterion_ids: [criteria[i].id, ...(id === 'research' && i === stages.length - 1 ? ['otto-research-report'] : [])] })) },
-    },
-  };
-}
-
-/** Research's server-owned artifact check is visible and attached before save. */
-export function researchDraft(draft: GoalLoopDraft): GoalLoopDraft {
-  const report = 'otto-research-report';
-  const criteria = draft.definition.acceptance_criteria;
-  const graph = draft.suggested_config.graph;
-  return {
-    ...draft,
-    definition: { ...draft.definition, acceptance_criteria: criteria.some(criterion => criterion.id === report) ? criteria : [...criteria, { id: report, text: 'The research report is retained on disk.', verify: 'Inspect findings.md in the research directory.', verify_kind: 'agent', verify_cmd: null }] },
-    suggested_config: { ...draft.suggested_config, graph: graph ? { nodes: graph.nodes.map((node, index) => index === graph.nodes.length - 1 && !graph.nodes.some(other => other.criterion_ids.includes(report)) ? { ...node, criterion_ids: [...node.criterion_ids, report] } : node) } : graph },
+    criteria: stages.map((stage, i) => ({ id: `c${i + 1}`, text: stage.criterion, verify: 'agent', how: stage.verify })),
+    iterations: stages.length + 2,
+    activeS: template.minutes * 60,
+    research: id === 'research',
   };
 }

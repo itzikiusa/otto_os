@@ -1,16 +1,26 @@
-//! The node loop of a run, one node per [`step`]: scope and edge decisions,
-//! then (for a node that runs) the attempt loop with retries, live session /
-//! log / activity harvesting and cancel / skip handling, then the outcome
-//! (step files, edge pruning, session stop, chat progress). Moved verbatim
-//! out of `run_workflow_with_budget`; the driver loops over `step` until it
-//! returns [`NodeFlow::Stop`] or the order runs out.
+//! The scheduler driver of a run (engine.md §3): `otto_workflows::schedule`
+//! decides which nodes start, in run order, with which step number; every
+//! started node runs as its own future, polled by the run's own task, and
+//! the shared bookkeeping (outputs, errored, untaken edges) changes only
+//! here, one settled node at a time. A node future is today's per-node body:
+//! the attempt loop with retries, live session / log / activity harvesting
+//! and cancel / skip handling, then the outcome (step files, edge pruning,
+//! session stop, chat progress) on its own state, published through
+//! [`RunBoard`].
 
+use super::super::step_thread::StepNote;
 use super::super::*;
-use super::state::{NodeFlow, RunState};
+use super::board::RunBoard;
+use super::state::RunState;
+use futures_util::future::BoxFuture;
+use futures_util::stream::{FuturesUnordered, StreamExt};
+use otto_workflows::schedule::{
+    Init, Outcome, Scheduler, SkipWhy, Start, DEFAULT_MAX_PARALLEL_STEPS,
+};
 
 /// What every node of one run shares: who and where it runs as, the run's
 /// input and context files, and the scope it was started with. Immutable for
-/// the whole node loop (the mutable side is [`RunState`]).
+/// the whole run (the mutable side is [`RunState`] and the [`RunBoard`]).
 #[derive(Clone, Copy)]
 pub(in crate::workflow_engine) struct RunCx<'a> {
     pub(in crate::workflow_engine) ctx: &'a ServerCtx,
@@ -29,139 +39,280 @@ pub(in crate::workflow_engine) struct RunCx<'a> {
     pub(in crate::workflow_engine) continue_unfinished: bool,
 }
 
-/// Persist the run's node states and push them to the run view, naming
-/// `states[idx]` as the node that changed (the run is still "running").
-async fn publish_node(cx: RunCx<'_>, states: &[NodeRunState], idx: usize) {
-    let rev = cx
-        .repo
-        .update_run_progress(cx.run_id, states)
+/// How a node future ended, for the scheduler.
+struct NodeDone {
+    idx: usize,
+    /// The node's output (incl. a chat skip's marker output).
+    output: Option<Value>,
+    outcome: Outcome,
+    /// The run was canceled, or its active-time budget ran out.
+    canceled: bool,
+    timed_out: bool,
+}
+
+/// `wf_max_parallel_steps`: per-run step slots (default 4, 1 = serial).
+async fn max_parallel_steps(ctx: &ServerCtx) -> usize {
+    otto_state::SettingsRepo::new(ctx.pool.clone())
+        .get("wf_max_parallel_steps")
         .await
-        .unwrap_or(0);
-    emit_run_updated(
-        cx.ctx,
-        &cx.workflow.workspace_id,
-        cx.run_id,
-        "running",
-        Some(&states[idx].node_id),
-        rev,
-        Some(&states[idx]),
-        states,
-        false,
-    );
+        .ok()
+        .flatten()
+        .and_then(|v| v.as_u64())
+        .map_or(DEFAULT_MAX_PARALLEL_STEPS, |n| n as usize)
 }
 
-/// Mark `states[idx]` Skipped with one log line and publish it.
-async fn skip_with(cx: RunCx<'_>, states: &mut [NodeRunState], idx: usize, why: &str) {
-    states[idx].status = NodeStatus::Skipped;
-    states[idx].logs = vec![why.into()];
-    publish_node(cx, states, idx).await;
-}
-
-/// One node of the loop: cancel / budget checks, adoption, run scope and the
-/// incoming-edge decision; a node that runs goes on to [`execute_step`].
-pub(in crate::workflow_engine) async fn step(
-    cx: RunCx<'_>,
-    rs: &mut RunState,
-    node_id: String,
-) -> NodeFlow {
-    let RunCx {
-        workflow,
-        run_id,
-        repo,
-        input,
-        files,
-        run_set,
-        prior_nodes,
-        continue_unfinished,
-        env,
-        ..
-    } = cx;
-    // Canceled before it started (the Pending→Running CAS lost).
+/// Run the graph: start what the scheduler says, settle what finishes,
+/// until nothing runs and nothing can start, or the run is canceled or out
+/// of time budget (dropping the running node futures stops them all).
+pub(in crate::workflow_engine) async fn drive(cx: RunCx<'_>, rs: &mut RunState, order: &[String]) {
     if rs.canceled {
-        return NodeFlow::Stop;
+        return;
     }
-    // Honor a cancel request (the API flips the run status to Canceled).
-    if repo.is_canceled(run_id).await {
-        rs.canceled = true;
-        return NodeFlow::Stop;
-    }
-
-    // Stop once the run has exceeded its global time budget.
-    if env.budget.expired() {
-        rs.timed_out = true;
-        if let Some(state) = rs.states.iter_mut().find(|state| state.node_id == node_id) {
-            state.status = NodeStatus::Error;
-            state.error = Some("workflow active time budget exhausted".into());
-        }
-        return NodeFlow::Stop;
-    }
-
-    let Some(node) = workflow.graph.nodes.iter().find(|n| n.id == node_id) else {
-        return NodeFlow::Next;
+    let graph = &cx.workflow.graph;
+    let has_output: HashSet<String> = rs.outputs.keys().cloned().collect();
+    let init = Init {
+        states: &rs.states,
+        has_output: &has_output,
+        errored: &rs.errored,
+        inactive_edges: &rs.inactive_edges,
+        run_set: cx.run_set,
+        prior: cx.prior_nodes,
+        continue_unfinished: cx.continue_unfinished,
     };
-    let idx = rs.states.iter().position(|s| s.node_id == node_id).unwrap();
-
-    let adopted = rs.states[idx].status != NodeStatus::Pending
-        && (continue_unfinished || run_set.is_some_and(|set| !set.contains(&node_id)));
-    if adopted {
-        if matches!(
-            rs.states[idx].status,
-            NodeStatus::Success | NodeStatus::Error
-        ) {
-            rs.step_counter += 1;
-            if rs.states[idx].status == NodeStatus::Success {
-                let base = crate::workflow_context::step_base_name(
-                    rs.step_counter,
-                    node_display_name(node),
-                    None,
-                    None,
-                );
-                files.adopt_step(&base, &node.kind);
+    let mut sched = Scheduler::new(graph, order, init, max_parallel_steps(cx.ctx).await);
+    let base = cx.repo.get_run(cx.run_id).await.ok();
+    let board = RunBoard::new(std::mem::take(&mut rs.states), base);
+    let mut active: FuturesUnordered<BoxFuture<'_, Option<NodeDone>>> = FuturesUnordered::new();
+    loop {
+        for start in sched.startable() {
+            match start {
+                Start::Adopt { idx, step_no } => {
+                    let Some(n) = step_no else { continue };
+                    // An old row's number is kept on the state from now on.
+                    let ok = board.with(idx, |s| {
+                        s.step_no.get_or_insert(n);
+                        s.status == NodeStatus::Success
+                    });
+                    if ok {
+                        files_adopt(cx, &graph.nodes[idx], n);
+                    }
+                }
+                Start::Skip { idx, why } => {
+                    if why == SkipWhy::Upstream {
+                        rs.errored.insert(graph.nodes[idx].id.clone());
+                    }
+                    board.with(idx, |s| {
+                        s.status = NodeStatus::Skipped;
+                        s.logs = vec![why.log_line().into()];
+                    });
+                    let board = &board;
+                    active.push(Box::pin(async move {
+                        board.publish_current(cx, idx).await;
+                        None
+                    }));
+                }
+                Start::Queue { idx, step_no, .. } => {
+                    let (in_use, cap) = sched.slots();
+                    let file = step_file(&graph.nodes[idx], step_no);
+                    board.with(idx, |s| {
+                        s.status = NodeStatus::Running;
+                        s.step_no = Some(step_no);
+                        s.step_file = Some(file);
+                        s.phase = Some(otto_core::workflows::StepPhase::Queued);
+                        s.logs = vec![format!(
+                            "waiting for a step slot ({in_use} of {cap} in use)"
+                        )];
+                    });
+                    let board = &board;
+                    active.push(Box::pin(async move {
+                        board.publish_current(cx, idx).await;
+                        None
+                    }));
+                }
+                Start::Run {
+                    idx,
+                    step_no,
+                    sources,
+                } => {
+                    let input = assemble_input(&sources, &rs.outputs, cx.input);
+                    let node = &graph.nodes[idx];
+                    let board = &board;
+                    active.push(Box::pin(async move {
+                        cx.env.budget.on_start().await;
+                        let done = run_node(cx, board, node, idx, input, step_no).await;
+                        cx.env.budget.on_settle();
+                        Some(done)
+                    }));
+                }
             }
         }
-        return NodeFlow::Next;
+        let Some(done) = active.next().await else {
+            break;
+        };
+        let Some(done) = done else {
+            continue;
+        };
+        if done.canceled || done.timed_out {
+            rs.canceled |= done.canceled;
+            rs.timed_out |= done.timed_out;
+            break;
+        }
+        let id = graph.nodes[done.idx].id.clone();
+        if done.outcome.errored {
+            rs.errored.insert(id.clone());
+        }
+        rs.inactive_edges
+            .extend(done.outcome.inactive_edges.iter().cloned());
+        if let Some(out) = done.output {
+            rs.outputs.insert(id, out);
+        }
+        sched.settle(done.idx, done.outcome);
     }
+    drop(active);
+    rs.states = board.into_states();
+}
 
-    // Outside the run scope (start-from-here) → skip without running. A
-    // retry re-entry already adopted the node's prior state — keep it.
-    if run_set.is_some_and(|set| !set.contains(&node_id)) {
-        if rs.states[idx].status != NodeStatus::Pending {
-            return NodeFlow::Next;
-        }
-        skip_with(cx, &mut rs.states, idx, "outside run scope").await;
-        return NodeFlow::Next;
-    }
+/// The step file base name of `node` numbered `step_no`.
+fn step_file(node: &WorkflowNode, step_no: u32) -> String {
+    crate::workflow_context::step_base_name(step_no as usize, node_display_name(node), None, None)
+}
 
-    // Decide whether to run this node based on its incoming edges. Only
-    // edges whose source is within the run scope constrain control flow (a
-    // start-from-here run leaves ancestors out of scope; their edges don't
-    // poison or branch-skip the entry node — it falls back to the run input).
-    let views: Vec<EdgeView> = incoming_edges(&workflow.graph, &node_id)
-        .iter()
-        .filter(|e| dependency_is_relevant(&e.source, run_set, prior_nodes))
-        .map(|e| EdgeView {
-            source: e.source.clone(),
-            errored: rs.errored.contains(&e.source),
-            has_output: rs.outputs.contains_key(&e.source),
-            edge_active: !rs.inactive_edges.contains(&e.id),
-        })
-        .collect();
-    let node_input = match decide_node(&views) {
-        NodeDecision::ErrorSkip => {
-            rs.errored.insert(node_id.clone());
-            skip_with(cx, &mut rs.states, idx, SKIPPED_UPSTREAM).await;
-            return NodeFlow::Next;
-        }
-        NodeDecision::BranchSkip => {
-            skip_with(cx, &mut rs.states, idx, "skipped (branch not taken)").await;
-            return NodeFlow::Next;
-        }
-        NodeDecision::Run(satisfied) => assemble_input(&satisfied, &rs.outputs, input),
+/// Re-link an adopted successful step's files under its number.
+fn files_adopt(cx: RunCx<'_>, node: &WorkflowNode, step_no: u32) {
+    cx.files.adopt_step(&step_file(node, step_no), &node.kind);
+}
+
+/// Run one started node: mark it running under its step number, run its
+/// attempts, then settle it (chat skip, stop or outcome) on its own state and
+/// publish that.
+async fn run_node(
+    cx: RunCx<'_>,
+    board: &RunBoard,
+    node: &WorkflowNode,
+    idx: usize,
+    node_input: Value,
+    step_no: u32,
+) -> NodeDone {
+    let mut st = board.get(idx);
+    let mut done = NodeDone {
+        idx,
+        output: None,
+        outcome: Outcome::default(),
+        canceled: false,
+        timed_out: false,
     };
+    // Honor a cancel request (the API flips the run status to Canceled).
+    if cx.repo.is_canceled(cx.run_id).await {
+        done.canceled = true;
+        return done;
+    }
+    // Stop once the run has exceeded its global time budget.
+    if cx.env.budget.expired() {
+        st.status = NodeStatus::Error;
+        st.error = Some("workflow active time budget exhausted".into());
+        board.set(idx, &st);
+        done.timed_out = true;
+        return done;
+    }
+    let step_file_base = step_file(node, step_no);
+    // Re-entered after a restart (DR-006): the old agent may live on in its
+    // holder beside the fresh step — stop it; a thread step resumes its thread.
+    if st.started_at.is_some() {
+        let mut logs = vec![];
+        for sid in std::mem::take(&mut st.sessions) {
+            stop_step_session(cx.ctx, &sid, cx.run_id, &mut logs).await;
+        }
+        if let Some(t) = st
+            .thread
+            .as_ref()
+            .filter(|t| t.runner == "threads" && t.closed_at.is_none())
+        {
+            super::super::step_thread::mark_resume(cx.run_id, &node.id, t);
+        }
+    }
+    // The preamble lists the settled ancestors' step files (and this node's
+    // own, for a loop's earlier iterations), never a sibling's (§5.2).
+    let mut listed = board.step_nos_of(&otto_workflows::graph::ancestors(
+        &cx.workflow.graph,
+        &node.id,
+    ));
+    listed.insert(step_no);
+    cx.files.set_listed_steps(step_no as usize, listed);
+    st.status = NodeStatus::Running;
+    st.started_at = Some(chrono::Utc::now());
+    st.logs = vec![format!("▶ {} started", node.kind)];
+    st.phase = None;
+    st.step_no = Some(step_no);
+    st.step_file = Some(step_file_base.clone());
+    // Signal node start so the UI can show live progress immediately.
+    board.publish(cx, idx, &st).await;
+    if cx.progress.enabled() && is_reportable(&node.kind) {
+        cx.progress
+            .post(format!("▶ *{}* started", node_label(node)));
+    }
 
-    // No cross-run node-result cache: every node executes in its own run
-    // (the cache and its `cache_exempt_kind` were removed in 344315ea7).
-    execute_step(cx, rs, node, idx, node_input).await
+    let started = Instant::now();
+    let scope = StepScope {
+        step_no: step_no as usize,
+        iter: None,
+        inner_idx: None,
+    };
+    let mut ch = NodeChannels::new();
+    let attempts = run_attempts(cx, board, &mut st, node, idx, &node_input, &scope, &mut ch).await;
+    // Drain any session ids reported right as the node finished.
+    while let Ok(sid) = ch.sess_rx.try_recv() {
+        record_association(&mut st, sid);
+    }
+    // Drain any trailing live-log lines — kept on EVERY path now (R5.5): the
+    // phase lines ARE the record of how the step completed.
+    while let Ok(line) = ch.log_rx.try_recv() {
+        st.logs.push(line);
+    }
+    // Drain trailing activity snapshots (last one wins), then clear it:
+    // `activity` is only meaningful while the node RUNS.
+    while ch.activity_rx.try_recv().is_ok() {}
+    st.activity = None;
+    // A marker nobody consumed (the step finished first) dies with the step.
+    take_skip_marker(cx.ctx, cx.run_id, &node.id);
+    if attempts.skip_current {
+        let inactive_edges = skip_node(cx, board, &mut st, node, idx, started).await;
+        done.output = st.output.clone();
+        done.outcome = Outcome {
+            errored: false,
+            has_output: true,
+            inactive_edges,
+        };
+        return done;
+    }
+    // Canceled mid-node: the run goes straight to finalize, which marks the
+    // remaining nodes Skipped, flips the run to Canceled, and kills every
+    // session this run spawned (incl. this node's, harvested just above).
+    if attempts.canceled || attempts.timed_out {
+        board.set(idx, &st);
+        done.canceled = attempts.canceled;
+        done.timed_out = attempts.timed_out;
+        return done;
+    }
+    let (output, outcome) = settle(
+        cx,
+        &mut st,
+        node,
+        &node_input,
+        started,
+        &step_file_base,
+        attempts,
+    )
+    .await;
+    // "settled" is not a phase (§2.2).
+    st.phase = None;
+    // The step's answer is on its state: its thread may close now (§6.5).
+    let states = board.snapshot();
+    super::super::step_thread::close_settled(cx.ctx, &cx.workflow.graph, &states, &mut st).await;
+    // Signal node finish so the inspector can update without waiting for the next poll.
+    board.publish(cx, idx, &st).await;
+    done.output = output;
+    done.outcome = outcome;
+    done
 }
 
 /// The live channels of one executing node: agent sessions it spawns, its
@@ -204,83 +355,9 @@ struct Attempts {
     skip_current: bool,
     /// Retry notes (and stopped-session lines) to append to the node's logs.
     retry_logs: Vec<String>,
-}
-
-/// Execute one in-scope node: mark it running, run its attempts, then settle
-/// it (skip, stop or outcome) and publish the final state.
-async fn execute_step(
-    cx: RunCx<'_>,
-    rs: &mut RunState,
-    node: &WorkflowNode,
-    idx: usize,
-    node_input: Value,
-) -> NodeFlow {
-    let start_line = format!("▶ {} started", node.kind);
-    rs.states[idx].status = NodeStatus::Running;
-    rs.states[idx].started_at = Some(chrono::Utc::now());
-    rs.states[idx].logs = vec![start_line];
-    // Signal node start so the UI can show live progress immediately.
-    publish_node(cx, &rs.states, idx).await;
-    if cx.progress.enabled() && is_reportable(&node.kind) {
-        cx.progress
-            .post(format!("▶ *{}* started", node_label(node)));
-    }
-
-    let started = Instant::now();
-    // This node executes — it owns the next step-file number.
-    rs.step_counter += 1;
-    let scope = StepScope {
-        step_no: rs.step_counter,
-        iter: None,
-        inner_idx: None,
-    };
-    let step_file_base = crate::workflow_context::step_base_name(
-        rs.step_counter,
-        node_display_name(node),
-        None,
-        None,
-    );
-    let mut ch = NodeChannels::new();
-    let done = run_attempts(cx, rs, node, idx, &node_input, &scope, &mut ch).await;
-    // Drain any session ids reported right as the node finished.
-    while let Ok(sid) = ch.sess_rx.try_recv() {
-        record_association(&mut rs.states[idx], sid);
-    }
-    // Drain any trailing live-log lines — kept on EVERY path now (R5.5): the
-    // phase lines ARE the record of how the step completed.
-    while let Ok(line) = ch.log_rx.try_recv() {
-        rs.states[idx].logs.push(line);
-    }
-    // Drain trailing activity snapshots (last one wins), then clear it:
-    // `activity` is only meaningful while the node RUNS.
-    while ch.activity_rx.try_recv().is_ok() {}
-    rs.states[idx].activity = None;
-    // A marker nobody consumed (the step finished first) dies with the step.
-    take_skip_marker(cx.ctx, cx.run_id, &node.id);
-    if done.skip_current {
-        skip_node(cx, rs, node, idx, started).await;
-        return NodeFlow::Next;
-    }
-    // Canceled mid-node: bail straight to the finalize block, which marks the
-    // remaining nodes Skipped, flips the run to Canceled, and kills every
-    // session this run spawned (incl. this node's, harvested just above).
-    if rs.canceled || rs.timed_out {
-        return NodeFlow::Stop;
-    }
-    settle(
-        cx,
-        rs,
-        node,
-        idx,
-        &node_input,
-        started,
-        &step_file_base,
-        done,
-    )
-    .await;
-    // Signal node finish so the inspector can update without waiting for the next poll.
-    publish_node(cx, &rs.states, idx).await;
-    NodeFlow::Next
+    /// The run was canceled, or its active-time budget ran out, mid-node.
+    canceled: bool,
+    timed_out: bool,
 }
 
 /// Run the node, honoring its retry policy (default: a single attempt). A
@@ -290,7 +367,8 @@ async fn execute_step(
 #[allow(clippy::too_many_arguments)]
 async fn run_attempts(
     cx: RunCx<'_>,
-    rs: &mut RunState,
+    board: &RunBoard,
+    st: &mut NodeRunState,
     node: &WorkflowNode,
     idx: usize,
     node_input: &Value,
@@ -307,12 +385,7 @@ async fn run_attempts(
         progress,
         ..
     } = cx;
-    let RunState {
-        states,
-        canceled,
-        timed_out,
-        ..
-    } = rs;
+    let (mut canceled, mut timed_out) = (false, false);
     // The node future reads the senders; the monitor below drains the receivers.
     let (sess_tx, log_tx, activity_tx) = (&ch.sess_tx, &ch.log_tx, &ch.activity_tx);
     let (sess_rx, log_rx, activity_rx) = (&mut ch.sess_rx, &mut ch.log_rx, &mut ch.activity_rx);
@@ -345,16 +418,17 @@ async fn run_attempts(
     // cancel it aborts only the CURRENT node, which is then marked Skipped and
     // the run continues to the next node.
     let mut skip_current = false;
+    let mut park = None;
     let result = loop {
         attempt += 1;
-        states[idx].attempts = Some(attempt);
-        states[idx].logs.push(format!(
+        st.attempts = Some(attempt);
+        st.logs.push(format!(
             "{} — attempt {}/{}",
             node_display_name(node),
             attempt,
             attempt_limit
         ));
-        publish_node(cx, states, idx).await;
+        board.publish(cx, idx, st).await;
         attempt_started = std::time::SystemTime::now();
         // Heap-pin the large node future before the driver's nested select frames.
         let fut = Box::pin(async {
@@ -398,12 +472,24 @@ async fn run_attempts(
             tokio::select! {
                 biased;
                 () = env.budget.exhausted() => {
-                    *timed_out = true;
+                    timed_out = true;
                     break Err(otto_core::Error::Upstream("workflow active time budget exhausted".into()));
                 }
                 Some(sid) = sess_rx.recv() => {
-                    if record_association(&mut states[idx], sid) {
-                        publish_node(cx, states, idx).await;
+                    // A step waiting on a person parks (§2.4); its answer unparks it.
+                    match &sid {
+                        AgentAssociation::Step(StepNote::NeedsYou(_)) => {
+                            park.get_or_insert_with(|| env.budget.park());
+                        }
+                        AgentAssociation::Step(StepNote::Resumed { .. }) => {
+                            if let Some(p) = park.take() {
+                                p.unpark().await;
+                            }
+                        }
+                        _ => {}
+                    }
+                    if record_association(st, sid) {
+                        board.publish(cx, idx, st).await;
                         // The write carried any buffered log lines too.
                         log_persist.carried();
                     }
@@ -413,12 +499,12 @@ async fn run_attempts(
                     // first line after a quiet spell is written (and pushed to
                     // the run detail) at once; a burst is coalesced into one
                     // write per LOG_PERSIST_EVERY / LOG_PERSIST_LINES.
-                    states[idx].logs.push(line);
-                    if states[idx].logs.len() > NODE_LIVE_LOG_CAP {
-                        cap_node_logs(&mut states[idx].logs, NODE_LIVE_LOG_CAP);
+                    st.logs.push(line);
+                    if st.logs.len() > NODE_LIVE_LOG_CAP {
+                        cap_node_logs(&mut st.logs, NODE_LIVE_LOG_CAP);
                     }
                     if log_persist.on_line(Instant::now()) {
-                        publish_node(cx, states, idx).await;
+                        board.publish(cx, idx, st).await;
                     }
                 }
                 () = tokio::time::sleep_until(tokio::time::Instant::from_std(
@@ -426,16 +512,16 @@ async fn run_attempts(
                 )), if log_persist.flush_at.is_some() => {
                     // Trailing flush of a coalesced log burst.
                     log_persist.wrote_log(Instant::now());
-                    publish_node(cx, states, idx).await;
+                    board.publish(cx, idx, st).await;
                 }
                 Some(a) = activity_rx.recv() => {
                     // R1.4: the live sub-agent/phase snapshot. Always kept on
                     // the state (the next emit carries it), persisted at most
                     // every 5s so a chatty sweep can't hammer the run row.
-                    states[idx].activity = Some(bound_activity(a));
+                    st.activity = Some(bound_activity(a));
                     if last_activity_persist.is_none_or(|t| t.elapsed() >= Duration::from_secs(5)) {
                         last_activity_persist = Some(Instant::now());
-                        publish_node(cx, states, idx).await;
+                        board.publish(cx, idx, st).await;
                         log_persist.carried();
                     }
                 }
@@ -444,7 +530,7 @@ async fn run_attempts(
                     // this run's sessions. No node task remains detached.
                     let parked_at_approval = match wake {
                         CancelWake::Canceled => {
-                            *canceled = true;
+                            canceled = true;
                             break Err(otto_core::Error::Internal("run canceled".into()));
                         }
                         CancelWake::Skip { parked_at_approval } => parked_at_approval,
@@ -459,7 +545,7 @@ async fn run_attempts(
                     // skipping the loop dropped the gate and let the steps
                     // after it (a PR, say) run with nobody's sign-off.
                     if node.kind == "human_approval" || parked_at_approval {
-                        states[idx].logs.push(
+                        st.logs.push(
                             "⚠ skip ignored — an approval step must be approved or rejected".into(),
                         );
                     } else {
@@ -475,7 +561,7 @@ async fn run_attempts(
             Ok(ok) => break Ok(ok),
             Err(e) => {
                 // Canceled or skipped mid-node → stop immediately, never retry.
-                if *canceled || skip_current || *timed_out {
+                if canceled || skip_current || timed_out {
                     break Err(e);
                 }
                 // R5.2: a `529 Overloaded` / fd-exhaustion failure needs a
@@ -494,22 +580,22 @@ async fn run_attempts(
                     break Err(e);
                 };
                 attempt_limit = max_eff + 1;
-                states[idx].logs.push(otto_workflows::retry::retry_log_line(
+                st.logs.push(otto_workflows::retry::retry_log_line(
                     attempt + 1,
                     max_eff + 1,
                     sleep_ms,
                     &reason,
                 ));
-                publish_node(cx, states, idx).await;
+                board.publish(cx, idx, st).await;
                 // The failed attempt's agent must not stay alive next to the
                 // retry's fresh one (5 live PTYs per step in a 529 storm; and
                 // fd exhaustion is itself a retry class). Suspend/kill it the
                 // way a successful step's session is stopped.
                 if stop_step_sessions_wanted(&node.kind, &node.params) {
                     while let Ok(sid) = sess_rx.try_recv() {
-                        record_association(&mut states[idx], sid);
+                        record_association(st, sid);
                     }
-                    for sid in states[idx].sessions.clone() {
+                    for sid in st.sessions.clone() {
                         stop_step_session(ctx, &sid, run_id, &mut retry_logs).await;
                     }
                 }
@@ -523,12 +609,12 @@ async fn run_attempts(
                 tokio::select! {
                     biased;
                     () = env.budget.exhausted() => {
-                        *timed_out = true;
+                        timed_out = true;
                         break Err(otto_core::Error::Upstream("workflow active time budget exhausted".into()));
                     }
                     stopped = backoff_canceled(repo, run_id, Duration::from_millis(sleep_ms)) => {
                         if stopped {
-                            *canceled = true;
+                            canceled = true;
                             break Err(otto_core::Error::Internal("run canceled".into()));
                         }
                     }
@@ -544,73 +630,72 @@ async fn run_attempts(
         attempt_started,
         skip_current,
         retry_logs,
+        canceled,
+        timed_out,
     }
 }
 
 /// Skipped mid-node via a chat `skip` command: stop THIS node's agents, mark
-/// it Skipped, and continue to the NEXT node (unlike cancel, the run
-/// proceeds). A marker output keeps dependents satisfied — an empty output
-/// would make them BranchSkip and cascade the whole tail away.
+/// it Skipped, and let the run go on (unlike cancel). A marker output keeps
+/// dependents satisfied — an empty output would make them BranchSkip and
+/// cascade the whole tail away; it is stored on the node state too, so a
+/// retry or restart adopts it with its output. Returns the out-edges not taken.
 async fn skip_node(
     cx: RunCx<'_>,
-    rs: &mut RunState,
+    board: &RunBoard,
+    st: &mut NodeRunState,
     node: &WorkflowNode,
     idx: usize,
     started: Instant,
-) {
+) -> Vec<String> {
     let RunCx { ctx, workflow, .. } = cx;
-    let states = &mut rs.states;
     // A skipped review step's fleet is cancelled through the review
     // engine, like a run cancel does: killing a reviewer's PTY alone
     // makes its recovery loop respawn it, ownerless.
-    for review_id in states[idx].review_ids.clone() {
+    for review_id in st.review_ids.clone() {
         if let Ok(review) = ctx.reviews_store.get_review(&review_id).await {
             crate::modules::cancel_running_review(ctx, &review, &workflow.workspace_id).await;
         }
     }
-    for sid in &states[idx].sessions {
+    for sid in &st.sessions {
         if let Err(e) = ctx.manager.kill_session(sid).await {
             tracing::warn!("skip: failed to kill workflow session {sid}: {e}");
         }
     }
-    states[idx].status = NodeStatus::Skipped;
-    states[idx].logs.push("⏭ skipped via chat command".into());
+    st.status = NodeStatus::Skipped;
+    st.logs.push("⏭ skipped via chat command".into());
     // A skipped step decided nothing, so none of its CONDITIONAL
-    // out-edges is taken (those branches BranchSkip). Nothing used to be
-    // pruned here — both sides of a branch after a skipped condition /
-    // review ran. Unconditional edges stay live; the marker output below
-    // satisfies those dependents.
+    // out-edges is taken (those branches BranchSkip). Unconditional edges
+    // stay live; the marker output below satisfies those dependents.
+    let mut inactive = Vec::new();
     for e in outgoing_edges(&workflow.graph, &node.id) {
         if e.condition.is_some() {
-            rs.inactive_edges.insert(e.id.clone());
-            states[idx]
-                .logs
+            inactive.push(e.id.clone());
+            st.logs
                 .push(format!("edge → {} not taken (step skipped)", e.target));
         }
     }
-    cap_node_logs(&mut states[idx].logs, NODE_LOG_CAP);
-    states[idx].duration_ms = Some(started.elapsed().as_millis() as u64);
-    rs.outputs.insert(
-        node.id.clone(),
-        json!({ "skipped": true, "note": "skipped via chat command" }),
-    );
-    publish_node(cx, &rs.states, idx).await;
+    cap_node_logs(&mut st.logs, NODE_LOG_CAP);
+    st.duration_ms = Some(started.elapsed().as_millis() as u64);
+    st.output = Some(json!({ "skipped": true, "note": "skipped via chat command" }));
+    board.publish(cx, idx, st).await;
+    inactive
 }
 
 /// Settle a node whose attempts finished (not skipped, canceled or timed
 /// out): record its output or error, write its step file, stop its agent,
-/// prune its out-edges and report it to the chat thread.
+/// prune its out-edges and report it to the chat thread. Returns the output
+/// and what the scheduler needs of the outcome.
 #[allow(clippy::too_many_arguments)]
 async fn settle(
     cx: RunCx<'_>,
-    rs: &mut RunState,
+    st: &mut NodeRunState,
     node: &WorkflowNode,
-    idx: usize,
     node_input: &Value,
     started: Instant,
     step_file_base: &str,
     done: Attempts,
-) {
+) -> (Option<Value>, Outcome) {
     let RunCx {
         ctx,
         workflow,
@@ -627,25 +712,20 @@ async fn settle(
         mut retry_logs,
         ..
     } = done;
-    let node_id = &node.id;
-    let states = &mut rs.states;
     match result {
         Ok((out, mut ret_logs)) => {
             let failure = outcome_error(&out).map(str::to_owned);
-            states[idx].status = if failure.is_some() {
+            st.status = if failure.is_some() {
                 NodeStatus::Error
             } else {
                 NodeStatus::Success
             };
-            states[idx].error = failure.clone();
-            if failure.is_some() {
-                rs.errored.insert(node_id.clone());
-            }
-            states[idx].output = Some(out.clone());
+            st.error = failure.clone();
+            st.output = Some(out.clone());
             // R5.5: the LIVE vector (which already starts with `start_line`
             // and carries every streamed phase line) is the base — the
             // returned lines are appended, never substituted for it.
-            let mut logs = std::mem::take(&mut states[idx].logs);
+            let mut logs = std::mem::take(&mut st.logs);
             logs.append(&mut ret_logs);
             logs.append(&mut retry_logs);
             // Warn-only output validation against the node's declared schema.
@@ -671,22 +751,24 @@ async fn settle(
             // otherwise. `review_run`'s sessions belong to the review, and
             // `keep_session: true` opts a step out.
             if stop_step_sessions_wanted(&node.kind, &node.params) {
-                for sid in states[idx].sessions.clone() {
+                for sid in st.sessions.clone() {
                     stop_step_session(ctx, &sid, run_id, &mut logs).await;
                 }
             }
             // Prune outgoing edges whose condition fails on this output.
-            let (pruned, mut plogs) = eval_outgoing(&workflow.graph, node, &out, node_input, input);
-            rs.inactive_edges.extend(pruned);
+            let run = super::state::run_data(files, input);
+            let (pruned, mut plogs) = eval_outgoing(&workflow.graph, node, &out, node_input, &run);
             logs.append(&mut plogs);
             cap_node_logs(&mut logs, NODE_LOG_CAP);
-            states[idx].logs = logs;
-            states[idx].attempts = Some(attempt);
+            st.logs = logs;
+            st.attempts = Some(attempt);
             // Also harvest a session id carried in the output (dedups with the
             // live channel report).
-            harvest_session_ids(&out, &mut states[idx].sessions);
+            if st.thread.as_ref().is_none_or(|t| t.runner == "pty") {
+                harvest_session_ids(&out, &mut st.sessions);
+            }
             let elapsed = started.elapsed().as_millis() as u64;
-            states[idx].duration_ms = Some(elapsed);
+            st.duration_ms = Some(elapsed);
             if progress.enabled() && is_reportable(&node.kind) && failure.is_none() {
                 let dur = format!("{:.1}s", elapsed as f64 / 1000.0);
                 match brief_summary(&out) {
@@ -702,18 +784,23 @@ async fn settle(
             if progress.enabled() && (is_reportable(&node.kind) || node.kind == "review_run") {
                 progress.post_step_file(files, step_file_base);
             }
-            rs.outputs.insert(node_id.clone(), out);
+            let outcome = Outcome {
+                errored: failure.is_some(),
+                has_output: true,
+                inactive_edges: pruned,
+            };
+            (Some(out), outcome)
         }
         Err(e) => {
-            states[idx].status = NodeStatus::Error;
-            states[idx].error = Some(e.to_string());
-            let mut elogs = std::mem::take(&mut states[idx].logs);
+            st.status = NodeStatus::Error;
+            st.error = Some(e.to_string());
+            let mut elogs = std::mem::take(&mut st.logs);
             elogs.append(&mut retry_logs);
             elogs.push(format!("✗ {e}"));
             // A failed step's agent is stopped like a successful one's —
             // it used to idle at its prompt until the idle sweep found it.
             if stop_step_sessions_wanted(&node.kind, &node.params) {
-                for sid in states[idx].sessions.clone() {
+                for sid in st.sessions.clone() {
                     stop_step_session(ctx, &sid, run_id, &mut elogs).await;
                 }
             }
@@ -730,9 +817,9 @@ async fn settle(
             );
             elogs.append(&mut flogs);
             cap_node_logs(&mut elogs, NODE_LOG_CAP);
-            states[idx].logs = elogs;
-            states[idx].attempts = Some(attempt);
-            states[idx].duration_ms = Some(started.elapsed().as_millis() as u64);
+            st.logs = elogs;
+            st.attempts = Some(attempt);
+            st.duration_ms = Some(started.elapsed().as_millis() as u64);
             if progress.enabled() && is_reportable(&node.kind) {
                 progress.post(format!(
                     "❌ *{}* failed — {}",
@@ -744,7 +831,15 @@ async fn settle(
             if progress.enabled() && (is_reportable(&node.kind) || node.kind == "review_run") {
                 progress.post_step_file(files, step_file_base);
             }
-            rs.errored.insert(node_id.clone());
+            let outcome = Outcome {
+                errored: true,
+                ..Outcome::default()
+            };
+            (None, outcome)
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/workflow_parallel.rs"]
+mod tests;
