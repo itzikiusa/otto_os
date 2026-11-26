@@ -46,16 +46,7 @@ impl RunState {
             .iter()
             .map(|node| NodeRunState {
                 node_id: node.id.clone(),
-                status: NodeStatus::Pending,
-                output: None,
-                error: None,
-                logs: vec![],
-                started_at: None,
-                duration_ms: None,
-                attempts: None,
-                sessions: vec![],
-                review_ids: Vec::new(),
-                activity: None,
+                ..Default::default() // every node Pending
             })
             .collect();
         Self {

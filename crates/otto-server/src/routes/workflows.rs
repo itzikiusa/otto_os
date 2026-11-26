@@ -843,6 +843,7 @@ pub async fn cancel_run(
                 nodes_done: 0,
                 nodes_total: 0,
                 waiting_approval: false,
+                overview: None,
             });
         }
     }
@@ -858,6 +859,7 @@ pub struct RunListQuery {
     q: Option<String>,
     status: Option<String>,
     workflow_id: Option<Id>,
+    attention: Option<u8>,
     limit: Option<u32>,
     cursor: Option<String>,
 }
@@ -877,6 +879,7 @@ impl RunListQuery {
                 .filter(|s| !s.is_empty())
                 .map(str::to_string)
                 .collect(),
+            attention: self.attention == Some(1),
             limit: self.limit,
             cursor: self.cursor,
         }
@@ -905,7 +908,7 @@ pub fn workspace_run_routes() -> axum::Router<ServerCtx> {
         )
 }
 
-/// `GET /workspaces/{wid}/workflow-runs?q=&status=&workflow_id=&limit=&cursor=`
+/// `GET /workspaces/{wid}/workflow-runs?q=&status=&workflow_id=&attention=1&limit=&cursor=`
 /// — the workspace's run history, newest first, searchable (`RunListPage`).
 pub async fn search_runs(
     Path(wid): Path<Id>,
@@ -1785,6 +1788,7 @@ fn emit_run_decision(ctx: &ServerCtx, workspace_id: &Id, run_id: &Id, node_id: &
         nodes_done: 0,
         nodes_total: 0,
         waiting_approval: false,
+        overview: None,
     });
 }
 

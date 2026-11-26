@@ -733,6 +733,8 @@ mod tests {
             updated_at: chrono::Utc::now(),
             version: 1,
             on_restart: "resume".into(),
+            origin: None,
+            origin_ref: None,
         };
         let merged = seed_from_manual_trigger(&wf, json!({ "prompt": "override" }));
         assert_eq!(merged["prompt"], "override");

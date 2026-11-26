@@ -518,6 +518,7 @@ mod tests {
             nodes_done: 0,
             nodes_total: 0,
             waiting_approval: false,
+            overview: None,
         };
         assert_eq!(event_to_kind(&ev), None);
     }

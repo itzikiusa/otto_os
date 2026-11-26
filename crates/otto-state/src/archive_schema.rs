@@ -664,6 +664,15 @@ pub fn inert_with(
     if table == "mcp_servers" && row.contains_key("all_workspaces") {
         row.insert("all_workspaces".into(), json!(0));
     }
+    // An imported run's overview and person count describe the source
+    // daemon's moment (its status may be rewritten below): recomputed here.
+    if table == "workflow_runs" {
+        for (col, value) in [("overview_json", Value::Null), ("attention", json!(0))] {
+            if row.contains_key(col) {
+                row.insert(col.into(), value);
+            }
+        }
+    }
     if table == "sessions" {
         row.insert("status".into(), json!("exited"));
         row.insert("provider_session_id".into(), Value::Null);

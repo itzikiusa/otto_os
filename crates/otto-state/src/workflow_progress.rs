@@ -73,6 +73,42 @@ fn project(value: &Value, checkpoint: bool) -> Result<Value> {
         json!(value.get("output").is_some_and(|v| !v.is_null())),
     );
     out.insert("detail_version".into(), json!(version(value)?));
+    // The run-view fields, bounded: the thread without its digest, children
+    // without usage, the newest 12 phases and 5 human entries.
+    for key in [
+        "step_no",
+        "step_file",
+        "phase",
+        "wait",
+        "attention",
+        "error_class",
+        "deliverables",
+        "brief",
+    ] {
+        if let Some(value) = value.get(key) {
+            out.insert(key.into(), value.clone());
+        }
+    }
+    for (key, keep) in [("phases", 12), ("human_log", 5)] {
+        if let Some(list) = value.get(key).and_then(Value::as_array) {
+            out.insert(key.into(), json!(list[list.len().saturating_sub(keep)..]));
+        }
+    }
+    if let Some(thread) = value.get("thread").and_then(Value::as_object) {
+        let mut thread = thread.clone();
+        thread.remove("digest");
+        out.insert("thread".into(), Value::Object(thread));
+    }
+    if let Some(children) = value.get("children").and_then(Value::as_array) {
+        let small = children.iter().map(|c| {
+            let mut c = c.clone();
+            if let Some(o) = c.as_object_mut() {
+                o.remove("usage");
+            }
+            c
+        });
+        out.insert("children".into(), Value::Array(small.collect()));
+    }
     if let Some(activity) = value.get("activity").filter(|v| !v.is_null()) {
         let mut small = activity.clone();
         for key in ["phase", "hold_reason"] {
@@ -297,7 +333,7 @@ async fn repair(pool: &DbPool, id: &str) -> Result<()> {
     }).await.map_err(json_error)?
 }
 
-const RUN_COLUMNS: &str="id,workflow_id,workspace_id,status,error,started_at,finished_at,rev,waiting_approval,approval_node_id,approved_by,created_by,approval_note,approved_at,workflow_version,resume_attempts,progress_json,checkpoint_rev,checkpoint_generation";
+const RUN_COLUMNS: &str="id,workflow_id,workspace_id,status,error,started_at,finished_at,rev,waiting_approval,approval_node_id,approved_by,created_by,approval_note,approved_at,workflow_version,resume_attempts,progress_json,checkpoint_rev,checkpoint_generation,overview_json,hold_json";
 pub async fn progress(pool: &DbPool, id: &Id, after_rev: Option<i64>) -> Result<Value> {
     for attempt in 0..2 {
         let mut tx = pool
@@ -369,6 +405,17 @@ pub async fn progress(pool: &DbPool, id: &Id, after_rev: Option<i64>) -> Result<
             "nodes".into(),
             serde_json::from_str(&projection.unwrap()).map_err(json_error)?,
         );
+        // `overview` (null when stale: the server recomputes it) and the
+        // hold beside the unchanged `summary: true` projection marker (DR-003).
+        let overview = crate::workflows::fresh_overview(
+            row.get::<Option<String>, _>("overview_json").as_deref(),
+            rev,
+        );
+        run.insert("overview".into(), json!(overview));
+        let hold = row
+            .get::<Option<String>, _>("hold_json")
+            .and_then(|h| serde_json::from_str::<Value>(&h).ok());
+        run.insert("hold".into(), json!(hold));
         run.insert("summary".into(), json!(true));
         run.insert("input".into(), Value::Null);
         run.insert("checkpoints".into(), json!([]));
@@ -645,6 +692,7 @@ mod tests {
                     error: None,
                     logs: vec![],
                     updated_at: chrono::Utc::now(),
+                    active_ms: 0,
                 },
             )
             .await
@@ -686,6 +734,7 @@ mod tests {
             error: None,
             logs: vec!["line".into()],
             updated_at: chrono::Utc::now(),
+            active_ms: 0,
         }
     }
     #[tokio::test]

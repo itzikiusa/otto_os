@@ -334,6 +334,7 @@ fn emit_run_updated(
             .count() as u32,
         nodes_total: states.len() as u32,
         waiting_approval,
+        overview: None,
     };
     if ctx.events.send(ev).is_err() {
         tracing::debug!(%run_id, "no WS subscribers for WorkflowRunUpdated");
@@ -2611,12 +2612,9 @@ fn loop_checkpoint(
         kind: node.kind.clone(),
         name: node_display_name(node).into(),
         status: NodeStatus::Pending,
-        attempts: 0,
         input,
-        output: None,
-        error: None,
-        logs: vec![],
         updated_at: chrono::Utc::now(),
+        ..Default::default()
     }
 }
 
@@ -4295,6 +4293,7 @@ mod event_wait_tests {
             nodes_done: 0,
             nodes_total: 0,
             waiting_approval: waiting,
+            overview: None,
         }
     }
 
