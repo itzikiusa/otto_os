@@ -563,7 +563,15 @@ fn spawn_workflow_run_retention(ctx: &ServerCtx) -> tokio::task::JoinHandle<()> 
                 )
                 .await
             {
-                Ok(otto_state::workflows::PrunedRuns { run_ids: ids, .. }) if !ids.is_empty() => {
+                Ok(otto_state::workflows::PrunedRuns {
+                    run_ids: ids,
+                    thread_ids,
+                }) if !ids.is_empty() => {
+                    // A thread the retention sweep never got (no
+                    // retain_until: an earlier crash) goes with its run.
+                    for t in &thread_ids {
+                        let _ = ctx.agent_runtime.delete(t).await;
+                    }
                     let root = ctx_root.clone();
                     let n = ids.len();
                     // Runs inside spawn_blocking (std fs is fine there).

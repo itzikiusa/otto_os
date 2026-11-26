@@ -146,7 +146,7 @@ impl Post {
             node_id: "n13".into(),
             status: otto_core::workflows::NodeStatus::Success,
             step_no: Some(6),
-            step_file: Some("step6-draft-pr-summary.md".into()),
+            step_file: Some("step6-draft-pr-summary".into()),
             ..Default::default()
         };
         self.f
@@ -332,4 +332,66 @@ async fn every_post_failing_is_an_error_and_releases_the_claims() {
         "a later run can post it"
     );
     let _ = body_string_contains("x");
+}
+
+#[tokio::test]
+async fn a_posted_summary_keeps_the_step_ok_when_inline_posts_fail_and_a_clean_pr_shows_only_the_summary(
+) {
+    // Inline posts fail (5xx, never retried), the summary note posts.
+    let p = post_fixture(201).await;
+    Mock::given(method("POST"))
+        .and(path(format!("{MR}/discussions")))
+        .respond_with(ResponseTemplate::new(500))
+        .with_priority(1)
+        .mount(&p.forge)
+        .await;
+    p.draft(CommentSeverity::Bug, Some("a.rs"), Some(3), "bug")
+        .await;
+    p.seed_run("passed", true).await;
+    let (out, logs) = p.run(json!({})).await.expect("the summary posted");
+    assert_eq!(
+        (out["posted"].as_u64(), out["failed"].as_u64()),
+        (Some(0), Some(1)),
+        "{out}"
+    );
+    let states: Vec<(&str, &str)> = out["deliverables"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| (d["label"].as_str().unwrap(), d["state"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        states,
+        [("PR comments", "failed"), ("PR summary comment", "done")],
+        "{out}"
+    );
+    assert!(logs.iter().any(|l| l.starts_with("⚠")), "{logs:?}");
+
+    // No findings at all: the summary is the only deliverable.
+    let p = post_fixture(201).await;
+    p.seed_run("passed", true).await;
+    let (out, _) = p.run(json!({})).await.unwrap();
+    let labels: Vec<&str> = out["deliverables"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|d| d["label"].as_str())
+        .collect();
+    assert_eq!(labels, ["PR summary comment"], "{out}");
+}
+
+#[tokio::test]
+async fn summary_files_outside_the_bare_names_are_never_posted() {
+    let p = post_fixture(201).await;
+    p.seed_run("passed", true).await;
+    let dir = p.f.files.dir_str().unwrap();
+    std::fs::create_dir_all(format!("{dir}/attachments")).unwrap();
+    std::fs::write(format!("{dir}/attachments/internal.txt"), "INTERNAL").unwrap();
+    p.run(json!({"summary_files": ["attachments/internal.txt", "go-standards-evals.md"]}))
+        .await
+        .unwrap();
+    let notes = p.posts("/notes").await;
+    let summary = notes.last().expect("a summary");
+    assert!(summary.contains("| gate | ok |"), "{summary}");
+    assert!(!summary.contains("INTERNAL"), "{summary}");
 }

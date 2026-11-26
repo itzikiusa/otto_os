@@ -137,12 +137,9 @@ async fn apply(
             max_parallel_steps,
             validate: &blocking,
         };
-        optimize::apply(&wf, &history, &req.change_ids, &opts).map(|g| {
-            let draft = optimize::plan(&wf, &history, &opts);
-            (
-                g,
-                optimize::version_note(&user.display_name, &draft, &req.change_ids),
-            )
+        optimize::apply(&wf, &history, &req.change_ids, &opts).map(|(g, changes)| {
+            let note = optimize::version_note(&user.display_name, &changes, &req.change_ids);
+            (g, note)
         })
     };
     let (graph, note) = match derived {

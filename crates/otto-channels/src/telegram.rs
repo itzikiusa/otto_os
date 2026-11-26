@@ -354,11 +354,14 @@ fn html_within(gfm: &str, max: usize) -> String {
     let mut src = gfm.to_string();
     loop {
         let html = crate::gfm::to_telegram_html(&src);
-        let over = html.chars().count().saturating_sub(max);
-        if over == 0 {
+        let html_len = html.chars().count();
+        if html_len <= max {
             return html;
         }
-        let keep = src.chars().count().saturating_sub(over + 1);
+        // Escapes grow the text (`<` → `&lt;`), so the source shrinks in
+        // proportion, not by the overflow (which could cut it all away).
+        let len = src.chars().count();
+        let keep = (len * max / html_len).min(len.saturating_sub(1));
         src = crate::adapter::clip_chars(&src, keep);
     }
 }
@@ -527,7 +530,11 @@ impl Adapter for TelegramAdapter {
             .send_document(chat, thread, filename, content, Some((&html, true)))
             .await
         {
-            Err(e) if e.to_string().contains("can't parse") => {
+            Err(e)
+                if ["can't parse", "parse entities"]
+                    .iter()
+                    .any(|p| e.to_string().contains(p)) =>
+            {
                 let plain = crate::adapter::clip_chars(caption, CAPTION_MAX_CHARS);
                 self.send_document(chat, thread, filename, content, Some((&plain, false)))
                     .await
@@ -1736,7 +1743,8 @@ mod tests {
                     let rejected = html && text.contains("&lt;bad");
                     b.lock().unwrap().push(text);
                     let (status, out) = if rejected {
-                        tg_bad("Bad Request: can't parse entities: bad tag")
+                        // Not "can't parse": the wording send/edit also accept.
+                        tg_bad("Bad Request: failed to parse entities: bad tag")
                     } else {
                         tg_ok(&serde_json::Value::Null)
                     };
@@ -1771,5 +1779,12 @@ mod tests {
         let html = html_within(&format!("**{}**", "a".repeat(2_000)), CAPTION_MAX_CHARS);
         assert!(html.chars().count() <= CAPTION_MAX_CHARS);
         assert!(html.starts_with("<b>") || html.starts_with("**"), "{html}");
+        // Escapes triple the length: the text is cut to fit, not to "…".
+        let html = html_within(&"<&>".repeat(400), CAPTION_MAX_CHARS);
+        let n = html.chars().count();
+        assert!(
+            n <= CAPTION_MAX_CHARS && n > CAPTION_MAX_CHARS / 2,
+            "{n}: {html}"
+        );
     }
 }

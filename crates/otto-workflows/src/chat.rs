@@ -1344,7 +1344,10 @@ impl<C: WorkflowCtx> WorkflowChatTrigger for WorkflowChatTriggerImpl<C> {
                     now: chrono::Utc::now(),
                     tz: *chrono::Local::now().offset(),
                 };
-                let overview = run.overview.clone().unwrap_or_default();
+                // A stale or missing one (queued, paused) is recomputed, as the API does.
+                let overview = run.overview.clone().unwrap_or_else(|| {
+                    crate::overview::run_overview(&run, &graph, None, None, view.now)
+                });
                 Some(WorkflowChatAck {
                     reply: crate::chat_status::render_status(&view, &overview, &run.nodes, &graph),
                 })

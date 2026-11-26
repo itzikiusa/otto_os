@@ -82,7 +82,7 @@ pub async fn run(
         .map(|p| p.with_extension("log"));
     // A re-run (retry, restart of an idempotent step) starts the output file
     // afresh: a command that appends to it must not append twice.
-    if let Some(name) = output_file {
+    if let Some(name) = output_file.filter(|_| !ctx_dir.is_empty()) {
         let _ = tokio::fs::remove_file(std::path::Path::new(&ctx_dir).join(name)).await;
     }
     if let Some(log) = &log_file {

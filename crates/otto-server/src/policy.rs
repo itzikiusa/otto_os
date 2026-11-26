@@ -94,6 +94,18 @@ fn is_resource_access_route(p: &str) -> bool {
 /// Root-only daemon diagnostics (`Settings:Admin`).
 const ROOT_DIAGNOSTICS: [&str; 3] = ["/capabilities", "/support-bundle", "/system/restart-impact"];
 
+/// Workflows: View reads, Edit changes — except the read-shaped POSTs, a
+/// validation and an Optimize preview, which save nothing (their handlers
+/// gate at ws Viewer); `/optimize/apply` stays Edit.
+fn workflows_tier(method: &Method, p: &str) -> Capability {
+    let preview = matches!(p, "/workflows/{id}/validate" | "/workflows/{id}/optimize");
+    if method == Method::GET || (method == Method::POST && preview) {
+        Capability::View
+    } else {
+        Capability::Edit
+    }
+}
+
 /// Map an `(method, matched_path)` pair to its feature-axis [`PolicyDecision`].
 ///
 /// `matched_path` is the Axum route **template** with `{id}`-style placeholders,
@@ -962,7 +974,7 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         || p.starts_with("/workspaces/{wid}/workflow")
         || p.starts_with("/workspaces/{wid}/goals")
     {
-        return Require(Workflows, if get { View } else { Edit });
+        return Require(Workflows, workflows_tier(method, p));
     }
 
     // ---- Channels (Slack / Telegram / Webhook integrations) -------------------

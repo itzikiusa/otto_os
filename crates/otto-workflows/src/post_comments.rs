@@ -100,13 +100,14 @@ pub async fn run(
             .and_then(Value::as_str)
             .and_then(|id| run.nodes.iter().find(|n| n.node_id == id))
             .and_then(|n| n.step_file.as_deref())
-            .and_then(|f| files.read_confined(f)),
+            .and_then(|base| files.read_confined(&format!("{base}.md"))),
         files: p
             .get("summary_files")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
             .filter_map(Value::as_str)
+            .filter(|f| crate::context::is_bare_name(f))
             .filter_map(|f| files.read_confined(f).map(|t| (f.to_string(), t)))
             .collect(),
     };
@@ -184,7 +185,7 @@ pub async fn run(
         }
     }
     let total = tally.posted + tally.failed.len();
-    if total > 0 && tally.posted == 0 {
+    if total > 0 && tally.posted == 0 && tally.summaries == 0 {
         return Err(otto_core::Error::Upstream(format!(
             "every post failed: {}",
             tally.failed.join("; ")
@@ -199,13 +200,16 @@ pub async fn run(
             url: None,
         });
     } else {
-        let mut d =
-            crate::deliverables::tally("PR comments", "posted", tally.posted, &tally.failed, 0);
-        d.url = pr_link
-            .get("url")
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        deliverables.push(d);
+        // A clean PR (no findings) has only its summary to show.
+        if total > 0 || tally.summaries == 0 {
+            let mut d =
+                crate::deliverables::tally("PR comments", "posted", tally.posted, &tally.failed, 0);
+            d.url = pr_link
+                .get("url")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            deliverables.push(d);
+        }
         if tally.summaries > 0 {
             deliverables.push(crate::deliverables::tally(
                 "PR summary comment",
@@ -308,13 +312,15 @@ async fn post_target(
     let (inline, info): (Vec<&ReviewComment>, Vec<&ReviewComment>) = drafts
         .into_iter()
         .partition(|c| opts.inline.contains(&c.severity) && c.path.is_some() && c.line.is_some());
+    // `max_inline` and the log line are per PR; the tally is the run's.
+    let before = (tally.posted, tally.duplicates, tally.overflow);
     let mut more = Vec::new();
     for c in inline {
         if on_pr(c) {
             tally.duplicates += 1;
             continue;
         }
-        if tally.posted >= opts.max_inline {
+        if tally.posted - before.0 >= opts.max_inline {
             more.push(c);
             continue;
         }
@@ -394,7 +400,9 @@ async fn post_target(
     }
     logs.push(format!(
         "PR #{number}: {} posted, {} duplicates skipped, {} in \"More findings\"",
-        tally.posted, tally.duplicates, tally.overflow
+        tally.posted - before.0,
+        tally.duplicates - before.1,
+        tally.overflow - before.2
     ));
     Ok(summary_posted)
 }

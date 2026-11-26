@@ -1006,7 +1006,7 @@ fn slow_steps_get_an_unselected_timeout_from_their_own_history() {
 fn apply_rederives_exactly_the_chosen_changes() {
     let base = reviewer();
     let ids = vec!["git_checkout:n3".to_string(), "parallel:n3".to_string()];
-    let g = apply(&base, &[], &ids, &opts()).unwrap();
+    let (g, _) = apply(&base, &[], &ids, &opts()).unwrap();
     assert_eq!(
         edges(&g),
         edges(
@@ -1057,7 +1057,7 @@ fn the_version_note_names_the_applied_changes() {
     let d = plan(&reviewer(), &[], &opts());
     let note = version_note(
         "Dana",
-        &d,
+        &d.changes,
         &[
             "git_checkout:n3".to_string(),
             "single_repo_skip:n11".to_string(),
@@ -1094,4 +1094,92 @@ fn the_wire_shape_matches_the_contract() {
     ] {
         assert!(v["checks"]["files"][0].get(k).is_some(), "{k}");
     }
+}
+
+/// The drafted gates command, run by `sh` against a fake `pr_gates.sh`: a
+/// failed gate with its report is the table (success), a script that writes
+/// no fresh report fails the step instead of passing on a stale one.
+#[test]
+#[allow(clippy::disallowed_methods)] // a test drives sh and git directly
+fn the_gates_command_fails_without_a_fresh_report_and_keeps_failed_gate_rows() {
+    let td = tempfile::tempdir().unwrap();
+    let root = td.path().canonicalize().unwrap();
+    let (repo, ctx) = (root.join("repo"), root.join("ctx"));
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::create_dir_all(&ctx).unwrap();
+    let git = |args: &[&str]| {
+        let ok = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(ok.status.success(), "{ok:?}");
+    };
+    git(&["init", "-q"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "base"]);
+    std::fs::write(repo.join("a.go"), "package a\n").unwrap();
+    git(&["add", "a.go"]);
+    git(&["commit", "-q", "-m", "go"]);
+    let script = root.join("pr_gates.sh");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\nwhile [ \"$1\" != --out ]; do shift; done\ncase \"$FAKE\" in report-fail) echo '| vet | FAIL |' > \"$2\"; exit 1;; *) exit 2;; esac\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // "pr_gates.sh:" — trailing punctuation is not part of the path.
+    let prompt = format!(
+        "Run {}: \"<worktree>\" --out gates.md and reply with the table.",
+        script.display()
+    );
+    let g = wf(
+        &[
+            ("n1", "manual_trigger", "Start", json!({})),
+            (
+                "n2",
+                "agent_prompt",
+                "Gates",
+                json!({"skills": ["otto-go-gates"], "prompt": prompt}),
+            ),
+        ],
+        &[("n1", "n2", None)],
+    );
+    let d = plan(&g, &[], &opts());
+    let cmd = node(&d.draft_graph, "n2").unwrap().params["command"]
+        .as_str()
+        .unwrap_or_else(|| panic!("not offered: {:?}", d.not_offered))
+        .to_string();
+    let run = |fake: &str| {
+        std::process::Command::new("/bin/sh")
+            .args(["-c", &cmd])
+            .env("FAKE", fake)
+            .env("OTTO_WORKTREE", &repo)
+            .env("OTTO_BASE", "HEAD~1")
+            .env("OTTO_REPO", &repo)
+            .env("OTTO_REPO_NAME", "app")
+            .env("OTTO_CONTEXT_DIR", &ctx)
+            .env("OTTO_OUT", "gates.md")
+            .status()
+            .unwrap()
+            .success()
+    };
+    assert!(
+        run("report-fail"),
+        "a failed gate with its report is the table"
+    );
+    let table = std::fs::read_to_string(ctx.join("gates.md")).unwrap();
+    assert!(table.contains("| vet | FAIL |"), "{table}");
+    // A retry whose script crashes: the last attempt's report is not reused.
+    std::fs::remove_file(ctx.join("gates.md")).unwrap();
+    assert!(!run("crash"), "no fresh report fails the step");
+    assert!(!ctx.join("gates.md").exists(), "nothing stale appended");
 }

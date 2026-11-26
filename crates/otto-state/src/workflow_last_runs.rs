@@ -12,7 +12,7 @@ use sqlx::Row;
 pub struct LastRun {
     pub id: Id,
     pub status: String,
-    /// `overview.state` as last stored (absent on rows of older builds).
+    /// `overview.state` when the stored one is fresh (its `rev` is the row's).
     pub overview_state: Option<String>,
     pub attention: bool,
     pub ended_at: Option<String>,
@@ -22,8 +22,10 @@ pub struct LastRun {
 /// Per workflow of `workspace_id`: `(workflow_id, latest run, running_count)`.
 pub async fn last_runs(pool: &DbPool, workspace_id: &Id) -> Result<Vec<(Id, LastRun, u32)>> {
     let rows = sqlx::query(
-        "SELECT * FROM (SELECT workflow_id, id, status, attention, started_at, finished_at,
-                json_extract(overview_json, '$.state') AS overview_state,
+        "SELECT * FROM (SELECT workflow_id, id, status, started_at, finished_at,
+                CASE WHEN status = 'running' THEN attention ELSE 0 END AS attention,
+                CASE WHEN json_extract(overview_json, '$.rev') = rev
+                     THEN json_extract(overview_json, '$.state') END AS overview_state,
                 ROW_NUMBER() OVER (PARTITION BY workflow_id ORDER BY started_at DESC, id DESC) AS rn,
                 SUM(status IN ('pending', 'running')) OVER (PARTITION BY workflow_id) AS running
              FROM workflow_runs WHERE workspace_id = ?) WHERE rn = 1",
@@ -95,7 +97,7 @@ mod tests {
             .create_run(&b.id, &ws, &serde_json::json!({}), None)
             .await
             .unwrap();
-        sqlx::query("UPDATE workflow_runs SET status = 'error', started_at = '2026-11-01T00:00:00Z', finished_at = '2026-11-01T00:01:30Z', overview_json = '{\"state\":\"failed\"}' WHERE id = ?")
+        sqlx::query("UPDATE workflow_runs SET status = 'error', started_at = '2026-11-01T00:00:00Z', finished_at = '2026-11-01T00:01:30Z', rev = rev + 1, overview_json = json_object('state', 'failed', 'rev', rev + 1) WHERE id = ?")
             .bind(&done.id)
             .execute(&pool)
             .await
@@ -113,6 +115,24 @@ mod tests {
         assert_eq!(
             (last.overview_state.as_deref(), last.duration_ms),
             (Some("failed"), Some(90_000))
+        );
+        // A stale overview (another rev: a status write, an older build's
+        // write-back) and the attention of a run no longer running are not read.
+        let c = repo.create(&ws, "C", "", "", &graph, &u).await.unwrap();
+        let stale = repo
+            .create_run(&c.id, &ws, &serde_json::json!({}), None)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE workflow_runs SET status = 'error', attention = 1, overview_json = json_object('state', 'needs_you', 'rev', rev - 1) WHERE id = ?")
+            .bind(&stale.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let got = last_runs(&pool, &ws).await.unwrap();
+        let (_, last, _) = got.iter().find(|g| g.0 == c.id).unwrap();
+        assert_eq!(
+            (last.overview_state.as_deref(), last.attention),
+            (None, false)
         );
         assert!(last_runs(&pool, &"other".into()).await.unwrap().is_empty());
     }

@@ -200,10 +200,17 @@ pub async fn read(
         return Ok(Json(read).into_response());
     }
     let (name, bytes) = blocking(move || download_sync(&root, &rel, restricted)).await?;
-    let disposition = format!(
-        "attachment; filename=\"{}\"",
-        name.replace(['"', '\\'], "_")
-    );
+    // A header value is visible ASCII: anything else (a control character,
+    // a non-ASCII name) would fail the response, so it becomes `_`.
+    let name: String = name
+        .chars()
+        .map(|c| match c {
+            '"' | '\\' | ';' => '_',
+            c if c.is_ascii_graphic() || c == ' ' => c,
+            _ => '_',
+        })
+        .collect();
+    let disposition = format!("attachment; filename=\"{name}\"");
     let headers = [
         (
             axum::http::header::CONTENT_TYPE,

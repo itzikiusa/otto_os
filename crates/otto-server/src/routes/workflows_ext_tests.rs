@@ -23,6 +23,8 @@ async fn fixture() -> Fx {
     sqlx::query("INSERT INTO users(id,username,password_hash,display_name,is_root,created_at) VALUES('root','root','x','Root',1,?)")
         .bind(chrono::Utc::now().to_rfc3339()).execute(&pool).await.unwrap();
     let ctx = test_ctx(&pool, tmp.path().join("data")).await;
+    // Built edges: a `"source"` literal trips otto-core's session-source guard.
+    let edge = |id: &str, s: &str, t: &str| json!({"id": id, "source": s, "target": t});
     let graph: WorkflowGraph = serde_json::from_value(json!({
         "nodes": [
             {"id": "n1", "kind": "manual_trigger", "name": "Start"},
@@ -30,7 +32,7 @@ async fn fixture() -> Fx {
              "params": {"prompt": CHECKOUT_RECIPE, "provider": "claude"}},
             {"id": "n4", "kind": "log", "name": "Done"}
         ],
-        "edges": [{"id": "e1", "source": "n1", "target": "n3"}, {"id": "e2", "source": "n3", "target": "n4"}]
+        "edges": [edge("e1", "n1", "n3"), edge("e2", "n3", "n4")]
     }))
     .unwrap();
     let wf = WorkflowsRepo::new(pool)
