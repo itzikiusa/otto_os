@@ -792,6 +792,41 @@ async fn a_research_goal_works_in_its_own_folder() {
     );
 }
 
+/// CR2-006: a kept research folder that is gone gives a fresh research
+/// folder, never the workspace root.
+#[tokio::test]
+async fn a_research_goal_whose_kept_folder_is_gone_works_in_a_fresh_one() {
+    let f = fake();
+    let steps = json!([{"kind": "agent_prompt", "name": "Work", "params": {"prompt": "find out", "provider": "claude"}}]);
+    let fx = setup(
+        "goal-research-gone",
+        goal_graph(steps, json!({"max_iterations": 1})),
+    )
+    .await;
+    let gone = fx.ctx.data_dir.join("goal-loops/old/work");
+    let input = json!({"research_dir": gone.to_string_lossy()});
+    let drive = run_workflow(
+        fx.ctx.clone(),
+        fx.ws.clone(),
+        fx.wf.clone(),
+        fx.run_id.clone(),
+        input,
+        RunScope::default(),
+        None,
+    );
+    tokio::time::timeout(Duration::from_secs(15), tokio::spawn(drive))
+        .await
+        .unwrap()
+        .unwrap();
+    let turns = f.turns.lock().unwrap().clone();
+    let want = format!("workflow-context/{}/research", fx.run_id);
+    assert!(
+        turns[0].cwd.ends_with(&want),
+        "{} does not end with {want}",
+        turns[0].cwd.display()
+    );
+}
+
 /// CR1-002: a node's future is a few pointers wide. The node kinds' bodies
 /// are boxed, so a resumed goal's loop → check → command chain does not carry
 /// every kind's frame inline; together they overflowed a 2 MiB worker stack.
