@@ -2,7 +2,7 @@
 // output (CheckOutput, agreed-names.md §4) laid over the check node's criteria,
 // with "Verify" for a criterion parked for a person. Pure; unit-tested in
 // ui/unit/goalCheck.test.ts.
-import type { CheckOutput, Criterion, NodeRunState, VerifyKind, WorkflowCheckpoint } from '../../../lib/api/types';
+import type { CheckOutput, Criterion, NodeRunState, VerifyKind, WorkflowCheckpoint, WorkflowGraph } from '../../../lib/api/types';
 
 /** The method chip's words (the form says "I check it"; the run page "You"). */
 export const METHOD_WORD: Record<string, string> = { command: 'Command', agent: 'Agent', human: 'You', expr: 'Rule' };
@@ -25,6 +25,14 @@ export interface CriterionRow {
   output: string;
   /** `command` · `rule` · `agent` · a person's name. */
   by: string;
+}
+
+/** The criteria of every check in a graph: a top-level check, or a loop's
+ *  check step (a goal's "Work toward the goal" loop). */
+export function graphCriteria(graph: Pick<WorkflowGraph, 'nodes'>): Criterion[] {
+  type Step = { kind: string; params?: unknown };
+  const steps = graph.nodes.flatMap((n): Step[] => [n, ...((n.params as { steps?: Step[] } | null)?.steps ?? [])]);
+  return steps.filter((s) => s.kind === 'check').flatMap((s) => (s.params as { criteria?: Criterion[] } | null)?.criteria ?? []);
 }
 
 /** A `check` step's output (its criteria and verdict). */

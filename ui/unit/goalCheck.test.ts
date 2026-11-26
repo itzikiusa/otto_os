@@ -1,7 +1,7 @@
 // A goal run's criteria rows (goal.md §3.5, GL8.1) — workflows/goal/goalCheck.ts.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { criterionRows, latestCheck, newestCheckpoint } from '../src/modules/workflows/goal/goalCheck.ts';
+import { criterionRows, graphCriteria, latestCheck, newestCheckpoint } from '../src/modules/workflows/goal/goalCheck.ts';
 import type { CheckOutput, Criterion, NodeRunState, WorkflowCheckpoint } from '../src/lib/api/types.ts';
 
 const criteria: Criterion[] = [
@@ -52,6 +52,15 @@ test("rows follow the node's criteria with Met, Not met, Verify and not checked 
   assert.equal(rows[1].headline, 'docs/export.md describes streaming');
   assert.equal(rows[1].detail, 'Section 3, lines 10-40');
   assert.equal(criterionRows(criteria, null)[0].state, 'pending');
+});
+
+test('the criteria come from a check step inside a loop as well as a top-level check', () => {
+  const graph = { nodes: [
+    { id: 'start', kind: 'manual_trigger', name: 'Start', x: 0, y: 0, params: {} },
+    { id: 'loop', kind: 'loop', name: 'Work toward the goal', x: 0, y: 0, params: { steps: [{ kind: 'agent_prompt', params: {} }, { kind: 'check', params: { criteria: criteria.slice(0, 2) } }] } },
+    { id: 'solo', kind: 'check', name: 'Check', x: 0, y: 0, params: { criteria: criteria.slice(2) } },
+  ] };
+  assert.deepEqual(graphCriteria(graph).map((c) => c.id), ['tests', 'docs', 'ui']);
 });
 
 test("with no criteria on the graph, the result's own rows are shown", () => {
