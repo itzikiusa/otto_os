@@ -29,12 +29,16 @@ pub enum Recorded {
         chat: String,
         message_id: String,
         text: String,
+        /// `edit_formatted` (GFM) rather than `edit`.
+        formatted: bool,
     },
     Upload {
         chat: String,
         thread: Option<String>,
         name: String,
         content: Vec<u8>,
+        /// `upload_with_caption`'s caption; `None` for a plain `upload`.
+        caption: Option<String>,
     },
 }
 
@@ -45,6 +49,10 @@ pub struct RecordingAdapter {
     chat: String,
     thread: Option<String>,
     log: Mutex<Vec<Recorded>>,
+    /// Errors the next edits / uploads fail with, oldest first
+    /// ([`Self::fail_next_edit`], [`Self::fail_next_upload`]).
+    edit_errors: Mutex<std::collections::VecDeque<String>>,
+    upload_errors: Mutex<std::collections::VecDeque<String>>,
 }
 
 impl RecordingAdapter {
@@ -60,7 +68,61 @@ impl RecordingAdapter {
             chat: chat.into(),
             thread: thread.map(str::to_owned),
             log: Mutex::new(vec![]),
+            edit_errors: Mutex::default(),
+            upload_errors: Mutex::default(),
         })
+    }
+
+    /// The next edit fails with `error` (e.g. Slack's
+    /// `slack chat.update: message_not_found`) and is not recorded.
+    pub fn fail_next_edit(&self, error: &str) {
+        self.edit_errors.lock().unwrap().push_back(error.into());
+    }
+
+    /// The next upload fails with `error` (e.g.
+    /// `slack upload PUT: ratelimited (retry after 1s)`) and is not recorded.
+    pub fn fail_next_upload(&self, error: &str) {
+        self.upload_errors.lock().unwrap().push_back(error.into());
+    }
+
+    fn edit_inner(
+        &self,
+        chat: &str,
+        message_id: &str,
+        text: &str,
+        formatted: bool,
+    ) -> anyhow::Result<()> {
+        if let Some(e) = self.edit_errors.lock().unwrap().pop_front() {
+            anyhow::bail!(e);
+        }
+        self.push(Recorded::Edit {
+            chat: chat.into(),
+            message_id: message_id.into(),
+            text: text.into(),
+            formatted,
+        });
+        Ok(())
+    }
+
+    fn upload_inner(
+        &self,
+        chat: &str,
+        thread: Option<&str>,
+        name: &str,
+        content: &[u8],
+        caption: Option<&str>,
+    ) -> anyhow::Result<()> {
+        if let Some(e) = self.upload_errors.lock().unwrap().pop_front() {
+            anyhow::bail!(e);
+        }
+        self.push(Recorded::Upload {
+            chat: chat.into(),
+            thread: thread.map(str::to_owned),
+            name: name.into(),
+            content: content.to_vec(),
+            caption: caption.map(str::to_owned),
+        });
+        Ok(())
     }
 
     /// The message `user` would send in this adapter's chat and thread.
@@ -73,6 +135,7 @@ impl RecordingAdapter {
             user_name: None,
             text: text.into(),
             edited: false,
+            attachments: vec![],
         }
     }
 
@@ -125,12 +188,11 @@ impl Adapter for RecordingAdapter {
     }
 
     async fn edit(&self, chat: &str, message_id: &str, text: &str) -> anyhow::Result<()> {
-        self.push(Recorded::Edit {
-            chat: chat.into(),
-            message_id: message_id.into(),
-            text: text.into(),
-        });
-        Ok(())
+        self.edit_inner(chat, message_id, text, false)
+    }
+
+    async fn edit_formatted(&self, chat: &str, message_id: &str, text: &str) -> anyhow::Result<()> {
+        self.edit_inner(chat, message_id, text, true)
     }
 
     fn channel(&self) -> Channel {
@@ -144,13 +206,18 @@ impl Adapter for RecordingAdapter {
         filename: &str,
         content: &[u8],
     ) -> anyhow::Result<()> {
-        self.push(Recorded::Upload {
-            chat: chat.into(),
-            thread: thread.map(str::to_owned),
-            name: filename.into(),
-            content: content.to_vec(),
-        });
-        Ok(())
+        self.upload_inner(chat, thread, filename, content, None)
+    }
+
+    async fn upload_with_caption(
+        &self,
+        chat: &str,
+        thread: Option<&str>,
+        filename: &str,
+        content: &[u8],
+        caption: &str,
+    ) -> anyhow::Result<()> {
+        self.upload_inner(chat, thread, filename, content, Some(caption))
     }
 }
 
@@ -235,5 +302,30 @@ mod tests {
             ),
             ("ws-rec", "chat-1", Some("t-1"), "U1")
         );
+    }
+
+    #[tokio::test]
+    async fn records_formatted_edits_captions_and_injected_failures() {
+        let rec = RecordingAdapter::new(Channel::Slack, "ws-rec2", "chat-1", Some("t-1"));
+        let id = rec
+            .send_formatted("chat-1", Some("t-1"), "a")
+            .await
+            .unwrap();
+        rec.fail_next_edit("slack chat.update: message_not_found");
+        let lost = rec.edit_formatted("chat-1", &id, "b").await.unwrap_err();
+        assert!(crate::adapter::edit_needs_new_post(&lost));
+        rec.edit_formatted("chat-1", &id, "c").await.unwrap();
+        rec.fail_next_upload("slack upload PUT: ratelimited (retry after 1s)");
+        assert!(rec
+            .upload_with_caption("chat-1", Some("t-1"), "s.md", b"x", "✅ S · 1s")
+            .await
+            .is_err());
+        rec.upload_with_caption("chat-1", Some("t-1"), "s.md", b"x", "✅ S · 1s")
+            .await
+            .unwrap();
+        let log = rec.recorded();
+        assert_eq!(log.len(), 3, "failed calls are not recorded: {log:?}");
+        assert!(matches!(&log[1], Recorded::Edit { text, formatted: true, .. } if text == "c"));
+        assert!(matches!(&log[2], Recorded::Upload { caption: Some(c), .. } if c == "✅ S · 1s"));
     }
 }

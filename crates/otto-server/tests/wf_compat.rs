@@ -570,16 +570,28 @@ impl Normalizer {
                     chat,
                     message_id,
                     text,
-                } => (format!("edit {message_id} in {chat}"), text.clone()),
+                    formatted,
+                } => (
+                    format!(
+                        "edit {message_id} in {chat}{}",
+                        if *formatted { " formatted" } else { "" }
+                    ),
+                    text.clone(),
+                ),
                 Recorded::Upload {
                     chat,
                     thread,
                     name,
                     content,
+                    caption,
                 } => (
                     format!(
-                        "upload {name} to {chat} {}",
-                        thread.as_deref().unwrap_or("(no thread)")
+                        "upload {name} to {chat} {}{}",
+                        thread.as_deref().unwrap_or("(no thread)"),
+                        caption
+                            .as_deref()
+                            .map(|c| format!(" caption {c:?}"))
+                            .unwrap_or_default()
                     ),
                     String::from_utf8_lossy(content).into_owned(),
                 ),

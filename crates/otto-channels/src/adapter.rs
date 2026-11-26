@@ -24,6 +24,50 @@ pub struct Inbound {
     /// `Action: Workflow` must not start a second run) and marks it for the
     /// agent as an edit.
     pub edited: bool,
+    /// The files the listener downloaded for THIS message (Slack only), as
+    /// data: a workflow run copies exactly these, never paths read back out
+    /// of `text` (DR-109). Empty for every other channel.
+    pub attachments: Vec<InboundAttachment>,
+}
+
+/// One file attached to an inbound message, as the listener received it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboundAttachment {
+    /// The sender's file name, unsanitised (display only; never a path).
+    pub name: String,
+    pub mime: String,
+    pub size_bytes: u64,
+    /// Where the listener saved it (`$TMPDIR/otto-slack-…`); `None` when the
+    /// download failed.
+    pub path: Option<std::path::PathBuf>,
+    /// Why there is no `path`.
+    pub error: Option<String>,
+}
+
+/// Edit errors after which the message can no longer be edited — deleted,
+/// not ours, or past the channel's edit window (Telegram: 48 h): post a new
+/// message instead of retrying (DR-025).
+pub fn edit_needs_new_post(err: &anyhow::Error) -> bool {
+    let s = err.to_string();
+    [
+        "message_not_found",
+        "cant_update_message",
+        "edit_window_closed",
+        "message to edit not found",
+        "message can't be edited",
+    ]
+    .iter()
+    .any(|m| s.contains(m))
+}
+
+/// `s` cut to at most `max` characters, the cut marked with "…".
+pub fn clip_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
 }
 
 /// The earlier messages of a thread, written to a private file for a fresh
@@ -89,6 +133,13 @@ pub trait Adapter: Send + Sync {
     /// Edit a previously sent message in-place (used for the rolling activity feed).
     async fn edit(&self, chat: &str, message_id: &str, text: &str) -> anyhow::Result<()>;
 
+    /// [`Adapter::edit`] with the formatting of [`Adapter::send_formatted`]
+    /// (`text` is GFM), cut to the channel's limit after conversion. An
+    /// error [`edit_needs_new_post`] accepts means: post a new message.
+    async fn edit_formatted(&self, chat: &str, message_id: &str, text: &str) -> anyhow::Result<()> {
+        self.edit(chat, message_id, text).await
+    }
+
     /// Which channel this adapter is for.
     fn channel(&self) -> Channel;
 
@@ -105,6 +156,20 @@ pub trait Adapter: Send + Sync {
         _content: &[u8],
     ) -> anyhow::Result<()> {
         Ok(())
+    }
+
+    /// [`Adapter::upload`] with a one-line GFM `caption` shown with the file
+    /// (Slack `initial_comment`, Telegram `caption`). Default: no caption.
+    async fn upload_with_caption(
+        &self,
+        chat: &str,
+        thread: Option<&str>,
+        filename: &str,
+        content: &[u8],
+        caption: &str,
+    ) -> anyhow::Result<()> {
+        let _ = caption;
+        self.upload(chat, thread, filename, content).await
     }
 
     /// Send a "typing…" indicator to the chat.

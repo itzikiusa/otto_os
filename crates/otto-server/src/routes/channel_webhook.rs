@@ -280,6 +280,7 @@ pub async fn inbound(
         user_name: None,
         text,
         edited: false,
+        attachments: vec![],
     };
     let permit = match admit_webhook(&bridge.admission, &ws_id, &msg.chat, msg.thread.as_deref()) {
         Ok(permit) => permit,

@@ -40,6 +40,7 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
+use otto_channels::adapter::InboundAttachment;
 use otto_channels::workflow_trigger::{WorkflowChatAck, WorkflowChatTrigger};
 use otto_core::event::Event;
 use otto_core::workflows::{NodeStatus, Workflow, WorkflowRun};
@@ -953,6 +954,7 @@ impl<C: WorkflowCtx> WorkflowChatTrigger for WorkflowChatTriggerImpl<C> {
         thread: Option<&str>,
         user: &str,
         text: &str,
+        _attachments: &[InboundAttachment],
     ) -> Option<WorkflowChatAck> {
         let repo = WorkflowsRepo::new(self.ctx.pool().clone());
 
@@ -1208,6 +1210,7 @@ impl<C: WorkflowCtx> WorkflowChatTrigger for WorkflowChatTriggerImpl<C> {
         thread: Option<&str>,
         _user: &str,
         text: &str,
+        _attachments: &[InboundAttachment],
     ) -> Option<WorkflowChatAck> {
         let control = parse_wf_control(text)?;
 
