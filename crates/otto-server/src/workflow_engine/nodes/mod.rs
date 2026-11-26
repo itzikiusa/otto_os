@@ -99,18 +99,18 @@ pub(in crate::workflow_engine) async fn dispatch(
             Ok((Value::Object(base), vec![]))
         }
 
-        "agent_prompt" => Box::pin(agent_prompt::execute(call)).await,
+        "agent_prompt" => otto_core::heap(move || agent_prompt::execute(call)).await,
 
-        "prepare_context" => Box::pin(prepare_context::execute(call)).await,
+        "prepare_context" => otto_core::heap(move || prepare_context::execute(call)).await,
 
-        "http_request" => Box::pin(http_request::execute(call)).await,
+        "http_request" => otto_core::heap(move || http_request::execute(call)).await,
 
         // --- Game pipeline scaffolds (need an external engine to be real) ----
-        "game_engine" => Box::pin(game_engine::execute(call)).await,
+        "game_engine" => otto_core::heap(move || game_engine::execute(call)).await,
 
-        "verifier" => Box::pin(verifier::execute(call)).await,
+        "verifier" => otto_core::heap(move || verifier::execute(call)).await,
 
-        "check" => Box::pin(check::execute(call)).await,
+        "check" => otto_core::heap(move || check::execute(call)).await,
 
         // --- DB Query -------------------------------------------------------
         // Runs a read-only SQL/NoSQL statement against a saved DB-Explorer
@@ -119,7 +119,7 @@ pub(in crate::workflow_engine) async fn dispatch(
         // default 100) caps the result set.  Mutating statements (INSERT/UPDATE/
         // DELETE/DROP/…) are blocked by the engine's existing write-gate unless
         // `params.confirm_write = true` is explicitly set (not the default).
-        "db_query" => Box::pin(db_query::execute(call)).await,
+        "db_query" => otto_core::heap(move || db_query::execute(call)).await,
 
         // --- Broker Peek ----------------------------------------------------
         // Consumes up to `params.limit` recent messages from a Kafka topic on
@@ -127,7 +127,7 @@ pub(in crate::workflow_engine) async fn dispatch(
         // `params.cluster_id` — the otto-brokers BrokerCluster id.
         // `params.topic`       — topic name.
         // `params.limit`       — max messages to return (default 20, capped 50).
-        "broker_peek" => Box::pin(broker_peek::execute(call)).await,
+        "broker_peek" => otto_core::heap(move || broker_peek::execute(call)).await,
 
         // --- Channel Notify -------------------------------------------------
         // Sends a text message to a Slack or Telegram integration configured
@@ -140,7 +140,7 @@ pub(in crate::workflow_engine) async fn dispatch(
         // The `channel_id` (Slack channel / Telegram chat id) is taken from
         // `Integration.channel_id` (the default chat set when the integration
         // was configured). To override, the params may contain `chat_id`.
-        "channel_notify" => Box::pin(channel_notify::execute(call)).await,
+        "channel_notify" => otto_core::heap(move || channel_notify::execute(call)).await,
 
         // --- Budget Gate ----------------------------------------------------
         // Calls `check_budget` (same function the monitor uses) for the given
@@ -150,7 +150,7 @@ pub(in crate::workflow_engine) async fn dispatch(
         // so downstream nodes can branch on it.
         // `params.provider`      — provider name; empty ⇒ the run's resolved default agent
         // `params.workspace_id`  — override the run workspace (optional; default ws.id)
-        "budget_gate" => Box::pin(budget_gate::execute(call)).await,
+        "budget_gate" => otto_core::heap(move || budget_gate::execute(call)).await,
 
         // --- Human Approval -------------------------------------------------
         // Pauses the run until an operator calls
@@ -161,11 +161,11 @@ pub(in crate::workflow_engine) async fn dispatch(
         // min 60s), for the row to be cleared. If the operator rejects (`approved: false`) the
         // node errors. If the deadline expires the node errors with
         // "approval timed out".
-        "human_approval" => Box::pin(human_approval::execute(call)).await,
+        "human_approval" => otto_core::heap(move || human_approval::execute(call)).await,
 
         // --- API Run --------------------------------------------------------
         // Share the API client's environment, auth, transport and history path.
-        "api_run" => Box::pin(api_request::execute(ctx, ws, user, p)).await,
+        "api_run" => otto_core::heap(|| api_request::execute(ctx, ws, user, p)).await,
 
         // --- Condition (branching primitive) --------------------------------
         "condition" => {
@@ -193,26 +193,25 @@ pub(in crate::workflow_engine) async fn dispatch(
         }
 
         // --- Loop (bounded iterate-until) -----------------------------------
-        "loop" => Box::pin(loop_node::execute(call)).await,
+        "loop" => otto_core::heap(move || loop_node::execute(call)).await,
 
         // --- Review Run (wired: local-review engine + 0–100 score + goals) ---
-        "review_run" => Box::pin(review_run::execute(call)).await,
+        "review_run" => otto_core::heap(move || review_run::execute(call)).await,
 
         // --- Product nodes (wired: real single-agent turn over story context) -
         "product_analyze" | "product_rewrite" | "product_plan" => {
-            Box::pin(product::execute(call)).await
+            otto_core::heap(move || product::execute(call)).await
         }
 
         // --- Product Publish (RFC / Jira; dry-run by default) ----------------
         "product_publish" => {
-            Box::pin(product_publication::execute(
-                ctx, ws, user, node, call.input, run_id,
-            ))
-            .await
+            let input = call.input;
+            otto_core::heap(|| product_publication::execute(ctx, ws, user, node, input, run_id))
+                .await
         }
 
         // --- Canvas (generate a mermaid/excalidraw diagram artifact) ---------
-        "canvas" => Box::pin(canvas::execute(call)).await,
+        "canvas" => otto_core::heap(move || canvas::execute(call)).await,
 
         // --- Git PR (draft, or open with open=true) --------------------------
         // Multi-repo aware: opens ONE PR per changed repo. Targets come from the
@@ -221,19 +220,21 @@ pub(in crate::workflow_engine) async fn dispatch(
         // fan-in of several review branches — so a run that touched multiple
         // repositories opens them all, each on its own base branch. The PR never
         // needs the repo/base re-typed; it inherits them.
-        "git_pr" => Box::pin(git_pr::execute(call)).await,
+        "git_pr" => otto_core::heap(move || git_pr::execute(call)).await,
 
         // --- Deterministic steps (engine.md §7) ------------------------------
-        "git_checkout" => Box::pin(git_checkout::execute(call)).await,
-        "script" => Box::pin(script::execute(call)).await,
-        "post_review_comments" => Box::pin(post_review_comments::execute(call)).await,
+        "git_checkout" => otto_core::heap(move || git_checkout::execute(call)).await,
+        "script" => otto_core::heap(move || script::execute(call)).await,
+        "post_review_comments" => {
+            otto_core::heap(move || post_review_comments::execute(call)).await
+        }
 
         // --- Self-improvement (offer-only) ----------------------------------
         // Reflect on the workspace's recent sessions and OFFER skill/memory
         // improvements. Runs the self-improvement engine with Autonomy::Propose
         // so every proposed edit is QUEUED for approval — never auto-applied —
         // then posts the offered list to the trigger's chat thread (design §I).
-        "self_improve" => Box::pin(self_improve::execute(call)).await,
+        "self_improve" => otto_core::heap(move || self_improve::execute(call)).await,
 
         other => Err(otto_core::Error::Invalid(format!(
             "unknown node kind '{other}'"

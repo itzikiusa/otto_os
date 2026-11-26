@@ -171,41 +171,44 @@ pub(in crate::workflow_engine) async fn execute(
             let checkpoint = loop_checkpoint(&sub, &node.id, i, k, step_input.clone());
             let checkpoint_repo = WorkflowsRepo::new(ctx.pool.clone());
             let clock = AttemptClock::default();
-            match Box::pin(crate::workflow_checkpoint::execute_timed(
-                &checkpoint_repo,
-                run_id,
-                checkpoint,
-                &resolve_retry(&sub),
-                sub.kind == "loop" || otto_workflows::resume::is_restart_resumable(&sub),
-                || {
-                    let (sub, step_input, sub_scope) = (&sub, step_input.clone(), &sub_scope);
-                    Box::pin(observed(
-                        &clock,
-                        session_tx,
-                        step_note,
-                        move |tx| async move {
-                            execute_inner_attempt(
-                                ctx,
-                                ws,
-                                user,
-                                sub,
-                                step_input,
-                                env,
-                                sub_scope,
-                                &tx,
-                                log_tx,
-                                activity_tx,
-                                progress,
-                            )
-                            .await
-                        },
-                    ))
-                },
-                |line| {
-                    let _ = log_tx.send(line);
-                },
-                &clock,
-            ))
+            let policy = resolve_retry(&sub);
+            match otto_core::heap(|| {
+                crate::workflow_checkpoint::execute_timed(
+                    &checkpoint_repo,
+                    run_id,
+                    checkpoint,
+                    &policy,
+                    sub.kind == "loop" || otto_workflows::resume::is_restart_resumable(&sub),
+                    || {
+                        let (sub, step_input, sub_scope) = (&sub, step_input.clone(), &sub_scope);
+                        Box::pin(observed(
+                            &clock,
+                            session_tx,
+                            step_note,
+                            move |tx| async move {
+                                execute_inner_attempt(
+                                    ctx,
+                                    ws,
+                                    user,
+                                    sub,
+                                    step_input,
+                                    env,
+                                    sub_scope,
+                                    &tx,
+                                    log_tx,
+                                    activity_tx,
+                                    progress,
+                                )
+                                .await
+                            },
+                        ))
+                    },
+                    |line| {
+                        let _ = log_tx.send(line);
+                    },
+                    &clock,
+                )
+            })
             .await
             {
                 Ok(outcome) => {

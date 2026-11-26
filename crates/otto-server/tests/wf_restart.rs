@@ -427,8 +427,8 @@ fn an_agent_step_whose_thread_died_continues_on_the_same_thread() {
     on_workers(BIG, thread_died());
 }
 
+/// CR1-002: the daemon's own worker stack (tokio's default 2 MiB, debug build).
 #[test]
-#[ignore = "engine bug: the resumed agent step overflows a 2 MiB worker stack (debug)"]
 fn an_agent_step_whose_thread_died_continues_on_the_default_stack() {
     on_workers(2 * 1024 * 1024, thread_died());
 }
@@ -562,4 +562,123 @@ async fn a_delay_cut_mid_wait_runs_again_and_the_run_finishes() {
     assert_eq!(run.status, RunStatus::Success, "{:?}", run.error);
     assert!(node(&run, "n2").started_at.is_some_and(|t| t >= booted));
     assert_eq!(node(&run, "n3").status, NodeStatus::Success);
+}
+
+/// CR1-002: tokio's default worker stack, the one ottod runs on.
+const DEFAULT_STACK: usize = 2 * 1024 * 1024;
+
+/// Start a run through `spawn_run` (the daemon's entry: run gate, task-local
+/// permit) and wait for it to settle or park.
+async fn spawn_and_settle(ctx: &ServerCtx, graph: WorkflowGraph, parked: bool) -> WorkflowRun {
+    let (wf, run_id) = create(ctx, &graph).await;
+    let ws = ctx.workspaces.get(&WS.into()).await.unwrap();
+    otto_server::workflow_engine::spawn_run(
+        ctx.clone(),
+        ws,
+        wf,
+        run_id.clone(),
+        json!({}),
+        RunScope::default(),
+        None,
+    );
+    settled(ctx, &run_id, parked).await
+}
+
+/// CR1-002: a plain run that parks at an approval — the daemon aborted on it.
+#[test]
+fn an_approval_run_parks_on_the_default_stack() {
+    on_workers(DEFAULT_STACK, async {
+        let rig = Rig::new().await;
+        let ctx = rig.life(None).await;
+        let run = spawn_and_settle(&ctx, graph("human_approval", json!({})), true).await;
+        assert!(run.waiting_approval, "{:?}", run.error);
+        WorkflowsRepo::new(ctx.pool.clone())
+            .request_cancel(&run.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            settled(&ctx, &run.id, false).await.status,
+            RunStatus::Canceled
+        );
+        ctx.agent_runtime.shutdown().await;
+    });
+}
+
+/// CR1-002: an agent step on the thread runner (in-memory fake agent).
+#[test]
+fn an_agent_run_on_threads_finishes_on_the_default_stack() {
+    on_workers(DEFAULT_STACK, async {
+        let rig = Rig::new().await;
+        std::fs::write(
+            rig.root.join("scripts/step-2.txt"),
+            "write $HANDOFF @filler:400\nreply done\n",
+        )
+        .unwrap();
+        let ctx = rig.life(None).await;
+        let run =
+            spawn_and_settle(&ctx, graph("agent_prompt", params("agent_prompt")), false).await;
+        assert_eq!(run.status, RunStatus::Success, "{:?}", run.error);
+        ctx.agent_runtime.shutdown().await;
+    });
+}
+
+/// CR1-002: a loop around a check whose command runs.
+#[test]
+fn a_loop_with_a_check_finishes_on_the_default_stack() {
+    on_workers(DEFAULT_STACK, async {
+        let rig = Rig::new().await;
+        let ctx = rig.life(None).await;
+        let check = json!({"kind": "check", "name": "Check", "params": {"criteria": [
+            {"id": "ok", "text": "true is true", "verify": "command", "command": "true"}]}});
+        let p = json!({"steps": [check], "max_iterations": 2});
+        let run = spawn_and_settle(&ctx, graph("loop", p), false).await;
+        assert_eq!(run.status, RunStatus::Success, "{:?}", run.error);
+        ctx.agent_runtime.shutdown().await;
+    });
+}
+
+/// CR1-002: an agent step that asks for an approval and is approved — the
+/// e2e "Approve by tap" run that aborted the daemon.
+#[test]
+fn an_agent_approval_is_answered_on_the_default_stack() {
+    on_workers(DEFAULT_STACK, async {
+        let rig = Rig::new().await;
+        std::fs::write(
+            rig.root.join("scripts/step-2.txt"),
+            "approve Bash\nwrite $HANDOFF @filler:400\nreply done\n",
+        )
+        .unwrap();
+        let ctx = rig.life(None).await;
+        let (wf, run_id) = create(&ctx, &graph("agent_prompt", params("agent_prompt"))).await;
+        let ws = ctx.workspaces.get(&WS.into()).await.unwrap();
+        otto_server::workflow_engine::spawn_run(
+            ctx.clone(),
+            ws,
+            wf,
+            run_id.clone(),
+            json!({}),
+            RunScope::default(),
+            None,
+        );
+        let repo = WorkflowsRepo::new(ctx.pool.clone());
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let (thread, request) = loop {
+            let run = repo.get_run(&run_id).await.unwrap();
+            let n2 = run.nodes.iter().find(|n| n.node_id == "n2");
+            let asked = n2.and_then(|n| n.attention.clone());
+            if let Some(a) = asked.filter(|a| a.request_id.is_some()) {
+                break (a.thread_id.unwrap(), a.request_id.unwrap());
+            }
+            assert!(Instant::now() < deadline, "the step asks: {:?}", run.nodes);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        let accept = otto_core::agent_runtime::ApprovalDecision::Accept;
+        ctx.agent_runtime
+            .respond(&thread, &request, accept)
+            .await
+            .unwrap();
+        let run = settled(&ctx, &run_id, false).await;
+        assert_eq!(run.status, RunStatus::Success, "{:?}", run.error);
+        ctx.agent_runtime.shutdown().await;
+    });
 }

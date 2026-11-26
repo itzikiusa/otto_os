@@ -137,9 +137,11 @@ pub(in crate::workflow_engine) async fn drive(cx: RunCx<'_>, rs: &mut RunState, 
                     let input = assemble_input(&sources, &rs.outputs, cx.input);
                     let node = &graph.nodes[idx];
                     let board = &board;
-                    active.push(Box::pin(async move {
+                    active.push(otto_core::heap(move || async move {
                         cx.env.budget.on_start().await;
-                        let done = run_node(cx, board, node, idx, input, step_no).await;
+                        let run =
+                            otto_core::heap(|| run_node(cx, board, node, idx, input, step_no));
+                        let done = run.await;
                         cx.env.budget.on_settle();
                         Some(done)
                     }));
@@ -281,8 +283,10 @@ async fn run_node(
         inner_idx: None,
     };
     let mut ch = NodeChannels::new();
-    let mut attempts =
-        run_attempts(cx, board, &mut st, node, idx, &node_input, &scope, &mut ch).await;
+    let mut attempts = otto_core::heap(|| {
+        run_attempts(cx, board, &mut st, node, idx, &node_input, &scope, &mut ch)
+    })
+    .await;
     if let Some(t) = resumed_since.filter(|_| attempts.attempt == 1) {
         attempts.attempt_started = t;
     }
@@ -320,15 +324,17 @@ async fn run_node(
         done.timed_out = attempts.timed_out;
         return done;
     }
-    let (output, outcome) = settle(
-        cx,
-        &mut st,
-        node,
-        &node_input,
-        started,
-        &step_file_base,
-        attempts,
-    )
+    let (output, outcome) = otto_core::heap(|| {
+        settle(
+            cx,
+            &mut st,
+            node,
+            &node_input,
+            started,
+            &step_file_base,
+            attempts,
+        )
+    })
     .await;
     // "settled" is not a phase (§2.2).
     st.phase = None;
@@ -460,7 +466,7 @@ async fn run_attempts(
         board.publish(cx, idx, st).await;
         attempt_started = std::time::SystemTime::now();
         // Heap-pin the large node future before the driver's nested select frames.
-        let fut = Box::pin(async {
+        let fut = otto_core::heap(|| async {
             if node.kind == "loop" {
                 let checkpoint = loop_checkpoint(node, &node.id, 0, 0, node_input.clone());
                 crate::workflow_checkpoint::execute(repo, run_id, checkpoint, &policy, true, || {

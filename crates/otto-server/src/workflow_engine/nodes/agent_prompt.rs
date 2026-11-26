@@ -101,22 +101,24 @@ pub(in crate::workflow_engine) async fn execute(
     let (reply, sid, reused) = if let Some(reply) = cached {
         (reply, None, true)
     } else {
-        let (reply, sid) = run_node_agent(
-            ctx,
-            ws,
-            user,
-            node,
-            &env.wf_name,
-            &env.run_id,
-            provider,
-            model,
-            &full,
-            &acwd,
-            done,
-            session_tx,
-            log_tx,
-            activity_tx,
-        )
+        let (reply, sid) = otto_core::heap(|| {
+            run_node_agent(
+                ctx,
+                ws,
+                user,
+                node,
+                &env.wf_name,
+                &env.run_id,
+                provider,
+                model,
+                &full,
+                &acwd,
+                done,
+                session_tx,
+                log_tx,
+                activity_tx,
+            )
+        })
         .await?;
         (reply, Some(sid), false)
     };

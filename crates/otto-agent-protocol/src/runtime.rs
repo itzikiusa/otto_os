@@ -1166,7 +1166,7 @@ impl AgentRuntime {
         };
         otto_telemetry::context::measure_result(
             "threads.spawn_driver",
-            self.spawn_driver_inner(live, session),
+            otto_core::heap(|| self.spawn_driver_inner(live, session)),
         )
         .await?;
         admission::watch_handshake(&self.inner, live);
@@ -1342,7 +1342,7 @@ impl AgentRuntime {
         let _prompt = live.prompt_lock.lock().await;
         otto_telemetry::context::measure_result(
             "threads.prompt",
-            self.prompt_locked(id, &live, req),
+            otto_core::heap(|| self.prompt_locked(id, &live, req)),
         )
         .await
     }
@@ -1398,7 +1398,7 @@ impl AgentRuntime {
         }
         let switch = self.provider_switch(live, req)?;
         if req.fresh_context || switch.is_some() {
-            return self.prompt_fresh(id, live, req, switch).await;
+            return otto_core::heap(|| self.prompt_fresh(id, live, req, switch)).await;
         }
         for _ in 0..8 {
             if !poll_driver_sideband(&self.inner, live, None).await {
@@ -1424,7 +1424,7 @@ impl AgentRuntime {
             }
             (r, _) => r?,
         }
-        match self.prompt_now(id, live, req).await {
+        match otto_core::heap(|| self.prompt_now(id, live, req)).await {
             Err(Error::Conflict(m)) if m == TURN_RUNNING && req.delivery.is_some() => {
                 let d = req.delivery.unwrap_or(PromptDelivery::Queue);
                 self.deliver_busy(id, live, req, d).await
@@ -1443,7 +1443,7 @@ impl AgentRuntime {
         let live = Arc::clone(live);
         let _starting = Starting::new(&live);
         let req = &self.apply_selection(&live, req).await?;
-        self.spawn_resuming(id, &live).await?;
+        otto_core::heap(|| self.spawn_resuming(id, &live)).await?;
         if req.fresh_context && !self.fresh_process_ready(&live).await {
             return Err(fresh::not_started(&live.lock()));
         }
@@ -2040,7 +2040,7 @@ impl AgentRuntime {
         if live.lock().proc.is_some() {
             return Ok(());
         }
-        self.ensure_process(live).await?;
+        otto_core::heap(|| self.ensure_process(live)).await?;
         let resume = live.lock().session.native_thread_id.clone();
         if resume.is_none() {
             return Ok(());
