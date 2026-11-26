@@ -32,7 +32,8 @@ pub struct Spec<'a> {
     pub cache_tag: Option<&'a str>,
     /// Bytes of each stream kept in memory — the newest ones.
     pub output_cap: usize,
-    /// Every byte of stdout and stderr, appended as it arrives.
+    /// Every byte of stdout and stderr, appended as it arrives (the file is
+    /// never truncated: a caller running several commands keeps them all).
     pub log_file: Option<&'a Path>,
 }
 
@@ -150,7 +151,13 @@ pub async fn execute(spec: &Spec<'_>, cancel: impl Future<Output = ()>) -> Finis
         .kill_on_drop(true);
     #[cfg(unix)]
     command_spec.process_group(0);
-    let log = match spec.log_file.map(std::fs::File::create).transpose() {
+    let append = |p: &Path| {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(p)
+    };
+    let log = match spec.log_file.map(append).transpose() {
         Ok(f) => f.map(std::sync::Mutex::new),
         Err(e) => {
             return done(
@@ -178,9 +185,22 @@ pub async fn execute(spec: &Spec<'_>, cancel: impl Future<Output = ()>) -> Finis
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
     let cap = spec.output_cap;
+    // The command ends when its shell exits: whatever it left running in the
+    // background is killed then, so its open pipes cannot hold the step open
+    // (the 15-minute linger of runs.md §6.3).
+    #[cfg(unix)]
+    let pgid = _group.as_ref().map(|g| g.0);
+    let status = async {
+        let status = child.wait().await;
+        #[cfg(unix)]
+        if let Some(pgid) = pgid {
+            let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::KILL);
+        }
+        status
+    };
     let capture = async {
         tokio::try_join!(
-            child.wait(),
+            status,
             crate::command_output::drain_tail(stdout, cap, log.as_ref()),
             crate::command_output::drain_tail(stderr, cap, log.as_ref())
         )
@@ -252,6 +272,43 @@ mod tests {
             result.output.len()
         );
         assert!(result.output.contains("bytes omitted"));
+    }
+
+    /// A child left in the background neither holds the command open nor
+    /// outlives it, and a log file keeps what earlier commands wrote.
+    #[tokio::test]
+    async fn the_shell_exit_ends_the_command_and_its_background_children() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().to_str().unwrap();
+        let log = dir.path().join("all.log");
+        std::fs::write(&log, "earlier\n").unwrap();
+        let spec = Spec {
+            log_file: Some(&log),
+            ..Spec::new(
+                cwd,
+                "(sleep 2; touch late) & echo started",
+                Duration::from_secs(30),
+            )
+        };
+        let t0 = Instant::now();
+        let done = execute(&spec, std::future::pending()).await;
+        assert!(
+            t0.elapsed() < Duration::from_secs(2),
+            "lingered {:?}",
+            t0.elapsed()
+        );
+        assert_eq!(done.end, End::Exited(0));
+        assert!(done.output.contains("started"));
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert!(
+            !dir.path().join("late").exists(),
+            "the background child survived"
+        );
+        let text = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            text.starts_with("earlier\n") && text.contains("started"),
+            "{text}"
+        );
     }
 
     #[tokio::test]
