@@ -32,17 +32,20 @@ commit, and nothing reads or writes a cache.
 3. **sign** runs in the GitHub Environment `release`. It waits for your approval
    and is the only job that sees the secrets. Its token is read-only.
    - It installs the signer before any secret is on the runner. It imports the
-     release `.p12` into a throwaway keychain.
+     Developer ID `.p12` into a throwaway keychain.
    - `release-artifacts.sh bundle`
      ([source](../packaging/release-artifacts.sh)):
-     1. signs with `sign.sh`;
+     1. signs with `sign.sh` (hardened runtime, Apple's secure timestamp);
      2. checks the app, `ottod` (and `kiri`) each against its own identifier and
-        the accepted certificates in
+        the accepted Developer ID team in
         `apps/desktop/src-tauri/release-identity.json`;
-     3. packs `Otto_<v>_aarch64.app.tar.gz` with no AppleDouble files, and
-        proves its signature survives a literal extraction;
-     4. makes the DMG and its `.sha256`, and the notes.
-   - It deletes the keychain and the `.p12`, also on failure.
+     3. has Apple notarize the app and staples the ticket to it;
+     4. packs `Otto_<v>_aarch64.app.tar.gz` from the stapled app with no
+        AppleDouble files, and proves its signature survives a literal
+        extraction;
+     5. makes the DMG, signs it, has Apple notarize it and staples it; writes
+        its `.sha256` and the notes.
+   - It deletes the keychain, the `.p12` and the notary key, also on failure.
    - `release-artifacts.sh update` signs the archive with the update key,
      bound to `<v>`, and writes `latest.json`. The two private keys are never
      on the runner at the same time.
@@ -53,49 +56,74 @@ commit, and nothing reads or writes a cache.
 Nothing reaches anyone until you **publish** the draft. Installed apps read
 `https://github.com/itzikiusa/otto_os/releases/latest/download/latest.json`,
 which resolves only to the newest published release that is not a prerelease.
+A copy with **Settings ▸ Updates ▸ Include release candidates** on reads the
+newest published release of any kind instead (GitHub's API list), so a
+published pre-release reaches those copies and no others.
 
 ### One-time setup (owner)
 
-Run these on your Mac. The private files never go into the repository.
+The private files live in `~/otto-release/` on the owner's Mac, with a backup
+in his password manager. They never go into the repository.
 
-1. **Signing certificate** (self-signed; see the note on Developer ID below):
+1. **Signing certificate**: a *Developer ID Application* certificate of the
+   Apple Developer team. Only the Account Holder can create one.
 
    ```bash
-   OTTO_SIGN_IDENTITY="Otto Release Signing" OTTO_P12_PASSWORD='<a strong password>' \
-     packaging/make-cert.sh --export ~/otto-release
-   # prints: Leaf hash: <40 hex>
+   cd ~/otto-release && umask 077
+   openssl req -new -newkey rsa:2048 -nodes -keyout developer-id-application.key \
+     -out developer-id-application.certSigningRequest -subj "/CN=Otto Developer ID Application"
+   # developer.apple.com ▸ Certificates ▸ + ▸ Developer ID Application ▸ G2 Sub-CA:
+   # upload the request (Apple accepts each request file once) and download
+   # developerID_application.cer into this folder. Then:
+   # The .p12 carries Apple's intermediate too, so the chain is complete
+   # wherever it is imported:
+   curl -fsSO https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
+   openssl x509 -inform DER -in DeveloperIDG2CA.cer -out g2.pem
+   openssl x509 -inform DER -in developerID_application.cer -out cert.pem
+   openssl pkcs12 -export -inkey developer-id-application.key -in cert.pem -certfile g2.pem \
+     -keypbe PBE-SHA1-3DES -certpbe PBE-SHA1-3DES -macalg sha1 \
+     -out developer-id-application.p12      # asks for a password; keep it
    ```
 
-   - It writes `~/otto-release/Otto Release Signing.p12` (private) and `.cer`
-     (public).
-   - Keep the `.p12` and its password in your password manager.
-   - Losing it means the next release is signed differently, and every user
-     re-grants macOS permissions once.
+   - To sign on this Mac as well, import it:
+     `security import developer-id-application.p12 -k ~/Library/Keychains/login.keychain-db -T /usr/bin/codesign`.
+   - The certificate expires; the current one on 2027-12-26. Installed apps
+     accept the team, not one certificate, so a renewed certificate needs only
+     new `OTTO_SIGN_P12_BASE64` and `OTTO_SIGN_P12_PASSWORD` secrets (and
+     `signingIdentity`, if the name changed).
 
-2. **Update key** (minisign; Tauri asks for a password):
+2. **Notary key**: App Store Connect ▸ Users and Access ▸ Integrations ▸ App
+   Store Connect API ▸ Team Keys ▸ **+**, access *Developer*. Download
+   `AuthKey_<KEY ID>.p8` (Apple offers it once) and note the Issuer ID. To
+   notarize from this Mac too:
+
+   ```bash
+   xcrun notarytool store-credentials otto-notary \
+     --key ~/otto-release/AuthKey_<KEY ID>.p8 --key-id <KEY ID> --issuer <ISSUER ID>
+   ```
+
+3. **Update key** (minisign; Tauri asks for a password):
 
    ```bash
    npx --yes @tauri-apps/cli@2.12.6 signer generate -w ~/otto-release/otto-update.key
    ```
 
-   Back up `otto-update.key` and its password too. Without them no installed
-   copy can ever update again; it would need a manual DMG install.
+   Without this key and its password no installed copy can ever update again;
+   it would need a manual DMG install.
 
-3. **Put the public halves in the repository** (one PR). Today they hold TEST
-   values that exist only on the machine that made them:
+4. **The public halves are in the repository**:
    - `apps/desktop/src-tauri/tauri.conf.json` → `plugins.updater.pubkey` = the
      content of `~/otto-release/otto-update.key.pub`.
    - `apps/desktop/src-tauri/release-identity.json` → `"test": false`,
-     `"signingIdentity": "Otto Release Signing"`,
-     `"acceptedLeaves": ["<leaf hash from step 1>"]`.
-   - Until both are replaced, every release job stops at once
-     (`release-manifest.py check-release-config`), and an app built from the TEST
-     values stays on the source channel and never installs an update.
-     Installed apps refuse an update signed by any other certificate. To move
-     to another certificate later (for example Developer ID), first ship a
-     release that lists both.
+     `"signingIdentity"` = the certificate's full name,
+     `"acceptedTeams": ["<TEAM ID>"]`.
+   - Installed apps refuse an update signed by any other team. To move to
+     another team, first ship a release that lists both.
+   - A build from the throwaway TEST values (`make-cert.sh`, the TEST update
+     key) is refused by every release job
+     (`release-manifest.py check-release-config`) and never installs an update.
 
-4. **GitHub Environment, secrets and tag protection** (`gh` as the repository
+5. **GitHub Environment, secrets and tag protection** (`gh` as the repository
    admin):
 
    ```bash
@@ -105,8 +133,11 @@ Run these on your Mac. The private files never go into the repository.
     "deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}
    JSON
    gh api -X POST repos/$R/environments/release/deployment-branch-policies -f name='v*' -f type=tag
-   base64 -i ~/otto-release/"Otto Release Signing.p12" | gh secret set OTTO_SIGN_P12_BASE64 --repo $R --env release
+   base64 -i ~/otto-release/developer-id-application.p12 | gh secret set OTTO_SIGN_P12_BASE64 --repo $R --env release
    gh secret set OTTO_SIGN_P12_PASSWORD --repo $R --env release            # paste the .p12 password
+   base64 -i ~/otto-release/AuthKey_<KEY ID>.p8 | gh secret set OTTO_NOTARY_KEY_BASE64 --repo $R --env release
+   gh secret set OTTO_NOTARY_KEY_ID --repo $R --env release --body '<KEY ID>'
+   gh secret set OTTO_NOTARY_ISSUER --repo $R --env release --body '<ISSUER ID>'
    gh secret set TAURI_SIGNING_PRIVATE_KEY --repo $R --env release < ~/otto-release/otto-update.key
    gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD --repo $R --env release  # paste the key password
    # Only admins may create, move or delete v* tags:
@@ -122,13 +153,6 @@ Run these on your Mac. The private files never go into the repository.
      longer updated. Delete it when you like:
      `gh release delete latest --repo $R --cleanup-tag`.
 
-> **Developer ID instead** (Apple, $99/year): the first open is then
-> Gatekeeper-clean, and no one sees a Keychain prompt. Export the Developer ID
-> Application identity as the `.p12`. Set `signingIdentity` to its full name.
-> Add `(anchor apple generic and certificate leaf[subject.OU] = "<TEAM ID>")` to
-> the accepted list, through a release that still accepts the old certificate.
-> Notarization and `--timestamp` are not wired in yet.
-
 ### Releasing a version (one step)
 
 1. Bump the version and add `### What's new in <version>` to `README.md` in the
@@ -139,12 +163,13 @@ Run these on your Mac. The private files never go into the repository.
    git fetch origin && git tag v0.6.1 origin/main && git push origin v0.6.1
    ```
 
-3. In **Actions ▸ Release**, approve the `release` deployment. About 40
-   minutes later the draft is ready.
+3. In **Actions ▸ Release**, approve the `release` deployment. The run waits
+   for it after the build, about an hour after the tag; signing and Apple's
+   two notarizations then take from ten minutes to an hour.
 4. Open the draft.
    - Check the notes and attach the tour film by hand.
-   - Optionally check an asset: `codesign -d -r- Otto.app` should show the
-     release leaf.
+   - Optionally check an asset: `spctl -a -vv Otto.app` should say
+     `source=Notarized Developer ID`.
    - Click **Publish**.
 5. Check what installed apps will see:
    `curl -sL https://github.com/itzikiusa/otto_os/releases/latest/download/latest.json | jq .version`.
@@ -171,28 +196,35 @@ need a Mac (or a macOS VM) that has never had Otto, under a normal user
 account. Use release candidates built by the workflow, e.g. `0.6.1-rc.1`,
 `0.6.1-rc.2` and `0.6.1-rc.3`.
 
-Installed apps look only at `/releases/latest`, and GitHub never counts a
-pre-release as "latest". So publish each candidate as the **Latest release**,
-not as a pre-release. The workflow drafts `-rc` versions as pre-releases, so
-change that when you publish:
-`gh release edit v0.6.1-rc.2 --repo itzikiusa/otto_os --draft=false --prerelease=false --latest`.
+A candidate stays a **pre-release**, which is how the workflow drafts a `-rc`
+version: publish the draft as it is
+(`gh release edit v0.6.1-rc.4 --repo itzikiusa/otto_os --draft=false`).
+GitHub never counts a pre-release as "latest", so only copies with
+**Settings ▸ Updates ▸ Include release candidates** on are offered it. Turn
+that on on the test Mac. Every copy, with the switch on or off, moves to
+0.6.1 when it is published, since 0.6.1 > 0.6.1-rc.N.
 
-This is safe only **before 0.6.1 itself is published**. No installed copy has
-the updater until then, so only the test Mac ever sees a candidate.
-Afterwards:
-- delete the candidates: `gh release delete v0.6.1-rc.N --repo itzikiusa/otto_os --yes`;
-- publish 0.6.1. The test Mac then updates to it, since 0.6.1 > 0.6.1-rc.N.
+0.6.1-rc.2 has no such switch and looks only at `/releases/latest`. To move
+a copy of it on, publish the next candidate as the Latest release once, and
+set it back when that copy has updated:
 
-Once 0.6.1 is out, never mark a candidate Latest again; every installed copy
-would update to it.
+```bash
+gh release edit v0.6.1-rc.3 --repo itzikiusa/otto_os --draft=false --prerelease=false --latest
+gh release edit v0.6.1-rc.3 --repo itzikiusa/otto_os --prerelease
+```
+
+This is safe only **before 0.6.1 itself is published**: no other installed
+copy has the updater until then. Once 0.6.1 is out, never mark a candidate
+Latest; every installed copy would update to it.
 
 1. Download the rc.1 DMG with Safari, drag Otto to /Applications, open it:
-   Privacy & Security ▸ **Open Anyway** must be the only Gatekeeper step.
+   macOS must ask only its usual "downloaded from the Internet" question, with
+   no Privacy & Security step.
 2. Use what needs a permission once: paste from the clipboard history
    (Accessibility), take a snip (Screen Recording), dictate (Microphone), save a
    secret (one Keychain "Always Allow" for `ottod`).
 3. Start a shell session, a Threads conversation mid-turn and an SSH terminal.
-4. Publish rc.2 as Latest (above). Within 6 h (or Otto ▸ Check for
+4. Publish rc.2 (above). Within 6 h (or Otto ▸ Check for
    Updates…) the sidebar shows the update. Download it; the restart dialog must list the SSH terminal as
    ending and the shell and thread as kept.
 5. Restart to update. Check:
@@ -200,11 +232,10 @@ would update to it.
      prompt ("Otto wants to modify apps") appears;
    - Otto comes back on rc.2 (Otto ▸ About) within about 2 minutes, the shell
      and thread are still there, the turn continued;
-   - no permission is asked again, and at most one Keychain prompt (none if
-     the release certificate was trusted);
+   - no permission and no Keychain prompt is asked again;
    - `~/Library/Application Support/Otto/updates/previous/Otto.app` is rc.1 and
      `xattr -l /Applications/Otto.app` shows no `com.apple.quarantine`.
-6. Failure path: publish, as Latest, an rc.3 whose daemon exits at start.
+6. Failure path: publish an rc.3 whose daemon exits at start.
    The update must roll back to rc.2 by itself, say "failed and was undone", and not offer
    rc.3 again.
 7. A standard (non-admin) account: the update row says the account can't

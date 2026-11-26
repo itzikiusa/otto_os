@@ -1105,7 +1105,15 @@ async fn durable_replay_and_parked_budget_include_pending_spend() {
         engine.session_totals_background(30, true).await.unwrap()[0].cost_usd,
         9.0
     );
-    assert!(ch.maybe_park(Duration::ZERO).await);
+    // The engine's own background requests can still be in flight, and the
+    // sink never parks under one: park as soon as it is idle.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !ch.maybe_park(Duration::ZERO).await {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the sink parks once it is idle");
     assert!(ch.is_parked());
     engine
         .commit_ingestion(

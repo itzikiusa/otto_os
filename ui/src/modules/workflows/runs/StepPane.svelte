@@ -153,10 +153,10 @@
     if (!node) return;
     const id = node.node_id;
     const items: MenuItem[] = [];
-    // Only a failed step re-runs alone (the server refuses it otherwise); any settled one re-runs with what follows.
+    // Only a failed step re-runs alone (the server refuses it otherwise); any other step that ran re-runs with what follows.
     if (!(run.status === 'pending' || run.status === 'running')) {
       if (node.status === 'error') items.push({ label: 'Retry only this step', icon: 'refresh', action: () => void retryStep(run.id, id, false) });
-      else items.push({ label: 'Retry from here', icon: 'refresh', action: () => void retryStep(run.id, id) });
+      else if (node.status !== 'pending' && node.status !== 'running') items.push({ label: 'Retry from here', icon: 'refresh', action: () => void retryStep(run.id, id) });
     }
     items.push({ label: 'Copy step output', icon: 'copy', action: async () => {
       const d = body ?? (await workflowNodeDetail(run.id, id)).body;
@@ -244,7 +244,7 @@
       {#if attachments.length}
         <h4>Files sent with the run</h4>
         <ul class="att" data-testid="wf-run-attachments">
-          {#each attachments as a (a.name)}
+          {#each attachments as a, i (a.path ?? `${a.source}:${a.name}:${i}`)}
             {@const path = !a.error ? a.path : undefined}
             <li data-testid="wf-run-attachment" data-source={a.source} data-error={a.error ? 'true' : undefined}>
               <Icon name="file" size={13} /><span class="ellipsis" dir="auto">{a.name}</span>

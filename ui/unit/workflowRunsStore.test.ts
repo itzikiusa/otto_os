@@ -104,3 +104,26 @@ test('of two list reads, the older answer arriving last is dropped (CR1-037)', a
   await a;
   assert.deepEqual(workflowRuns.list.map((r: any) => r.run_id), ['new']);
 });
+
+test('a settled run retried in place comes back with the next list read, as after a socket reconnect (CR2-008)', async () => {
+  const { workflowRuns, calls } = fixture();
+  const first = workflowRuns.refresh('A');
+  calls[0].result.resolve([run('r1')]);
+  await first;
+  workflowRuns.apply({ workspace_id: 'A', run_id: 'r1', status: 'error' }, 'A');
+  assert.equal(workflowRuns.list.length, 0);
+  // The socket slept through the retry's events; the reconnect reads the list again.
+  const again = workflowRuns.refresh('A');
+  calls[1].result.resolve([run('r1')]);
+  await again;
+  assert.deepEqual(workflowRuns.list.map((r: any) => r.run_id), ['r1']);
+});
+
+test('clear() drops a list read already in flight (CR2-008)', async () => {
+  const { workflowRuns, calls } = fixture();
+  const read = workflowRuns.refresh('A');
+  workflowRuns.clear('A');
+  calls[0].result.resolve([run('r1')]);
+  await read;
+  assert.equal(workflowRuns.list.length, 0);
+});

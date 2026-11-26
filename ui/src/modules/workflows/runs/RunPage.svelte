@@ -230,7 +230,7 @@
           {#if wide && maximized}
             <button type="button" class="btn small runback" onclick={() => (maximized = false)}><Icon name="chevronLeft" size={12} />Run</button>
           {/if}
-          <StepPane {run} {sync} {workspaceId} {runState} cardNode={pushed || (wide && maximized) ? null : failedNode} step={openStep} childId={selected.child} stepCount={steps.length} {now} tab={askedTab} {criteria} {maximized} onmaximize={wide ? () => (maximized = !maximized) : undefined} />
+          <StepPane {run} {sync} {workspaceId} {runState} cardNode={pushed || (wide && maximized) || runState !== 'failed' ? null : failedNode} step={openStep} childId={selected.child} stepCount={steps.length} {now} tab={askedTab} {criteria} {maximized} onmaximize={wide ? () => (maximized = !maximized) : undefined} />
         </div>
       {/if}
     {/if}

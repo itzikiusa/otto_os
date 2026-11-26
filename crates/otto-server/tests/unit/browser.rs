@@ -12,24 +12,11 @@ use otto_core::auth::AuthUser;
 use otto_core::domain::User;
 use otto_core::secrets::SecretStore;
 use otto_state::DbPool;
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tempfile::TempDir;
 use tower::ServiceExt; // for `oneshot`
 
 pub(crate) async fn mem_pool() -> DbPool {
-    let opts = SqliteConnectOptions::new()
-        .in_memory(true)
-        .foreign_keys(true);
-    let pool = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect_with(opts)
-        .await
-        .expect("connect in-memory sqlite");
-    sqlx::migrate!("../otto-state/migrations")
-        .run(&pool)
-        .await
-        .expect("run migrations");
-    pool.into()
+    otto_state::db::test_pool().await
 }
 
 /// Root so `require_ws_role` passes without seeding `workspace_members`

@@ -134,22 +134,28 @@ struct Look {
     last_activity: Option<Instant>,
     background_ended: Option<Instant>,
     descendants_busy: bool,
+    /// A sub-thread below runs background work with no turn of its own.
+    background_below: bool,
     waits: Vec<Wait>,
     descendants: Vec<(Id, Arc<Live>)>,
 }
 
 impl Look {
-    fn settled(&self, now: Instant) -> bool {
+    /// Nothing runs, waits or is about to start, a held reply aside.
+    fn quiet(&self, now: Instant) -> bool {
         !self.turn
             && !self.background
             && !self.ready_queue
             && !self.pending_wakes
             && !self.pending
             && !self.descendants_busy
-            && !self.held_wake
             && self
                 .background_ended
                 .is_none_or(|t| now >= t + AUTO_TURN_GRACE)
+    }
+
+    fn settled(&self, now: Instant) -> bool {
+        self.quiet(now) && !self.held_wake
     }
 }
 
@@ -364,19 +370,14 @@ impl AgentRuntime {
                 }
                 break Ended::Settled;
             }
-            if look.held_wake
-                && !look.turn
-                && !look.background
-                && !look.ready_queue
-                && !look.descendants_busy
-                && !look.pending
-            {
+            if look.held_wake && look.quiet(now) {
                 break Ended::LoopGuard;
             }
             if opts.cancel.is_cancelled() {
                 break Ended::Cancelled;
             }
-            let background_now = look.background && !look.turn;
+            let background = look.background || look.background_below;
+            let background_now = background && !look.turn;
             background_since = background_now.then(|| background_since.unwrap_or(now));
             let mut next: Vec<(Instant, Ended)> = Vec::new();
             if let Some(d) = opts.deadline {
@@ -385,24 +386,25 @@ impl AgentRuntime {
             if let (Some(d), Some(at), false) = (
                 opts.no_progress,
                 look.last_activity,
-                look.pending || look.background || waiting,
+                look.pending || background || waiting,
             ) {
                 next.push((at + d, Ended::NoProgress));
             }
             if let Some(t) = background_since {
                 next.push((t + opts.background_limit, Ended::BackgroundLimit));
             }
-            if let Some(t) = look.background_ended {
-                next.push((t + AUTO_TURN_GRACE, Ended::Settled));
-            }
-            next.sort_by_key(|(t, _)| *t);
-            if let Some((t, e)) = next.first().copied().filter(|(t, _)| *t <= now) {
-                let _ = t;
-                if e != Ended::Settled {
-                    break e;
+            // Only a wake-up: once past, the grace is `settled`'s to judge,
+            // and it must not hide a limit that is due behind it.
+            if let Some(t) = look.background_ended.map(|t| t + AUTO_TURN_GRACE) {
+                if t > now {
+                    next.push((t, Ended::Settled));
                 }
             }
-            let timer = next.iter().map(|(t, _)| *t).find(|t| *t > now);
+            next.sort_by_key(|(t, _)| *t);
+            if let Some((_, e)) = next.first().filter(|(t, _)| *t <= now) {
+                break *e;
+            }
+            let timer = next.first().map(|(t, _)| *t);
             tokio::select! {
                 _ = futures_util::future::select_all(wakes.iter_mut().map(|w| w.as_mut())) => {}
                 _ = opts.cancel.cancelled() => {}
@@ -416,9 +418,9 @@ impl AgentRuntime {
         };
         match ended {
             Ended::Settled | Ended::LoopGuard | Ended::ServerRestart => {}
+            // A sub-thread's background work counts too: stop it all.
             Ended::BackgroundLimit => {
-                let _ = self.stop_all_tasks(id).await;
-                let _ = self.interrupt(id).await;
+                let _ = otto_core::heap(|| self.stop_family(id, true)).await;
             }
             _ => {
                 let _ = self.interrupt(id).await;
@@ -497,14 +499,12 @@ impl AgentRuntime {
                         continue;
                     }
                     let (ready, held) = queue_state(&st);
-                    if st.turn.is_some()
-                        || st.starting > 0
-                        || !st.session.background_tasks.is_empty()
-                        || ready
-                        || has_pending(&st)
-                    {
+                    let turn = st.turn.is_some() || st.starting > 0;
+                    let background = !st.session.background_tasks.is_empty();
+                    if turn || background || ready || has_pending(&st) {
                         look.descendants_busy = true;
                     }
+                    look.background_below |= background && !turn;
                     look.held_wake |= held;
                     look.last_activity = look.last_activity.max(Some(st.last_activity));
                     look.background_ended = look.background_ended.max(st.background_ended_idle_at);

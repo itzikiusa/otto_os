@@ -1,5 +1,5 @@
 {
-  "test": true,
-  "signingIdentity": "Otto Release Signing TEST",
-  "acceptedLeaves": ["e2fd4736e55446f39c4151e258a6f260b1ae40cc"]
+  "test": false,
+  "signingIdentity": "Developer ID Application: Itzik Lavon (NSKUVJ8W7A)",
+  "acceptedTeams": ["NSKUVJ8W7A"]
 }
