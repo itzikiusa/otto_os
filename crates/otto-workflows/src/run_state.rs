@@ -204,7 +204,7 @@ pub fn write_brief(
             (name.clone(), n.kind.clone())
         })
         .collect();
-    files.write_brief(&render_brief(
+    let mut brief = render_brief(
         &workflow.name,
         &workflow.description,
         run_id,
@@ -213,7 +213,19 @@ pub fn write_brief(
         &planned,
         has_instructions,
         has_prompt,
-    ));
+    );
+    // The requester's files (DR-114), copied in before the run starts.
+    let refs = files
+        .dir_str()
+        .map(|d| crate::attachments::read(std::path::Path::new(&d)))
+        .unwrap_or_default();
+    if !refs.is_empty() {
+        brief.push_str("\n## Attachments\n\n");
+        for line in crate::attachments::brief_lines(&refs) {
+            brief.push_str(&format!("- {line}\n"));
+        }
+    }
+    files.write_brief(&brief);
 }
 
 #[cfg(test)]
@@ -303,6 +315,60 @@ mod tests {
         assert_eq!(names(scope_set(g, Some("b"), false, true)), ["c"]);
         assert_eq!(names(scope_set(g, Some("b"), true, false)), ["b"]);
         assert!(names(scope_set(g, Some("b"), true, true)).is_empty());
+    }
+
+    /// CR1-014: the run brief names the requester's files for the steps.
+    #[test]
+    fn the_brief_names_the_attachments() {
+        use otto_core::workflows::{AttachmentRef, AttachmentSource};
+        let dir = tempfile::tempdir().unwrap();
+        let files = RunContextFiles::create(dir.path(), "run-1");
+        let ctx_dir = dir.path().join("workflow-context/run-1");
+        let wf = workflow(vec![node("a", "log", json!({}))], vec![]);
+        let brief = || {
+            write_brief(
+                &wf,
+                "run-1",
+                &["a".into()],
+                None,
+                &json!({}),
+                false,
+                false,
+                &files,
+            );
+            std::fs::read_to_string(ctx_dir.join(crate::context::RUN_BRIEF_FILE)).unwrap()
+        };
+        assert!(!brief().contains("## Attachments"), "none, no section");
+        let refs = [
+            AttachmentRef {
+                name: "spec.pdf".into(),
+                mime: "application/pdf".into(),
+                size_bytes: Some(2048),
+                path: Some("attachments/spec.pdf".into()),
+                error: None,
+                source: AttachmentSource::Start,
+            },
+            AttachmentRef {
+                name: "big.zip".into(),
+                mime: "application/zip".into(),
+                size_bytes: None,
+                path: None,
+                error: Some("too large".into()),
+                source: AttachmentSource::Start,
+            },
+        ];
+        let json = serde_json::to_vec(&refs).unwrap();
+        std::fs::write(ctx_dir.join(crate::attachments::ATTACHMENTS_FILE), json).unwrap();
+        let md = brief();
+        assert!(md.contains("## Attachments"), "{md}");
+        assert!(
+            md.contains("- Attachment from the requester: attachments/spec.pdf"),
+            "{md}"
+        );
+        assert!(
+            md.contains("- Attachment not received: big.zip — too large"),
+            "{md}"
+        );
     }
 
     #[test]
