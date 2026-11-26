@@ -94,6 +94,9 @@ async function gotoWorkflows(page: Page): Promise<void> {
 
 test.beforeEach(async ({}, testInfo) => {
   test.skip(testInfo.project.name !== 'desktop-browser', 'desktop-browser only');
+  // The sentinel is the PTY runner's offline path (runtime.md §8); global-setup
+  // runs workflow steps on threads unless OTTO_WF_STEP_RUNNER=pty.
+  test.skip(process.env.OTTO_WF_STEP_RUNNER !== 'pty', 'PTY runner only: run with OTTO_WF_STEP_RUNNER=pty');
 });
 
 test.beforeAll(async ({}, testInfo) => {
