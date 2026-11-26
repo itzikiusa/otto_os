@@ -224,11 +224,11 @@
   function automateMenu(e: MouseEvent, a: ActionItem): void {
     ctxMenu.showAt(e.currentTarget as HTMLElement, [
       {
-        label: 'Turn into Goal Loop…',
-        icon: 'refresh',
+        label: 'Hand off as a goal…',
+        icon: 'target',
         action: () => {
-          stageAutomationDraft(buildAutomationDraft('goal_loop', a, periodText));
-          router.go('loops');
+          stageAutomationDraft(buildAutomationDraft('goal', a, periodText));
+          router.go('workflows');
         },
       },
       {
@@ -370,7 +370,7 @@
                         type="button"
                         class="btn small ghost"
                         aria-haspopup="menu"
-                        title="Turn this action into a Goal Loop or Scheduled Task"
+                        title="Turn this action into a goal or a Scheduled Task"
                         data-testid="insight-action-automate"
                         onclick={(e) => automateMenu(e, a)}
                       >

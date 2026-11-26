@@ -1,19 +1,19 @@
-// Pure sessionStorage handoff from Insights Action Plan items to Goal Loops
-// or Scheduled Tasks (E-22). Keeps insights/ decoupled from loops/ and
-// scheduled-tasks/ (zero cross-module imports).
+// Pure sessionStorage handoff from Insights Action Plan items to the Goal form
+// (Workflows) or Scheduled Tasks (E-22). Keeps insights/ decoupled from
+// workflows/ and scheduled-tasks/ (zero cross-module imports).
 import type { ActionItem } from './insightsParse';
 
 export const AUTOMATION_DRAFT_KEY = 'otto:automation-draft';
 
 export interface AutomationDraftPayload {
-  target: 'goal_loop' | 'scheduled_task';
+  target: 'goal' | 'scheduled_task';
   title: string;
   prompt: string;
   sourceLabel?: string;
 }
 
 export function buildAutomationDraft(
-  target: 'goal_loop' | 'scheduled_task',
+  target: 'goal' | 'scheduled_task',
   action: Pick<ActionItem, 'title' | 'metric' | 'current' | 'target' | 'effort' | 'ids'>,
   periodLabel?: string,
 ): AutomationDraftPayload {

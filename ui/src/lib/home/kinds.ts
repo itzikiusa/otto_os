@@ -94,8 +94,8 @@ export const HOME_KINDS: HomeBoxKindDef[] = [
   },
   {
     kind: 'automations',
-    label: 'Workflows & loops',
-    blurb: 'Active workflow runs, goal loops and workspace workflows.',
+    label: 'Workflows',
+    blurb: 'Active workflow and goal runs, and the workspace’s workflows.',
     icon: 'split',
     feature: 'workflows',
     w: 6,

@@ -69,6 +69,9 @@
     <span class="fact"><Icon name="ticket" size={13} /><a href={subject.ticket.url} target="_blank" rel="noreferrer noopener">{subject.ticket.key}</a></span>
   {/if}
   <span class="fact"><Icon name="clock" size={13} />{clockTime(run.started_at)}{run.workflow_version ? ` · version ${run.workflow_version}` : ''}</span>
+  {#if run.steering_queued?.length}
+    <span class="fact" data-testid="wf-run-notes"><Icon name="note" size={13} />{run.steering_queued.length === 1 ? '1 note waiting' : `${run.steering_queued.length} notes waiting`} for the next step</span>
+  {/if}
   {#if (run.resume_attempts ?? 0) > 0}
     <span class="fact"><Icon name="refresh" size={13} />Resumed after Otto restarted</span>
   {/if}

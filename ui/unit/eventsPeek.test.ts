@@ -47,7 +47,6 @@ const inert: any = new Proxy(function () {}, {
 const STORES = {
   apiClient: ['./stores/apiClient.svelte', ['noteHistoryAppended', 'noteRunProgress']],
   product: ['./stores/product.svelte', ['applyEvent', 'applyPlanRun']],
-  loops: ['./stores/loops.svelte', ['applyEvent']],
   scheduledTasks: ['./stores/scheduledTasks.svelte', ['applyEvent']],
   browser: ['./stores/browser.svelte', ['applyEvent']],
   browserLive: ['./stores/browserLive.svelte', ['applyEvent']],
@@ -57,13 +56,12 @@ const STORES = {
   database: ['./stores/database.svelte', ['applyAssistUpdate', 'setAssistSession']],
 } as const;
 
-/** One event per peeked handler (13 branches; multi-type branches send each). */
+/** One event per peeked handler (12 branches; multi-type branches send each). */
 const PEEKED: Record<string, unknown>[] = [
   { type: 'api_history_appended', workspace_id: 'w1', entry_id: 'h1' },
   { type: 'api_run_progress', run_id: 'r1', status: 'running' },
   { type: 'product_changed', story_id: 's1', section: 'analysis', status: 'done' },
   { type: 'plan_run', story_id: 's1', session_ids: ['x'], interactive: false },
-  { type: 'goal_loop_updated', loop_id: 'l1', status: 'running', phase: 'p', current_iteration: 1, progress_pct: 5 },
   { type: 'scheduled_task_run_updated', workspace_id: 'w1', task_id: 't1', run_id: 'tr1', status: 'ok' },
   { type: 'browser_tab_updated', workspace_id: 'w1', tab: { id: 'b1', url: 'https://x.test' } },
   { type: 'browser_annotation_added', workspace_id: 'w1', annotation: { id: 'a1', url: 'https://x.test' } },
@@ -132,7 +130,6 @@ test('events: with the page open (its store announced), every peeked event reach
     'apiClient.noteRunProgress:r1',
     'product.applyEvent:product_changed',
     'product.applyPlanRun:plan_run',
-    'loops.applyEvent:goal_loop_updated',
     'scheduledTasks.applyEvent:scheduled_task_run_updated',
     'browser.applyEvent:browser_tab_updated',
     'browser.applyEvent:browser_annotation_added',

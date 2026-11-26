@@ -1,6 +1,6 @@
 <script lang="ts">
-  // Workflows & Goal Loops box: combines live `ws.activeWorkflowRuns` with
-  // workspace Goal Loops (`/workspaces/{id}/goal-loops`) and Workflows
+  // Workflows box: combines live `ws.activeWorkflowRuns` (goal runs included,
+  // with the target icon) with the workspace's Workflows
   // (`/workspaces/{id}/workflows`) via `livePoll` (respecting `active` & `tick`).
   import { untrack } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
@@ -12,7 +12,7 @@
   import { router } from '../../../lib/router.svelte';
   import { rel } from '../../../lib/stores/now.svelte';
   import { ws } from '../../../lib/stores/workspace.svelte';
-  import type { GoalLoop, Workflow } from '../../../lib/api/types';
+  import type { Workflow } from '../../../lib/api/types';
   import type { HomeBox } from '../home.svelte';
   import { freshness, livePoll, type Poller } from './poll';
   import { DEFAULT_BOX_ROW_LIMIT, summarizeAutomations } from './homeBoxesData';
@@ -27,7 +27,6 @@
 
   const POLL_MS = 60_000;
 
-  let loops = $state<GoalLoop[]>([]);
   let workflows = $state<Workflow[]>([]);
   let loading = $state(true);
   let loaded = $state(false);
@@ -40,7 +39,6 @@
     const wsId = ws.currentId;
     if (!wsId) {
       if (ws.listSettled) {
-        loops = [];
         workflows = [];
         loaded = true;
         loading = false;
@@ -49,36 +47,10 @@
       return true;
     }
     try {
-      const encoded = encodeURIComponent(wsId);
-      const [loopsRes, workflowsRes] = await Promise.allSettled([
-        api.bg.get<GoalLoop[]>(`/workspaces/${encoded}/goal-loops`, signal),
-        api.bg.get<Workflow[]>(`/workspaces/${encoded}/workflows`, signal),
-      ]);
+      const list = await api.bg.get<Workflow[]>(`/workspaces/${encodeURIComponent(wsId)}/workflows`, signal);
       if (mine !== seq || signal?.aborted) return true;
-
-      let failed = 0;
-      let firstErr: unknown = null;
-      if (loopsRes.status === 'fulfilled') loops = loopsRes.value;
-      else {
-        failed += 1;
-        firstErr = loopsRes.reason;
-      }
-      if (workflowsRes.status === 'fulfilled') workflows = workflowsRes.value;
-      else {
-        failed += 1;
-        if (!firstErr) firstErr = workflowsRes.reason;
-      }
-
-      if (failed < 2) loaded = true;
-      if (failed === 2) {
-        error = loadErrorText(firstErr);
-        return false;
-      }
-      if (failed === 1) {
-        const which = loopsRes.status === 'rejected' ? 'goal loops' : 'workflows';
-        error = `Couldn’t load ${which}: ${loadErrorText(firstErr)}`;
-        return false;
-      }
+      workflows = list;
+      loaded = true;
       error = '';
       return true;
     } catch (e) {
@@ -98,7 +70,6 @@
     if (lastWs !== undefined && lastWs !== wsKey) {
       untrack(() => {
         seq += 1;
-        loops = [];
         workflows = [];
         loaded = false;
         loading = true;
@@ -108,7 +79,7 @@
     lastWs = wsKey;
     if (!active) return;
     poller?.stop();
-    poller = livePoll(fresh.run, POLL_MS, ['workflow_run_updated', 'goal_loop_updated'], {
+    poller = livePoll(fresh.run, POLL_MS, ['workflow_run_updated'], {
       immediate: fresh.start(wsKey, POLL_MS),
     });
     return () => poller?.stop();
@@ -126,7 +97,6 @@
   const summary = $derived(
     summarizeAutomations({
       activeRuns: ws.activeWorkflowRuns,
-      loops,
       workflows,
       limit: zoomed ? 30 : DEFAULT_BOX_ROW_LIMIT,
     }),
@@ -144,17 +114,13 @@
       <span class="l">running</span>
     </div>
     <div class="stat">
-      <span class="n">{statText(summary.stats.loops)}</span>
-      <span class="l">loops</span>
-    </div>
-    <div class="stat">
       <span class="n">{statText(summary.stats.workflows)}</span>
       <span class="l">workflows</span>
     </div>
   </div>
 
   <LoadState
-    what="workflows and loops"
+    what="workflows"
     variant="compact"
     loading={loading && !hasData}
     error={error || null}
@@ -164,8 +130,8 @@
     {#snippet emptyView()}
       <EmptyState
         icon="split"
-        title="No workflows or goal loops"
-        body="Create a workflow or start a goal loop to automate repeatable work."
+        title="No workflows yet"
+        body="Create a workflow, or start a goal, to automate repeatable work."
       >
         <button class="btn small" onclick={() => router.go('workflows')}>Open Workflows</button>
       </EmptyState>
@@ -176,7 +142,7 @@
         <li>
           <button class="arow" onclick={() => router.go(row.route)} title={row.title}>
             <span class="ricon">
-              <Icon name={row.kind === 'goal-loop' ? 'target' : row.kind === 'workflow-run' ? 'play' : 'split'} size={12} />
+              <Icon name={row.goal ? 'target' : row.kind === 'workflow-run' ? 'play' : 'split'} size={12} />
             </span>
             <span class="meta">
               <span class="title ellipsis">{row.title}</span>
@@ -197,9 +163,6 @@
         <button class="foot" onclick={() => router.go('workflows')}>
           Workflows<Icon name="chevronRight" size={12} />
         </button>
-        <button class="foot" onclick={() => router.go('loops')}>
-          Goal Loops<Icon name="chevronRight" size={12} />
-        </button>
       </div>
       {#if summary.truncatedCount > 0}
         <span class="more">+{summary.truncatedCount} more</span>
@@ -218,7 +181,7 @@
   }
   .stats {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(2, 1fr);
     gap: 0;
   }
   .stat {

@@ -614,13 +614,6 @@
       "input_schema": { "type": "object", "required": ["loop"], "properties": {
         "loop": { "type": "string", "description": "Loop id or name (otto.ui_loops_list)." } },
         "additionalProperties": false } },
-    { "name": "loops_control", "module": "loops", "route": "loops", "risk": "local_write", "timeout_ms": 120000,
-      "description": "Start, pause, resume or stop a goal loop. Start/pause/resume take an attributed confirm (may be allowed for the session); stop can't be undone and always asks.",
-      "input_schema": { "type": "object", "required": ["loop", "action"], "properties": {
-        "loop": { "type": "string" },
-        "action": { "type": "string", "enum": ["start", "pause", "resume", "stop"] } },
-        "additionalProperties": false } },
-
     { "$comment": "── IDE agent debugging (design-agent-debug.md; handlers ui/src/lib/uiCommands/ide.ts). Only when the user asked to debug with Otto. execute = runs code on the user's Mac outside the agent's sandbox: an attributed confirm EVERY time, never remembered. Scope rule: control/breakpoints/inspect/evaluate/request/db act only on the debug session this agent session started. ──",
       "name": "ide_debug_start", "module": "ide", "route": "ide", "risk": "execute", "timeout_ms": 120000, "open_placement": "window",
       "description": "Only when the user explicitly asked you to debug with Otto (\"use Otto to debug …\"); never on your own initiative. Opens the project in Otto's IDE (its own window, unless you run in the IDE's agent dock), sets your breakpoints, and launches the target the way the gutter Debug button does (build tags merged). The user confirms every start: it runs on their Mac as them, outside your sandbox. Local projects only. Calling it again while your session runs restarts it (asks again). Returns at the first stop (a Stop: {debug_id, stop_seq, reason, user_moved, location, source, frames, locals, changed, output_tail, breakpoints, db?, request?}), as soon as `ready_pattern` / `ready_port` says the app is up, or near the deadline (`state: running` — then use ide_debug_request or ide_debug_control `wait`). Always lists your breakpoints with `verified` and the line they bound to. At each stop explain what the values show in ≤ 3 sentences and end your turn; move on only when the user says so.",

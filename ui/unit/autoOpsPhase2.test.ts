@@ -9,7 +9,7 @@ import { buildFiresNext, countActiveAutomations } from '../src/modules/scheduled
 import { agentCapabilityChips } from '../src/modules/personal-agents/agentCapabilities.ts';
 import { normalizePolicyTrace, traceOutcomeTone } from '../src/modules/mcp/policyTrace.ts';
 import { AUTOMATION_DRAFT_KEY, buildAutomationDraft, stageAutomationDraft } from '../src/modules/insights/actionHandoff.ts';
-import { takeStagedGoalDraft } from '../src/modules/loops/actionDraft.ts';
+import { takeStagedGoalDraft } from '../src/modules/workflows/goal/goalDraft.ts';
 import { takeStagedTaskDraft } from '../src/modules/scheduled-tasks/actionDraft.ts';
 
 test('E-15: buildFiresNext merges tasks & agent routines in chronological order and skips paused items', () => {
@@ -122,7 +122,7 @@ test('E-22: Insights Action-to-Automation stages and consumes drafts cleanly per
   };
 
   const loopPayload = buildAutomationDraft(
-    'goal_loop',
+    'goal',
     { title: 'Cut flaky E2E retries', metric: 'Retry rate', current: '18%', target: '<5%', effort: 'M', ids: ['A-12'] },
     'Mon 19 Nov 2026',
   );

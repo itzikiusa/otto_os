@@ -1,52 +1,23 @@
 <script lang="ts">
+  // Older goal loops (goal.md §5.2): Goal Loops are now goals in Workflows.
+  // This read-only history keeps the loops made before, reachable from the
+  // Runs tab's foot, old notices and pasted `#/loops/<id>` links. An
+  // unfinished loop can be continued as a goal (the Goal form on Workflows).
   import { ws } from '../../lib/stores/workspace.svelte';
-  import { ui } from '../../lib/stores/ui.svelte';
   import { loops } from '../../lib/stores/loops.svelte';
   import { loopsPagePort } from '../../lib/uiCommands/loops';
-  import LazyMount from '../../lib/components/LazyMount.svelte';
-  import { lazyComponent } from '../../lib/lazy-component.svelte';
-  const GoalDefineForm = lazyComponent(() => import('./GoalDefineForm.svelte'));
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
-  import AutomateGuide from '../../lib/components/AutomateGuide.svelte';
-  import AutomateGuideButton from '../../lib/components/AutomateGuideButton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import LoopDetail from './LoopDetail.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
-  import { loopStatusOf } from './loopSafety';
-  import Icon from '../../lib/components/Icon.svelte';
+  import { loopStatusOf } from './loopStatus';
   import RelTime from '../../lib/components/RelTime.svelte';
   import { untrack } from 'svelte';
   import { router } from '../../lib/router.svelte';
-  import { registry } from '../../lib/commands.svelte';
-  import { recallSelection, rememberSelection } from '../../lib/lastSelection';
-  import { takeStagedGoalDraft } from './actionDraft';
-
-  const PHASE_LABEL: Record<string, string> = {
-    planning: 'Planning',
-    executing: 'Executing',
-    evaluating: 'Evaluating',
-    digesting: 'Digesting',
-    waiting: 'Waiting on an agent',
-  };
 
   let selectedId = $state<string | null>(null);
-  let creating = $state(false);
-  let stagedSeed = $state('');
-
-  // Consume a staged Insights → Goal Loop handoff draft (E-22).
-  $effect(() => {
-    const draft = untrack(() => takeStagedGoalDraft());
-    if (draft) {
-      stagedSeed = draft.prompt;
-      selectedId = null;
-      creating = true;
-    }
-  });
-  $effect(() => {
-    if (!creating && stagedSeed) stagedSeed = '';
-  });
 
   // (Re)load the list when the workspace changes.
   $effect(() => {
@@ -54,17 +25,13 @@
     if (id) void loops.loadList(id);
   });
 
-  // A workspace switch closes the open loop (it belongs to the previous
-  // workspace: it stayed open and controllable, and the URL kept its id) and
-  // the new-goal form. The restore effect below then reopens the new
-  // workspace's last loop.
+  // A workspace switch closes the open loop (it belongs to the previous workspace).
   let viewWs = untrack(() => ws.currentId);
   $effect(() => {
     const id = ws.currentId;
     if (id === viewWs) return;
     viewWs = id;
     untrack(() => {
-      creating = false;
       if (selectedId) back();
     });
   });
@@ -73,7 +40,6 @@
 
   function open(id: string): void {
     selectedId = id;
-    creating = false;
     void loops.loadDetail(id);
   }
   function back(): void {
@@ -82,30 +48,11 @@
     const id = ws.currentId;
     if (id) void loops.loadList(id);
   }
-  // The last-opened loop was remembered (rememberSelection below) but never
-  // restored: reopen it once per workspace when the page lands on the bare
-  // list (no `#/loops/<id>` link) and that loop still exists. Closing it is
-  // respected — this runs once per workspace load, not on every list refresh.
-  let restoredFor: string | null = null;
-  $effect(() => {
-    const w = ws.currentId;
-    const items = list;
-    if (!w || restoredFor === w || loops.loadingList || loops.listWs !== w || items.length === 0) return;
-    untrack(() => {
-      restoredFor = w;
-      if (selectedId || creating || router.parts[1]) return;
-      const last = recallSelection('loops');
-      if (last && items.some((l) => l.id === last)) open(last);
-    });
-  });
 
   // Agent UI control (lib/uiCommands/loops.ts) opens a loop's detail here.
   $effect(() => loopsPagePort.bind({ open, selectedId: () => selectedId }));
 
-  // The URL carries the open loop (`#/loops/<id>`) so a
-  // reload / share / notification lands on it. Route → page: a link (or
-  // Back/Forward) opens / closes the detail; page → route: opening or closing
-  // a loop rewrites the URL in place.
+  // The URL carries the open loop (`#/loops/<id>`): route → page and back.
   $effect(() => {
     const [mod, id] = router.parts;
     if (mod !== 'loops') return;
@@ -117,7 +64,6 @@
   let routedId: string | null = null;
   $effect(() => {
     const id = selectedId;
-    if (id) rememberSelection('loops', id);
     const was = routedId;
     routedId = id;
     if (!id && !was) return;
@@ -125,66 +71,21 @@
       if (router.module === 'loops' && (router.parts[1] ?? null) !== id) router.replace(id ? `loops/${id}` : 'loops');
     });
   });
-
-  // ⌘K verbs for the open loop. The detail owns confirm/extend; this only registers them.
-  const loopActions = {
-    pause: () => {},
-    resume: () => {},
-    stop: () => {},
-    extend: () => {},
-  };
-  // ⌘K: create on the list; Pause / Resume / Extend budget / Stop while a loop is open.
-  $effect(() => {
-    const create = { id: 'loops.new', title: 'New goal loop or engineering graph…', group: 'Goal Loops', keywords: 'create goal iterate objective engineering graph dependencies', run: () => { if (selectedId) back(); creating = true; } };
-    const openId = selectedId;
-    if (!openId) return registry.register('loops', [create]);
-    const loop = loops.detail?.loop.id === openId ? loops.detail.loop : null;
-    const name = loop?.name ?? 'goal loop';
-    const status = loop?.status;
-    const resumable = status === 'paused' || status === 'blocked' || status === 'exhausted';
-    const needsAnswer = loop?.ledger?.questions.some((q) => !q.answer) ?? false;
-    return registry.register('loops', [
-      create,
-      { id: 'loops.pause', title: `Pause “${name}”`, group: 'Goal Loops', keywords: 'pause goal loop', disabled: status !== 'running', run: () => loopActions.pause() },
-      { id: 'loops.resume', title: `Resume “${name}”`, group: 'Goal Loops', keywords: 'resume goal loop', disabled: !resumable || needsAnswer, run: () => loopActions.resume() },
-      { id: 'loops.extend', title: `Extend budget for “${name}”…`, group: 'Goal Loops', keywords: 'extend budget iterations runtime', disabled: !resumable || needsAnswer, run: () => loopActions.extend() },
-      { id: 'loops.stop', title: `Stop “${name}”…`, group: 'Goal Loops', keywords: 'stop goal loop', disabled: !loop || status === 'draft' || status === 'succeeded' || status === 'failed' || status === 'stopped', run: () => loopActions.stop() },
-    ]);
-  });
 </script>
 
 <div class="loops">
   {#if selectedId}
-    <!-- A direct link can switch ids without leaving this page. Draft answers,
-         verification evidence and open dialogs belong to exactly one loop. -->
     {#key selectedId}
-      <LoopDetail id={selectedId} onback={back} actions={loopActions} />
+      <LoopDetail id={selectedId} onback={back} />
     {/key}
-  {:else if creating}
-    <LazyMount lazy={GoalDefineForm} what="the goal editor" props={{ oncancel: () => (creating = false), oncreated: open, initialSeed: stagedSeed }} />
   {:else}
-    <PageHeader
-      title="Goal Loops"
-      subtitle="Goal loops and engineering graphs, bounded by evidence and budget"
-    >
-      {#snippet actions()}
-        <AutomateGuideButton current="loops" />
-        <!-- One primary per page: while the list is empty the empty state owns
-             the "New goal loop" CTA. -->
-        {#if ws.currentId && list.length > 0}
-          <button class="btn small primary" onclick={() => (creating = true)}><Icon name="plus" size={12} /> New goal loop</button>
-        {/if}
-      {/snippet}
-    </PageHeader>
+    <PageHeader title="Older goal loops" subtitle="Goal Loops are now goals in Workflows. These are kept for reference." />
     <PageBody>
-
     {#if !ws.currentId}
-      <EmptyState variant="page" icon="refresh" title="Add a workspace to get started"
-        body="Goal loops belong to a workspace. Add your project folder, then define your goal and budget."
-        actionLabel="Add workspace" actionIcon="plus" onaction={() => (ui.newWorkspaceOpen = true)} />
+      <EmptyState variant="page" icon="refresh" title="No workspace" body="Older goal loops belong to a workspace." />
     {:else}
     <LoadState
-      what="goal loops"
+      what="older goal loops"
       variant="page"
       loading={loops.loadingList}
       error={loops.listError}
@@ -192,17 +93,7 @@
       onretry={() => ws.currentId && void loops.loadList(ws.currentId)}
     >
       {#snippet emptyView()}
-        <EmptyState
-          variant="page"
-          icon="refresh"
-          title="No goal loops yet"
-          body="Choose a whole-goal loop or an engineering graph with task prerequisites. Set a concrete goal and a budget."
-          actionLabel="New goal loop"
-          actionIcon="plus"
-          onaction={() => (creating = true)}
-        >
-          <AutomateGuide current="loops" open />
-        </EmptyState>
+        <EmptyState variant="page" icon="target" title="No older goal loops" body="Goals now run in Workflows." actionLabel="Go to Workflows" onaction={() => router.go('workflows')} />
       {/snippet}
       <ul class="cards">
         {#each list as l (l.id)}
@@ -218,8 +109,7 @@
                 <span>{l.config.graph ? 'Engineering graph' : 'Goal loop'}</span>
                 <span>Iteration {l.current_iteration} of {l.limits.max_iterations}</span>
                 <span>{l.progress_pct}% complete</span>
-                {#if l.status === 'running' && PHASE_LABEL[l.phase]}<span class="phase">{PHASE_LABEL[l.phase]}</span>
-                {:else if l.updated_at}<span class="when">Updated <RelTime iso={l.updated_at} /></span>{/if}
+                {#if l.updated_at}<span class="when">Updated <RelTime iso={l.updated_at} /></span>{/if}
               </div>
             </button>
           </li>
@@ -230,6 +120,7 @@
     </PageBody>
   {/if}
 </div>
+
 
 <style>
   .loops {
@@ -286,9 +177,6 @@
     gap: 4px 12px;
     font-size: var(--fs-s);
     color: var(--text-dim);
-  }
-  .phase {
-    color: var(--text);
   }
   .when {
     margin-inline-start: auto;

@@ -165,25 +165,25 @@ test('customize: moves stay in-section, hidden stays hidden, empty sections vani
   await boot(page, 'home');
   // A folded section still lists every row while editing.
   await head(page, 'automate').click();
-  await expect(row(page, 'Goal Loops')).toHaveCount(0);
+  await expect(row(page, 'Workflows')).toHaveCount(0);
   await page.getByTestId('sidebar-edit-toggle').click();
-  await expect(page.getByTestId('sidebar-edit-row-loops')).toBeVisible();
+  await expect(page.getByTestId('sidebar-edit-row-workflows')).toBeVisible();
 
   // First row of a section can't move up (no crossing into the previous one).
-  await expect(page.getByRole('button', { name: 'Move Goal Loops up' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Move Workflows up' })).toBeDisabled();
   await expect(page.getByRole('button', { name: 'Move Home up' })).toBeDisabled();
   await expect(page.getByRole('button', { name: 'Move Usage down' })).toBeDisabled();
 
-  // In-section move: Workflows above Goal Loops.
+  // In-section move: Personal Agents above Workflows.
   const automateRows = () =>
     group(page, 'automate')
       .locator('[data-testid^="sidebar-edit-row-"]')
       .evaluateAll((els) => els.map((e) => e.getAttribute('data-testid')!.replace('sidebar-edit-row-', '')));
-  expect((await automateRows()).slice(0, 3)).toEqual(['loops', 'workflows', 'scheduled-tasks']);
+  expect((await automateRows()).slice(0, 2)).toEqual(['workflows', 'scheduled-tasks']);
   // The arrows open up on row hover / focus (the label keeps its room).
-  await page.getByTestId('sidebar-edit-row-workflows').hover();
-  await page.getByRole('button', { name: 'Move Workflows up' }).click();
-  expect((await automateRows()).slice(0, 3)).toEqual(['workflows', 'loops', 'scheduled-tasks']);
+  await page.getByTestId('sidebar-edit-row-scheduled-tasks').hover();
+  await page.getByRole('button', { name: 'Move Personal Agents up' }).click();
+  expect((await automateRows()).slice(0, 2)).toEqual(['scheduled-tasks', 'workflows']);
 
   // Hide both Insight modules → that section disappears outside edit mode.
   await page.getByTestId('sidebar-hide-insights').click();
@@ -202,7 +202,7 @@ test('customize: moves stay in-section, hidden stays hidden, empty sections vani
   const order = await group(page, 'automate')
     .locator('.nav-item')
     .evaluateAll((els) => els.map((e) => e.textContent!.trim()));
-  expect(order.slice(0, 3)).toEqual(['Workflows', 'Goal Loops', 'Personal Agents']);
+  expect(order.slice(0, 2)).toEqual(['Personal Agents', 'Workflows']);
   await page.locator('.navigator').getByRole('button', { name: 'Collapse sidebar' }).click();
   await expect(page.locator('.rail')).toBeVisible();
   await expect(page.locator('.rail').getByRole('button', { name: 'Usage', exact: true })).toHaveCount(0);

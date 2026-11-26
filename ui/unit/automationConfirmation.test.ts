@@ -25,7 +25,7 @@ function fixture(component: string, method: string) {
   return { state, confirmation, targets };
 }
 for (const [component, method] of [
-  ['loops/LoopDetail', 'del'], ['loops/LoopDetail', 'stop'],
+  ['loops/LoopDetail', 'del'],
 ]) {
   test(`${component} ${method} acts on the target named by its confirmation`, async () => {
     const { state, confirmation, targets } = fixture(component, method);
