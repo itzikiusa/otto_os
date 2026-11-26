@@ -83,22 +83,25 @@ export default async function globalSetup(_config: FullConfig): Promise<void> {
   // commands. It has no steer, like every ACP agent but Grok's interject.
   const fakeAcp = join(dirname(OTTOD), 'otto-fake-agent');
   const ACP = ['agy', 'gemini', 'grok', 'opencode', 'muse'];
-  // `pi --mode rpc` gets `otto-fake-pi`. Every fake also acts out the
-  // `OTTO_FAKE:` step scripts (crates/otto-agent-protocol/src/fake_script.rs);
-  // the daemon inherits this process's env, so `OTTO_FAKE_*` reach them.
-  const fakePi = join(dirname(OTTOD), 'otto-fake-pi');
-  for (const cli of ['claude', 'codex', 'pi', ...ACP]) {
+  // Every fake also acts out the `OTTO_FAKE:` step scripts
+  // (crates/otto-agent-protocol/src/fake_script.rs); the daemon inherits this
+  // process's env, so `OTTO_FAKE_*` reach them. CI sets
+  // OTTO_E2E_REQUIRE_FAKES=1: a missing fake fails here instead of every
+  // runtime spec hanging on the `exec cat` stand-in.
+  const missing = [fakeCodex, fakeClaude, fakeAcp].filter((f) => !existsSync(f));
+  if (process.env.OTTO_E2E_REQUIRE_FAKES === '1' && missing.length) {
+    throw new Error(`[e2e] OTTO_E2E_REQUIRE_FAKES=1 but the fake agents are missing: ${missing.join(', ')} (build them with cargo build -p otto-agent-protocol --bins)`);
+  }
+  for (const cli of ['claude', 'codex', ...ACP]) {
     const shim = join(fakeBin, cli);
     const runtime =
       cli === 'codex' && existsSync(fakeCodex)
         ? `for a in "$@"; do [ "$a" = app-server ] && exec '${fakeCodex}' "$@"; done\n`
         : cli === 'claude' && existsSync(fakeClaude)
           ? `for a in "$@"; do [ "$a" = stream-json ] && exec '${fakeClaude}' "$@"; done\n`
-          : cli === 'pi' && existsSync(fakePi)
-            ? `for a in "$@"; do [ "$a" = rpc ] && exec '${fakePi}' "$@"; done\n`
-            : ACP.includes(cli) && existsSync(fakeAcp)
-              ? `for a in "$@"; do case "$a" in --acp|acp|stdio) exec '${fakeAcp}' "$@";; esac; done\n`
-              : '';
+          : ACP.includes(cli) && existsSync(fakeAcp)
+            ? `for a in "$@"; do case "$a" in --acp|acp|stdio) exec '${fakeAcp}' "$@";; esac; done\n`
+            : '';
     writeFileSync(
       shim,
       `#!/bin/sh\n${runtime}echo "otto e2e: the real ${cli} CLI is disabled in tests"\nexec cat\n`,
