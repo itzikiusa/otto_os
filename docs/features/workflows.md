@@ -1022,6 +1022,21 @@ writes. Ticking a change asks the daemon again for that selection's draft.
 **Apply as version N…** confirms and saves a new version (the old one stays in
 Versions); only a person can apply (an agent credential gets 403); a save made
 meanwhile asks you to **Check again**.
+### Goals (Goal Loops folded in)
+A **goal** is a workflow of a fixed shape — work, then check the criteria, in a
+budgeted loop — started from **Run… → A goal…**, ⌘K **New goal…**, Insights'
+"Hand off as a goal…" or an older loop's **Continue as a goal**. The Goal form
+(`ui/src/modules/workflows/goal/`, mounted on the page by `GoalHost`) takes the
+goal, the criteria (each checked by a command, an agent, or a person), where it
+works (a repository or research), the budget (iterations, active time) and the
+models that work and check. It starts with `POST /workspaces/{wid}/goals` and
+opens the run page, which shows the goal card (criteria met, budget left), the
+loop's **iterations as child rows** of the loop step (one ring tick each), the
+**Criteria** tab, and the hold cards: **Resume**, **Extend and resume…**, a
+"you check it" criterion's **Record** / **Not met…**. Goal workflows fold under
+**Goals** in the Workflows tab; the old Goal Loops page is a read-only history
+reached from **Older goal loops** at the foot of Runs (`#/loops` links keep
+working). Details: [Goal Loops](./goal-loops.md).
 
 ## 7. Running & monitoring
 

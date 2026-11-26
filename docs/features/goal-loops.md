@@ -1,5 +1,7 @@
 # Goal Loops
 
+> **Goals now run in Workflows.** New goals start from **Workflows → Run… → A goal…** (or ⌘K **New goal…**) and run as workflows you watch on the run page — see [Workflows § Goals](./workflows.md#goals-goal-loops-folded-in). The Goal Loops page below is kept as a **read-only history** of loops run before the change, reached from **Older goal loops** at the foot of the Runs tab; **Continue as a goal** picks one up again. The rest of this page describes those older loops.
+
 Goal Loops runs bounded Plan → Execute → Evaluate → Digest iterations toward concrete acceptance criteria. Build loops use an isolated `goal-loop/<id>` git worktree; research loops use a dedicated directory and produce `findings.md` with cited evidence. Your original checkout is not the executor working directory.
 
 ## Define and launch
