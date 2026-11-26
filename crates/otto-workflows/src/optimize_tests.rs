@@ -988,6 +988,54 @@ fn under_three_runs_no_number() {
         .all(|c| c.saving_ms.is_none()));
 }
 
+/// A slower "after" is never the expected result: on a thin history of
+/// quick runs the built-in checkout's 15 s was added to a 17 s run ("Expected:
+/// about 17s → 32s"), and each change claimed a saving under a second ("−0s").
+#[test]
+fn a_draft_that_is_not_faster_shows_no_numbers_and_says_why() {
+    let times = [
+        ("n2", 100),
+        ("n3", 2_000),
+        ("n4", 5_000),
+        ("n11", 2_600),
+        ("n12", 3_000),
+        ("n5", 5_000),
+        ("n6", 2_000),
+    ];
+    let history: Vec<WorkflowRun> = (0..3).map(|i| run(i, &times, 1, false)).collect();
+
+    // The checkout alone: Otto's is no slower than the agent's 2 s.
+    let sel = vec!["git_checkout:n3".to_string()];
+    let only = Options {
+        selection: Some(&sel),
+        ..opts()
+    };
+    let d = plan(&reviewer(), &history, &only);
+    assert_eq!(node(&d.draft_graph, "n3").unwrap().kind, "git_checkout");
+    let e = &d.estimate;
+    assert_eq!(
+        (e.runs, e.typical_before_ms, e.typical_after_ms),
+        (3, None, None),
+        "{e:?}"
+    );
+    assert_eq!((e.slow_before_ms, e.slow_after_ms), (None, None));
+    assert_eq!(
+        e.note.as_deref(),
+        Some("No clear time saving on the last 3 runs")
+    );
+
+    // Every pre-selected change: still not faster, and no change claims a
+    // saving under a second.
+    let d = plan(&reviewer(), &history, &opts());
+    assert_eq!(d.estimate.typical_after_ms, None, "{:?}", d.estimate);
+    assert!(!d.changes.is_empty());
+    for c in &d.changes {
+        assert!(c.saving_ms.is_none_or(|ms| ms >= 1_000), "{c:?}");
+    }
+    let skip = d.changes.iter().find(|c| c.id == "single_repo_skip:n11");
+    assert_eq!(skip.unwrap().saving_ms, Some(2_600), "a real one stays");
+}
+
 #[test]
 fn a_single_repo_guard_counts_zero_in_single_repo_runs() {
     let times = [

@@ -24,16 +24,19 @@ export function initialSelection(changes: readonly OptimizeChange[]): string[] {
 
 export const canApply = (selected: readonly string[]): boolean => selected.length > 0;
 
-/** "−4.7m" / "−40s"; empty when unknown. */
+/** "−4.7m" / "−40s"; empty when unknown or under a second (never "−0s"). */
 export function savingText(ms?: number | null): string {
-  if (!ms || ms <= 0) return '';
+  if (!ms || ms < 1000) return '';
   return ms < 60_000 ? `−${Math.round(ms / 1000)}s` : `−${(ms / 60_000).toFixed(1)}m`;
 }
 
-/** The estimate card's lines; `none` under 3 runs (no minutes then). */
+/** The estimate card's lines. `none` (why there is no estimate) under 3 runs,
+ *  and when the server sent no times or an "after" that is not faster: a
+ *  slower run is never shown as the expected result. */
 export function estimateLines(e: OptimizeDraft['estimate']): { typical?: string; slow?: string; basis?: string; none?: string } {
-  if (e.runs < 3 || e.typical_before_ms == null || e.typical_after_ms == null) {
-    return { none: `Not enough runs yet to estimate time (${e.runs} so far). The changes below are still checked.` };
+  if (e.runs < 3) return { none: `Not enough runs yet to estimate time (${e.runs} so far). The changes below are still checked.` };
+  if (e.typical_before_ms == null || e.typical_after_ms == null || e.typical_after_ms >= e.typical_before_ms) {
+    return { none: `No clear time saving on the last ${e.runs} runs. The changes below are still checked.` };
   }
   const since = e.since ? ` since ${new Date(e.since).toLocaleDateString([], { month: 'short', day: 'numeric' })}` : '';
   return {
@@ -41,6 +44,11 @@ export function estimateLines(e: OptimizeDraft['estimate']): { typical?: string;
     ...(e.slow_before_ms != null && e.slow_after_ms != null ? { slow: `slow runs ${elapsed(e.slow_before_ms)} → ${elapsed(e.slow_after_ms)}` } : {}),
     basis: `from ${e.runs} runs${since}`,
   };
+}
+
+/** A step's "prior step summaries" it no longer gets, as one entry of its Reads cell. */
+export function listingRemovedText(removed: readonly string[]): string {
+  return removed.length ? `No longer listed: ${removed.join(', ')}` : '';
 }
 
 /** The After view's marks: steps that are new, and steps a ticked change touches. */
