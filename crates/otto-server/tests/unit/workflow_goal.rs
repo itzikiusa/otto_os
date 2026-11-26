@@ -486,6 +486,9 @@ struct Fake {
     hang_first: std::sync::atomic::AtomicBool,
     /// A resumed turn finds its handoff already written (restart meanwhile).
     quiet_resume: std::sync::atomic::AtomicBool,
+    /// The first turn asks a question, is answered once `answer` is set, then hangs.
+    ask: std::sync::atomic::AtomicBool,
+    answer: std::sync::atomic::AtomicBool,
 }
 
 #[async_trait::async_trait]
@@ -506,6 +509,29 @@ impl otto_agent_run::step::StepRunner for Fake {
             thread_id: thread_id.clone(),
             start_ordinal: 0,
         });
+        if self.ask.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            let _ = ev.send(otto_agent_run::step::StepEvent::NeedsYou(
+                otto_core::agent_runtime::Attention {
+                    kind: otto_core::agent_runtime::AttentionKind::Question,
+                    via: Some(otto_core::agent_runtime::AttentionVia::Provider),
+                    text: "Which one?".into(),
+                    since: chrono::Utc::now(),
+                    thread_id: Some(thread_id.clone()),
+                    request_id: None,
+                    resets_at: None,
+                    criterion_id: None,
+                },
+            ));
+            while !self.answer.load(std::sync::atomic::Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            let _ = ev.send(otto_agent_run::step::StepEvent::Resumed {
+                request_id: None,
+                answer: Some("this one".into()),
+                by: None,
+            });
+            std::future::pending::<()>().await;
+        }
         if self
             .hang_first
             .swap(false, std::sync::atomic::Ordering::SeqCst)
@@ -1014,4 +1040,292 @@ fn a_digest_file_never_leaves_the_threads_folder() {
     for bad in ["../../../tmp/pwn", "a/b", "..", ".hidden", ""] {
         assert_eq!(digest_prefix(bad), None, "{bad}");
     }
+}
+
+/// CR1-007: while a gate waits for its approval, a sibling step's publish
+/// keeps the run's overview at "needs you" and the run waiting for approval.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn a_siblings_publish_keeps_the_approval_wait() {
+    let graph = WorkflowGraph {
+        nodes: vec![
+            node("start", "log", json!({})),
+            node("gate", "human_approval", json!({})),
+            node("d", "delay", json!({"ms": 1500})),
+        ],
+        edges: vec![edge("start", "gate"), edge("start", "d")],
+    };
+    let fx = setup("approval-sibling", graph).await;
+    let _driver = fx.drive();
+    // The gate's own park stores "needs you" while the sibling still runs.
+    let run = until(&fx, "d", |n| n.status == NodeStatus::Running).await;
+    let parked = |r: &WorkflowRun| {
+        r.overview.as_ref().map(|o| o.state) == Some(otto_core::workflows::RunState::NeedsYou)
+    };
+    let t0 = Instant::now();
+    let mut run = run;
+    while !parked(&run) {
+        assert_eq!(
+            state(&run, "d").status,
+            NodeStatus::Running,
+            "parked before d ends"
+        );
+        assert!(t0.elapsed() < Duration::from_secs(5));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        run = fx.repo.get_run(&fx.run_id).await.unwrap();
+    }
+    let run = until(&fx, "d", |n| n.status == NodeStatus::Success).await;
+    assert!(run.waiting_approval);
+    let ov = run.overview.expect("stored");
+    assert_eq!(ov.state, otto_core::workflows::RunState::NeedsYou, "{ov:?}");
+}
+
+/// CR1-015: Pause announces the run with its held overview (the Runs inbox
+/// keeps a held run), and a canceled run stores its overview.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn pause_and_cancel_announce_the_overview() {
+    let graph = WorkflowGraph {
+        nodes: vec![
+            node("start", "log", json!({})),
+            node("d", "delay", json!({"ms": 4000})),
+        ],
+        edges: vec![edge("start", "d")],
+    };
+    let fx = setup("pause-overview", graph).await;
+    let mut events = fx.ctx.events.subscribe();
+    let driver = fx.drive();
+    until(&fx, "d", |n| n.status == NodeStatus::Running).await;
+    hold::pause(&fx.ctx, &fx.run_id, &fx.user).await.unwrap();
+    let ov = loop {
+        if let Ok(Event::WorkflowRunUpdated {
+            status, overview, ..
+        }) = events.recv().await
+        {
+            if status == "canceled" {
+                break overview;
+            }
+        }
+    };
+    assert!(
+        ov.and_then(|o| o.hold).is_some(),
+        "the pause event carries the hold"
+    );
+    tokio::time::timeout(Duration::from_secs(4), driver)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(hold::cancel_held(&fx.ctx, &fx.run_id).await.unwrap());
+
+    let fx = setup("cancel-overview", fx.wf.graph.clone()).await;
+    let driver = fx.drive();
+    until(&fx, "d", |n| n.status == NodeStatus::Running).await;
+    fx.repo.request_cancel(&fx.run_id).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(4), driver)
+        .await
+        .unwrap()
+        .unwrap();
+    let run = fx.repo.get_run(&fx.run_id).await.unwrap();
+    assert_eq!(
+        run.overview.map(|o| o.state),
+        Some(otto_core::workflows::RunState::Canceled)
+    );
+}
+
+/// CR1-021: a Pause that lands after the driver's own hold check (the run
+/// finishing or timing out) is still a hold: the cancel finalize settles it
+/// instead of skipping its steps and reaping its worktrees.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn a_pause_racing_the_end_still_holds() {
+    let graph = WorkflowGraph {
+        nodes: vec![
+            node("start", "log", json!({})),
+            node("d", "delay", json!({"ms": 10})),
+        ],
+        edges: vec![edge("start", "d")],
+    };
+    let fx = setup("pause-race", graph).await;
+    fx.repo
+        .update_run_if(
+            &fx.run_id,
+            &[RunStatus::Pending],
+            RunStatus::Running,
+            &[],
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+    let hold = otto_workflows::hold::pause_hold(&fx.user.id, "Root");
+    fx.repo
+        .request_pause(&fx.run_id, &hold)
+        .await
+        .unwrap()
+        .unwrap();
+    let dir = fx
+        .ctx
+        .data_dir
+        .join("workflow-runs")
+        .join(fx.run_id.as_str());
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut states = vec![
+        NodeRunState {
+            node_id: "start".into(),
+            status: NodeStatus::Success,
+            ..Default::default()
+        },
+        NodeRunState {
+            node_id: "d".into(),
+            status: NodeStatus::Running,
+            ..Default::default()
+        },
+    ];
+    finalize_canceled_run(
+        &fx.ctx,
+        &fx.repo,
+        &fx.wf,
+        &fx.run_id,
+        &mut states,
+        &json!({}),
+    )
+    .await;
+    let run = fx.repo.get_run(&fx.run_id).await.unwrap();
+    assert!(run.hold.is_some(), "still held");
+    assert_eq!(state(&run, "d").status, NodeStatus::Pending, "not skipped");
+    assert!(dir.exists(), "not reaped");
+}
+
+/// CR1-022: a step answered while every run slot is taken waits for a slot
+/// beside the cancel watch, so a Cancel still stops the run at once.
+#[tokio::test]
+async fn a_cancel_stops_a_step_waiting_to_retake_its_slot() {
+    let f = fake();
+    f.ask.store(true, std::sync::atomic::Ordering::SeqCst);
+    let graph = WorkflowGraph {
+        nodes: vec![node("start", "log", json!({})), agent("a")],
+        edges: vec![edge("start", "a")],
+    };
+    let fx = setup("retake-cancel", graph).await;
+    spawn_run(
+        fx.ctx.clone(),
+        fx.ws.clone(),
+        fx.wf.clone(),
+        fx.run_id.clone(),
+        json!({}),
+        RunScope::default(),
+        None,
+    );
+    until(&fx, "a", |n| n.attention.is_some()).await;
+    let gate =
+        otto_workflows::run_queue::gate_for(otto_workflows::run_queue::lane_of(&fx.wf.graph));
+    let t0 = Instant::now();
+    let mut held = vec![];
+    while held.len() < otto_workflows::run_queue::max_parallel_runs() {
+        held.extend(gate.try_acquire().ok());
+        assert!(
+            t0.elapsed() < Duration::from_secs(5),
+            "the parked run gives its slot back"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    f.answer.store(true, std::sync::atomic::Ordering::SeqCst);
+    until(&fx, "a", |n| n.attention.is_none()).await;
+    fx.repo.request_cancel(&fx.run_id).await.unwrap();
+    let run = fx.settled().await;
+    assert_eq!(run.status, RunStatus::Canceled);
+}
+
+/// CR1-024: a step paused while it asked a question resumes without the
+/// question, and its timeline says "paused", not "canceled" then "paused".
+#[tokio::test]
+async fn a_paused_question_is_gone_on_resume() {
+    let f = fake();
+    f.ask.store(true, std::sync::atomic::Ordering::SeqCst);
+    let graph = WorkflowGraph {
+        nodes: vec![node("start", "log", json!({})), agent("a")],
+        edges: vec![edge("start", "a")],
+    };
+    let fx = setup("pause-question", graph).await;
+    let driver = fx.drive();
+    until(&fx, "a", |n| n.attention.is_some()).await;
+    hold::pause(&fx.ctx, &fx.run_id, &fx.user).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(4), driver)
+        .await
+        .unwrap()
+        .unwrap();
+    let run = fx.repo.get_run(&fx.run_id).await.unwrap();
+    let a = state(&run, "a");
+    assert!(a.attention.is_none() && a.phase.is_none(), "{a:?}");
+    let notes: Vec<_> = a.phases.iter().filter_map(|m| m.note.as_deref()).collect();
+    assert_eq!(notes, ["paused"]);
+}
+
+/// CR1-026: a time budget that stops a goal before an iteration's first step
+/// has not used that iteration, so Resume with more time continues.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn a_goal_out_of_time_before_an_iteration_resumes_with_more_time() {
+    let steps = json!([{"kind": "log", "name": "work"}]);
+    let params = json!({"max_iterations": 1, "max_active_s": 300, "hold_when_unmet": true});
+    let fx = setup("goal-time-iter", goal_graph(steps, params)).await;
+    let earlier = otto_core::workflows::WorkflowCheckpoint {
+        node_id: "goal#0.0".into(),
+        loop_id: "goal".into(),
+        status: NodeStatus::Success,
+        active_ms: 300_000,
+        updated_at: chrono::Utc::now(),
+        ..Default::default()
+    };
+    fx.repo.save_checkpoint(&fx.run_id, &earlier).await.unwrap();
+    let run = fx.run().await;
+    assert_eq!(
+        run.hold.as_ref().unwrap().iteration,
+        Some(0),
+        "{:?}",
+        run.hold
+    );
+    let more = otto_core::api::ExtendReq {
+        iterations: None,
+        active_s: Some(600),
+    };
+    hold::resume(&fx.ctx, &fx.run_id, Some(&more))
+        .await
+        .unwrap();
+    fx.settled().await;
+    assert!(fx.checkpoint("goal#1.0").await.is_some(), "iteration 1 ran");
+}
+
+/// CR1-071: with continue_on_error, a goal whose last iteration failed is
+/// held out of iterations instead of failing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn a_continue_on_error_goal_holds_after_a_failed_last_iteration() {
+    let steps = json!([{"kind": "verifier", "name": "broken"}]);
+    let params = json!({"max_iterations": 1, "hold_when_unmet": true, "continue_on_error": true});
+    let fx = setup("goal-coe", goal_graph(steps, params)).await;
+    let run = fx.run().await;
+    let out = state(&run, "goal").output.clone();
+    let hold = run
+        .hold
+        .unwrap_or_else(|| panic!("not held: {:?} {out:?}", run.error));
+    assert_eq!(hold.kind, otto_core::workflows::HoldKind::Exhausted);
+}
+
+/// CR1-023: a prepare_context agent on a thread reports a `thread_id`, never
+/// a `session_id` the previous build would open as a PTY session.
+#[tokio::test]
+async fn a_prepare_context_agent_reports_its_thread() {
+    let _f = fake();
+    let graph = WorkflowGraph {
+        nodes: vec![
+            node("start", "log", json!({})),
+            node(
+                "prep",
+                "prepare_context",
+                json!({"prompt": "gather", "provider": "claude"}),
+            ),
+        ],
+        edges: vec![edge("start", "prep")],
+    };
+    let fx = setup("prep-thread", graph).await;
+    let run = fx.run().await;
+    let out = state(&run, "prep").output.clone().unwrap();
+    assert_eq!(out["thread_id"], "th-1", "{out}");
+    assert!(out.get("session_id").is_none());
 }

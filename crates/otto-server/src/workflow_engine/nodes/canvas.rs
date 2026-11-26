@@ -64,9 +64,10 @@ pub(in crate::workflow_engine) async fn execute(
         let _ = tokio::fs::create_dir_all(parent).await;
     }
     let written = tokio::fs::write(&path, &diagram).await.is_ok();
+    let key = super::super::step_thread::id_key(ctx, &env.run_id, provider).await;
     Ok((
         json!({ "scene_id": rel, "path": path.to_string_lossy(), "mode": mode,
-                        "diagram": diagram, "written": written, "session_id": sid }),
+                        "diagram": diagram, "written": written, key: sid }),
         vec![format!("canvas: {mode} diagram ({} bytes)", diagram.len())],
     ))
 }

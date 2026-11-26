@@ -109,7 +109,8 @@ pub(in crate::workflow_engine) async fn execute(
     .await?;
     let mut out = serde_json::Map::new();
     out.insert("story_id".into(), json!(story_id));
-    out.insert("session_id".into(), json!(sid));
+    let key = super::super::step_thread::id_key(ctx, &env.run_id, provider).await;
+    out.insert(key.into(), json!(sid));
     match kind.as_str() {
         "product_analyze" => {
             out.insert("analysis".into(), json!(reply));

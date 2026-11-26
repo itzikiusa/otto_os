@@ -446,6 +446,8 @@ async fn run_attempts(
     // the run continues to the next node.
     let mut skip_current = false;
     let mut park = None;
+    // A step's answer re-takes the run's slot beside the watch, not in it (CR1-022).
+    let mut unpark = None;
     let result = loop {
         attempt += 1;
         st.attempts = Some(attempt);
@@ -513,7 +515,7 @@ async fn run_attempts(
                         }
                         AgentAssociation::Step(StepNote::Resumed { .. }) => {
                             if let Some(p) = park.take() {
-                                p.unpark().await;
+                                unpark = Some(Box::pin(p.unpark()));
                             }
                         }
                         _ => {}
@@ -536,6 +538,9 @@ async fn run_attempts(
                     if log_persist.on_line(Instant::now()) {
                         board.publish(cx, idx, st).await;
                     }
+                }
+                () = async { unpark.as_mut().expect("guarded").await }, if unpark.is_some() => {
+                    unpark = None;
                 }
                 () = tokio::time::sleep_until(tokio::time::Instant::from_std(
                     log_persist.flush_at.unwrap_or_else(Instant::now),
@@ -609,6 +614,10 @@ async fn run_attempts(
                 let Some((sleep_ms, max_eff, reason)) = plan else {
                     break Err(e);
                 };
+                // The retry works: a park of the failed attempt ends with it.
+                if let Some(p) = park.take() {
+                    p.unpark().await;
+                }
                 attempt_limit = max_eff + 1;
                 st.logs.push(otto_workflows::retry::retry_log_line(
                     attempt + 1,

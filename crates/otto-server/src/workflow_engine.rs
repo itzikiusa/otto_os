@@ -1692,6 +1692,10 @@ async fn finalize_canceled_run(
     states: &mut [NodeRunState],
     input: &Value,
 ) {
+    // A Pause that landed after the driver's own hold check holds the run.
+    if run::hold::settle_held(ctx, repo, workflow, run_id, states).await {
+        return;
+    }
     stop_run_reviews(ctx, repo, &workflow.workspace_id, run_id, states).await;
     kill_run_sessions(ctx, states).await;
     for s in states.iter_mut() {
@@ -1723,6 +1727,7 @@ async fn finalize_canceled_run(
             0
         }
     };
+    let ov = run::finalize::store_overview(repo, workflow, run_id, rev).await;
     deliver_run_result(
         ctx,
         workflow,
@@ -1733,17 +1738,8 @@ async fn finalize_canceled_run(
         None,
     )
     .await;
-    emit_run_updated(
-        ctx,
-        &workflow.workspace_id,
-        run_id,
-        "canceled",
-        None,
-        rev,
-        None,
-        states,
-        false,
-    );
+    let at = (&workflow.workspace_id, run_id, "canceled", rev);
+    emit_run_updated_with(ctx, at, None, None, states, false, ov.as_ref());
     clear_skip_markers(ctx, run_id);
     reap_run_worktrees(ctx, run_id).await;
 }

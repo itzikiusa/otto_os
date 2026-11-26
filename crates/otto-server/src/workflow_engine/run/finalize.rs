@@ -87,7 +87,7 @@ pub(in crate::workflow_engine) async fn finish(
                 return;
             }
         };
-        store_overview(&repo, &workflow, &run_id, rev).await;
+        let ov = store_overview(&repo, &workflow, &run_id, rev).await;
         deliver_run_result(
             &ctx,
             &workflow,
@@ -98,17 +98,8 @@ pub(in crate::workflow_engine) async fn finish(
             None,
         )
         .await;
-        emit_run_updated(
-            &ctx,
-            &workflow.workspace_id,
-            &run_id,
-            "error",
-            None,
-            rev,
-            None,
-            &states,
-            false,
-        );
+        let at = (&workflow.workspace_id, &run_id, "error", rev);
+        emit_run_updated_with(&ctx, at, None, None, &states, false, ov.as_ref());
         clear_skip_markers(&ctx, &run_id);
         reap_run_worktrees(&ctx, &run_id).await;
         return;
@@ -153,7 +144,7 @@ pub(in crate::workflow_engine) async fn finish(
     // The run's deliverable: a copy of the last content-bearing step's handoff
     // file, only on outright success — an errored run has no coherent "answer"
     // to hand back, so delivery falls back to the per-step summary.md instead.
-    store_overview(&repo, &workflow, &run_id, rev).await;
+    let ov = store_overview(&repo, &workflow, &run_id, rev).await;
     step_thread::retain_run(&ctx, &mut states, final_status == RunStatus::Success).await;
     let final_output = if final_status == RunStatus::Success {
         files.write_final_output()
@@ -174,17 +165,8 @@ pub(in crate::workflow_engine) async fn finish(
     )
     .await;
     // Final event: run complete.
-    emit_run_updated(
-        &ctx,
-        &workflow.workspace_id,
-        &run_id,
-        final_status.as_str(),
-        None,
-        rev,
-        None,
-        &states,
-        false,
-    );
+    let at = (&workflow.workspace_id, &run_id, final_status.as_str(), rev);
+    emit_run_updated_with(&ctx, at, None, None, &states, false, ov.as_ref());
     // Free the run's provisioned worktrees (+ safe branch cleanup) — repeat
     // automations must not accumulate one worktree/branch per run.
     clear_skip_markers(&ctx, &run_id);
@@ -196,7 +178,7 @@ pub(in crate::workflow_engine) async fn finish(
 
 /// A terminal write cleared the overview: store the settled run's (CAS on
 /// `rev`, engine.md §2.3).
-pub(super) async fn store_overview(
+pub(in crate::workflow_engine) async fn store_overview(
     repo: &WorkflowsRepo,
     workflow: &Workflow,
     run_id: &Id,

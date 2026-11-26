@@ -80,9 +80,12 @@ impl RunBoard {
             all[idx] = st.clone();
             all.clone()
         };
+        let gate = super::super::nodes::human_approval::waiting_gate(cx.run_id);
         let mut overview = self.base.as_ref().map(|base| {
             let run = WorkflowRun {
                 nodes: states.clone(),
+                waiting_approval: gate.is_some(),
+                approval_node_id: gate.clone(),
                 ..base.clone()
             };
             otto_workflows::overview::run_overview(
@@ -117,7 +120,7 @@ impl RunBoard {
             Some(&states[idx].node_id),
             Some(&states[idx]),
             &states,
-            false,
+            gate.is_some(),
             overview.as_ref(),
         );
     }

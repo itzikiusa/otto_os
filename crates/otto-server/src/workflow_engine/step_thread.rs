@@ -39,6 +39,15 @@ pub(super) async fn runner_for(ctx: &ServerCtx, run_id: &Id, provider: &str) -> 
         .unwrap_or(pick)
 }
 
+/// The output key of a step's agent id: `session_id` on PTY, else
+/// `thread_id` — a thread is not a PTY session to open (DR-014).
+pub(super) async fn id_key(ctx: &ServerCtx, run_id: &Id, provider: &str) -> &'static str {
+    match runner_for(ctx, run_id, provider).await {
+        "pty" => "session_id",
+        _ => "thread_id",
+    }
+}
+
 fn latched() -> &'static std::sync::Mutex<HashMap<Id, &'static str>> {
     static L: OnceLock<std::sync::Mutex<HashMap<Id, &'static str>>> = OnceLock::new();
     L.get_or_init(Default::default)

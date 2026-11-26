@@ -30,14 +30,11 @@ pub(in crate::workflow_engine) async fn execute(
     let run_id: &Id = &env.run_id;
     let p = &node.params;
     let repo = WorkflowsRepo::new(ctx.pool.clone());
-    // Only Resume raises a loop's limits, and only a goal-style loop is held.
-    let limits = if p.get("hold_when_unmet").is_some() || p.get("max_active_s").is_some() {
-        let run = repo.get_run(run_id).await.ok();
-        run.and_then(|r| r.limits)
-            .and_then(|l| l.loops.get(&node.id).cloned())
-    } else {
-        None
-    };
+    // Only Resume raises a loop's limits (any paused loop's too).
+    let run = repo.get_run(run_id).await.ok();
+    let limits = run
+        .and_then(|r| r.limits)
+        .and_then(|l| l.loops.get(&node.id).cloned());
     let budget = LoopBudget::new(p, limits.as_ref());
     let max_iter = u64::from(budget.max_iterations);
     let until = p
@@ -90,7 +87,6 @@ pub(in crate::workflow_engine) async fn execute(
     let mut stop: Option<Stop> = None;
     let mut failed: Option<(String, String)> = None;
     for i in 1..=max_iter {
-        iterations = i;
         if WorkflowsRepo::new(ctx.pool.clone())
             .is_canceled(run_id)
             .await
@@ -128,6 +124,8 @@ pub(in crate::workflow_engine) async fn execute(
             if stop.is_some() {
                 break;
             }
+            // An iteration the time budget stopped before its first step is not used.
+            iterations = i;
             let mut merged = loop_base.clone();
             if let Value::Object(m) = &thread {
                 for (mk, mv) in m {
@@ -354,7 +352,9 @@ pub(in crate::workflow_engine) async fn execute(
             break;
         }
     }
-    if stop.is_none() && !satisfied && last_iteration_error.is_none() && iterations == max_iter {
+    // With continue_on_error, a failed last iteration still holds a goal.
+    let went_on = last_iteration_error.is_none() || continue_on_error;
+    if stop.is_none() && !satisfied && went_on && iterations == max_iter {
         stop = loop_stop(
             &budget,
             StopPoint::BeforeIteration {

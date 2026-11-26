@@ -92,11 +92,15 @@ impl ActiveBudget {
         }
     }
 
+    /// `released` stays set while the slot is re-taken, so a park or a
+    /// settle meanwhile does not release (and pause) a second time.
     async fn retake_now(&self) {
-        let released = self.lock().released.take();
-        let Some(permit) = released else { return };
+        let Some(permit) = self.lock().released else {
+            return;
+        };
         super::reacquire_run_permit(permit).await;
         let mut state = self.lock();
+        state.released = None;
         if let Some(start) = state.paused.take() {
             state.deadline += start.elapsed();
         }
@@ -123,6 +127,41 @@ impl Drop for Park<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CR1-022: a settle while the slot is being re-taken does not release
+    /// (and pause) a second time; the re-take ends the parked state.
+    #[tokio::test]
+    async fn a_settle_during_a_retake_does_not_release_again() {
+        let gate: &'static tokio::sync::Semaphore =
+            Box::leak(Box::new(tokio::sync::Semaphore::new(1)));
+        let permit = gate.try_acquire().unwrap();
+        let cell = std::cell::RefCell::new((gate, Some(permit)));
+        super::super::RUN_PERMIT
+            .scope(cell, async {
+                let budget = ActiveBudget::new(Duration::from_secs(60));
+                budget.on_start().await;
+                budget.on_start().await;
+                let (a, b) = (budget.park(), budget.park());
+                assert_eq!(
+                    budget.lock().released,
+                    Some(true),
+                    "both parked: the slot is given back"
+                );
+                let other = gate.try_acquire().unwrap();
+                let mut retake = Box::pin(a.unpark());
+                assert!(
+                    futures_util::poll!(&mut retake).is_pending(),
+                    "the gate is full"
+                );
+                drop(b);
+                budget.on_settle();
+                drop(other);
+                retake.await;
+                let state = budget.lock();
+                assert_eq!((state.released, state.paused), (None, None));
+            })
+            .await;
+    }
     #[tokio::test]
     async fn a_park_pauses_the_budget_only_while_every_executing_node_is_parked() {
         let budget = ActiveBudget::new(Duration::ZERO);
