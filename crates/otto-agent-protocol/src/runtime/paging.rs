@@ -1068,6 +1068,7 @@ mod tests {
                 question_title: None,
                 answers: None,
                 for_person: false,
+                resolved_by: None,
             },
         );
 

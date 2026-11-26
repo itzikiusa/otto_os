@@ -337,11 +337,16 @@ pub(super) fn on_turn_end(inner: &Inner, st: &State, turn_id: &Id, status: TurnT
     let (answer, asked) = turn_reply(st.proj.items.values(), turn_id, &of.id);
     let child = st.session.clone();
     let turn = turn_id.clone();
+    // Under this child's lock: an unattended wait on the parent never sees
+    // the child idle before its answer is queued.
+    unattended::wake_announced(inner, &of.id, &child.id);
     let rt = AgentRuntime { inner: me };
     let reporting = Reporting::start(&child.id);
     tokio::spawn(async move {
+        let (parent, key) = (of.id.clone(), child.id.clone());
         rt.child_turn_ended(child, of, turn, status, answer, asked, false)
             .await;
+        unattended::wake_done(&rt.inner, &parent, &key);
         drop(reporting);
     });
 }

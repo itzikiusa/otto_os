@@ -35,6 +35,10 @@ agent-client-protocol = { version = "5.0.0", default-features = false }
 # killpg: interrupt / kill the child's whole process group.
 libc = "0.2.191"
 sqlx = { workspace = true }
+# The StepRunner trait ThreadStepRunner implements (`step_runner`).
+otto-agent-run = { workspace = true }
+# One wait over a thread and every sub-thread below it (`unattended`).
+futures-util = { workspace = true }
 
 [features]
 # The in-memory fake agents (`scripted`: the fake programs behind the
@@ -49,6 +53,8 @@ tempfile = { workspace = true }
 otto-agent-protocol = { path = ".", features = ["test-util"] }
 otto-workflows = { workspace = true }
 otto-review = { workspace = true }
+otto-agent-run = { workspace = true }
+async-trait = { workspace = true }
 
 # Test doubles: an ACP agent, a Codex app-server and Claude's SDK stream-json
 # over stdio, all acting out the `OTTO_FAKE:` scripts of src/fake_script.rs.

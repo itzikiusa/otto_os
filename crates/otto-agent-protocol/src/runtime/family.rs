@@ -57,10 +57,18 @@ pub(super) fn family_ids(id: &Id, rows: &[RuntimeSession]) -> Vec<Id> {
 }
 
 impl AgentRuntime {
+    /// A linked group by its root, closed members included, live state
+    /// applied — not the person's 500-row list, which leaves engine threads
+    /// out and drops old members.
+    pub(super) async fn linked(&self, root: &Id) -> Result<Vec<RuntimeSession>> {
+        let recs = self.inner.repo.list_linked(root).await?;
+        Ok(self.with_live(recs))
+    }
+
     /// `POST /runtime-sessions/{id}/stop-family`.
     pub async fn stop_family(&self, id: &Id, background: bool) -> Result<FamilyStopResp> {
         let me = self.get(id).await?;
-        let rows = self.list(&me.workspace_id, Some(&me.created_by)).await?;
+        let rows = self.linked(me.parent_id.as_ref().unwrap_or(&me.id)).await?;
         let ids = family_ids(id, &rows);
         // Only what it delegated to is quiet: the thread Stop was pressed on,
         // when itself a subagent, still tells its lead it was stopped.

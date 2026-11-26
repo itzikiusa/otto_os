@@ -93,7 +93,7 @@ fn releasable(st: &State, minutes: u64, now: DateTime<Utc>) -> bool {
 /// SIGKILL past the grace; a held child's holder exits with it, so a restart
 /// finds nothing to adopt) and revoke its per-spawn credential, leaving the
 /// thread open and `dormant`.
-fn release_locked(inner: &Arc<Inner>, live: &Live, st: &mut State) {
+pub(super) fn release_locked(inner: &Arc<Inner>, live: &Live, st: &mut State) {
     let Some(p) = st.proc.take() else {
         return;
     };

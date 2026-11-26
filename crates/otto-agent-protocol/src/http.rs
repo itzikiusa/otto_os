@@ -582,6 +582,9 @@ async fn answer<S: RuntimeCtx>(
 ) -> ApiResult<StatusCode> {
     require_human(&ctx, &auth)?;
     authorized(&ctx, &user, &id).await?;
+    ctx.agent_runtime()
+        .note_resolver(&id, &request_id, &user.id)
+        .await;
     match req {
         RuntimeRequestRespondReq::Approval { decision } => {
             ctx.agent_runtime()

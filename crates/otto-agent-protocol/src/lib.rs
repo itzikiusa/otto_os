@@ -46,6 +46,7 @@ pub mod ring;
 pub mod runtime;
 #[cfg(any(test, feature = "test-util"))]
 pub mod scripted;
+pub mod step_runner;
 mod tool_images;
 #[cfg(test)]
 mod tool_images_tests;
@@ -64,7 +65,7 @@ pub use driver::{
 pub use host::{RuntimeHost, SessionManagerHost};
 pub use runtime::{
     answer_secret_request, pending_secret_requests, settle_archived_entity_json, AgentRuntime,
-    RuntimeConfig,
+    Ended, RuntimeConfig, SettledTurn, TurnOpts, AUTO_TURN_GRACE, BACKGROUND_LIMIT,
 };
 
 /// The daemon surface the `/runtime-sessions` router runs against

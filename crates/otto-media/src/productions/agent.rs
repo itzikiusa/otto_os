@@ -15,7 +15,7 @@ use otto_agent_run::assist::{run_assist_job, AgentTurn, AssistOutcome, AssistSlo
 use otto_agent_run::session_turn::SessionManager;
 use otto_core::domain::{User, Workspace};
 use otto_core::{Error, Id, Result};
-use otto_sessions::provider_models::{probe_provider_models_cached, ModelProbe};
+use otto_sessions::provider_models::{check_pick, PickCheck};
 use otto_sessions::ProviderRegistry;
 use serde_json::json;
 
@@ -66,46 +66,17 @@ pub async fn agent_planner(
 }
 
 /// Refuse what a new agent session could not run as picked, as session
-/// creation does: an unknown or turned-off provider; a model the provider's
-/// catalog (what `/meta` lists, so what the pickers offer) lacks; and an
-/// effort that is no level, or that the model (none picked: any of the
-/// provider's) does not list.
+/// creation does (`otto_sessions::provider_models::check_pick`, strict: a
+/// pick that cannot be checked now is refused too).
 pub async fn check_agent(
     reg: &ProviderRegistry,
     provider: &str,
     model: Option<&str>,
     effort: Option<&str>,
 ) -> Result<()> {
-    reg.ensure_enabled(provider)?;
-    if !reg.is_enabled(provider) {
-        return Err(Error::Invalid(format!("unknown provider '{provider}'")));
-    }
-    if model.is_none() && effort.is_none() {
-        return Ok(());
-    }
-    let catalog = probe_provider_models_cached(&ModelProbe::for_registry(reg)).await;
-    let models = catalog.get(provider).map(Vec::as_slice).unwrap_or_default();
-    let picked: Vec<_> = models
-        .iter()
-        .filter(|m| model.is_none_or(|id| m.id == id))
-        .collect();
-    if let (Some(model), true) = (model, picked.is_empty()) {
-        return Err(Error::Invalid(format!(
-            "{provider} has no model '{model}' — pick one it lists"
-        )));
-    }
-    match effort {
-        Some(e)
-            if !picked
-                .iter()
-                .any(|m| m.supported_efforts.iter().any(|s| s == e)) =>
-        {
-            Err(Error::Invalid(format!(
-                "{provider} {} has no effort '{e}' — pick one it lists",
-                model.unwrap_or("models")
-            )))
-        }
-        _ => Ok(()),
+    match check_pick(reg, provider, model, effort).await {
+        PickCheck::Ok => Ok(()),
+        PickCheck::Unverified(m) | PickCheck::Invalid(m) => Err(Error::Invalid(m)),
     }
 }
 
@@ -343,7 +314,10 @@ mod tests {
         let m = refused(check_agent(&reg, "claude", Some("no-such-model"), None).await);
         assert!(m.contains("no model 'no-such-model'"), "{m}");
         check_agent(&reg, "claude", None, None).await.unwrap();
-        let catalog = probe_provider_models_cached(&ModelProbe::for_registry(&reg)).await;
+        let catalog = otto_sessions::provider_models::probe_provider_models_cached(
+            &otto_sessions::provider_models::ModelProbe::for_registry(&reg),
+        )
+        .await;
         let listed = &catalog["claude"][0];
         check_agent(&reg, "claude", Some(&listed.id), None)
             .await

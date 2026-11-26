@@ -337,6 +337,8 @@ export interface RuntimeRequest {
   question_title?: string;
   answers?: QuestionAnswer[];
   /** An MCP / ACP elicitation: only the person answers it, never a parent agent. */ for_person?: boolean;
+  /** Who answered it: a user id, or `thread:<id>` for a parent thread's agent. */
+  resolved_by?: string | null;
 }
 
 export interface PlanArtifact {

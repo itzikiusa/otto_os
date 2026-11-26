@@ -1005,7 +1005,7 @@ async fn session_hold_cap(ctx: &ServerCtx, id: &str) -> u64 {
             Err(_) => return otto_mcp::approval_wait::HEADLESS_WAIT_SECS,
         },
     };
-    let interactive = session.is_foreground_agent() && session.meta.get("run_id").is_none();
+    let interactive = otto_mcp::approval_wait::interactive_hold(&session);
     otto_mcp::approval_wait::hold_secs(&family, interactive)
 }
 
