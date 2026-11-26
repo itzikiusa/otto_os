@@ -288,6 +288,7 @@ async fn keep_digest_items(ctx: &ServerCtx, run_id: &Id, node_id: &str, thread_i
     crate::offload::blocking(move || {
         let _ = std::fs::create_dir_all(&dir);
         let prefix = format!("{node_id}-");
+        #[allow(clippy::disallowed_methods)] // runs inside offload::blocking
         let n = std::fs::read_dir(&dir).map_or(0, |rd| {
             rd.flatten()
                 .filter(|e| e.file_name().to_string_lossy().starts_with(&prefix))
@@ -367,16 +368,29 @@ pub(super) async fn close_settled(
         return;
     };
     let mine = [Some(st.node_id.as_str()), t.continued_from.as_deref()];
-    let continued_later = graph.nodes.iter().any(|n| {
-        let from = n.params.get("continue_from").and_then(Value::as_str);
-        from.is_some()
-            && mine.contains(&from)
-            && n.id != st.node_id
-            && states.iter().any(|s| {
-                s.node_id == n.id && matches!(s.status, NodeStatus::Pending | NodeStatus::Running)
-            })
-    });
-    if continued_later {
+    let continuers: Vec<&str> = graph
+        .nodes
+        .iter()
+        .filter(|n| {
+            let from = n.params.get("continue_from").and_then(Value::as_str);
+            from.is_some()
+                && mine.contains(&from)
+                && n.id != st.node_id
+                && states.iter().any(|s| {
+                    s.node_id == n.id
+                        && matches!(s.status, NodeStatus::Pending | NodeStatus::Running)
+                })
+        })
+        .map(|n| n.id.as_str())
+        .collect();
+    if !continuers.is_empty() {
+        // Kept for a later continuer that is not the next step: no idle process meanwhile (§4.5).
+        let next = |e: &otto_core::workflows::WorkflowEdge| {
+            e.source == st.node_id && continuers.contains(&e.target.as_str())
+        };
+        if !graph.edges.iter().any(next) {
+            r.release_process(&t.thread_id).await;
+        }
         return;
     }
     r.close(&t.thread_id, until).await;

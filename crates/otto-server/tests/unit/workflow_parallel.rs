@@ -203,6 +203,7 @@ struct FakeRunner {
     closed: std::sync::Mutex<Vec<Id>>,
     retained: std::sync::Mutex<Vec<Id>>,
     resumed: std::sync::Mutex<Vec<(Id, u32)>>,
+    released: std::sync::Mutex<Vec<Id>>,
 }
 
 #[async_trait::async_trait]
@@ -287,8 +288,59 @@ impl otto_agent_run::step::StepRunner for FakeRunner {
     async fn set_retain_until(&self, ids: &[Id], _: chrono::DateTime<chrono::Utc>) {
         self.retained.lock().unwrap().extend(ids.iter().cloned());
     }
-    async fn release_process(&self, _: &Id) {}
+    async fn release_process(&self, id: &Id) {
+        self.released.lock().unwrap().push(id.clone());
+    }
     async fn delete(&self, _: &Id) {}
+}
+
+/// Engine.md §4.5: a step whose thread a later step continues keeps it open
+/// (not closed at its settle) but stops its process while another step runs
+/// in between; the continuer gets that thread and closes it.
+#[tokio::test]
+async fn a_thread_kept_for_a_later_continuer_holds_no_process_meanwhile() {
+    let fake = std::sync::Arc::new(FakeRunner::default());
+    super::super::super::step_thread::FAKE_RUNNER.with(|f| *f.borrow_mut() = Some(fake.clone()));
+    let agent = |extra: Value| {
+        let mut p = json!({"prompt": "do it", "provider": "claude"});
+        p.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        p
+    };
+    let graph = WorkflowGraph {
+        nodes: vec![
+            node("start", "log", json!({})),
+            node("a", "agent_prompt", agent(json!({}))),
+            node("mid", "log", json!({})),
+            node("b", "agent_prompt", agent(json!({"continue_from": "a"}))),
+        ],
+        edges: vec![edge("start", "a"), edge("a", "mid"), edge("mid", "b")],
+    };
+    let (ctx, ws, wf, run_id, repo, _tmp) = setup("continue-ws", graph).await;
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        run_workflow(
+            ctx,
+            ws,
+            wf,
+            run_id.clone(),
+            json!({}),
+            RunScope::default(),
+            None,
+        ),
+    )
+    .await
+    .expect("the run settles");
+    let run = repo.get_run(&run_id).await.unwrap();
+    assert_eq!(run.status, RunStatus::Success, "{:?}", run.error);
+    assert_eq!(
+        *fake.released.lock().unwrap(),
+        ["th-1"],
+        "a's process stopped while mid ran"
+    );
+    let a = state(&run, "a").thread.as_ref().unwrap();
+    assert!(a.closed_at.is_none(), "kept open for b");
 }
 
 /// Test plan §2 agent steps: an agent step runs on a runtime thread by

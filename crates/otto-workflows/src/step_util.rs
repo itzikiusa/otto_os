@@ -10,7 +10,7 @@ use otto_core::agent_runtime::{
 use otto_core::text::clip_bytes as truncate;
 use otto_core::workflows::{
     ChildThread, HumanEntry, NodeRunState, NodeStatus, PhaseMark, RunStatus, StepPhase, StepThread,
-    Workflow, WorkflowNode,
+    Workflow, WorkflowCheckpoint, WorkflowNode,
 };
 use otto_core::Id;
 use serde_json::Value;
@@ -734,6 +734,55 @@ pub fn find_step_handoff(
         }
     }
     None
+}
+
+pub fn loop_checkpoint(
+    node: &WorkflowNode,
+    loop_id: &str,
+    iteration: u64,
+    step_index: usize,
+    input: Value,
+) -> WorkflowCheckpoint {
+    WorkflowCheckpoint {
+        node_id: node.id.clone(),
+        loop_id: loop_id.into(),
+        iteration,
+        step_index,
+        kind: node.kind.clone(),
+        name: node_display_name(node).into(),
+        status: NodeStatus::Pending,
+        input,
+        updated_at: chrono::Utc::now(),
+        ..Default::default()
+    }
+}
+
+/// The directory an agent node runs in: a per-node `cwd`/`working_directory`
+/// param, else the run-level working dir, else the workspace root. Tilde-expanded.
+pub fn node_cwd(node: &WorkflowNode, input: &Value, run_cwd: &str) -> String {
+    let p = &node.params;
+    let pick = p
+        .get("cwd")
+        .or_else(|| p.get("working_directory"))
+        .and_then(Value::as_str)
+        .or_else(|| input.get("working_directory").and_then(Value::as_str))
+        .filter(|s| !s.trim().is_empty());
+    match pick {
+        Some(s) => otto_core::paths::expand_tilde(s),
+        None => run_cwd.to_string(),
+    }
+}
+
+/// Data-dir-relative file of a `canvas` step's diagram. Step ids are only
+/// checked for being non-empty and unique, so an id like `../../../tmp/x`
+/// wrote (and created directories) outside the data dir; such an id falls
+/// back to its slug, while an ordinary id keeps its exact file name.
+pub fn canvas_rel(run_id: &str, node_id: &str, ext: &str) -> String {
+    let name = otto_core::paths::safe_component(node_id)
+        .filter(|n| !n.starts_with('.'))
+        .map(str::to_string)
+        .unwrap_or_else(|| crate::context::slug(node_id));
+    format!("workflow-canvas/{run_id}/{name}.{ext}")
 }
 
 #[cfg(test)]

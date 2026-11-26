@@ -30,8 +30,8 @@ use otto_core::event::Event;
 use otto_core::paths::expand_tilde;
 use otto_core::text::clip_bytes as truncate;
 use otto_core::workflows::{
-    NodeActivity, NodeRunState, NodeStatus, RunScope, RunStatus, Workflow, WorkflowCheckpoint,
-    WorkflowGraph, WorkflowNode, WorkflowRun,
+    NodeActivity, NodeRunState, NodeStatus, RunScope, RunStatus, Workflow, WorkflowGraph,
+    WorkflowNode, WorkflowRun,
 };
 use otto_core::{Id, Result};
 use otto_dbviewer::QueryRequest;
@@ -59,7 +59,8 @@ use otto_workflows::step_util::{
     param_str_list, seed_input_from_entries, short_id,
 };
 use otto_workflows::step_util::{
-    build_run_summary, collect_pr_targets, find_step_handoff, parse_checks, skipped_hooks_note,
+    build_run_summary, canvas_rel, collect_pr_targets, find_step_handoff, loop_checkpoint,
+    node_cwd, parse_checks, skipped_hooks_note,
 };
 
 /// The "Required checks" reviewer (`otto_workflows::step_util::checks_review_agent`).
@@ -2088,27 +2089,6 @@ fn review_coverage_complete(
     )
 }
 
-fn loop_checkpoint(
-    node: &WorkflowNode,
-    loop_id: &str,
-    iteration: u64,
-    step_index: usize,
-    input: Value,
-) -> WorkflowCheckpoint {
-    WorkflowCheckpoint {
-        node_id: node.id.clone(),
-        loop_id: loop_id.into(),
-        iteration,
-        step_index,
-        kind: node.kind.clone(),
-        name: node_display_name(node).into(),
-        status: NodeStatus::Pending,
-        input,
-        updated_at: chrono::Utc::now(),
-        ..Default::default()
-    }
-}
-
 // Retry classification + backoff live in `otto_workflows::retry` (imported above).
 
 /// R5.1: whether the engine stops the sessions a SUCCESSFUL step spawned.
@@ -2714,22 +2694,6 @@ async fn resolve_repo_id_for_path(
     None
 }
 
-/// The directory an agent node runs in: a per-node `cwd`/`working_directory`
-/// param, else the run-level working dir, else the workspace root. Tilde-expanded.
-fn node_cwd(node: &WorkflowNode, input: &Value, run_cwd: &str) -> String {
-    let p = &node.params;
-    let pick = p
-        .get("cwd")
-        .or_else(|| p.get("working_directory"))
-        .and_then(Value::as_str)
-        .or_else(|| input.get("working_directory").and_then(Value::as_str))
-        .filter(|s| !s.trim().is_empty());
-    match pick {
-        Some(s) => expand_tilde(s),
-        None => run_cwd.to_string(),
-    }
-}
-
 /// The version id a `product_*` step with `persist: true` saved. A failed
 /// save used to be dropped silently: the step succeeded without its
 /// `version_id`, and nothing said the result was never stored.
@@ -2746,18 +2710,6 @@ fn persisted_version(
 /// The log line of a step skipped because an upstream step failed — the
 /// marker a single-step retry looks for to re-run what its target blocked.
 pub(crate) const SKIPPED_UPSTREAM: &str = "skipped (upstream did not succeed)";
-
-/// Data-dir-relative file of a `canvas` step's diagram. Step ids are only
-/// checked for being non-empty and unique, so an id like `../../../tmp/x`
-/// wrote (and created directories) outside the data dir; such an id falls
-/// back to its slug, while an ordinary id keeps its exact file name.
-fn canvas_rel(run_id: &str, node_id: &str, ext: &str) -> String {
-    let name = otto_core::paths::safe_component(node_id)
-        .filter(|n| !n.starts_with('.'))
-        .map(str::to_string)
-        .unwrap_or_else(|| crate::workflow_context::slug(node_id));
-    format!("workflow-canvas/{run_id}/{name}.{ext}")
-}
 
 #[cfg(test)]
 mod event_wait_tests {
