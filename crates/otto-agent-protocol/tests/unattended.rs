@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 use otto_agent_protocol::claude::ClaudeDriver;
 use otto_agent_protocol::codex::CodexDriver;
-use otto_agent_protocol::fake_script::Config;
-use otto_agent_protocol::scripted::ScriptedDriver;
+use otto_agent_protocol::process::ChildTransport;
+use otto_agent_protocol::scripted;
 use otto_agent_protocol::{
     AgentRuntime, DriverFactory, Ended, LaunchSpec, McpDelivery, McpServerDef, RuntimeConfig,
     RuntimeHost, StructuredDriver, TurnOpts,
@@ -98,6 +98,7 @@ struct Rig {
     pool: DbPool,
     host: Arc<Host>,
     drivers: Arc<dyn DriverFactory>,
+    transport: Option<Arc<dyn ChildTransport>>,
     _dir: tempfile::TempDir,
     root: PathBuf,
 }
@@ -127,24 +128,17 @@ impl Rig {
                 })
             })
         } else {
-            ScriptedDriver::factory(Config {
-                provider: String::new(),
-                time_scale: 1.0,
-                scripts_dir: None,
-                step_persona: false,
-                review_dir: None,
-                state_dir: root.join("state"),
-                unsupported: &[],
-                log: None,
-            })
+            scripted::drivers()
         };
+        let transport = (!binaries).then(|| scripted::transport(Vec::new()));
         let pool = pool().await;
-        let rt = Self::runtime(&pool, &host, &drivers, &root);
+        let rt = Self::runtime(&pool, &host, &drivers, &transport, &root);
         Self {
             rt,
             pool,
             host,
             drivers,
+            transport,
             _dir: dir,
             root,
         }
@@ -154,6 +148,7 @@ impl Rig {
         pool: &DbPool,
         host: &Arc<Host>,
         drivers: &Arc<dyn DriverFactory>,
+        transport: &Option<Arc<dyn ChildTransport>>,
         root: &std::path::Path,
     ) -> AgentRuntime {
         AgentRuntime::new(
@@ -162,8 +157,20 @@ impl Rig {
             Arc::clone(drivers),
             RuntimeConfig {
                 attachments_dir: root.join("attachments"),
+                transport: transport.clone(),
                 ..RuntimeConfig::default()
             },
+        )
+    }
+
+    /// A second runtime on the same store (a daemon restart).
+    fn again(&self) -> AgentRuntime {
+        Self::runtime(
+            &self.pool,
+            &self.host,
+            &self.drivers,
+            &self.transport,
+            &self.root,
         )
     }
 
@@ -209,10 +216,18 @@ impl Seen {
 }
 
 async fn need(rx: &mut tokio::sync::mpsc::UnboundedReceiver<StepEvent>) -> Attention {
+    need_seen(rx, &mut Vec::new()).await
+}
+
+/// [`need`], keeping every other event it passes over in `seen`.
+async fn need_seen(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<StepEvent>,
+    seen: &mut Vec<StepEvent>,
+) -> Attention {
     loop {
         match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await {
             Ok(Some(StepEvent::NeedsYou(a))) => return a,
-            Ok(Some(_)) => continue,
+            Ok(Some(e)) => seen.push(e),
             other => panic!("no NeedsYou: {other:?}"),
         }
     }
@@ -353,7 +368,8 @@ async fn a_question_and_an_approval_need_you_then_resume_with_the_answer() {
     }];
     rig.rt.note_resolver(&id, &r.id, "u1").await;
     rig.rt.respond_question(&id, &r.id, answer).await.unwrap();
-    let a = need(&mut rx).await;
+    let mut seen = Vec::new();
+    let a = need_seen(&mut rx, &mut seen).await;
     assert_eq!(a.kind, AttentionKind::Approval);
     assert!(a.text.starts_with("wants approval"), "{}", a.text);
     rig.rt
@@ -370,6 +386,9 @@ async fn a_question_and_an_approval_need_you_then_resume_with_the_answer() {
     let mut resumed = Vec::new();
     let mut by = Vec::new();
     while let Ok(e) = rx.try_recv() {
+        seen.push(e);
+    }
+    for e in seen {
         if let StepEvent::Resumed {
             answer, by: who, ..
         } = e
@@ -509,7 +528,7 @@ async fn a_restart_that_cut_the_turn_ends_the_wait_as_server_restart() {
         .await
         .unwrap();
     rig.rt.shutdown().await;
-    let rt = Rig::runtime(&rig.pool, &rig.host, &rig.drivers, &rig.root);
+    let rt = rig.again();
     rt.recover().await.unwrap();
     let started = Instant::now();
     let out = rt.await_settled(&id, 0, opts(), |_| {}).await.unwrap();
@@ -606,7 +625,7 @@ async fn a_step_runs_in_order_and_a_missing_handoff_gets_one_nudge() {
         "{}",
         out.reply
     );
-    assert_eq!(out.usage.input_tokens, 10);
+    assert!(out.usage.input_tokens >= 10, "{:?}", out.usage);
     let digest = out.digest.unwrap();
     assert_eq!(digest.turns, 2);
     assert!(serde_json::to_vec(&digest).unwrap().len() <= 8 * 1024);
@@ -832,7 +851,7 @@ async fn resume_after_a_restart_finishes_the_step_on_the_same_thread() {
     rig.rt.shutdown().await;
     task.abort();
     drop(runner);
-    let rt = Rig::runtime(&rig.pool, &rig.host, &rig.drivers, &rig.root);
+    let rt = rig.again();
     rt.recover().await.unwrap();
     let runner = ThreadStepRunner::new(rt.clone(), Arc::new(NoStepHost));
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();

@@ -580,7 +580,19 @@ impl AgentRuntime {
         let Ok(rows) = self.linked(id).await else {
             return Vec::new();
         };
-        let mut out = Vec::new();
+        // Sub-threads an agent removed before the step settled: their record
+        // stays on the thread that opened them (`otto.thread_close remove`).
+        let mut out: Vec<SubThreadUse> = rows
+            .iter()
+            .filter_map(|s| {
+                s.meta
+                    .as_ref()?
+                    .get(peers::REMOVED_CHILDREN_META_KEY)?
+                    .as_array()
+            })
+            .flatten()
+            .filter_map(|v| serde_json::from_value(v.clone()).ok())
+            .collect();
         for s in rows.into_iter().filter(|s| &s.id != id) {
             if s.child_of().is_none_or(|o| o.by != ChildOpener::Agent) {
                 continue;

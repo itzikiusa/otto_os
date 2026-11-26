@@ -409,9 +409,17 @@ impl AgentRuntime {
         {
             return Err(Error::Conflict("close its subagents first".into()));
         }
-        // Its answer reaches the parent before the child goes.
-        while children::reporting_end(&p.id) {
-            tokio::time::sleep(Duration::from_millis(20)).await;
+        // Its answer reaches the parent before the child goes (the wake it
+        // announced as its turn ended leaves the parent's pending set).
+        let parent = self.live(&c.id).await?;
+        loop {
+            let changed = parent.deadline_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if !parent.pending_wakes().contains(&p.id) {
+                break;
+            }
+            changed.await;
         }
         let record = {
             let st = live.lock();
@@ -504,7 +512,7 @@ impl AgentRuntime {
 }
 
 /// `meta` key on a parent: the subagents its agent removed (newest last).
-const REMOVED_CHILDREN_META_KEY: &str = "removed_children";
+pub(super) const REMOVED_CHILDREN_META_KEY: &str = "removed_children";
 /// How many of them the parent keeps.
 const REMOVED_CHILDREN_KEPT: usize = 20;
 
@@ -513,32 +521,27 @@ const REMOVED_CHILDREN_KEPT: usize = 20;
 fn removed_record(s: &RuntimeSession, turns: &[ProviderTurn]) -> serde_json::Value {
     let mut usage = otto_core::agent_runtime::TurnTokenUsage::default();
     for u in turns.iter().filter_map(|t| t.turn_token_usage.as_ref()) {
-        usage.input_tokens += u.input_tokens;
-        usage.output_tokens += u.output_tokens;
-        let add = |a: &mut Option<u64>, b: Option<u64>| {
-            if let Some(b) = b {
-                *a = Some(a.unwrap_or(0) + b);
-            }
-        };
-        add(&mut usage.cached_input_tokens, u.cached_input_tokens);
-        add(&mut usage.reasoning_tokens, u.reasoning_tokens);
-        if let Some(c) = u.cost_usd {
-            usage.cost_usd = Some(usage.cost_usd.unwrap_or(0.0) + c);
-        }
+        usage.add(u);
     }
     let model = turns
         .iter()
         .max_by_key(|t| t.ordinal)
         .and_then(|t| t.model.clone())
         .or_else(|| s.model.clone());
-    serde_json::json!({
-        "id": s.id,
-        "provider": s.provider_slug(),
-        "model": model,
-        "title": s.title,
-        "status": s.last_turn_status,
-        "usage": usage,
+    let status = s
+        .last_turn_status
+        .and_then(|o| serde_json::to_value(o).ok())
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_else(|| "idle".into());
+    serde_json::to_value(otto_core::agent_runtime::SubThreadUse {
+        id: s.id.clone(),
+        provider: s.provider_slug().to_string(),
+        model,
+        title: Some(s.title.clone()),
+        status,
+        usage,
     })
+    .unwrap_or_default()
 }
 
 /// Allowlist metadata keys an agent credential may supply when opening a peer
