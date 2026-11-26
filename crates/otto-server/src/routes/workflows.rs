@@ -983,9 +983,26 @@ fn with_context_dir(ctx: &ServerCtx, mut run: WorkflowRun) -> WorkflowRun {
         return run;
     };
     if dir.is_dir() {
+        run.attachments = otto_workflows::attachments::read(&dir);
         run.context_dir = Some(dir.to_string_lossy().into_owned());
     }
     run
+}
+
+/// The overview the server recomputes when the stored one is stale or
+/// missing (a queued or paused run, an archive restore — api.md `overview`).
+pub(crate) async fn recompute_overview(
+    ctx: &ServerCtx,
+    run: &WorkflowRun,
+) -> Option<otto_core::workflows::RunOverview> {
+    let wf = repo(ctx).definition_for_run(run).await.ok()?;
+    Some(otto_workflows::overview::run_overview(
+        run,
+        &wf.graph,
+        None,
+        None,
+        chrono::Utc::now(),
+    ))
 }
 
 /// `GET /workflow-runs/{id}`
@@ -999,6 +1016,9 @@ pub async fn get_run(
     run.checkpoints = repo(&ctx).checkpoints(&id).await.map_err(ApiError)?;
     crate::workflow_engine::fill_thread_available(&ctx, &mut run.nodes).await;
     run.steering_queued = crate::workflow_engine::hold::steering_queued(&ctx, &id);
+    if run.overview.is_none() {
+        run.overview = recompute_overview(&ctx, &run).await;
+    }
     Ok(Json(with_context_dir(&ctx, run)))
 }
 

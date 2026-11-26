@@ -295,6 +295,54 @@ async fn download_returns_the_bytes_as_an_attachment() {
     assert_eq!(&resp.bytes().await.unwrap()[..], b"PK\x03\x04\0\0binary");
     assert_eq!(get(&d.viewer, "id_rsa").await.unwrap().status(), 403);
     assert_eq!(get(&d.viewer, "../secret.txt").await.unwrap().status(), 400);
+    // A name no header can carry (a control character, non-ASCII) still downloads.
+    let odd = "a\rb ü;.txt";
+    std::fs::write(d.tmp.path().join("workflow-context/run1").join(odd), "odd").unwrap();
+    let resp = get(&d.viewer, odd).await.unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers()["content-disposition"],
+        "attachment; filename=\"a_b __.txt\""
+    );
+    assert_eq!(&resp.bytes().await.unwrap()[..], b"odd");
+}
+
+/// DR-201 / DR-114: the run view carries the chat message's attachments,
+/// and an overview the row does not hold (queued, paused, restored) is
+/// recomputed on the run view and on `/progress`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_run_view_lists_its_attachments_and_recomputes_a_missing_overview() {
+    let d = boot().await;
+    let spec = otto_core::workflows::AttachmentRef {
+        name: "spec.pdf".into(),
+        mime: "application/pdf".into(),
+        size_bytes: Some(3),
+        path: Some("attachments/spec.pdf".into()),
+        error: None,
+        source: otto_core::workflows::AttachmentSource::Start,
+    };
+    std::fs::write(
+        d.tmp.path().join("workflow-context/run1/attachments.json"),
+        serde_json::to_vec(&[spec]).unwrap(),
+    )
+    .unwrap();
+    let get = |path: &str| {
+        d.http
+            .get(format!("{}/api/v1/workflow-runs/run1{path}", d.base))
+            .bearer_auth(d.viewer.clone())
+            .send()
+    };
+    let run: Value = get("").await.unwrap().json().await.unwrap();
+    assert_eq!(
+        run["attachments"][0]["path"], "attachments/spec.pdf",
+        "{run}"
+    );
+    assert_eq!(run["overview"]["state"], "succeeded", "{run}");
+    let progress: Value = get("/progress").await.unwrap().json().await.unwrap();
+    assert_eq!(
+        progress["run"]["overview"]["state"], "succeeded",
+        "{progress}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
