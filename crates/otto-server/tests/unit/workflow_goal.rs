@@ -493,6 +493,8 @@ struct Fake {
     closed: std::sync::Mutex<Vec<Id>>,
     /// The first turn hangs once its thread started (a step to pause or skip).
     hang_first: std::sync::atomic::AtomicBool,
+    /// This turn (1-based) hangs once, like `hang_first`.
+    hang_at: std::sync::atomic::AtomicUsize,
     /// A resumed turn finds its handoff already written (restart meanwhile).
     quiet_resume: std::sync::atomic::AtomicBool,
     /// The first turn asks a question, is answered once `answer` is set, then hangs.
@@ -541,9 +543,19 @@ impl otto_agent_run::step::StepRunner for Fake {
             });
             std::future::pending::<()>().await;
         }
-        if self
-            .hang_first
-            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        let hang_now = self
+            .hang_at
+            .compare_exchange(
+                n,
+                0,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .is_ok();
+        if hang_now
+            || self
+                .hang_first
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
         {
             std::future::pending::<()>().await;
         }
@@ -1032,6 +1044,79 @@ async fn a_skipped_thread_step_closes_its_thread() {
         .await
         .unwrap()
         .unwrap();
+}
+
+/// CR2-004: a hold closes the threads of a loop's earlier steps too (the
+/// worker's stays open beside the next step until the loop ends, and a hold
+/// never reaches that end), and a `same_thread` step still continues its
+/// thread after Resume — the runner reopens a closed one.
+#[tokio::test]
+async fn a_paused_goal_closes_its_earlier_threads_and_same_thread_resumes() {
+    let (f, _fake) = fake();
+    f.hang_at.store(2, std::sync::atomic::Ordering::SeqCst);
+    let once =
+        "test -f \"$OTTO_CONTEXT_DIR/seen\" || { touch \"$OTTO_CONTEXT_DIR/seen\"; exit 1; }";
+    let steps = json!([
+        {"kind": "agent_prompt", "name": "Work", "same_thread": true, "params": {"prompt": "do it", "provider": "claude"}},
+        check(json!([{"id": "twice", "text": "second time lucky", "verify": "command", "command": once}])),
+    ]);
+    let fx = setup(
+        "goal-children",
+        goal_graph(steps, json!({"max_iterations": 2})),
+    )
+    .await;
+    let driver = fx.drive();
+    let on = |id: &'static str| {
+        move |n: &NodeRunState| n.thread.as_ref().is_some_and(|t| t.thread_id == id)
+    };
+    until(&fx, "goal", on("th-2")).await;
+    hold::pause(&fx.ctx, &fx.run_id, &fx.user).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(4), driver)
+        .await
+        .unwrap()
+        .unwrap();
+    let closed = f.closed.lock().unwrap().clone();
+    assert!(
+        closed.contains(&"th-1".to_string()) && closed.contains(&"th-2".to_string()),
+        "iteration 1's thread is closed with the paused one: {closed:?}"
+    );
+    hold::resume(&fx.ctx, &fx.run_id, None).await.unwrap();
+    let run = fx.settled().await;
+    assert_eq!(run.status, RunStatus::Success, "{:?}", run.error);
+    let turns = f.turns.lock().unwrap().clone();
+    assert_eq!(
+        turns.last().unwrap().continue_thread.as_deref(),
+        Some("th-1"),
+        "the resumed iteration continues the closed thread"
+    );
+}
+
+/// CR2-004: skipping a loop stops its earlier steps' threads with its current one.
+#[tokio::test]
+async fn a_skipped_loop_closes_its_earlier_threads() {
+    let (f, _fake) = fake();
+    f.hang_at.store(2, std::sync::atomic::Ordering::SeqCst);
+    let agent_step = |name: &str| json!({"kind": "agent_prompt", "name": name, "params": {"prompt": "do it", "provider": "claude"}});
+    let steps = json!([agent_step("Work"), agent_step("Polish")]);
+    let fx = setup("goal-skip", goal_graph(steps, json!({"max_iterations": 1}))).await;
+    let driver = fx.drive();
+    until(&fx, "goal", |n| {
+        n.thread.as_ref().is_some_and(|t| t.thread_id == "th-2")
+    })
+    .await;
+    fx.ctx
+        .wf_skip_current
+        .lock()
+        .unwrap()
+        .insert(skip_marker_key(&fx.run_id, "goal"));
+    tokio::time::timeout(Duration::from_secs(10), driver)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut closed = f.closed.lock().unwrap().clone();
+    closed.sort();
+    closed.dedup();
+    assert_eq!(closed, ["th-1".to_string(), "th-2".to_string()]);
 }
 
 /// CR1-055 / CR1-056: a resume the run never took dies with the run (the
