@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { agentStep, chain, createWorkflow, wfApi, type WfApi, node } from './workflowsFixture';
+import { createWorkflow, prShape, wfApi, type WfApi } from './workflowsFixture';
 
 // Optimize (addendum-chat-optimize.md §2.4, §2.6): the draft's changes in
 // their effect groups with the lens hold unticked; unticking re-asks the
@@ -26,17 +26,6 @@ test.beforeEach(async ({ page }, info) => {
 });
 
 
-function prShape() {
-  const g = chain(
-    node('checkout', 'agent_prompt', 'Check out PR branch', { provider: 'claude', prompt: 'git fetch, --detach at the merge-base, write repos.json with base_branch.' }),
-  );
-  const side = [agentStep('vault', 'Gather context'), agentStep('gates', 'Go PR gates'), agentStep('cross', 'Cross-repo check')];
-  g.nodes.push(...side, node('review', 'review_run', 'Review', { reviewers: [{ lens: 'correctness', provider: 'claude' }], mode: 'orchestrator' }));
-  let prev = 'checkout';
-  for (const s of side) { g.edges.push({ id: `e-${s.id}`, source: prev, target: s.id }); prev = s.id; }
-  g.edges.push({ id: 'e-review', source: prev, target: 'review' });
-  return g;
-}
 
 test('the review page: groups, the lens hold unticked, re-asking on a change, Not offered', async ({ page }) => {
   const wf = await createWorkflow(api, 'E2E Optimize', prShape());
@@ -44,18 +33,20 @@ test('the review page: groups, the lens hold unticked, re-asking on a change, No
   await expect(page.getByTestId('wf-opt-page')).toBeVisible({ timeout: 20_000 });
   await expect(page.getByTestId('wf-opt-estimate')).toBeVisible();
   await expect(page.getByTestId('wf-opt-checks')).toContainText('Checked: valid');
+  // The lens hold is offered, unticked.
   const lens = page.locator('[data-testid="wf-opt-change"][data-rule="review_declared_lenses"]');
-  if (await lens.count()) await expect(lens.getByRole('checkbox')).not.toBeChecked();
+  await expect(lens).toHaveCount(1);
+  await expect(lens.getByRole('checkbox')).not.toBeChecked();
   const first = page.locator('[data-testid="wf-opt-change"][data-preselected="true"]').first();
   await expect(first).toBeVisible();
   const asked = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith(`/workflows/${wf}/optimize`) && !!r.postDataJSON()?.change_ids);
   await first.getByRole('checkbox').uncheck();
   await asked;
+  // Not offered: the single-repo skip, whose edge already has a condition — a reason, no checkbox.
   const notOffered = page.getByTestId('wf-opt-not-offered');
-  if (await notOffered.count()) {
-    await notOffered.getByRole('button', { name: /Not offered/ }).click();
-    await expect(notOffered.getByRole('checkbox')).toHaveCount(0);
-  }
+  await notOffered.getByRole('button', { name: /Not offered/ }).click();
+  await expect(notOffered.getByRole('listitem').filter({ hasText: 'already has a condition' })).toHaveCount(1);
+  await expect(notOffered.getByRole('checkbox')).toHaveCount(0);
 });
 
 test('Apply confirms, saves the next version with its note; Restore brings the old graph back', async ({ page }) => {

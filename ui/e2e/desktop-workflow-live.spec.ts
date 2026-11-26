@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { agentStep, chain, createWorkflow, needsYou, startRun, waitRun, wfApi, type WfApi } from './workflowsFixture';
+import { agentStep, cancelStarted, chain, createWorkflow, needsYou, startRun, waitRun, wfApi, type WfApi } from './workflowsFixture';
 import { openRun, runsTab } from './workflowsUi';
 
 // Live updates (ux.md §3, §16): a state change reaches the DOM within a
@@ -10,6 +10,9 @@ let api: WfApi;
 test.beforeAll(async ({}, info) => {
   if (!(info.project.name === 'desktop-browser')) return;
   api = await wfApi();
+});
+test.afterEach(async () => {
+  await cancelStarted(api);
 });
 test.afterAll(async () => {
   await api?.ctx.dispose();
@@ -45,7 +48,10 @@ test('an open running step fetches its body at most once a second', async ({ pag
   await openRun(page, wf, run, 'a');
   await page.getByTestId('wf-step-tab-output').click();
   await page.waitForTimeout(5_000); // ui-guards: allow (counting requests over a fixed window)
+  // The stream changes the node all the time: the body is read again, but no
+  // more than once a second (2–6 reads in 5 s; 0 or 1 would prove nothing).
+  expect(bodies.length, `${bodies.length} body reads`).toBeGreaterThanOrEqual(2);
+  expect(bodies.length).toBeLessThanOrEqual(6);
   const gaps = bodies.slice(1).map((t, i) => t - bodies[i]);
   expect(gaps.every((g) => g >= 900), `body fetches ${gaps.join(', ')} ms apart`).toBeTruthy();
-  await api.post(`/workflow-runs/${run}/cancel`);
 });

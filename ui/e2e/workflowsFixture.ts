@@ -87,6 +87,23 @@ export async function waitRun(api: WfApi, runId: string, ready: (run: WorkflowRu
 export const settled = (run: WorkflowRun): boolean => run.status !== 'running' && run.status !== 'pending';
 export const needsYou = (run: WorkflowRun): boolean => run.overview?.state === 'needs_you';
 
+/** A small clone of the PR-review shape that Optimize always has something
+ *  for (crates/otto-workflows/src/optimize.rs): the fixed checkout recipe (a
+ *  preselected git_checkout change), three independent agent steps chained
+ *  (a parallel change), an orchestrator review declaring its lenses (the
+ *  review_declared_lenses hold, unticked) and a single-repo step whose edge
+ *  already has a condition (a Not offered entry with its reason). */
+export function prShape(): WorkflowGraph {
+  const g = chain(node('checkout', 'agent_prompt', 'Check out PR branch', { provider: 'claude', prompt: 'git fetch, --detach at the merge-base, write repos.json with base_branch.' }));
+  const side = [agentStep('vault', 'Gather context'), agentStep('gates', 'Go PR gates'), agentStep('cross', 'Cross-repo check')];
+  g.nodes.push(...side, node('review', 'review_run', 'Review', { reviewers: [{ lens: 'correctness', provider: 'claude' }], mode: 'orchestrator' }),
+    node('multi', 'agent_prompt', 'Cross-repo summary', { provider: 'claude', prompt: 'With only one repo, stop with a one line note.' }));
+  let prev = 'checkout';
+  for (const s of side) { g.edges.push({ id: `e-${s.id}`, source: prev, target: s.id }); prev = s.id; }
+  g.edges.push({ id: 'e-review', source: prev, target: 'review' }, { id: 'e-multi', source: 'review', target: 'multi', condition: 'len(run.repos) > 0' });
+  return g;
+}
+
 /** A review step with `n` named reviewers over claude and codex (the fan-out fixture). */
 export function reviewStep(id: string, n: number): WorkflowNode {
   const lenses = Array.from({ length: n }, (_, i) => `lens-${i + 1}`);
