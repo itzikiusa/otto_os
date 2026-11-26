@@ -181,8 +181,9 @@
   }
 </script>
 
-{#if pushed && openStep}
-  <PageHeader title={openStep.name} crumbs={[]}>
+{#if pushed}
+  <!-- A pushed step, reviewer or the run's Result: Back returns to the run. -->
+  <PageHeader title={openStep?.name ?? 'Result'} crumbs={[]}>
     {#snippet leading()}
       <button type="button" class="icon-btn" aria-label="Back to the run" title="Back to the run" onclick={() => onselect(null, null)}><Icon name="chevronLeft" size={16} /></button>
     {/snippet}
@@ -229,7 +230,7 @@
           {#if wide && maximized}
             <button type="button" class="btn small runback" onclick={() => (maximized = false)}><Icon name="chevronLeft" size={12} />Run</button>
           {/if}
-          <StepPane {run} {sync} {workspaceId} {runState} step={openStep} childId={selected.child} stepCount={steps.length} {now} tab={askedTab} {criteria} {maximized} onmaximize={wide ? () => (maximized = !maximized) : undefined} />
+          <StepPane {run} {sync} {workspaceId} {runState} cardNode={pushed || (wide && maximized) ? null : failedNode} step={openStep} childId={selected.child} stepCount={steps.length} {now} tab={askedTab} {criteria} {maximized} onmaximize={wide ? () => (maximized = !maximized) : undefined} />
         </div>
       {/if}
     {/if}

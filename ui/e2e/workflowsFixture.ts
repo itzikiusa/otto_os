@@ -55,8 +55,23 @@ export async function createWorkflow(api: WfApi, name: string, graph: WorkflowGr
   return (await api.post<{ id: string }>(`/workspaces/${api.ws}/workflows`, { name, description: 'e2e', graph })).id;
 }
 
+/** Runs this worker started: `cancelStarted` stops them after each test. */
+const started = new Set<string>();
+
 export async function startRun(api: WfApi, workflowId: string, input?: Record<string, unknown>): Promise<string> {
-  return (await api.post<{ id: string }>(`/workflows/${workflowId}/run`, input ? { input } : {})).id;
+  const id = (await api.post<{ id: string }>(`/workflows/${workflowId}/run`, input ? { input } : {})).id;
+  started.add(id);
+  return id;
+}
+
+/** `afterEach`: cancel every run the test started, passed or failed — a run
+ *  left blocking (a sleep, an ask) holds one of the daemon's two run slots
+ *  (OTTO_WF_MAX_PARALLEL_RUNS) and queues the next spec's runs. A settled run's
+ *  cancel is a no-op. */
+export async function cancelStarted(api: WfApi | undefined): Promise<void> {
+  if (!api) return;
+  for (const id of started) await api.ctx.post(`${api.base}/api/v1/workflow-runs/${id}/cancel`, { data: {} }).catch(() => undefined);
+  started.clear();
 }
 
 /** Poll the run until `ready` holds (or fail after `timeoutMs`). */
