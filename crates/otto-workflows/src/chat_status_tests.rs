@@ -279,6 +279,24 @@ fn final_post_of_a_passed_review_is_the_designed_text() {
 }
 
 #[test]
+fn a_review_below_its_pass_mark_is_never_called_passed() {
+    let nodes = vec![NodeRunState {
+        output: Some(json!({"score": 69, "passed": false, "threshold": 80})),
+        ..done("n7", 1, None)
+    }];
+    assert_eq!(
+        render_final(
+            &view(),
+            &finished(RunState::Succeeded),
+            &nodes,
+            &graph(),
+            None
+        ),
+        "⚠️ *PR Reviewer* done — review 69/100, not passed · 11m 52s"
+    );
+}
+
+#[test]
 fn final_post_never_says_posted_for_what_was_not() {
     let mut overview = finished(RunState::Succeeded);
     overview.deliverables = vec![

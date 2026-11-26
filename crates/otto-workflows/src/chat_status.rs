@@ -266,8 +266,18 @@ pub fn render_final(
                     .iter()
                     .any(|d| d.state != DeliverableState::Done);
                 let icon = if short { "⚠️" } else { "✅" };
-                lines.push(match review_score(nodes, graph) {
-                    Some(score) => format!("{icon} *{name}* passed — {score}/100 · {took}"),
+                lines.push(match review_verdict(nodes, graph) {
+                    Some(Verdict {
+                        score,
+                        passed: true,
+                        ..
+                    }) => {
+                        format!("{icon} *{name}* passed — {score}/100 · {took}")
+                    }
+                    // The run went on (its notify branch said so), the review did not pass.
+                    Some(Verdict { score, .. }) => {
+                        format!("⚠️ *{name}* done — review {score}/100, not passed · {took}")
+                    }
                     None => format!("{icon} *{name}* done · {took}"),
                 });
             }
@@ -655,15 +665,24 @@ fn run_elapsed(view: &ChatView, overview: &RunOverview, nodes: &[NodeRunState]) 
         .map_or(0, |t| (view.now - t).num_milliseconds().max(0) as u64)
 }
 
-/// A review step's score, when the run has one.
-fn review_score(nodes: &[NodeRunState], graph: &WorkflowGraph) -> Option<u64> {
-    graph
+/// A review step's outcome (`review_run`'s output: score, passed — a
+/// blocking finding fails a high score too).
+struct Verdict {
+    score: u64,
+    passed: bool,
+}
+
+fn review_verdict(nodes: &[NodeRunState], graph: &WorkflowGraph) -> Option<Verdict> {
+    let out = graph
         .nodes
         .iter()
         .filter(|n| n.kind == "review_run")
         .filter_map(|n| nodes.iter().find(|s| s.node_id == n.id))
-        .find_map(|s| s.output.as_ref()?.get("score")?.as_f64())
-        .map(|s| s.round() as u64)
+        .find_map(|s| s.output.as_ref().filter(|o| o.get("score").is_some()))?;
+    Some(Verdict {
+        score: out["score"].as_f64()?.round() as u64,
+        passed: out["passed"].as_bool().unwrap_or(true),
+    })
 }
 
 fn error_of(state: &NodeRunState) -> &str {
