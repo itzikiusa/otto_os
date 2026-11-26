@@ -14,7 +14,7 @@ test('data archives include feature records and Vault files with reviewed additi
     return response.json();
   };
   try {
-    const workflow = await post(`/workspaces/${ws}/workflows`, { name: 'Archive workflow', graph: { nodes: [{ id: 'start', kind: 'start', name: 'Start', params: {} }], edges: [] } });
+    const workflow = await post(`/workspaces/${ws}/workflows`, { name: 'Archive workflow', graph: { nodes: [{ id: 'start', kind: 'manual_trigger', name: 'Start', params: {} }], edges: [] } });
     const task = await post(`/workspaces/${ws}/scheduled-tasks`, { name: 'Archive task', prompt: 'Saved task text', schedule: { cadence: 'interval', every_min: 60 }, destination: { type: 'none' }, enabled: false });
     const connection = await post(`/workspaces/${ws}/connections`, { name: 'Archive database', kind: 'redis', params: { host: 'archive.invalid' }, secret: 'fixture-archive-password-4938' });
     await seedVaultDir(ctx, base, ws);
