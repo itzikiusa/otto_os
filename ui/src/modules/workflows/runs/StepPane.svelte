@@ -153,10 +153,10 @@
     if (!node) return;
     const id = node.node_id;
     const items: MenuItem[] = [];
-    // Only a failed step re-runs alone (the server refuses it otherwise); any settled one re-runs with what follows.
+    // Only a failed step re-runs alone (the server refuses it otherwise); any other step that ran re-runs with what follows.
     if (!(run.status === 'pending' || run.status === 'running')) {
       if (node.status === 'error') items.push({ label: 'Retry only this step', icon: 'refresh', action: () => void retryStep(run.id, id, false) });
-      else items.push({ label: 'Retry from here', icon: 'refresh', action: () => void retryStep(run.id, id) });
+      else if (node.status !== 'pending' && node.status !== 'running') items.push({ label: 'Retry from here', icon: 'refresh', action: () => void retryStep(run.id, id) });
     }
     items.push({ label: 'Copy step output', icon: 'copy', action: async () => {
       const d = body ?? (await workflowNodeDetail(run.id, id)).body;
