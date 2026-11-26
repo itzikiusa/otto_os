@@ -1,6 +1,6 @@
-//! The run's mutable bookkeeping (`RunState`) and the node loop's control
-//! signal (`NodeFlow`). Admission builds the state, the scheduler mutates it
-//! node by node, and finalize consumes it — one owner, threaded through.
+//! The run's mutable bookkeeping (`RunState`). Admission builds the state,
+//! the scheduler mutates it as nodes settle, and finalize consumes it — one
+//! owner, threaded through.
 
 use super::super::*;
 
@@ -12,10 +12,6 @@ pub(in crate::workflow_engine) struct RunState {
     pub(in crate::workflow_engine) outputs: HashMap<String, Value>,
     /// node_id -> resolved state for persistence (graph order).
     pub(in crate::workflow_engine) states: Vec<NodeRunState>,
-    /// 1-based number of the NEXT executed step — drives step-file naming.
-    /// Skipped nodes don't consume a number; adopted ones do (their files are
-    /// re-linked so the trail stays complete).
-    pub(in crate::workflow_engine) step_counter: usize,
     /// Nodes that errored (or were poisoned by an errored upstream) — these
     /// propagate failure. A node pruned by an edge condition (or downstream of
     /// a pruned one) is only marked Skipped: it does NOT fail the run, and
@@ -27,15 +23,6 @@ pub(in crate::workflow_engine) struct RunState {
     pub(in crate::workflow_engine) canceled: bool,
     /// The run's active time budget ran out.
     pub(in crate::workflow_engine) timed_out: bool,
-}
-
-/// What the node loop does after one node.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::workflow_engine) enum NodeFlow {
-    /// Go on to the next node in topological order.
-    Next,
-    /// Leave the loop for finalize (canceled or out of time budget).
-    Stop,
 }
 
 impl RunState {
@@ -52,7 +39,6 @@ impl RunState {
         Self {
             outputs: HashMap::new(),
             states,
-            step_counter: 0,
             errored: HashSet::new(),
             inactive_edges: HashSet::new(),
             canceled: false,
@@ -78,7 +64,10 @@ impl RunState {
                 ps.status,
                 NodeStatus::Success | NodeStatus::Skipped | NodeStatus::Error
             );
-            if !(out_of_scope || continue_unfinished && settled) {
+            // A step a restart caught mid-flight went back to pending with its
+            // thread, sessions and number kept (DR-006): it re-enters from them.
+            let interrupted = ps.status == NodeStatus::Pending && ps.started_at.is_some();
+            if !(out_of_scope || continue_unfinished && (settled || interrupted)) {
                 continue;
             }
             if let Some(idx) = self.states.iter().position(|s| s.node_id == ps.node_id) {
@@ -93,42 +82,37 @@ impl RunState {
         }
     }
 
-    /// Reconstruct adopted branch decisions without rerunning their nodes.
+    /// Reconstruct adopted branch decisions without rerunning their nodes
+    /// (`otto_workflows::graph::reconstruct_branches`, with today's run data).
     pub(in crate::workflow_engine) fn reconstruct_branches(
         &mut self,
         order: &[String],
         graph: &WorkflowGraph,
+        files: &crate::workflow_context::RunContextFiles,
         input: &Value,
     ) {
-        for id in order {
-            let Some(node) = graph.nodes.iter().find(|n| &n.id == id) else {
-                continue;
-            };
-            if let Some(output) = self.outputs.get(id) {
-                let sources: Vec<String> = incoming_edges(graph, id)
-                    .iter()
-                    .filter(|e| {
-                        self.outputs.contains_key(&e.source) && !self.inactive_edges.contains(&e.id)
-                    })
-                    .map(|e| e.source.clone())
-                    .collect();
-                let adopted_input = assemble_input(&sources, &self.outputs, input);
-                let (pruned, _) = eval_outgoing(graph, node, output, &adopted_input, input);
-                self.inactive_edges.extend(pruned);
-            } else if self
-                .states
-                .iter()
-                .any(|s| &s.node_id == id && s.status == NodeStatus::Skipped)
-            {
-                // Skipped below an errored source is poison; otherwise the
-                // branch simply wasn't taken.
-                if incoming_edges(graph, id)
-                    .iter()
-                    .any(|e| self.errored.contains(&e.source))
-                {
-                    self.errored.insert(id.clone());
-                }
-            }
-        }
+        otto_workflows::graph::reconstruct_branches(
+            order,
+            graph,
+            &run_data(files, input),
+            &self.states,
+            &self.outputs,
+            &mut self.inactive_edges,
+            &mut self.errored,
+        );
     }
+}
+
+/// The `run` object edge conditions and `condition` nodes see (DR-005):
+/// the run input, the current `repos.json` registry and `prs.json`. Read
+/// when the condition is evaluated (its source settles).
+pub(in crate::workflow_engine) fn run_data(
+    files: &crate::workflow_context::RunContextFiles,
+    input: &Value,
+) -> Value {
+    let prs: Vec<otto_workflows::run_refs::RunPr> = files
+        .read_named(otto_workflows::run_refs::PRS_FILE)
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    otto_workflows::graph::run_data(input, &files.repos(), &prs)
 }

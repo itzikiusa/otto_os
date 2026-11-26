@@ -42,6 +42,7 @@ pub mod graph;
 pub mod overview;
 pub mod resume;
 pub mod schedule;
+pub mod step_util;
 
 use otto_core::domain::Workspace;
 use otto_core::event::Event;

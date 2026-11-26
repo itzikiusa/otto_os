@@ -6709,6 +6709,36 @@ Transcript session GETs reuse bounded immutable folds (32 retained entries / 128
 
 `status`, `duration_ms`, `request_id`, `source.session_id` and `source.via` may be null. `source.kind` defaults to `human` when absent/null and retains explicit legacy kinds. Summaries omit request/response bodies, headers and authentication. Fetch `GET /workspaces/{wid}/api-client/history/{id}` for the original full `ApiHistoryEntry` before replay. The existing full `/history` route and MCP history behavior remain unchanged. Cross-workspace detail access is rejected; missing detail is 404 and insufficient workspace access is 403. Listing causes no remote request execution or credential lookup.
 
+### Steps side by side and the step runner
+
+- **Parallel steps:** a run starts every step whose inputs have settled, in
+  run order (a step starts only after every step before it in run order has
+  started or been skipped), so each step keeps the number the one-at-a-time
+  engine gave it (`NodeRunState.step_no` / `step_file`, stored once
+  numbered). Setting `wf_max_parallel_steps` (default 4, 1–8; 1 = one at a
+  time) caps the running steps that hold an agent or a process; a step over
+  the cap is `running` with `phase: "queued"` and the log line "waiting for a
+  step slot (N of M in use)".
+- A step's `[workflow context]` preamble lists the step files of its settled
+  ancestors (and its own earlier loop iterations), never a sibling's.
+- While every running step of a run waits on a person (approval, question),
+  the run gives its run-queue slot back and its active-time budget stops; the
+  first step to work again takes both back first.
+- **Step runner:** agent steps run on structured runtime threads (engine
+  threads, below) unless `OTTO_WF_STEP_RUNNER=pty` or the setting
+  `wf_step_runner: "pty"` (read once per run execution; a provider the
+  runtime has no driver for always runs on PTY). A thread step records
+  `NodeRunState.thread` (runner `threads`, usage, turns, model, effort) —
+  never `sessions` — and its `agent_prompt` output carries `thread_id`
+  instead of `session_id`. Agent step params `effort`, `timeout_s`
+  (60–36,000) and `continue_from` (a node id: continue that step's thread;
+  a removed thread starts a fresh one) reach the runner. The thread's phases
+  (`waiting` with `wait`, `starting`, `working`, `needs_you` with
+  `attention`, `finishing`) are appended to `phases`; an answered question
+  is kept in `human_log`. The thread is closed when the step settles (unless
+  a later step continues it) and kept until the run's end plus the retention
+  period below.
+
 ### Lightweight workflow progress and lazy details
 
 `GET /api/v1/workflow-runs/{id}/progress?after_rev=N` requires workspace Viewer before reading/returning either branch. It returns 200 `{"changed":false,"rev":N}` if current, or `{"changed":true,"rev":N,"run":WorkflowRun}` with `run.summary=true`, lightweight nodes and `checkpoint_rev`, `checkpoint_generation`, `checkpoint_count`, `checkpoint_done`. Input/output/log bodies are omitted (`input`/`output` null, `logs` empty); node summaries add `detail_version`, `log_count`, `has_output`, bounded error/phase previews and session references, and copy the run-view fields `step_no`, `step_file`, `phase`, `wait`, `attention`, `error_class`, `deliverables`, `brief`, the newest 12 `phases` and 5 `human_log` entries, `thread` without `digest` and `children` without `usage` (the full node from `…/nodes/{node_id}` has both). The run adds `overview` (null when stale) and `hold` beside the unchanged `summary: true`. Context directory/approval/proof/version metadata remain available. Missing imported projections repair from authoritative JSON before the conditional comparison; busy admission returns 409, never a fabricated empty run.
