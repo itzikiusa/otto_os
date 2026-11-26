@@ -155,7 +155,10 @@ test('files sent with the message show under Result → Input: a text one previe
   await waitRun(api, run, settled);
   await page.route(`**/api/v1/workflow-runs/${run}`, async (route) => {
     const res = await route.fetch();
-    const body = { ...(await res.json()), attachments: [
+    const real = await res.json();
+    // An outside link only when it is http(s) (CR1-077).
+    const overview = { ...real.overview, deliverables: [{ label: 'Posted the summary', state: 'done', url: 'https://example.invalid/pr/1' }, { label: 'Notified the thread', state: 'done', url: 'javascript:alert(1)' }] };
+    const body = { ...real, overview, attachments: [
       { name: 'trace.log', mime: 'text/plain', size_bytes: 2048, path: 'attachments/trace.log', source: 'start' },
       { name: 'screen.png', mime: 'image/png', source: 'steer', error: 'too large' },
     ] };
@@ -169,6 +172,10 @@ test('files sent with the message show under Result → Input: a text one previe
     else await route.fulfill({ json: { path: 'attachments/trace.log', content: 'line one\nline two', language: 'text', truncated: false } });
   });
   await openRun(page, wf, run);
+  const card = page.getByTestId('wf-run-card');
+  await expect(card).toHaveAttribute('data-kind', 'delivered');
+  await expect(card.locator('a')).toHaveCount(1);
+  await expect(card.locator('a')).toHaveAttribute('href', 'https://example.invalid/pr/1');
   await page.getByTestId('wf-step-tab-input').click();
   await expect(page.getByTestId('wf-run-attachment')).toHaveCount(2);
   const failed = page.locator('[data-testid="wf-run-attachment"][data-error="true"]');
