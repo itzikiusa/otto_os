@@ -77,11 +77,10 @@ impl AgentRuntime {
             .clone()
             .unwrap_or_else(|| caller.id.clone());
         Ok(self
-            .list(&caller.workspace_id, Some(&caller.created_by))
+            .linked(&root)
             .await?
             .into_iter()
             .filter(|s| s.status != RuntimeSessionStatus::Closed)
-            .filter(|s| s.id == root || s.parent_id.as_ref() == Some(&root))
             .collect())
     }
 

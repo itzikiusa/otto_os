@@ -1228,6 +1228,7 @@ async fn the_sweep_keeps_threads_still_in_use() {
                     question_title: None,
                     answers: None,
                     for_person: false,
+                    resolved_by: None,
                 },
             );
         }),

@@ -71,6 +71,23 @@ pub struct RawRuntimeEntityRow {
 /// The last two read the latest `turn` entity (by sequence: one turn runs at a
 /// time, so the last one written is the latest) and its `<turn>:error` item —
 /// `RuntimeSession::last_turn_status` / `last_error_class` of a cold thread.
+/// Leaves out engine threads (`ENGINE_THREAD_SOURCES`, bound by
+/// [`bind_engine_sources`]): a person's lists never show a workflow step's or a
+/// review's threads, so they cannot push the person's own out of the window.
+macro_rules! not_engine {
+    () => {
+        "AND (json_extract(meta, '$.source') IS NULL \
+         OR json_extract(meta, '$.source') NOT IN (?, ?, ?))"
+    };
+}
+
+fn bind_engine_sources<'q>(
+    q: sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments>,
+) -> sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments> {
+    let [a, b, c] = otto_core::agent_runtime::ENGINE_THREAD_SOURCES;
+    q.bind(a).bind(b).bind(c)
+}
+
 macro_rules! session_cols {
     () => {
         "id, workspace_id, provider, title, cwd, model, native_thread_id, closed, \
@@ -227,14 +244,17 @@ impl AgentRuntimeRepo {
             "SELECT ",
             session_cols!(),
             " FROM agent_runtime_sessions WHERE workspace_id = ? \
-             AND (? IS NULL OR created_by = ?) ORDER BY last_active_at DESC LIMIT 500"
+             AND (? IS NULL OR created_by = ?) ",
+            not_engine!(),
+            " ORDER BY last_active_at DESC LIMIT 500"
         ))
         .bind(workspace_id)
         .bind(owner)
-        .bind(owner)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(dberr("list runtime sessions"))?;
+        .bind(owner);
+        let rows = bind_engine_sources(rows)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("list runtime sessions"))?;
         Ok(listable(&rows))
     }
 
@@ -245,15 +265,51 @@ impl AgentRuntimeRepo {
         let rows = sqlx::query(concat!(
             "SELECT ",
             session_cols!(),
-            " FROM agent_runtime_sessions WHERE (? IS NULL OR created_by = ?) \
-             ORDER BY last_active_at DESC LIMIT 500"
+            " FROM agent_runtime_sessions WHERE (? IS NULL OR created_by = ?) ",
+            not_engine!(),
+            " ORDER BY last_active_at DESC LIMIT 500"
         ))
         .bind(owner)
-        .bind(owner)
+        .bind(owner);
+        let rows = bind_engine_sources(rows)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("list runtime sessions"))?;
+        Ok(listable(&rows))
+    }
+
+    /// A linked group: its root and every thread opened under it, closed ones
+    /// included, newest activity first — no window (the person's own list
+    /// stops at 500 rows and leaves engine threads out).
+    pub async fn list_linked(&self, root: &Id) -> Result<Vec<RuntimeSessionRecord>> {
+        let rows = sqlx::query(concat!(
+            "SELECT ",
+            session_cols!(),
+            " FROM agent_runtime_sessions WHERE id = ? OR parent_id = ? \
+             ORDER BY last_active_at DESC"
+        ))
+        .bind(root)
+        .bind(root)
         .fetch_all(&self.pool)
         .await
-        .map_err(dberr("list runtime sessions"))?;
+        .map_err(dberr("list linked runtime sessions"))?;
         Ok(listable(&rows))
+    }
+
+    /// Closed threads whose `meta.retain_until` (RFC 3339) is before `now`,
+    /// at most `limit`: the retention sweep deletes them.
+    pub async fn retained_due(&self, now: DateTime<Utc>, limit: u32) -> Result<Vec<Id>> {
+        let rows = sqlx::query(
+            "SELECT id FROM agent_runtime_sessions WHERE closed = 1 \
+             AND json_extract(meta, '$.retain_until') IS NOT NULL \
+             AND json_extract(meta, '$.retain_until') < ? LIMIT ?",
+        )
+        .bind(now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("retained runtime sessions"))?;
+        Ok(rows.iter().map(|r| r.get::<String, _>("id")).collect())
     }
 
     /// [`Self::list`] narrowed to the threads whose `meta.source` and/or
@@ -611,6 +667,7 @@ impl AgentRuntimeRepo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use otto_core::agent_runtime::ENGINE_THREAD_SOURCES;
     use serde_json::json;
 
     async fn mem_pool() -> DbPool {
@@ -769,6 +826,113 @@ mod tests {
 
     fn ids(recs: &[RuntimeSessionRecord]) -> Vec<&str> {
         recs.iter().map(|r| r.session.id.as_str()).collect()
+    }
+
+    /// Engine threads never reach a person's lists, so 50 fresh step threads
+    /// cannot push the person's own out of the newest-500 window; a source
+    /// filter still finds them, and a linked group is read by its root with
+    /// no window at all.
+    #[tokio::test]
+    async fn engine_threads_stay_out_of_the_lists_and_groups_have_no_window() {
+        let pool = mem_pool().await;
+        seed(&pool).await;
+        let repo = AgentRuntimeRepo::new(pool.clone());
+        let old = Utc::now() - chrono::TimeDelta::days(3);
+        new_session(&repo, "root", "u1", serde_json::Value::Null).await;
+        set_active(&pool, "root", old).await;
+        for (n, closed) in [("kid1", false), ("kid2", true)] {
+            repo.create(NewRuntimeSession {
+                id: n.into(),
+                workspace_id: "w1".into(),
+                provider: RuntimeProvider::Codex,
+                title: n.into(),
+                cwd: "/tmp".into(),
+                model: None,
+                access_mode: RuntimeAccessMode::ApprovalRequired,
+                parent_id: Some("root".into()),
+                meta: None,
+                created_by: "u1".into(),
+            })
+            .await
+            .unwrap();
+            set_active(&pool, n, old).await;
+            if closed {
+                repo.set_closed(&n.into()).await.unwrap();
+            }
+        }
+        for i in 0..600 {
+            new_session(&repo, &format!("p{i:03}"), "u1", serde_json::Value::Null).await;
+        }
+        for (i, source) in ENGINE_THREAD_SOURCES.iter().cycle().take(50).enumerate() {
+            new_session(
+                &repo,
+                &format!("e{i:02}"),
+                "u1",
+                json!({ "source": source }),
+            )
+            .await;
+        }
+        let w = "w1".to_string();
+        for listed in [
+            repo.list(&w, None).await.unwrap(),
+            repo.list_all(Some(&"u1".to_string())).await.unwrap(),
+        ] {
+            assert_eq!(listed.len(), 500);
+            assert!(listed.iter().all(|r| r.session.id.starts_with('p')));
+        }
+        let wf = repo
+            .list_filtered(&w, None, Some("workflow"), None)
+            .await
+            .unwrap();
+        assert_eq!(wf.len(), 17);
+        let mut group = ids(&repo.list_linked(&"root".into()).await.unwrap())
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        group.sort();
+        assert_eq!(
+            group,
+            ["kid1", "kid2", "root"],
+            "closed and old members included"
+        );
+    }
+
+    /// The retention sweep's query: closed rows past `meta.retain_until` only.
+    #[tokio::test]
+    async fn retained_due_lists_closed_rows_past_their_date() {
+        let pool = mem_pool().await;
+        seed(&pool).await;
+        let repo = AgentRuntimeRepo::new(pool.clone());
+        let now = Utc::now();
+        let at =
+            |d: chrono::TimeDelta| (now + d).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        new_session(
+            &repo,
+            "past",
+            "u1",
+            json!({"retain_until": at(-chrono::TimeDelta::minutes(1))}),
+        )
+        .await;
+        new_session(
+            &repo,
+            "open",
+            "u1",
+            json!({"retain_until": at(-chrono::TimeDelta::minutes(1))}),
+        )
+        .await;
+        new_session(
+            &repo,
+            "future",
+            "u1",
+            json!({"retain_until": at(chrono::TimeDelta::hours(1))}),
+        )
+        .await;
+        new_session(&repo, "plain", "u1", serde_json::Value::Null).await;
+        for id in ["past", "future", "plain"] {
+            repo.set_closed(&id.into()).await.unwrap();
+        }
+        assert_eq!(repo.retained_due(now, 200).await.unwrap(), ["past"]);
+        assert!(repo.retained_due(now, 0).await.unwrap().is_empty());
     }
 
     /// The embedded page's lookup: by `meta.source` and/or `meta.origin.id`,

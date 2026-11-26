@@ -35,11 +35,13 @@ pub(super) fn on_waiting(inner: &Inner, st: &State) {
     let text = question_text(&st.session, &r.id, r);
     let child = st.session.id.clone();
     let key: Id = format!("question:{}", r.id);
+    unattended::wake_announced(inner, &of.id, &key);
     let rt = AgentRuntime { inner: me };
     tokio::spawn(async move {
         if let Err(e) = rt.queue_wake(&of.id, &child, &key, text, true).await {
             tracing::warn!(session = %of.id, %child, "could not pass a subagent's question on: {e}");
         }
+        unattended::wake_done(&rt.inner, &of.id, &key);
     });
 }
 
@@ -181,6 +183,7 @@ mod tests {
             question_title: None,
             answers: None,
             for_person: false,
+            resolved_by: None,
         };
         let t = question_text(&child, "rq1", &r);
         assert!(t.starts_with("[Question from subagent \"kid\""));
