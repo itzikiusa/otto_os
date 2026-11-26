@@ -166,6 +166,9 @@ pub async fn mem_pool() -> DbPool {
         .foreign_keys(true);
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
+        // No health check on acquire: a query cancelled during that check makes
+        // sqlx drop the connection, and with it the whole in-memory database.
+        .test_before_acquire(false)
         .connect_with(opts)
         .await
         .expect("connect in-memory sqlite");
