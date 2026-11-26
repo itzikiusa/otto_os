@@ -524,6 +524,9 @@ pub async fn test_pool() -> DbPool {
         .foreign_keys(true);
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
+        // No health check on acquire: a query cancelled during that check makes
+        // sqlx drop the connection, and with it the whole in-memory database.
+        .test_before_acquire(false)
         .connect_with(opts)
         .await
         .expect("open in-memory sqlite");

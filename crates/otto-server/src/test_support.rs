@@ -161,17 +161,5 @@ impl ServerCtx {
 /// A fresh in-memory SQLite pool with every migration applied (one connection,
 /// so the in-memory DB is shared by every query).
 pub async fn mem_pool() -> DbPool {
-    let opts = sqlx::sqlite::SqliteConnectOptions::new()
-        .in_memory(true)
-        .foreign_keys(true);
-    let pool = sqlx::sqlite::SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect_with(opts)
-        .await
-        .expect("connect in-memory sqlite");
-    sqlx::migrate!("../otto-state/migrations")
-        .run(&pool)
-        .await
-        .expect("run migrations");
-    pool.into()
+    otto_state::db::test_pool().await
 }
