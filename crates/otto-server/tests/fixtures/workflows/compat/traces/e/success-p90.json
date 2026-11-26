@@ -1,0 +1,241 @@
+{
+  "workflow": "wf-compat-e",
+  "run": {
+    "status": "success",
+    "error_class": null,
+    "resume_attempts": 0,
+    "duration_s": 4013
+  },
+  "input_keys": {
+    "base": "null",
+    "channel": "string",
+    "chat": "string",
+    "goals": "array",
+    "jira_ticket": "string",
+    "msg": "string",
+    "name": "string",
+    "origin_workspace_id": "string",
+    "pr": "null",
+    "pr_branch": "null",
+    "prompt": "string",
+    "raw": "string",
+    "relevant_info": "array",
+    "thread": "string",
+    "trigger": "string",
+    "user": "string",
+    "working_directory": "string"
+  },
+  "nodes": [
+    {
+      "id": "n1",
+      "kind": "manual_trigger",
+      "status": "success",
+      "skip": null,
+      "attempts": 1,
+      "sessions": 0,
+      "duration_s": 0,
+      "step_no": 1,
+      "step_file": "step1-start-1.md",
+      "output_keys": [
+        "base",
+        "channel",
+        "chat",
+        "goals",
+        "jira_ticket",
+        "msg",
+        "name",
+        "origin_workspace_id",
+        "pr",
+        "pr_branch",
+        "prompt",
+        "raw",
+        "relevant_info",
+        "repo_id",
+        "repos",
+        "thread",
+        "trigger",
+        "user",
+        "working_directory"
+      ],
+      "error_class": null,
+      "reply": null
+    },
+    {
+      "id": "n2",
+      "kind": "prepare_context",
+      "status": "success",
+      "skip": null,
+      "attempts": 1,
+      "sessions": 0,
+      "duration_s": 1,
+      "step_no": 2,
+      "step_file": "step2-prepare-2.md",
+      "output_keys": [
+        "jira"
+      ],
+      "error_class": null,
+      "reply": null
+    },
+    {
+      "id": "n3",
+      "kind": "agent_prompt",
+      "status": "success",
+      "skip": null,
+      "attempts": 1,
+      "sessions": 1,
+      "duration_s": 523,
+      "step_no": 4,
+      "step_file": "step4-agent-step-3.md",
+      "output_keys": [
+        "reply",
+        "session_id",
+        "working_directory"
+      ],
+      "error_class": null,
+      "reply": "8k"
+    },
+    {
+      "id": "n4",
+      "kind": "agent_prompt",
+      "status": "success",
+      "skip": null,
+      "attempts": 1,
+      "sessions": 1,
+      "duration_s": 1008,
+      "step_no": 5,
+      "step_file": "step5-agent-step-4.md",
+      "output_keys": [
+        "reply",
+        "session_id",
+        "working_directory"
+      ],
+      "error_class": null,
+      "reply": "8k"
+    },
+    {
+      "id": "n5",
+      "kind": "agent_prompt",
+      "status": "success",
+      "skip": null,
+      "attempts": 1,
+      "sessions": 1,
+      "duration_s": 249,
+      "step_no": 6,
+      "step_file": "step6-agent-step-5.md",
+      "output_keys": [
+        "reply",
+        "session_id",
+        "working_directory"
+      ],
+      "error_class": null,
+      "reply": "8k"
+    },
+    {
+      "id": "n6",
+      "kind": "agent_prompt",
+      "status": "success",
+      "skip": null,
+      "attempts": 1,
+      "sessions": 1,
+      "duration_s": 1258,
+      "step_no": 9,
+      "step_file": "step9-agent-step-6.md",
+      "output_keys": [
+        "reply",
+        "session_id",
+        "working_directory"
+      ],
+      "error_class": null,
+      "reply": "16k"
+    },
+    {
+      "id": "n7",
+      "kind": "channel_notify",
+      "status": "success",
+      "skip": null,
+      "attempts": 1,
+      "sessions": 0,
+      "duration_s": 0,
+      "step_no": 10,
+      "step_file": "step10-notify-7.md",
+      "output_keys": [
+        "message",
+        "sent"
+      ],
+      "error_class": null,
+      "reply": null
+    },
+    {
+      "id": "n8",
+      "kind": "log",
+      "status": "success",
+      "skip": null,
+      "attempts": 1,
+      "sessions": 0,
+      "duration_s": 0,
+      "step_no": 11,
+      "step_file": "step11-log-8.md",
+      "output_keys": [
+        "message",
+        "sent"
+      ],
+      "error_class": null,
+      "reply": null
+    },
+    {
+      "id": "n9",
+      "kind": "agent_prompt",
+      "status": "success",
+      "skip": null,
+      "attempts": 1,
+      "sessions": 1,
+      "duration_s": 74,
+      "step_no": 3,
+      "step_file": "step3-agent-step-9.md",
+      "output_keys": [
+        "reply",
+        "session_id",
+        "working_directory"
+      ],
+      "error_class": null,
+      "reply": "8k"
+    },
+    {
+      "id": "n10",
+      "kind": "agent_prompt",
+      "status": "success",
+      "skip": null,
+      "attempts": 1,
+      "sessions": 1,
+      "duration_s": 410,
+      "step_no": 7,
+      "step_file": "step7-agent-step-10.md",
+      "output_keys": [
+        "reply",
+        "session_id",
+        "working_directory"
+      ],
+      "error_class": null,
+      "reply": "16k"
+    },
+    {
+      "id": "n11",
+      "kind": "agent_prompt",
+      "status": "success",
+      "skip": null,
+      "attempts": 1,
+      "sessions": 1,
+      "duration_s": 487,
+      "step_no": 8,
+      "step_file": "step8-agent-step-11.md",
+      "output_keys": [
+        "reply",
+        "session_id",
+        "working_directory"
+      ],
+      "error_class": null,
+      "reply": "16k"
+    }
+  ],
+  "routing": []
+}

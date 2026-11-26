@@ -1,0 +1,198 @@
+{
+  "id": "wf-compat-c",
+  "workspace_id": "ws-compat",
+  "name": "Compat C",
+  "description": "lorem elit labore minim nisi aute cillum cupidatat deserunt pretium maecenas donec senectus integer gravida odio porttitor sit eiusmod magna nostrud ea reprehenderit pariatur sunt id nunc purus pellentesque fames arcu placerat quam tellus adipiscing ut ad laboris duis esse occaecat officia curabitur viverra eleifend tristique egestas ultrices volutpat nullam dolor do dolore quis ex in nulla proident anim lacus lacinia sapien malesuada vivamus fusce mauris justo consectetur incididunt enim ullamco consequat velit sint qui laborum risus scelerisque morbi turpis bibendum eu potenti ipsum sed et veniam",
+  "instructions": "",
+  "graph": {
+    "nodes": [
+      {
+        "id": "n1",
+        "kind": "manual_trigger",
+        "name": "Start 1",
+        "x": 40,
+        "y": 30,
+        "params": {}
+      },
+      {
+        "id": "n2",
+        "kind": "prepare_context",
+        "name": "Prepare 2",
+        "x": 300,
+        "y": 30,
+        "params": {
+          "require": false
+        }
+      },
+      {
+        "id": "n3",
+        "kind": "agent_prompt",
+        "name": "Agent step 3",
+        "x": 560,
+        "y": 30,
+        "params": {
+          "provider": "claude",
+          "prompt": "[compat]\nlorem elit labore minim nisi aute cillum cupidatat deserunt pretium maecenas donec senectus integer gravida odio porttitor sit eiusmod magna nostrud ea reprehenderit pariatur sunt id nunc purus pellentesque fames arcu placerat quam tellus adipiscing ut ad laboris duis esse occaecat officia curabitur viverra eleifend tristique egestas ultrices volutpat nullam dolor do dolore quis ex in nulla proident anim lacus lacinia sapien malesuada vivamus fusce mauris justo consectetur incididunt enim ullamco consequat velit sint qui laborum risus scelerisque morbi turpis bibendum eu potenti ipsum sed et veniam aliquip irure fugiat non mollit tincidunt accumsan vitae netus feugiat dictum facilisis massa amet tempor aliqua exercitation commodo voluptate excepteur culpa est vel faucibus habitant ac felis orci suspendisse lorem elit labore minim nisi aute cillum cupidatat deserunt pretium maecenas donec senectus integer gravida odio porttitor sit eiusmod magna nostrud ea reprehenderit pariatur sunt id nunc purus pellentesque fames arcu placerat quam tellus adipiscing ut ad laboris duis esse occaecat officia curabitur viverra eleifend tristique egestas ultrices volutpat nullam dolor do dolore quis ex in nulla proident anim lacus lacinia sapien malesuada vivamus fusce mauris justo consectetur incididunt enim ullamco consequat velit sint qui laborum risus scelerisque morbi turpis bibendum eu potenti ipsum sed et veniam aliquip irure fugiat non mollit tincidunt accumsan vitae netus feugiat dictum facilisis massa amet tempor aliqua exercitation commodo voluptate excepteur culpa est vel faucibus habitant ac felis orci suspendisse lorem elit labore minim nisi aute cillum cupidatat deserunt pretium maecenas donec senectus integer gravida odio porttitor sit eiusmod magna nostrud ea reprehenderit pariatur sunt id nunc purus pellentesque fames arcu placerat quam tellus adipiscing ut ad laboris duis esse occaecat officia curabitur viverra eleifend tristique egestas ultrices volutpat nullam dolor do dolore quis ex in nulla proident anim lacus lacinia sapien malesuada vivamus fusce mauris justo consectetur incididunt enim ullamco consequat velit sint qui laborum risus scelerisque morbi turpis bibendum eu potenti ipsum sed et veniam aliquip irure fugiat non mollit tincidunt accumsan vitae netus feugiat dictum facilisis massa amet tempor aliqua exercitation commodo voluptate excepteur culpa est vel faucibus habitant ac felis orci suspendisse lorem elit labore minim nisi aute cillum cupidatat deserunt pretium maecenas donec senectus integer gravida odio porttitor sit eiusmod magna nostrud ea reprehenderit pariatur sunt id nunc purus pellentesque fames arcu placerat quam tellus adipiscing ut ad laboris duis esse occaecat officia curabitur viverra eleifend tristique egestas ultrices volutpat nullam dolor do dolore quis ex in nulla proident anim lacus lacinia sapien malesuada vivamus fusce mauris justo consectetur incididunt enim ullamco consequat velit sint qui laborum risus scelerisque morbi turpis bibendum eu potenti ipsum sed et veniam aliquip irure fugiat non mollit tincidunt accumsan vitae netus feugiat dictum facilisis massa amet tempor aliqua exercitation commodo voluptate excepteur culpa est vel faucibus habitant ac felis orci suspendisse lorem elit labore minim nisi aute cillum cupidatat deserunt pretium maecenas donec senectus integer gravida odio porttitor sit eiusmod magna nostrud ea reprehenderit pariatur sunt id nunc purus pellentesque fames arcu placerat quam tellus adipiscing ut ad laboris duis esse occaecat officia curabitur viverra eleifend tristique egestas ultrices volutpat nullam dolor do dolore quis ex in nulla proident anim lacus lacinia sapien malesuada vivamus fusce mauris justo consectetur incididunt enim ullamco consequat velit sint qui laborum risus scelerisque morbi turpis bibendum eu potenti ipsum sed et veniam aliquip irure fugiat non mollit tincidunt accumsan vitae netus feugiat dictum facilisis massa amet tempor aliqua exercitation commodo voluptate excepteur culpa est vel faucibus habitant ac felis orci suspendisse lorem elit labore minim nisi aute cillum cupidatat deserunt pretium maecenas donec senectus integer gravida odio porttitor sit eiusmod magna nostrud ea reprehenderit pariatur sunt id nunc purus pellentesque fames arcu placerat quam tellus adipiscing ut ad laboris duis esse occaecat officia curabitur viverra eleifend tristique egestas ultrices volutpat nullam dolor do dolore quis ex in nulla proident anim lacus lacinia sapien malesuada vivamus fusce mauris justo consectetur incididunt enim ullamco consequat velit sint qui laborum risus scelerisque morbi turpis bibendum eu potenti ipsum sed et veniam aliquip irure fugiat non mollit tincidunt accumsan vitae netus feugiat dictum facilisis massa amet tempor aliqua exercitation commodo voluptate excepteur culpa est vel faucibus habitant ac felis orci suspendisse lorem elit labore minim nisi aute cillum cupidatat deserunt pretium maecenas donec senectus integer gravida odio porttitor sit eiusmod magna nostrud ea reprehenderit pariatur sunt id nunc purus pellentesque fames arcu placerat quam tellus adipiscing ut ad laboris duis esse occaecat officia curabitur viverra eleifend tristique egestas ultrices volutpat nullam dolor do dolore quis ex in nulla proident anim lacus lacinia sapien malesuada vivamus fusce mauris justo consectetur incididunt enim ullamco consequat velit sint qui laborum risus scelerisque morbi turpis bibendum eu potenti ipsum sed et veniam aliquip irure fugiat non mollit tincidunt accumsan vitae netus feugiat dictum facilisis massa amet tempor aliqua exercitation commodo voluptate excepteur culpa est vel faucibus habitant ac felis orci suspendisse lorem elit labore minim nisi aute cillum cupidatat deserunt pretium maecenas donec senectus integer gravida odio porttitor sit eiusmod magna nostrud ea reprehenderit pariatur sunt id nunc purus pellentesque fames arcu placerat quam tellus adipiscing ut ad laboris duis esse\nReferences: run-brief.md, repos.json, *.output.json, otto_get_pr, otto_list_prs\nOTTO_FAKE: @script\n"
+        }
+      },
+      {
+        "id": "n12",
+        "kind": "agent_prompt",
+        "name": "Agent step 12",
+        "x": 820,
+        "y": 30,
+        "params": {
+          "provider": "claude",
+          "skills": [
+            "missing-skill-1"
+          ],
+          "prompt": "[compat]\nlorem elit labore minim nisi aute cillum cupidatat deserunt pretium maecenas donec senectus integer gravida odio porttitor sit eiusmod magna nostrud ea reprehenderit pariatur sunt id nunc purus pellentesque fames arcu placerat quam tellus adipiscing ut ad laboris duis esse occaecat officia curabitur viverra eleifend tristique egestas ultrices volutpat nullam dolor do dolore quis ex in nulla proident anim lacus lacinia sapien malesuada vivamus fusce mauris justo consectetur incididunt enim ullamco consequat velit sint qui laborum risus scelerisque morbi turpis bibendum eu potenti ipsum sed et veniam aliquip irure fugiat non mollit tincidunt accumsan vitae netus feugiat dictum facilisis massa amet tempor aliqua exercitation commodo voluptate excepteur culpa est vel faucibus habitant ac felis orci suspendisse lorem elit labore minim nisi aute cillum cupidatat deserunt pretium maecenas donec senectus integer gravida odio porttitor sit eiusmod magna nostrud ea reprehenderit pariatur sunt id nunc purus pellentesque fames arcu placerat quam tellus adipiscing ut ad laboris duis esse occaecat officia curabitur viverra eleifend tristique egestas ultrices volutpat nullam dolor do dolore quis ex in nulla proident anim lacus lacinia sapien malesuada vivamus fusce mauris justo consectetur incididunt enim ullamco consequat velit sint qui laborum risus scelerisque morbi turpis bibendum eu potenti ipsum sed et veniam aliquip irure fugiat non mollit tincidunt accumsan vitae netus feugiat dictum facilisis massa amet tempor aliqua exercitation commodo voluptate excepteur culpa est vel faucibus habitant ac felis orci suspendisse lorem elit labore minim nisi aute cillum cupidatat deserunt pretium maecenas donec senectus integer gravida odio porttitor sit eiusmod magna nostrud ea reprehenderit pariatur sunt id nunc purus pellentesque fames arcu placerat quam tellus adipiscing ut ad laboris duis esse occaecat officia curabitur viverra eleifend tristique egestas ultrices volutpat nullam dolor do dolore quis ex in nulla proident anim lacus lacinia sapien malesuada vivamus fusce mauris justo consectetur incididunt enim ullamco consequat velit sint qui laborum risus scelerisque morbi turpis bibendum eu potenti ipsum sed et veniam aliquip irure fugiat non mollit tincidunt accumsan vitae netus feugiat dictum facilisis massa amet tempor aliqua exercitation commodo voluptate excepteur culpa est vel faucibus habitant ac felis orci suspendisse lorem elit labore minim nisi aute cillum cupidatat\nReferences: repos.json\nOTTO_FAKE: @script\n"
+        }
+      },
+      {
+        "id": "n5",
+        "kind": "review_run",
+        "name": "Review 5",
+        "x": 1080,
+        "y": 30,
+        "params": {
+          "threshold": 80,
+          "require_pass": false,
+          "reviewers": [
+            {
+              "lens": "correctness-review",
+              "providers": [
+                "claude"
+              ]
+            },
+            {
+              "lens": "missing-lens-2",
+              "providers": [
+                "claude"
+              ]
+            }
+          ],
+          "summarizer": {
+            "provider": "claude",
+            "instructions": "lorem elit labore minim nisi aute cillum cupidatat deserunt pretium maecenas donec senectus integer gravida odio porttitor sit eiusmod magna nostrud ea reprehenderit pariatur sunt id nunc purus pellentesque fames arcu placerat quam tellus adipiscing ut ad laboris duis esse occaecat officia curabitur viverra eleifend tristique egestas ultrices volutpat nullam dolor do dolore quis ex in nulla proident anim lacus lacinia sapien malesuada vivamus fusce mauris justo consectetur incididunt enim ullamco consequat velit sint qui laborum risus scelerisque morbi turpis bibendum eu potenti ipsum sed et veniam aliquip irure fugiat non mollit tincidunt accumsan vitae netus feugiat dictum facilisis massa amet tempor aliqua exercitation commodo voluptate excepteur culpa est vel faucibus habitant ac felis orci suspendisse lorem elit labore minim nisi aute cillum cupidatat deserunt pretium maecenas donec senectus integer gravida odio porttitor sit eiusmod magna nostrud ea reprehenderit pariatur sunt id nunc purus pellentesque fames arcu placerat quam tellus adipiscing ut ad laboris duis esse occaecat officia curabitur viverra eleifend tristique egestas ultrices volutpat nullam dolor do dolore quis ex in nulla proident anim lacus lacinia sapien malesuada vivamus fusce mauris justo consectetur incididunt enim ullamco consequat velit sint qui laborum risus scelerisque morbi turpis bibendum eu potenti ipsum sed et veniam aliquip irure fugiat non mollit tincidunt accumsan vitae netus feugiat dictum facilisis massa amet tempor aliqua exercitation commodo voluptate excepteur culpa est vel faucibus habitant ac felis orci suspendisse lorem elit labore minim nisi aute cillum cupidatat deserunt pretium maecenas donec senectus integer gravida odio porttitor sit eiusmod magna nostrud ea reprehenderit pariatur sunt id nunc purus pellentesque fames arcu placerat quam tellus adipiscing ut ad laboris duis esse occaecat officia curabitur viverra eleifend tristique egestas ultrices volutpat nullam dolor do dolore quis ex in nulla proident anim lacus lacinia sapien malesuada vivamus fusce mauris justo consectetur incididunt enim ullamco consequat velit sint qui laborum risus scelerisque morbi turpis bibendum eu potenti ipsum sed et veniam aliquip irure fugiat non mollit tincidunt accumsan vitae netus feugiat dictum facilisis massa amet tempor aliqua exercitation commodo voluptate excepteur culpa est vel faucibus habitant ac felis orci suspendisse lorem elit labore minim nisi aute cillum cupidatat deserunt pretium maecenas donec senectus integer gravida odio porttitor sit eiusmod magna nostrud ea reprehenderit pariatur sunt id nunc purus pellentesque fames arcu placerat quam tellus adipiscing ut ad laboris duis esse occaecat officia curabitur viverra eleifend tristique egestas ultrices volutpat nullam dolor do dolore quis ex in nulla proident anim lacus lacinia sapien malesuada vivamus fusce mauris justo consectetur incididunt enim ullamco consequat velit sint qui laborum risus scelerisque morbi turpis bibendum eu potenti ipsum sed et veniam aliquip irure fugiat non mollit tincidunt accumsan vitae netus feugiat dictum facilisis massa amet tempor aliqua exercitation commodo voluptate excepteur culpa est vel faucibus habitant ac felis orci suspendisse lorem elit labore minim nisi aute cillum cupidatat deserunt pretium maecenas donec senectus integer gravida odio porttitor sit eiusmod magna nostrud ea reprehenderit pariatur sunt id nunc purus pellentesque fames arcu placerat quam tellus adipiscing ut ad laboris duis esse occaecat officia curabitur viverra eleifend tristique egestas ultrices volutpat nullam dolor do dolore quis ex in nulla proident anim lacus lacinia sapien malesuada vivamus fusce mauris justo consectetur incididunt enim ullamco consequat velit sint qui laborum risus scelerisque morbi turpis bibendum eu potenti ipsum sed et veniam aliquip irure fugiat non mollit tincidunt accumsan vitae netus feugiat dictum facilisis massa amet tempor aliqua exercitation commodo voluptate excepteur culpa est vel faucibus habitant ac felis orci suspendisse lorem elit labore minim nisi aute cillum cupidatat deserunt pretium maecenas donec senectus integer gravida odio porttitor sit eiusmod magna nostrud ea reprehenderit pariatur sunt id nunc purus pellentesque fames arcu placerat quam tellus adipiscing ut ad laboris duis esse occaecat officia curabitur viverra eleifend tristique egestas ultrices volutpat nullam dolor do dolore quis ex in nulla proident anim lacus lacinia sapien malesuada vivamus fusce mauris justo consectetur incididunt enim ullamco consequat velit sint qui laborum risus scelerisque morbi turpis bibendum eu potenti ipsum sed et veniam aliquip irure fugiat non mollit tincidunt accumsan vitae netus feugiat dictum facilisis massa amet tempor aliqua exercitation commodo voluptate excepteur culpa est vel faucibus habitant ac felis orci suspendisse lorem elit labore minim nisi aute cillum cupidatat deserunt pretium maecenas donec senectus integer gravida odio porttitor sit eiusmod magna nostrud ea reprehenderit pariatur sunt id nunc purus pellentesque fames arcu placerat quam tellus adipiscing ut ad laboris duis esse occaecat officia curabitur viverra eleifend tristique egestas ultrices volutpat nullam dolor do dolore quis ex in nulla proident anim lacus lacinia sapien malesuada vivamus fusce mauris justo consectetur incididunt enim ullamco consequat velit sint qui laborum risus scelerisque morbi turpis bibendum eu potenti ipsum sed et veniam aliquip irure fugiat non mollit tincidunt accumsan vitae netus feugiat dictum facilisis massa amet tempor aliqua exercitation commodo voluptate excepteur culpa est vel faucibus habitant ac felis orci suspendisse lorem elit labore minim nisi aute cillum cupidatat deserunt pretium maecenas donec senectus integer gravida odio porttitor sit eiusmod magna nostrud ea reprehenderit pariatur sunt id nunc purus pellentesque fames arcu placerat quam tellus adipiscing ut ad laboris duis esse"
+          },
+          "scoring": {
+            "bug": 25,
+            "warn": 3,
+            "info": 0
+          },
+          "timeout_s": 7200,
+          "mode": "orchestrator"
+        }
+      },
+      {
+        "id": "n7",
+        "kind": "condition",
+        "name": "Condition 7",
+        "x": 40,
+        "y": 210,
+        "params": {
+          "expr": "passed == true"
+        }
+      },
+      {
+        "id": "n8",
+        "kind": "channel_notify",
+        "name": "Notify 8",
+        "x": 300,
+        "y": 210,
+        "params": {
+          "message": "✅ elit labore minim nisi — {jira_ticket} · {working_directory} (aute `{base}`)\ncillum {score}/cupidatat (deserunt {threshold}) · {total} pretium — {blocking} maecenas, {advisory} donec\nsenectus `{review_id}` · integer gravida odio porttitor sit eiusmod."
+        }
+      },
+      {
+        "id": "n9",
+        "kind": "channel_notify",
+        "name": "Notify 9",
+        "x": 560,
+        "y": 210,
+        "params": {
+          "message": "❌ elit labore minim nisi — {jira_ticket} · {working_directory} (aute `{base}`)\ncillum {score}/cupidatat (deserunt {threshold}) · {total} pretium — {blocking} maecenas, {advisory} donec\nsenectus `{review_id}` · integer gravida odio porttitor sit."
+        }
+      },
+      {
+        "id": "n6",
+        "kind": "agent_prompt",
+        "name": "Agent step 6",
+        "x": 820,
+        "y": 210,
+        "params": {
+          "provider": "claude",
+          "prompt": "[compat]\nlorem elit labore minim nisi aute cillum cupidatat deserunt pretium maecenas donec senectus integer gravida odio porttitor sit eiusmod magna nostrud ea reprehenderit pariatur sunt id nunc purus pellentesque fames arcu placerat quam tellus adipiscing ut ad laboris duis esse occaecat officia curabitur viverra eleifend tristique egestas ultrices volutpat nullam dolor do dolore quis ex in nulla proident anim lacus lacinia sapien malesuada vivamus fusce mauris justo consectetur incididunt enim ullamco consequat velit sint qui laborum risus scelerisque morbi turpis bibendum eu potenti ipsum sed et veniam aliquip irure fugiat non mollit tincidunt accumsan vitae netus feugiat dictum facilisis massa amet tempor aliqua exercitation commodo voluptate excepteur culpa est vel faucibus habitant ac felis orci suspendisse lorem elit labore minim nisi aute cillum cupidatat deserunt pretium maecenas donec senectus integer gravida odio porttitor sit eiusmod magna nostrud ea reprehenderit pariatur sunt id nunc purus pellentesque fames arcu placerat quam tellus adipiscing ut ad laboris duis esse occaecat officia curabitur viverra eleifend tristique egestas ultrices volutpat nullam dolor do dolore quis ex in nulla proident anim lacus lacinia sapien malesuada vivamus fusce mauris justo consectetur incididunt enim ullamco consequat velit sint qui laborum risus scelerisque morbi turpis bibendum eu potenti ipsum sed et veniam aliquip irure fugiat non mollit tincidunt accumsan vitae netus feugiat dictum facilisis massa amet tempor aliqua exercitation commodo voluptate excepteur culpa est vel faucibus habitant ac felis orci suspendisse lorem elit labore minim nisi aute cillum cupidatat deserunt pretium maecenas donec senectus integer gravida odio porttitor sit eiusmod magna nostrud ea reprehenderit pariatur sunt id nunc purus pellentesque fames arcu placerat quam tellus adipiscing ut ad laboris duis esse occaecat officia curabitur viverra eleifend tristique egestas ultrices volutpat nullam dolor do dolore quis ex in nulla proident anim lacus lacinia sapien malesuada vivamus fusce mauris justo consectetur incididunt enim ullamco consequat velit sint qui laborum risus scelerisque morbi turpis bibendum eu potenti ipsum sed et veniam aliquip irure fugiat non mollit tincidunt accumsan vitae netus feugiat dictum facilisis massa amet tempor aliqua exercitation commodo voluptate excepteur culpa est vel faucibus habitant ac felis orci suspendisse lorem elit labore minim nisi aute cillum cupidatat deserunt pretium maecenas donec senectus integer gravida odio porttitor sit eiusmod magna nostrud ea reprehenderit pariatur sunt id nunc purus pellentesque fames arcu placerat quam tellus adipiscing ut ad laboris duis esse occaecat officia curabitur viverra eleifend tristique egestas ultrices volutpat nullam dolor do dolore quis ex in nulla proident anim lacus lacinia sapien malesuada vivamus fusce mauris justo consectetur incididunt enim ullamco consequat velit sint qui laborum risus scelerisque morbi turpis bibendum eu potenti ipsum sed et veniam aliquip irure fugiat non mollit tincidunt accumsan vitae netus feugiat dictum facilisis massa amet tempor aliqua exercitation commodo voluptate excepteur culpa est vel faucibus habitant ac felis orci suspendisse lorem elit labore minim nisi aute cillum cupidatat deserunt pretium maecenas donec senectus integer gravida odio porttitor sit eiusmod magna nostrud ea reprehenderit pariatur sunt id nunc purus pellentesque fames arcu placerat quam tellus adipiscing ut ad laboris duis esse occaecat officia curabitur viverra eleifend tristique egestas ultrices volutpat nullam dolor do dolore quis ex in nulla proident anim lacus lacinia sapien malesuada vivamus fusce mauris justo consectetur incididunt enim ullamco consequat velit sint qui laborum risus scelerisque morbi turpis bibendum eu potenti ipsum sed et veniam aliquip irure fugiat non mollit tincidunt accumsan vitae netus feugiat dictum facilisis massa amet tempor aliqua exercitation commodo voluptate excepteur culpa est vel faucibus habitant ac felis orci suspendisse lorem elit labore minim nisi aute cillum cupidatat deserunt pretium maecenas donec senectus integer gravida odio porttitor sit eiusmod magna nostrud ea reprehenderit pariatur sunt id nunc purus pellentesque fames arcu placerat quam tellus adipiscing ut ad laboris duis esse occaecat officia curabitur viverra eleifend tristique egestas ultrices volutpat nullam dolor do dolore quis ex in nulla proident anim lacus lacinia sapien malesuada vivamus fusce mauris justo consectetur incididunt enim ullamco consequat velit sint qui laborum risus scelerisque morbi turpis bibendum eu potenti ipsum sed et veniam aliquip irure fugiat non mollit tincidunt accumsan vitae netus feugiat dictum facilisis massa amet tempor aliqua exercitation commodo voluptate excepteur culpa est vel faucibus habitant ac felis orci suspendisse lorem elit labore minim nisi aute cillum cupidatat deserunt pretium maecenas donec senectus integer gravida odio porttitor sit eiusmod magna nostrud ea reprehenderit pariatur sunt id nunc purus pellentesque fames arcu placerat quam tellus adipiscing ut ad laboris duis esse occaecat officia curabitur viverra eleifend tristique egestas ultrices volutpat nullam dolor do dolore quis ex in nulla proident anim lacus lacinia sapien malesuada vivamus fusce mauris justo consectetur incididunt enim ullamco consequat velit sint qui laborum risus scelerisque morbi turpis bibendum eu potenti ipsum sed et veniam aliquip irure fugiat non mollit tincidunt accumsan vitae netus feugiat dictum facilisis massa amet tempor aliqua exercitation commodo voluptate excepteur culpa est vel faucibus habitant ac felis orci suspendisse lorem elit labore minim nisi aute cillum cupidatat deserunt pretium maecenas donec senectus integer gravida odio porttitor sit eiusmod magna nostrud ea reprehenderit pariatur sunt id nunc purus pellentesque fames arcu placerat quam tellus adipiscing ut ad laboris duis esse occaecat officia curabitur viverra eleifend tristique egestas ultrices volutpat nullam dolor do dolore quis ex in nulla proident anim lacus lacinia sapien malesuada vivamus fusce mauris justo consectetur incididunt enim ullamco consequat velit sint qui laborum risus scelerisque morbi turpis bibendum eu potenti ipsum sed et veniam aliquip irure fugiat non mollit tincidunt accumsan vitae netus feugiat dictum facilisis massa amet tempor aliqua exercitation commodo voluptate excepteur culpa est vel faucibus habitant ac felis orci suspendisse lorem elit labore minim nisi aute cillum cupidatat deserunt pretium maecenas donec senectus integer gravida odio porttitor sit eiusmod magna nostrud ea reprehenderit pariatur sunt id nunc purus pellentesque fames arcu placerat quam tellus adipiscing ut ad laboris duis esse occaecat officia curabitur viverra eleifend tristique egestas ultrices volutpat nullam dolor do dolore quis ex in nulla proident anim lacus lacinia sapien malesuada vivamus fusce mauris justo consectetur incididunt enim ullamco consequat velit sint qui laborum risus scelerisque morbi turpis bibendum eu potenti ipsum sed et veniam aliquip irure fugiat non mollit tincidunt accumsan vitae netus feugiat dictum facilisis massa amet tempor aliqua exercitation commodo voluptate excepteur culpa est vel faucibus habitant ac felis orci suspendisse lorem elit labore minim nisi aute cillum cupidatat deserunt pretium maecenas donec senectus integer gravida odio porttitor sit eiusmod magna nostrud ea reprehenderit pariatur sunt id nunc purus pellentesque fames arcu placerat quam tellus adipiscing ut ad laboris duis esse occaecat officia curabitur viverra eleifend tristique egestas ultrices volutpat nullam dolor do dolore quis ex in nulla proident anim lacus lacinia sapien malesuada vivamus fusce mauris justo consectetur incididunt enim ullamco consequat velit sint qui laborum risus scelerisque morbi turpis bibendum eu potenti ipsum sed et veniam aliquip irure fugiat non mollit tincidunt accumsan vitae netus feugiat dictum facilisis massa amet tempor aliqua exercitation commodo voluptate excepteur culpa est vel faucibus habitant ac felis orci suspendisse lorem elit labore minim nisi aute cillum cupidatat deserunt pretium maecenas donec senectus integer gravida odio porttitor sit eiusmod magna nostrud ea reprehenderit pariatur sunt id nunc purus pellentesque fames arcu placerat quam tellus adipiscing ut ad laboris duis esse occaecat officia curabitur viverra eleifend tristique egestas ultrices volutpat nullam dolor do dolore quis ex in nulla proident anim lacus lacinia sapien malesuada vivamus fusce mauris justo consectetur incididunt enim ullamco consequat velit sint qui laborum risus scelerisque morbi turpis bibendum eu potenti ipsum sed et veniam aliquip irure fugiat non mollit tincidunt accumsan vitae netus feugiat dictum facilisis massa amet tempor aliqua exercitation commodo voluptate excepteur culpa est vel faucibus habitant ac felis orci suspendisse lorem elit labore minim nisi aute cillum cupidatat deserunt pretium maecenas donec senectus integer gravida odio porttitor sit eiusmod magna nostrud ea reprehenderit pariatur sunt id nunc purus pellentesque fames arcu placerat quam tellus adipiscing ut ad laboris duis esse occaecat officia curabitur viverra eleifend tristique egestas ultrices volutpat nullam dolor do dolore quis ex in nulla proident anim lacus lacinia sapien malesuada vivamus fusce mauris justo consectetur incididunt enim ullamco consequat velit sint qui laborum risus scelerisque morbi turpis bibendum eu potenti ipsum sed et veniam aliquip irure fugiat non mollit tincidunt accumsan vitae netus feugiat dictum facilisis massa amet tempor aliqua exercitation commodo voluptate excepteur culpa est vel faucibus habitant ac felis orci suspendisse lorem elit labore minim nisi aute cillum cupidatat deserunt pretium maecenas donec senectus integer gravida odio porttitor sit eiusmod magna nostrud ea reprehenderit pariatur sunt id nunc purus pellentesque fames arcu placerat quam tellus adipiscing ut ad laboris duis esse occaecat officia curabitur viverra eleifend tristique egestas ultrices volutpat nullam dolor do dolore quis ex in nulla proident anim lacus lacinia sapien malesuada vivamus fusce mauris justo consectetur incididunt enim ullamco consequat velit sint qui laborum risus scelerisque morbi turpis bibendum eu potenti ipsum sed et veniam aliquip irure fugiat non mollit tincidunt accumsan vitae netus feugiat dictum facilisis massa amet tempor aliqua exercitation commodo voluptate excepteur culpa est vel faucibus habitant ac felis orci suspendisse lorem elit labore minim nisi aute cillum cupidatat deserunt pretium maecenas donec senectus integer gravida odio porttitor sit eiusmod magna nostrud ea reprehenderit pariatur sunt id nunc purus pellentesque fames arcu placerat quam tellus adipiscing ut ad laboris duis esse occaecat officia curabitur viverra eleifend tristique egestas ultrices volutpat nullam dolor do dolore quis ex in nulla proident anim lacus lacinia sapien malesuada vivamus fusce mauris justo consectetur incididunt enim ullamco consequat velit sint qui laborum risus scelerisque morbi turpis bibendum eu potenti ipsum sed et veniam aliquip irure fugiat non mollit tincidunt accumsan vitae netus feugiat dictum facilisis massa amet tempor aliqua exercitation commodo voluptate excepteur culpa est vel faucibus habitant ac felis orci suspendisse lorem elit labore minim nisi aute cillum cupidatat deserunt pretium maecenas donec senectus integer gravida odio porttitor sit eiusmod magna nostrud ea reprehenderit pariatur sunt id nunc purus pellentesque fames arcu placerat quam tellus adipiscing ut ad laboris duis esse occaecat officia curabitur viverra eleifend tristique egestas ultrices volutpat nullam dolor do dolore quis ex in nulla proident anim lacus lacinia sapien malesuada vivamus fusce mauris justo consectetur incididunt enim ullamco consequat velit sint qui laborum risus scelerisque\nReferences: repos.json, step3, otto.comment_pr, otto.get_pr, otto_comment_pr, otto_get_pr, otto_git_pr_review\nOTTO_FAKE: @script\n"
+        }
+      },
+      {
+        "id": "n10",
+        "kind": "log",
+        "name": "Log 10",
+        "x": 1080,
+        "y": 210,
+        "params": {}
+      }
+    ],
+    "edges": [
+      {
+        "id": "e1",
+        "source": "n1",
+        "target": "n2"
+      },
+      {
+        "id": "e2",
+        "source": "n2",
+        "target": "n3"
+      },
+      {
+        "id": "e3",
+        "source": "n3",
+        "target": "n12"
+      },
+      {
+        "id": "e4",
+        "source": "n12",
+        "target": "n5"
+      },
+      {
+        "id": "e5",
+        "source": "n5",
+        "target": "n7"
+      },
+      {
+        "id": "e6",
+        "source": "n7",
+        "target": "n8",
+        "condition": "output.result == true"
+      },
+      {
+        "id": "e7",
+        "source": "n7",
+        "target": "n9",
+        "condition": "output.result == false"
+      },
+      {
+        "id": "e8",
+        "source": "n8",
+        "target": "n6"
+      },
+      {
+        "id": "e9",
+        "source": "n9",
+        "target": "n6"
+      },
+      {
+        "id": "e10",
+        "source": "n6",
+        "target": "n10"
+      }
+    ]
+  },
+  "created_by": "user-compat",
+  "created_at": "2026-01-01T00:00:00Z",
+  "updated_at": "2026-01-01T00:07:38Z",
+  "version": 2,
+  "on_restart": "resume"
+}

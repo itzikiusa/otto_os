@@ -451,6 +451,7 @@ jobs:
           python3 -B -m unittest discover -s scripts -p 'test_ci_cargo_cache.py'
           python3 -B -m unittest discover -s scripts -p 'test_ci_route.py'
           python3 -B -m unittest discover -s scripts -p 'test_repo_guards.py'
+          python3 -B -m unittest discover -s scripts -p 'test_scrub_workflow_export.py'
 
       - name: Repo static guards (UI + control bytes)
         working-directory: .
