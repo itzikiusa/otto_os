@@ -166,12 +166,13 @@ pub async fn continue_loop(
     let kept = loop_.worktree_path.clone();
     let built = if loop_.config.mode == "research" {
         spec.work = GoalWork::Research;
-        let dir = kept.unwrap_or_else(|| {
-            let dir = ctx.data_dir.join("goal-loops").join(&loop_.id).join("work");
-            dir.to_string_lossy().into_owned()
-        });
+        let work = ctx.data_dir.join("goal-loops").join(&loop_.id).join("work");
+        let dir = kept.map_or(work, std::path::PathBuf::from);
+        // No kept folder on disk: `research_dir: true` (a fresh research folder).
         let mut built = goal::goal_workflow(&spec, None);
-        built.input["research_dir"] = dir.into();
+        if tokio::fs::metadata(&dir).await.is_ok_and(|m| m.is_dir()) {
+            built.input["research_dir"] = dir.to_string_lossy().into_owned().into();
+        }
         built
     } else {
         let r = repo_by_path(ctx, ws_id, &loop_.repo_path)
