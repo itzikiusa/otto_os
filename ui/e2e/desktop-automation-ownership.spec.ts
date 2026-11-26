@@ -11,23 +11,23 @@ function loop(id: string) {
   };
 }
 
-test('goal-loop Stop remains bound to the loop confirmed before a route change', async ({ page }) => {
+test('older goal loop Delete history remains bound to the loop confirmed before a route change', async ({ page }) => {
   const mutations: string[] = [];
   await page.addInitScript(() => { localStorage.setItem('otto_base', location.origin); localStorage.setItem('otto_token', 'fixture'); });
   await page.route('**/api/v1/**', async (route) => {
     const path = new URL(route.request().url()).pathname;
-    if (path.endsWith('/stop')) { mutations.push(path); return route.fulfill({ json: { ...loop('A'), status: 'stopped' } }); }
+    if (route.request().method() === 'DELETE') { mutations.push(path); return route.fulfill({ status: 204, body: '' }); }
     if (/\/goal-loops\/[AB]$/.test(path)) return route.fulfill({ json: { loop: loop(path.slice(-1)), iterations: [] } });
     return route.fulfill({ json: [] });
   });
   await page.goto('/e2e/fixtures/automation-ownership.html');
   await expect(page.getByRole('heading', { name: 'Loop A', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'More actions', exact: true }).click();
-  await page.getByRole('menuitem', { name: 'Stop loop…', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Delete history…', exact: true }).click();
   const sheet = page.getByRole('dialog'); await expect(sheet).toBeVisible();
   await page.evaluate(() => window.dispatchEvent(new Event('review-target-change')));
-  await sheet.getByRole('button', { name: 'Stop loop', exact: true }).click();
-  await expect.poll(() => mutations).toEqual(['/api/v1/goal-loops/A/stop']);
+  await sheet.getByRole('button', { name: 'Delete', exact: true }).click();
+  await expect.poll(() => mutations).toEqual(['/api/v1/goal-loops/A']);
   await expect(page.getByRole('heading', { name: 'Loop B', exact: true })).toBeVisible();
   await expectNoHorizontalOverflow(page);
 });
