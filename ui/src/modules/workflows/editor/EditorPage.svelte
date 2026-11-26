@@ -26,6 +26,8 @@
   import TriggersPanel from '../TriggersPanel.svelte';
   import StepInspector from '../inspector/StepInspector.svelte';
   import { InspectorOptions } from '../inspector/options.svelte';
+  import { withParam } from '../inspector/util';
+  import Modal from '../../../lib/components/Modal.svelte';
   import StartRunModal from '../runs/StartRunModal.svelte';
   import { workflowsUi } from '../workflowsUiState.svelte';
   import { autoLayout } from './autoLayout';
@@ -50,6 +52,8 @@
   let starting = $state(false);
   let saving = $state(false);
   let instructions = $state('');
+  /** "Open the prompt in a larger editor": one text param of the selected step. */
+  let zoom = $state<{ field: string; label: string } | null>(null);
   const pickers = new InspectorOptions();
   const defaultProvider = $derived(defaultAgentProvider());
   const phone = $derived(viewport.isPhone);
@@ -84,6 +88,7 @@
   $effect(() => guardUnsaved(() => dirty, { what: wf ? `“${wf.name}”` : 'this workflow' }));
 
   const selected = $derived(selectedId ? graph.nodes.find((n) => n.id === selectedId) ?? null : null);
+  const zoomText = $derived(zoom && selected ? String((selected.params as Record<string, unknown> | null)?.[zoom.field] ?? '') : '');
   const invalid = $derived(Object.fromEntries(issues.filter((i) => i.node_id).map((i) => [i.node_id!, i.message])));
   const problems = $derived([...blockers, ...issues.map((i) => i.message)]);
 
@@ -283,7 +288,7 @@
     <PhoneOutline {graph} {triggers} {defaultProvider} openId={selectedId} onopen={openSheet} oncancel={cancelSheet} ondone={() => void doneSheet()} {saving}>
       {#snippet sheet(id)}
         {@const n = graph.nodes.find((x) => x.id === id)}
-        {#if n}<StepInspector node={n} {graph} {types} wsId={wf?.workspace_id ?? ''} {pickers} {defaultProvider} workflowName={wf?.name} onedit={(m) => { m(n); dirty = true; }} onzoom={() => {}} />{/if}
+        {#if n}<StepInspector node={n} {graph} {types} wsId={wf?.workspace_id ?? ''} {pickers} {defaultProvider} workflowName={wf?.name} onedit={(m) => { m(n); dirty = true; }} onzoom={(field, label) => (zoom = { field, label })} />{/if}
       {/snippet}
     </PhoneOutline>
   {:else}
@@ -323,7 +328,7 @@
           </LoadState>
         {:else if selected}
           {#key selected.id}
-            <StepInspector node={selected} {graph} {types} wsId={wf.workspace_id} {pickers} {defaultProvider} workflowName={wf.name} onedit={edit} onzoom={() => {}} />
+            <StepInspector node={selected} {graph} {types} wsId={wf.workspace_id} {pickers} {defaultProvider} workflowName={wf.name} onedit={edit} onzoom={(field, label) => (zoom = { field, label })} />
           {/key}
         {:else}
           <h2 class="ed-h">{wf.name}</h2>
@@ -336,6 +341,13 @@
     </div>
   {/if}
 </PageBody>
+
+{#if zoom && selected}
+  <Modal title={`${zoom.label} · ${selected.name}`} width={900} onclose={() => (zoom = null)}>
+    <textarea dir="auto" class="ed-instr" rows="28" aria-label={zoom.label} value={zoomText}
+      oninput={(e) => { const v = e.currentTarget.value; const f = zoom!.field; edit((n) => (n.params = withParam(n.params, f, v))); }}></textarea>
+  </Modal>
+{/if}
 
 {#if starting && wf}
   <StartRunModal workflow={{ ...wf, graph }} beforeRun={async () => !dirty || (await save())} onclose={() => (starting = false)} />
