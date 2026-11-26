@@ -78,6 +78,9 @@ pub struct Attention {
     /// `usage_limit`: when the provider's limit resets.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resets_at: Option<DateTime<Utc>>,
+    /// `verify`: the criterion a person must record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub criterion_id: Option<String>,
 }
 
 pub const ATTENTION_TEXT_MAX: usize = 300;
@@ -92,6 +95,7 @@ impl Attention {
             thread_id: None,
             request_id: None,
             resets_at: None,
+            criterion_id: None,
         }
     }
 }
@@ -230,5 +234,12 @@ mod tests {
             json.get("via").is_none(),
             "absent optionals are not written"
         );
+        let verify = Attention {
+            criterion_id: Some("tests-pass".into()),
+            ..Attention::new(AttentionKind::Verify, "Check it", Utc::now())
+        };
+        let json = serde_json::to_value(&verify).unwrap();
+        assert_eq!(json["criterion_id"], "tests-pass");
+        assert_eq!(serde_json::from_value::<Attention>(json).unwrap(), verify);
     }
 }
