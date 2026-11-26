@@ -323,18 +323,11 @@ async fn review_config(
         cfg.agents
             .push(checks_review_agent(&default_provider, check_specs));
     }
-    if p.get("cross_provider_check").is_some() || p.get("previous_review_id").is_some() {
+    if otto_review::engine::has_node_review_params(p) {
         let provider = crate::modules::default_review_provider(ctx).await;
         let cfg = cfg_override
             .get_or_insert_with(|| crate::modules::workflow_review_config(&provider, &[], &[]));
-        cfg.cross_provider_check = p
-            .get("cross_provider_check")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        cfg.previous_review_id = p
-            .get("previous_review_id")
-            .and_then(Value::as_str)
-            .map(str::to_string);
+        otto_review::engine::apply_node_review_params(cfg, p);
     }
     cfg_override
 }
@@ -549,26 +542,20 @@ async fn launch(
                 .map(str::to_owned)
         });
     let mut cfg_override = plan.cfg_override.clone();
-    let previous_id = match plan
-        .env
-        .run_input
-        .get(otto_workflows::rereview::PREVIOUS_RUN_KEY)
-        .and_then(Value::as_str)
-    {
-        Some(prior) => {
-            otto_workflows::review_history::previous_review_for_target(
-                &ctx.pool,
-                &plan.env.run_id,
-                prior,
-                &plan.node.id,
-                plan.scope.iter.is_some(),
-                repo_id,
-            )
-            .await
-        }
-        None => None,
-    };
-    if let Some(id) = previous_id {
+    let at = (
+        run_id,
+        node.id.as_str(),
+        plan.scope.iter.is_some(),
+        repo_id,
+        t_idx,
+    );
+    let previous = otto_workflows::review_history::previous_for_launch(
+        &ctx.pool,
+        &node.params,
+        &plan.env.run_input,
+        at,
+    );
+    if let Some(id) = previous.await {
         let mut cfg = match cfg_override.take() {
             Some(cfg) => cfg,
             None => crate::modules::review::load_review_config_for_repo(ctx, repo_id).await,
@@ -942,6 +929,8 @@ async fn resolve_targets(
             ));
         }
     }
+    // An explicit node `base` wins over every declared / threaded entry's (DR-103).
+    explicit_base(&mut targets, p);
     if targets.is_empty() {
         // Resilient repo resolution (design §B): explicit repo_id wins,
         // else derive it from the step's worktree_path / the run's
@@ -1031,13 +1020,7 @@ async fn await_review(
             if let Ok((review_status, agents)) = ctx.reviews_store.review_agents(review_id).await {
                 use otto_core::cancel::CancelRegistryExt;
                 use otto_core::domain::ReviewStatus as RS;
-                for a in &agents {
-                    if let Some(sid) = &a.session_id {
-                        if seen_sessions.insert(sid.clone()) {
-                            let _ = session_tx.send(AgentAssociation::Session(sid.clone()));
-                        }
-                    }
-                }
+                publish_rows(session_tx, review_id, &agents, &mut seen_sessions);
                 match review_status {
                     RS::Done => {
                         status = "done".into();
@@ -1112,16 +1095,57 @@ async fn await_review(
         // Fire-and-forget review: still surface any reviewer sessions that
         // have already spawned so they're attributable under this step.
         if let Ok((_, agents)) = ctx.reviews_store.review_agents(review_id).await {
-            for a in &agents {
-                if let Some(sid) = &a.session_id {
-                    if seen_sessions.insert(sid.clone()) {
-                        let _ = session_tx.send(AgentAssociation::Session(sid.clone()));
-                    }
-                }
-            }
+            publish_rows(session_tx, review_id, &agents, &mut seen_sessions);
         }
     }
     Ok(status)
+}
+
+/// Every target takes the node's explicit `params.base` when it sets one.
+fn explicit_base(targets: &mut [ReviewTarget], p: &Value) {
+    let base = p.get("base").and_then(Value::as_str).map(str::trim);
+    if let Some(b) = base.filter(|s| !s.is_empty()) {
+        targets.iter_mut().for_each(|t| t.2 = Some(b.to_string()));
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn an_explicit_base_overrides_every_declared_entry() {
+    let mut t: Vec<ReviewTarget> = vec![
+        (
+            "r1".into(),
+            "/w1".into(),
+            Some("develop".into()),
+            String::new(),
+        ),
+        ("r2".into(), "/w2".into(), None, String::new()),
+    ];
+    explicit_base(&mut t, &json!({}));
+    assert_eq!(t[0].2.as_deref(), Some("develop"), "absent = today");
+    explicit_base(&mut t, &json!({"base": "release/2"}));
+    assert!(t.iter().all(|t| t.2.as_deref() == Some("release/2")));
+}
+
+/// The review's rows to the step: every row as a sub-thread (`children`),
+/// and terminal sessions — never thread ids (DR-014) — into `sessions`.
+fn publish_rows(
+    tx: &tokio::sync::mpsc::UnboundedSender<AgentAssociation>,
+    review_id: &Id,
+    agents: &[otto_core::domain::ReviewAgentState],
+    seen: &mut std::collections::HashSet<String>,
+) {
+    for sid in agents
+        .iter()
+        .filter(|a| !a.thread)
+        .filter_map(|a| a.session_id.clone())
+    {
+        if seen.insert(sid.clone()) {
+            let _ = tx.send(AgentAssociation::Session(sid));
+        }
+    }
+    let rows = otto_review::thread_run::child_rows(review_id, agents);
+    let _ = tx.send(AgentAssociation::Children(review_id.clone(), rows));
 }
 
 #[cfg(test)]

@@ -316,7 +316,7 @@ async fn runtime_holder_survives_daemon_restart_streams_gap_output_and_runs_next
 
     let adopted = rt2.recover_and_adopt().await.unwrap();
     assert!(
-        adopted.contains(&session.id),
+        adopted.live_ids.contains(&session.id),
         "recover_and_adopt must report the live held session id for MCP token preservation"
     );
     assert!(
@@ -615,7 +615,7 @@ for raw in sys.stdin:
         cfg,
     );
     let adopted = rt2.recover_and_adopt().await.unwrap();
-    assert!(adopted.contains(&session.id));
+    assert!(adopted.live_ids.contains(&session.id));
 
     let RuntimeReplay::Snapshot { snapshot, .. } = rt2.replay(&session.id, 0).await.unwrap() else {
         panic!("expected snapshot after adopt");

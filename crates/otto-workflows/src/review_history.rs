@@ -135,10 +135,102 @@ fn logical_review_step(node_id: &str) -> String {
         .collect()
 }
 
+/// The review a `review_run` target is checked against: with
+/// `chain_iterations` (DR-103) the review iteration i − 1 of the same loop
+/// step ran in this run ([`previous_iteration_review`]); else, for a re-run
+/// of an earlier run, that run's review of the same repo
+/// ([`previous_review_for_target`]). `at` = `(run_id, node_id, in_loop,
+/// repo_id, target)`.
+pub async fn previous_for_launch(
+    pool: &DbPool,
+    params: &Value,
+    run_input: &Value,
+    (run_id, node_id, in_loop, repo_id, target): (&Id, &str, bool, &Id, usize),
+) -> Option<Id> {
+    if params.get("chain_iterations").and_then(Value::as_bool) == Some(true) {
+        let checkpoints = WorkflowsRepo::new(pool.clone())
+            .checkpoints(run_id)
+            .await
+            .ok()?;
+        if let Some(id) = previous_iteration_review(&checkpoints, node_id, target) {
+            return Some(id);
+        }
+    }
+    let prior = run_input.get(crate::rereview::PREVIOUS_RUN_KEY)?.as_str()?;
+    previous_review_for_target(pool, run_id, prior, node_id, in_loop, repo_id).await
+}
+
+/// `chain_iterations` (DR-103): the review that iteration i − 1 of the same
+/// loop step ran in this run for target `target` — the output `review_id`
+/// of checkpoint `<loop>#<i-1>.<k>#review.<target>`, `node_id` being the
+/// step's own `<loop>#<i>.<k>`. `None` for iteration 1, outside a loop, or
+/// when that iteration left no review.
+pub fn previous_iteration_review(
+    checkpoints: &[otto_core::workflows::WorkflowCheckpoint],
+    node_id: &str,
+    target: usize,
+) -> Option<Id> {
+    let (lp, at) = node_id.rsplit_once('#')?;
+    let (i, k) = at.split_once('.')?;
+    let i = i.parse::<u64>().ok().filter(|i| *i > 1)?;
+    let wanted = format!("{lp}#{}.{k}#review.{target}", i - 1);
+    checkpoints
+        .iter()
+        .find(|c| c.node_id == wanted)?
+        .output
+        .as_ref()?
+        .get("review_id")?
+        .as_str()
+        .map(str::to_string)
+}
+
 #[cfg(test)]
 mod rereview_lineage_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_chained_iteration_takes_the_review_of_the_one_before() {
+        let cp = |node_id: &str, review: &str| otto_core::workflows::WorkflowCheckpoint {
+            node_id: node_id.into(),
+            output: Some(json!({"review_id": review})),
+            ..Default::default()
+        };
+        let cps = [
+            cp("fix#1.1#review.0", "r1"),
+            cp("fix#1.1#review.1", "r1-b"),
+            cp("fix#2.1#review.0", "r2"),
+            cp("fix#2.2#review.0", "other-step"),
+        ];
+        assert_eq!(
+            previous_iteration_review(&cps, "fix#2.1", 0).as_deref(),
+            Some("r1")
+        );
+        assert_eq!(
+            previous_iteration_review(&cps, "fix#2.1", 1).as_deref(),
+            Some("r1-b"),
+            "per target"
+        );
+        assert_eq!(
+            previous_iteration_review(&cps, "fix#3.1", 0).as_deref(),
+            Some("r2")
+        );
+        assert_eq!(
+            previous_iteration_review(&cps, "fix#1.1", 0),
+            None,
+            "iteration 1 uses the literal id"
+        );
+        assert_eq!(
+            previous_iteration_review(&cps, "review", 0),
+            None,
+            "outside a loop"
+        );
+        assert_eq!(
+            previous_iteration_review(&cps, "fix#4.1", 0),
+            None,
+            "iteration 3 left none"
+        );
+    }
     #[test]
     fn nested_loop_lineage_matches_step_not_iteration_or_other_review() {
         assert_eq!(

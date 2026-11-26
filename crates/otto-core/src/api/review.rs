@@ -44,6 +44,42 @@ pub struct ReviewConfig {
     /// as an Option so the engine can tell "stored" from "defaulted".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<crate::domain::ReviewMode>,
+    /// Review-wide model and effort per provider (key = provider slug): every
+    /// lens on that provider without its own pick, scope-invented lenses too.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub picks: std::collections::BTreeMap<String, crate::domain::ModelPick>,
+    /// A reviewer still working this long after it started is interrupted; a
+    /// valid findings file written by then is kept as partial. `None` = off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewer_time_box_secs: Option<u64>,
+    /// `configured`: the scope assessment may drop declared lenses, never add one.
+    #[serde(default, skip_serializing_if = "ScopeAssessment::is_auto")]
+    pub scope_assessment: ScopeAssessment,
+    /// Runtime only (never stored): `threads` | `pty` — the runner a workflow
+    /// run latched; `None` reads the `wf_step_runner` setting.
+    #[serde(skip)]
+    pub runner: Option<String>,
+    /// Runtime only: `{run_id, node_id, work}` a workflow run puts on every
+    /// review thread it starts (Null outside a run).
+    #[serde(skip)]
+    pub thread_meta: Value,
+}
+
+/// Who chooses a review's lenses: the scope agent (`auto`, today's
+/// behaviour) or the declared reviewers, which the scope agent may only
+/// narrow (`configured`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScopeAssessment {
+    #[default]
+    Auto,
+    Configured,
+}
+
+impl ScopeAssessment {
+    pub fn is_auto(&self) -> bool {
+        *self == Self::Auto
+    }
 }
 
 /// A named, reusable full review configuration ("conf A" / "conf Y").

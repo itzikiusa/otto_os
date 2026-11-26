@@ -68,16 +68,25 @@ struct InMemory {
 
 impl ChildTransport for InMemory {
     fn spawn(&self, cmd: &ChildCommand) -> std::io::Result<ChildHandle> {
-        let main: fn() = match Path::new(&cmd.program).file_name().and_then(|n| n.to_str()) {
-            Some(CLAUDE) => crate::fakes::claude::main,
-            Some(CODEX) => crate::fakes::codex::main,
-            Some(ACP) => crate::fakes::agent::main,
-            _ => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    format!("no in-memory fake named {}", cmd.program),
-                ))
+        let fake = |p: &str| -> Option<fn()> {
+            match Path::new(p).file_name().and_then(|n| n.to_str()) {
+                Some(CLAUDE) => Some(crate::fakes::claude::main),
+                Some(CODEX) => Some(crate::fakes::codex::main),
+                Some(ACP) => Some(crate::fakes::agent::main),
+                _ => None,
             }
+        };
+        // A confined (read-only) thread runs under Seatbelt: the fake is the
+        // program `sandbox-exec -p <profile> …` wraps.
+        let (program, args) = match cmd.args.iter().position(|a| fake(a).is_some()) {
+            Some(i) if cmd.program.ends_with("sandbox-exec") => (&cmd.args[i], &cmd.args[i + 1..]),
+            _ => (&cmd.program, &cmd.args[..]),
+        };
+        let Some(main) = fake(program) else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("no in-memory fake named {}", cmd.program),
+            ));
         };
         let (msg_tx, messages) = tokio::sync::mpsc::channel::<ChildMsg>(256);
         let (stdin, mut stdin_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
@@ -103,8 +112,8 @@ impl ChildTransport for InMemory {
         });
 
         let io = Arc::new(Io {
-            args: std::iter::once(cmd.program.clone())
-                .chain(cmd.args.iter().cloned())
+            args: std::iter::once(program.clone())
+                .chain(args.iter().cloned())
                 .collect(),
             env: self.env.iter().chain(&cmd.env).cloned().collect(),
             cwd: cmd.cwd.clone().into(),

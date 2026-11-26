@@ -8,11 +8,6 @@
 use super::*;
 use otto_review::prompts::*;
 
-/// How often a running summarizer re-reads the durable review status when no
-/// `ReviewChanged` arrives (the flagless cancel paths: restart, a cancel that
-/// landed before this attempt registered).
-const SUMMARIZER_CANCEL_RECHECK: Duration = Duration::from_secs(5);
-
 /// The draft loop reads the durable review status once per this many parsed
 /// comments; the in-memory cancel flag is checked for every one.
 const CANCEL_CHECK_BATCH: usize = 25;
@@ -28,7 +23,7 @@ pub(crate) async fn summarize_and_persist(
     user: &otto_core::domain::User,
     repo_id: &Id,
     pr_number: u64,
-    summarizer_cfg: &ReviewAgentCfg,
+    cfg: &ReviewConfig,
     agent_findings: &[Vec<otto_core::domain::ReviewFinding>],
     // What the caller already knew about the change (ticket + prior-step
     // briefs), pre-rendered. The summarizer is the step that applies the scope
@@ -54,6 +49,7 @@ pub(crate) async fn summarize_and_persist(
             .is_some_and(|f| f.load(std::sync::atomic::Ordering::SeqCst))
     };
     let is_cancelled = || async { flag_tripped() || review_is_cancelled(ctx, review_id).await };
+    let (summarizer_cfg, threads) = (&cfg.summarizer, review_threads(ctx, Some(cfg)).await);
     let mut agent_states = ctx.reviews_store.get_review(review_id).await?.agents;
     let summarizer_idx = agent_states
         .len()
@@ -118,6 +114,7 @@ pub(crate) async fn summarize_and_persist(
         total_findings,
         cancel_flag: cancel_flag.as_ref(),
         row: summarizer_idx,
+        threads: threads.as_ref(),
     };
     // A start/delivery failure gets a fresh attempt (fresh handoff dir) within
     // the same overall budget; the verifier used to get exactly one.
@@ -275,13 +272,17 @@ async fn persist_comments(
             }
         };
 
-        let fp = promote_finding(
-            ctx,
+        let stores = (&ctx.findings_store, &ctx.finding_events_store);
+        let at = (
             review_id,
-            repo_path,
-            workspace,
+            workspace.id.as_str(),
             repo_id,
             pr_number,
+            repo_path,
+        );
+        let fp = otto_review::promote::promote_finding(
+            stores,
+            at,
             &c,
             &comment_id,
             &seen_fingerprints,
@@ -291,128 +292,6 @@ async fn persist_comments(
         seen_fingerprints.push(fp);
     }
     Ok(Some(seen_fingerprints))
-}
-
-/// Promote one draft comment into a tracked workflow Finding (created →
-/// audit event linking the comment). Returns its fingerprint.
-#[allow(clippy::too_many_arguments)]
-async fn promote_finding(
-    ctx: &ServerCtx,
-    review_id: &Id,
-    repo_path: &str,
-    workspace: &Workspace,
-    repo_id: &Id,
-    pr_number: u64,
-    c: &otto_review::engine::DraftComment,
-    comment_id: &Id,
-    seen_fingerprints: &[String],
-    anchor_files: &mut std::collections::HashMap<String, Option<Vec<String>>>,
-) -> String {
-    // PR #0 is the local-review sentinel → dedup within the review, not across PRs.
-    let pr_opt = if pr_number == 0 {
-        None
-    } else {
-        Some(pr_number)
-    };
-    // Derive the enriched fields from the comment when the summarizer didn't
-    // emit them (back-compat; §15.9).
-    let title = c
-        .title
-        .clone()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| c.body.lines().next().unwrap_or("").trim().to_string());
-    let evidence = c
-        .evidence
-        .clone()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| c.body.clone());
-    let reasoning = c.reasoning.clone().unwrap_or_default();
-    // Stable (v2) fingerprint anchored on the flagged code line's text (or
-    // the title), NOT the summarizer's re-worded body — see
-    // `compute_finding_fingerprint`. The legacy body hash rides along so
-    // rows stored before v2 are recognized and re-keyed, not duplicated.
-    let legacy_fp = otto_state::review_findings::compute_fingerprint(
-        repo_id,
-        pr_number,
-        c.path.as_deref(),
-        c.category.as_deref(),
-        &c.body,
-    );
-    let line_text = match (c.path.as_deref(), c.line) {
-        (Some(p), Some(l)) => anchored_line_text(repo_path, p, l, anchor_files).await,
-        _ => None,
-    };
-    let anchor = otto_state::review_findings::finding_anchor(line_text.as_deref(), &title, &c.body);
-    let mut fp = otto_state::review_findings::compute_finding_fingerprint(
-        repo_id,
-        pr_number,
-        c.path.as_deref(),
-        c.category.as_deref(),
-        &anchor,
-    );
-    if seen_fingerprints.contains(&fp) {
-        // A second, distinct finding on the same line/category in this run:
-        // disambiguate by title so it is not folded into the first one.
-        let titled = format!(
-            "{anchor}|{}",
-            otto_state::review_findings::normalize_anchor_text(&title)
-        );
-        fp = otto_state::review_findings::compute_finding_fingerprint(
-            repo_id,
-            pr_number,
-            c.path.as_deref(),
-            c.category.as_deref(),
-            &titled,
-        );
-    }
-    // Anchor the finding to a sane (line, line_end) span — an end without a
-    // start, or an inverted/degenerate range, collapses appropriately.
-    let (line, line_end) = otto_core::finding::normalize_line_range(c.line, c.line_end);
-    let nf = otto_state::NewFinding {
-        review_id,
-        workspace_id: &workspace.id,
-        repo_id,
-        pr_number: pr_opt,
-        path: c.path.as_deref(),
-        line: line.map(|l| l as i64),
-        line_end: line_end.map(|l| l as i64),
-        severity: &c.severity,
-        category: c.category.as_deref(),
-        title: &title,
-        body: &c.body,
-        evidence: &evidence,
-        agent_reasoning_summary: &reasoning,
-        suggested_fix: c.suggested_fix.as_deref(),
-        produced_by_agent: Some("review"),
-        reviewer: "review",
-        fingerprint: &fp,
-        run_id: review_id,
-    };
-    match ctx
-        .findings_store
-        .upsert_tracked(&nf, Some(&legacy_fp))
-        .await
-    {
-        Ok((f, created)) => {
-            if created {
-                // Anchor the audit trail + link the originating comment id.
-                let _ = ctx
-                    .finding_events_store
-                    .append(
-                        &f.id,
-                        &f.workspace_id,
-                        "created",
-                        "review",
-                        None,
-                        Some("open"),
-                        serde_json::json!({ "comment_id": comment_id }),
-                    )
-                    .await;
-            }
-        }
-        Err(e) => tracing::warn!(review = %review_id, "persist finding failed: {e}"),
-    }
-    fp
 }
 
 /// One managed summarizer turn — the `summarizer` step [`summarize_and_persist`]
@@ -432,6 +311,7 @@ struct SummarizerTurn<'a> {
     cancel_flag: Option<&'a Arc<std::sync::atomic::AtomicBool>>,
     /// The summarizer's agent row (always the last).
     row: usize,
+    threads: Option<&'a otto_review::thread_run::Threads>,
 }
 
 impl SummarizerTurn<'_> {
@@ -478,6 +358,50 @@ impl SummarizerTurn<'_> {
             &summarizer_cfg.model,
         )?;
         attempt.meta["review_id"] = serde_json::json!(review_id);
+        // Event- and flag-driven (no 100 ms DB poll of the whole review).
+        let cancelled = otto_review::summarizer::until_cancelled(
+            ctx.events.subscribe(),
+            review_id,
+            flag_tripped,
+            || review_is_cancelled(ctx, review_id),
+        );
+        let publish = move |sid: String| async move {
+            let row = &mut agent_states[summarizer_idx];
+            (row.session_id, row.thread) = (Some(sid.clone()), self.threads.is_some());
+            ctx.reviews_store
+                .set_agent_at(review_id, summarizer_idx, &agent_states[summarizer_idx])
+                .await
+                .map_err(|e| e.to_string())?;
+            let _ = ctx.events.send(Event::ReviewChanged {
+                workspace_id: workspace.id.clone(),
+                session_id: Some(sid),
+                review_id: review_id.clone(),
+                status: "running".into(),
+            });
+            Ok(())
+        };
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        if let Some(threads) = self.threads {
+            // The runner takes the machine place itself.
+            let brief = (
+                summarizer_prompt,
+                summarizer_cfg,
+                workspace,
+                user,
+                repo_path,
+            );
+            let turn = threads.summarizer_turn(&attempt, brief, ready_tx, self.cancel_flag);
+            let stop = |sid: String| async move { threads.close(&sid).await };
+            return crate::review_summarizer::drive(
+                turn,
+                ready_rx,
+                summarizer_timeout,
+                cancelled,
+                publish,
+                stop,
+            )
+            .await;
+        }
         // Queue for a machine slot BEFORE the summarizer's hard budget starts,
         // racing against cancellation so a cancelled review never hangs queued.
         let admission = tokio::select! {
@@ -491,7 +415,6 @@ impl SummarizerTurn<'_> {
         };
         admission.stamp(&mut attempt.meta);
         let prompt = attempt.prompt(summarizer_prompt);
-        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let turn = crate::agent_session::run_session_turn_with(
             ctx,
             workspace,
@@ -513,34 +436,6 @@ impl SummarizerTurn<'_> {
                 let _ = ready_tx.send(id.clone());
             },
         );
-        // Event- and flag-driven: the cheap in-memory flag every 100 ms, the
-        // one-column status on this review's `ReviewChanged`, and a slow safety
-        // recheck. A 100 ms DB poll used to load the whole review (agents JSON
-        // plus every comment) 3,000–18,000 times per summarizer turn.
-        let cancelled = async {
-            let mut events = ctx.events.subscribe();
-            let mut events_open = true;
-            let mut flag_tick = tokio::time::interval(Duration::from_millis(100));
-            let mut recheck = tokio::time::interval(SUMMARIZER_CANCEL_RECHECK);
-            loop {
-                let check_db = tokio::select! {
-                    _ = flag_tick.tick() => false,
-                    _ = recheck.tick() => true,
-                    ev = events.recv(), if events_open => match ev {
-                        Ok(Event::ReviewChanged { review_id: rid, .. }) => rid == *review_id,
-                        Ok(_) => false,
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => true,
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                            events_open = false;
-                            false
-                        }
-                    },
-                };
-                if flag_tripped() || (check_db && review_is_cancelled(ctx, review_id).await) {
-                    break;
-                }
-            }
-        };
         crate::review_summarizer::drive(
             async {
                 turn.await
@@ -550,20 +445,7 @@ impl SummarizerTurn<'_> {
             ready_rx,
             summarizer_timeout,
             cancelled,
-            |sid| async {
-                agent_states[summarizer_idx].session_id = Some(sid.clone());
-                ctx.reviews_store
-                    .set_agent_at(review_id, summarizer_idx, &agent_states[summarizer_idx])
-                    .await
-                    .map_err(|e| e.to_string())?;
-                let _ = ctx.events.send(Event::ReviewChanged {
-                    workspace_id: workspace.id.clone(),
-                    session_id: Some(sid),
-                    review_id: review_id.clone(),
-                    status: "running".into(),
-                });
-                Ok(())
-            },
+            publish,
             |sid| async move {
                 otto_review::session::stop_review_sessions(&ctx.manager, &[sid]).await;
             },
