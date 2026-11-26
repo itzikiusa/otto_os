@@ -621,17 +621,15 @@ fn clones_import_and_validate() {
     assert_eq!(kinds.into_iter().collect::<Vec<_>>(), want);
 }
 
-/// proves: C1, C2, X1.f, X1.g — and part of X1.h and X7 (the bundled
-/// templates, MCP tool names and chat control words are not covered here).
-/// On today's engine, each clone's
-/// review-stubbed run from a chat block produces exactly the golden step
-/// numbers (both sides of the PASSED/FAILED join, the Test Cases fork),
-/// context files and their contents, step-prompt bytes (preamble, input
-/// excerpt, completion rules), notify renderings, routing, and old-style chat
-/// transcript (ack, per-step lines and files, final brief).
-#[test]
-fn characterization_goldens_on_todays_engine() {
-    if !in_offline_child("characterization_goldens_on_todays_engine") {
+/// On today's engine, each clone's review-stubbed runs from a chat block
+/// produce exactly the golden step numbers (both sides of the PASSED/FAILED
+/// join, the Test Cases fork), context files and their contents, step-prompt
+/// bytes (preamble, input excerpt, completion rules), notify renderings,
+/// routing, and old-style chat transcript (ack, per-step lines and files,
+/// final brief). One test per clone, so each stays well inside CI's per-test
+/// time limit.
+fn goldens_of(clone: &str) {
+    if !in_offline_child(&format!("golden_{clone}")) {
         return;
     }
     let log_dir = tempfile::tempdir().unwrap();
@@ -640,10 +638,8 @@ fn characterization_goldens_on_todays_engine() {
         .build()
         .unwrap();
     let mut diffs = vec![];
-    for s in SCENARIOS {
-        let log = log_dir
-            .path()
-            .join(format!("{}-{}.prompts", s.clone, s.name));
+    for s in SCENARIOS.iter().filter(|s| s.clone == clone) {
+        let log = log_dir.path().join(format!("{}.prompts", s.name));
         // The offline child is its own process running only this test.
         std::env::set_var("OTTO_E2E_PROMPT_LOG", &log);
         let (h, out) = rt.block_on(run_scenario(s));
@@ -667,4 +663,37 @@ fn characterization_goldens_on_todays_engine() {
         "today's engine no longer matches its goldens:\n{}",
         diffs.join("\n")
     );
+}
+
+/// proves: C1, C2, X1.f, X1.g — and part of X1.h and X7 (the bundled
+/// templates, MCP tool names and chat control words are not covered here):
+/// clone A (12-node review), passed and failed verdicts.
+#[test]
+fn golden_a() {
+    goldens_of("a");
+}
+
+/// Clone B (the 12-node review's twin), passed and failed verdicts.
+#[test]
+fn golden_b() {
+    goldens_of("b");
+}
+
+/// Clone C (10-node quick review), passed and failed verdicts.
+#[test]
+fn golden_c() {
+    goldens_of("c");
+}
+
+/// Clone D (feature review), passed and failed verdicts.
+#[test]
+fn golden_d() {
+    goldens_of("d");
+}
+
+/// Clone E (11-node document workflow with the fork): no ticket, and a
+/// required ticket that cannot be read.
+#[test]
+fn golden_e() {
+    goldens_of("e");
 }
