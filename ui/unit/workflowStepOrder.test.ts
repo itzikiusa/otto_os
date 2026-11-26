@@ -3,8 +3,9 @@
 // selection — runs/stepOrder.ts.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { childCrumb, childNoun, defaultSelection, doneFold, entrySteps, loopChildren, orderChildren, orderSteps, RESULT, timeBar, topoOrder } from '../src/modules/workflows/runs/stepOrder.ts';
+import { childCrumb, childNoun, defaultSelection, doneFold, entrySteps, loopChildren, orderChildren, orderSteps, RESULT, settledNodes, timeBar, topoOrder } from '../src/modules/workflows/runs/stepOrder.ts';
 import { at, fanoutNodes, node, PR_GRAPH, reviewers, T0 } from './workflowRunFixtures.ts';
+import { stepWord } from '../src/modules/workflows/runs/runWords.ts';
 import type { WorkflowGraph } from '../src/lib/api/types';
 
 const NOW = T0 + 12 * 60_000;
@@ -68,6 +69,22 @@ test('a child is called what it is: an iteration, a reviewer, or just its own na
   assert.equal(childNoun('loop', kid('Work · iteration 1')), 'iteration');
   assert.equal(childNoun('review_run', kid('Security · Claude')), 'reviewer');
   assert.equal(childNoun('agent_prompt', kid('claude · earlier turn')), 'thread');
+});
+
+// Seen on a real history: a run a daemon restart interrupted under the old
+// engine keeps its step `running`; the failed run's page said "Working 3463h 47m".
+test('a settled run shows a step left running as stopped, with no live timer', () => {
+  const left = node('n3', 'running', 1, null, { phase: 'working', activity: { phase: 'reading', updated_at: at(1), pending_tasks: 0, subagents: [] } });
+  const nodes = [node('n1', 'success', 0, 1000), left];
+  const [, stopped] = settledNodes(nodes, false);
+  assert.deepEqual([stopped.status, stopped.error_class, stopped.phase, stopped.activity], ['skipped', 'canceled', undefined, undefined]);
+  assert.deepEqual(stepWord(stopped, { now: NOW + 3463 * 3_600_000, run: 'failed' }), { word: 'Stopped', tone: '', glyph: 'dash' });
+  const step = orderSteps([stopped], PR_GRAPH, NOW + 3463 * 3_600_000).flatMap(entrySteps)[0];
+  assert.equal(step.end, step.start, 'its bar does not grow with the clock');
+  // Before: the same step on the same settled run.
+  assert.match(stepWord(left, { now: NOW + 3463 * 3_600_000, run: 'failed' }).word, /^Working 3463h/);
+  // A live run's steps are untouched.
+  assert.equal(settledNodes(nodes, true), nodes);
 });
 
 test('the phone folds the done steps before the current one', () => {

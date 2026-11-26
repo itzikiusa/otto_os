@@ -42,10 +42,13 @@ pub fn run_overview(
 ) -> RunOverview {
     let name = |id: &str| step_name(graph, id);
     let hold = effective_hold(run.status, run.hold.as_ref()).cloned();
+    // A settled run has nothing running: a step an older engine left
+    // `running` (a run a daemon restart interrupted) is not what happens now.
+    let live = matches!(run.status, RunStatus::Pending | RunStatus::Running);
     let running: Vec<&NodeRunState> = run
         .nodes
         .iter()
-        .filter(|n| n.status == NodeStatus::Running)
+        .filter(|n| live && n.status == NodeStatus::Running)
         .collect();
 
     let mut attention: Vec<AttentionRef> = running

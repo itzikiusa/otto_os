@@ -324,6 +324,26 @@ fn failed_names_the_failing_step_and_its_own_error() {
     );
 }
 
+/// Seen on a real history: a run a daemon restart interrupted under the old
+/// engine keeps its step `running` for good, and the settled run still said
+/// `now = {phase: working}` (the page: "Working 3463h 47m" under "Failed").
+#[test]
+fn a_settled_run_has_no_now_even_when_a_step_was_left_running() {
+    let mut left = running("n2", "needs_you");
+    left["attention"] = json!({"kind": "question", "text": "which repo?", "since": t(40)});
+    let mut r = run("error", json!([done("n1"), left]));
+    r.error = Some("Interrupted by a daemon restart".into());
+    r.finished_at = Some(t(60));
+    let o = ov(&r);
+    assert_eq!(o.state, RunState::Failed);
+    assert_eq!(o.now, None);
+    assert!(o.attention.is_empty(), "nobody is asked by a settled run");
+    assert_eq!(o.headline, "Failed: Interrupted by a daemon restart");
+    // The same nodes in a live run are what happens now.
+    r.status = RunStatus::Running;
+    assert_eq!(ov(&r).now.unwrap().node_ids, ["n2"]);
+}
+
 #[test]
 fn a_passed_review_leads_with_its_score_and_what_was_posted() {
     let mut review = done("n5");

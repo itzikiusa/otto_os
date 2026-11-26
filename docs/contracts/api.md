@@ -3004,7 +3004,8 @@ as before, so the previous build reads every row. New enums end in a catch-all
   hold?}` — `state`: `queued · running · waiting · needs_you · succeeded · failed · canceled ·
   paused · blocked · exhausted` (+ `unknown`); `now = {node_ids, node_names, phase, wait_text?,
   fan?: {done, total, running}}` (`fan` counts a review's reviewers only — not its scope
-  assessment or summarizer); `AttentionRef` = `Attention` + `{node_id, name}` (flat);
+  assessment or summarizer; a settled run has no `now` and no `attention`, whatever
+  status an older engine left on its steps); `AttentionRef` = `Attention` + `{node_id, name}` (flat);
   `queue = {position, ahead, cap, lane?}`; `failed_step = {node_id, name, error, error_class?}`;
   `time = {queued_ms, waiting_ms, with_you_ms, working_ms}`; `origin = {kind:
   chat|manual|schedule|webhook|event|task|mcp|goal, channel_name?, user_name?, thread_url?}`;

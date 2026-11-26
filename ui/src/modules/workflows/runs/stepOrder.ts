@@ -81,6 +81,14 @@ function ancestorsOf(graph: WorkflowGraph): (id: string) => Set<string> {
   return (id) => visit(id, new Set());
 }
 
+/** A settled run has nothing running: a step an older engine left `running`
+ *  (a run a daemon restart interrupted) reads as stopped — no spinner, no
+ *  live timer — everywhere the page shows it. */
+export function settledNodes(nodes: readonly NodeRunState[], live: boolean): readonly NodeRunState[] {
+  if (live) return nodes;
+  return nodes.map((n): NodeRunState => (n.status === 'running' ? { ...n, status: 'skipped', error_class: 'canceled', phase: undefined, wait: undefined, attention: undefined, activity: undefined } : n));
+}
+
 /** The run's steps as display entries (§4.2). */
 export function orderSteps(nodes: readonly NodeRunState[], graph: WorkflowGraph, now: number): StepEntry[] {
   const gnodes = new Map(graph.nodes.map((n) => [n.id, n]));
