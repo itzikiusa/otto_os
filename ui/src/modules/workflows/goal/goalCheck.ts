@@ -51,6 +51,14 @@ export function newestCheckpoint(checkpoints: readonly WorkflowCheckpoint[]): Wo
   return best;
 }
 
+/** Whether the goal card reads the loop's checkpoints itself. A live run's
+ *  page goes stale (the progress merge keeps the run read's first page while
+ *  later iterations land); a settled run's read is whole — unless the card
+ *  already read them while it ran, then once more for the last check. */
+export function readsCheckpoints(run: { status: string; checkpoints?: readonly WorkflowCheckpoint[] }, readBefore: boolean): boolean {
+  return !run.checkpoints?.length || readBefore || run.status === 'pending' || run.status === 'running';
+}
+
 /** The newest check result of the run: a loop's check checkpoints, a settled
  *  loop's last history entry, or a standalone check node's output. */
 export function latestCheck(nodes: readonly NodeRunState[], checkpoints?: readonly WorkflowCheckpoint[]): CheckOutput | null {

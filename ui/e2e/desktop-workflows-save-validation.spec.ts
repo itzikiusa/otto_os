@@ -6,7 +6,8 @@ import { canvasNode, openEditor, saveEditor } from './workflowsUi';
 // publish):
 //   - An edit (here "+ Step") only marks the editor unsaved — it never saves
 //     (Tidy used to PATCH the whole graph, half-made edits included).
-//   - Save validates first: a graph with errors is shown, not saved.
+//   - Save validates first: a draft's missing piece (a `run` issue) is shown
+//     and the draft saves (DR-028); a `save` issue is shown and nothing saves.
 //   - "+ Step" is a filterable menu, each step with its category.
 // Desktop-browser only; drives the ISOLATED OTTO_E2E daemon.
 
@@ -66,7 +67,7 @@ test.beforeEach(async ({ page }, testInfo) => {
   }, ws);
 });
 
-test('an edit leaves the change unsaved, and Save refuses a graph with errors', async ({ page }) => {
+test('an edit leaves the change unsaved; Save keeps a draft with run issues and refuses a save issue', async ({ page }) => {
   await page.setViewportSize({ width: 1400, height: 900 });
   const wfId = await createWorkflow('E2E Save Validation');
   await openWorkflow(page, wfId);
@@ -84,15 +85,24 @@ test('an edit leaves the change unsaved, and Save refuses a graph with errors', 
   await page.waitForTimeout(500); // ui-guards: allow — proves an absence: the edit must NOT have saved by now
   expect((await savedNodes(wfId)).map((n) => n.id)).toEqual(['start', 'fetch']);
 
-  // Save validates: the issue is shown above the canvas and nothing is written.
+  // A save-class issue (stubbed: the editor cannot draw a cycle here) is shown
+  // above the canvas and nothing is written.
+  await page.route('**/api/v1/workflows/*/validate', (r) => r.fulfill({ json: { valid: false, issues: [{ node_id: 'fetch', edge_id: null, field: 'edges', message: 'This step belongs to or follows a cycle.', class: 'save' }] } }));
   await saveEditor(page);
   await expect(page.getByText('Not saved — resolve the problems above the canvas').first()).toBeVisible({ timeout: 10_000 });
-  const problems = page.locator('.ed-problems');
-  await expect(problems).toContainText(/\d+ problems? ·/);
-  await expect(problems.getByRole('listitem').filter({ hasText: /url/i }).first()).toBeVisible();
-  await expect(save).toBeEnabled();
+  const problems = page.getByTestId('wf-editor-problems');
+  await expect(problems).toContainText(/1 problem ·/);
   await expect(header.getByText('Unsaved')).toBeVisible();
   expect((await savedNodes(wfId)).map((n) => n.id)).toEqual(['start', 'fetch']);
+
+  // The real validator: `fetch` has no url — a run issue. The draft saves, the
+  // issue stays listed.
+  await page.unroute('**/api/v1/workflows/*/validate');
+  await saveEditor(page);
+  await expect(header.getByText('Unsaved')).toBeHidden({ timeout: 10_000 });
+  await expect.poll(async () => (await savedNodes(wfId)).map((n) => n.kind)).toContain('delay');
+  await expect(problems).toContainText(/\d+ problems? ·/);
+  await expect(problems.getByRole('listitem').filter({ hasText: /url/i })).toBeVisible();
 });
 
 test('"+ Step" filters the steps and names each one\'s category', async ({ page }) => {

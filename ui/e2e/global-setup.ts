@@ -83,6 +83,12 @@ export default async function globalSetup(_config: FullConfig): Promise<void> {
   // commands. It has no steer, like every ACP agent but Grok's interject.
   const fakeAcp = join(dirname(OTTOD), 'otto-fake-agent');
   const ACP = ['agy', 'gemini', 'grok', 'opencode', 'muse'];
+  // Workflow steps run on the THREAD runner — the product's runner — with
+  // the fakes below acting out each step's `OTTO_FAKE:` script (test-plan §1:
+  // the e2e short-circuit stays on the PTY fallback only). Set explicitly, so
+  // the specs never depend on the daemon's default for OTTO_E2E;
+  // OTTO_WF_STEP_RUNNER=pty in this process runs the PTY-only specs instead.
+  const stepRunner = process.env.OTTO_WF_STEP_RUNNER ?? 'threads';
   // Every fake also acts out the `OTTO_FAKE:` step scripts
   // (crates/otto-agent-protocol/src/fake_script.rs); the daemon inherits this
   // process's env, so `OTTO_FAKE_*` reach them. CI sets
@@ -136,6 +142,12 @@ export default async function globalSetup(_config: FullConfig): Promise<void> {
       // meaningfully, so this only makes that already-doomed path quick + and
       // deterministic; no other spec exercises agent execution.
       CLAUDE_BIN: '/nonexistent/otto-e2e-no-claude',
+      OTTO_WF_STEP_RUNNER: stepRunner,
+      // A workflow step without a script acts as the step persona: it reads
+      // the context files its preamble names, writes its handoff and answers.
+      OTTO_FAKE_DEFAULT: process.env.OTTO_FAKE_DEFAULT ?? 'step',
+      // `remember` / `fail-attempts` state per run, never the shared $TMPDIR one.
+      OTTO_FAKE_STATE_DIR: join(dataDir, 'fake-state'),
       // Isolate runtime plugins: without this, a spec that installs a plugin
       // would write into the user's REAL ~/otto-plugins.
       OTTO_PLUGINS_HOME: join(dataDir, 'plugins-home'),

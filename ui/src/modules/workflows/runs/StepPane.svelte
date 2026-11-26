@@ -4,15 +4,19 @@
   // its kind has — the read-only conversation, output, log, files; a review's
   // summary and summarizer; an approval's preview; the run's Result, Input
   // and (a goal run) Criteria. Its body loads on demand, at most once a second.
+  import { untrack } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import JsonTree from '../../../lib/components/JsonTree.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
   import Tabs from '../../../lib/components/Tabs.svelte';
+  import { authedBlobUrl } from '../../../lib/api/client';
   import { copyWithToast } from '../../../lib/clipboard';
+  import { downloadBlobUrl } from '../../../lib/downloadBlob';
+  import { toastError } from '../../../lib/toastError';
   import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
-  import { workflowNodeDetail } from '../../../lib/api/workflows';
+  import { readRunContext, workflowNodeDetail } from '../../../lib/api/workflows';
   import { loadErrorText } from '../../../lib/loadError';
-  import type { ChildThread, Criterion, NodeRunState, RunState, StepThread, WorkflowRun } from '../../../lib/api/types';
+  import type { AttachmentRef, ChildThread, Criterion, NodeRunState, RunState, StepThread, WorkflowRun } from '../../../lib/api/types';
   import RunFinalOutput from '../RunFinalOutput.svelte';
   import type { RunSync } from '../runSync.svelte';
   import CriteriaTable from '../goal/CriteriaTable.svelte';
@@ -24,7 +28,7 @@
   import { openReview, retryStep, skipStep } from './runActions';
   import { reviewIds } from '../reviewAgents';
   import { runReviews } from '../runReviews.svelte';
-  import { childWord, stepDuration, stepWord } from './runWords';
+  import { childWord, errorParts, stepDuration, stepWord } from './runWords';
   import type { StepItem } from './stepOrder';
   import { paneTabs, phaseSegments, TAB_LABEL, type PaneTab } from './stepTabs';
 
@@ -41,11 +45,13 @@
     /** A tab a card asked for ("conversation", "preview"). */
     tab?: string | null;
     criteria?: readonly Criterion[];
+    /** The step whose failure the run's card beside the pane already shows. */
+    cardNode?: string | null;
     /** The pane's own Maximize (the run column folds behind "Run"). */
     maximized?: boolean;
     onmaximize?: () => void;
   }
-  let { run, sync, workspaceId, runState, step, childId, stepCount, now, tab: asked = null, criteria = [], maximized = false, onmaximize }: Props = $props();
+  let { run, sync, workspaceId, runState, step, childId, stepCount, now, tab: asked = null, criteria = [], cardNode = null, maximized = false, onmaximize }: Props = $props();
 
   const node = $derived(step?.node ?? null);
   const child = $derived<ChildThread | null>(node?.children?.find((c) => c.id === childId) ?? null);
@@ -61,12 +67,16 @@
   // The full node (output, logs, digest): on demand, at most once a second.
   let detail = $state<NodeRunState | null>(null);
   let detailError = $state<string | null>(null);
+  let retry = $state(0);
   let lastFetch = 0;
   const needsBody = $derived(!!node && !child && (['output', 'log', 'summary', 'preview', 'conversation'].includes(tab) || (tab === 'criteria' && step?.kind === 'check')));
   $effect(() => {
     const id = node?.node_id;
     void node?.detail_version;
+    void retry;
     if (!id || !needsBody) return;
+    // Another step's error never shows while this one's body loads.
+    if (untrack(() => detail?.node_id) !== id) detailError = null;
     const ac = new AbortController();
     const t = setTimeout(() => {
       lastFetch = Date.now();
@@ -110,13 +120,39 @@
     const r = (out as { repo_id?: unknown } | null)?.repo_id ?? (run.input as { repo_id?: unknown } | null)?.repo_id;
     return typeof r === 'string' && r ? r : null;
   };
-  const attachments = $derived((run as WorkflowRun & { attachments?: { name: string; mime: string; size_bytes?: number; source: string; error?: string }[] }).attachments ?? []);
+  const attachments = $derived<AttachmentRef[]>(run.attachments ?? []);
+  /** The failing step's own words, on every tab (the run's card shows one failure only, and none on a pushed phone pane). */
+  const failed = $derived(!child && node?.status === 'error' && node.node_id !== cardNode && (body?.error ?? node.error) ? errorParts((body?.error ?? node.error)!) : null);
+  // Result → Input: a text attachment previews in place; any downloads.
+  let shown = $state<{ path: string; text: string | null; error: string | null } | null>(null);
+  const previewable = (a: AttachmentRef) => /^text\/|json|xml|yaml|markdown/.test(a.mime);
+  async function preview(path: string): Promise<void> {
+    if (shown?.path === path) return void (shown = null);
+    shown = { path, text: null, error: null };
+    try {
+      const r = await readRunContext(run.id, path);
+      if (shown?.path === path) shown.text = r.content;
+    } catch (e) {
+      if (shown?.path === path) shown.error = loadErrorText(e);
+    }
+  }
+  async function download(a: AttachmentRef): Promise<void> {
+    try {
+      downloadBlobUrl(await authedBlobUrl(`/workflow-runs/${encodeURIComponent(run.id)}/context/read?path=${encodeURIComponent(a.path ?? '')}&download=1`), a.name);
+    } catch (e) {
+      toastError('Couldn’t download the file', e);
+    }
+  }
 
   function stepMenu(e: MouseEvent): void {
     if (!node) return;
     const id = node.node_id;
     const items: MenuItem[] = [];
-    if (!(run.status === 'pending' || run.status === 'running')) items.push({ label: 'Retry only this step', icon: 'refresh', action: () => void retryStep(run.id, id, false) });
+    // Only a failed step re-runs alone (the server refuses it otherwise); any settled one re-runs with what follows.
+    if (!(run.status === 'pending' || run.status === 'running')) {
+      if (node.status === 'error') items.push({ label: 'Retry only this step', icon: 'refresh', action: () => void retryStep(run.id, id, false) });
+      else items.push({ label: 'Retry from here', icon: 'refresh', action: () => void retryStep(run.id, id) });
+    }
     items.push({ label: 'Copy step output', icon: 'copy', action: async () => {
       const d = body ?? (await workflowNodeDetail(run.id, id)).body;
       void copyWithToast(typeof d.output === 'string' ? d.output : JSON.stringify(d.output ?? null, null, 2), 'Step output');
@@ -151,6 +187,12 @@
     {:else if node?.wait && node.phase === 'waiting'}
       <p class="wait">{node.wait.text}</p>
     {/if}
+    {#if failed}
+      <div class="failed" data-testid="wf-step-error">
+        <p class="ftitle" dir="auto"><Icon name="x" size={13} />{failed.title}</p>
+        {#if failed.body}<p class="fbody" dir="auto">{failed.body}</p>{/if}
+      </div>
+    {/if}
   </header>
 
   {#if tabs.length > 1}
@@ -159,10 +201,11 @@
 
   <div class="body" role="tabpanel" id="wf-step-panel-{tab}" aria-labelledby="wf-step-tab-{tab}">
     {#if tab === 'conversation'}
-      <StepConversation {thread} sessions={child ? [] : (node?.sessions ?? [])} digest={body?.thread?.digest ?? null} {workspaceId} runId={run.id} nodeId={node?.node_id ?? ''} attempt={node?.attempts ?? 1} />
+      <!-- A reviewer keeps no digest file of its own: no nodeId, so it never reads the step's. -->
+      <StepConversation {thread} sessions={child ? [] : (node?.sessions ?? [])} digest={child ? null : (body?.thread?.digest ?? null)} {workspaceId} runId={run.id} nodeId={child ? '' : (node?.node_id ?? '')} attempt={node?.attempts ?? 1} />
     {:else if tab === 'summarizer'}
       {#if summarizer?.thread_id}
-        <StepConversation thread={{ thread_id: summarizer.thread_id, runner: 'threads', provider: summarizer.provider, turns: 0, usage: {} as StepThread['usage'] }} {workspaceId} runId={run.id} nodeId={node?.node_id ?? ''} attempt={node?.attempts ?? 1} />
+        <StepConversation thread={{ thread_id: summarizer.thread_id, runner: 'threads', provider: summarizer.provider, turns: 0, usage: {} as StepThread['usage'] }} {workspaceId} runId={run.id} nodeId="" attempt={node?.attempts ?? 1} />
       {:else}
         <p class="none">The summarizer starts after the reviewers.</p>
       {/if}
@@ -197,16 +240,28 @@
         <h4>Files sent with the run</h4>
         <ul class="att" data-testid="wf-run-attachments">
           {#each attachments as a (a.name)}
+            {@const path = !a.error ? a.path : undefined}
             <li data-testid="wf-run-attachment" data-source={a.source} data-error={a.error ? 'true' : undefined}>
               <Icon name="file" size={13} /><span class="ellipsis" dir="auto">{a.name}</span>
               <span class="dim">{a.mime}{a.size_bytes != null ? ` · ${Math.ceil(a.size_bytes / 1024)} KB` : ''}{a.source === 'steer' ? ' · sent during the run' : ''}{a.error ? ` · not downloaded: ${a.error}` : ''}</span>
+              {#if path}
+                {#if previewable(a)}<button type="button" class="btn small" aria-pressed={shown?.path === path} onclick={() => void preview(path)}>Preview</button>{/if}
+                <button type="button" class="btn small" onclick={() => void download(a)}><Icon name="download" size={12} />Download</button>
+              {/if}
             </li>
+            {#if shown && shown.path === path}
+              <li class="attprev" data-testid="wf-run-attachment-preview">
+                {#if shown.error}<LoadState what="the file" variant="compact" error={shown.error} empty onretry={() => { const p = shown!.path; shown = null; void preview(p); }} />
+                {:else if shown.text === null}<LoadState what="the file" variant="compact" loading empty />
+                {:else}<pre class="log" dir="auto">{shown.text}</pre>{/if}
+              </li>
+            {/if}
           {/each}
         </ul>
       {/if}
       <div class="json"><JsonTree value={run.input} /></div>
     {:else}
-      <LoadState what="the step" loading={!body && !detailError} error={detailError} empty={!body}>
+      <LoadState what="the step" loading={!body && !detailError} error={detailError} empty={!body} onretry={() => retry++}>
         {#if tab === 'summary'}
           <p class="score">{reviewOut.score_text ?? (node?.status === 'running' ? 'Reviewing…' : '—')}{reviewOut.outcome ? ` · ${reviewOut.outcome}` : ''}</p>
           {#if fallback}<p class="dim" data-testid="summarizer-fallback">Deterministic fallback — the reviewers’ findings, not a verified summary.</p>{/if}
@@ -387,8 +442,48 @@
     flex: 1;
     min-inline-size: 0;
   }
+  .att li .ellipsis {
+    min-inline-size: 12ch;
+  }
+  .att li {
+    flex-wrap: wrap;
+  }
   .att .dim {
     font-size: var(--fs-s);
+  }
+  .att li.attprev {
+    display: block;
+    border-block-start: 0;
+  }
+  .failed {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-2);
+    margin-block-start: var(--sp-4);
+    padding: var(--sp-4) var(--sp-5);
+    border: 1px solid var(--danger);
+    border-radius: var(--radius-m);
+    background: var(--danger-soft);
+  }
+  .ftitle {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--sp-3);
+    margin: 0;
+    font-size: var(--fs-m);
+    font-weight: 600;
+    color: var(--danger);
+    overflow-wrap: anywhere;
+  }
+  .ftitle :global(svg) {
+    flex: none;
+    margin-block-start: var(--sp-1);
+  }
+  .fbody {
+    margin: 0;
+    font-size: var(--fs-s);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
   .findings li {
     align-items: flex-start;

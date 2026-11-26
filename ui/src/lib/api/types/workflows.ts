@@ -368,17 +368,6 @@ export interface CheckOutput {
   review?: { approved: boolean; findings: string[] };
 }
 
-/** A file sent with the chat message that started or steered a run. */
-export interface AttachmentRef {
-  name: string;
-  mime: string;
-  size_bytes?: number;
-  /** Context-relative (`attachments/<name>`); absent when the copy failed. */
-  path?: string;
-  error?: string;
-  source: 'start' | 'steer';
-}
-
 // Goals (otto-core api/goals.rs).
 
 export type GoalWork = { kind: 'build'; repo_id: Id; base?: string | null } | { kind: 'research' };

@@ -9,6 +9,13 @@ import { fanoutNodes, node, PR_GRAPH, T0 } from './workflowRunFixtures.ts';
 
 const NOW = T0 + 12 * 60_000;
 
+/** An arc path's sweep in degrees, read back from its two end points (the ring's centre is 60,60). */
+function sweepOf(d: string): number {
+  const [x0, y0, , , , , , x1, y1] = d.replace(/^M /, '').replace(' A ', ' ').split(' ').map(Number);
+  const deg = (x: number, y: number) => (Math.atan2(x - 60, 60 - y) * 180) / Math.PI;
+  return (deg(x1, y1) - deg(x0, y0) + 360) % 360;
+}
+
 test('slots and the gaps between them make the full circle', () => {
   for (const n of [1, 2, 7, 12]) {
     const a = slotAngles(n);
@@ -54,8 +61,10 @@ test('29 children are one segment per state, sized by count', () => {
   assert.equal(o.children, 29);
   assert.equal(o.grouped, true);
   assert.deepEqual(fan.map((a) => a.state), ['done', 'working', 'pending']);
-  const sweep = (d: string) => d.length; // every segment is a real arc path
-  assert.ok(fan.every((a) => sweep(a.d) > 10));
+  // 19 done, 6 working, 3 queued + the queued summarizer: sweeps in that proportion (CR1-079).
+  const [done, working, pending] = fan.map((a) => sweepOf(a.d));
+  assert.ok(Math.abs(done / working - 19 / 6) < 0.02, `done/working ${done / working}`);
+  assert.ok(Math.abs(working / pending - 6 / 4) < 0.02, `working/pending ${working / pending}`);
 });
 
 test('colour comes from state only; a canceled run greys what never ran', () => {
@@ -67,4 +76,21 @@ test('colour comes from state only; a canceled run greys what never ran', () => 
 test('the accessible name counts what the step list shows', () => {
   const entries = orderSteps(fanoutNodes(19, 6, 3), PR_GRAPH, NOW);
   assert.equal(orbitLabel(entries, 'Running'), 'Running: 5 of 10 steps done; Multi-agent PR review 19 of 29 done');
+});
+
+test('a long workflow with a 12-child fan-out never draws an inverted arc (CR1-045)', () => {
+  const steps = Array.from({ length: 16 }, (_, i) => ({ type: 'step' as const, step: { id: `s${i}`, name: `s${i}`, kind: '', start: 0, end: 1, node: node(`s${i}`, 'success', 0, 1) } }));
+  steps[5].step.node = node('s5', 'running', 0, null, { children: Array.from({ length: 12 }, (_, i) => ({ id: `k${i}`, label: `k${i}`, provider: 'codex', status: i < 4 ? 'success' : 'running' })) });
+  const span = slotAngles(16)[0][1] - slotAngles(16)[0][0];
+  const o = buildOrbit(steps as never, 'running');
+  for (const a of o.arcs) assert.ok(sweepOf(a.d) > 0 && sweepOf(a.d) <= span + 0.1, `slot ${a.slot}: sweep ${sweepOf(a.d)} of ${span}`);
+  // Twelve ticks would be under 1° each here: the fan-out draws as state segments.
+  assert.equal(o.grouped, true);
+  assert.deepEqual(o.arcs.filter((a) => a.slot === 5).map((a) => a.state), ['done', 'working']);
+});
+
+test('a hundred steps still close the circle with positive slots (CR1-045)', () => {
+  const a = slotAngles(100);
+  assert.ok(a.every(([a0, a1]) => a1 > a0));
+  assert.ok(a[99][1] <= 360);
 });

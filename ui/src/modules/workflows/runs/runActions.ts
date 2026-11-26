@@ -2,13 +2,14 @@
 // with the run page's confirmations and toasts. Every one leaves the run on
 // screen live through RunSync's event path.
 import { api } from '../../../lib/api/client';
+import { mcpCpApi } from '../../../lib/api/mcp';
 import { rereviewWorkflowRun, retryRunNode } from '../../../lib/api/workflows';
 import { confirmer } from '../../../lib/confirm.svelte';
 import { loadIdeRuntimeSessionPort } from '../../../lib/runtimeThreadPort';
 import { toasts } from '../../../lib/toast.svelte';
 import { toastError } from '../../../lib/toastError';
 import { router } from '../../../lib/router.svelte';
-import type { Review } from '../../../lib/api/types';
+import type { Attention, Review } from '../../../lib/api/types';
 
 const run = (id: string) => `/workflow-runs/${encodeURIComponent(id)}`;
 
@@ -68,9 +69,16 @@ export function verifyCriterion(runId: string, nodeId: string, criterionId: stri
     api.post(`${run(runId)}/nodes/${encodeURIComponent(nodeId)}/criteria/${encodeURIComponent(criterionId)}/verify`, { met, evidence }));
 }
 
-/** Answer a step thread's approval (`via: provider | mcp`) by its request id. */
-export function answerRequest(threadId: string, requestId: string, approve: boolean): Promise<boolean> {
+/** Answer a step's approval where it was raised: a governed Otto MCP call
+ *  (`via: mcp`, `request_id` = the approval's id) in the MCP queue, with the
+ *  person's note; a provider request on the step's thread. */
+export function answerRequest(wait: Pick<Attention, 'via' | 'thread_id' | 'request_id'>, approve: boolean, note?: string | null): Promise<boolean> {
+  const { thread_id: threadId = '', request_id: requestId = '' } = wait;
   return attempt(approve ? 'approve' : 'deny', null, async () => {
+    if (wait.via === 'mcp') {
+      await mcpCpApi.cpDecide(requestId, { approved: approve, ...(note?.trim() ? { note: note.trim() } : {}) });
+      return;
+    }
     const port = await loadIdeRuntimeSessionPort();
     await port.runtimeThreads.respond(threadId, requestId, approve ? 'accept' : 'decline');
   });

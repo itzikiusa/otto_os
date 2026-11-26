@@ -66,16 +66,19 @@
   // Gone (404, or removed while shown) or not readable (403): a host with
   // `onunavailable` shows its own fallback, told once per thread.
   let gone = $state<RuntimeEmbedUnavailable | null>(null);
-  let told: RuntimeEmbedUnavailable | null = null;
+  // Told per thread, and kept: the view forgets "unavailable" once the thread
+  // view closes, which must not bring the embed back for the same thread.
+  let told = $state<{ id: string | null; r: RuntimeEmbedUnavailable } | null>(null);
   const lost = $derived.by((): RuntimeEmbedUnavailable | null => {
     if (!onunavailable || !sessionId) return null;
     if (!runtimeThreads.get(sessionId) && runtimeThreads.removed(sessionId)) return 'deleted';
-    return gone ?? runtimeViews.unavailable[sessionId] ?? null;
+    return gone ?? runtimeViews.unavailable[sessionId] ?? (told?.id === sessionId ? told.r : null);
   });
   $effect(() => {
     const r = lost;
-    if (!r || told === r) return;
-    told = r;
+    const id = sessionId;
+    if (!r || (told?.id === id && told.r === r)) return;
+    told = { id, r };
     untrack(() => onunavailable?.(r));
   });
   const linked = $derived(shown !== sessionId);
@@ -172,7 +175,6 @@
     void sid;
     picked = null;
     gone = null;
-    told = null;
   });
 </script>
 

@@ -47,30 +47,50 @@
   let { thread = null, sessions = [], digest = null, workspaceId, runId, nodeId, attempt }: Props = $props();
 
   let gone = $state<'deleted' | 'forbidden' | null>(null);
+  // Another step (or attempt) in the same pane starts over: the last one's
+  // "removed" state and digest never show for it.
+  $effect(() => {
+    void [thread?.thread_id, nodeId, attempt];
+    gone = null;
+    items = null;
+    itemsError = null;
+  });
   let note = $state(retentionNote(24, 168));
   $effect(() => void retentionHours().then((h) => (note = retentionNote(h.success, h.failed))));
   const live = $derived(thread?.runner === 'threads' && thread.available !== false && !gone);
 
   let View = $state<Component<ReadOnlyEmbedProps> | null>(null);
   let viewError = $state<string | null>(null);
+  let viewRetry = $state(0);
   $effect(() => {
+    void viewRetry;
     if (!live || View) return;
     loadRuntimeThreadView().then((m) => (View = m.default as Component<ReadOnlyEmbedProps>), (e) => (viewError = loadErrorText(e)));
   });
 
   // The digest's timeline, kept beside the run's files.
+  // (A reviewer or the summarizer has none: the host passes no nodeId.)
   let items = $state<DigestItem[] | null>(null);
   let itemsError = $state<string | null>(null);
+  let itemsRetry = $state(0);
   $effect(() => {
-    if (live || thread?.runner !== 'threads') return;
-    const path = `.threads/${nodeId}-${attempt}.json`;
-    readRunContext(runId, path).then(
+    void itemsRetry;
+    if (live || thread?.runner !== 'threads' || !nodeId) return;
+    const ac = new AbortController();
+    readRunContext(runId, `.threads/${nodeId}-${attempt}.json`, ac.signal).then(
       (f) => {
-        const v = JSON.parse(f.content) as { items?: DigestItem[] } | DigestItem[];
-        items = Array.isArray(v) ? v : (v.items ?? []);
+        try {
+          const v = JSON.parse(f.content) as { items?: DigestItem[] } | DigestItem[];
+          items = Array.isArray(v) ? v : (v.items ?? []);
+        } catch (e) {
+          itemsError = loadErrorText(e);
+        }
       },
-      (e) => (itemsError = loadErrorText(e)),
+      (e) => {
+        if (!ac.signal.aborted) itemsError = loadErrorText(e);
+      },
     );
+    return () => ac.abort();
   });
 </script>
 
@@ -80,7 +100,7 @@
   </div>
   <p class="note"><Icon name="lock" size={12} />{note}</p>
 {:else if live}
-  <LoadState what="the conversation" loading={!viewError} error={viewError} empty />
+  <LoadState what="the conversation" loading={!viewError} error={viewError} empty onretry={() => { viewError = null; viewRetry++; }} />
 {:else if thread?.runner === 'threads'}
   <div class="digest" data-testid="wf-step-digest">
     <p class="note"><Icon name="info" size={12} />{gone === 'forbidden' ? 'You can’t open this conversation. The answer, files and usage are kept — summary below.' : 'The conversation was removed after the run ended. The answer, files and usage are kept — summary below.'}</p>
@@ -91,7 +111,7 @@
         {/each}
       </ol>
     {:else if itemsError && !digest}
-      <LoadState what="the conversation summary" variant="compact" error={itemsError} empty />
+      <LoadState what="the conversation summary" variant="compact" error={itemsError} empty onretry={() => { itemsError = null; itemsRetry++; }} />
     {/if}
     {#if digest}
       {#if digest.last_answer_excerpt}<h4>The last answer</h4><pre class="answer" dir="auto">{digest.last_answer_excerpt}</pre>{/if}

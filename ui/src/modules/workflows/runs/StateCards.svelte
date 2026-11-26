@@ -44,6 +44,7 @@
   import { confirmer } from '../../../lib/confirm.svelte';
   import { extendProblem, extendProposal } from '../goal/goalExtend';
   import { answerRequest, resumeRun, steerRun, verifyCriterion } from './runActions';
+  import { isHttpUrl } from '../../../lib/browserDeepLink';
   import { clockTime, deliverablesInOrder, deliverableWord, errorParts } from './runWords';
   import GoalCard from './GoalCard.svelte';
 
@@ -80,7 +81,7 @@
       return;
     }
     busy = approve ? 'approve' : 'deny';
-    await answerRequest(wait.thread_id, wait.request_id, approve);
+    await answerRequest(wait, approve, note);
     busy = null;
   }
 
@@ -115,7 +116,7 @@
 </script>
 
 {#if kind}
-  <section class="scard {kind}" data-testid="wf-run-card" data-kind={kind} aria-label="Run runState">
+  <section class="scard {kind}" data-testid="wf-run-card" data-kind={kind} aria-label="Run status">
     {#if kind === 'error'}
       <h3 class="title danger"><Icon name="x" size={13} /><span dir="auto">{failure.title}</span></h3>
       {#if failure.body}<p class="body" dir="auto">{failure.body}</p>{/if}
@@ -175,7 +176,7 @@
           <li class={w.tone}>
             <Icon name={d.state === 'done' ? 'check' : d.state === 'failed' ? 'x' : 'clock'} size={13} />
             <span class="dl" dir="auto">{d.label}</span>
-            {#if d.url}<a href={d.url} target="_blank" rel="noreferrer noopener">{w.word}</a>{:else}<span class="dw">{w.word}</span>{/if}
+            {#if d.url && isHttpUrl(d.url)}<a href={d.url} target="_blank" rel="noreferrer noopener">{w.word}</a>{:else}<span class="dw">{w.word}</span>{/if}
           </li>
         {/each}
       </ul>

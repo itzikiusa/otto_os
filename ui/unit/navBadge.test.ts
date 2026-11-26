@@ -26,6 +26,15 @@ test('nothing waits on you: the running count, calm; a paused run is not running
   assert.equal(b.tone, 'working');
 });
 
+test('an older daemon without an overview: an approval wait still counts as waiting on you (CR1-063)', () => {
+  const { navBadge } = loadSource(new URL('../src/lib/navBadge.ts', import.meta.url), {
+    './stores/workspace.svelte': { ws: { activeWorkflowRuns: [{ run_id: 'r0', status: 'running', waiting_approval: true }, { run_id: 'r1', status: 'running' }] } },
+  });
+  const b = navBadge('workflows');
+  assert.equal(b.count, 1);
+  assert.equal(b.tone, 'needs', 'the Runs tab counts it the same way (fallbackState)');
+});
+
 test('no active runs, or only paused ones: no badge', () => {
   assert.equal(badgeFor([]), null);
   assert.equal(badgeFor(['paused']), null);

@@ -22,7 +22,7 @@ export function goalWorkflow(workspaceId: string) {
         { id: 'loop', kind: 'loop', name: 'Work toward the goal', x: 0, y: 120, params: { max_iterations: 6, max_active_s: 7200, hold_when_unmet: true,
           steps: [{ id: 'work', kind: 'agent_prompt', name: 'Work', params: { same_thread: true } }, { id: 'check', kind: 'check', name: 'Check criteria', params: { criteria: CRITERIA } }] } },
       ],
-      edges: [{ id: 'e1', from: 'start', to: 'loop' }],
+      edges: [{ id: 'e1', source: 'start', target: 'loop' }],
     },
   };
 }
@@ -47,6 +47,7 @@ export function goalRun(workspaceId: string, state: State) {
   return {
     id: GOAL_RUN, workflow_id: GOAL_WF, workspace_id: workspaceId, status, input: { goal: { title: 'Reject malformed rows' }, repos: [{ repo: 'r1', type: 'worktree', name: '/src/app', source: 'abc123' }] },
     started_at: '2026-11-20T09:00:00Z', finished_at: status === 'running' ? null : '2026-11-20T10:10:00Z', rev: 7, workflow_version: 1,
+    resume_attempts: 0, checkpoint_rev: 1, checkpoint_generation: 0, waiting_approval: false,
     hold, steering_queued: state === 'running' ? ['Also cover the CRLF case'] : [],
     nodes: [
       { node_id: 'start', status: 'success', logs: [], step_no: 1 },
@@ -65,6 +66,22 @@ export function goalRun(workspaceId: string, state: State) {
   };
 }
 
+/** `GET /workflow-runs/{id}/progress` as the server builds it
+ *  (crates/otto-state/src/workflow_progress.rs): the envelope, the run's
+ *  scalar columns, node summaries, `summary: true`, `input: null`, no
+ *  checkpoint bodies — only their counts. */
+export function progressOf(run: ReturnType<typeof goalRun>) {
+  const { input: _input, checkpoints, steering_queued: _steer, ...cols } = run;
+  return {
+    changed: true, rev: run.rev,
+    run: {
+      ...cols, summary: true, input: null, checkpoints: [],
+      checkpoint_count: checkpoints.length, checkpoint_done: checkpoints.filter((c) => c.status === 'success').length,
+      nodes: run.nodes.map((n) => ({ ...n, logs: [], log_count: n.logs.length, has_output: false, detail_version: `${n.node_id}-${n.status}` })),
+    },
+  };
+}
+
 /** Serve the goal workflow and one run of it; record every write. */
 export async function serveGoalRun(page: Page, workspaceId: string, state: State): Promise<{ writes: { path: string; body: unknown }[] }> {
   const writes: { path: string; body: unknown }[] = [];
@@ -77,7 +94,9 @@ export async function serveGoalRun(page: Page, workspaceId: string, state: State
       writes.push({ path, body: req.postDataJSON() });
       return route.fulfill({ json: run });
     }
-    if (path === `/workflow-runs/${GOAL_RUN}` || path === `/workflow-runs/${GOAL_RUN}/progress`) return route.fulfill({ json: run });
+    if (path === `/workflow-runs/${GOAL_RUN}`) return route.fulfill({ json: run });
+    if (path === `/workflow-runs/${GOAL_RUN}/progress`) return route.fulfill({ json: progressOf(run) });
+    if (path === `/workflow-runs/${GOAL_RUN}/checkpoints`) return route.fulfill({ json: { checkpoint_rev: run.checkpoint_rev, generation: run.checkpoint_generation, items: run.checkpoints, next_cursor: null } });
     if (path.startsWith(`/workflows/${GOAL_WF}`)) return route.fulfill({ json: wf });
     return route.fallback();
   });

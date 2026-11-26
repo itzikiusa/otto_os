@@ -183,7 +183,7 @@ test('run materializes run-brief, repos.json and per-step files; context_dir sur
   expect(JSON.parse(readFileSync(join(d, setJson), 'utf8')).note).toBe('ctx');
 });
 
-test('agent step leaves an engine-fallback handoff file with the full stub reply', async () => {
+test('agent step leaves its handoff file in the context dir', async () => {
   const wfId = await createWorkflow(
     'E2E Context Agent',
     [node('trigger', 'manual_trigger'), node('agent', 'agent_prompt', { prompt: 'context probe' })],
@@ -195,10 +195,12 @@ test('agent step leaves an engine-fallback handoff file with the full stub reply
   const files = readdirSync(d);
   const agentMd = files.find((f) => /^step\d+-agent\.md$/.test(f));
   expect(agentMd, files.join(', ')).toBeTruthy();
-  // The OTTO_E2E stub replies "OK" and returns before any real agent could
-  // write its own summary — so this file IS the engine fallback, and it must
-  // carry the reply verbatim (untruncated channel).
-  expect(readFileSync(join(d, agentMd!), 'utf8')).toContain('OK');
+  // On the thread runner the fake agent acts as the step persona: it writes
+  // its handoff itself (400 bytes); the PTY runner's offline stub leaves the
+  // engine fallback with its "OK" reply.
+  const text = readFileSync(join(d, agentMd!), 'utf8');
+  if (process.env.OTTO_WF_STEP_RUNNER === 'pty') expect(text).toContain('OK');
+  else expect(text.length).toBeGreaterThanOrEqual(400);
 });
 
 test('review_run succeeds on a master-only repo — the exit-128 regression', async () => {

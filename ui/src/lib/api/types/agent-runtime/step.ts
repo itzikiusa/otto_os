@@ -29,7 +29,8 @@ export type AttentionKind = 'approval' | 'question' | 'usage_limit' | 'verify' |
 export type AttentionVia = 'provider' | 'mcp';
 
 /** A live wait on a person. Answered through
- *  `POST /runtime-sessions/{thread_id}/requests/{request_id}`. */
+ *  `POST /runtime-sessions/{thread_id}/requests/{request_id}`; an approval
+ *  `via: mcp` through `POST /mcp/approvals/{request_id}/decide`. */
 export interface Attention {
   kind: AttentionKind;
   via?: AttentionVia;

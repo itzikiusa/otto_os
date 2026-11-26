@@ -1245,6 +1245,20 @@ test('RuntimeViews: a gone thread (404) stops reading; a failed read keeps its b
   await flush();
   assert.equal(h3.views.unavailable['s-403'], 'forbidden');
   close3();
+  assert.equal(h3.views.unavailable['s-403'], undefined, 'closing the last view forgets it (CR1-039)');
+
+  // A thread read as forbidden that a Retry then reads: no longer unavailable (CR1-039).
+  const h4 = makeRuntimeHarness();
+  const close4 = h4.views.open('s-back');
+  h4.gets[0].gate.reject(Object.assign(new Error('forbidden'), { status: 403 }));
+  await flush();
+  assert.equal(h4.views.unavailable['s-back'], 'forbidden');
+  h4.views.retry('s-back');
+  await flush();
+  h4.gets[h4.gets.length - 1].gate.resolve({ kind: 'events', events: [msgEvent('s-back', 1, 'm-1', 'hi')], last_sequence: 1 });
+  await flush();
+  assert.equal(h4.views.unavailable['s-back'], undefined);
+  close4();
 });
 
 test('RuntimeViews: a row read during the first replay does not fetch /events a second time', async () => {

@@ -3,7 +3,7 @@
 // selection — runs/stepOrder.ts.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { defaultSelection, doneFold, entrySteps, loopChildren, orderChildren, orderSteps, RESULT, topoOrder } from '../src/modules/workflows/runs/stepOrder.ts';
+import { defaultSelection, doneFold, entrySteps, loopChildren, orderChildren, orderSteps, RESULT, timeBar, topoOrder } from '../src/modules/workflows/runs/stepOrder.ts';
 import { at, fanoutNodes, node, PR_GRAPH, reviewers, T0 } from './workflowRunFixtures.ts';
 import type { WorkflowGraph } from '../src/lib/api/types';
 
@@ -89,4 +89,16 @@ test('a loop step\'s iterations become child rows, newest first, worded from the
   ]);
   assert.equal(kids[0].ended_at, undefined, 'a running iteration has no end');
   assert.equal(kids[2].ended_at, '2026-11-26T10:01:01Z');
+});
+
+test('a step\'s time bar stays inside the run\'s clock (CR1-062)', () => {
+  const clock = { start: 1_000, end: 11_000 };
+  const s = (start: number | null, end: number | null) => ({ id: 'a', name: 'a', kind: '', node: node('a', 'success', 0, 1), start, end });
+  assert.deepEqual(timeBar(s(3_500, 6_000), clock), { at: 25, w: 25 });
+  assert.equal(timeBar(s(null, null), clock), null);
+  // A retry ran past the clock's end, and a skewed start before its beginning.
+  for (const b of [timeBar(s(9_000, 40_000), clock)!, timeBar(s(-5_000, 4_000), clock)!, timeBar(s(12_000, 13_000), clock)!]) {
+    assert.ok(b.at >= 0 && b.at + b.w <= 100 + 1e-9, JSON.stringify(b));
+    assert.ok(b.w > 0, 'still a visible sliver');
+  }
 });

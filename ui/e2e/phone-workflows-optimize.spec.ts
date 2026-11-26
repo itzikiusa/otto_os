@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
-import { agentStep, chain, createWorkflow, wfApi, type WfApi } from './workflowsFixture';
+import { createWorkflow, prShape, wfApi, type WfApi } from './workflowsFixture';
 
 // Optimize on a phone (addendum-chat-optimize.md §2.5): touch check and
 // uncheck, the After outline in place of the canvas, Apply confirms; nothing
@@ -23,24 +23,24 @@ test.beforeEach(async ({ page }, info) => {
 });
 
 test('tick and untick by touch; the After outline; Apply asks first', async ({ page }) => {
-  const wf = await createWorkflow(api, 'E2E Phone optimize', chain(agentStep('a', 'Gather'), agentStep('b', 'Check'), agentStep('c', 'Write')));
+  const wf = await createWorkflow(api, 'E2E Phone optimize', prShape());
   await page.goto(`/#/workflows/${wf}/optimize`);
   await expect(page.getByTestId('wf-opt-page')).toBeVisible({ timeout: 20_000 });
   await expect(page.locator('[data-testid="wf-opt-canvas"][data-view="after"]')).toBeVisible();
-  const change = page.getByTestId('wf-opt-change').first();
-  if (await change.count()) {
-    const box = change.getByRole('checkbox');
-    const was = await box.isChecked();
-    await box.tap();
-    await expect(box).toBeChecked({ checked: !was });
-  }
+  // The checkout change is preselected (prShape): untick, then tick it again, by touch.
+  const box = page.locator('[data-testid="wf-opt-change"][data-rule="git_checkout"]').getByRole('checkbox');
+  await expect(box).toBeChecked();
+  await box.tap();
+  await expect(box).not.toBeChecked();
+  await box.tap();
+  await expect(box).toBeChecked();
   await expectNoHorizontalOverflow(page);
   const apply = page.getByTestId('wf-opt-apply');
-  if (await apply.isEnabled()) {
-    await apply.tap();
-    const dialog = page.getByRole('dialog');
-    await expect(dialog).toBeVisible();
-    await expectFullyInViewport(page, dialog);
-    await dialog.getByRole('button', { name: 'Cancel' }).tap();
-  }
+  await expect(apply).toBeEnabled();
+  await apply.tap();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toBeVisible();
+  await expectFullyInViewport(page, dialog);
+  await dialog.getByRole('button', { name: 'Cancel' }).tap();
+  await expect(dialog).toBeHidden();
 });

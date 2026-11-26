@@ -159,11 +159,13 @@ test('conditional branching: true branch runs, false branch is branch-skipped (n
   expect(failedLogs.toLowerCase()).toContain('branch not taken');
 });
 
-test('agent node surfaces an openable session on its step', async () => {
+test('agent node surfaces an openable conversation on its step', async () => {
   const run = await runToCompletion(sessionWfId);
   const agent = nodeState(run, 'agent');
   expect(agent.status).toBe('success');
-  expect(Array.isArray(agent.sessions) && agent.sessions.length >= 1).toBeTruthy();
+  // The thread runner records the step's runtime thread; the PTY runner a session.
+  if (process.env.OTTO_WF_STEP_RUNNER === 'pty') expect(Array.isArray(agent.sessions) && agent.sessions.length >= 1).toBeTruthy();
+  else expect(agent.thread).toMatchObject({ runner: 'threads', thread_id: expect.any(String) });
 });
 
 test('loop stops when the until-expression is satisfied', async () => {

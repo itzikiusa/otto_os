@@ -28,11 +28,16 @@ class WorkflowRunsStore {
   list: ActiveWorkflowRun[] = $state([]);
   /** The workspace `list` belongs to; a late response for another is dropped. */
   private workspaceId: Id | null = null;
+  /** The newest list read: an older one answering later is dropped. */
+  private seq = 0;
+  /** Runs an event settled: a list read that started before it never brings them back. */
+  private settled = new Set<Id>();
 
   /** Forget the list (identity change, workspace switch, zero-workspace mode). */
   clear(workspaceId: Id | null = null): void {
     this.workspaceId = workspaceId;
     this.list = [];
+    this.settled.clear();
   }
 
   /** Reload the runs of `workspaceId`. Cheap query; called on workspace switch
@@ -40,14 +45,23 @@ class WorkflowRunsStore {
    *  count stay live without per-page polling. */
   async refresh(workspaceId: Id | null): Promise<void> {
     this.workspaceId = workspaceId;
+    const seq = ++this.seq;
     if (!workspaceId) {
       this.list = [];
       return;
     }
     try {
       const runs = await listActiveWorkflowRuns(workspaceId);
-      // Guard against an out-of-order response after a workspace switch.
-      if (this.workspaceId === workspaceId) this.list = runs;
+      // Guard against an out-of-order response (an older read, a workspace switch).
+      if (seq !== this.seq || this.workspaceId !== workspaceId) return;
+      // Events that landed while it was in flight are newer than it.
+      const known = new Map(this.list.map((r) => [r.run_id, r]));
+      this.list = runs
+        .filter((r) => !this.settled.has(r.run_id))
+        .map((r) => {
+          const cur = known.get(r.run_id);
+          return cur && (cur.overview?.rev ?? 0) > (r.overview?.rev ?? 0) ? cur : r;
+        });
     } catch {
       /* transient; the next event re-fetches */
     }
@@ -63,9 +77,11 @@ class WorkflowRunsStore {
     if (ev.workspace_id !== currentWorkspaceId) return;
     const idx = this.list.findIndex((r) => r.run_id === ev.run_id);
     if (TERMINAL.has(ev.status) && !ev.overview?.hold) {
+      this.settled.add(ev.run_id);
       if (idx >= 0) this.list.splice(idx, 1);
       return;
     }
+    this.settled.delete(ev.run_id);
     if (idx < 0) {
       // A run the list doesn't know yet (started elsewhere) — one full refetch
       // brings it in with its workflow name.
@@ -79,7 +95,7 @@ class WorkflowRunsStore {
       r.nodes_total = ev.nodes_total;
     }
     if (ev.waiting_approval !== undefined) r.waiting_approval = ev.waiting_approval;
-    if (ev.overview) r.overview = ev.overview;
+    if (ev.overview && (ev.overview.rev ?? 0) >= (r.overview?.rev ?? 0)) r.overview = ev.overview;
     // The current step changed (a new step started, or the current one
     // settled): refetch for its name. A few times per run, not per log line.
     const n = ev.node;

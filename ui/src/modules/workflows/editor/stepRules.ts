@@ -2,7 +2,7 @@
 // continue, which continuers clash, where "+ Step" wires a new step, and the
 // review step's per-reviewer model picks (ux.md §9.3; engine.md §4.5;
 // runtime.md §7.3 / agreed-names.md §4).
-import type { WorkflowEdge, WorkflowGraph, WorkflowNode } from '../../../lib/api/types';
+import type { WorkflowEdge, WorkflowGraph, WorkflowNode, WorkflowValidationIssue } from '../../../lib/api/types';
 import { providerName } from './nodeSummary.ts';
 
 type Params = Record<string, unknown>;
@@ -157,6 +157,11 @@ export function withReviewerPick(row: ReviewerParams, provider: string, pick: Mo
   if (clean) picks[provider] = clean;
   else delete picks[provider];
   const { picks: _old, ...rest } = row;
+  // The primary provider's legacy model/effort would win over an empty pick.
+  if ((row.providers ?? [])[0] === provider) {
+    delete rest.model;
+    delete rest.effort;
+  }
   return Object.keys(picks).length ? { ...rest, picks } : rest;
 }
 
@@ -167,6 +172,13 @@ export function withNodePick(picks: Record<string, ModelPick> | undefined, provi
   if (clean) next[provider] = clean;
   else delete next[provider];
   return Object.keys(next).length ? next : undefined;
+}
+
+/** Whether an issue stops a save or a run (DR-028): a save only on a `save`
+ *  issue (a draft keeps its missing pieces), a run on `save` and `run`, a
+ *  warning never. */
+export function issueBlocks(issue: WorkflowValidationIssue, at: 'save' | 'run'): boolean {
+  return issue.class === 'save' || (at === 'run' && issue.class === 'run');
 }
 
 /** Skills a step names that are not installed for its provider. */

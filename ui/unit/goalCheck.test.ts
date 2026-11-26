@@ -1,7 +1,7 @@
 // A goal run's criteria rows (goal.md §3.5, GL8.1) — workflows/goal/goalCheck.ts.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { criterionRows, graphCriteria, latestCheck, newestCheckpoint } from '../src/modules/workflows/goal/goalCheck.ts';
+import { criterionRows, graphCriteria, latestCheck, newestCheckpoint, readsCheckpoints } from '../src/modules/workflows/goal/goalCheck.ts';
 import type { CheckOutput, Criterion, NodeRunState, WorkflowCheckpoint } from '../src/lib/api/types.ts';
 
 const criteria: Criterion[] = [
@@ -65,4 +65,15 @@ test('the criteria come from a check step inside a loop as well as a top-level c
 
 test("with no criteria on the graph, the result's own rows are shown", () => {
   assert.deepEqual(criterionRows([], out({ a: [true, 'e'] })).map((r) => r.state), ['met']);
+});
+
+test('a live goal run re-reads its checkpoints as iterations land; a settled run read whole does not (CR1-042)', () => {
+  const page = [{ node_id: 'c1', loop_id: 'loop', iteration: 0, step_index: 1, kind: 'check', name: 'Check', status: 'success' }] as unknown as WorkflowCheckpoint[];
+  // Opened mid-run: the run read carried iteration 1; /progress keeps that page while 2, 3 … land.
+  assert.equal(readsCheckpoints({ status: 'running', checkpoints: page }, false), true);
+  assert.equal(readsCheckpoints({ status: 'running' }, false), true);
+  // Opened on a settled run: its read is complete.
+  assert.equal(readsCheckpoints({ status: 'success', checkpoints: page }, false), false);
+  // Read while live, then it settled: once more, for the last iteration's check.
+  assert.equal(readsCheckpoints({ status: 'success', checkpoints: page }, true), true);
 });

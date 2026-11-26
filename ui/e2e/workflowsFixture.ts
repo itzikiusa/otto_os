@@ -55,8 +55,23 @@ export async function createWorkflow(api: WfApi, name: string, graph: WorkflowGr
   return (await api.post<{ id: string }>(`/workspaces/${api.ws}/workflows`, { name, description: 'e2e', graph })).id;
 }
 
+/** Runs this worker started: `cancelStarted` stops them after each test. */
+const started = new Set<string>();
+
 export async function startRun(api: WfApi, workflowId: string, input?: Record<string, unknown>): Promise<string> {
-  return (await api.post<{ id: string }>(`/workflows/${workflowId}/run`, input ? { input } : {})).id;
+  const id = (await api.post<{ id: string }>(`/workflows/${workflowId}/run`, input ? { input } : {})).id;
+  started.add(id);
+  return id;
+}
+
+/** `afterEach`: cancel every run the test started, passed or failed — a run
+ *  left blocking (a sleep, an ask) holds one of the daemon's two run slots
+ *  (OTTO_WF_MAX_PARALLEL_RUNS) and queues the next spec's runs. A settled run's
+ *  cancel is a no-op. */
+export async function cancelStarted(api: WfApi | undefined): Promise<void> {
+  if (!api) return;
+  for (const id of started) await api.ctx.post(`${api.base}/api/v1/workflow-runs/${id}/cancel`, { data: {} }).catch(() => undefined);
+  started.clear();
 }
 
 /** Poll the run until `ready` holds (or fail after `timeoutMs`). */
@@ -71,6 +86,23 @@ export async function waitRun(api: WfApi, runId: string, ready: (run: WorkflowRu
 }
 export const settled = (run: WorkflowRun): boolean => run.status !== 'running' && run.status !== 'pending';
 export const needsYou = (run: WorkflowRun): boolean => run.overview?.state === 'needs_you';
+
+/** A small clone of the PR-review shape that Optimize always has something
+ *  for (crates/otto-workflows/src/optimize.rs): the fixed checkout recipe (a
+ *  preselected git_checkout change), three independent agent steps chained
+ *  (a parallel change), an orchestrator review declaring its lenses (the
+ *  review_declared_lenses hold, unticked) and a single-repo step whose edge
+ *  already has a condition (a Not offered entry with its reason). */
+export function prShape(): WorkflowGraph {
+  const g = chain(node('checkout', 'agent_prompt', 'Check out PR branch', { provider: 'claude', prompt: 'git fetch, --detach at the merge-base, write repos.json with base_branch.' }));
+  const side = [agentStep('vault', 'Gather context'), agentStep('gates', 'Go PR gates'), agentStep('cross', 'Cross-repo check')];
+  g.nodes.push(...side, node('review', 'review_run', 'Review', { reviewers: [{ lens: 'correctness', provider: 'claude' }], mode: 'orchestrator' }),
+    node('multi', 'agent_prompt', 'Cross-repo summary', { provider: 'claude', prompt: 'With only one repo, stop with a one line note.' }));
+  let prev = 'checkout';
+  for (const s of side) { g.edges.push({ id: `e-${s.id}`, source: prev, target: s.id }); prev = s.id; }
+  g.edges.push({ id: 'e-review', source: prev, target: 'review' }, { id: 'e-multi', source: 'review', target: 'multi', condition: 'len(run.repos) > 0' });
+  return g;
+}
 
 /** A review step with `n` named reviewers over claude and codex (the fan-out fixture). */
 export function reviewStep(id: string, n: number): WorkflowNode {

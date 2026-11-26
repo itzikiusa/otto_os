@@ -11,6 +11,9 @@
   import RunOrbit from './RunOrbit.svelte';
   import StateCards from './StateCards.svelte';
   import { ago, clockTime, headline, subLine } from './runWords';
+  import { isHttpUrl } from '../../../lib/browserDeepLink';
+  /** An outside link only when it is http(s): these come from integrations and step outputs. */
+  const web = (u: string | null | undefined): u is string => !!u && isHttpUrl(u);
   import type { StepEntry } from './stepOrder';
 
   interface Props {
@@ -59,17 +62,17 @@
 
 <p class="facts">
   {#if origin?.user_name || origin?.channel_name}
-    <span class="fact"><Icon name="user" size={13} /><strong>{origin.user_name ?? ''}</strong>{#if origin.channel_name}{origin.user_name ? ' in ' : ''}{#if origin.thread_url}<a href={origin.thread_url} target="_blank" rel="noreferrer noopener">{origin.channel_name}</a>{:else}{origin.channel_name}{/if}{/if}{#if chat}<span class="dim"> ({chat.source})</span>{/if}</span>
+    <span class="fact"><Icon name="user" size={13} /><strong>{origin.user_name ?? ''}</strong>{#if origin.channel_name}{origin.user_name ? ' in ' : ''}{#if web(origin.thread_url)}<a href={origin.thread_url} target="_blank" rel="noreferrer noopener">{origin.channel_name}</a>{:else}{origin.channel_name}{/if}{/if}{#if chat}<span class="dim"> ({chat.source})</span>{/if}</span>
   {:else if chat}
     <span class="fact"><Icon name="comment" size={13} />Started from {chat.source}</span>
   {/if}
   {#if subject?.pr}
-    <span class="fact"><Icon name="pr" size={13} /><a href={subject.pr.url} target="_blank" rel="noreferrer noopener">{subject.pr.repo} #{subject.pr.number}</a></span>
+    <span class="fact"><Icon name="pr" size={13} />{#if web(subject.pr.url)}<a href={subject.pr.url} target="_blank" rel="noreferrer noopener">{subject.pr.repo} #{subject.pr.number}</a>{:else}{subject.pr.repo} #{subject.pr.number}{/if}</span>
   {:else if subject?.repo || subject?.branch}
     <span class="fact"><Icon name="branch" size={13} />{[subject.repo, subject.branch].filter(Boolean).join(' · ')}</span>
   {/if}
   {#if subject?.ticket}
-    <span class="fact"><Icon name="ticket" size={13} /><a href={subject.ticket.url} target="_blank" rel="noreferrer noopener">{subject.ticket.key}</a></span>
+    <span class="fact"><Icon name="ticket" size={13} />{#if web(subject.ticket.url)}<a href={subject.ticket.url} target="_blank" rel="noreferrer noopener">{subject.ticket.key}</a>{:else}{subject.ticket.key}{/if}</span>
   {/if}
   <span class="fact"><Icon name="clock" size={13} />{clockTime(run.started_at)}{run.workflow_version ? ` · version ${run.workflow_version}` : ''}</span>
   {#if run.steering_queued?.length}
