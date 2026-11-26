@@ -3003,13 +3003,15 @@ as before, so the previous build reads every row. New enums end in a catch-all
   failed_step?, deliverables, usage, time, origin?, subject?, elapsed_ms, typical_ms?, goal?,
   hold?}` — `state`: `queued · running · waiting · needs_you · succeeded · failed · canceled ·
   paused · blocked · exhausted` (+ `unknown`); `now = {node_ids, node_names, phase, wait_text?,
-  fan?: {done, total, running}}`; `AttentionRef` = `Attention` + `{node_id, name}` (flat);
+  fan?: {done, total, running}}` (`fan` counts a review's reviewers only — not its scope
+  assessment or summarizer); `AttentionRef` = `Attention` + `{node_id, name}` (flat);
   `queue = {position, ahead, cap, lane?}`; `failed_step = {node_id, name, error, error_class?}`;
   `time = {queued_ms, waiting_ms, with_you_ms, working_ms}`; `origin = {kind:
   chat|manual|schedule|webhook|event|task|mcp|goal, channel_name?, user_name?, thread_url?}`;
   `subject = {pr?: {repo, number, url, title?}, ticket?: {key, url, title?}, repo?, branch?}`;
   `goal = GoalProgress {iteration, max_iterations, criteria_met, criteria_total, active_ms,
-  max_active_ms?, awaiting?}`; `hold = RunHold`. The field is `overview`, never
+  max_active_ms?, awaiting?}` (while the loop runs the counts are the newest check's, 0 of
+  the check's criteria before the first); `hold = RunHold`. The field is `overview`, never
   `summary` (`/progress` keeps its boolean `summary: true` marker). Stored in
   `workflow_runs.overview_json` stamped with the row's `rev` by the same progress write;
   it is absent from a response when the stored one is stale (its `rev` is not the row's —

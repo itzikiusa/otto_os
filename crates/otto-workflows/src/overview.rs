@@ -127,8 +127,8 @@ pub fn run_overview(
                 .map(|w| clip(&w.text, 200)),
             fan: running
                 .iter()
-                .find(|n| !n.children.is_empty())
-                .map(|n| fan(n)),
+                .map(|n| fan(step_kind(graph, &n.node_id), n))
+                .find(|f| f.total > 0),
         }
     });
 
@@ -207,15 +207,31 @@ fn goal_progress(
         .filter_map(|a| a.criterion_id.clone())
         .collect();
     let Some(out) = st.output.as_ref() else {
-        // While the loop runs: the iteration it is in (its "🔁 iteration i/n"
-        // log line), the last check's counts carried from before.
-        let at: Option<(u32, u32)> = st.logs.iter().rev().find_map(|l| {
-            let (i, n) = l.strip_prefix("🔁 iteration ")?.split_once('/')?;
-            Some((i.parse().ok()?, n.trim().parse().ok()?))
-        });
+        // While the loop runs: the iteration it is in and the newest check's
+        // counts — the check's "m of t criteria met" line as the loop relays
+        // it ("  [2/Check criteria] 2 of 3 criteria met"). When the capped
+        // log no longer has that line the counts are carried from before;
+        // before the first check, none of the check step's criteria is met.
         let mut g = prev.cloned().unwrap_or_default();
-        if let Some((i, n)) = at {
+        if let Some((i, n)) = loop_iteration(st) {
             (g.iteration, g.max_iterations) = (i, n);
+        }
+        let checked: Option<(u32, u32)> = st.logs.iter().rev().find_map(|l| {
+            let (_, said) = l.strip_prefix("  [")?.split_once("] ")?;
+            let (met, total) = said.strip_suffix(" criteria met")?.split_once(" of ")?;
+            Some((met.parse().ok()?, total.parse().ok()?))
+        });
+        if let Some(counts) = checked {
+            (g.criteria_met, g.criteria_total) = counts;
+        } else if g.criteria_total == 0 {
+            g.criteria_total = lp.params["steps"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|s| s["kind"] == "check")
+                .filter_map(|s| s["params"]["criteria"].as_array())
+                .map(Vec::len)
+                .sum::<usize>() as u32;
         }
         g.awaiting = awaiting;
         return (g.max_iterations > 0).then_some(g);
@@ -275,8 +291,12 @@ fn headline(run: &WorkflowRun, graph: &WorkflowGraph, o: &RunOverview) -> String
         RunState::NeedsYou => match o.attention.first() {
             Some(a) if a.attention.kind == AttentionKind::UsageLimit => a.attention.text.clone(),
             Some(a) => format!("Needs you — {}", a.attention.text),
-            None => match run.approval_node_id.as_deref() {
-                Some(gate) => format!("Needs you — approve {} to continue", name(gate)),
+            None => match run.approval_node_id.as_deref().map(name) {
+                // A gate named for its own verb ("Approve comments") says it once.
+                Some(gate) if gate.to_lowercase().starts_with("approve") => {
+                    format!("Needs you — {gate} to continue")
+                }
+                Some(gate) => format!("Needs you — approve {gate} to continue"),
                 None => "Needs you".into(),
             },
         },
@@ -305,13 +325,12 @@ fn headline(run: &WorkflowRun, graph: &WorkflowGraph, o: &RunOverview) -> String
         RunState::Running => match running.as_slice() {
             [] => "Working".into(),
             [n] => match o.goal.as_ref().filter(|g| g.iteration > 0) {
-                // A goal's loop: which iteration it is in (goal.md §3.5).
-                Some(g) if step_kind(graph, &n.node_id) == "loop" => {
+                // A goal's loop: which iteration it is in and how far the
+                // goal is (goal.md §3.5), the card's own two numbers.
+                Some(g) if step_kind(graph, &n.node_id) == "loop" && g.criteria_total > 0 => {
                     format!(
-                        "Iteration {} of {} — {}",
-                        g.iteration,
-                        g.max_iterations,
-                        activity(graph, n)
+                        "Iteration {} of {} — {} of {} criteria met",
+                        g.iteration, g.max_iterations, g.criteria_met, g.criteria_total
                     )
                 }
                 _ => format!("{} — {}", name(&n.node_id), activity(graph, n)),
@@ -443,22 +462,11 @@ fn succeeded(run: &WorkflowRun, graph: &WorkflowGraph, o: &RunOverview) -> Strin
     }
 }
 
-/// What one running step is doing: a review's "9 of 12 reviewers done", the
-/// runtime's current activity line, or "working".
+/// What one running step is doing: its sub-threads' progress, the runtime's
+/// current activity line, or "working".
 fn activity(graph: &WorkflowGraph, n: &NodeRunState) -> String {
-    if !n.children.is_empty() {
-        let f = fan(n);
-        let kind = graph
-            .nodes
-            .iter()
-            .find(|g| g.id == n.node_id)
-            .map(|g| g.kind.as_str());
-        let what = if kind == Some("review_run") {
-            " reviewers"
-        } else {
-            ""
-        };
-        return format!("{} of {}{what} done", f.done, f.total);
+    if let Some(words) = fan_words(step_kind(graph, &n.node_id), n) {
+        return words;
     }
     n.activity
         .as_ref()
@@ -468,16 +476,49 @@ fn activity(graph: &WorkflowGraph, n: &NodeRunState) -> String {
         .unwrap_or_else(|| "working".into())
 }
 
-fn fan(n: &NodeRunState) -> FanProgress {
-    let count = |states: &[&str]| {
-        n.children
-            .iter()
-            .filter(|c| states.contains(&c.status.as_str()))
-            .count() as u32
+/// A running step's progress in words, when its sub-threads say it: a loop's
+/// "iteration 2 of 6" (its children are its iterations' threads, so "1 of 2
+/// done" would count threads), a review's "9 of 12 reviewers done", another
+/// step's "1 of 2 done".
+pub(crate) fn fan_words(kind: &str, n: &NodeRunState) -> Option<String> {
+    if let Some((i, of)) = loop_iteration(n).filter(|_| kind == "loop") {
+        return Some(format!("iteration {i} of {of}"));
+    }
+    let f = fan(kind, n);
+    let what = if kind == "review_run" {
+        " reviewers"
+    } else {
+        ""
     };
+    (f.total > 0).then(|| format!("{} of {}{what} done", f.done, f.total))
+}
+
+/// The iteration a running loop is in: its newest "🔁 iteration i/n" log line.
+fn loop_iteration(n: &NodeRunState) -> Option<(u32, u32)> {
+    n.logs.iter().rev().find_map(|l| {
+        let (i, of) = l.strip_prefix("🔁 iteration ")?.split_once('/')?;
+        Some((i.parse().ok()?, of.trim().parse().ok()?))
+    })
+}
+
+/// A step's fan: its sub-threads, and of a review only its reviewers — the
+/// scope assessment and the summarizer are rows of the review, not reviewers
+/// (the run page lists them apart, so both show the same count).
+fn fan(kind: &str, n: &NodeRunState) -> FanProgress {
+    let reviewer = |label: &str| {
+        let label = label.to_lowercase();
+        !label.starts_with("summar") && label != "scope assessment"
+    };
+    let kids: Vec<&str> = n
+        .children
+        .iter()
+        .filter(|c| kind != "review_run" || reviewer(&c.label))
+        .map(|c| c.status.as_str())
+        .collect();
+    let count = |states: &[&str]| kids.iter().filter(|s| states.contains(s)).count() as u32;
     FanProgress {
         done: count(&["success", "error", "skipped"]),
-        total: n.children.len() as u32,
+        total: kids.len() as u32,
         running: count(&["running", "needs_you"]),
     }
 }

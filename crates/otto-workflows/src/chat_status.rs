@@ -186,18 +186,8 @@ fn status_line(view: &ChatView, node: &WorkflowNode, state: Option<&NodeRunState
                     .map(|t| (view.now - t).num_milliseconds().max(0) as u64)
                     .unwrap_or(0);
                 let mut line = format!("▶ {name} · {}", clock(elapsed));
-                if !s.children.is_empty() {
-                    let finished = s
-                        .children
-                        .iter()
-                        .filter(|c| matches!(c.status.as_str(), "success" | "error" | "skipped"))
-                        .count();
-                    let who = if node.kind == "review_run" {
-                        " reviewers"
-                    } else {
-                        ""
-                    };
-                    line.push_str(&format!(" — {finished} of {}{who} done", s.children.len()));
+                if let Some(words) = crate::overview::fan_words(&node.kind, s) {
+                    line.push_str(&format!(" — {words}"));
                 }
                 line
             }

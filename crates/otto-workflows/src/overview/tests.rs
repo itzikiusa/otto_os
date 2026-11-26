@@ -156,15 +156,48 @@ fn a_review_says_how_many_reviewers_are_done() {
             .map(|i| child(i, if i < 9 { "success" } else { "running" }))
             .collect(),
     );
-    let o = ov(&run("running", json!([done("n1"), review])));
+    let o = ov(&run("running", json!([done("n1"), review.clone()])));
     assert_eq!(o.headline, "Multi-agent PR review — 9 of 12 reviewers done");
+    let twelve = Some(FanProgress {
+        done: 9,
+        total: 12,
+        running: 3,
+    });
+    assert_eq!(o.now.unwrap().fan, twelve);
+
+    // The summarizer is a row of the review, not a thirteenth reviewer.
+    let mut summarized = review.clone();
+    summarized["children"].as_array_mut().unwrap().push(
+        json!({"id": "c12", "label": "Summarizer", "provider": "claude", "status": "pending"}),
+    );
+    let o = ov(&run("running", json!([done("n1"), summarized])));
+    assert_eq!(o.headline, "Multi-agent PR review — 9 of 12 reviewers done");
+    assert_eq!(o.now.unwrap().fan, twelve);
+
+    // While the scope is assessed the review has no reviewers yet.
+    review["children"] = json!([{"id": "c0", "label": "Scope assessment", "provider": "claude", "status": "running"}]);
+    let o = ov(&run("running", json!([done("n1"), review])));
+    assert_eq!(o.headline, "Multi-agent PR review — working");
+    assert_eq!(o.now.unwrap().fan, None);
+}
+
+#[test]
+fn a_loop_says_its_iteration_and_another_fan_counts_its_threads() {
+    let mut g = graph();
+    g.nodes[1].kind = "loop".into();
+    let kid = |status: &str| json!({"id": status, "label": "Fix · iteration 1", "provider": "claude", "status": status});
+    let mut step = running("n2", "working");
+    step["children"] = json!([kid("success"), kid("running")]);
+    step["logs"] = json!(["🔁 iteration 1/4", "🔁 iteration 2/4"]);
+    let r = run("running", json!([done("n1"), step]));
     assert_eq!(
-        o.now.unwrap().fan,
-        Some(FanProgress {
-            done: 9,
-            total: 12,
-            running: 3
-        })
+        run_overview(&r, &g, None, None, t(100)).headline,
+        "Gather context from the Vault — iteration 2 of 4"
+    );
+    // The same children under an agent step are its threads.
+    assert_eq!(
+        ov(&r).headline,
+        "Gather context from the Vault — 1 of 2 done"
     );
 }
 
@@ -254,6 +287,15 @@ fn needs_you_leads_with_the_oldest_ask() {
     assert_eq!(
         ov(&r).headline,
         "Needs you — approve post_review_comments to continue"
+    );
+
+    // A gate named for its own verb says it once (the inbox drops the
+    // "Needs you — " and showed "Approve Approve comments to continue").
+    let mut g = graph();
+    g.nodes[5].name = "Approve comments".into();
+    assert_eq!(
+        run_overview(&r, &g, None, None, t(100)).headline,
+        "Needs you — Approve comments to continue"
     );
 }
 
@@ -542,26 +584,78 @@ fn a_goal_run_carries_its_progress_and_says_it_reached_the_goal() {
 }
 
 /// goal.md §3.5: while its loop runs, a goal run says which iteration it is
-/// in, and keeps the last check's counts it already knew.
+/// in and how many criteria the newest check found met — the numbers its
+/// card lists (it said "Criteria 0 of 0 met" and "0 of 1 done" over a table
+/// with two of three met).
 #[test]
-fn a_running_goal_says_which_iteration_it_is_in() {
+fn a_running_goal_says_its_iteration_and_its_criteria() {
     let mut g = graph();
+    let criterion = |id: &str| json!({"id": id, "text": id, "verify": "command"});
     g.nodes.push(WorkflowNode {
         id: "goal".into(),
         kind: "loop".into(),
         name: "Work toward the goal".into(),
         x: 0.0,
         y: 0.0,
-        params: json!({"steps": [{"kind": "agent_prompt"}, {"kind": "check"}]}),
+        params: json!({"steps": [{"kind": "agent_prompt"}, {"kind": "check", "params": {
+            "criteria": [criterion("tests"), criterion("cart"), criterion("changelog")]}}]}),
         retry: None,
     });
-    let mut r: WorkflowRun = serde_json::from_value(json!({
-        "id": "r1", "workflow_id": "wf", "workspace_id": "ws", "status": "running",
-        "input": {}, "started_at": t(0), "rev": 3,
-        "nodes": [{"node_id": "goal", "status": "running", "started_at": t(0), "step_no": 1,
-            "logs": ["🔁 iteration 1/6", "▶ Work — iteration 1…", "🔁 iteration 2/6"]}],
-    }))
-    .unwrap();
+    let goal_run = |logs: Value| -> WorkflowRun {
+        serde_json::from_value(json!({
+            "id": "r1", "workflow_id": "wf", "workspace_id": "ws", "status": "running",
+            "input": {}, "started_at": t(0), "rev": 3,
+            "nodes": [{"node_id": "goal", "status": "running", "started_at": t(0), "step_no": 1, "logs": logs,
+                "children": [{"id": "t1", "label": "Work · iteration 2", "provider": "claude", "status": "running"}]}],
+        }))
+        .unwrap()
+    };
+
+    // Before the first check: none of the check step's criteria is met.
+    let o = run_overview(
+        &goal_run(json!(["🔁 iteration 1/6", "▶ Work — iteration 1…"])),
+        &g,
+        None,
+        None,
+        t(100),
+    );
+    let goal = o.goal.clone().expect("goal progress while running");
+    assert_eq!((goal.criteria_met, goal.criteria_total), (0, 3));
+    assert_eq!(o.headline, "Iteration 1 of 6 — 0 of 3 criteria met");
+
+    // After a check: its counts, as the loop relays the check's log line.
+    let o = run_overview(
+        &goal_run(json!([
+            "🔁 iteration 1/6",
+            "▶ Work — iteration 1…",
+            "✅ Work done — 2 of 3 criteria met",
+            "  [1/Check criteria] 2 of 3 criteria met",
+            "✅ Check criteria done — 2 of 3 criteria met",
+            "🔁 iteration 2/6",
+            "▶ Work — iteration 2…",
+            "  [2/Work] the agent says 3 of 3 criteria met"
+        ])),
+        &g,
+        None,
+        None,
+        t(100),
+    );
+    let goal = o.goal.clone().expect("goal progress while running");
+    assert_eq!(
+        (goal.iteration, goal.max_iterations),
+        (2, 6),
+        "{:?}",
+        o.goal
+    );
+    assert_eq!((goal.criteria_met, goal.criteria_total), (2, 3));
+    assert_eq!(o.headline, "Iteration 2 of 6 — 2 of 3 criteria met");
+
+    // A capped log that lost the check's line keeps the counts it knew.
+    let mut r = goal_run(json!([
+        "🔁 iteration 1/6",
+        "▶ Work — iteration 1…",
+        "🔁 iteration 2/6"
+    ]));
     let before = otto_core::workflows::GoalProgress {
         iteration: 1,
         max_iterations: 6,
@@ -579,9 +673,5 @@ fn a_running_goal_says_which_iteration_it_is_in() {
         (goal.iteration, goal.max_iterations, goal.criteria_met),
         (2, 6, 1)
     );
-    assert!(
-        o.headline.starts_with("Iteration 2 of 6 — "),
-        "{}",
-        o.headline
-    );
+    assert_eq!(o.headline, "Iteration 2 of 6 — 1 of 3 criteria met");
 }
