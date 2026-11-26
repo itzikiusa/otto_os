@@ -1935,6 +1935,12 @@ must-fix); on the summarizer row they are the verifier's overall rating after
 verification. Agents emit it as one `{"lens_score": n, "score_reason": "…"}`
 element of their JSON array, which is never stored as a finding or comment.
 The workflow `review_run` node outputs them as `lens_scores: [{lens, score, reason}]`.
+`effort` (optional) is the effort the row runs with (empty = provider default).
+`thread` (optional, true) says `session_id` names a runtime thread (open it in
+the embedded thread view) rather than a terminal session; `started_at` /
+`finished_at` (optional) time the row's agent. On the thread runner an
+admission wait keeps the row `pending` with the wait's words in `note`, and a
+question or approval makes it `waiting` with "needs you: …".
 A scope assessment's `related_modules`/`risks` entries may arrive as strings or
 objects; objects are folded into one `"a — b"` string each.
 Recovery policy for a failed agent: up to `ReviewConfig.max_attempts`
@@ -3710,6 +3716,15 @@ Filesystem paths are on the **daemon host**, including when the caller uses a re
 - `large_pr_lines?: number | null` — changed lines (tests included) above which a PR is LARGE: no scope assessment, every configured lens on every configured provider. Default 5000.
 - `medium_pr_lines?: number | null` — changed lines above which a PR is MEDIUM (recorded on the plan; lenses stay agent-selected, as for SMALL). Default 1000.
 - `ReviewScopePlan` additionally carries `size` (`small|medium|large`), `changed_lines` and `all_providers` (true for LARGE PRs). A failed scope assessment never stops a review: it falls back to every configured lens (`source` says so).
+
+**Model and effort per reviewer and provider; drop-only scope (additive, optional, all `serde(default)`):**
+- `ModelPick { model, effort }` — empty = the provider's default (no flag sent).
+- `ReviewAgentCfg.effort?: string` (beside `model`, on `provider`) and `ReviewAgentCfg.picks?: { <provider>: ModelPick }`.
+- `ReviewConfig.picks?: { <provider>: ModelPick }` — the review-wide default per provider; also reaches lenses the scope assessment adds.
+- Resolution for a row "lens L on provider P": `L.picks[P]` → `(L.model, L.effort)` when `L.provider == P` → `picks[P]` → provider default (an empty pick falls through). An orchestrator row (one per provider) takes the first lens pick for P, else the first configured model that applies to P, else `picks[P]`. The summarizer and the scope assessment run on `summarizer.{provider, model, effort}`.
+- `ReviewConfig.scope_assessment?: "auto" | "configured"` (absent = `auto`, today's behaviour). `configured`: the scope assessment still runs, then the plan keeps only lenses a configured reviewer declares (name, case-insensitive), in plan order — it may drop a declared lens, never add one; a plan left empty runs every configured lens.
+- `ReviewConfig.reviewer_time_box_secs?: number` — reserved (accepted and stored; not enforced yet).
+- A `review_run` node takes the same keys: `reviewers[].effort`, `reviewers[].picks`, node-level `picks`, `summarizer.effort`, `scope_assessment`, `reviewer_time_box_secs`.
 
 **`Review` DTO additions (A2 — additive, optional):**
 - `verdict?: "approved" | "changes_requested" | "incomplete" | null` — computed at read time (every review read route) from the review's tracked findings: `incomplete` when `error` carries `Review incomplete — not a verdict:`, else for a `done` review `changes_requested` when `blocker_count > 0`, `approved` otherwise; `null` while running, cancelled or failed with nothing usable.

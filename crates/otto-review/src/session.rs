@@ -891,8 +891,11 @@ pub async fn run_agent_session_with_recovery(
     skills_add_dir: Option<&str>,
     // Orchestrator lens slugs (see `run_agent_session`); empty for fan-out.
     lens_slugs: &[String],
+    // The review's thread runner; `None` = the terminal path (frozen).
+    threads: Option<&crate::thread_run::Threads>,
 ) -> AgentRunResult {
     let attempts = effective_max_attempts(max_attempts);
+    let threads = threads.filter(|t| (t.has_driver)(provider));
     // Shared retry loop (kills the prior session + backs off between attempts).
     // The `cancel` flag, when set by a Cancel-review request, short-circuits the
     // loop with `Stopped` and is not retried.
@@ -916,9 +919,31 @@ pub async fn run_agent_session_with_recovery(
         &[REVIEW_RETRY_BACKOFF],
         cancel,
         give_up,
-        |_attempt| {
-            run_agent_session(
-                manager,
+        |_attempt| async {
+            let Some(threads) = threads else {
+                return run_agent_session(
+                    manager,
+                    reviews,
+                    states,
+                    ws,
+                    user,
+                    provider,
+                    model,
+                    cwd,
+                    review_id,
+                    agent_index,
+                    base_prompt,
+                    timeout,
+                    skills_add_dir,
+                    lens_slugs,
+                    prompt_path.as_deref(),
+                    &prompt_refused,
+                )
+                .await;
+            };
+            let dirs = review_skills_extra_dirs(&manager.cli_family(provider), skills_add_dir);
+            crate::thread_run::run_agent_thread(
+                threads,
                 reviews,
                 states,
                 ws,
@@ -930,11 +955,12 @@ pub async fn run_agent_session_with_recovery(
                 agent_index,
                 base_prompt,
                 timeout,
-                skills_add_dir,
+                dirs,
                 lens_slugs,
                 prompt_path.as_deref(),
-                &prompt_refused,
+                cancel,
             )
+            .await
         },
     )
     .await;
@@ -1368,6 +1394,7 @@ mod tests {
             lens_slugs: Vec::new(),
             score: None,
             score_reason: String::new(),
+            ..Default::default()
         }
     }
 

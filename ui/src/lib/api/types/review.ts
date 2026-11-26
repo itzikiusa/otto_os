@@ -71,6 +71,12 @@ export interface ReviewAgentState {
   score?: number | null;
   /** One sentence on why that score. */
   score_reason?: string;
+  /** The effort the agent runs with; absent/empty = provider default. */
+  effort?: string;
+  /** True when `session_id` names a runtime thread (open it in the thread view), not a terminal. */
+  thread?: boolean;
+  started_at?: string | null;
+  finished_at?: string | null;
 }
 
 export interface ReviewComment {
@@ -182,7 +188,20 @@ export interface ReviewAgentCfg {
    *  is inlined into the prompt at review time, for every provider. Rust `#[serde(default)]`:
    *  always sent by the server (empty = none); optional on writes. */
   skill?: string;
+  /** Reasoning effort on `provider` (empty = provider default). */
+  effort?: string;
+  /** Model and effort per provider; wins over `model`/`effort` on that provider. */
+  picks?: Record<string, ModelPick>;
 }
+
+/** A model and effort for one provider; empty = the provider's default. */
+export interface ModelPick {
+  model: string;
+  effort: string;
+}
+
+/** Who chooses the lenses: the scope agent (`auto`) or the declared reviewers, which it may only narrow. */
+export type ScopeAssessment = 'auto' | 'configured';
 
 /** Review execution mode: one reviewer per lens × provider, or one orchestrator per provider running every lens as sub-agents. */
 export type ReviewMode = 'fan_out' | 'orchestrator';
@@ -206,6 +225,12 @@ export interface ReviewConfig {
   /** Execution mode; absent/null ⇒ fan_out. A review_run step's `params.mode` and a run's
    *  `review_mode` both override it. */
   mode?: ReviewMode | null;
+  /** Review-wide model and effort per provider (lenses without their own pick, invented ones too). */
+  picks?: Record<string, ModelPick>;
+  /** Absent ⇒ `auto`. */
+  scope_assessment?: ScopeAssessment;
+  /** Reserved: accepted and stored, not enforced yet. */
+  reviewer_time_box_secs?: number | null;
 }
 
 /** A named, reusable full review configuration.

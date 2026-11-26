@@ -333,6 +333,7 @@ pub(crate) async fn run_review_core(
             otto_review::scope::configured_plan(&cfg, &prior_ids, &e.to_string())
         }
     };
+    otto_review::scope::keep_configured(&mut scope_plan, &cfg, &prior_ids);
     scope_plan.base_sha = causal_base.unwrap_or_default();
     (scope_plan.size, scope_plan.changed_lines) = (size.into(), lines);
     ctx.reviews_store
@@ -379,18 +380,7 @@ pub(crate) async fn run_review_core(
     // `read_only` (forced Seatbelt, no shell) with `project_settings: false`
     // (`--setting-sources user`, so a PR's `.claude/settings.json` hooks never
     // load) — see `otto_review::session::review_session_meta`.
-    {
-        let mut trusted = std::collections::HashSet::<String>::new();
-        for provider in agent_runs
-            .iter()
-            .map(|r| r.provider.clone())
-            .chain(std::iter::once("claude".to_string()))
-        {
-            if trusted.insert(provider.clone()) {
-                otto_sessions::trust::ensure_trusted(&provider, repo_path);
-            }
-        }
-    }
+    otto_review::engine::trust_checkout(&agent_runs, repo_path);
 
     // Where this run reads the code: the source branch scopes local finding
     // resolution (S2-05) and the checkout + head are what a Retry re-enters
@@ -475,10 +465,14 @@ pub(crate) async fn run_review_core(
         })
         .collect();
 
+    let threads = review_threads(ctx, Some(&cfg)).await;
     let mut set = tokio::task::JoinSet::new();
-    for (i, run) in agent_runs.into_iter().enumerate() {
+    for (n, (i, run)) in otto_review::engine::in_spawn_order(agent_runs)
+        .into_iter()
+        .enumerate()
+    {
         // Space the cold starts out (R3), waking immediately on cancel.
-        let delay = REVIEW_SPAWN_STAGGER * u32::from(i > 0);
+        let delay = REVIEW_SPAWN_STAGGER * u32::from(n > 0);
         if !otto_review::scope::stagger_wait(delay, cancel_flag.as_deref()).await {
             break;
         }
@@ -524,8 +518,8 @@ pub(crate) async fn run_review_core(
         {
             tracing::warn!(review = %review_id, agent = i, "could not persist agent prompt: {e}");
         }
-        let max_attempts = cfg.max_attempts;
-        let slots = reviewer_slots();
+        let (max_attempts, threads) = (cfg.max_attempts, threads.clone());
+        let slots = threads.is_none().then(reviewer_slots);
         set.spawn(async move {
             // SI-11: wait for a reviewer slot (a closed semaphore never
             // happens — it lives for the process).
@@ -556,6 +550,7 @@ pub(crate) async fn run_review_core(
                 Some(&agent_cancel),
                 review_skills_dir.as_deref(),
                 &lens_slugs,
+                threads.as_ref(),
             )
             .await;
             (i, res)

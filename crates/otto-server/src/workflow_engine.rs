@@ -3555,6 +3555,7 @@ fn checks_review_agent(
         model: String::new(),
         prompt,
         skill: String::new(),
+        ..Default::default()
     }
 }
 

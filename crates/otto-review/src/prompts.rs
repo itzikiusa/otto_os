@@ -41,6 +41,7 @@ pub fn seed_states(agent_runs: &[AgentRun], summarizer: &ReviewAgentCfg) -> Vec<
             name: r.display_name.clone(),
             provider: r.provider.clone(),
             model: r.model.clone(),
+            effort: r.effort.clone(),
             status: "pending".to_string(),
             note: String::new(),
             comment_count: 0,
@@ -51,12 +52,14 @@ pub fn seed_states(agent_runs: &[AgentRun], summarizer: &ReviewAgentCfg) -> Vec<
             lens_slugs: r.lens_slugs(),
             score: None,
             score_reason: String::new(),
+            ..Default::default()
         })
         .collect();
     agent_states.push(ReviewAgentState {
         name: summarizer.name.clone(),
         provider: summarizer.provider.clone(),
         model: summarizer.model.clone(),
+        effort: summarizer.effort.clone(),
         status: "pending".to_string(),
         note: String::new(),
         comment_count: 0,
@@ -67,6 +70,7 @@ pub fn seed_states(agent_runs: &[AgentRun], summarizer: &ReviewAgentCfg) -> Vec<
         lens_slugs: Vec::new(),
         score: None,
         score_reason: String::new(),
+        ..Default::default()
     });
     agent_states
 }

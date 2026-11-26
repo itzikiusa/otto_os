@@ -3,6 +3,8 @@
 //! - [`session`]: runs one reviewer as a real, openable PTY session (prompt
 //!   injection, findings-file capture, recovery, lens files).
 //! - [`summarizer`]: the managed summarizer lifecycle.
+//! - [`thread_run`]: the same agents as runtime threads, through the shared
+//!   step runner (the default runner; the terminal path stays behind it).
 //! - [`fallback`]: the deterministic summarizer floor.
 //! - [`worktree`]: isolated PR-head checkouts for review runs.
 //! - [`engine`]: the pure core — diff rendering, config defaults + budgets,
@@ -28,6 +30,7 @@ pub mod scope;
 pub mod session;
 pub mod skill_bundle;
 pub mod summarizer;
+pub mod thread_run;
 pub mod triage;
 pub mod verification;
 pub mod worktree;
