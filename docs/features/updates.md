@@ -18,7 +18,7 @@ anything: pull and run `packaging/deploy.sh` instead.
 ## Walkthrough
 
 1. **A new version is out** — a quiet row appears in the sidebar footer above
-   **Help**: **Update to 0.5.4**. In the collapsed rail it is one icon with a
+   **Help**: **Update to 0.6.1**. In the collapsed rail it is one icon with a
    dot (its tooltip and accessible name say the same). Up to date, checking, a
    failed automatic check and a skipped version show nothing.
 2. **Open it** — the row, **Otto → Check for Updates…** or **Settings →
@@ -33,7 +33,7 @@ anything: pull and run `packaging/deploy.sh` instead.
    containers, tunnels, phone/remote clients. When nothing ends the button is
    **Restart now** (one click). When something ends it reads **Restart and end
    3** and asks once more, naming what ends. If the count fails, it asks.
-5. **After the relaunch** — a toast **Updated to 0.5.4**. If the new version
+5. **After the relaunch** — a toast **Updated to 0.6.1**. If the new version
    did not start, the shell put the old app back; the row reads **Update failed
    and was undone · Details** and the dialog shows why, with **Show the update
    log** (reveals it in Finder). That version is skipped so it is not tried again.

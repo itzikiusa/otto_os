@@ -136,7 +136,7 @@ Run these on your Mac. The private files never go into the repository.
 2. Tag the merged commit and push the tag:
 
    ```bash
-   git fetch origin && git tag v0.5.4 origin/main && git push origin v0.5.4
+   git fetch origin && git tag v0.6.1 origin/main && git push origin v0.6.1
    ```
 
 3. In **Actions ▸ Release**, approve the `release` deployment. About 40
@@ -150,38 +150,40 @@ Run these on your Mac. The private files never go into the repository.
    `curl -sL https://github.com/itzikiusa/otto_os/releases/latest/download/latest.json | jq .version`.
 
 A failed or wrong draft:
-- `gh release delete v0.5.4 --repo itzikiusa/otto_os --yes` deletes the draft
+- `gh release delete v0.6.1 --repo itzikiusa/otto_os --yes` deletes the draft
   and keeps the tag.
 - A flaky failure: **Re-run all jobs** on that run. This builds the same commit.
 - A fix in the code needs a new commit, and therefore a new tag. Tag the next
   version, or move the tag as admin:
-  `git push origin :refs/tags/v0.5.4`, then tag the fixed commit and push.
+  `git push origin :refs/tags/v0.6.1`, then tag the fixed commit and push.
   There is no manual "Run workflow". A run always builds the commit the tag
   points to.
 
-The first release that contains the updater is 0.5.4. The first real update is
-therefore 0.5.4 → 0.5.5.
+The updater code first shipped in 0.6.0, but the DMGs of 0.6.0 and earlier
+were built and signed locally and never update themselves. The first release
+this workflow publishes (0.6.1 in the examples here) is the first that does;
+the first real update is therefore the one after it.
 
 ### Before relying on updates: the clean-Mac check (owner, once)
 
 The updater's unit tests run on throwaway bundles in temp folders; these steps
 need a Mac (or a macOS VM) that has never had Otto, under a normal user
-account. Use release candidates built by the workflow, e.g. `0.5.4-rc.1`,
-`0.5.4-rc.2` and `0.5.4-rc.3`.
+account. Use release candidates built by the workflow, e.g. `0.6.1-rc.1`,
+`0.6.1-rc.2` and `0.6.1-rc.3`.
 
 Installed apps look only at `/releases/latest`, and GitHub never counts a
 pre-release as "latest". So publish each candidate as the **Latest release**,
 not as a pre-release. The workflow drafts `-rc` versions as pre-releases, so
 change that when you publish:
-`gh release edit v0.5.4-rc.2 --repo itzikiusa/otto_os --draft=false --prerelease=false --latest`.
+`gh release edit v0.6.1-rc.2 --repo itzikiusa/otto_os --draft=false --prerelease=false --latest`.
 
-This is safe only **before 0.5.4 itself is published**. No installed copy has
+This is safe only **before 0.6.1 itself is published**. No installed copy has
 the updater until then, so only the test Mac ever sees a candidate.
 Afterwards:
-- delete the candidates: `gh release delete v0.5.4-rc.N --repo itzikiusa/otto_os --yes`;
-- publish 0.5.4. The test Mac then updates to it, since 0.5.4 > 0.5.4-rc.N.
+- delete the candidates: `gh release delete v0.6.1-rc.N --repo itzikiusa/otto_os --yes`;
+- publish 0.6.1. The test Mac then updates to it, since 0.6.1 > 0.6.1-rc.N.
 
-Once 0.5.4 is out, never mark a candidate Latest again; every installed copy
+Once 0.6.1 is out, never mark a candidate Latest again; every installed copy
 would update to it.
 
 1. Download the rc.1 DMG with Safari, drag Otto to /Applications, open it:
@@ -377,7 +379,9 @@ packaging/publish-walkthroughs.sh   # 720p re-encode → gh release upload --clo
 - [ ] Publishing is the CI flow in [Published releases](#published-releases):
       push the `v<version>` tag, approve, review the draft, Publish. A locally
       signed DMG is signed with your own certificate, so installed release
-      builds would refuse it as an update; don't attach it to a release.
+      builds would refuse it as an update; once the workflow has published
+      its first release, don't attach one to a release. (The releases up to
+      0.6.0 carry a locally built DMG.)
 
 ---
 
