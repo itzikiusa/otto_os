@@ -598,10 +598,13 @@ impl otto_agent_run::step::StepRunner for Fake {
     async fn delete(&self, _: &Id) {}
 }
 
-fn fake() -> std::sync::Arc<Fake> {
+fn fake() -> (
+    std::sync::Arc<Fake>,
+    super::super::super::step_thread::FakeRunnerGuard,
+) {
     let f = std::sync::Arc::new(Fake::default());
-    super::super::super::step_thread::FAKE_RUNNER.with(|r| *r.borrow_mut() = Some(f.clone()));
-    f
+    let guard = super::super::super::step_thread::install_fake_runner(f.clone());
+    (f, guard)
 }
 
 /// GL1.1 / GL3.2: a "met" without evidence counts as not met; the checker
@@ -609,7 +612,7 @@ fn fake() -> std::sync::Arc<Fake> {
 /// next agent step's prompt once and is recorded on the loop's node.
 #[tokio::test]
 async fn an_unevidenced_claim_is_not_met_and_a_steering_note_reaches_the_worker() {
-    let f = fake();
+    let (f, _fake) = fake();
     let steps = json!([
         {"kind": "agent_prompt", "name": "Work", "params": {"prompt": "do the work", "provider": "claude"}},
         check(json!([{"id": "judged", "text": "it works", "verify": "agent", "how": "run it"}])),
@@ -664,7 +667,7 @@ async fn an_unevidenced_claim_is_not_met_and_a_steering_note_reaches_the_worker(
 /// resumes that thread instead of a fresh prompt.
 #[tokio::test]
 async fn an_inner_step_caught_by_a_restart_resumes_its_thread() {
-    let f = fake();
+    let (f, _fake) = fake();
     let steps = json!([{"kind": "agent_prompt", "name": "Work", "params": {"prompt": "do it", "provider": "claude"}}]);
     let fx = setup(
         "goal-restart",
@@ -701,7 +704,7 @@ async fn an_inner_step_caught_by_a_restart_resumes_its_thread() {
 /// previous iteration worked on; the checker still gets a fresh one.
 #[tokio::test]
 async fn a_same_thread_step_continues_its_previous_iterations_thread() {
-    let f = fake();
+    let (f, _fake) = fake();
     let once =
         "test -f \"$OTTO_CONTEXT_DIR/seen\" || { touch \"$OTTO_CONTEXT_DIR/seen\"; exit 1; }";
     let steps = json!([
@@ -725,7 +728,7 @@ async fn a_same_thread_step_continues_its_previous_iterations_thread() {
 /// workspace root.
 #[tokio::test]
 async fn a_research_goal_works_in_its_own_folder() {
-    let f = fake();
+    let (f, _fake) = fake();
     let steps = json!([{"kind": "agent_prompt", "name": "Work", "params": {"prompt": "find out", "provider": "claude"}}]);
     let fx = setup(
         "goal-research",
@@ -880,7 +883,7 @@ async fn until(fx: &Fx, id: &str, f: impl Fn(&NodeRunState) -> bool) -> Workflow
 /// neither deleted before the resume nor overwritten by the engine's summary.
 #[tokio::test]
 async fn a_restarted_thread_step_keeps_the_handoff_its_agent_wrote_meanwhile() {
-    let f = fake();
+    let (f, _fake) = fake();
     f.quiet_resume
         .store(true, std::sync::atomic::Ordering::SeqCst);
     let graph = WorkflowGraph {
@@ -948,7 +951,7 @@ async fn a_restarted_thread_step_keeps_the_handoff_its_agent_wrote_meanwhile() {
 /// runs it on a fresh thread instead of awaiting the stopped turn.
 #[tokio::test]
 async fn a_paused_thread_step_starts_afresh_on_resume() {
-    let f = fake();
+    let (f, _fake) = fake();
     f.hang_first
         .store(true, std::sync::atomic::Ordering::SeqCst);
     let graph = WorkflowGraph {
@@ -981,7 +984,7 @@ async fn a_paused_thread_step_starts_afresh_on_resume() {
 /// goes on — the agent must not keep editing the worktree beside the next step.
 #[tokio::test]
 async fn a_skipped_thread_step_closes_its_thread() {
-    let f = fake();
+    let (f, _fake) = fake();
     f.hang_first
         .store(true, std::sync::atomic::Ordering::SeqCst);
     let graph = WorkflowGraph {
@@ -1013,7 +1016,7 @@ async fn a_skipped_thread_step_closes_its_thread() {
 /// workflow in `meta.work`.
 #[tokio::test]
 async fn a_finished_run_forgets_a_resume_it_never_took() {
-    let f = fake();
+    let (f, _fake) = fake();
     let graph = WorkflowGraph {
         nodes: vec![node("start", "log", json!({})), agent("a")],
         edges: vec![edge("start", "a")],
@@ -1197,7 +1200,7 @@ async fn a_pause_racing_the_end_still_holds() {
 /// beside the cancel watch, so a Cancel still stops the run at once.
 #[tokio::test]
 async fn a_cancel_stops_a_step_waiting_to_retake_its_slot() {
-    let f = fake();
+    let (f, _fake) = fake();
     f.ask.store(true, std::sync::atomic::Ordering::SeqCst);
     let graph = WorkflowGraph {
         nodes: vec![node("start", "log", json!({})), agent("a")],
@@ -1237,7 +1240,7 @@ async fn a_cancel_stops_a_step_waiting_to_retake_its_slot() {
 /// question, and its timeline says "paused", not "canceled" then "paused".
 #[tokio::test]
 async fn a_paused_question_is_gone_on_resume() {
-    let f = fake();
+    let (f, _fake) = fake();
     f.ask.store(true, std::sync::atomic::Ordering::SeqCst);
     let graph = WorkflowGraph {
         nodes: vec![node("start", "log", json!({})), agent("a")],

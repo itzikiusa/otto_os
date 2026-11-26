@@ -296,11 +296,12 @@ impl otto_agent_run::step::StepRunner for FakeRunner {
 
 /// Engine.md §4.5: a step whose thread a later step continues keeps it open
 /// (not closed at its settle) but stops its process while another step runs
-/// in between; the continuer gets that thread and closes it.
+/// in between. That the continuer then gets that thread needs a real one:
+/// `wf_threads::a_fork_a_question_an_approval_and_a_continued_thread_…`.
 #[tokio::test]
 async fn a_thread_kept_for_a_later_continuer_holds_no_process_meanwhile() {
     let fake = std::sync::Arc::new(FakeRunner::default());
-    super::super::super::step_thread::FAKE_RUNNER.with(|f| *f.borrow_mut() = Some(fake.clone()));
+    let _fake = super::super::super::step_thread::install_fake_runner(fake.clone());
     let agent = |extra: Value| {
         let mut p = json!({"prompt": "do it", "provider": "claude"});
         p.as_object_mut()
@@ -351,7 +352,7 @@ async fn a_thread_kept_for_a_later_continuer_holds_no_process_meanwhile() {
 #[tokio::test]
 async fn an_agent_step_runs_on_a_thread_and_leaves_its_record_on_the_run() {
     let fake = std::sync::Arc::new(FakeRunner::default());
-    super::super::super::step_thread::FAKE_RUNNER.with(|f| *f.borrow_mut() = Some(fake.clone()));
+    let _fake = super::super::super::step_thread::install_fake_runner(fake.clone());
     let graph = WorkflowGraph {
         nodes: vec![
             node("start", "log", json!({})),
@@ -452,7 +453,7 @@ async fn an_agent_step_runs_on_a_thread_and_leaves_its_record_on_the_run() {
 #[tokio::test]
 async fn a_step_caught_by_a_restart_resumes_its_thread() {
     let fake = std::sync::Arc::new(FakeRunner::default());
-    super::super::super::step_thread::FAKE_RUNNER.with(|f| *f.borrow_mut() = Some(fake.clone()));
+    let _fake = super::super::super::step_thread::install_fake_runner(fake.clone());
     let graph = WorkflowGraph {
         nodes: vec![
             node("start", "log", json!({})),
@@ -610,8 +611,8 @@ impl otto_agent_run::step::StepRunner for LimitRunner {
 /// tool calls become the step's deliverables.
 #[tokio::test]
 async fn a_usage_limit_parks_the_step_until_its_reset_and_notifies_once() {
-    super::super::super::step_thread::FAKE_RUNNER
-        .with(|f| *f.borrow_mut() = Some(std::sync::Arc::new(LimitRunner)));
+    let _fake =
+        super::super::super::step_thread::install_fake_runner(std::sync::Arc::new(LimitRunner));
     let graph = WorkflowGraph {
         nodes: vec![
             node("start", "log", json!({})),
@@ -738,5 +739,18 @@ async fn skipping_one_of_two_running_steps_leaves_the_other_running() {
         state(&run, "after").status,
         NodeStatus::Success,
         "the marker output satisfies it"
+    );
+}
+
+/// CR1-049: the fake runner a test installs is gone once its guard drops.
+#[test]
+fn a_fake_runner_is_uninstalled_with_its_guard() {
+    use super::super::super::step_thread::{install_fake_runner, FAKE_RUNNER};
+    let guard = install_fake_runner(std::sync::Arc::new(LimitRunner));
+    assert!(FAKE_RUNNER.with(|f| f.borrow().is_some()));
+    drop(guard);
+    assert!(
+        FAKE_RUNNER.with(|f| f.borrow().is_none()),
+        "leaked into the next test"
     );
 }
