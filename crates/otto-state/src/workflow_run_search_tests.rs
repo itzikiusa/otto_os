@@ -136,6 +136,11 @@ async fn open_text_matches_message_repo_branch_pr_steps_and_workflow_name() {
     assert_eq!(it.repo.as_deref(), Some("sinatra-games-go"));
     assert_eq!(it.branch.as_deref(), Some("feature/PAY-1"));
     assert_eq!(it.pr.as_deref(), Some("15"));
+    // A row with no stored overview still says what it is about.
+    let subject = it.subject.clone().expect("derived from the input");
+    let pr = subject.pr.expect("the pull request");
+    assert_eq!((pr.repo.as_str(), pr.number), ("sinatra-games-go", 15));
+    assert_eq!(subject.branch.as_deref(), Some("feature/PAY-1"));
     let none = search_runs(
         &pool,
         &RunSearch {
@@ -240,4 +245,62 @@ async fn bounds_are_enforced() {
         ..Default::default()
     };
     assert_eq!(search_runs(&pool, &big).await.unwrap().items.len(), 4); // clamped, not refused
+}
+
+/// Seen on a real history: every inbox row's second line was the base branch
+/// ("develop"), although each run's input names its ticket.
+#[test]
+fn a_run_is_about_its_pr_then_its_ticket_then_its_branch_never_its_base() {
+    // A chat run: the ticket and the repo; the base is not the subject.
+    let s = subject_from_input(&json!({"trigger": "chat", "jira_ticket": "gs-16578",
+        "base": "develop", "working_directory": "/src/wallet-go, /src/other"}))
+    .unwrap();
+    assert_eq!(s.pr, None);
+    let ticket = s.ticket.unwrap();
+    assert_eq!((ticket.key.as_str(), ticket.url.as_str()), ("GS-16578", ""));
+    assert_eq!((s.repo.as_deref(), s.branch), (Some("wallet-go"), None));
+
+    // A pasted ticket URL keeps its link; "N/A" is no ticket.
+    let url = "https://acme.atlassian.net/browse/OT-7";
+    let s = subject_from_input(&json!({"jira_ticket": url})).unwrap();
+    assert_eq!(s.ticket.unwrap().url, url);
+    assert_eq!(
+        subject_from_input(&json!({"jira_ticket": "N/A", "base": "main"})),
+        None
+    );
+
+    // The pull request, as the input names it.
+    let pr = |input: Value| subject_from_input(&input).unwrap().pr.unwrap();
+    let repos = json!([{"repo": "/src/wallet-go"}]);
+    let p = pr(json!({"pr": 15, "repos": repos}));
+    assert_eq!(
+        (p.repo.as_str(), p.number, p.url.as_str()),
+        ("wallet-go", 15, "")
+    );
+    assert_eq!(pr(json!({"pr": "#15", "repos": repos})).number, 15);
+    let p = pr(json!({"pr": "repo-a#15, repo-b#340", "repos": repos}));
+    assert_eq!((p.repo.as_str(), p.number), ("repo-a", 15));
+    for link in [
+        "https://github.com/acme/wallet-go/pull/15",
+        "https://bitbucket.org/acme/wallet-go/pull-requests/15/",
+    ] {
+        let p = pr(json!({ "pr": link }));
+        assert_eq!((p.repo.as_str(), p.number), ("wallet-go", 15), "{link}");
+        assert_eq!(p.url, link.trim_end_matches('/'));
+    }
+    assert_eq!(subject_from_input(&json!({"pr": "soon"})), None);
+
+    // What admission resolved (`prs[]`) wins: it has the title and the link.
+    let s = subject_from_input(&json!({"pr": 15, "pr_branch": "feature/OT-7", "prs": [
+        {"repo_id": "r1", "repo_path": "/src/wallet-go", "number": 15, "head": "feature/OT-7",
+         "base": "develop", "url": "https://forge.test/pr/15", "title": "Round totals"}]}))
+    .unwrap();
+    let p = s.pr.unwrap();
+    assert_eq!((p.repo.as_str(), p.number), ("wallet-go", 15));
+    assert_eq!(
+        (p.url.as_str(), p.title.as_deref()),
+        ("https://forge.test/pr/15", Some("Round totals"))
+    );
+    assert_eq!(s.branch.as_deref(), Some("feature/OT-7"));
+    assert_eq!(subject_from_input(&json!({"base": "develop"})), None);
 }

@@ -1,7 +1,7 @@
 // The step pane's tabs by step kind and its phase bar (ux.md §4.4) — runs/stepTabs.ts.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { paneTabs, phaseSegments } from '../src/modules/workflows/runs/stepTabs.ts';
+import { keptSessions, paneTabs, phaseSegments } from '../src/modules/workflows/runs/stepTabs.ts';
 import { at, node, T0 } from './workflowRunFixtures.ts';
 
 test('each kind of step opens on its own first tab', () => {
@@ -31,4 +31,14 @@ test('phase segments run until the next phase, the last until the end', () => {
   const s = phaseSegments([{ phase: 'starting', at: at(0) }, { phase: 'waiting', at: at(0.1), note: 'memory' }, { phase: 'working', at: at(5) }], T0 + 11 * 60_000);
   assert.deepEqual(s.map((x) => [x.label, Math.round(x.ms / 1000)]), [['Starting', 6], ['Waited', 294], ['Working', 360]]);
   assert.equal(s[1].note, 'memory');
+});
+
+// Seen on a real history: an old step's only action was "Open in Agents" on a
+// session deleted long ago (a 404 and an error toast).
+test('an older step offers only the terminal sessions that still exist, and says when none does', () => {
+  assert.deepEqual(keptSessions(['s1', 's2'], { s1: true, s2: false }), { open: ['s1'], gone: false });
+  assert.deepEqual(keptSessions(['s1'], { s1: false }), { open: [], gone: true });
+  // Not checked yet: no action, and no verdict either.
+  assert.deepEqual(keptSessions(['s1', 's2'], { s1: false }), { open: [], gone: false });
+  assert.deepEqual(keptSessions([], {}), { open: [], gone: false });
 });

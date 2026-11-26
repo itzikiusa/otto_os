@@ -4,7 +4,9 @@ import { openRun, stepPane } from './workflowsUi';
 
 // Old runs and deleted threads (ux.md §4.6, §16; test-plan.md §5.10): a run
 // from before the upgrade (PTY sessions, no phases, no threads) shows "Older
-// run" and its sessions open in Agents; a run whose step threads retention
+// run" and a step whose terminal session is gone says so instead of offering
+// "Open in Agents" (a kept one still opens: desktop-workflow-retry-status); a
+// run whose step threads retention
 // deleted shows the digest instead of the live conversation. The old-format
 // row is served through page.route over a real run (test-plan.md §7 allows
 // the frozen-old-type row to be seeded; this is that row's shape).
@@ -25,7 +27,7 @@ test.beforeEach(async ({ page }, info) => {
   }, api.ws);
 });
 
-test('a run from before the upgrade says so and lists its sessions', async ({ page }) => {
+test('a run from before the upgrade says so, and a session that is gone offers no dead action', async ({ page }) => {
   const wf = await createWorkflow(api, 'E2E Old run', chain(agentStep('a', 'Old step')));
   const run = await startRun(api, wf);
   await waitRun(api, run, settled);
@@ -45,7 +47,9 @@ test('a run from before the upgrade says so and lists its sessions', async ({ pa
   });
   await openRun(page, wf, run, 'a');
   await expect(page.getByText('Older run')).toBeVisible();
-  await expect(stepPane(page)).toContainText(/Session/);
+  // `sess_old_1` does not exist on this daemon.
+  await expect(page.getByTestId('wf-step-session-gone')).toHaveText('This step ran in a terminal session that is no longer kept.');
+  await expect(stepPane(page).getByRole('button', { name: 'Open in Agents' })).toHaveCount(0);
 });
 
 test('a deleted thread shows the kept digest, read-only', async ({ page }) => {

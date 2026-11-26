@@ -50,11 +50,14 @@ test('a retrying agent step stays working and keeps its earlier attempt before t
       if (path.endsWith('/nodes/review')) return route.fulfill({ json: { rev: run.rev, detail_version: 'retry-2', body: run.nodes[0] } });
       return route.fulfill({ json: run });
     });
-    await page.route('**/api/v1/sessions/retry-status-previous', (route) => route.fulfill({ json: {
+    const previous = {
       id: 'retry-status-previous', workspace_id: workspace, kind: 'agent', provider: 'codex',
       title: 'Review changes · earlier attempt', status: 'exited', created_at: now,
       cwd: '/tmp/otto-recovery-browser-fixture', meta: { source: 'workflow', run_id: run.id },
-    } }));
+    };
+    await page.route('**/api/v1/sessions/retry-status-previous', (route) => route.fulfill({ json: previous }));
+    // The step lists only sessions that still exist (it asks by id first).
+    await page.route(/\/api\/v1\/sessions\?ids=retry-status-previous$/, (route) => route.fulfill({ json: [previous] }));
 
     const runView = await openRun(page, workflow.id, run.id, 'review');
     await expect(runView).toHaveAttribute('data-state', 'running');

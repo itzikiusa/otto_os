@@ -81,6 +81,20 @@ function ancestorsOf(graph: WorkflowGraph): (id: string) => Set<string> {
   return (id) => visit(id, new Set());
 }
 
+/** A step's number for "Step 3 of 6": the engine's own, else (a run from
+ *  before steps were numbered) its place in the run's order. */
+export function stepNumber(steps: readonly StepItem[], step: StepItem): number {
+  return step.node.step_no ?? steps.indexOf(step) + 1;
+}
+
+/** A settled run has nothing running: a step an older engine left `running`
+ *  (a run a daemon restart interrupted) reads as stopped — no spinner, no
+ *  live timer — everywhere the page shows it. */
+export function settledNodes(nodes: readonly NodeRunState[], live: boolean): readonly NodeRunState[] {
+  if (live) return nodes;
+  return nodes.map((n): NodeRunState => (n.status === 'running' ? { ...n, status: 'skipped', error_class: 'canceled', phase: undefined, wait: undefined, attention: undefined, activity: undefined } : n));
+}
+
 /** The run's steps as display entries (§4.2). */
 export function orderSteps(nodes: readonly NodeRunState[], graph: WorkflowGraph, now: number): StepEntry[] {
   const gnodes = new Map(graph.nodes.map((n) => [n.id, n]));
