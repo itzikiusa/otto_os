@@ -2,9 +2,10 @@
   import type { Feature } from '../api/types';
   import { routeAllowed } from '../sidebar';
 
-  /** The four Automate places (each renders the guide on its empty state). */
-  export type AutomateModule = 'loops' | 'workflows' | 'scheduled-tasks' | 'personal-agents';
-  export type AutomateGuideId = AutomateModule;
+  /** The Automate pages (each renders the guide on its empty state). */
+  export type AutomateModule = 'workflows' | 'scheduled-tasks' | 'personal-agents';
+  /** A row: a page, or a goal (the Goal form on the Workflows page). */
+  export type AutomateGuideId = AutomateModule | 'goal';
 
   /** Intent first: each row leads with the JOB a person has in mind and ends
    *  with the PLACE that does it. The schedule engine is shared; the places
@@ -12,7 +13,7 @@
   export const AUTOMATE_GUIDE: readonly { id: AutomateGuideId; route: string; label: string; job: string }[] = [
     { id: 'scheduled-tasks', route: 'scheduled-tasks', label: 'Scheduled tasks', job: 'Run one prompt or command on a schedule and get the report (Slack, email…)' },
     { id: 'workflows', route: 'workflows', label: 'Workflows', job: 'Several steps in order: on demand, from a trigger, or on a schedule' },
-    { id: 'loops', route: 'loops', label: 'Goal Loops', job: 'Keep going until a goal is met or the budget runs out' },
+    { id: 'goal', route: 'workflows', label: 'Goal', job: 'Keep working until your criteria are met or the budget runs out' },
     { id: 'personal-agents', route: 'personal-agents', label: 'Personal Agents', job: 'A named assistant with memory, its own routines and a chat' },
   ];
 
@@ -55,6 +56,20 @@
   } = $props();
 
   const entries = $derived(automateGuideEntries(current, (f) => auth.can(f, 'view')));
+
+  /** The goal row opens the Goal form: a blank draft the Workflows page takes
+   *  on mount (the Insights handoff's key, workflows/goal/goalDraft.ts). */
+  function go(m: { id: AutomateGuideId; route: string }): void {
+    onnavigate?.();
+    if (m.id === 'goal') {
+      try {
+        sessionStorage.setItem('otto:automation-draft', JSON.stringify({ target: 'goal', title: '', prompt: '' }));
+      } catch {
+        /* private storage: the page still opens */
+      }
+    }
+    router.go(m.route);
+  }
 </script>
 
 {#snippet rows()}
@@ -67,7 +82,7 @@
             <span class="place"><strong>{m.label}</strong> · this page</span>
           </div>
         {:else}
-          <button type="button" class="ag-row" onclick={() => { onnavigate?.(); router.go(m.route); }}>
+          <button type="button" class="ag-row" onclick={() => go(m)}>
             <span class="job">{m.job}</span>
             <span class="place link">{m.label} <Icon name="chevronRight" size={12} /></span>
           </button>
