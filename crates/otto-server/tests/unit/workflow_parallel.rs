@@ -185,7 +185,12 @@ async fn a_cancel_stops_every_running_node_at_once() {
     let run = repo.get_run(&run_id).await.unwrap();
     assert_eq!(run.status, RunStatus::Canceled);
     for id in ["a", "b", "c"] {
-        assert_ne!(state(&run, id).status, NodeStatus::Success, "{id}");
+        let st = state(&run, id);
+        assert_ne!(st.status, NodeStatus::Success, "{id}");
+        // "Stopped", not "Skipped" (§2.1): every running step, not only the first.
+        assert_eq!(st.error_class.as_deref(), Some("canceled"), "{id}");
+        let last = st.phases.last().and_then(|m| m.note.as_deref());
+        assert_eq!(last, Some("canceled"), "{id}");
     }
 }
 
@@ -198,6 +203,7 @@ struct FakeRunner {
     closed: std::sync::Mutex<Vec<Id>>,
     retained: std::sync::Mutex<Vec<Id>>,
     resumed: std::sync::Mutex<Vec<(Id, u32)>>,
+    released: std::sync::Mutex<Vec<Id>>,
 }
 
 #[async_trait::async_trait]
@@ -282,8 +288,59 @@ impl otto_agent_run::step::StepRunner for FakeRunner {
     async fn set_retain_until(&self, ids: &[Id], _: chrono::DateTime<chrono::Utc>) {
         self.retained.lock().unwrap().extend(ids.iter().cloned());
     }
-    async fn release_process(&self, _: &Id) {}
+    async fn release_process(&self, id: &Id) {
+        self.released.lock().unwrap().push(id.clone());
+    }
     async fn delete(&self, _: &Id) {}
+}
+
+/// Engine.md §4.5: a step whose thread a later step continues keeps it open
+/// (not closed at its settle) but stops its process while another step runs
+/// in between; the continuer gets that thread and closes it.
+#[tokio::test]
+async fn a_thread_kept_for_a_later_continuer_holds_no_process_meanwhile() {
+    let fake = std::sync::Arc::new(FakeRunner::default());
+    super::super::super::step_thread::FAKE_RUNNER.with(|f| *f.borrow_mut() = Some(fake.clone()));
+    let agent = |extra: Value| {
+        let mut p = json!({"prompt": "do it", "provider": "claude"});
+        p.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        p
+    };
+    let graph = WorkflowGraph {
+        nodes: vec![
+            node("start", "log", json!({})),
+            node("a", "agent_prompt", agent(json!({}))),
+            node("mid", "log", json!({})),
+            node("b", "agent_prompt", agent(json!({"continue_from": "a"}))),
+        ],
+        edges: vec![edge("start", "a"), edge("a", "mid"), edge("mid", "b")],
+    };
+    let (ctx, ws, wf, run_id, repo, _tmp) = setup("continue-ws", graph).await;
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        run_workflow(
+            ctx,
+            ws,
+            wf,
+            run_id.clone(),
+            json!({}),
+            RunScope::default(),
+            None,
+        ),
+    )
+    .await
+    .expect("the run settles");
+    let run = repo.get_run(&run_id).await.unwrap();
+    assert_eq!(run.status, RunStatus::Success, "{:?}", run.error);
+    assert_eq!(
+        *fake.released.lock().unwrap(),
+        ["th-1"],
+        "a's process stopped while mid ran"
+    );
+    let a = state(&run, "a").thread.as_ref().unwrap();
+    assert!(a.closed_at.is_none(), "kept open for b");
 }
 
 /// Test plan §2 agent steps: an agent step runs on a runtime thread by
@@ -307,6 +364,7 @@ async fn an_agent_step_runs_on_a_thread_and_leaves_its_record_on_the_run() {
         edges: vec![edge("start", "agent")],
     };
     let (ctx, ws, wf, run_id, repo, _tmp) = setup("thread-ws", graph).await;
+    let reader = ctx.clone();
     tokio::time::timeout(
         Duration::from_secs(20),
         run_workflow(
@@ -380,6 +438,11 @@ async fn an_agent_step_runs_on_a_thread_and_leaves_its_record_on_the_run() {
     assert_eq!(turn.meta["work"]["kind"], "workflow_run");
     assert!(fake.closed.lock().unwrap().contains(&"th-1".to_string()));
     assert!(fake.retained.lock().unwrap().contains(&"th-1".to_string()));
+    // The fake thread never existed in the runtime: a read says it is gone.
+    let mut nodes = run.nodes.clone();
+    crate::workflow_engine::fill_thread_available(&reader, &mut nodes).await;
+    let t = nodes.iter().find_map(|n| n.thread.as_ref()).unwrap();
+    assert_eq!(t.available, Some(false));
 }
 
 /// Test plan §5 restart (DR-006): a thread step a restart caught mid-flight
@@ -459,4 +522,221 @@ async fn a_step_caught_by_a_restart_resumes_its_thread() {
         "the old PTY session is stopped and dropped"
     );
     assert_eq!(st.thread.as_ref().unwrap().thread_id, "th-1");
+}
+
+/// A thread runner whose step hits the provider's usage limit: it asks the
+/// person to wait until the reset (needs you), continues after it, and the
+/// thread's outward tool calls come back in its digest.
+struct LimitRunner;
+
+#[async_trait::async_trait]
+impl otto_agent_run::step::StepRunner for LimitRunner {
+    async fn run(
+        &self,
+        t: otto_agent_run::step::StepTurn,
+        ev: tokio::sync::mpsc::UnboundedSender<otto_agent_run::step::StepEvent>,
+        _cancel: otto_core::cancel_signal::CancelSignal,
+    ) -> Result<otto_agent_run::step::StepOutcome> {
+        use otto_agent_run::step::StepEvent as E;
+        use otto_core::agent_runtime::{
+            Attention, AttentionKind, OutwardAction, OutwardOutcome, TranscriptDigest,
+        };
+        let now = chrono::Utc::now();
+        let _ = ev.send(E::Started {
+            thread_id: "th-l".into(),
+            start_ordinal: 0,
+        });
+        let _ = ev.send(E::Working);
+        let mut limit = Attention::new(
+            AttentionKind::UsageLimit,
+            "claude's usage limit stopped the step — resets at 14:00",
+            now,
+        );
+        limit.resets_at = Some(now + chrono::Duration::milliseconds(80));
+        let _ = ev.send(E::NeedsYou(limit));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let _ = ev.send(E::Resumed {
+            request_id: None,
+            answer: None,
+            by: None,
+        });
+        std::fs::write(t.handoff.as_ref().unwrap(), "# done\n").unwrap();
+        let action = |outcome, target: &str| OutwardAction {
+            tool: "otto.comment_pr".into(),
+            target: Some(target.into()),
+            outcome,
+            message: None,
+        };
+        Ok(otto_agent_run::step::StepOutcome {
+            thread_id: "th-l".into(),
+            reply: "posted".into(),
+            handoff_written: true,
+            turn_status: "completed".into(),
+            error: None,
+            context_usage: None,
+            turns: 2,
+            usage: Default::default(),
+            model: None,
+            effort: None,
+            sub_threads: vec![],
+            digest: Some(TranscriptDigest {
+                actions: vec![
+                    action(OutwardOutcome::Ok, "pr-1"),
+                    action(OutwardOutcome::Failed, "pr-2"),
+                ],
+                ..Default::default()
+            }),
+        })
+    }
+    async fn resume(
+        &self,
+        _: &Id,
+        _: u32,
+        t: &otto_agent_run::step::StepTurn,
+        ev: tokio::sync::mpsc::UnboundedSender<otto_agent_run::step::StepEvent>,
+        cancel: otto_core::cancel_signal::CancelSignal,
+    ) -> Result<otto_agent_run::step::StepOutcome> {
+        self.run(t.clone(), ev, cancel).await
+    }
+    async fn close(&self, _: &Id, _: chrono::DateTime<chrono::Utc>) {}
+    async fn set_retain_until(&self, _: &[Id], _: chrono::DateTime<chrono::Utc>) {}
+    async fn release_process(&self, _: &Id) {}
+    async fn delete(&self, _: &Id) {}
+}
+
+/// Test plan §5 usage limit (engine.md §2.4, §4.2, §6.3): the step parks
+/// while the limit holds — the run's overview says needs you, a notice goes
+/// to the owner once — and settles after the reset; the thread's outward
+/// tool calls become the step's deliverables.
+#[tokio::test]
+async fn a_usage_limit_parks_the_step_until_its_reset_and_notifies_once() {
+    super::super::super::step_thread::FAKE_RUNNER
+        .with(|f| *f.borrow_mut() = Some(std::sync::Arc::new(LimitRunner)));
+    let graph = WorkflowGraph {
+        nodes: vec![
+            node("start", "log", json!({})),
+            node(
+                "agent",
+                "agent_prompt",
+                json!({"prompt": "post it", "provider": "claude"}),
+            ),
+        ],
+        edges: vec![edge("start", "agent")],
+    };
+    let (ctx, ws, wf, run_id, repo, _tmp) = setup("limit-ws", graph).await;
+    let pool = ctx.pool.clone();
+    let driver = tokio::spawn(run_workflow(
+        ctx,
+        ws,
+        wf,
+        run_id.clone(),
+        json!({}),
+        RunScope::default(),
+        None,
+    ));
+    // While the limit holds the run needs the person.
+    let started = Instant::now();
+    loop {
+        let run = repo.get_run(&run_id).await.unwrap();
+        if run.overview.as_ref().map(|o| o.state) == Some(otto_core::workflows::RunState::NeedsYou)
+        {
+            let a = &run.overview.unwrap().attention[0];
+            assert_eq!(a.node_id, "agent");
+            assert!(a.attention.resets_at.is_some());
+            break;
+        }
+        assert!(started.elapsed() < Duration::from_secs(5), "the step parks");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    tokio::time::timeout(Duration::from_secs(20), driver)
+        .await
+        .expect("the run settles after the reset")
+        .unwrap();
+    let run = repo.get_run(&run_id).await.unwrap();
+    assert_eq!(run.status, RunStatus::Success, "{:?}", run.error);
+    let st = state(&run, "agent");
+    assert!(st.attention.is_none(), "the reset cleared the wait");
+    use otto_core::workflows::StepPhase as P;
+    let phases: Vec<_> = st.phases.iter().map(|m| m.phase).collect();
+    assert_eq!(phases, [P::Starting, P::Working, P::NeedsYou, P::Working]);
+    let notices: Vec<String> =
+        sqlx::query_scalar("SELECT title FROM notifications WHERE title LIKE '%needs you%'")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        notices,
+        ["Workflow “Parallel” needs you"],
+        "one notice per episode"
+    );
+    assert_eq!(st.deliverables.len(), 1, "{:?}", st.deliverables);
+    let d = &st.deliverables[0];
+    assert_eq!(d.label, "PR comments");
+    assert_eq!(d.state, otto_core::workflows::DeliverableState::Partial);
+}
+
+/// Test plan §2.6 skip with siblings (engine.md §3.6): `skip <name>` with
+/// several steps running skips only that one; its sibling runs to its end
+/// and the run goes on.
+#[tokio::test]
+async fn skipping_one_of_two_running_steps_leaves_the_other_running() {
+    let graph = WorkflowGraph {
+        nodes: vec![
+            node("start", "log", json!({})),
+            node("long", "delay", json!({"ms": 15000})),
+            node("short", "delay", json!({"ms": 2500})),
+            node("after", "log", json!({})),
+        ],
+        edges: vec![
+            edge("start", "long"),
+            edge("start", "short"),
+            edge("long", "after"),
+        ],
+    };
+    let (ctx, ws, wf, run_id, repo, _tmp) = setup("skip-ws", graph).await;
+    let marks = ctx.wf_skip_current.clone();
+    let driver = tokio::spawn(run_workflow(
+        ctx,
+        ws,
+        wf,
+        run_id.clone(),
+        json!({}),
+        RunScope::default(),
+        None,
+    ));
+    let started = Instant::now();
+    while repo
+        .get_run(&run_id)
+        .await
+        .unwrap()
+        .nodes
+        .iter()
+        .filter(|n| n.status == NodeStatus::Running)
+        .count()
+        < 2
+    {
+        assert!(started.elapsed() < Duration::from_secs(5), "both run");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    marks
+        .lock()
+        .unwrap()
+        .insert(skip_marker_key(&run_id, "long"));
+    tokio::time::timeout(Duration::from_secs(10), driver)
+        .await
+        .expect("the skip ends the long step early")
+        .unwrap();
+    let run = repo.get_run(&run_id).await.unwrap();
+    assert_eq!(run.status, RunStatus::Success, "{:?}", run.error);
+    assert_eq!(state(&run, "long").status, NodeStatus::Skipped);
+    assert_eq!(
+        state(&run, "short").status,
+        NodeStatus::Success,
+        "the sibling ran to its end"
+    );
+    assert_eq!(
+        state(&run, "after").status,
+        NodeStatus::Success,
+        "the marker output satisfies it"
+    );
 }

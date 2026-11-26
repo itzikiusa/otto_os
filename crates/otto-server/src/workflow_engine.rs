@@ -24,14 +24,15 @@ use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use otto_agent_run::phase_feed::bound_activity;
 use otto_brokers::types::{ConsumeReq, ValueFormat};
 use otto_core::domain::{Channel, User, Workspace};
 use otto_core::event::Event;
 use otto_core::paths::expand_tilde;
 use otto_core::text::clip_bytes as truncate;
 use otto_core::workflows::{
-    NodeActivity, NodeRunState, NodeStatus, RunScope, RunStatus, SubagentActivity, Workflow,
-    WorkflowCheckpoint, WorkflowGraph, WorkflowNode, WorkflowRun,
+    NodeActivity, NodeRunState, NodeStatus, RunScope, RunStatus, Workflow, WorkflowGraph,
+    WorkflowNode, WorkflowRun,
 };
 use otto_core::{Id, Result};
 use otto_dbviewer::QueryRequest;
@@ -57,6 +58,10 @@ use otto_workflows::step_util::{
     brief_summary, canvas_node_ext, extract_code_block, harvest_session_ids, is_reportable,
     merge_published_refs, node_display_name, node_label, node_skill_names, normalize_prompt,
     param_str_list, seed_input_from_entries, short_id,
+};
+use otto_workflows::step_util::{
+    build_run_summary, canvas_rel, collect_pr_targets, find_step_handoff, loop_checkpoint,
+    node_cwd, parse_checks, skipped_hooks_note,
 };
 
 /// Session and review associations share the ordered progress stream. Reviews
@@ -381,7 +386,13 @@ fn emit_run_updated_with(
 /// thread and opens the file for the full detail).
 enum ProgressItem {
     Text(String),
-    File { name: String, text: String },
+    File {
+        name: String,
+        text: String,
+        caption: String,
+    },
+    Status(String),
+    Post(String),
 }
 
 /// Cap on the prior-step context handed to reviewers. Their prompt already
@@ -397,27 +408,58 @@ const PROGRESS_FILE_CAP: usize = 1024 * 1024;
 /// thread that triggered the run. Cloneable + cheap; a *disabled* sink (manual UI
 /// run, or webhook-only trigger) silently drops everything. Messages are sent
 /// non-blocking over a channel and posted, in order, by a single pump task so the
-/// engine never blocks on Slack/Telegram latency.
+/// engine never blocks on Slack/Telegram latency. In the `live` style (§9.4) a
+/// text line is dropped here — the status card says it — and step files carry
+/// their caption.
 #[derive(Clone)]
 struct ProgressSink {
     tx: Option<tokio::sync::mpsc::UnboundedSender<ProgressItem>>,
+    live: bool,
 }
 
 impl ProgressSink {
     fn disabled() -> Self {
-        Self { tx: None }
-    }
-    /// Queue a progress line (no-op when disabled).
-    fn post(&self, msg: impl Into<String>) {
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(ProgressItem::Text(msg.into()));
+        Self {
+            tx: None,
+            live: false,
         }
     }
-    /// Queue a step's `.md` handoff file as a chat attachment (no-op when
-    /// disabled or the file doesn't exist — attachments never fail a step).
+    fn send(&self, item: ProgressItem) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(item);
+        }
+    }
+    /// Queue a progress line (no-op when disabled, and in the live style).
+    fn post(&self, msg: impl Into<String>) {
+        if !self.live {
+            self.send(ProgressItem::Text(msg.into()));
+        }
+    }
+    /// The live status card's newest text (live style only).
+    fn status(&self, text: String) {
+        if self.live {
+            self.send(ProgressItem::Status(text));
+        }
+    }
+    /// A new post in the live thread (needs-you; edits do not notify).
+    fn announce(&self, text: String) {
+        if self.live {
+            self.send(ProgressItem::Post(text));
+        }
+    }
     fn post_step_file(&self, files: &crate::workflow_context::RunContextFiles, base_name: &str) {
-        let Some(tx) = &self.tx else { return };
-        let Some(path) = files.step_md_path(base_name) else {
+        self.post_step_file_as(files, base_name, String::new());
+    }
+    /// Queue a step's `.md` handoff file as a chat attachment, captioned in
+    /// the live style (no-op when disabled or the file doesn't exist —
+    /// attachments never fail a step).
+    fn post_step_file_as(
+        &self,
+        files: &crate::workflow_context::RunContextFiles,
+        base_name: &str,
+        caption: String,
+    ) {
+        let Some(path) = self.tx.as_ref().and(files.step_md_path(base_name)) else {
             return;
         };
         let Ok(mut text) = std::fs::read_to_string(&path) else {
@@ -433,9 +475,11 @@ impl ProgressSink {
                 "\n… [truncated for chat — the full file is in the run's context directory]",
             );
         }
-        let _ = tx.send(ProgressItem::File {
-            name: format!("{base_name}.md"),
+        let name = format!("{base_name}.md");
+        self.send(ProgressItem::File {
+            name,
             text,
+            caption,
         });
     }
     fn enabled(&self) -> bool {
@@ -443,64 +487,68 @@ impl ProgressSink {
     }
 }
 
-/// Spawn the progress pump: a single task that owns the receiver + resolved
-/// integration and posts each queued line, in order, to the chat thread
-/// (redacted, best-effort). Returns the sink (held by `run_workflow`, threaded
-/// into nodes) and the task handle (awaited at run end to flush before the final
-/// summary is delivered). Drop the sink to close the channel and end the pump.
+/// Spawn the progress pump: a single task that owns the receiver and the run's
+/// [`ChatThread`](otto_workflows::chat_status::ChatThread), and posts each
+/// queued item, in order (redacted, best-effort): lines and files as today in
+/// `per_step`; in `live` the status card edited in place (at most one edit per
+/// 3 s, with a trailing edit; its id stored in `chat_status_json`), captioned
+/// files and new posts. Drop the sink to close the channel and end the pump.
 fn spawn_progress_pump(
     ctx: ServerCtx,
+    run_id: Id,
     target: ChatTarget,
+    style: otto_workflows::chat_status::ChatUpdates,
 ) -> (ProgressSink, tokio::task::JoinHandle<()>) {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ProgressItem>();
+    let redact = |s: &str| otto_core::redact::redact_text(s).value;
     let handle = tokio::spawn(async move {
-        let integ = match otto_state::IntegrationsRepo::new(ctx.pool.clone())
-            .get(&target.ws, target.channel)
-            .await
-        {
-            Ok(Some(i)) => i,
-            _ => {
-                // No integration to post to — drain so senders don't block on a
-                // bounded buffer (it's unbounded, but keep the task tidy).
-                while rx.recv().await.is_some() {}
-                return;
-            }
+        let thread = match target.chat.trim().is_empty() {
+            true => None,
+            false => run::chat::thread(&ctx, &run_id, &target, style).await,
         };
-        // One adapter for the whole run (texts + file uploads), built once: one
-        // Keychain read and the shared HTTP pool, not one per progress line.
-        let adapter = ctx.outbound.adapter(&integ).await;
-        while let Some(item) = rx.recv().await {
-            match item {
-                ProgressItem::Text(msg) => {
-                    let msg = otto_core::redact::redact_text(&msg).value;
-                    if let Some(a) = adapter.as_ref().filter(|_| !target.chat.trim().is_empty()) {
-                        let _ = a
-                            .send_formatted(&target.chat, target.thread.as_deref(), &msg)
-                            .await;
-                    }
-                }
-                ProgressItem::File { name, text } => {
-                    // Same discipline as summary.md: redact before it leaves
-                    // the machine; best-effort.
-                    let text = otto_core::redact::redact_text(&text).value;
-                    if let Some(adapter) = adapter.as_ref() {
-                        if let Err(e) = adapter
-                            .upload(
-                                &target.chat,
-                                target.thread.as_deref(),
-                                &name,
-                                text.as_bytes(),
-                            )
-                            .await
-                        {
-                            tracing::debug!("workflow progress: {name} upload failed: {e}");
+        let Some(mut thread) = thread else {
+            // Nothing to post to: drain so the task ends with the sink.
+            while rx.recv().await.is_some() {}
+            return;
+        };
+        loop {
+            let item = match thread.flush_in() {
+                Some(wait) => tokio::select! {
+                    item = rx.recv() => item,
+                    () = tokio::time::sleep(wait) => {
+                        if thread.flush().await {
+                            run::chat::persist(&ctx, &run_id, &thread).await;
                         }
+                        continue;
+                    }
+                },
+                None => rx.recv().await,
+            };
+            let Some(item) = item else { break };
+            match item {
+                ProgressItem::Text(msg) => thread.line(&redact(&msg)).await,
+                ProgressItem::File {
+                    name,
+                    text,
+                    caption,
+                } => {
+                    let text = redact(&text);
+                    thread.step_file(&name, text.as_bytes(), &caption).await;
+                }
+                ProgressItem::Status(text) => {
+                    if thread.status(redact(&text)).await {
+                        run::chat::persist(&ctx, &run_id, &thread).await;
                     }
                 }
+                ProgressItem::Post(text) => thread.post(&redact(&text)).await,
             }
         }
+        if thread.flush().await {
+            run::chat::persist(&ctx, &run_id, &thread).await;
+        }
     });
-    (ProgressSink { tx: Some(tx) }, handle)
+    let live = style == otto_workflows::chat_status::ChatUpdates::Live;
+    (ProgressSink { tx: Some(tx), live }, handle)
 }
 
 /// Prepend each resolved skill (body + references) ahead of `base`, in the same
@@ -692,7 +740,7 @@ pub async fn reconcile_interrupted_runs(ctx: &ServerCtx) -> (usize, usize) {
                 // Tell the chat thread that started it — its last message was
                 // otherwise "▶ … started" forever.
                 if let Ok((wf, _)) = &loaded {
-                    spawn_recovery_delivery(ctx, wf, &nodes, RunStatus::Error, &run.input);
+                    spawn_recovery_delivery(ctx, wf, &run.id, &nodes, RunStatus::Error, &run.input);
                 }
                 settled += 1;
             }
@@ -717,7 +765,7 @@ pub async fn reconcile_interrupted_runs(ctx: &ServerCtx) -> (usize, usize) {
                     false,
                 );
                 if let Ok((wf, _)) = &loaded {
-                    spawn_recovery_delivery(ctx, wf, &nodes, status, &run.input);
+                    spawn_recovery_delivery(ctx, wf, &run.id, &nodes, status, &run.input);
                 }
                 settled += 1;
             }
@@ -735,13 +783,15 @@ pub async fn reconcile_interrupted_runs(ctx: &ServerCtx) -> (usize, usize) {
 fn spawn_recovery_delivery(
     ctx: &ServerCtx,
     wf: &Workflow,
+    run_id: &Id,
     nodes: &[NodeRunState],
     status: RunStatus,
     input: &Value,
 ) {
     let (ctx, wf, nodes, input) = (ctx.clone(), wf.clone(), nodes.to_vec(), input.clone());
+    let run_id = run_id.clone();
     tokio::spawn(async move {
-        deliver_run_result(&ctx, &wf, &nodes, status, &input, None).await;
+        deliver_run_result(&ctx, &wf, &run_id, &nodes, status, &input, None).await;
     });
 }
 
@@ -759,15 +809,31 @@ async fn apply_done_file_oracle(
     scope: &mut RunScope,
     nodes: &mut [NodeRunState],
 ) {
-    let Some(entry_id) = run
+    // Every step the restart caught (several run side by side, §11.3).
+    let mut ids: Vec<String> = run
         .nodes
         .iter()
-        .find(|n| n.status == NodeStatus::Running)
+        .filter(|n| n.status == NodeStatus::Running)
         .map(|n| n.node_id.clone())
-        .or_else(|| scope.start_node.clone())
-    else {
-        return;
-    };
+        .collect();
+    if ids.is_empty() {
+        ids.extend(scope.start_node.clone());
+    }
+    for id in ids {
+        adopt_finished_step(ctx, run, graph, scope, nodes, &id).await;
+    }
+}
+
+/// [`apply_done_file_oracle`] for one interrupted PTY agent step (a thread
+/// step re-enters through its thread instead).
+async fn adopt_finished_step(
+    ctx: &ServerCtx,
+    run: &WorkflowRun,
+    graph: &WorkflowGraph,
+    scope: &mut RunScope,
+    nodes: &mut [NodeRunState],
+    entry_id: &str,
+) {
     let Some(node) = graph.nodes.iter().find(|n| n.id == entry_id) else {
         return;
     };
@@ -777,6 +843,9 @@ async fn apply_done_file_oracle(
     let Some(state) = nodes.iter_mut().find(|n| n.node_id == entry_id) else {
         return;
     };
+    if state.thread.as_ref().is_some_and(|t| t.runner == "threads") {
+        return;
+    }
     let (dir, slug, started_at) = (
         ctx.data_dir.join("workflow-context").join(&run.id),
         crate::workflow_context::slug(node_display_name(node)),
@@ -833,50 +902,6 @@ async fn apply_done_file_oracle(
     if !scope.continue_unfinished {
         scope.adopt_start = true;
     }
-}
-
-/// Locate the interrupted step's handoff file: `step{N}-{slug(name)}.md` in
-/// `<data_dir>/workflow-context/<run_id>/`, where N (the execution-order step
-/// number) is unknown after a restart — so match on the slug, require the
-/// mtime to postdate the step's recorded start (a leftover from an earlier
-/// attempt is cleared before each submit, but stay defensive), and require
-/// non-trivial content. Returns the file's content.
-#[allow(clippy::disallowed_methods)] // sync helper: apply_done_file_oracle runs it via offload::blocking
-fn find_step_handoff(
-    dir: &std::path::Path,
-    slug: &str,
-    started_at: Option<chrono::DateTime<chrono::Utc>>,
-) -> Option<String> {
-    let entries = std::fs::read_dir(dir).ok()?;
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        // step{N}-{slug}.md exactly (no loop-iteration/inner suffixes — those
-        // belong to inner steps the loop node itself re-drives).
-        let Some(rest) = name.strip_prefix("step") else {
-            continue;
-        };
-        let Some(tail) = rest
-            .split_once('-')
-            .and_then(|(n, tail)| n.chars().all(|c| c.is_ascii_digit()).then_some(tail))
-        else {
-            continue;
-        };
-        if tail != format!("{slug}.md") {
-            continue;
-        }
-        let meta = entry.metadata().ok()?;
-        if let (Some(start), Ok(modified)) = (started_at, meta.modified()) {
-            let modified: chrono::DateTime<chrono::Utc> = modified.into();
-            if modified < start {
-                continue;
-            }
-        }
-        let content = std::fs::read_to_string(entry.path()).ok()?;
-        if content.trim().len() > 40 {
-            return Some(content);
-        }
-    }
-    None
 }
 
 tokio::task_local! {
@@ -1106,9 +1131,14 @@ pub fn spawn_run(
                 // Watch for a cancel while parked: the driver guard is alive
                 // all along, and a retry of the canceled run answered 409
                 // "still stopping" for as long as the queue stayed full.
+                run::chat::queued_card(&ctx, &workflow, &run_id, &input, false).await;
                 match park_until_permit_or_cancel(gate, &ctx.pool, &run_id).await {
                     Some(p) => p,
-                    None => return, // canceled while queued, or gate closed
+                    None => {
+                        // Canceled while queued (or the gate closed): its card says so.
+                        run::chat::queued_card(&ctx, &workflow, &run_id, &input, true).await;
+                        return;
+                    }
                 }
             }
         };
@@ -1339,7 +1369,7 @@ pub(crate) async fn sweep_orphaned_runs(ctx: &ServerCtx, prev: &HashSet<Id>) -> 
             // its worktrees provisioned.
             kill_run_sessions(ctx, &nodes).await;
             if let Ok(wf) = repo.get(&run.workflow_id).await {
-                spawn_recovery_delivery(ctx, &wf, &nodes, RunStatus::Error, &run.input);
+                spawn_recovery_delivery(ctx, &wf, &run.id, &nodes, RunStatus::Error, &run.input);
             }
             clear_skip_markers(ctx, &id);
             reap_run_worktrees(ctx, &id).await;
@@ -1538,7 +1568,7 @@ async fn run_workflow_with_budget(
     let _ = repo.set_run_version(&run_id, workflow.version).await;
     run::admission::mark_running(&ctx, &repo, &workflow, &run_id, &mut rs).await;
     let (progress, progress_pump) =
-        run::admission::open_progress(&ctx, &workflow, &input, order.len(), rs.canceled);
+        run::admission::open_progress(&ctx, &run_id, &workflow, &input, order.len(), rs.canceled);
 
     // Active execution budget is enforced during nodes and retry backoff,
     // including loop children, rather than only at top-level boundaries.
@@ -1675,7 +1705,16 @@ async fn finalize_canceled_run(
             0
         }
     };
-    deliver_run_result(ctx, workflow, states, RunStatus::Canceled, input, None).await;
+    deliver_run_result(
+        ctx,
+        workflow,
+        run_id,
+        states,
+        RunStatus::Canceled,
+        input,
+        None,
+    )
+    .await;
     emit_run_updated(
         ctx,
         &workflow.workspace_id,
@@ -1709,107 +1748,6 @@ async fn kill_run_sessions(ctx: &ServerCtx, states: &[NodeRunState]) {
     }
 }
 
-/// Build a `(brief, full_markdown)` summary of a finished run. `brief` is the
-/// short chat message; `full_markdown` is the attached `summary.md`.
-fn build_run_summary(
-    workflow: &Workflow,
-    states: &[NodeRunState],
-    status: RunStatus,
-) -> (String, String) {
-    let emoji = match status {
-        RunStatus::Success => "✅",
-        RunStatus::Error => "❌",
-        RunStatus::Canceled => "⏹",
-        _ => "•",
-    };
-    let total = states.len();
-    let ok = states
-        .iter()
-        .filter(|s| s.status == NodeStatus::Success)
-        .count();
-    let failed = states
-        .iter()
-        .filter(|s| s.status == NodeStatus::Error)
-        .count();
-    let skipped = states
-        .iter()
-        .filter(|s| s.status == NodeStatus::Skipped)
-        .count();
-
-    // Pull a review score out of any node output that carries one.
-    let score = states.iter().find_map(|s| {
-        s.output
-            .as_ref()
-            .and_then(|o| o.get("score"))
-            .and_then(Value::as_i64)
-    });
-
-    let counts = format!("{ok}/{total} steps ok · {failed} failed · {skipped} skipped");
-    let score_line = score
-        .map(|sc| format!("\n*Review score:* {sc}/100"))
-        .unwrap_or_default();
-
-    let brief = format!(
-        "{emoji} *{}* — {}\n{counts}{score_line}\n_Full summary attached (summary.md)._",
-        workflow.name,
-        status.as_str(),
-    );
-
-    // Full markdown: per-step detail.
-    let mut md = String::new();
-    md.push_str(&format!("# Workflow run — {}\n\n", workflow.name));
-    md.push_str(&format!("- **Status:** {} {}\n", emoji, status.as_str()));
-    md.push_str(&format!("- **Steps:** {counts}\n"));
-    if let Some(sc) = score {
-        md.push_str(&format!("- **Review score:** {sc}/100\n"));
-    }
-    md.push_str("\n## Steps\n\n");
-    for (i, s) in states.iter().enumerate() {
-        let kind = workflow
-            .graph
-            .nodes
-            .iter()
-            .find(|n| n.id == s.node_id)
-            .map(|n| {
-                if n.name.is_empty() {
-                    n.kind.clone()
-                } else {
-                    format!("{} ({})", n.name, n.kind)
-                }
-            })
-            .unwrap_or_else(|| s.node_id.clone());
-        let dur = s
-            .duration_ms
-            .map(|d| format!(" · {d}ms"))
-            .unwrap_or_default();
-        let attempts = match s.attempts {
-            Some(a) if a > 1 => format!(" · {a} attempts"),
-            _ => String::new(),
-        };
-        md.push_str(&format!(
-            "{}. **{kind}** — {}{dur}{attempts}\n",
-            i + 1,
-            s.status.as_str()
-        ));
-        if let Some(err) = &s.error {
-            md.push_str(&format!("   - error: {}\n", truncate(err, 300)));
-        }
-        // A short peek at the work product (agent reply or compact JSON).
-        if let Some(out) = &s.output {
-            let peek = out
-                .get("reply")
-                .and_then(Value::as_str)
-                .map(|r| r.to_string())
-                .unwrap_or_else(|| out.to_string());
-            let peek = truncate(peek.trim(), 240);
-            if !peek.is_empty() && peek != "null" {
-                md.push_str(&format!("   - {}\n", peek.replace('\n', " ")));
-            }
-        }
-    }
-    (brief, md)
-}
-
 /// Deliver a finished run's result to wherever it was triggered from: the chat
 /// channel + thread that started it (Slack/Telegram — the main path), and/or a
 /// `result_webhook`/`callback_url` in the run input. A brief status message is
@@ -1819,6 +1757,7 @@ fn build_run_summary(
 async fn deliver_run_result(
     ctx: &ServerCtx,
     workflow: &Workflow,
+    run_id: &Id,
     states: &[NodeRunState],
     status: RunStatus,
     input: &Value,
@@ -1851,7 +1790,27 @@ async fn deliver_run_result(
         return; // no origin to report back to (e.g. a manual UI run)
     }
 
-    let (brief, full) = build_run_summary(workflow, states, status);
+    let (mut brief, full) = build_run_summary(workflow, states, status);
+    // Live style (§9.2): the final post says what was delivered, in words.
+    if run::chat::style(workflow, input) == otto_workflows::chat_status::ChatUpdates::Live {
+        if let Ok(run) = WorkflowsRepo::new(ctx.pool.clone()).get_run(run_id).await {
+            let ov = otto_workflows::overview::run_overview(
+                &run,
+                &workflow.graph,
+                None,
+                None,
+                run.finished_at.unwrap_or_else(chrono::Utc::now),
+            );
+            let view = run::chat::view(workflow);
+            brief = otto_workflows::chat_status::render_final(
+                &view,
+                &ov,
+                states,
+                &workflow.graph,
+                None,
+            );
+        }
+    }
     let brief = otto_core::redact::redact_text(&brief).value;
     // The attachment: the run's actual deliverable when it produced one (the
     // last content-bearing step's handoff, copied to final-output.md), else
@@ -2128,27 +2087,6 @@ fn review_coverage_complete(
     )
 }
 
-fn loop_checkpoint(
-    node: &WorkflowNode,
-    loop_id: &str,
-    iteration: u64,
-    step_index: usize,
-    input: Value,
-) -> WorkflowCheckpoint {
-    WorkflowCheckpoint {
-        node_id: node.id.clone(),
-        loop_id: loop_id.into(),
-        iteration,
-        step_index,
-        kind: node.kind.clone(),
-        name: node_display_name(node).into(),
-        status: NodeStatus::Pending,
-        input,
-        updated_at: chrono::Utc::now(),
-        ..Default::default()
-    }
-}
-
 // Retry classification + backoff live in `otto_workflows::retry` (imported above).
 
 /// R5.1: whether the engine stops the sessions a SUCCESSFUL step spawned.
@@ -2255,25 +2193,6 @@ async fn resolve_run_user(ctx: &ServerCtx, created_by: &Id) -> User {
             disabled: false,
             created_at: chrono::Utc::now(),
         })
-}
-
-/// Clamp an activity snapshot to the documented bounds (§2): ≤ 40 sub-agents,
-/// ids ≤ 64 chars, descriptions ≤ 80 — so even a 40-agent sweep adds under
-/// 12 KiB to `nodes_json` and the WS frame, well inside
-/// `NODE_EVENT_MAX_BYTES`.
-fn bound_activity(mut a: NodeActivity) -> NodeActivity {
-    a.subagents.truncate(40);
-    for s in &mut a.subagents {
-        if s.id.chars().count() > 64 {
-            s.id = s.id.chars().take(64).collect();
-        }
-        if s.description.chars().count() > 80 {
-            s.description = s.description.chars().take(80).collect();
-        }
-    }
-    a.phase = a.phase.chars().take(200).collect();
-    a.hold_reason = a.hold_reason.map(|r| r.chars().take(200).collect());
-    a
 }
 
 /// One agent turn of a step on the run's latched step runner (DR-019): a
@@ -2472,115 +2391,12 @@ pub(crate) async fn ensure_run_location_as(
     Ok(())
 }
 
-/// The run note for a repo whose in-worktree hooks Otto's own git skipped.
-fn skipped_hooks_note(repo: &str) -> String {
-    format!(
-        "⚠ git_pr: {repo}'s hooks live inside its work tree (core.hooksPath, e.g. husky) \
-         and did not run for Otto's own commit / push — an agent there can edit them, so \
-         unattended runs skip them; CI or your next commit still runs them"
-    )
-}
-
-/// Gather the set of PR targets a `git_pr` node should open — one per changed
-/// repo. Sources: explicit `params.repos[]`, a loop's published `input.repos[]`,
-/// the input itself as a single reference (a review/loop output carrying
-/// `repo_id`/`worktree`), and fan-in (multiple predecessor outputs keyed by node
-/// id, each a review with its own `repo_id`). Each entry is `{repo_id?,
-/// worktree?, worktree_path?, base?}`. Empty ⇒ the caller uses one implicit
-/// target from the run context. Deduplication by resolved repo_id is the
-/// caller's job.
-fn collect_pr_targets(p: &Value, input: &Value) -> Vec<Value> {
-    let mut out: Vec<Value> = Vec::new();
-    let has_ref = |v: &Value| {
-        ["repo_id", "worktree", "worktree_path"].iter().any(|k| {
-            v.get(*k)
-                .and_then(Value::as_str)
-                .map(|s| !s.trim().is_empty())
-                .unwrap_or(false)
-        })
-    };
-    if let Some(arr) = p.get("repos").and_then(Value::as_array) {
-        out.extend(arr.iter().filter(|v| has_ref(v)).cloned());
-    }
-    if let Some(arr) = input.get("repos").and_then(Value::as_array) {
-        out.extend(arr.iter().filter(|v| has_ref(v)).cloned());
-    }
-    if has_ref(input) {
-        out.push(input.clone());
-    }
-    if let Value::Object(m) = input {
-        for v in m.values() {
-            if v.is_object() && has_ref(v) {
-                out.push(v.clone());
-            }
-        }
-    }
-    out
-}
-
-/// Parse a `checks` value into (name, command) pairs. Accepts an array of plain
-/// command strings, or of objects `{name?, cmd}`. Drives the reviewer's
-/// user-defined verification commands (e.g. `go test -tags=component ./...`).
-fn parse_checks(v: Option<&Value>) -> Vec<(String, String)> {
-    let Some(arr) = v.and_then(Value::as_array) else {
-        return vec![];
-    };
-    let mut out = Vec::new();
-    for (i, item) in arr.iter().enumerate() {
-        match item {
-            Value::String(s) if !s.trim().is_empty() => {
-                out.push((format!("check {}", i + 1), s.trim().to_string()));
-            }
-            Value::Object(_) => {
-                if let Some(cmd) = item
-                    .get("cmd")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                {
-                    let name = item
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or(cmd)
-                        .to_string();
-                    out.push((name, cmd.to_string()));
-                }
-            }
-            _ => {}
-        }
-    }
-    out
-}
-
-/// Resolve declared repo entries against registered repos + live git state:
-/// fill `repo_id`/`worktree`/`base`, or set a per-entry `error` (kept visible
-/// in `repos.json`; the run proceeds with the valid entries). A `branch`
-/// entry resolves to the checkout that HAS that branch checked out — falling
-/// back to the repo's registered path only when that path is actually on the
-/// branch, because silently reviewing/PRing whatever else is checked out
-/// would target the wrong branch. A missing `source` resolves to the
-/// checkout's DETECTED default branch, never a fabricated "main".
 /// Cut a dedicated linked worktree from each entry's `base` branch when the entry
 /// would otherwise run in the repo's MAIN checkout (the user's live working copy),
-/// and repoint the entry at it. Returns the FIRST provisioned worktree path (the
-/// run's new working directory), or `None` if nothing was provisioned.
-///
-/// SAFETY (load-bearing): this only ever CREATES a new linked worktree + a fresh
-/// `otto-wf/<run_id>` branch under the data dir. It never checks out, resets, or
-/// switches branches in the user's own repo, and never deletes. `rev-parse`
-/// resolves the base — the local branch, else its remote-tracking
-/// `origin/<base>` (a repo that only has `origin/develop` used to fall through
-/// here), else a single-branch fetch into `refs/remotes/origin/<base>` (a base
-/// created on the remote after the clone last fetched). No-op when no `base`
-/// is set.
-///
-/// Returns `(primary, isolation_failures)`. A failure is an entry that WOULD
-/// run in the user's own checkout because its base could not be resolved or
-/// its worktree could not be created: the caller fails the run with those
-/// messages rather than silently letting agents edit/commit in the user's
-/// working copy (seen for `koala-zenith-go`: base `develop` only on origin).
+/// and repoint the entry at it (`otto_workflows::run_worktrees::provision`).
+/// Returns `(primary, isolation_failures)`: the first provisioned worktree (the
+/// run's new working directory) and the entries that WOULD run in the user's
+/// own checkout — the caller fails the run with those messages.
 async fn provision_wf_worktrees(
     ctx: &ServerCtx,
     run_id: &Id,
@@ -2590,126 +2406,51 @@ async fn provision_wf_worktrees(
     let mut primary: Option<String> = None;
     let mut failures: Vec<String> = Vec::new();
     let canon = |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| std::path::PathBuf::from(p));
-    for e in entries.iter_mut() {
-        if e.error.is_some() {
+    for e in entries.iter_mut().filter(|e| e.error.is_none()) {
+        let (Some(repo_id), Some(base), Some(worktree)) = (&e.repo_id, &e.base, &e.worktree) else {
+            continue;
+        };
+        let base = base.trim();
+        let Ok(repo) = ctx.git_store.get_repo(repo_id).await else {
+            continue;
+        };
+        // An entry already pointing at a dedicated worktree is left as-is.
+        if base.is_empty() || canon(worktree) != canon(&repo.path) {
             continue;
         }
-        let (Some(repo_id), Some(base), Some(worktree)) =
-            (e.repo_id.clone(), e.base.clone(), e.worktree.clone())
-        else {
-            continue;
-        };
-        let base = base.trim().to_string();
-        if base.is_empty() {
-            continue;
-        }
-        let Ok(repo) = ctx.git_store.get_repo(&repo_id).await else {
-            continue;
-        };
-        // Only provision when we'd otherwise operate on the repo's MAIN checkout;
-        // an entry already pointing at a dedicated worktree is left as-is.
-        if canon(&worktree) != canon(&repo.path) {
-            continue;
-        }
-        let git = otto_git::LocalGit::new(&repo.path);
-        // READ-ONLY: resolve the base branch to a commit in the user's repo —
-        // the run-start sync's ref first (the fast-forwarded local branch, or
-        // `origin/<base>` when the local copy is checked out behind / diverged).
-        let synced = match synced.get(&repo_id).and_then(|r| r.resolved(&base)) {
-            Some(r) => git.rev_parse(r).await.ok(),
-            None => None,
-        };
-        let resolved = match synced {
-            Some(c) => Some(c),
-            None => resolve_wf_base(&git, &base).await,
-        };
-        let Some(base_commit) = resolved else {
-            tracing::warn!(
-                "wf worktree: base '{base}' not found in {} (locally or as origin/{base}) — refusing to run in the user's checkout",
-                repo.path
-            );
-            failures.push(format!(
-                "base branch '{base}' was not found in {} (neither locally nor as origin/{base}) — fetch it or fix the run's base",
-                repo.name
-            ));
-            continue;
-        };
-        let wt_path = ctx
-            .data_dir
-            .join("workflow-runs")
-            .join(run_id)
-            .join(crate::workflow_context::slug(&repo.name));
-        let wt_str = wt_path.to_string_lossy().to_string();
-        let branch = format!("otto-wf/{run_id}");
-        match git
-            .worktree_add_if_absent(&wt_str, &branch, &base_commit)
-            .await
+        let synced = synced.get(repo_id).and_then(|r| r.resolved(base));
+        match otto_workflows::run_worktrees::provision(
+            &ctx.data_dir,
+            run_id,
+            &repo.path,
+            &repo.name,
+            base,
+            synced,
+        )
+        .await
         {
-            Ok(_) => {
-                tracing::info!("wf worktree: {} @ {base} → {wt_str}", repo.name);
-                e.worktree = Some(wt_str.clone());
-                if primary.is_none() {
-                    primary = Some(wt_str);
-                }
+            Ok(wt) => {
+                primary.get_or_insert_with(|| wt.clone());
+                e.worktree = Some(wt);
             }
-            Err(err) => {
-                tracing::warn!(
-                    "wf worktree provision failed for {} @ {base}: {err} — refusing to run in the user's checkout",
-                    repo.name
-                );
-                failures.push(format!(
-                    "could not create an isolated worktree of {} @ {base}: {err}",
-                    repo.name
-                ));
-            }
+            Err(msg) => failures.push(msg),
         }
     }
     (primary, failures)
 }
 
-/// Reap the worktrees a run provisioned under
-/// `<data_dir>/workflow-runs/<run_id>/` and, when safe, the matching
-/// `otto-wf/<run_id>` branch in each owning repo. Without this, every
-/// scheduled/chat run left a permanent linked worktree + branch in the user's
-/// real repository (24/day for an hourly workflow).
-///
-/// Branch policy — never discard commits: the branch is deleted only when its
-/// commits are reachable elsewhere (merged into HEAD) or pushed to origin;
-/// otherwise the branch stays (cheap) and only the worktree directory goes
-/// (`worktree_add_if_absent` re-attaches a surviving branch on a later run).
-///
-/// Work policy — never discard UNCOMMITTED work either: leftovers in a dirty
-/// worktree are swept into a commit on the run branch BEFORE removal (2026-07-14:
-/// a failed run's reap destroyed an implement step's uncommitted test suite —
-/// the branch policy alone protects only what was committed). If that sweep
-/// fails, the worktree directory is kept rather than destroyed.
+/// Reap the worktrees a run provisioned (`otto_workflows::run_worktrees::reap`).
+/// Without this, every scheduled/chat run left a permanent linked worktree +
+/// branch in the user's real repository (24/day for an hourly workflow).
 ///
 /// Reopen policy: while a step session whose cwd is one of these worktrees can
 /// still be reopened, the worktrees stay ([`run_worktrees_in_use`]) — "Open
-/// session" on a finished step resumes the agent IN its worktree, and reaping
-/// it under the session re-created an empty non-git dir that the next
-/// startup sweep then deleted with whatever the user did there. Deferred
+/// session" on a finished step resumes the agent IN its worktree. Deferred
 /// runs are reaped by the next sweep once their sessions are gone (or the
 /// reopen TTL has passed).
 async fn reap_run_worktrees(ctx: &ServerCtx, run_id: &str) {
     let dir = ctx.data_dir.join("workflow-runs").join(run_id);
-    // Listing (and the per-entry `is_dir` stats) is sync fs work: blocking pool.
-    #[allow(clippy::disallowed_methods)] // runs inside spawn_blocking
-    let listed = {
-        let dir = dir.clone();
-        tokio::task::spawn_blocking(move || {
-            std::fs::read_dir(&dir).ok().map(|rd| {
-                rd.flatten()
-                    .map(|e| e.path())
-                    .filter(|p| p.is_dir())
-                    .collect::<Vec<_>>()
-            })
-        })
-        .await
-        .ok()
-        .flatten()
-    };
-    let Some(worktrees) = listed else {
+    let Some(worktrees) = otto_workflows::run_worktrees::list_dirs(&dir).await else {
         otto_workflows::run_refs::release_pr_heads(&ctx.data_dir, run_id).await;
         return; // nothing provisioned
     };
@@ -2720,72 +2461,7 @@ async fn reap_run_worktrees(ctx: &ServerCtx, run_id: &str) {
         );
         return;
     }
-    otto_workflows::run_refs::release_pr_heads(&ctx.data_dir, run_id).await;
-    let branch = format!("otto-wf/{run_id}");
-    let mut kept_any = false;
-    for wt in worktrees {
-        let wt_str = wt.to_string_lossy().to_string();
-        // Owning repo root: the worktree's git-common-dir is `<root>/.git`.
-        let wt_git = otto_git::LocalGit::new(&wt_str);
-        // Not (or no longer) a readable git worktree: its content can't be
-        // swept into a commit, so the directory cleanup below must not
-        // bulldoze it either.
-        let Ok(common) = wt_git
-            .run(&["rev-parse", "--path-format=absolute", "--git-common-dir"])
-            .await
-        else {
-            tracing::warn!("wf reap: {wt_str} is not a readable git worktree — keeping it");
-            kept_any = true;
-            continue;
-        };
-        let common = common.trim();
-        let Some(root) = std::path::Path::new(common).parent() else {
-            kept_any = true;
-            continue;
-        };
-        match wt_git
-            .commit_all_if_dirty(&format!(
-                "chore: preserve workflow leftovers (run {run_id})"
-            ))
-            .await
-        {
-            Ok(Some(sha)) => tracing::info!(
-                "wf reap: committed leftover changes in {wt_str} onto {branch} ({})",
-                &sha[..sha.len().min(9)]
-            ),
-            Ok(None) => {}
-            Err(e) => {
-                tracing::warn!(
-                    "wf reap: could not commit leftovers in {wt_str}: {e} — keeping the worktree"
-                );
-                kept_any = true;
-                continue;
-            }
-        }
-        let repo_git = otto_git::LocalGit::new(root);
-        let _ = repo_git.worktree_remove(&wt_str).await;
-        // Safe-delete the run branch: merged into HEAD OR pushed to origin.
-        let merged = repo_git
-            .run(&["branch", "--merged", "HEAD", "--list", &branch])
-            .await
-            .map(|out| !out.trim().is_empty())
-            .unwrap_or(false);
-        // Quiet probe: a deleted remote ref is the common case, not an error.
-        let pushed = repo_git.origin_branch_exists(&branch).await;
-        if merged || pushed {
-            let _ = repo_git.run(&["branch", "-D", &branch]).await;
-        } else {
-            tracing::debug!(
-                "wf reap: keeping branch {branch} in {} (unmerged, unpushed commits)",
-                root.display()
-            );
-        }
-    }
-    // Only when every worktree was safely handled — a kept (unsweepable)
-    // worktree must not be bulldozed by the directory cleanup.
-    if !kept_any {
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-    }
+    otto_workflows::run_worktrees::reap(&ctx.data_dir, run_id, &dir, worktrees).await;
 }
 
 /// Startup sweep: reap worktree leftovers of every run directory whose run is
@@ -2799,23 +2475,13 @@ pub async fn sweep_stale_run_worktrees(ctx: &ServerCtx) {
     let Ok(_sweeping) = SWEEP.get_or_init(|| tokio::sync::Mutex::new(())).try_lock() else {
         return;
     };
-    let base = ctx.data_dir.join("workflow-runs");
-    #[allow(clippy::disallowed_methods)] // runs inside spawn_blocking
-    let run_ids: Vec<String> = tokio::task::spawn_blocking(move || {
-        std::fs::read_dir(&base)
-            .map(|rd| {
-                rd.flatten()
-                    .map(|e| e.file_name().to_string_lossy().to_string())
-                    .collect()
-            })
+    let dirs = otto_workflows::run_worktrees::list_dirs(&ctx.data_dir.join("workflow-runs")).await;
+    for dir in dirs.unwrap_or_default() {
+        let run_id = dir
+            .file_name()
             .unwrap_or_default()
-    })
-    .await
-    .unwrap_or_default();
-    for run_id in run_ids {
-        if run_id.is_empty() {
-            continue;
-        }
+            .to_string_lossy()
+            .to_string();
         // Active runs keep their worktrees.
         let active: Option<String> = sqlx::query_scalar(
             "SELECT id FROM workflow_runs WHERE id = ? AND status IN ('pending','running')",
@@ -2825,10 +2491,9 @@ pub async fn sweep_stale_run_worktrees(ctx: &ServerCtx) {
         .await
         .ok()
         .flatten();
-        if active.is_some() {
-            continue;
+        if active.is_none() {
+            reap_run_worktrees(ctx, &run_id).await;
         }
-        reap_run_worktrees(ctx, &run_id).await;
     }
 }
 
@@ -2873,6 +2538,14 @@ async fn run_worktrees_in_use(ctx: &ServerCtx, run_id: &str, dir: &std::path::Pa
     false
 }
 
+/// Resolve declared repo entries against registered repos + live git state:
+/// fill `repo_id`/`worktree`/`base`, or set a per-entry `error` (kept visible
+/// in `repos.json`; the run proceeds with the valid entries). A `branch`
+/// entry resolves to the checkout that HAS that branch checked out — falling
+/// back to the repo's registered path only when that path is actually on the
+/// branch, because silently reviewing/PRing whatever else is checked out
+/// would target the wrong branch. A missing `source` resolves to the
+/// checkout's DETECTED default branch, never a fabricated "main".
 async fn resolve_repo_entries(
     ctx: &ServerCtx,
     workspace_id: &Id,
@@ -3019,22 +2692,6 @@ async fn resolve_repo_id_for_path(
     None
 }
 
-/// The directory an agent node runs in: a per-node `cwd`/`working_directory`
-/// param, else the run-level working dir, else the workspace root. Tilde-expanded.
-fn node_cwd(node: &WorkflowNode, input: &Value, run_cwd: &str) -> String {
-    let p = &node.params;
-    let pick = p
-        .get("cwd")
-        .or_else(|| p.get("working_directory"))
-        .and_then(Value::as_str)
-        .or_else(|| input.get("working_directory").and_then(Value::as_str))
-        .filter(|s| !s.trim().is_empty());
-    match pick {
-        Some(s) => expand_tilde(s),
-        None => run_cwd.to_string(),
-    }
-}
-
 /// The version id a `product_*` step with `persist: true` saved. A failed
 /// save used to be dropped silently: the step succeeded without its
 /// `version_id`, and nothing said the result was never stored.
@@ -3051,18 +2708,6 @@ fn persisted_version(
 /// The log line of a step skipped because an upstream step failed — the
 /// marker a single-step retry looks for to re-run what its target blocked.
 pub(crate) const SKIPPED_UPSTREAM: &str = "skipped (upstream did not succeed)";
-
-/// Data-dir-relative file of a `canvas` step's diagram. Step ids are only
-/// checked for being non-empty and unique, so an id like `../../../tmp/x`
-/// wrote (and created directories) outside the data dir; such an id falls
-/// back to its slug, while an ordinary id keeps its exact file name.
-fn canvas_rel(run_id: &str, node_id: &str, ext: &str) -> String {
-    let name = otto_core::paths::safe_component(node_id)
-        .filter(|n| !n.starts_with('.'))
-        .map(str::to_string)
-        .unwrap_or_else(|| crate::workflow_context::slug(node_id));
-    format!("workflow-canvas/{run_id}/{name}.{ext}")
-}
 
 #[cfg(test)]
 mod event_wait_tests {
@@ -3172,11 +2817,15 @@ mod run;
 mod step_pty;
 mod step_thread;
 #[cfg(test)]
+use otto_agent_run::phase_feed::{e2e_subagents, phase_text, PhaseFeed};
+#[cfg(test)]
+use otto_core::workflows::SubagentActivity;
+#[cfg(test)]
 use otto_workflows::run_refs::fetchable_branch_name;
+#[cfg(test)]
 use otto_workflows::run_refs::resolve_wf_base;
 #[cfg(test)]
 use run::identity::acting_user_id;
 use run::identity::run_identity;
 use run::refs::sync_run_branches;
-#[cfg(test)]
-use step_pty::{e2e_subagents, phase_text, PhaseFeed};
+pub(crate) use step_thread::fill_thread_available;

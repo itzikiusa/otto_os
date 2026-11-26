@@ -835,3 +835,86 @@ fn fork_sweeps_run_side_by_side() {
         "the sweeps ran one after the other: n10 {a0}..{a1}, n11 {b0}..{b1}"
     );
 }
+
+/// Chat live style (engine.md §9.2, DR-113) through the real bridge and
+/// engine: the run's thread gets the ack, ONE status message edited in place
+/// (formatted), every step file captioned, no per-step text lines, and a
+/// final post that says the run passed. The Phase-0 goldens above prove the
+/// per_step style is byte for byte today's.
+#[test]
+fn live_style_keeps_one_status_message_and_captions_every_file() {
+    if !in_offline_child("live_style_keeps_one_status_message_and_captions_every_file") {
+        return;
+    }
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let s = SCENARIOS
+        .iter()
+        .find(|s| s.clone == "c" && s.name == "passed")
+        .unwrap();
+    let (_h, out) = rt.block_on(run_scenario(s, None, |wf| {
+        for node in wf["graph"]["nodes"].as_array_mut().unwrap() {
+            if node["kind"] == "manual_trigger" {
+                node["params"]["chat_updates"] = json!("live");
+            }
+        }
+    }));
+    assert_eq!(out.run.status, RunStatus::Success, "{:?}", out.run.error);
+    let sends: Vec<&str> = out
+        .chat
+        .iter()
+        .filter_map(|r| match r {
+            Recorded::Send { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    let card = sends
+        .iter()
+        .position(|t| t.starts_with("*Compat C*"))
+        .unwrap_or_else(|| panic!("a status message: {sends:#?}"));
+    assert!(
+        !sends
+            .iter()
+            .any(|t| t.contains("▶ *") || t.contains(" done (")),
+        "no per-step lines in live: {sends:#?}"
+    );
+    assert!(
+        sends.last().unwrap().starts_with("✅ *Compat C*"),
+        "the final post: {sends:#?}"
+    );
+    let card_id = format!("m{}", card + 1);
+    let edits: Vec<_> = out
+        .chat
+        .iter()
+        .filter_map(|r| match r {
+            Recorded::Edit {
+                message_id,
+                formatted,
+                ..
+            } => Some((message_id.clone(), *formatted)),
+            _ => None,
+        })
+        .collect();
+    assert!(!edits.is_empty(), "the card is edited in place");
+    assert!(
+        edits.iter().all(|(id, f)| *id == card_id && *f),
+        "only the card, formatted: {edits:?} (card {card_id})"
+    );
+    let step_files: Vec<_> = out
+        .chat
+        .iter()
+        .filter_map(|r| match r {
+            Recorded::Upload { name, caption, .. } if name.starts_with("step") => Some(caption),
+            _ => None,
+        })
+        .collect();
+    assert!(!step_files.is_empty());
+    assert!(
+        step_files
+            .iter()
+            .all(|c| c.as_deref().is_some_and(|c| c.starts_with('✅'))),
+        "every step file captioned: {step_files:?}"
+    );
+}

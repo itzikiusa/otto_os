@@ -30,6 +30,7 @@ pub mod review_parallel;
 pub mod review_scoring;
 pub mod run_queue;
 pub mod run_refs;
+pub mod run_worktrees;
 pub mod script_run;
 pub mod templates;
 pub mod trigger_outcome;

@@ -77,7 +77,9 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-fn runner(ctx: &ServerCtx) -> std::sync::Arc<dyn StepRunner> {
+/// The thread runner; given the run's user, a usage limit parks the step
+/// until the reset the user's limits know of (§4.2), else it fails it.
+fn runner(ctx: &ServerCtx, user: Option<&User>) -> std::sync::Arc<dyn StepRunner> {
     #[cfg(test)]
     if let Some(r) = FAKE_RUNNER.with(|f| f.borrow().clone()) {
         return r;
@@ -88,12 +90,39 @@ fn runner(ctx: &ServerCtx) -> std::sync::Arc<dyn StepRunner> {
             otto_state::McpApprovalRepo::new(ctx.pool.clone()),
             ctx.events.clone(),
         )),
-        resets: None,
+        resets: user.map(|u| usage_resets(ctx, u)),
     };
     std::sync::Arc::new(ThreadStepRunner::new(
         ctx.agent_runtime.clone(),
         std::sync::Arc::new(host),
     ))
+}
+
+type ResetsAt = dyn Fn(String, Value) -> otto_core::auth::BoxFuture<'static, Option<chrono::DateTime<chrono::Utc>>>
+    + Send
+    + Sync;
+
+/// When `provider`'s plan limit resets for `user`: `reset_for` over the
+/// user's limits, keyed by the step's account (`meta.account_id`) and the
+/// daemon's Claude config dir.
+pub(super) fn usage_resets(ctx: &ServerCtx, user: &User) -> std::sync::Arc<ResetsAt> {
+    let (pool, data_dir) = (ctx.pool.clone(), ctx.data_dir.clone());
+    let (uid, root) = (user.id.clone(), user.is_root);
+    std::sync::Arc::new(move |provider: String, meta: Value| {
+        let (pool, data_dir, uid) = (pool.clone(), data_dir.clone(), uid.clone());
+        Box::pin(async move {
+            let limits =
+                otto_usage::limits::remaining_limits_filtered(&pool, &uid, root, &data_dir, None);
+            let claude_dir = std::env::var("CLAUDE_CONFIG_DIR").ok();
+            let account = meta.get("account_id").and_then(Value::as_str);
+            otto_usage::limits::reset_for(
+                &limits.await.ok()?,
+                &provider,
+                account,
+                claude_dir.as_deref(),
+            )
+        }) as otto_core::auth::BoxFuture<'static, _>
+    })
 }
 
 /// One agent turn of a step on a runtime thread. Returns `(reply, thread id)`.
@@ -162,7 +191,7 @@ pub(super) async fn run(
     };
     let _ = log_tx.send(format!("⏳ starting {provider} thread"));
     let (ev_tx, mut ev_rx) = tokio::sync::mpsc::unbounded_channel::<StepEvent>();
-    let runner = runner(ctx);
+    let runner = runner(ctx, Some(user));
     let resume = resumes()
         .lock()
         .ok()
@@ -212,6 +241,7 @@ pub(super) async fn run(
     }
     let out = out?;
     let (thread_id, reply, error) = (out.thread_id.clone(), out.reply.clone(), out.error.clone());
+    keep_digest_items(ctx, run_id, &node.id, &thread_id).await;
     note(StepNote::Settled(Box::new(Settled {
         turns: out.turns,
         usage: out.usage,
@@ -235,6 +265,39 @@ pub(super) async fn run(
     }
     let _ = log_tx.send("✓ step complete".into());
     Ok((reply, thread_id))
+}
+
+/// `thread.available` on a read (§6.5): false once retention deleted the thread.
+pub(crate) async fn fill_thread_available(ctx: &ServerCtx, nodes: &mut [NodeRunState]) {
+    let threads = nodes.iter_mut().filter_map(|n| n.thread.as_mut());
+    for t in threads.filter(|t| t.runner == "threads") {
+        t.available = Some(ctx.agent_runtime.get(&t.thread_id).await.is_ok());
+    }
+}
+
+/// The thread's newest ≤ 50 timeline items, kept beside the run's context
+/// files as `.threads/<node>-<attempt>.json` (§6.4) so the run view still has
+/// them after retention deleted the thread. Each settled turn of a node
+/// writes one file, so the next number is the attempt.
+async fn keep_digest_items(ctx: &ServerCtx, run_id: &Id, node_id: &str, thread_id: &Id) {
+    let Ok(items) = ctx.agent_runtime.digest_items(thread_id, 50).await else {
+        return;
+    };
+    let dir = otto_workflows::attachments::context_dir(&ctx.data_dir, run_id).join(".threads");
+    let node_id = node_id.to_string();
+    crate::offload::blocking(move || {
+        let _ = std::fs::create_dir_all(&dir);
+        let prefix = format!("{node_id}-");
+        #[allow(clippy::disallowed_methods)] // runs inside offload::blocking
+        let n = std::fs::read_dir(&dir).map_or(0, |rd| {
+            rd.flatten()
+                .filter(|e| e.file_name().to_string_lossy().starts_with(&prefix))
+                .count()
+        });
+        let body = serde_json::to_vec(&items).unwrap_or_default();
+        let _ = std::fs::write(dir.join(format!("{prefix}{}.json", n + 1)), body);
+    })
+    .await;
 }
 
 /// The thread of the step `src` this run recorded, unless retention removed it.
@@ -287,7 +350,7 @@ pub(super) async fn close_settled(
     st: &mut NodeRunState,
 ) {
     let until = retain_until(ctx, st.status == NodeStatus::Success).await;
-    let r = runner(ctx);
+    let r = runner(ctx, None);
     for c in st
         .children
         .iter()
@@ -305,16 +368,29 @@ pub(super) async fn close_settled(
         return;
     };
     let mine = [Some(st.node_id.as_str()), t.continued_from.as_deref()];
-    let continued_later = graph.nodes.iter().any(|n| {
-        let from = n.params.get("continue_from").and_then(Value::as_str);
-        from.is_some()
-            && mine.contains(&from)
-            && n.id != st.node_id
-            && states.iter().any(|s| {
-                s.node_id == n.id && matches!(s.status, NodeStatus::Pending | NodeStatus::Running)
-            })
-    });
-    if continued_later {
+    let continuers: Vec<&str> = graph
+        .nodes
+        .iter()
+        .filter(|n| {
+            let from = n.params.get("continue_from").and_then(Value::as_str);
+            from.is_some()
+                && mine.contains(&from)
+                && n.id != st.node_id
+                && states.iter().any(|s| {
+                    s.node_id == n.id
+                        && matches!(s.status, NodeStatus::Pending | NodeStatus::Running)
+                })
+        })
+        .map(|n| n.id.as_str())
+        .collect();
+    if !continuers.is_empty() {
+        // Kept for a later continuer that is not the next step: no idle process meanwhile (§4.5).
+        let next = |e: &otto_core::workflows::WorkflowEdge| {
+            e.source == st.node_id && continuers.contains(&e.target.as_str())
+        };
+        if !graph.edges.iter().any(next) {
+            r.release_process(&t.thread_id).await;
+        }
         return;
     }
     r.close(&t.thread_id, until).await;
@@ -326,7 +402,7 @@ pub(super) async fn close_settled(
 /// The run ended: a stopped run's open threads are closed, and every thread
 /// of the run is kept for the success or the failed period from now (§6.5).
 pub(super) async fn retain_run(ctx: &ServerCtx, states: &[NodeRunState], success: bool) {
-    let r = runner(ctx);
+    let r = runner(ctx, None);
     let mut ids = vec![];
     for s in states {
         if let Some(t) = s.thread.as_ref().filter(|t| t.runner == "threads") {
