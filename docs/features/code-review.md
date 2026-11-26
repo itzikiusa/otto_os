@@ -223,7 +223,12 @@ run again over those findings (as **Retry summarizer** does) and the review show
 as running; a workflow step waiting on it picks it up. Each such resume is noted in
 the scope's verification notes, and after two a review is failed instead
 (`Interrupted by daemon restarts while summarizing, after 2 automatic resumes`),
-so a crash loop stops. A review whose reviewers had not all finished fails with
+so a crash loop stops. On the thread runner a reviewer's agent survives a restart
+in its holder: a review with such a reviewer stays running, its checkout is not
+swept, the surviving reviewers are awaited (their findings are read as usual), only
+the reviewers whose agent did not survive re-run from their saved prompt, and the
+summarizer then runs as for a resume (it counts against the same two resumes). Any
+other review whose reviewers had not all finished fails with
 `Interrupted by a daemon restart — re-run to review again.` A cancelled review is
 left cancelled.
 

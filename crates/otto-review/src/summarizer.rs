@@ -87,6 +87,48 @@ async fn read_result(path: &std::path::Path) -> Option<String> {
         .filter(|text| valid_result(text))
 }
 
+/// The slow safety recheck of a review's stored status while it summarizes.
+const CANCEL_RECHECK: Duration = Duration::from_secs(5);
+
+/// Resolves once the review is cancelled — event- and flag-driven: the cheap
+/// in-memory flag every 100 ms, the stored status on this review's
+/// `ReviewChanged`, and a slow safety recheck. A 100 ms DB poll used to load
+/// the whole review (agents JSON plus every comment) 3,000–18,000 times per
+/// summarizer turn.
+pub async fn until_cancelled<F, C, CF>(
+    mut events: tokio::sync::broadcast::Receiver<otto_core::event::Event>,
+    review_id: &otto_core::Id,
+    flag_tripped: F,
+    stored_cancelled: C,
+) where
+    F: Fn() -> bool,
+    C: Fn() -> CF,
+    CF: Future<Output = bool>,
+{
+    use tokio::sync::broadcast::error::RecvError;
+    let mut events_open = true;
+    let mut flag_tick = tokio::time::interval(Duration::from_millis(100));
+    let mut recheck = tokio::time::interval(CANCEL_RECHECK);
+    loop {
+        let check_db = tokio::select! {
+            _ = flag_tick.tick() => false,
+            _ = recheck.tick() => true,
+            ev = events.recv(), if events_open => match ev {
+                Ok(otto_core::event::Event::ReviewChanged { review_id: rid, .. }) => rid == *review_id,
+                Ok(_) => false,
+                Err(RecvError::Lagged(_)) => true,
+                Err(RecvError::Closed) => {
+                    events_open = false;
+                    false
+                }
+            },
+        };
+        if flag_tripped() || (check_db && stored_cancelled().await) {
+            return;
+        }
+    }
+}
+
 /// `ready` is delivered by the managed runner's synchronous on_ready callback.
 /// Publication is awaited here, never spawned, so completion cannot race a
 /// detached DB write. The deadline includes startup AND publication.
@@ -152,6 +194,40 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_cancel_is_heard_on_this_reviews_change_and_on_the_flag() {
+        use otto_core::event::Event;
+        let (tx, rx) = tokio::sync::broadcast::channel(8);
+        let id: otto_core::Id = "r1".into();
+        let checks = std::sync::atomic::AtomicUsize::new(0);
+        let wait = until_cancelled(
+            rx,
+            &id,
+            || false,
+            || async { checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 1 },
+        );
+        let send = async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let change = |rid: &str| Event::ReviewChanged {
+                workspace_id: "w".into(),
+                session_id: None,
+                review_id: rid.into(),
+                status: "cancelled".into(),
+            };
+            let _ = tx.send(change("other"));
+            let _ = tx.send(change("r1"));
+        };
+        let (done, ()) = tokio::join!(tokio::time::timeout(Duration::from_secs(2), wait), send);
+        assert!(done.is_ok(), "this review's change ends the wait");
+        // The first (interval) recheck said no; this review's change said yes.
+        assert_eq!(checks.load(std::sync::atomic::Ordering::SeqCst), 2);
+        let (_tx, rx) = tokio::sync::broadcast::channel(8);
+        let flagged = until_cancelled(rx, &id, || true, || async { false });
+        assert!(tokio::time::timeout(Duration::from_secs(1), flagged)
+            .await
+            .is_ok());
+    }
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 

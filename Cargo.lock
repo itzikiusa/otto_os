@@ -4803,6 +4803,7 @@ dependencies = [
 name = "otto-review"
 version = "0.6.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "otto-agent-run",
  "otto-context",

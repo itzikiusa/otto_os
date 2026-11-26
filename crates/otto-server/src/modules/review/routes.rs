@@ -601,117 +601,41 @@ pub(crate) async fn approve_comment(
     // A DECLINED comment is not approvable: a decline that lands while a
     // "Post all" loop is still walking its snapshot must not be posted anyway.
     // Restoring it to draft (`PATCH … {restore_draft:true}`) is the way back.
-    if comment.state == CommentState::Declined {
-        return Err(crate::error::ApiError(Error::Conflict(
+    let declined = || {
+        crate::error::ApiError(Error::Conflict(
             "comment was declined — restore it to draft before approving".into(),
-        )));
-    }
-
-    // Post the comment to the PR provider — at most once.
-    // - A LOCAL review (pr #0 sentinel) has no PR: approving it is a local
-    //   decision; calling the forge only 404'd against "PR #0".
-    // - An already-posted comment is never re-posted, and the post is CLAIMED
-    //   atomically (posted 0→1) before the forge call, so a double click or a
-    //   retried request can't post twice; a failed call releases the claim.
-    // `append`: this request is what put the comment on the PR (a local
-    // review: approved it) — a refused post or a re-approve never re-appends.
-    let (pr_posted, append) = if review.pr_number == LOCAL_REVIEW_PR_NUMBER {
-        (comment.posted, comment.state != CommentState::Approved)
-    } else if comment.posted {
-        (true, false)
-    } else if !ctx
-        .reviews_store
-        .claim_comment_post(&cid)
-        .await
-        .map_err(crate::error::ApiError)?
-    {
-        // Another request holds (or completed) the post.
-        (true, false)
-    } else {
-        // Re-read under the claim: a decline that raced the check above wins.
-        let fresh = ctx.reviews_store.get_comment(&cid).await;
-        if matches!(&fresh, Ok(c) if c.state == CommentState::Declined) {
-            let _ = ctx.reviews_store.release_comment_post(&cid).await;
-            return Err(crate::error::ApiError(Error::Conflict(
-                "comment was declined — restore it to draft before approving".into(),
-            )));
-        }
-        let posted = post_review_comment(&ctx, &user, &repo, review.pr_number, &comment).await;
-        if !posted {
-            let _ = ctx.reviews_store.release_comment_post(&cid).await;
-        }
-        (posted, posted)
+        ))
     };
-    if append {
+    if comment.state == CommentState::Declined {
+        return Err(declined());
+    }
+    // A LOCAL review (pr #0 sentinel) has no PR: approving it is a local
+    // decision (appended to the review file once); calling the forge only
+    // 404'd against "PR #0".
+    if review.pr_number != LOCAL_REVIEW_PR_NUMBER {
+        return match super::post::post_one(&ctx, &user, &cid, review.pr_number, true).await? {
+            super::post::PostOutcome::Declined => Err(declined()),
+            super::post::PostOutcome::Posted(c) | super::post::PostOutcome::AlreadyPosted(c) => {
+                Ok(Json(c))
+            }
+            super::post::PostOutcome::Failed(c, e) => {
+                tracing::info!(comment = %cid, "approved, not posted: {e}");
+                Ok(Json(c))
+            }
+        };
+    }
+    if comment.state != CommentState::Approved {
         if let Err(e) = append_to_review_file(&repo.path, review.pr_number, &comment).await {
             tracing::warn!(comment = %cid, "failed to append to review file: {e}");
         }
     }
-
     let updated = ctx
         .reviews_store
-        .set_comment_state(&cid, CommentState::Approved, pr_posted)
+        .set_comment_state(&cid, CommentState::Approved, comment.posted)
         .await
         .map_err(crate::error::ApiError)?;
     queue_review_learning(&ctx, &repo.workspace_id, &updated);
     Ok(Json(updated))
-}
-
-/// Post one approved review comment to its PR. Inline first; when the forge
-/// rejects the ANCHOR (GitHub 422 "line is not part of the diff" → `Conflict`,
-/// GitLab/Bitbucket 400 on an invalid position) it falls back to a general
-/// comment that cites `path:line`, instead of silently leaving the approved
-/// finding unposted. Any other failure (auth, network, 5xx) is NOT retried —
-/// a 5xx may have created the comment, and a second call would duplicate it.
-pub(crate) async fn post_review_comment(
-    ctx: &ServerCtx,
-    user: &otto_core::domain::User,
-    repo: &otto_core::domain::Repo,
-    pr_number: u64,
-    comment: &ReviewComment,
-) -> bool {
-    let (provider, remote) = match resolve_provider_remote(ctx, user, repo).await {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!(comment = %comment.id, "failed to resolve provider for approve: {e}");
-            return false;
-        }
-    };
-    let req = NewPrCommentReq {
-        body: comment.body.clone(),
-        path: comment.path.clone(),
-        line: comment.line,
-        in_reply_to: None,
-        side: None,
-        old_line: None,
-        commit_id: None,
-    };
-    let err = match provider.comment(&remote, pr_number, &req).await {
-        Ok(_) => return true,
-        Err(e) => e,
-    };
-    let inline = comment.path.is_some() && comment.line.is_some();
-    if !(inline && inline_anchor_rejected(&err)) {
-        tracing::warn!(comment = %comment.id, "failed to post comment to PR: {err}");
-        return false;
-    }
-    tracing::info!(comment = %comment.id, "inline anchor rejected ({err}); posting as a general comment");
-    let general = NewPrCommentReq {
-        body: general_comment_body(comment),
-        path: None,
-        line: None,
-        in_reply_to: None,
-        side: None,
-        old_line: None,
-        commit_id: None,
-    };
-    match provider.comment(&remote, pr_number, &general).await {
-        Ok(_) => true,
-        Err(e) => {
-            tracing::warn!(comment = %comment.id, "failed to post fallback comment to PR: {e}");
-            false
-        }
-    }
 }
 
 /// `POST /pr-review-comments/{cid}/decline` body (optional): what declining

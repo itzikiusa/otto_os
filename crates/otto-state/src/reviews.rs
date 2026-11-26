@@ -772,6 +772,7 @@ mod tests {
             lens_slugs: Vec::new(),
             score: None,
             score_reason: String::new(),
+            ..Default::default()
         }
     }
 

@@ -27,7 +27,7 @@ pub(super) async fn assess_scope(
     let user =
         otto_review::restart::review_user(&otto_state::UsersRepo::new(ctx.pool.clone())).await?;
     let cfg_agent = &cfg.summarizer;
-    let row = otto_review::scope::scope_row(&cfg_agent.provider, &cfg_agent.model);
+    let row = otto_review::scope::scope_row(cfg_agent);
     ctx.reviews_store
         .set_agents(review_id, std::slice::from_ref(&row))
         .await?;
@@ -38,10 +38,11 @@ pub(super) async fn assess_scope(
         return Err(Error::Invalid("review cancelled".into()));
     }
     let prompt = otto_review::scope::scope_prompt(diff_path, branch_context, guidance, cfg);
-    let slots = reviewer_slots();
-    let _slot = otto_review::scope::acquire_slot(slots, guard.flag())
-        .await
-        .map_err(Error::Invalid)?;
+    let threads = review_threads(ctx, Some(cfg)).await;
+    let _slot =
+        otto_review::scope::acquire_slot(threads.is_none().then(reviewer_slots), guard.flag())
+            .await
+            .map_err(Error::Invalid)?;
     let started = std::time::Instant::now();
     // Reviewer rule: the grace fails only a QUIET assessor; the hour is a
     // backstop for the whole step, the second attempt included.
@@ -65,6 +66,7 @@ pub(super) async fn assess_scope(
             Some(guard.flag()),
             None,
             &[],
+            threads.as_ref(),
         ),
     )
     .await;

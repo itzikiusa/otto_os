@@ -3,6 +3,25 @@
 
 use super::*;
 
+/// The thread runner a review's agents use (runtime.md §7.1), or `None` for
+/// the frozen terminal path: the run's latched choice, else the setting.
+pub(crate) async fn review_threads(
+    ctx: &ServerCtx,
+    cfg: Option<&ReviewConfig>,
+) -> Option<otto_review::thread_run::Threads> {
+    use otto_agent_protocol::step_runner::{DaemonStepHost, ThreadStepRunner};
+    let (rt, manager) = (ctx.agent_runtime.clone(), ctx.manager.clone());
+    let host = Arc::new(DaemonStepHost {
+        manager,
+        approvals: None,
+        resets: None,
+    });
+    let runner = Arc::new(ThreadStepRunner::new(rt.clone(), host));
+    let has_driver = Arc::new(move |p: &str| rt.resolve_runtime_provider(p).is_some());
+    let settings = otto_state::SettingsRepo::new(ctx.pool.clone());
+    otto_review::thread_run::threads(runner, has_driver, cfg, &settings).await
+}
+
 /// Persist a review's `status` (+ `error` note) and broadcast
 /// `Event::ReviewChanged` in ONE call, so no exit path can update the row and
 /// forget the broadcast (which leaves open panels on a stale "running"). A
