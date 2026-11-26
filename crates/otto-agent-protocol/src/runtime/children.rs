@@ -198,6 +198,16 @@ pub(super) fn ended_notice(
     format!("{body} [otto-thread:{}:{event}]", child.id)
 }
 
+/// The parent's notice for a subagent its agent removed (`close_peer`).
+pub(super) fn removed_notice(parent: &RuntimeSession, child: &RuntimeSession) -> String {
+    format!(
+        "{} removed {} [otto-thread:{}:removed]",
+        session_provider_label(parent),
+        child.title,
+        child.id
+    )
+}
+
 /// The parent's notice for a child turn a daemon restart cut off (the card
 /// reads it as stopped; the words say why).
 pub(super) fn restart_notice(child: &RuntimeSession, answer: &str) -> String {
@@ -328,10 +338,55 @@ pub(super) fn on_turn_end(inner: &Inner, st: &State, turn_id: &Id, status: TurnT
     let child = st.session.clone();
     let turn = turn_id.clone();
     let rt = AgentRuntime { inner: me };
+    let reporting = Reporting::start(&child.id);
     tokio::spawn(async move {
         rt.child_turn_ended(child, of, turn, status, answer, asked, false)
             .await;
+        drop(reporting);
     });
+}
+
+/// Children whose ended turn is still being reported to their parent (the
+/// notice and the queued reply): set under the child's lock as the turn
+/// ends, so removing it (`close_peer` with `remove`) waits for its answer
+/// to reach the parent first.
+fn reporting() -> &'static Mutex<HashMap<Id, usize>> {
+    static S: std::sync::OnceLock<Mutex<HashMap<Id, usize>>> = std::sync::OnceLock::new();
+    S.get_or_init(Default::default)
+}
+
+/// One in-flight report of [`reporting`]; ends when dropped.
+struct Reporting(Id);
+
+impl Reporting {
+    fn start(child: &Id) -> Self {
+        *reporting()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(child.clone())
+            .or_default() += 1;
+        Self(child.clone())
+    }
+}
+
+impl Drop for Reporting {
+    fn drop(&mut self) {
+        let mut m = reporting().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = m.get_mut(&self.0) {
+            *n -= 1;
+            if *n == 0 {
+                m.remove(&self.0);
+            }
+        }
+    }
+}
+
+/// `true` while child `id`'s ended turn is still on its way to its parent.
+pub(super) fn reporting_end(id: &Id) -> bool {
+    reporting()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains_key(id)
 }
 
 /// Turn `turn_id`'s answer (its top-level assistant messages, in order) and
@@ -782,6 +837,10 @@ mod tests {
         );
         let long = "x".repeat(400);
         assert!(ended_notice(&a, TurnTerminalStatus::Failed, &long).contains("…"));
+        assert_eq!(
+            removed_notice(&session(RuntimeProvider::Claude), &a),
+            "Claude removed Check the tests [otto-thread:kid:removed]"
+        );
     }
 
     #[test]

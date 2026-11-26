@@ -323,15 +323,27 @@ async fn answer_peer<S: RuntimeCtx>(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `POST …/peers/{peer}/close` body: `remove` also deletes a subagent
+/// this thread's agent opened, once it has answered.
+#[derive(Deserialize)]
+struct ClosePeerReq {
+    #[serde(default)]
+    remove: bool,
+}
+
 /// POST /runtime-sessions/{id}/peers/{peer}/close — close a linked thread.
 async fn close_peer<S: RuntimeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Extension(auth): Extension<AuthContext>,
     Path((id, peer)): Path<(Id, Id)>,
+    body: Option<Json<ClosePeerReq>>,
 ) -> ApiResult<Json<RuntimeSession>> {
     as_thread(&ctx, &user, &auth, &id).await?;
-    Ok(Json(ctx.agent_runtime().close_peer(&id, &peer).await?))
+    let remove = body.is_some_and(|Json(b)| b.remove);
+    Ok(Json(
+        ctx.agent_runtime().close_peer(&id, &peer, remove).await?,
+    ))
 }
 
 #[derive(Deserialize)]

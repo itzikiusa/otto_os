@@ -1692,9 +1692,9 @@ fn thread_tool_specs() -> [Value; 10] {
             "inputSchema":{"type":"object","required":["peer_session_id"],"properties":{
                 "peer_session_id":{"type":"string"},"wait_secs":{"type":"integer"},"session_id":{"type":"string","description":"caller (auto)"}}}}),
         json!({"name":"otto.thread_close","mutating":false,"category":"Sessions",
-            "description":"Close a linked thread in your group (stops its agent; kept in History). Not yourself or the group's lead.",
+            "description":"Close a linked thread (kept in History); remove:true deletes one you opened once it answered. Not you or the lead.",
             "inputSchema":{"type":"object","required":["peer_session_id"],"properties":{
-                "peer_session_id":{"type":"string"},"session_id":{"type":"string","description":"caller (auto)"}}}}),
+                "peer_session_id":{"type":"string"},"remove":{"type":"boolean"},"session_id":{"type":"string","description":"caller (auto)"}}}}),
         team_list,
         team_create,
         team_delegate,
