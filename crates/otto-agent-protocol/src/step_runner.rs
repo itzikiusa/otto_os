@@ -225,10 +225,8 @@ fn wait_reason(w: &otto_sessions::admission::AdmissionWait) -> Option<WaitReason
 
 pub const NUDGE: &str = "You did not write {path}. Write it now; nothing else.";
 pub const CONTINUE_AFTER_LIMIT: &str = "Continue the step where you stopped.";
-/// Sent after a restart cut the step's turn, followed by the step's own prompt:
-/// a conversation the provider did not resume has nothing else to go on.
 pub const AFTER_RESTART: &str = "Otto restarted while you were working on this step. \
-     Check what you already did and finish it. The step, again:";
+     Check what you already did and finish it.";
 
 pub struct ThreadStepRunner {
     rt: AgentRuntime,
@@ -734,7 +732,7 @@ impl StepRunner for ThreadStepRunner {
         };
         let (prompt, first, settled) = match settled.ended {
             // An unheld thread: tell the agent and finish on the same conversation.
-            Ended::ServerRestart => (format!("{AFTER_RESTART}\n\n{}", t.prompt), false, None),
+            Ended::ServerRestart => (AFTER_RESTART.to_string(), false, None),
             // The restart came before the step's prompt went out: send it now.
             Ended::Settled if settled.turns == 0 => (t.prompt.clone(), true, None),
             // Held through the restart: settle it as a step from here (handoff
