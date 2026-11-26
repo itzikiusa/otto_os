@@ -3119,12 +3119,6 @@ mod tests {
             "a",
             "abc",
             "b",
-            "x",
-            "v",
-            "s",
-            "r",
-            "g",
-            "c",
             "main",
             "preview",
             "gate",
@@ -3143,6 +3137,9 @@ mod tests {
             "CORTEX_STEP_SOURCE_USER_EXPLICIT",
             // IDE plugin install `source` URL test fixture (otto-ide).
             "https://example.com/plugin",
+            // A workflow run's chat attachment origin (`AttachmentSource`), not a session.
+            "start",
+            "steer",
             // Smart mode: a model taken from the Forge library (version provenance and
             // artifact meta in otto-media's productions), not a session.
             "library",
