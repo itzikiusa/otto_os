@@ -13,7 +13,7 @@
 //!   `$HANDOFF` is the step's handoff file and `$CTX/` the run's context
 //!   directory, both read from the engine's preamble.
 //! * `expect <path>` — fail the turn "missing <path>" (`*` matches in the
-//!   file name; `KEY` in a `jira-KEY.md` too).
+//!   file name; so do `KEY` and a `<placeholder>`, as in `jira-<KEY>.md`).
 //! * `sleep <ms>`, `stream <bytes> <ms>`, `reply <text>`, `usage <in> <out>`.
 //! * `ask <question>` (answered: "answer: <text>"), `approve <tool>`
 //!   ("approved: <tool>" / "denied: <tool>").
@@ -38,10 +38,15 @@
 //!
 //! Personas for prompts the engine writes itself: `OTTO_FAKE_DEFAULT=step` — a
 //! workflow step prompt without a sentinel `expect`s every context file it
-//! names and writes `$HANDOFF`; `OTTO_FAKE_REVIEW_DIR` — a scope, reviewer or
+//! is told to read, writes the ones it is told to write (see [`FileUse`]) and
+//! writes `$HANDOFF`; `OTTO_FAKE_REVIEW_DIR` — a scope, reviewer or
 //! summarizer prompt writes its result file from
-//! `<dir>/<role>[-<lens>-<provider>].json` (or an empty valid one), after
+//! `<dir>/<role>[-<lens>-<provider>].json` (or a valid default: no findings;
+//! for scope, a plan selecting every configured lens the prompt offers), after
 //! acting out the verbs of `<dir>/<role>.pre` when it exists (its work time).
+//! An orchestrator reviewer first writes every lens's own file (from
+//! `reviewer-<slug>-<provider>.json`, else `reviewer.json`, else none), then
+//! their union as the merged result.
 //!
 //! Environment: `OTTO_FAKE_TIME_SCALE` multiplies every `sleep`, `stream` and
 //! `background`; `OTTO_FAKE_LOG` appends a JSON line per turn
@@ -283,8 +288,91 @@ pub fn handoff_slug(handoff: &str) -> String {
     .to_string()
 }
 
-/// The context files a prompt names (the step persona `expect`s them).
+/// What a prompt does with a context file it names, weakest first (a file
+/// named twice keeps the strongest).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FileUse {
+    /// "… if present" / "if it exists" / "if any": read when there, never required.
+    Optional,
+    /// Read: the step persona `expect`s it.
+    Read,
+    /// The step is told to write it ("write the report to X", "create X",
+    /// "copied to X"): the step persona writes it when it is not there yet.
+    Write,
+}
+
+/// The context files a prompt names.
 pub fn contract_files(text: &str) -> Vec<String> {
+    named_files(text).into_iter().map(|(f, _)| f).collect()
+}
+
+/// [`contract_files`] with what the prompt does with each. Read sentence by
+/// sentence: a file is written when a writing word (write, create, produce,
+/// save, generate, copy) comes right before it, or earlier with only "to" /
+/// "into" / "as" / "in" between; "X and Y" share X's use.
+pub fn named_files(text: &str) -> Vec<(String, FileUse)> {
+    const WRITING: [&str; 7] = ["writ", "creat", "produc", "sav", "generat", "copi", "copy"];
+    const SKIPPED: [&str; 6] = ["", "the", "a", "an", "file", "your"];
+    let clean = |w: &str| {
+        w.trim_matches(|c: char| !c.is_alphanumeric())
+            .to_lowercase()
+    };
+    let ends = |w: &str| {
+        w.trim_end_matches(['`', '"', '\'', ')'])
+            .ends_with(['.', '!', '?'])
+    };
+    let writing = |w: &String| WRITING.iter().any(|v| w.starts_with(v));
+    let mut out: Vec<(String, FileUse)> = Vec::new();
+    for line in text.lines() {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        // Where this sentence starts, and its latest file's (word, use).
+        let (mut start, mut last) = (0, None::<(usize, FileUse)>);
+        for (i, word) in words.iter().enumerate() {
+            for file in file_tokens(word) {
+                let before: Vec<String> = words[start..i].iter().map(|w| clean(w)).collect();
+                let prev = before.iter().rposition(|w| !SKIPPED.contains(&w.as_str()));
+                let end = (i..words.len())
+                    .find(|&j| ends(words[j]))
+                    .unwrap_or(words.len() - 1);
+                let rest = words[i..=end].join(" ").to_lowercase();
+                let listed = last.filter(|&(at, _)| {
+                    at == i
+                        || prev.is_none_or(|p| {
+                            start + p == at || ["and", "or"].contains(&before[p].as_str())
+                        })
+                });
+                let usage = if ["if present", "if it exists", "if any"]
+                    .iter()
+                    .any(|o| rest.contains(o))
+                {
+                    FileUse::Optional
+                } else if let Some((_, usage)) = listed {
+                    usage
+                } else if prev.is_some_and(|p| {
+                    writing(&before[p])
+                        || (["to", "into", "as", "in"].contains(&before[p].as_str())
+                            && before.iter().any(writing))
+                }) {
+                    FileUse::Write
+                } else {
+                    FileUse::Read
+                };
+                last = Some((i, usage));
+                match out.iter_mut().find(|(f, _)| f == file) {
+                    Some(known) => known.1 = known.1.max(usage),
+                    None => out.push((file.to_string(), usage)),
+                }
+            }
+            if ends(word) {
+                (start, last) = (i + 1, None);
+            }
+        }
+    }
+    out
+}
+
+/// The context files one whitespace-separated word of a prompt names.
+fn file_tokens(word: &str) -> impl Iterator<Item = &str> {
     const NAMED: [&str; 7] = [
         "run-brief.md",
         "repos.json",
@@ -301,19 +389,16 @@ pub fn contract_files(text: &str) -> Vec<String> {
                 !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) && rest.ends_with(".md")
             })
     };
-    let mut out: Vec<String> = Vec::new();
-    for t in text.split(|c: char| c.is_whitespace() || ",;()[]`'\"".contains(c)) {
-        let t = t.trim_end_matches(['.', ':']);
-        let t = t.strip_prefix("$CTX/").unwrap_or(t);
-        let keep = NAMED.contains(&t)
-            || step_md(t)
-            || (t.ends_with(".output.json") && !t.contains('/'))
-            || (t.starts_with("jira-") && t.ends_with(".md"));
-        if keep && !out.iter().any(|o| o == t) {
-            out.push(t.to_string());
-        }
-    }
-    out
+    word.split(|c: char| ",;()[]`'\"".contains(c))
+        .filter_map(move |t| {
+            let t = t.trim_end_matches(['.', ':']);
+            let t = t.strip_prefix("$CTX/").unwrap_or(t);
+            let keep = NAMED.contains(&t)
+                || step_md(t)
+                || (t.ends_with(".output.json") && !t.contains('/'))
+                || (t.starts_with("jira-") && t.ends_with(".md"));
+            keep.then_some(t)
+        })
 }
 
 /// What a fake is configured with (the binaries read it from the environment).
@@ -462,10 +547,22 @@ impl Turn {
         let handoff = handoff_path(prompt);
         let ctx = context_dir(prompt);
         let step_persona = |h: &str| {
-            let mut acts: Vec<Act> = contract_files(prompt)
+            let there = |f: &str| {
+                ctx.as_deref()
+                    .is_some_and(|d| exists_like(&Path::new(d).join(f)))
+            };
+            let mut acts: Vec<Act> = named_files(prompt)
                 .into_iter()
-                .filter(|f| !h.ends_with(&format!("/{f}")))
-                .map(|f| Act::Expect(format!("$CTX/{f}")))
+                .filter(|(f, _)| !h.ends_with(&format!("/{f}")))
+                .filter_map(|(f, usage)| match usage {
+                    FileUse::Read => Some(Act::Expect(format!("$CTX/{f}"))),
+                    // Its to write: only what is not there, and only a real name.
+                    FileUse::Write if !there(&f) && glob_name(&f) == f => Some(Act::Write {
+                        path: format!("$CTX/{f}"),
+                        text: "@filler:400".into(),
+                    }),
+                    _ => None,
+                })
                 .collect();
             acts.push(Act::Write {
                 path: "$HANDOFF".into(),
@@ -744,15 +841,32 @@ fn references(prompt: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// A path that exists, `*` (and a `jira-KEY` key) matching any run of
-/// characters in the file name.
+/// A file name as a pattern: a `<placeholder>` and `KEY` (`jira-<KEY>.md`,
+/// `jira-KEY.md`) become `*`.
+fn glob_name(name: &str) -> String {
+    let mut out = String::new();
+    let mut rest = name;
+    while let Some((head, tail)) = rest.split_once('<') {
+        let Some((_, after)) = tail.split_once('>') else {
+            break;
+        };
+        out.push_str(head);
+        out.push('*');
+        rest = after;
+    }
+    out.push_str(rest);
+    out.replace("KEY", "*")
+}
+
+/// A path that exists, `*` (and a placeholder, see [`glob_name`]) matching
+/// any run of characters in the file name.
 #[allow(clippy::disallowed_methods)] // a test double listing one small context dir
 fn exists_like(path: &Path) -> bool {
     let name = path
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or_default();
-    let pattern = name.replace("KEY", "*");
+    let pattern = glob_name(name);
     let Some((head, tail)) = pattern.split_once('*') else {
         return path.exists();
     };
@@ -810,6 +924,58 @@ fn review_acts(prompt: &str, cfg: &Config) -> Option<Vec<Act>> {
     } else {
         ("summarizer", after("first, then atomically rename it to ")?)
     };
+    // An orchestrator's sub-agents: (lens slug, that lens's own file).
+    let mut slug = "";
+    let mut lens_files: Vec<(&str, &str)> = Vec::new();
+    for line in all.lines() {
+        if let Some(head) = line
+            .strip_prefix("--- lens ")
+            .and_then(|l| l.strip_suffix(") ---"))
+        {
+            slug = head.rsplit_once('(').map_or("", |(_, s)| s);
+        } else if let Some(p) = line.strip_prefix("Sub-agent output path: ") {
+            lens_files.push((slug, p.trim()));
+        }
+    }
+    let mut acts = std::fs::read_to_string(dir.join(format!("{role}.pre")))
+        .map(|t| parse_script(&t))
+        .unwrap_or_default();
+    let done = |mut acts: Vec<Act>, path: String, text: String| {
+        acts.extend([
+            Act::Write { path, text },
+            Act::Reply(format!("{role} done")),
+        ]);
+        Some(acts)
+    };
+    if role == "reviewer" && !lens_files.is_empty() {
+        // Every lens's file first, then their union (each finding labelled
+        // with its lens, exact duplicates dropped) as the merged result —
+        // written last.
+        let mut merged: Vec<Value> = Vec::new();
+        for (slug, lens_path) in lens_files {
+            let text = [
+                format!("reviewer-{slug}-{}.json", cfg.provider),
+                "reviewer.json".into(),
+            ]
+            .iter()
+            .find_map(|f| std::fs::read_to_string(dir.join(f)).ok())
+            .unwrap_or_else(|| "[]".to_string());
+            let found: Vec<Value> = serde_json::from_str(&text).unwrap_or_default();
+            for mut f in found {
+                if f.is_object() && f.get("lens").is_none() {
+                    f["lens"] = json!(slug);
+                }
+                if !merged.contains(&f) {
+                    merged.push(f);
+                }
+            }
+            acts.push(Act::Write {
+                path: lens_path.to_string(),
+                text,
+            });
+        }
+        return done(acts, path, Value::Array(merged).to_string());
+    }
     let lens = all
         .split_once("Use the `")
         .and_then(|(_, r)| r.split_once('`'))
@@ -820,18 +986,40 @@ fn review_acts(prompt: &str, cfg: &Config) -> Option<Vec<Act>> {
         .unwrap_or_else(|| dir.join(format!("{role}.json")));
     let text = std::fs::read_to_string(named).unwrap_or_else(|_| match role {
         "scope" => json!([{"severity": "info", "body": json!({
-            "summary": "fake scope", "related_modules": [], "risks": [], "lenses": []}).to_string()}])
+            "summary": "fake scope: every configured lens", "related_modules": [], "risks": [],
+            "lenses": offered_lenses(&all)}).to_string()}])
         .to_string(),
         _ => "[]".to_string(),
     });
-    let mut acts = std::fs::read_to_string(dir.join(format!("{role}.pre")))
-        .map(|t| parse_script(&t))
-        .unwrap_or_default();
-    acts.extend([
-        Act::Write { path, text },
-        Act::Reply(format!("{role} done")),
-    ]);
-    Some(acts)
+    done(acts, path, text)
+}
+
+/// The lenses a scope prompt offers ("Configured lenses (…):" then one
+/// `<name>: <prompt>` per reviewer), each as a selected lens. A later line of
+/// a reviewer's own prompt that reads like `<short name>: …` counts as one
+/// too; a test that needs an exact plan supplies `scope.json`.
+fn offered_lenses(prompt: &str) -> Vec<Value> {
+    let mut names: Vec<&str> = Vec::new();
+    for line in prompt
+        .lines()
+        .skip_while(|l| !l.starts_with("Configured lenses ("))
+        .skip(1)
+        .take_while(|l| !l.starts_with("If configured, the Required checks lens"))
+    {
+        if let Some((name, _)) = line.split_once(": ") {
+            let lens = name.len() <= 60 && name.starts_with(|c: char| c.is_alphanumeric());
+            if lens && !names.iter().any(|n| n.eq_ignore_ascii_case(name)) {
+                names.push(name);
+            }
+        }
+    }
+    names
+        .into_iter()
+        .map(|n| {
+            json!({"name": n, "reason": "offered by the review's configuration",
+                        "instructions": format!("Review the change through the {n} lens.")})
+        })
+        .collect()
 }
 
 /// The blocking side of a binary fake: how it acts each [`Step`] out on its

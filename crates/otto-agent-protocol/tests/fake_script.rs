@@ -1145,3 +1145,216 @@ fn the_parser_reads_every_verb_and_flags_the_rest() {
         Some(vec![Act::Sleep(1), Act::Recall])
     );
 }
+
+/// A step-persona config (and, with `review`, the review persona's).
+fn persona(state: &std::path::Path, review: Option<&std::path::Path>) -> Config {
+    Config {
+        provider: "claude".into(),
+        time_scale: 1.0,
+        scripts_dir: None,
+        step_persona: true,
+        review_dir: review.map(Into::into),
+        state_dir: state.into(),
+        unsupported: &[],
+        log: None,
+    }
+}
+
+/// A real preamble in a fresh context dir holding `run-brief.md`, then `body`.
+fn step_prompt(dir: &std::path::Path, own_md: &str, body: &str) -> String {
+    std::fs::write(dir.join("run-brief.md"), "x").unwrap();
+    let ctx = dir.display().to_string();
+    let preamble = otto_workflows::context::agent_preamble(&ctx, false, false, false, &[], own_md);
+    format!("{preamble}{body}\n")
+}
+
+/// G1: a file named with a placeholder in angle brackets (`jira-<KEY>.md`) is
+/// the ticket's file whatever its key, and "if present" makes it optional.
+#[test]
+fn the_step_persona_reads_an_angle_bracket_placeholder_as_any_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = persona(dir.path(), None);
+    let run = |body: &str| {
+        let prompt = step_prompt(dir.path(), "step3-context.md", body);
+        fake_script::Turn::start(&prompt, dir.path(), "s", 1, &cfg)
+            .expect("the step persona")
+            .next_step()
+    };
+    let required =
+        "Compare the branch with <target>. Open jira-<KEY>.md from the context directory.";
+    assert_eq!(
+        run(required),
+        fake_script::Step::Fail(FailClass::Provider, "missing $CTX/jira-<KEY>.md".into()),
+        "no ticket file yet"
+    );
+    // No ticket was fetched: "if present" asks for nothing.
+    let optional = "Compare the branch with <target>. The ticket text is in jira-<KEY>.md, if present. Then sum it up.";
+    assert_eq!(run(optional), fake_script::Step::Say("step done".into()));
+    std::fs::write(dir.path().join("jira-ABC-123.md"), "x").unwrap();
+    assert_eq!(run(required), fake_script::Step::Say("step done".into()));
+    assert!(!dir.path().join("jira-<KEY>.md").exists());
+}
+
+/// G2: a file the prompt tells the step to write is its output — written,
+/// never expected — while the files it is told to read are still required.
+#[test]
+fn the_step_persona_writes_the_files_a_prompt_tells_it_to_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = persona(dir.path(), None);
+    let run = |own: &str, body: &str| {
+        let prompt = step_prompt(dir.path(), own, body);
+        fake_script::Turn::start(&prompt, dir.path(), "s", 1, &cfg)
+            .expect("the step persona")
+            .next_step()
+    };
+    let done = fake_script::Step::Say("step done".into());
+    let report = "Gather the results. The engine posts your step file, and the same text gets copied to `final-output.md` when the run ends. Write the machine-readable result to step9-report.output.json and create `prs.json`.";
+    assert_eq!(run("step9-report.md", report), done);
+    for f in [
+        "final-output.md",
+        "step9-report.output.json",
+        "prs.json",
+        "step9-report.md",
+    ] {
+        assert_eq!(std::fs::read(dir.path().join(f)).unwrap().len(), 400, "{f}");
+    }
+    // A file that is already there is left as it is.
+    std::fs::write(dir.path().join("final-output.md"), "kept").unwrap();
+    assert_eq!(run("step9-report.md", report), done);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("final-output.md")).unwrap(),
+        "kept"
+    );
+    // Reading is still checked, in the same sentence as a write too.
+    assert_eq!(
+        run(
+            "step10-publish.md",
+            "Read repos.json and write a summary of step4-gates.md to step10-notes.md."
+        ),
+        fake_script::Step::Fail(FailClass::Provider, "missing $CTX/repos.json".into())
+    );
+    std::fs::write(dir.path().join("repos.json"), "[]").unwrap();
+    assert_eq!(
+        run(
+            "step10-publish.md",
+            "Read repos.json and write a summary of step4-gates.md to step10-notes.md."
+        ),
+        fake_script::Step::Fail(FailClass::Provider, "missing $CTX/step4-gates.md".into())
+    );
+    assert!(
+        !dir.path().join("step10-notes.md").exists(),
+        "nothing written by a failed step"
+    );
+}
+
+/// G3: an orchestrator reviewer writes every lens's own file, then the merged
+/// result, so the review engine finds no lens unfinished.
+#[test]
+fn the_review_persona_writes_an_orchestrators_lens_files_then_the_merge() {
+    let dir = tempfile::tempdir().unwrap();
+    let review = dir.path().join("review");
+    std::fs::create_dir_all(&review).unwrap();
+    let cfg = persona(dir.path(), Some(&review));
+    let lens = |name: &str, slug: &str| otto_review::engine::OrchestratorLens {
+        name: name.into(),
+        slug: slug.into(),
+        skill_text: format!("Method of {name}."),
+        instructions: "Trace: every caller.".into(),
+        read_only: true,
+    };
+    let lenses = [
+        lens("Correctness (logic)", "correctness-review"),
+        lens("Security", "security-review"),
+    ];
+    let merged = dir.path().join("otto-review-R-0.json");
+    let lens_path =
+        |slug: &str| otto_review::session::lens_findings_path_in(dir.path(), "R", 0, slug);
+    let base =
+        otto_review::engine::compose_orchestrator_prompt(&lenses, "claude", lens_path, &merged);
+    let prompt =
+        otto_review::session::typed_reviewer_prompt(&base, &merged.display().to_string(), None);
+    let files: Vec<(String, std::path::PathBuf)> = lenses
+        .iter()
+        .map(|l| (l.slug.clone(), lens_path(&l.slug)))
+        .collect();
+    let run = || {
+        let mut t = fake_script::Turn::start(&prompt, dir.path(), "s", 1, &cfg)
+            .expect("the review persona");
+        assert_eq!(
+            t.next_step(),
+            fake_script::Step::Say("reviewer done".into())
+        );
+        let text = std::fs::read_to_string(&merged).unwrap();
+        let mut findings =
+            otto_review::session::parse_findings_array(&text).expect("a findings array");
+        let missing = otto_review::session::merge_lens_files(&mut findings, &files);
+        assert_eq!(missing, Vec::<String>::new(), "every lens finished");
+        findings
+    };
+    // No file for the role: every lens answers with no finding.
+    assert!(run().is_empty());
+    assert_eq!(std::fs::read_to_string(&files[1].1).unwrap(), "[]");
+    // One lens's own findings, the other's from the role's file.
+    std::fs::write(
+        review.join("reviewer-security-review-claude.json"),
+        r#"[{"path":"a.rs","line":3,"severity":"bug","body":"sec"}]"#,
+    )
+    .unwrap();
+    std::fs::write(
+        review.join("reviewer.json"),
+        r#"[{"path":"b.rs","line":7,"severity":"warn","body":"any"}]"#,
+    )
+    .unwrap();
+    let got: Vec<(String, String)> = run()
+        .into_iter()
+        .map(|f| (f.body, f.lens.unwrap_or_default()))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("any".to_string(), "correctness-review".to_string()),
+            ("sec".into(), "security-review".into())
+        ]
+    );
+    // A role file that already names each lens (one note per lens, alike but
+    // for the label) is the merge as it stands.
+    std::fs::remove_file(review.join("reviewer-security-review-claude.json")).unwrap();
+    std::fs::write(
+        review.join("reviewer.json"),
+        r#"[{"path":"a.rs","line":1,"severity":"info","body":"fine","lens":"correctness-review"},{"path":"a.rs","line":1,"severity":"info","body":"fine","lens":"security-review"}]"#,
+    )
+    .unwrap();
+    let lenses_named: Vec<String> = run().into_iter().filter_map(|f| f.lens).collect();
+    assert_eq!(lenses_named, ["correctness-review", "security-review"]);
+}
+
+/// G4: with no `scope.json`, the scope answer selects the lenses the prompt
+/// offers, and the review engine accepts it as a plan.
+#[test]
+fn the_review_persona_scope_answer_selects_the_offered_lenses() {
+    let dir = tempfile::tempdir().unwrap();
+    let review = dir.path().join("review");
+    std::fs::create_dir_all(&review).unwrap();
+    let cfg = persona(dir.path(), Some(&review));
+    let mut review_cfg = otto_review::engine::default_review_config("claude");
+    let names: Vec<String> = review_cfg.agents.iter().map(|a| a.name.clone()).collect();
+    assert!(names.len() >= 2, "{names:?}");
+    review_cfg.agents[0]
+        .prompt
+        .push_str("\n- look at every caller\nthen stop");
+    let base =
+        otto_review::scope::scope_prompt("/tmp/x.diff", "Branch: a → b", "none", &review_cfg);
+    let out = dir.path().join("otto-review-R-0.json");
+    let prompt =
+        otto_review::session::typed_reviewer_prompt(&base, &out.display().to_string(), None);
+    let mut t =
+        fake_script::Turn::start(&prompt, dir.path(), "s", 1, &cfg).expect("the review persona");
+    assert_eq!(t.next_step(), fake_script::Step::Say("scope done".into()));
+    let findings =
+        otto_review::session::parse_findings_array(&std::fs::read_to_string(&out).unwrap())
+            .unwrap();
+    let plan = otto_review::scope::parse_plan(&findings[0].body, &["01PRIOR".to_string()])
+        .expect("a plan the engine accepts");
+    let selected: Vec<String> = plan.lenses.into_iter().map(|l| l.name).collect();
+    assert_eq!(selected, names);
+}
