@@ -2207,6 +2207,44 @@ mod tests {
         admitted(g.poll(a, &calm(), &p, Instant::now()));
     }
 
+    /// DR-115.4: parked steps waking at the same reset go through the gate
+    /// one by one (queue, then spacing), not all at once.
+    #[test]
+    fn three_parked_steps_waking_together_pass_one_by_one() {
+        let g = gate();
+        let p = other_mac();
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        // Two agents run (the floor) on a loaded Mac when the reset comes.
+        let mut live = Vec::new();
+        for i in 0..2 {
+            let (tx, rx) = running();
+            g.register(&format!("r{i}"), Some(holder(&format!("r{i}"))), rx);
+            live.push(tx);
+        }
+        let busy = sample(30.0, 8, MemoryPressure::Warn);
+        let woken: Vec<u64> = (0..3)
+            .map(|_| g.enqueue("workflow", "WF step", t0))
+            .collect();
+        for &t in &woken {
+            assert!(matches!(g.poll(t, &busy, &p, t0), Poll::Wait(_)));
+        }
+        assert!(matches!(
+            g.poll(woken[1], &busy, &p, t0),
+            Poll::Wait(AdmissionWait::Queue { ahead: 1 })
+        ));
+        // The pressure clears: the head starts, the rest follow 5 s apart.
+        let mut starts = Vec::new();
+        for s in 10..30 {
+            for &t in &woken {
+                if let Poll::Admitted(_) = g.poll(t, &calm(), &p, at(s)) {
+                    starts.push(s);
+                }
+            }
+        }
+        assert_eq!(starts, [10, 15, 20]);
+    }
+
     #[test]
     fn the_permit_key_is_taken_out_of_meta() {
         let mut meta = json!({ "source": "workflow", "admission_permit": "k:1" });
