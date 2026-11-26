@@ -1,267 +1,304 @@
-# Goal Loops
+# Goals
 
-> **Goals now run in Workflows.** New goals start from **Workflows → Run… → A goal…** (or ⌘K **New goal…**) and run as workflows you watch on the run page — see [Workflows § Goals](./workflows.md#goals-goal-loops-folded-in). The Goal Loops page below is kept as a **read-only history** of loops run before the change, reached from **Older goal loops** at the foot of the Runs tab; **Continue as a goal** picks one up again. The rest of this page describes those older loops.
+> **Goals run inside Workflows.** A goal is a workflow of one fixed shape —
+> work, check the criteria with evidence, repeat within a budget — that you
+> start from a form and watch on a run page like any other run. It replaced
+> the separate Goal Loops feature: there is no Goal Loops controller any more,
+> and the loops made with it are a read-only history (*Older goal loops*
+> below). Engine details — how an agent step runs on a thread, scheduling,
+> holds, the chat message — are in [Workflows](./workflows.md); this page is
+> the guide to goals.
 
-Goal Loops runs bounded Plan → Execute → Evaluate → Digest iterations toward concrete acceptance criteria. Build loops use an isolated `goal-loop/<id>` git worktree; research loops use a dedicated directory and produce `findings.md` with cited evidence. Your original checkout is not the executor working directory.
+Code: `crates/otto-workflows/src/goal.rs` (the goal's graph and prompt),
+`criteria.rs` + `check_run.rs` (the check step's decisions), `hold.rs` +
+`steering.rs`; `crates/otto-server/src/goals.rs`, `routes/goals.rs`,
+`workflow_engine/nodes/{check,loop_node}.rs`, `workflow_engine/run/hold.rs`;
+`ui/src/modules/workflows/goal/` (the form), `runs/{GoalCard,StateCards}.svelte`
+(the run page), `ui/src/modules/loops/` (the history). Contract:
+`docs/contracts/api.md` § "Goals", § "Older goal loops (read-only history)".
 
-## Define and launch
+## What a goal is
 
-Open **Goal Loops → New goal loop**. Start from one of the seven suggested templates or describe a goal and choose **Define with AI**. A template creates an editable local draft immediately; it still needs your concrete goal. Build mode requires a repository; Research does not. AI definition uses the selected definer provider/model and creates a managed session. Refine the draft with feedback before launching.
+```
+Start ──▶ Work toward the goal  (a loop, with a budget)
+            ├─ Work            an agent works toward the goal — one thread, kept across iterations
+            └─ Check criteria  every criterion is decided, with evidence
+          repeat until every criterion is met, or the budget ends
+```
 
-Each criterion specifies how it is verified:
+- **Work** gets the goal, the criteria and how each will be checked. From the
+  second iteration on it also gets the last check's result and closes the
+  unmet criteria first. It keeps the same conversation from one iteration to
+  the next.
+- **Check criteria** decides each criterion: a command's exit status, an
+  independent checker agent that must cite evidence, or you. When every
+  criterion is met with evidence the goal is done — whatever else the checker
+  would still like.
+- A goal's agents never stage, commit, push, publish, open a pull request or
+  send a message. The work stays local, for you to review.
 
-- **Command:** Otto runs the command and uses its exit status as ground truth.
-- **Agent assessment:** the evaluator must cite evidence. A criterion it marks met with blank evidence counts as not met, and the iteration says so. Existing `manual` criteria retain this meaning.
-- **Human verification:** the model cannot mark it accepted. Once work is ready, the loop blocks; record what you personally verified and Resume.
+Each goal is its own workflow, named `Goal · <title>`. Goals fold under
+**Goals** in the Workflows tab, their runs sit in **Runs** with every other
+run, and you can open a goal's workflow in the editor to see — or change —
+its steps.
 
-Set iteration, active-time, phase-time and executor-attempt limits. Select executor and planner/evaluator/digester providers/models. Optional source/spec/plan links and skill names are included in agent context. Skill availability is checked by the executing agent, not guaranteed by preflight.
+## Start a goal
 
-**Allow local commits** defaults off. The executor is instructed to retain uncommitted files for review; local commits require this explicit opt-in. Push, publishing and external messages are not part of automatic completion. **Require independent completion review** adds a separate managed review turn; unresolved findings prevent success.
+**Workflows → Run… → A goal…**, or ⌘K **New goal…**. The **New goal** form:
 
-## Monitor and decisions
+| Field | What it takes |
+|---|---|
+| **Goal** | What you want, in your words (up to 8,000 characters). **Start from…** offers seven kinds of goal — see [Goal templates](./goal-loop-templates.md); picking one fills the criteria and the budget and leaves your goal text alone. |
+| **Title** | Follows the goal's first line until you edit it (up to 120 characters). |
+| **Done when** | The criteria, 1 to 40. Each says **what must be true** and how it is checked: **A command passes** (give the command), **An agent finds evidence** (say where it should look) or **I check it** (say what you will look at). Reorder with the arrows; **Add criterion** adds one. |
+| **Work in** | **A repository** of the workspace, **From the current commit** or from a branch — or **Research — no repository**. |
+| **Budget** | "Up to **N** iterations and **1h** of active time": 1–50 iterations; 15m, 30m, 1h, 2h, 4h or 8h. "Paused and waiting time is not counted." |
+| **Models** | **Work** and **Check**, each provider · model · effort with the Threads picker. Empty = the provider's default. |
+| **Review when done** | "A separate agent reviews the finished work; findings block success." |
 
-The detail view shows status, phase, criterion progress, elapsed budget, Otto's 4-hour run cap, retained work path, next action and iteration history. Each iteration's **Evaluation** lists every criterion with the evidence behind its verdict; a command criterion shows its exit status and, under **Command output**, the last 8 KB of what the command printed. The evaluator's feedback and its reasoning (**Why**) follow. **Agents and roles** lists executor, planner, evaluator, digester and completion-reviewer sessions with provider and state. Open a session inline to inspect its work. Sessions remain identifiable after their live PTYs are released.
+Under the fields the form says what it will do: "**This goal will** work in an
+isolated copy of <repository> (branch otto-wf/…). Nothing is committed to your
+branches, pushed or posted." **Start goal** creates the workflow, starts its
+run and opens the run page. The form does not start while something is
+missing, and says what ("Criterion 2 needs its command.", "Pick a repository,
+or choose Research.").
 
-The ledger persists questions, answers, verifier identity/evidence, next action and review results alongside the narrative context digest. A blocked question must receive a recorded answer before Resume. Answers do not automatically restart the loop.
+Other ways a goal starts:
+- **Insights → Hand off as a goal…** opens the form with the goal and title
+  filled from the report's action.
+- **Run agent to fix…** on a review in Git starts a goal that fixes the
+  review's findings in an isolated worktree at the reviewed commit, re-reviews
+  and repeats — up to 6 iterations or 2 hours of active time — and opens its
+  run page.
+- **Continue as a goal** on an older goal loop (below).
+- An agent through MCP: `otto.run_goal_loop` (below).
 
-Two iterations producing identical unmet criteria and evidence block with a request for a new approach. A human criterion can be accepted only through the verification action while paused, blocked or exhausted. Further executor work invalidates previous human approvals. After final human acceptance, Resume rechecks the existing iteration without rerunning executors or consuming an additional iteration; runtime and phase limits still apply.
+## What a run does
 
-## Preservation and recovery
+A goal's run is queued in the **long lane** — its own two places
+(`OTTO_WF_MAX_LONG_RUNS`), separate from ordinary runs, so an hours-long goal
+never blocks a quick review. Then, each iteration:
 
-**Extend budget.** An exhausted loop hit its iteration or time cap (the stat
-that ran out is marked "cap reached"); a plain Resume would re-exhaust at once.
-When no budget is left the primary action is **Extend & resume…**: a dialog
-prefilled with the current caps + 50% (always above what is already used)
-saves the new limits (`PATCH /goal-loops/{id} {limits}`) and resumes. While
-budget remains, **Extend budget…** sits next to Resume. An exhausted loop
-resumes once its limits leave room; otherwise Resume answers 409 naming the
-limit to raise ("Raise the iteration limit to resume: 5 of 5 iterations are
-used."), and the dialog names it before sending. A loop stopped by Otto's
-4-hour run cap has room already: plain Resume starts a new run window. A pending
-human-only re-evaluation needs no extra iteration.
+1. **Work** runs as an agent step on a thread (the same thread every
+   iteration), with a time limit of its own (20 minutes per iteration from
+   the form).
+2. **Check criteria** runs:
+   - **Commands** first, one after another, in the goal's working directory.
+     Exit 0 = met; the checker cannot overrule it. The evidence keeps the exit
+     status and the last 8 KB of output; all of it is in a `.log` file under
+     **Files**.
+   - **Agent criteria** get one turn of the **Check** model on a *fresh*
+     thread — never the worker's. It must give evidence for each: a "met"
+     with no evidence counts as not met, and no usable answer leaves every
+     agent criterion unmet.
+   - **A criterion you check** is asked only when everything else is met, so
+     you are never asked to verify unfinished work. The run then waits for
+     you (below).
+   - With **Review when done**, once every criterion is met a separate review
+     turn must approve with no findings. Findings block the goal: the run is
+     held **Blocked** with "The completion review has unresolved findings: …".
+3. The loop ends **satisfied** when every criterion is met with evidence.
+   Otherwise the next iteration starts — unless a stop rule holds the run
+   (*Holds* below).
 
-Pause banks active time. Stop releases execution resources and retains the worktree. Success, failure and exhaustion also retain tracked and untracked work. A daemon restart pauses running loops and preserves blocked decisions, so you can Resume explicitly. Such a loop shows **Paused by restart** (not plain Paused) with a banner and a Resume button, and the notification center gets one notice per loop that opens it. Deleting loop history does not delete the working directory or branch; the detail view shows the retained path before deletion.
+A research goal also gets one criterion by itself: `findings.md` exists and
+is not empty.
 
-Evidence lives on each iteration's evaluation (`GoalLoopIteration.evaluation.criteria[].evidence`): the evaluator's citation, the person's record for a human criterion, or for a command criterion its exit status followed by the tail of its output. Goal loops do not produce proof packs and do not capture a diff of the work; inspect the retained directory or branch for that. A research report is checked by its `test -s findings.md` command criterion, which proves the file exists and is not empty, not that its claims are right.
+## Watch it: the run page
 
-**When a loop completes.** The acceptance criteria decide. When every criterion is met with evidence (command criteria only count as met when their command exits 0, human criteria only with a person's record), the iteration completes even if the evaluator asked to continue; its request is kept in the iteration's rationale. An evaluator `blocked` verdict is left alone, because it asks a person for something. The optional completion review still runs before success. Every block (a question, repeated failure, completion-review finding, cost setting, task-admission error) emits `goal_loop_updated` with `blocked`, which raises the "is blocked and needs you" notice.
+The run page (see [Workflows § Inspect](./workflows.md#inspect-runs-and-the-run-page))
+adds, for a goal:
+
+- **The goal card** — "Criteria 2 of 3 met", one row per criterion with its
+  (**Met** · **Not met** · **Verify** · **Not checked**), how it is checked (Command ·
+  Agent · You · Rule) and the evidence (a command's output tail behind the
+  expander), then the budget: "Iteration 2 of 5 · 18m of 1h active". When a
+  more urgent card takes its place (a hold, a criterion to record, an error)
+  the criteria are under **Result → Criteria**.
+- **The iterations** as rows under the step "Work toward the goal"; a row
+  opens that iteration's Work conversation or its check.
+- **The Criteria tab** of the loop step and of each check, with the full
+  evidence.
+- When it is done: "Work kept on branch otto-wf/<run id>; nothing was
+  pushed." or "Findings are kept in the run's research folder (Files)."
+
+## When it waits for you
+
+- **Verify** — a criterion you check. The card reads "Check that <criterion>
+  — record what you verified". Write what you checked and what you saw, then
+  **Record**; or **Not met…** with what is still wrong, which the next
+  iteration reads as the reason. Your record is kept as the criterion's
+  evidence ("Verified by <you>: …"). It counts for that iteration: more work
+  means you are asked again.
+- **Approval** or **Question** — the worker asked to run something that needs
+  your approval, or asked a question; answer on the card or in the step's
+  conversation.
+- **Limited** — the provider's usage limit; with a known reset Otto continues
+  the step at the reset by itself.
+
+Otto raises a notification for each wait, and a goal started from a chat
+thread posts there too.
+
+## Holds: Paused, Blocked, Out of budget
+
+A held run is stopped but not finished: its work, its worktree and its
+conversations are kept, it is never pruned with old runs, and it waits for
+you however long that takes.
+
+| The run's word | Why | What you do |
+|---|---|---|
+| **Paused** | You chose **Pause** (the run's ⋯). The running step stops. | **Resume**. |
+| **Blocked** | The check says it needs a person; or two checks in a row failed the same way ("Two checks in a row failed the same way — a new approach is needed"); or a step failed ("Work failed at iteration 3: …"). | **Add a note first** if you want to tell it something, then **Resume** — it goes on with the next iteration. |
+| **Out of budget** | "Out of iterations: 5 of 5 used" or "Out of time: 1h of 1h active". | **Extend and resume…** — give new totals for **Iterations** and **Active time (minutes)**. The dialog proposes the current totals plus half, and both must be above what is already used ("Raise both limits above what is used: 5 iterations and 60 minutes."). |
+
+Blocked and Out of budget are listed under **Needs you** and raise one
+notification each ("“Goal · <title>” is blocked and needs you", "“Goal ·
+<title>” ran out of budget"); a finished goal says "Goal “<title>” reached
+its goal". **Resume**
+keeps everything that finished — steps and whole iterations — and starts the
+step that was in flight again. **Stop run…** on a held run ends it for good
+and cleans up its worktree (what it changed stays on its branch — *Where the
+work is* below).
+
+Active time is the time steps actually work. Time waiting on you, time
+paused and time the daemon was down are not counted.
+
+## Tell it something: notes
+
+**Add a note for the next step…** (a running run's ⋯; **Add a note first** on
+a held one) queues a note of up to 4,000 characters. The next agent step that
+starts — the next Work turn, usually — reads every waiting note before it
+begins, and the note is recorded on that step. The run page shows "1 note
+waiting for the next step" until then.
+
+## Where the work is
+
+- **A repository goal** works in an isolated worktree of the repository on
+  the branch `otto-wf/<run id>`, cut from the branch you picked or the
+  checkout's current commit. Your own checkout is not touched. A held run
+  keeps its worktree. When the run ends, Otto removes the worktree folder
+  and keeps what the goal changed on that branch — uncommitted changes are
+  first saved there as one commit ("chore: preserve workflow leftovers (run
+  …)"). Nothing is committed to your own branches, pushed or posted.
+- **A research goal** works in a research folder inside the run's own
+  folder, with no repository, and writes `findings.md` there (**Files** on
+  the run page).
+- Step files, command logs and the checks' tables are the run's context
+  files, like any workflow's.
+
+## Build your own
+
+A goal is ordinary workflow steps, so you can use them on the canvas:
+
+- **Check criteria** (`check`) — "Done when" with **Add**; each criterion
+  checked by **A command passes**, **An agent finds evidence**, **I check
+  it** or **A rule holds** (an expression over the iteration, e.g.
+  `steps.review.passed == true`); the **Checker**'s model; optional
+  instructions for it; and "When every criterion is met, have an independent
+  review approve it". Outside a loop it is a gate with evidence; inside a
+  loop a passing check ends the loop.
+- **Repeat (Until)** (`loop`) — besides `max_iterations` and `until`, a loop
+  takes `max_active_s` (a budget of active time, which also allows up to 50
+  iterations), `stop_on_repeat_failure`, `hold_when_unmet` (hold the run
+  instead of ending unsatisfied) and, per inner step, `same_thread` (keep the
+  conversation across iterations). The loop's form edits iterations, until
+  and the steps (`same_thread` through the steps' JSON); `max_active_s`,
+  `stop_on_repeat_failure` and `hold_when_unmet` have no field in the form —
+  the goal builder sets them, and so can an imported workflow or the API.
+- The bundled templates' "Review → fix until passing" loop is built from the
+  same pieces: review → check (the rule "A fresh independent review passes")
+  → fix.
+
+## From MCP
+
+- `otto.run_goal_loop` keeps its name and input and **starts a goal** (it
+  answers `{workflow_id, run_id}`). Roles a goal does not have — planner,
+  digester, definer — are ignored and listed as ignored; an engineering
+  graph and a cost cap are refused. It is a dangerous tool: off by default
+  and approval-gated.
+- `otto.list_goal_loops` lists goal runs, then the older loops.
+- `otto.control_workflow_run` pauses or resumes any workflow run and can set
+  a goal's new budget totals on resume. Off by default, approval-gated.
+
+See [MCP control plane](./mcp-control-plane.md).
+
+## Older goal loops
+
+Loops made with Goal Loops before this release are kept as a read-only
+history: **Workflows → Runs → Older goal loops (n)** at the foot of the page
+(shown only when the workspace has any; old `#/loops` links and notices still
+open it).
+
+- The list shows each loop's status, "Iteration 3 of 5" and its progress; a
+  loop opens to its progress, its iterations, its criteria with their
+  evidence and the changes kept in its worktree.
+- **Continue as a goal** (a loop that did not finish: a draft, or one that
+  was paused, blocked or out of budget, and was not continued before) opens
+  the goal form filled from the loop: its goal, criteria, models, and the
+  budget it had left (at least 1 iteration and 15 minutes). **Work in** is
+  fixed to "This loop's kept work", so the goal goes on where the loop
+  stopped; where the loop got to and its next action are added to the goal
+  text. "Earlier person verifications are not carried over: they were for
+  earlier work." The loop is then marked stopped, "Continued as a goal".
+- **Delete history…** removes the loop's record. "Its kept work on disk
+  stays."
+- **A loop that was running when Otto was updated** was paused once, with one
+  notice ("Goal loop “…” was paused by the update …"). Its work is kept;
+  continue it as a goal.
+
+What Goal Loops had and a goal does not: separate planner and digester
+agents (Work plans for itself and reads the last check), **Define with AI**
+(the form's **Start from…** templates fill the criteria instead),
+engineering graphs (put the tasks on a workflow canvas; continuing a graph
+loop carries its tasks into the goal text, in order), per-phase time limits,
+a cost cap and the "Allow local commits" option (a goal never commits).
+
+## API
+
+| Method & path | What |
+|---|---|
+| `POST /workspaces/{wid}/goals` | Start a goal from a `GoalSpec` (title, goal, criteria, work, budget, worker, checker, final_review) → `{workflow, run}`. 400 names the field that is wrong. |
+| `GET /workspaces/{wid}/goals` | Goal runs (each goal's latest), then the older loops (`legacy: true`). |
+| `POST /workspaces/{wid}/goals/from-loop` | The MCP tool's route: a Goal Loops request started as a goal. |
+| `POST /goal-loops/{id}/continue` | Continue an older loop as a goal. 409 when it finished or was continued already. |
+| `POST /reviews/{review_id}/fix-goal` | "Run agent to fix…" → `{workflow_id, run_id}`. |
+| `POST /workflow-runs/{id}/pause` · `/resume` | Hold / re-enter a run; `{extend: {iterations?, active_s?}}` are new totals. 409 says which limit to raise. |
+| `POST /workflow-runs/{id}/steer` | `{note}` — a note for the next agent step (a person's credential). |
+| `POST /workflow-runs/{id}/nodes/{node_id}/criteria/{criterion_id}/verify` | `{met, evidence}` — record a criterion you check (a person's credential). |
+| `GET /workspaces/{id}/goal-loops`, `GET /goal-loops/{id}`, `…/iterations/{idx}`, `…/diff`, `DELETE /goal-loops/{id}` | The older loops' history. Every other `/goal-loops` route answers 404. |
+
+A goal's run is an ordinary workflow run: `GET /workflow-runs/{id}` and the
+`workflow_run_updated` event carry its progress in `overview.goal`
+(`iteration`, `max_iterations`, `criteria_met`, `criteria_total`,
+`active_ms`, `max_active_ms`, `awaiting`) and its hold in `overview.hold`
+(`kind: paused|blocked|exhausted`, `reason`, `since`). The `goal_loop_updated`
+event is no longer sent.
 
 ## Limits and troubleshooting
 
-- Executors run sequentially in one working directory.
-- Iteration limits gate new work; active-time limits are checked at iteration boundaries, with per-role phase deadlines.
-- **Run cap: 4 hours.** One run (a Start or Resume until the loop settles) stops after at most 4 hours of active time, whatever `max_runtime_secs` says, and the loop ends Exhausted with the summary "time cap reached: Otto stops a run after 4 hours of active time". Resume starts a new run while the loop's own limits leave room. The cap is not configurable. The detail view and the launch form show it, and say so when the loop's own runtime limit is longer.
-- Token and cost totals per loop are not tracked: iteration `tokens_input`, `tokens_output` and `cost_usd` stay 0. Use **Usage** for provider totals.
-- Per-loop monetary accounting is not wired. Non-null `max_cost_usd` is rejected; older loops with this setting block until it is removed. Workspace usage-budget checks still gate Define/Launch/Resume.
-- If a loop is exhausted, raise iteration/runtime limits through PATCH before Resume. If human acceptance is the only remaining work, it does not require another execution iteration.
-- If a provider fails or times out, inspect its retained session and iteration evidence. Missing/noncompliant structured outputs fail the role rather than silently satisfying criteria.
-- Agent policy instructions do not constitute an OS permission boundary. Existing session sandbox and tool governance remain responsible for confinement.
+| Symptom | Cause / what to do |
+|---|---|
+| The goal stopped as **Blocked** after two iterations | Two checks in a row failed the same way. Add a note saying what to try differently, then **Resume**. |
+| **Resume** answers "Raise the iteration limit to resume: 5 of 5 iterations are used." | The run is out of budget: use **Extend and resume…** with totals above what is used. |
+| A criterion stays **Not met** though the work looks done | Read its evidence. A command criterion is its exit status — run the command yourself in the worktree. An agent criterion needs evidence the checker can cite; say where to look in the criterion. |
+| The checker says "met" but the row is Not met | A "met" without evidence counts as not met. |
+| You are asked to **Verify** again | A record counts for one iteration; the goal did more work after it. |
+| **Start goal** is refused for the repository | **Work in** must be a repository registered in this workspace. |
+| A goal waits in **Queued** while nothing else runs | Two other goals hold the long lane; it starts when one ends or is held. |
+| `otto.run_goal_loop` answers "Engineering-graph goals are not supported any more" | Build the tasks as steps on a workflow canvas, or start a plain goal. |
+| Where are the goal's changes? | On the branch `otto-wf/<run id>` of the repository (a held run: still in its worktree). Nothing is on your own branches: review that branch and merge or cherry-pick what you want. |
 
-## API and implementation
+Limits: 1–40 criteria; 1–50 iterations; 15 minutes to 8 hours of active
+time; one Work turn up to its time limit, one checker turn up to 30 minutes;
+two goals at once by default. A goal runs on the same engine as every
+workflow, so its steps wait for the same machine places as other agents.
 
-See [API contract](../contracts/api.md#goal-loops) and [WS contract](../contracts/ws.md) for HTTP requests and `goal_loop_updated`. List/detail require workspace Viewer; definition, mutation, verification and answers require Editor. Identity is derived from authentication, not an agent-supplied verifier field.
+## Related
 
-The controller is `crates/otto-automation/src/goal_loop.rs`; managed roles are in `goal_loop_roles.rs`; pure verification decisions (evidence rule, completion rule, verify-output tail) are in `goal_loop_policy.rs`; worktree provisioning is in `goal_loop_workspace.rs`; restart notices are in `goal_loop/restart.rs`. State lives in `GoalLoopsRepo`, with the ledger added by migration `0133_goal_loop_ledger.sql`. UI lives in `ui/src/modules/loops/`.
-
-## Walkthrough: build, inspect, and finish
-
-1. Open a workspace with a usable repository and an installed, authenticated agent provider. Otto creates a separate worktree from the repository's launch commit. A build goal needs an existing commit; research mode works without Git.
-2. Describe an outcome and boundaries: for example, “Add validation to the import screen; keep the existing CSV format; verify the failing-import test and inspect the error message.” Choose the provider/model used to draft the goal, then define it.
-3. Review the generated title, objectives, constraints, out-of-scope items and acceptance criteria. Make command criteria concrete commands that can run unattended in the isolated directory. Use Human verification for checks requiring personal inspection; Agent assessment is an automated judgment.
-4. Choose bounded limits and executor roles. Executors share one directory and run sequentially. Different providers/models can fill each role. Optional links and named skills guide the work; they do not grant access to unavailable sources or install skills.
-5. Create and start. Expand each iteration to inspect its plan, executor summaries, evaluations, digest and sessions. The provider/model on the definer controls drafting; executor and role choices control the subsequent loop.
-6. When the loop requests a decision, read the question and record an answer. When automated work is ready but a human criterion is pending, inspect the retained files or running product and record specific evidence. Resume is a separate action.
-7. Review the final evaluation evidence and retained files. Integrating, committing, pushing or publishing the result remains a separate operation. You can use the displayed directory in your editor or Git tools.
-
-## Goal loop or engineering graph
-
-Both are under **Goal Loops**. In **New goal loop**, choose **Execution → Goal loop** for whole-goal iterations, or **Engineering graph** for tasks with explicit prerequisites. This is separate from **Work type → Build / Research**.
-
-The standard loop has an interactive Plan → Execute → Evaluate → Digest diagram with a feedback arrow; select a phase to see what it does. The engineering graph draws the actual task dependencies. Select a node to edit its work and acceptance links before launch, or inspect its persisted status and evidence afterward. One ready task runs per iteration, sequentially. Changed work can invalidate prior evidence and dependent tasks.
-
-Switching modes preserves the current goal and criteria. Disabling an edited graph asks first, and its task edits remain available if you switch back before launching. The seven [suggested templates](goal-loop-templates.md) work with either execution type. Diagram nodes are keyboard-selectable and adapt to phone widths; large graphs scroll within their diagram.
-
-## Research workflow
-
-Choose Research to investigate a question without requiring a repository. Add useful source links and request citations in the goal. Otto creates a dedicated directory and requires a nonempty `findings.md` through the `otto-research-report` command criterion. Add separate acceptance criteria for source quality, confidence, unresolved questions or a human decision. A nonempty report alone does not establish that its claims are correct.
-
-Build/Research mode is fixed when the loop is created, because it determines the working-directory and report-verification requirements. Create another loop to change mode. Research does not automatically crawl private links or enable credentials; agent tools retain their existing access rules.
-
-## Lifecycle controls
-
-| State | Meaning and available action |
-| --- | --- |
-| Draft | Definition/configuration exists; Start begins execution. |
-| Running | A controller or explicit executor retry owns the work. Pause or Stop can interrupt it. |
-| Paused | Active time is banked. Once in-flight work has stopped, inspect, verify, raise limits or Resume. **Paused by restart** means a daemon restart, not a person, paused it. |
-| Blocked | A decision, repeated failure, human criterion or completion-review finding needs attention. Read the explanation before Resume. |
-| Exhausted | A hard limit was reached: the iteration limit, the runtime limit, or Otto's 4-hour run cap. Raise the applicable limit, or finish a pending human-only verification continuation. |
-| Succeeded | All acceptance criteria and configured completion gates passed. Files remain available. |
-| Failed / Stopped | Execution ended; inspect the error or retained output. These are terminal history states. |
-
-Pause interrupts managed roles and verification commands and releases executor sessions. A short “work is still active or stopping” response means cleanup has not finished yet; wait for it to settle before Resume or recording an approval. Stop is asynchronous while cleanup is in progress. Neither operation resets the worktree.
-
-A blocked sequential loop can retry one executor from its **current** iteration using its saved prompt. Graph loops use **Resume** instead, so prerequisite evidence is checked before retrying a task. The retry becomes Running, owns a cancellation handle and clears stale results, approvals and evaluation. It returns to Blocked when finished. Resume then performs fresh loop work/evaluation. This prevents old approvals from being reused for changed files. Two retries cannot run concurrently in the same loop.
-
-## Limits and evidence details
-
-The iteration counter measures iterations started, including interrupted iterations. Pause or Stop closes the open iteration as **Stopped**, and a role it cuts short reads **Stopped**, not Failed. A role whose result file is not the required JSON envelope reads **Failed** with the reason. Pause does not refund elapsed time. Raising limits does not erase previous work or progress. Each managed role has an absolute deadline including session startup and publication. Verification commands have a timeout and are stopped with their process group on cancellation or timeout. Captured output retains up to 512 KiB from each of stdout and stderr, marks omitted bytes, and keeps draining both pipes so verbose commands can finish. The iteration record keeps the last 8 KB of it with the criterion's evidence. The repeated-failure check compares only the exit-status line, so changing timings in the output do not hide a repeated failure. Executor recovery remains bounded by attempts and its per-attempt waiting rules.
-
-The narrative digest is auxiliary context; the retained working directory is the source of truth. The ledger preserves questions/answers, identity and evidence for human checks, the latest next action, repeated-failure state and completion-review results. It is not a complete task/file dependency tracker. The failure threshold is currently two matching unsuccessful evaluations and is not configurable.
-
-Human approvals are tied to the exact criterion revision, not only its ID. Revising a criterion or executing further work invalidates earlier approval. Authentication supplies the verifier identity. Session-managed agent credentials cannot call the human verification or question-answer endpoints; the person uses the UI or their own user credential.
-
-The optional completion review is a separate managed session that receives the goal, evaluation and verification evidence. An unavailable, malformed or rejecting review blocks completion. It does not claim independent human approval and does not automatically implement its own findings.
-
-## HTTP and WebSocket surface
-
-All paths below are under `/api/v1`. The authoritative request/response fields are in the [Goal Loops API contract](../contracts/api.md#goal-loops).
-
-| Method and path | Purpose |
-| --- | --- |
-| `GET /workspaces/{id}/goal-loops` | List workspace loops. |
-| `POST /workspaces/{id}/goal-loops/define` | Draft/refine a definition with a managed definer. |
-| `POST /workspaces/{id}/goal-loops` | Save the configured goal. |
-| `GET /goal-loops/{id}` | Read loop, ledger and iteration details. |
-| `PATCH /goal-loops/{id}` | Rename, adjust limits, or edit draft configuration. Any Editor may rename or adjust limits; changing `config` (the prompts and roles the loop runs with under its creator's identity) needs the creator, a workspace Admin or root, else 403. |
-| `DELETE /goal-loops/{id}` | Stop and remove history while retaining files. |
-| `POST /goal-loops/{id}/start` | Start a draft. |
-| `POST /goal-loops/{id}/pause` | Interrupt work and bank active time. |
-| `POST /goal-loops/{id}/resume` | Continue eligible paused/blocked/exhausted work. |
-| `POST /goal-loops/{id}/stop` | Cancel work and retain files. |
-| `POST /goal-loops/{id}/iterations/{idx}/agents/{agent}/retry` | Retry a current executor while blocked. |
-| `POST /goal-loops/{id}/criteria/{criterion}/verify` | Record human evidence using a person's credential. |
-| `POST /goal-loops/{id}/questions/{question}/answer` | Record a decision without automatically resuming. |
-
-`goal_loop_updated` signals changes to status, phase, current iteration and progress. Clients fetch detail for the updated ledger, session associations and evidence. Role session IDs are stored before the controller waits for role completion, so reload can rediscover an ongoing role.
-
-## Troubleshooting reference
-
-| Symptom | What to inspect or do |
-| --- | --- |
-| Saving a draft's configuration returns 403 | Only the loop's creator, a workspace Admin or root can change `config`; another Editor can still rename it, adjust limits, and pause, resume or stop it. |
-| Build cannot create its worktree | Confirm the repository has a commit and the retained path/branch is not occupied by unrelated work. Otto refuses destructive replacement. |
-| Definer/role fails during startup | Inspect provider authentication/configuration and the managed session. The phase deadline includes startup. |
-| A role stays running after its chat reply | The role must finish its validated result file; a chat reply alone does not satisfy that protocol. |
-| Human verification is rejected | Wait for work to stop, use a person’s credential, provide nonempty evidence, and verify a criterion whose kind is Human. |
-| Resume asks for an answer | Record every pending decision question first; answers persist and do not auto-resume. |
-| Retry is unavailable | Retry is limited to an executor in the current iteration of a blocked loop, with a retained prompt. Role sessions are inspectable but are not executor retry slots. |
-| A criterion shows "Marked met without evidence" | The evaluator claimed it without citing a check. Make the criterion's verification concrete (or a command) and Resume. |
-| Loop keeps iterating after everything passed | It should not: all criteria met with evidence completes the loop. If it continues, a criterion is unmet or lacks evidence; read the iteration's Evaluation. |
-| Completion blocks on review | Read the review findings and use them to decide the next action. Unavailable or malformed review output also blocks. |
-| Loop paused after daemon restart | Intentional recovery: the loop shows **Paused by restart** and a notice is posted. Inspect retained work and Resume explicitly. |
-| A skill or source is missing | Make it available through the provider's normal configuration or revise the goal. There is no automatic skill installation or source-access escalation. |
-
-Seven suggested templates and editable task graphs are available; see [Suggested loops and engineering graphs](./goal-loop-templates.md). General template export/import and pre-launch skill-availability resolution are not implemented. Templates do not install skills or guarantee access to source systems.
-
-## Views, fields and defaults
-
-Open the app's **Goal Loops** section. The list shows one card per loop with its name, status pill, progress bar, `iter N/max`, and current phase while running. The empty state offers **Define your first goal**. **New goal loop** opens the definition form.
-
-The AI definition response contains an editable `definition`, `suggested_limits` and `suggested_config`. Refinement sends the previous draft as `context` and your requested changes as `feedback`. Defining creates a managed session but does not create a loop row; creation happens on launch/save.
-
-The form edits Name, acceptance criteria, role configuration and budgets. Each criterion needs a unique ID, a nonempty description and verification instructions; Command also needs a shell command. At least one criterion and executor are required. “What this checks” documents the purpose of a command separately from its executable text.
-
-| Field | Stored setting | Default |
-| --- | --- | --- |
-| Max iterations | `limits.max_iterations` | 5 |
-| Max minutes | `limits.max_runtime_secs`, converted from minutes | 30 |
-| Per-phase minutes | `limits.per_phase_timeout_secs`, converted from minutes | 10 |
-| Executor recovery attempts | `limits.max_attempts_per_executor` | 3 |
-| Run cap (one Start/Resume) | Not configurable (`MAX_RUN_ACTIVE_SECS`) | 4 hours of active time |
-| Allow local commits | `config.allow_commits` | Off |
-| Completion review | `config.require_review` | Off |
-| Monetary limit | `limits.max_cost_usd` | Unset; setting it is rejected |
-
-**Launch loop** creates with `autostart:true` and navigates to detail. API clients can save with autostart disabled, edit draft configuration, then use Start. Once execution begins, configuration stays fixed; limits may change while not Running and the name may change while nonterminal.
-
-Detail has a progress bar, the Plan → Execute → Evaluate → Digest stepper, current iteration/active-time totals, retained path/branch, criteria and expandable iteration history. A Waiting executor appears under Executing. Expand an iteration for its plan, Agents and roles, assessment/evidence, and context carried forward. Open a waiting executor session to inspect its prompt or respond. Detail follows WebSocket updates with polling as a fallback.
-
-## Controller and directory reference
-
-`start_loop` provisions the directory, marks Running, registers its exclusive control handle and starts the controller. Each cycle checks limits; creates an iteration; plans; executes sequentially; evaluates command/agent/human criteria; digests; and decides whether to continue, block or complete. A failed planner supplies fallback instructions so executors can work toward the criteria directly. A malformed evaluator result never satisfies omitted criteria. Progress is recomputed from the actual accepted criterion count.
-
-For build goals the directory is `<data>/goal-loops/<id>/work`, on `goal-loop/<id>`. Fresh launch captures HEAD as `base_commit`. Resume reuses a registered worktree unchanged. If someone has removed the directory but the branch survives, Otto can reattach the branch without resetting it; already deleted uncommitted files cannot be reconstructed from that branch. An unrecorded occupied path fails rather than being overwritten. Research uses the dedicated directory without provisioning a Git worktree.
-
-| Layer | Location |
-| --- | --- |
-| Controller, lifecycle and recovery | `crates/otto-automation/src/goal_loop.rs` |
-| Managed provider role turns | `crates/otto-automation/src/goal_loop_roles.rs` |
-| Command cancellation and process cleanup | `crates/otto-automation/src/goal_loop_commands.rs` |
-| Evidence, completion, human verification and progress decisions | `crates/otto-automation/src/goal_loop_policy.rs` |
-| Worktree provisioning | `crates/otto-automation/src/goal_loop_workspace.rs` |
-| Restart-pause notice | `crates/otto-automation/src/goal_loop/restart.rs` |
-| Tolerant JSON extraction | `crates/otto-automation/src/goal_loop_parse.rs` |
-| HTTP handlers | `crates/otto-server/src/routes/goal_loops.rs` |
-| Domain types/default role prompts | `crates/otto-core/src/domain.rs` |
-| Request DTOs | `crates/otto-core/src/api.rs` |
-| Persistence | `crates/otto-state/src/goal_loops.rs`; migrations `0065` and `0133` |
-| Boot recovery | `crates/otto-server/src/boot/recovery.rs` (`recover_goal_loops`) |
-| UI | `ui/src/modules/loops/` |
-
-## Related features
-
-- [Agent sessions](./agent-sessions.md): opening and attaching managed terminals.
-- [Code review](./code-review.md): shared agent-run/session plumbing.
-- [Agent Swarm](./agent-swarm.md): related bounded multi-agent coordination.
-- [Mission Control](./mission-control.md): Goal Loops as work-graph items.
-- [API contract](../contracts/api.md) and [WebSocket contract](../contracts/ws.md): authoritative transport definitions.
-
-## Task graphs
-
-An optional task graph orders work by verified dependencies. Each task has a
-name, instructions and acceptance criteria; dependent tasks wait for fresh
-passing evidence from their prerequisites. One task uses one iteration, with
-the configured executor lineup running sequentially. Budget at least the number
-of tasks plus repair iterations, and allow time for prerequisite rechecks.
-
-Only tasks that executed can pass. Before reuse, the evaluator rechecks prior
-work in the current directory; regressions invalidate dependent tasks. The
-ledger shows pending, running, passed or blocked tasks with their actual
-criterion evidence. An optimistic agent verdict cannot skip future tasks or
-complete a graph with unfinished work. Existing pause, stop and runtime limits
-still apply. Use **Resume** to retry graph work; individual executor Retry is
-reserved for loops without a graph.
-
-Graphs support up to 16 tasks and reject cycles, unknown references and
-unassigned criteria. Put human acceptance on final tasks with no dependents:
-later mutations invalidate human approval. Research graphs must assign the
-reserved `otto-research-report` criterion to their report task. Graphs use the
-existing isolated work directory and executor policies; they do not authorize
-publishing, pushing or sending messages.
-
-## Engineering graphs
-
-A goal can include `config.graph` with 1–16 tasks. Each task has a stable ID, title,
-instructions, dependency IDs and acceptance-criterion IDs. Every goal criterion
-must belong to a task. Otto rejects cycles, unknown or duplicate references and
-empty tasks before saving or starting a graph. Human-verification tasks must be
-terminal: later code changes invalidate human approvals.
-
-The editor uses task cards and dependency controls, so the graph remains usable
-on a keyboard or phone. The preview groups tasks by dependency level. Nodes on
-the same level are independent prerequisites, not a promise of parallel execution.
-The existing executor lineup works sequentially in one isolated directory.
-
-Each execution iteration admits one ready task. Before admitting a dependent
-task, the evaluator rechecks previously passed prerequisite criteria against
-current work. After execution it evaluates the goal again; regressed prerequisites
-invalidate their descendants. An optimistic assessment cannot pass a task that
-never ran, a failed executor, missing evidence or a still-pending dependency.
-Completion requires all tasks and authoritative criteria to pass, plus the
-independent-review gate when configured. If final review finds a
-problem, the final task reopens for repair on Resume.
-
-The persisted `ledger.graph_nodes` records task ID, state, iteration and criterion
-evidence. The detail view shows those records after reload. Pause, cancellation,
-restart recovery and active-time limits retain the existing controller semantics.
-Final human verification can re-evaluate the completed work without consuming
-another execution iteration. A graph needs at least one iteration per task; the
-suggested three-task graphs allow five iterations, leaving two for repairs.
-
-Tasks may be pending, running, passed or blocked. Task blockage can mean failed
-verification while the overall loop is still trying repairs; it does not always
-mean the person must answer a question. Inspect the evidence and overall loop
-status. Existing goals without `config.graph` keep the sequential Plan → Execute
-→ Evaluate → Digest behavior. Graphs are bounded dependency DAGs, not the general
-conditional/external-action graphs provided by [Workflows](./workflows.md).
+- [Workflows](./workflows.md) — the engine: how agent steps run, the run
+  page, holds, the chat message, restart.
+- [Goal templates](./goal-loop-templates.md) — the seven **Start from…**
+  kinds.
+- [AI code review](./code-review.md) — **Run agent to fix…** starts a goal.
+- [Insights](./insights.md) — **Hand off as a goal…**.
+- [MCP control plane](./mcp-control-plane.md) — the goal tools.
