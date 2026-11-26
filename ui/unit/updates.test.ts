@@ -188,6 +188,7 @@ test('skip, unskip and automatic download go through the shell and follow its an
     invoke: (cmd, args) => {
       if (cmd === 'update_skip') shell = applySkip(shell, (args?.version as string | null) ?? null);
       if (cmd === 'update_set_auto') { if (fail) throw new Error('disk full'); shell = { ...shell, auto_install: !!args?.on }; }
+      if (cmd === 'update_set_prereleases') shell = { ...shell, prereleases: !!args?.on };
       return shell;
     },
   });
@@ -205,6 +206,9 @@ test('skip, unskip and automatic download go through the shell and follow its an
   assert.equal(mod.dialogView(mod.updates.state, null, null).primary.action, 'download');
   await mod.updates.setAuto(true);
   assert.equal(mod.updates.state?.auto_install, true);
+  await mod.updates.setPrereleases(true);
+  assert.equal(json(calls.at(-1)), json({ cmd: 'update_set_prereleases', args: { on: true } }));
+  assert.equal(mod.updates.state?.prereleases, true);
   fail = true;
   await mod.updates.setAuto(false);
   assert.equal(mod.updates.state?.auto_install, true, 'a failed save changes nothing');

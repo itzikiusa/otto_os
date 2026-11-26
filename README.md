@@ -21,7 +21,9 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
   **Open Anyway** step in Privacy & Security.
 - **Otto updates itself.** This is the first release that installs updates:
   *Otto ▸ Check for Updates…* (or the row at the bottom of the sidebar)
-  downloads the new version, verifies it and restarts into it.
+  downloads the new version, verifies it and restarts into it. *Settings ▸
+  Updates ▸ Include release candidates* also offers early builds of the next
+  version.
 - **Coming from 0.6.0 or earlier:** install this DMG by hand once. The signer
   changed, so macOS asks again for the permissions Otto uses (Accessibility,
   Screen Recording, Microphone, the Keychain).

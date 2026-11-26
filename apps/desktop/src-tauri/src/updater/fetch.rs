@@ -9,14 +9,18 @@ use reqwest::{redirect, StatusCode, Url};
 
 /// Where a release's manifest and assets may come from (https only).
 /// `github.com/<o>/<r>/releases/latest/download/…` redirects to one of the
-/// two asset hosts.
-const ALLOWED_HOSTS: [&str; 3] = [
+/// two asset hosts; the API host lists the releases (release candidates).
+const ALLOWED_HOSTS: [&str; 4] = [
     "github.com",
+    "api.github.com",
     "objects.githubusercontent.com",
     "release-assets.githubusercontent.com",
 ];
 /// `latest.json` is about 1 KB; the notes make it a few.
 pub const MANIFEST_MAX: u64 = 256 * 1024;
+/// The API's list of the newest releases, each with its notes and assets
+/// (about 65 KB today).
+pub const LISTING_MAX: u64 = 1024 * 1024;
 /// The archive is about 125 MB today (the app bundle is ~312 MB unpacked).
 pub const ARCHIVE_MAX: u64 = 512 * 1024 * 1024;
 const MAX_REDIRECTS: usize = 5;
@@ -141,6 +145,7 @@ mod tests {
         assert!(allowed(&u(
             "https://github.com/o/r/releases/latest/download/latest.json"
         )));
+        assert!(allowed(&u("https://api.github.com/repos/o/r/releases")));
         assert!(allowed(&u("https://objects.githubusercontent.com/x")));
         assert!(allowed(&u(
             "https://release-assets.githubusercontent.com/x"
