@@ -299,7 +299,16 @@ async fn the_terminal_runner_stays_behind_the_switch() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_configured_scope_drops_the_lens_the_scope_agent_adds() {
-    let (_tmp, ctx, ws, repo) = rig_with(&["Invented by scope"]).await;
+    let (tmp, ctx, ws, repo) = rig_with(&["Invented by scope"]).await;
+    // The scope agent drops "Lens 6" (kept dropped) and adds one (dropped).
+    let lenses: Vec<_> = (1..LENSES)
+        .map(|i| format!("Lens {i}"))
+        .chain(["Invented by scope".to_string()])
+        .map(|name| json!({"name": name, "reason": "touched", "instructions": "look"}))
+        .collect();
+    let plan = json!({"summary": "s", "related_modules": [], "risks": [], "lenses": lenses});
+    let scope = json!([{"severity": "info", "body": plan.to_string()}]);
+    std::fs::write(tmp.path().join("fakes/scope.json"), scope.to_string()).unwrap();
     let review = ctx
         .reviews_store
         .create_review(&repo.id, LOCAL_REVIEW_PR_NUMBER)
@@ -324,6 +333,7 @@ async fn a_configured_scope_drops_the_lens_the_scope_agent_adds() {
     )
     .await;
     let done = ctx.reviews_store.get_review(&review.id).await.unwrap();
+    assert!(res.is_ok(), "{res:?}: {:?}", done.agents);
     let lenses: Vec<_> = done
         .scope_plan
         .as_ref()
@@ -334,15 +344,59 @@ async fn a_configured_scope_drops_the_lens_the_scope_agent_adds() {
         .collect();
     assert_eq!(
         lenses,
-        (1..=LENSES)
-            .map(|i| format!("Lens {i}"))
-            .collect::<Vec<_>>(),
+        (1..LENSES).map(|i| format!("Lens {i}")).collect::<Vec<_>>(),
         "{res:?}"
     );
     assert_eq!(
         done.agents.len(),
-        LENSES + 1,
-        "one reviewer per declared lens + the summarizer"
+        LENSES,
+        "one reviewer per kept lens + the summarizer"
     );
     assert!(done.agents.iter().all(|a| a.name != "Invented by scope"));
+}
+
+/// CR1-029: cancelling a review closes its agents' runtime threads (a kill
+/// of a PTY session by the thread's id stopped nothing).
+#[tokio::test]
+async fn a_cancel_closes_the_reviews_threads() {
+    let (_tmp, ctx, ws, repo) = rig().await;
+    let owner = otto_state::UsersRepo::new(ctx.pool.clone())
+        .list()
+        .await
+        .unwrap()
+        .remove(0);
+    let req = otto_core::agent_runtime::CreateRuntimeSessionReq {
+        provider: otto_core::agent_runtime::RuntimeProvider::parse("claude"),
+        cwd: Some(repo.path.clone()),
+        ..Default::default()
+    };
+    let thread = ctx
+        .agent_runtime
+        .create(&owner.id, &ws.id, req)
+        .await
+        .unwrap();
+    let review = ctx
+        .reviews_store
+        .create_review(&repo.id, LOCAL_REVIEW_PR_NUMBER)
+        .await
+        .unwrap();
+    let row = otto_core::domain::ReviewAgentState {
+        name: "Lens 1".into(),
+        provider: "claude".into(),
+        status: "running".into(),
+        thread: true,
+        session_id: Some(thread.id.clone()),
+        ..Default::default()
+    };
+    ctx.reviews_store
+        .set_agents(&review.id, &[row])
+        .await
+        .unwrap();
+    let review = ctx.reviews_store.get_review(&review.id).await.unwrap();
+    cancel_running_review(&ctx, &review, &ws.id).await;
+    let after = ctx.agent_runtime.get(&thread.id).await.unwrap();
+    assert_eq!(
+        after.status,
+        otto_core::agent_runtime::RuntimeSessionStatus::Closed
+    );
 }
