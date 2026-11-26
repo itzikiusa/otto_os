@@ -10,7 +10,7 @@
   import { runOrigin } from '../runRoute';
   import RunOrbit from './RunOrbit.svelte';
   import StateCards from './StateCards.svelte';
-  import { clockTime, headline, subLine } from './runWords';
+  import { ago, clockTime, headline, subLine } from './runWords';
   import type { StepEntry } from './stepOrder';
 
   interface Props {
@@ -23,8 +23,10 @@
     nodeName: (id: string) => string;
     criteria?: readonly Criterion[];
     onopenstep: (nodeId: string, tab?: string) => void;
+    /** Live updates stopped: when the page last heard of the run (ux.md §4.6). */
+    staleSince?: number | null;
   }
-  let { run, runState, word, entries, sync, now, nodeName, criteria = [], onopenstep }: Props = $props();
+  let { run, runState, word, entries, sync, now, nodeName, criteria = [], onopenstep, staleSince = null }: Props = $props();
 
   const ov = $derived(run.overview ?? null);
   const live = $derived(run.status === 'pending' || run.status === 'running');
@@ -32,7 +34,8 @@
   const total = $derived((run.finished_at ? Date.parse(run.finished_at) : now) - started);
   const text = $derived(headline({ overview: ov, state: runState, currentStep: null, error: run.error ?? null, durationMs: run.finished_at ? total : null }) || nodeName(run.nodes.find((n) => n.status === 'running')?.node_id ?? '') || word);
   const sub = $derived(
-    ov
+    staleSince != null ? `Last update ${ago(now - staleSince)}`
+    : ov
       ? subLine(ov, { startedAt: run.started_at, finishedAt: run.finished_at, now, waitingSteps: run.nodes.filter((n) => n.phase === 'waiting').length })
       : live ? `Started at ${clockTime(run.started_at)}` : `After ${elapsed(total)}`,
   );

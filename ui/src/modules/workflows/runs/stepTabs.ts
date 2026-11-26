@@ -2,20 +2,20 @@
 // unit-tested in ui/unit/workflowStepTabs.test.ts.
 import type { NodeRunState, PhaseMark } from '../../../lib/api/types';
 
-export type PaneTab = 'conversation' | 'output' | 'files' | 'summary' | 'summarizer' | 'log' | 'preview' | 'result' | 'criteria' | 'input';
+export type PaneTab = 'conversation' | 'findings' | 'output' | 'files' | 'summary' | 'summarizer' | 'log' | 'preview' | 'result' | 'criteria' | 'input';
 
 /** Kinds whose work is an agent's conversation. */
 const AGENT_KINDS = new Set(['agent_prompt', 'prepare_context', 'product_analyze', 'product_rewrite', 'product_plan', 'product_publish', 'canvas', 'git_pr']);
 
 export const TAB_LABEL: Record<PaneTab, string> = {
-  conversation: 'Conversation', output: 'Output', files: 'Files', summary: 'Summary', summarizer: 'Summarizer',
+  conversation: 'Conversation', findings: 'Findings', output: 'Output', files: 'Files', summary: 'Summary', summarizer: 'Summarizer',
   log: 'Log', preview: 'Preview', result: 'Result', criteria: 'Criteria', input: 'Input',
 };
 
 /** The pane's tabs, the first one the default. `goal`: the Result of a goal run. */
 export function paneTabs(what: { result?: boolean; goal?: boolean; child?: boolean; kind?: string; node?: NodeRunState }): PaneTab[] {
   if (what.result) return what.goal ? ['result', 'criteria', 'files', 'input'] : ['result', 'files', 'input'];
-  if (what.child) return ['conversation', 'files'];
+  if (what.child) return ['conversation', 'findings', 'files'];
   const kind = what.kind ?? '';
   if (kind.endsWith('_trigger')) return ['input'];
   if (kind === 'review_run') return ['summary', 'summarizer', 'log', 'files'];

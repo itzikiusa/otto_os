@@ -29,6 +29,8 @@
   import { fallbackState, runTitle, runWord } from './runWords';
   import { defaultSelection, entrySteps, orderSteps, RESULT } from './stepOrder';
   import { markRunOpened } from './seenRuns';
+  import { registry } from '../../../lib/commands.svelte';
+  import { workflowsUi } from '../workflowsUiState.svelte';
 
   interface Props {
     workspaceId: string;
@@ -96,6 +98,18 @@
     : live && events.state === 'connecting' ? { word: 'Reconnecting…', tone: '' as const }
     : runWord(run.overview ?? { state: runState, attention: [] }, { startedAt: run.started_at, now, raw: run.status }),
   );
+  // When the page last heard of the run: the sub line says it while the socket is down.
+  let heardAt = $state(Date.now());
+  $effect(() => {
+    void run?.rev;
+    heardAt = Date.now();
+  });
+  const stale = $derived(!!run && live && events.state === 'connecting');
+  // The agent UI port's "the run on screen" (lib/uiCommands/workflows.ts).
+  $effect(() => {
+    workflowsUi.shownRun = run;
+  });
+  $effect(() => () => (workflowsUi.shownRun = null));
   const entries = $derived(run ? orderSteps(run.nodes, graph, now) : []);
   const steps = $derived(entries.flatMap(entrySteps));
   const selected = $derived(nodeId ? { node: nodeId, child: childId } : defaultSelection(runState, entries, run?.overview?.failed_step?.node_id));
@@ -125,6 +139,21 @@
     return null;
   });
   const showStop = $derived(runState === 'running' || runState === 'waiting');
+
+  // ⌘K while the run is on screen (ux.md §14.5). Approve stays on the card:
+  // a publish gate needs its preview read first.
+  $effect(() => {
+    if (!run) return;
+    const r = run;
+    const g = 'Workflows';
+    return registry.register('workflows.run', [
+      { id: 'workflows.run.copy', title: 'Copy run link', group: g, run: () => void copyWithToast(runDeepLink(window.location, r.workflow_id, r.id), 'Run link') },
+      ...(onopenworkflow ? [{ id: 'workflows.run.open', title: 'Open workflow', group: g, run: onopenworkflow }] : []),
+      ...(onrunagain ? [{ id: 'workflows.run.again', title: 'Run again with these inputs…', group: g, run: () => onrunagain(r) }] : []),
+      ...(primary?.action === 'retry' ? [{ id: 'workflows.run.retry', title: 'Retry step', group: g, run: primary.go }] : []),
+      ...(live || ['needs_you', 'paused', 'blocked', 'exhausted'].includes(runState) ? [{ id: 'workflows.run.stop', title: 'Stop run…', group: g, keywords: 'cancel halt', run: () => void stopRun(r.id) }] : []),
+    ]);
+  });
 
   function more(): MenuItem[] {
     if (!run) return [];
@@ -188,7 +217,7 @@
     {:else}
       {#if !pushed && !(wide && maximized)}
         <div class="col">
-          <RunOverview {run} {runState} word={word.word} {entries} {sync} {now} {nodeName} {criteria} onopenstep={openStepTab} />
+          <RunOverview {run} {runState} word={word.word} {entries} {sync} {now} {nodeName} {criteria} onopenstep={openStepTab} staleSince={stale ? heardAt : null} />
           <StepList {entries} {runState} clock={{ start: Date.parse(run.started_at), end: run.finished_at ? Date.parse(run.finished_at) : now }} {now} selected={wide ? selected : { node: '', child: null }} result={run.status === 'success' || run.status === 'canceled'} compact={!wide} onselect={select} />
         </div>
       {/if}

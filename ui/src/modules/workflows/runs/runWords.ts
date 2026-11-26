@@ -358,3 +358,17 @@ export function errorParts(error: string): { title: string; body: string } {
   if (!m) return { title: text, body: '' };
   return { title: m[1], body: m[3].trim() };
 }
+
+/** "24 hours", "7 days": a retention setting in words. */
+function keptFor(h: number): string {
+  if (h % 24 === 0 && h >= 48) return `${h / 24} days`;
+  return h === 1 ? '1 hour' : `${h} hours`;
+}
+
+/** The read-only note under a step's conversation, from the two retention
+ *  settings (`workflow_thread_retention_success_hours` / `_failed_hours`). */
+export function retentionNote(successHours: number, failedHours: number): string {
+  const lead = 'Read-only: this conversation belongs to the run.';
+  if (successHours === 0) return `${lead} It is removed when the step succeeds; a summary stays (${keptFor(failedHours)} if the run fails).`;
+  return `${lead} It is kept for ${keptFor(successHours)} after the run ends (${keptFor(failedHours)} if the run fails).`;
+}
