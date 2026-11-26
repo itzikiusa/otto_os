@@ -161,10 +161,10 @@ pub fn typed_reviewer_prompt(
 pub fn augment_prompt(base_prompt: &str, findings_path: &str) -> String {
     format!(
         "{base_prompt}\n\n---\nWhen you have finished reviewing, write your findings as a JSON \
-         array (the exact schema described above) to this absolute file path, overwriting any \
-         existing content:\n\n{findings_path}\n\nWrite ONLY the JSON array (no prose, \
-         no markdown fence). Write the complete array to a sibling temporary file, then \
-         atomically rename it to the path above as your final action."
+         array (the exact schema described above) {}\n\n{findings_path}\n\nWrite ONLY the JSON \
+         array (no prose, no markdown fence). Write the complete array to a sibling temporary \
+         file, then atomically rename it to the path above as your final action.",
+        otto_core::finding::FINDINGS_PATH_INTRO
     )
 }
 
@@ -1235,6 +1235,24 @@ mod tests {
         assert!(findings_path("r", 2)
             .to_string_lossy()
             .ends_with("otto-review-r-2.json"));
+    }
+
+    /// The fake agents find the findings path by the shared intro constant;
+    /// the reviewer's words stay exactly what they were.
+    #[test]
+    fn the_findings_hand_off_reads_as_before_and_names_the_path_after_the_shared_intro() {
+        assert_eq!(
+            augment_prompt("B", "/p.json"),
+            "B\n\n---\nWhen you have finished reviewing, write your findings as a JSON array \
+             (the exact schema described above) to this absolute file path, overwriting any \
+             existing content:\n\n/p.json\n\nWrite ONLY the JSON array (no prose, no markdown \
+             fence). Write the complete array to a sibling temporary file, then atomically rename \
+             it to the path above as your final action."
+        );
+        assert!(augment_prompt("B", "/p.json").contains(&format!(
+            "{}\n\n/p.json\n",
+            otto_core::finding::FINDINGS_PATH_INTRO
+        )));
     }
 
     /// Reviewer prompts stored for the 2026-11-12 reviews were 130–154 KB; a
