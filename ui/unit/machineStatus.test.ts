@@ -5,6 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   backgroundLine,
+  busyNote,
   chipState,
   detailRows,
   formatGiB,
@@ -12,9 +13,11 @@ import {
   queuedLine,
   sourceLabel,
   statusLine,
+  wouldWait,
 } from '../src/modules/settings/machineStatusText.ts';
 import {
   defaultMaxLive,
+  defaultPressureFloor,
   machineBody,
   machineFormError,
   machineFormErrors,
@@ -91,6 +94,31 @@ test('chip: icon alone when calm, warning text when busy or low on disk', () => 
   assert.match(both.label, /Only 12\.0 GB free on disk/);
 });
 
+test('a loaded Mac where background agents still start is not a busy chip', () => {
+  // The daemon says an arrival would start at once (below the pressure floor).
+  const loaded = status({ busy: true, busy_reason: 'load average 30.0 is above 12.0', admission: null, pressure_floor: 2 });
+  assert.equal(wouldWait(loaded), false);
+  assert.equal(chipState(loaded)!.tone, 'calm');
+  assert.equal(
+    busyNote(loaded),
+    'Busy: load average 30.0 is above 12.0. Background agents still start while fewer than 2 run — waiting would not help; your own sessions never wait.',
+  );
+  // From the floor on, an arrival waits: busy chip and the old note.
+  const held = status({
+    ...loaded,
+    admission: { kind: 'load', load1: 30, limit: 12, live: 2, floor: 2 },
+  });
+  assert.equal(wouldWait(held), true);
+  assert.equal(chipState(held)!.text, 'Machine busy');
+  assert.match(busyNote(held)!, /New background agents wait their turn/);
+  // The ceiling holds them on a calm machine: no busy note, still a busy chip.
+  const full = status({ admission: { kind: 'live_ceiling', live: 6, max: 6, holders: [] } });
+  assert.equal(chipState(full)!.tone, 'busy');
+  assert.equal(busyNote(full), null);
+  // A daemon from before `admission`: busy meant "would wait".
+  assert.equal(wouldWait(status({ busy: true })), true);
+});
+
 test('details: every number the chip summarises, and each queued agent with why', () => {
   const rows = detailRows(status({ swap_used_bytes: null }));
   assert.deepEqual(rows.map((r) => r.label), ['Load', 'Memory pressure', 'Swap in use', 'Background agents', 'All agents running', 'Free disk']);
@@ -112,16 +140,16 @@ test('details: every number the chip summarises, and each queued agent with why'
 test('settings form reads values exactly as the daemon parses them', () => {
   const empty = plain(machineFormFrom({}));
   assert.deepEqual(empty, {
-    admission: true, maxLive: null, maxLoadPerCore: null, maxWaitSecs: null, lowPriority: true,
+    admission: true, maxLive: null, pressureFloor: null, maxLoadPerCore: null, maxWaitSecs: null, lowPriority: true,
     buildMode: 'auto', buildWorkers: null, bgArchiveDays: 7, lowDiskGb: null,
   });
   const set = plain(machineFormFrom({
-    agent_admission_enabled: false, agent_background_max_live: 0, agent_admission_max_load_per_core: 2.5,
+    agent_admission_enabled: false, agent_background_max_live: 0, agent_admission_pressure_floor: 0, agent_admission_max_load_per_core: 2.5,
     agent_admission_max_wait_secs: 60, agent_background_low_priority: false, agent_build_parallelism: '4',
     session_auto_archive_background_days: 0, machine_low_disk_gb: 50,
   }));
   assert.deepEqual(set, {
-    admission: false, maxLive: 0, maxLoadPerCore: 2.5, maxWaitSecs: 60, lowPriority: false,
+    admission: false, maxLive: 0, pressureFloor: 0, maxLoadPerCore: 2.5, maxWaitSecs: 60, lowPriority: false,
     buildMode: 'fixed', buildWorkers: 4, bgArchiveDays: 0, lowDiskGb: 50,
   });
   // The daemon's fallbacks: junk → automatic / default; "off" / false → no budget;
@@ -141,6 +169,12 @@ test('settings form reads values exactly as the daemon parses them', () => {
   assert.equal(defaultMaxLive(8), 6);
   assert.equal(defaultMaxLive(2), 2);
   assert.equal(defaultMaxLive(16), 12);
+  // One agent per 3 GB of memory: 5 on an 8-core / 16 GB Mac (admission.rs).
+  assert.equal(defaultMaxLive(8, 16 * GIB), 5);
+  assert.equal(defaultMaxLive(14, 18 * GIB), 6);
+  assert.equal(defaultMaxLive(4, 4 * GIB), 2);
+  assert.equal(defaultPressureFloor(5), 2);
+  assert.equal(defaultPressureFloor(1), 1);
 });
 
 test('settings validators refuse what the daemon would quietly replace', () => {
@@ -152,6 +186,8 @@ test('settings validators refuse what the daemon would quietly replace', () => {
   assert.ok(err({ maxLive: 2.5 }).maxLive);
   assert.ok(!err({ maxLive: 0 }).maxLive, '0 = no ceiling');
   assert.ok(!err({ maxLive: undefined }).maxLive, 'blank = automatic');
+  assert.ok(err({ pressureFloor: -1 }).pressureFloor);
+  assert.ok(!err({ pressureFloor: 0 }).pressureFloor, '0 = always hold');
   assert.ok(err({ maxLoadPerCore: 0 }).maxLoadPerCore);
   assert.ok(!err({ maxLoadPerCore: 0.8 }).maxLoadPerCore);
   assert.ok(err({ maxWaitSecs: 1.5 }).maxWaitSecs);
@@ -168,6 +204,7 @@ test('save body carries only the changed keys; blank means the daemon default', 
   const saved = machineFormFrom({ agent_background_max_live: 4 });
   assert.ok(sameMachineForm(saved, machineFormFrom({ agent_background_max_live: 4 })));
   assert.deepEqual(plain(machineBody({ ...saved, maxLive: undefined }, saved)), { agent_background_max_live: null });
+  assert.deepEqual(plain(machineBody({ ...saved, pressureFloor: 1 }, saved)), { agent_admission_pressure_floor: 1 });
   assert.deepEqual(plain(machineBody({ ...saved, buildMode: 'fixed', buildWorkers: 3, lowPriority: false }, saved)), {
     agent_background_low_priority: false,
     agent_build_parallelism: 3,

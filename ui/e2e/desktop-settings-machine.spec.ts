@@ -99,8 +99,8 @@ test('status bar: busy with a queue, details list each waiting agent', async ({ 
   await expect(dlg).toContainText('14.2 on 8 cores');
   await expect(dlg).toContainText('6 of 6 background agents');
   await expect(dlg.getByRole('listitem')).toHaveText([
-    'Code review · waiting 1 min · memory pressure is high',
-    'Workflow step · waiting 40 s · waiting behind other background agents',
+    'Code review · waiting 1 min · Waiting for memory — 6 Otto agents are running',
+    'Workflow step · waiting 40 s · Waiting for a free agent slot — 1 ahead in line',
   ]);
   // Root can jump to the settings from here.
   await dlg.getByRole('button', { name: 'Machine resource settings' }).click();

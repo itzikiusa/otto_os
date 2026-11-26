@@ -1,5 +1,5 @@
 //! How busy the machine is right now: 1-minute load average, logical CPU
-//! count, macOS memory pressure and swap in use. The admission gate
+//! count, physical memory, macOS memory pressure and swap in use. The admission gate
 //! ([`crate::admission`]) reads it before it lets an engine-owned background
 //! agent start, so a review fan-out next to a nightly job no longer drives an
 //! 8-core / 16 GB Mac to a load of 60 and 22 GB of swap (2026-11-12).
@@ -57,6 +57,9 @@ pub struct MachineSample {
     pub pressure: MemoryPressure,
     /// Swap in use, bytes (macOS `vm.swapusage`); `None` elsewhere.
     pub swap_used_bytes: Option<u64>,
+    /// Physical memory, bytes (macOS `hw.memsize`); `None` elsewhere. Caps
+    /// the admission gate's default live ceiling.
+    pub ram_bytes: Option<u64>,
     /// When it was taken (drives the cache).
     pub taken: Instant,
 }
@@ -91,6 +94,7 @@ impl Sampler for OsSampler {
             cores: logical_cores(),
             pressure: os::pressure(),
             swap_used_bytes: os::swap_used(),
+            ram_bytes: os::ram_bytes(),
             taken: Instant::now(),
         }
     }
@@ -137,6 +141,10 @@ mod os {
         let zero: libc::xsw_usage = unsafe { std::mem::zeroed() };
         sysctl(c"vm.swapusage", zero).map(|x| x.xsu_used)
     }
+
+    pub fn ram_bytes() -> Option<u64> {
+        sysctl::<u64>(c"hw.memsize", 0).filter(|b| *b > 0)
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -155,6 +163,10 @@ mod os {
     }
 
     pub fn swap_used() -> Option<u64> {
+        None
+    }
+
+    pub fn ram_bytes() -> Option<u64> {
         None
     }
 }
@@ -239,6 +251,7 @@ impl Sampler for FixedSampler {
             cores: logical_cores(),
             pressure: self.pressure,
             swap_used_bytes: None,
+            ram_bytes: os::ram_bytes(),
             taken: Instant::now(),
         }
     }
@@ -348,6 +361,7 @@ mod tests {
                 cores: 4,
                 pressure: MemoryPressure::Normal,
                 swap_used_bytes: None,
+                ram_bytes: None,
                 taken: Instant::now(),
             }
         }
@@ -386,6 +400,7 @@ mod tests {
             cores: 8,
             pressure: MemoryPressure::Unknown,
             swap_used_bytes: None,
+            ram_bytes: None,
             taken: Instant::now(),
         };
         assert!((s.load_per_core() - 1.5).abs() < 1e-9);
@@ -455,5 +470,7 @@ mod tests {
         if let Some(l) = s.load1 {
             assert!(l >= 0.0 && l.is_finite());
         }
+        #[cfg(target_os = "macos")]
+        assert!(s.ram_bytes.is_some_and(|b| b >= 1 << 30), "hw.memsize");
     }
 }
