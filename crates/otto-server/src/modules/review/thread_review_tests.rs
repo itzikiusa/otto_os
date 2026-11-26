@@ -208,6 +208,13 @@ async fn a_whole_review_runs_on_threads_scope_twelve_reviewers_and_the_summarize
         ("", "high"),
         "a lens pick reaches its row"
     );
+    // Not the PTY's 1.5 s cold-start stagger on threads (16.5 s for twelve).
+    let starts: Vec<_> = rows.iter().filter_map(|r| r.started_at).collect();
+    let spread = *starts.iter().max().unwrap() - *starts.iter().min().unwrap();
+    assert!(
+        spread < chrono::Duration::from_std(2 * otto_review::engine::REVIEW_SPAWN_STAGGER).unwrap(),
+        "the twelve reviewers started over {spread}"
+    );
     assert!(
         summarizer[0].thread && summarizer[0].session_id.is_some(),
         "{:?}",

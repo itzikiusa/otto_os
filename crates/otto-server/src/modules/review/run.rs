@@ -472,7 +472,7 @@ pub(crate) async fn run_review_core(
         .enumerate()
     {
         // Space the cold starts out (R3), waking immediately on cancel.
-        let delay = REVIEW_SPAWN_STAGGER * u32::from(n > 0);
+        let delay = otto_review::engine::spawn_gap(threads.is_some()) * u32::from(n > 0);
         if !otto_review::scope::stagger_wait(delay, cancel_flag.as_deref()).await {
             break;
         }
