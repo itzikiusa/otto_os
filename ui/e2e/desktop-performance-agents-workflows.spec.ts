@@ -65,16 +65,15 @@ test('workflow summary polls leave closed bodies unloaded and expansion fetches 
     if(url.pathname.endsWith('/checkpoints'))return route.fulfill({json:{items:[],generation:0,checkpoint_rev:0,next_cursor:null}});
     fullReads++;return route.fulfill({json:run});
   });
-  await page.goto('/#/workflows');
-  await page.getByTestId(`wf-row-${workflow.id}`).locator('.row-main').click();
-  await page.getByRole('button',{name:'More actions',exact:true}).click();await page.getByRole('menuitem',{name:'Runs',exact:true}).click();await page.getByTestId('run-item').first().click();
-  await expect(page.locator('.run-detail details.step')).toBeVisible();
-  // With the event socket up the conditional progress re-read is the run
-  // view's 15 s safety net (WorkflowsPage liveQuery safetyMs), not a 2.5 s poll.
+  await page.goto(`/#/workflows/${workflow.id}/runs/${run.id}`);
+  await expect(page.getByTestId('wf-step-pane')).toBeVisible({ timeout: 20_000 });
+  // The run page reads the run once; with the event socket up the conditional
+  // progress re-read is RunSync's 15 s safety net (liveQuery safetyMs), not a 2.5 s poll.
   await expect.poll(()=>conditional,{timeout:25_000}).toBeGreaterThan(0);
-  expect(details).toBe(0);expect(fullReads).toBe(0);
-  await page.locator('.run-detail details.step > summary').click();
-  await expect(page.getByText('Exact lazy log',{exact:true})).toBeVisible();expect(details).toBe(1);
-  await page.locator('.run-detail details.step > summary').click();await page.locator('.run-detail details.step > summary').click();
-  await expect(page.getByText('Exact lazy log',{exact:true})).toBeVisible();expect(details).toBe(1);expect(fullReads).toBe(0);
+  expect(fullReads).toBe(1);
+  // The open step's body is read on demand, once per version — idle seconds add none.
+  await expect(page.getByText('Exact lazy log',{exact:true})).toBeVisible();
+  const read=details;expect(read).toBeGreaterThanOrEqual(1);
+  await page.waitForTimeout(3_000); // ui-guards: allow (proving no re-read while the version is unchanged)
+  expect(details).toBe(read);expect(fullReads).toBe(1);
 });

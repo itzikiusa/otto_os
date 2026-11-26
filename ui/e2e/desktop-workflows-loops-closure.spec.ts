@@ -70,14 +70,13 @@ test.describe('Workflows & Goal Loops UX closure (phone + tablet, light + dark)'
 
       await page.setViewportSize({ width: 390, height: 844 });
       await page.goto(`/#/workflows/${wf.id}`);
-      await expect(page.locator('.wf-root')).toBeVisible();
-      // 01-06 / 18-01: dock-side class must not be active on phone even when persisted in localStorage
-      await expect(page.locator('.wf-root')).not.toHaveClass(/dock-side/);
+      // On a phone the editor is the read-only outline (no side-docked
+      // inspector, no canvas), and it fits the screen.
+      await expect(page.getByTestId('wf-phone-outline')).toBeVisible();
+      await expect(page.getByTestId('wf-editor-canvas')).toHaveCount(0);
       await expectNoHorizontalOverflow(page);
-
-      // 01-09: in RunSteps, "Zoom in on this step" button is a sibling inside .step-wrap, not nested inside <summary>
-      const zoomInsideSummary = await page.locator('summary button.zoom-btn').count();
-      expect(zoomInsideSummary).toBe(0);
+      // No button nested inside another control's <summary>.
+      expect(await page.locator('summary button').count()).toBe(0);
     });
 
     test(`Goal Loops detail stepper, progress bar status colour, criteria labels, decision primary button, draft ⋯ menu, and phone session navigation (${scheme})`, async ({ page }) => {

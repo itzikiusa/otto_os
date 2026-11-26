@@ -101,6 +101,8 @@
   $effect(() => runReviews.watch(child || tab === 'summary' ? reviews : []));
   const agent = $derived(child ? reviews.flatMap((id) => runReviews.reviews[id]?.agents ?? []).find((a) => a.name === child.id || a.name === child.label || (!!child.thread_id && a.session_id === child.thread_id)) ?? null : null);
   const findings = $derived(agent?.findings ?? []);
+  /** The summary came from the deterministic fallback, not a verified summarizer. */
+  const fallback = $derived(reviews.some((id) => runReviews.reviews[id]?.agents.some((a) => a.fallback)));
   const repoOf = (out: unknown): string | null => {
     const r = (out as { repo_id?: unknown } | null)?.repo_id ?? (run.input as { repo_id?: unknown } | null)?.repo_id;
     return typeof r === 'string' && r ? r : null;
@@ -200,6 +202,7 @@
       <LoadState what="the step" loading={!body && !detailError} error={detailError} empty={!body}>
         {#if tab === 'summary'}
           <p class="score">{reviewOut.score_text ?? (node?.status === 'running' ? 'Reviewing…' : '—')}{reviewOut.outcome ? ` · ${reviewOut.outcome}` : ''}</p>
+          {#if fallback}<p class="dim" data-testid="summarizer-fallback">Deterministic fallback — the reviewers’ findings, not a verified summary.</p>{/if}
           <p class="dim">{reviewOut.blocking?.length ?? 0} must-fix · {reviewOut.advisory?.length ?? 0} advisory · {reviewOut.findings?.length ?? 0} findings</p>
           {#if node?.children?.length}
             <h4>Reviewers</h4>

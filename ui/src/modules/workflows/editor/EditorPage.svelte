@@ -92,7 +92,7 @@
     void workflowId;
     untrack(() => void load());
   });
-  $effect(() => guardUnsaved(() => dirty, { what: wf ? `“${wf.name}”` : 'this workflow' }));
+  $effect(() => guardUnsaved(() => dirty || (!!wf && instructions !== (wf.instructions ?? '')), { what: wf ? `“${wf.name}”` : 'this workflow' }));
 
   const selected = $derived(selectedId ? graph.nodes.find((n) => n.id === selectedId) ?? null : null);
   const zoomText = $derived(zoom && selected ? String((selected.params as Record<string, unknown> | null)?.[zoom.field] ?? '') : '');

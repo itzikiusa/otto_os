@@ -12,6 +12,7 @@
   import PageBody from '../../lib/components/PageBody.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import AutomateGuide from '../../lib/components/AutomateGuide.svelte';
   import AutomateGuideButton from '../../lib/components/AutomateGuideButton.svelte';
   import { api } from '../../lib/api/client';
@@ -209,7 +210,10 @@
       <!-- A first visit: which Automate tool fits, beside the empty state. -->
       <div class="read-col wf-guide"><AutomateGuide current="workflows" open /></div>
     {/if}
-    {#if tab === 'runs'}
+    {#if tab === 'runs' && error && !workflows.length}
+      <!-- Without its workflows the inbox would claim "No workflows yet". -->
+      <div class="read-col"><LoadState what="workflows" variant="page" {error} onretry={() => void load()} /></div>
+    {:else if tab === 'runs'}
       <RunsInbox workspaceId={ws.currentId ?? ''} active={ws.activeWorkflowRuns} workflows={workflows} bind:workflowFilter={workflowsUi.runsFilter}
         onopen={(wf, run) => router.go(runRoutePath(wf, run))} menu={runMenu} onrun={() => startRun()} onnewworkflow={viewport.isPhone ? undefined : () => (creating = true)} />
     {:else}

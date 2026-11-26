@@ -1,6 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
 import { expectFullyInViewport } from './helpers';
+import { canvasNode, openEditor } from './workflowsUi';
 
 test.use({ serviceWorkers: 'block' });
 async function setup(page: Page) {
@@ -91,8 +92,8 @@ async function workflows(page: Page) {
     } });
     expect(r.ok()).toBeTruthy(); ids.push((await r.json()).id);
   }
-  await ctx.dispose(); await page.goto('/#/workflows');
-  await page.getByTestId(`wf-row-${ids[0]}`).locator('.row-main').click();
+  await ctx.dispose();
+  await openEditor(page, ids[0]);
   await page.getByTestId('page-header').getByRole('button', { name: 'More actions' }).click();
   await page.getByRole('menuitemcheckbox', { name: 'Instructions', exact: true }).click();
   return ids;
@@ -100,11 +101,11 @@ async function workflows(page: Page) {
 
 test('workflow instructions: navigation guards unsaved standing rules', async ({ page }) => {
   const [, second] = await workflows(page);
-  const input = page.getByPlaceholder('Standing rules every step follows by the letter (markdown)');
+  const input = page.getByRole('textbox', { name: 'Instructions', exact: true });
   await input.fill('Never publish without approval');
-  await page.getByTestId(`wf-row-${second}`).locator('.row-main').click();
-  await expect(page.getByRole('dialog', { name: 'Discard unsaved changes' })).toBeVisible();
-  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await page.goto(`/#/workflows/${second}`);
+  await expect(page.getByRole('dialog', { name: 'Discard unsaved changes?' })).toBeVisible();
+  await page.getByRole('button', { name: 'Keep editing', exact: true }).click();
   await expect(input).toHaveValue('Never publish without approval');
 });
 
@@ -117,16 +118,18 @@ test('workflow instructions: late save cannot switch the active workflow', async
     if (r.request().method() !== 'PATCH') return r.continue();
     const response = await r.fetch(); requested = true; await gate; await r.fulfill({ response });
   });
-  await page.getByPlaceholder('Standing rules every step follows by the letter (markdown)').fill('Alpha standing rules');
+  await page.getByRole('textbox', { name: 'Instructions', exact: true }).fill('Alpha standing rules');
   await page.getByRole('button', { name: 'Save instructions', exact: true }).click();
   await expect.poll(() => requested).toBe(true);
-  await page.getByTestId(`wf-row-${second}`).locator('.row-main').click();
-  const discard = page.getByRole('button', { name: 'Discard changes', exact: true });
+  await page.goto(`/#/workflows/${second}`);
+  const discard = page.getByRole('button', { name: 'Discard', exact: true });
   if (await discard.isVisible()) await discard.click();
-  await expect(page.getByTestId(`wf-row-${second}`)).toHaveClass(/active/);
+  const title = page.getByTestId('page-header').first().getByRole('heading', { level: 1 });
+  await expect(title).toHaveText('Beta review');
   release();
   await expect(page.getByText('Instructions saved', { exact: true })).toBeVisible();
-  await expect(page.getByTestId(`wf-row-${second}`)).toHaveClass(/active/);
+  await expect(title).toHaveText('Beta review');
+  await expect(page).toHaveURL(new RegExp(`#/workflows/${second}$`));
 });
 
 test('personal agent: failed save preserves form and a retry creates the agent', async ({ page }) => {
@@ -155,7 +158,7 @@ test('personal agent: failed save preserves form and a retry creates the agent',
 
 test('workflow graph: completing Save retains edits made while saving', async ({ page }) => {
   const [first] = await workflows(page);
-  await page.locator('.node', { hasText: 'Alpha review start' }).click();
+  await canvasNode(page, 'start').getByRole('button').first().click();
   const message = page.getByLabel('Message / prompt', { exact: true });
   await message.fill('Submitted input');
   let release!: () => void;
