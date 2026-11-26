@@ -1329,3 +1329,122 @@ async fn a_prepare_context_agent_reports_its_thread() {
     assert_eq!(out["thread_id"], "th-1", "{out}");
     assert!(out.get("session_id").is_none());
 }
+
+/// CR1-002: every path a daemon run takes fits tokio's default 2 MiB worker
+/// stack in a debug build — a run started by `spawn_run` that parks at an
+/// approval, runs an agent step on the thread runner (the in-memory scripted
+/// agents), holds in a goal loop whose check fails, and comes back on Resume.
+/// Before the deep awaits were built in their own frames (`otto_core::stack`)
+/// the agent step alone overflowed the worker.
+///
+/// Run on half the default (1 MiB) for headroom: the debug frames vary by
+/// ABI and grow with every feature; before the fix this run overflowed it.
+#[test]
+fn approval_agent_step_goal_and_resume_fit_the_default_worker_stack() {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .thread_stack_size(1024 * 1024)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(approval_agent_step_goal_and_resume());
+}
+
+async fn approval_agent_step_goal_and_resume() {
+    use otto_agent_protocol::{scripted, AgentRuntime, RuntimeConfig, SessionManagerHost};
+    use std::sync::Arc;
+    let steps = json!([check(
+        json!([{"id": "ok", "text": "flagged", "verify": "command",
+        "command": "test -f \"$OTTO_CONTEXT_DIR/ok\""}])
+    )]);
+    let mut graph = goal_graph(steps, json!({"max_iterations": 1, "hold_when_unmet": true}));
+    graph
+        .nodes
+        .insert(1, node("gate", "human_approval", json!({})));
+    graph.nodes.insert(
+        2,
+        node(
+            "agent",
+            "agent_prompt",
+            json!({"provider": "claude", "prompt": "Do it."}),
+        ),
+    );
+    graph.edges = vec![
+        edge("start", "gate"),
+        edge("gate", "agent"),
+        edge("agent", "goal"),
+    ];
+    let mut fx = setup("stack-run", graph).await;
+    let host = SessionManagerHost {
+        manager: Arc::clone(&fx.ctx.manager),
+        workspaces: otto_state::WorkspacesRepo::new(fx.ctx.pool.clone()),
+        publish: Box::new(|_| {}),
+        notices: otto_agent_protocol::attention::AttentionNotices::new(
+            otto_state::NotificationsRepo::new(fx.ctx.pool.clone()),
+            Arc::new(|_| {}),
+        ),
+    };
+    fx.ctx.agent_runtime = AgentRuntime::new(
+        otto_state::AgentRuntimeRepo::new(fx.ctx.pool.clone()),
+        Arc::new(host),
+        scripted::drivers(),
+        RuntimeConfig {
+            attachments_dir: fx._tmp.path().join("attachments"),
+            transport: Some(scripted::transport(vec![])),
+            ..RuntimeConfig::default()
+        },
+    );
+    otto_state::SettingsRepo::new(fx.ctx.pool.clone())
+        .put("agent_admission_enabled", &json!(false))
+        .await
+        .unwrap();
+    spawn_run(
+        fx.ctx.clone(),
+        fx.ws.clone(),
+        fx.wf.clone(),
+        fx.run_id.clone(),
+        json!({}),
+        RunScope::default(),
+        None,
+    );
+    let t0 = Instant::now();
+    while !fx.repo.get_run(&fx.run_id).await.unwrap().waiting_approval {
+        assert!(t0.elapsed() < Duration::from_secs(15), "the gate parks");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let rev = fx
+        .repo
+        .record_approval(&fx.run_id, "gate", Some(&fx.user.id), "", None)
+        .await
+        .unwrap();
+    let _ = fx.ctx.events.send(Event::WorkflowRunUpdated {
+        workspace_id: fx.ws.id.clone(),
+        run_id: fx.run_id.clone(),
+        status: "running".into(),
+        node_id: Some("gate".into()),
+        rev,
+        node: None,
+        nodes_done: 0,
+        nodes_total: 0,
+        waiting_approval: false,
+        overview: None,
+    });
+    let run = fx.settled().await;
+    let hold = run
+        .hold
+        .clone()
+        .unwrap_or_else(|| panic!("held: {:?} {:#?}", run.error, run.nodes));
+    assert_eq!(hold.node_ids, ["goal"]);
+    let agent = state(&run, "agent");
+    assert_eq!(agent.status, NodeStatus::Success, "{:?}", agent.error);
+    assert!(agent.thread.is_some(), "the step ran on a runtime thread");
+    fx.flag("ok");
+    let ext = otto_core::api::ExtendReq {
+        iterations: Some(2),
+        active_s: None,
+    };
+    hold::resume(&fx.ctx, &fx.run_id, Some(&ext)).await.unwrap();
+    let run = fx.settled().await;
+    assert_eq!(run.status, RunStatus::Success, "{:?}", run.error);
+    fx.ctx.agent_runtime.shutdown().await;
+}

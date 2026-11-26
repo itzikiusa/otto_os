@@ -29,6 +29,7 @@ use otto_brokers::types::{ConsumeReq, ValueFormat};
 use otto_core::domain::{Channel, User, Workspace};
 use otto_core::event::Event;
 use otto_core::paths::expand_tilde;
+use otto_core::stack::boxed;
 use otto_core::text::clip_bytes as truncate;
 use otto_core::workflows::{
     NodeActivity, NodeRunState, NodeStatus, RunScope, RunStatus, Workflow, WorkflowGraph,
@@ -1230,15 +1231,7 @@ pub fn spawn_run(
         RUN_PERMIT
             .scope(
                 std::cell::RefCell::new((gate, Some(permit))),
-                Box::pin(run_workflow(
-                    ctx,
-                    ws,
-                    workflow,
-                    run_id,
-                    input,
-                    scope,
-                    prior_nodes,
-                )),
+                boxed(|| run_workflow(ctx, ws, workflow, run_id, input, scope, prior_nodes)),
             )
             .await;
     });
@@ -1516,16 +1509,18 @@ pub async fn run_workflow(
     // `None` for every normal run.
     prior_nodes: Option<Vec<NodeRunState>>,
 ) {
-    run_workflow_with_budget(
-        ctx,
-        ws,
-        workflow,
-        run_id,
-        input,
-        scope,
-        prior_nodes,
-        RUN_WALL_CLOCK_TIMEOUT,
-    )
+    boxed(|| {
+        run_workflow_with_budget(
+            ctx,
+            ws,
+            workflow,
+            run_id,
+            input,
+            scope,
+            prior_nodes,
+            RUN_WALL_CLOCK_TIMEOUT,
+        )
+    })
     .await;
 }
 
@@ -1555,17 +1550,19 @@ async fn run_workflow_with_budget(
         input,
         files,
         env,
-    }) = run::admission::admit(
-        &ctx,
-        &ws,
-        &workflow,
-        &run_id,
-        input,
-        scope,
-        prior_nodes.as_deref(),
-        &repo,
-        active_budget,
-    )
+    }) = boxed(|| {
+        run::admission::admit(
+            &ctx,
+            &ws,
+            &workflow,
+            &run_id,
+            input,
+            scope,
+            prior_nodes.as_deref(),
+            &repo,
+            active_budget,
+        )
+    })
     .await
     else {
         return;
@@ -1607,21 +1604,23 @@ async fn run_workflow_with_budget(
         prior_nodes: prior_nodes.as_deref(),
         continue_unfinished,
     };
-    run::schedule::drive(cx, &mut rs, &order).await;
+    boxed(|| run::schedule::drive(cx, &mut rs, &order)).await;
 
-    run::finalize::finish(
-        ctx,
-        repo,
-        workflow,
-        run_id,
-        rs.states,
-        input,
-        files,
-        progress,
-        progress_pump,
-        rs.canceled,
-        rs.timed_out,
-    )
+    boxed(|| {
+        run::finalize::finish(
+            ctx,
+            repo,
+            workflow,
+            run_id,
+            rs.states,
+            input,
+            files,
+            progress,
+            progress_pump,
+            rs.canceled,
+            rs.timed_out,
+        )
+    })
     .await;
 }
 

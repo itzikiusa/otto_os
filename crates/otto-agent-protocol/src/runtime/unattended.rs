@@ -262,7 +262,7 @@ impl AgentRuntime {
             }
             st.proj.next_turn_ordinal
         };
-        self.prompt_with(id, req).await?;
+        otto_core::stack::boxed(|| self.prompt_with(id, req)).await?;
         on(StepEvent::Working);
         self.settle(id, since, opts, on, Some(true)).await
     }

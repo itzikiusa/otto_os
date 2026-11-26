@@ -412,25 +412,17 @@ fn on_workers<F: std::future::Future<Output = ()>>(stack: usize, f: F) {
         .block_on(f);
 }
 
-/// See `an_agent_step_whose_thread_died_continues_on_the_same_thread`.
-const BIG: usize = 16 * 1024 * 1024;
+/// Tokio's default worker stack, the daemon's: a debug build of the resumed
+/// agent step overflowed it until the deep awaits were boxed in their own
+/// frames (CR1-002, `otto_core::stack`).
+const DEFAULT_STACK: usize = 2 * 1024 * 1024;
 
 /// An agent step mid-turn whose thread died with the daemon: after the boot
 /// it continues on the SAME thread — one more turn there (the handoff nudge),
 /// no second thread — and the step and run succeed with one resume spent.
-///
-/// Runs on 16 MiB workers: on tokio's default 2 MiB (the daemon's) the
-/// resumed step overflows the worker's stack in a debug build — reported
-/// to the engine; `..._on_the_default_stack` below is that repro.
 #[test]
 fn an_agent_step_whose_thread_died_continues_on_the_same_thread() {
-    on_workers(BIG, thread_died());
-}
-
-#[test]
-#[ignore = "engine bug: the resumed agent step overflows a 2 MiB worker stack (debug)"]
-fn an_agent_step_whose_thread_died_continues_on_the_default_stack() {
-    on_workers(2 * 1024 * 1024, thread_died());
+    on_workers(DEFAULT_STACK, thread_died());
 }
 
 async fn thread_died() {
@@ -500,7 +492,7 @@ async fn thread_died() {
 /// the new life awaits it — the turn finishes once, nothing is prompted again.
 #[test]
 fn an_agent_step_whose_thread_survived_is_awaited_not_prompted_again() {
-    on_workers(BIG, thread_survived());
+    on_workers(DEFAULT_STACK, thread_survived());
 }
 
 async fn thread_survived() {

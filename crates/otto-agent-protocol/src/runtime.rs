@@ -75,6 +75,7 @@ use otto_core::agent_runtime::{
     RuntimeRequestStatus, RuntimeSession, RuntimeSessionStatus, RuntimeSnapshot, TurnItem,
     TurnItemKind, TurnItemStatus, TurnOrigin, TurnTerminalStatus, TurnTokenUsage,
 };
+use otto_core::stack::boxed;
 use otto_core::{new_id, Error, Id, Result};
 use otto_state::{AgentRuntimeRepo, NewRuntimeSession, RawRuntimeEntityRow, RuntimeEntityRow};
 use tokio::sync::{mpsc, oneshot};
@@ -1164,10 +1165,13 @@ impl AgentRuntime {
             }
             st.session.clone()
         };
-        otto_telemetry::context::measure_result(
-            "threads.spawn_driver",
-            self.spawn_driver_inner(live, session),
-        )
+        // Boxed: this chain runs under every step and chat turn (see boxed).
+        boxed(|| {
+            otto_telemetry::context::measure_result(
+                "threads.spawn_driver",
+                self.spawn_driver_inner(live, session),
+            )
+        })
         .await?;
         admission::watch_handshake(&self.inner, live);
         Ok(())
@@ -1340,10 +1344,12 @@ impl AgentRuntime {
         self.cancel_resume(id).await; // new input (a switch, a fresh start) takes over
         let live = self.live(id).await?;
         let _prompt = live.prompt_lock.lock().await;
-        otto_telemetry::context::measure_result(
-            "threads.prompt",
-            self.prompt_locked(id, &live, req),
-        )
+        boxed(|| {
+            otto_telemetry::context::measure_result(
+                "threads.prompt",
+                self.prompt_locked(id, &live, req),
+            )
+        })
         .await
     }
 
@@ -1424,7 +1430,7 @@ impl AgentRuntime {
             }
             (r, _) => r?,
         }
-        match self.prompt_now(id, live, req).await {
+        match boxed(|| self.prompt_now(id, live, req)).await {
             Err(Error::Conflict(m)) if m == TURN_RUNNING && req.delivery.is_some() => {
                 let d = req.delivery.unwrap_or(PromptDelivery::Queue);
                 self.deliver_busy(id, live, req, d).await
@@ -2040,7 +2046,7 @@ impl AgentRuntime {
         if live.lock().proc.is_some() {
             return Ok(());
         }
-        self.ensure_process(live).await?;
+        boxed(|| self.ensure_process(live)).await?;
         let resume = live.lock().session.native_thread_id.clone();
         if resume.is_none() {
             return Ok(());
@@ -2053,7 +2059,7 @@ impl AgentRuntime {
         // network blip, a busy transcript): resume once more before giving
         // the thread up (T3 Code #34762 keeps the native session too).
         if !resume_refused_for_good(&live.lock()) {
-            self.ensure_process(live).await?;
+            boxed(|| self.ensure_process(live)).await?;
             if self.wait_started(live).await {
                 return Ok(());
             }
@@ -2064,7 +2070,7 @@ impl AgentRuntime {
         }
         // Keep the old key until the fresh thread is up.
         live.lock().session.native_thread_id = None;
-        let fresh = self.ensure_process(live).await;
+        let fresh = boxed(|| self.ensure_process(live)).await;
         if fresh.is_err() || !self.wait_started(live).await {
             live.lock().session.native_thread_id = resume;
             fresh?;

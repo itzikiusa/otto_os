@@ -34,6 +34,7 @@ pub mod restart;
 pub mod runtime_drafts;
 pub mod secret_paths;
 pub mod secrets;
+pub mod stack;
 pub mod supervise;
 pub mod text;
 pub mod ui_grant;

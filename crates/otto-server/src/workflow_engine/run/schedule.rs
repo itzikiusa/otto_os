@@ -139,7 +139,7 @@ pub(in crate::workflow_engine) async fn drive(cx: RunCx<'_>, rs: &mut RunState, 
                     let board = &board;
                     active.push(Box::pin(async move {
                         cx.env.budget.on_start().await;
-                        let done = run_node(cx, board, node, idx, input, step_no).await;
+                        let done = boxed(|| run_node(cx, board, node, idx, input, step_no)).await;
                         cx.env.budget.on_settle();
                         Some(done)
                     }));
