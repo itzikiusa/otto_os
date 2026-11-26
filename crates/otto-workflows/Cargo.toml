@@ -19,6 +19,8 @@ otto-git = { workspace = true }
 otto-issues = { workspace = true }
 # The chat workflow trigger implements `otto_channels::WorkflowChatTrigger`.
 otto-channels = { workspace = true }
+# Optimize derives "outward effect" from the outward catalog's mutating tools.
+otto-mcp = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 # Trigger-spec validation (`triggers::validate_spec`): IANA timezones and the

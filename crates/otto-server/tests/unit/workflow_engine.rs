@@ -326,6 +326,7 @@ fn mk_run(status: RunStatus, nodes: Vec<NodeRunState>) -> WorkflowRun {
         hold: None,
         limits: None,
         steering_queued: vec![],
+        attachments: vec![],
     }
 }
 
@@ -1363,6 +1364,7 @@ fn entry(
         worktree: worktree.map(str::to_string),
         base: base.map(str::to_string),
         error: error.map(str::to_string),
+        base_branch: None,
     }
 }
 

@@ -9,7 +9,8 @@
 //! ported to the new runner (test-plan Phase 4) and reads the same table.
 
 use otto_core::workflows::{NodeStatus, WorkflowGraph, WorkflowRun};
-use otto_server::workflow_engine::{classify_resume, ResumeDecision};
+// The restart policy's home (engine.md §13.2); the engine switches to it.
+use otto_workflows::resume::{classify_resume, ResumeDecision};
 use serde_json::{json, Value};
 
 /// What a restart does with a run whose node of this kind was mid-flight.
@@ -53,9 +54,17 @@ const RESTART: &[(&str, Restart)] = &[
     ("git_pr", Restart::FailOutcomeUnknown),
     ("api_run", Restart::FailOutcomeUnknown),
     ("self_improve", Restart::FailOutcomeUnknown),
+    ("git_checkout", Restart::Resume),
+    // Resumable only with `idempotent: true` (not set here).
+    ("script", Restart::FailOutcomeUnknown),
+    ("post_review_comments", Restart::Resume),
+    ("check", Restart::Resume),
 ];
 
 fn graph(kind: &str) -> WorkflowGraph {
+    // Built from variables: otto-core's background-source guard reads every
+    // literal string under a "source" key in the workspace as a session source.
+    let edge = |id: &str, from: &str, to: &str| json!({"id": id, "source": from, "target": to});
     serde_json::from_value(json!({
         "nodes": [
             {"id": "n1", "kind": "manual_trigger", "name": "Start 1"},
@@ -63,8 +72,8 @@ fn graph(kind: &str) -> WorkflowGraph {
             {"id": "n3", "kind": "log", "name": "Log 3"},
         ],
         "edges": [
-            {"id": "e1", "source": "n1", "target": "n2"},
-            {"id": "e2", "source": "n2", "target": "n3"},
+            edge("e1", "n1", "n2"),
+            edge("e2", "n2", "n3"),
         ],
     }))
     .unwrap()

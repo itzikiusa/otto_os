@@ -2,7 +2,11 @@
 // the Rail, the Navigator and the phone BottomNav so the three never disagree on
 // the count, the tone or the words a screen reader hears. A session waiting on
 // you outranks "working" for the same entry.
+import type { RunState } from './api/types';
 import { ws } from './stores/workspace.svelte';
+
+/** Run states that wait on a person (a held run blocked or out of budget too). */
+const RUN_NEEDS: ReadonlySet<RunState> = new Set(['needs_you', 'blocked', 'exhausted']);
 
 export interface NavBadge {
   count: number;
@@ -28,8 +32,13 @@ export function navBadge(id: string): NavBadge | null {
     if (ws.threadsNeedsYouCount > 0) return badge(ws.threadsNeedsYouCount, 'needs', 'waiting on you');
     if (ws.threadsWorkingCount > 0) return badge(ws.threadsWorkingCount, 'working', 'working');
   } else if (id === 'workflows') {
-    const n = ws.activeWorkflowRuns.length;
-    if (n > 0) return badge(n, 'working', 'running');
+    // Active runs: the ones waiting on you outrank the running ones; a paused
+    // run is neither (an older daemon sends no overview: running).
+    const runs = ws.activeWorkflowRuns;
+    const needs = runs.filter((r) => r.overview && RUN_NEEDS.has(r.overview.state)).length;
+    if (needs > 0) return badge(needs, 'needs', 'waiting on you');
+    const running = runs.filter((r) => r.overview?.state !== 'paused').length;
+    if (running > 0) return badge(running, 'working', 'running');
   }
   return null;
 }

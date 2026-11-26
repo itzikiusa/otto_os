@@ -15,7 +15,7 @@
       ui.navDrawerOpen = false;
       void lightMode.set(!lightMode.active);
     }}
-    title={lightMode.active ? 'Switch to Full app (show all modules)' : 'Switch to Light version (Threads, Connections, Git, API, Usage)'}
+    title={lightMode.active ? 'Switch to Full app (show all modules)' : 'Switch to Light version (Threads, Workflows, Connections, Git, API, Usage)'}
   >
     <Icon name={lightMode.active ? 'maximize' : 'minimize'} size={14} />
     <span class="grow">{lightMode.active ? 'Full app' : 'Light version'}</span>

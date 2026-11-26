@@ -11,3 +11,6 @@ export const MonitorLazy = lazyComponent(() => import('./RunMonitor.svelte'));
 export const RunInputLazy = lazyComponent(() => import('./RunInputPanel.svelte'));
 export const ApprovalsLazy = lazyComponent(() => import('./RunApprovals.svelte'));
 export const ContextLazy = lazyComponent(() => import('./RunContextSidebar.svelte'));
+// The new screens (ux.md §14): mounted by the switchover, each its own chunk.
+export const EditorLazy = lazyComponent(() => import('./editor/EditorPage.svelte'));
+export const StartRunLazy = lazyComponent(() => import('./runs/StartRunModal.svelte'));

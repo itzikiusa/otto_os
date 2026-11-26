@@ -45,6 +45,13 @@ pub(crate) fn fresh_overview(json: Option<&str>, rev: i64) -> Option<RunOverview
         .filter(|o| o.rev == rev)
 }
 
+/// The effective-hold rule ([`otto_core::workflows::RunHold::is_effective`])
+/// as one SQL predicate over unqualified `status` / `hold_json`: a hold
+/// counts only while its kind matches the stored status. Never NULL.
+pub const HOLD_SQL: &str = "(hold_json IS NOT NULL AND (
+    (status = 'canceled' AND json_extract(hold_json, '$.kind') = 'paused')
+    OR (status = 'error' AND json_extract(hold_json, '$.kind') IN ('blocked', 'exhausted'))))";
+
 /// Steps waiting on a person right now (`workflow_runs.attention`).
 fn attention_count(nodes: &[NodeRunState]) -> i64 {
     nodes
@@ -111,12 +118,13 @@ fn row_to_run(r: &sqlx::sqlite::SqliteRow) -> Result<WorkflowRun> {
     let waiting: i64 = r.try_get("waiting_approval").unwrap_or(0);
     let rev: i64 = r.try_get("rev").unwrap_or(0);
     let overview: Option<String> = r.try_get("overview_json").ok().flatten();
+    let status = RunStatus::parse(&r.get::<String, _>("status"))
+        .ok_or_else(|| Error::Internal("bad run status".into()))?;
     Ok(WorkflowRun {
         id: r.get("id"),
         workflow_id: r.get("workflow_id"),
         workspace_id: r.get("workspace_id"),
-        status: RunStatus::parse(&r.get::<String, _>("status"))
-            .ok_or_else(|| Error::Internal("bad run status".into()))?,
+        status,
         input,
         nodes,
         checkpoints: vec![],
@@ -136,9 +144,11 @@ fn row_to_run(r: &sqlx::sqlite::SqliteRow) -> Result<WorkflowRun> {
         // run id when the directory exists — never persisted.
         context_dir: None,
         overview: fresh_overview(overview.as_deref(), rev),
-        hold: json_col(r, "hold_json"),
+        hold: json_col::<otto_core::workflows::RunHold>(r, "hold_json")
+            .filter(|h| h.is_effective(status)),
         limits: json_col(r, "limits_json"),
         steering_queued: vec![],
+        attachments: vec![],
     })
 }
 
@@ -282,7 +292,7 @@ impl WorkflowsRepo {
             .begin()
             .await
             .map_err(dberr("begin workflow retry"))?;
-        let changed = sqlx::query("UPDATE workflow_runs SET status = 'pending', finished_at = NULL, error = NULL, resume_scope_json = ?, waiting_approval = 0, approval_node_id = NULL, attention = 0, overview_json = NULL, resume_attempts = 0, rev = rev + 1, checkpoint_generation = checkpoint_generation + 1 WHERE id = ? AND status IN ('success','error','canceled')")
+        let changed = sqlx::query("UPDATE workflow_runs SET status = 'pending', finished_at = NULL, error = NULL, resume_scope_json = ?, waiting_approval = 0, approval_node_id = NULL, attention = 0, overview_json = NULL, hold_json = NULL, resume_attempts = 0, rev = rev + 1, checkpoint_generation = checkpoint_generation + 1 WHERE id = ? AND status IN ('success','error','canceled')")
             .bind(scope_json).bind(run_id).execute(&mut *tx).await.map_err(dberr("prepare workflow retry"))?.rows_affected();
         if changed == 0 {
             return Err(Error::Conflict("run is still active".into()));
@@ -453,6 +463,7 @@ impl WorkflowsRepo {
             "edited",
             None,
             None,
+            None,
         )
         .await
     }
@@ -472,6 +483,7 @@ impl WorkflowsRepo {
         note: &str,
         actor: Option<&Id>,
         snapshot_labels: Option<(&str, &str)>,
+        expected_version: Option<i64>,
     ) -> Result<Workflow> {
         let versioned = instructions.is_some() || graph.is_some() || on_restart.is_some();
         let graph_json = graph
@@ -485,10 +497,24 @@ impl WorkflowsRepo {
             .map_err(dberr("begin workflow publication"))?;
         // UPDATE is the first statement, acquiring the write lock before any
         // row/version read. A competing save or run sees only committed pairs.
-        let row = sqlx::query("UPDATE workflows SET name=COALESCE(?,name), description=COALESCE(?,description), instructions=COALESCE(?,instructions), graph_json=COALESCE(?,graph_json), on_restart=COALESCE(?,on_restart), version=version+?, updated_at=? WHERE id=? RETURNING *")
+        // `expected_version` is checked by the same statement (DR-110): two
+        // saves from the same base can never both pass.
+        let row = sqlx::query("UPDATE workflows SET name=COALESCE(?,name), description=COALESCE(?,description), instructions=COALESCE(?,instructions), graph_json=COALESCE(?,graph_json), on_restart=COALESCE(?,on_restart), version=version+?, updated_at=? WHERE id=? AND (? IS NULL OR version = ?) RETURNING *")
             .bind(name).bind(description).bind(instructions).bind(graph_json).bind(on_restart)
             .bind(i64::from(versioned)).bind(fmt(Utc::now())).bind(id)
-            .fetch_one(&mut *tx).await.map_err(dberr("publish workflow"))?;
+            .bind(expected_version).bind(expected_version)
+            .fetch_optional(&mut *tx).await.map_err(dberr("publish workflow"))?;
+        let Some(row) = row else {
+            let now: Option<i64> = sqlx::query_scalar("SELECT version FROM workflows WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(dberr("publish workflow"))?;
+            return Err(match now {
+                Some(v) => Error::Conflict(format!("workflow changed elsewhere (now version {v})")),
+                None => Error::NotFound("publish workflow".into()),
+            });
+        };
         let wf = row_to_workflow(&row)?;
         if versioned {
             Self::snapshot_live(&mut tx, id, note, actor, snapshot_labels).await?;
@@ -790,7 +816,7 @@ impl WorkflowsRepo {
             "UPDATE workflow_runs
              SET status = 'error', error = ?, finished_at = COALESCE(finished_at, ?),
                  resume_scope_json = NULL, attention = 0, overview_json = NULL,
-                 rev = rev + 1
+                 hold_json = NULL, rev = rev + 1
              WHERE status = 'running' OR (status = 'pending' AND nodes_json != '[]')",
         )
         .bind(error)
@@ -878,7 +904,7 @@ impl WorkflowsRepo {
                  interrupted_at = ?, resume_attempts = resume_attempts + ?,
                  error = NULL, finished_at = NULL,
                  waiting_approval = 0, approval_node_id = NULL,
-                 attention = 0, overview_json = NULL,
+                 attention = 0, overview_json = NULL, hold_json = NULL,
                  rev = rev + 1
              WHERE id = ?
              RETURNING rev",
@@ -911,20 +937,29 @@ impl WorkflowsRepo {
     /// with their workflow name and with per-run step progress pre-computed.
     /// Backs the "Running" sidebar list (`GET /workspaces/{wid}/workflow-runs/active`).
     pub async fn list_active_runs(&self, workspace_id: &Id) -> Result<Vec<ActiveWorkflowRun>> {
-        let rows = sqlx::query(
+        // In-flight rows by the workspace/status index, plus effectively held
+        // ones (settled — HOLD_SQL implies canceled/error — so the orphan
+        // sweep never sees them) by the 0233 partial index, whose predicate
+        // the second branch repeats.
+        let sql = format!(
             "SELECT r.id AS run_id, r.workflow_id, r.workspace_id, r.status,
                     r.started_at, COALESCE(r.progress_json, r.nodes_json) AS nodes_json,
                     r.waiting_approval, r.overview_json, r.rev,
                     w.name AS workflow_name, w.graph_json
-             FROM workflow_runs r
+             FROM (SELECT * FROM workflow_runs
+                   WHERE workspace_id = ?1 AND status IN ('pending','running')
+                   UNION ALL
+                   SELECT * FROM workflow_runs INDEXED BY idx_workflow_runs_ws_attention
+                   WHERE workspace_id = ?1 AND (status = 'running' OR hold_json IS NOT NULL)
+                     AND {HOLD_SQL}) r
              JOIN workflows w ON w.id = r.workflow_id
-             WHERE r.workspace_id = ? AND r.status IN ('pending','running')
-             ORDER BY r.started_at DESC",
-        )
-        .bind(workspace_id)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(dberr("active runs"))?;
+             ORDER BY r.started_at DESC"
+        );
+        let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(workspace_id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("active runs"))?;
         rows.iter().map(row_to_active_run).collect()
     }
 
@@ -957,16 +992,16 @@ impl WorkflowsRepo {
         chat: &str,
         thread: Option<&str>,
     ) -> Result<Option<Id>> {
-        sqlx::query_scalar::<_, String>(
+        sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(format!(
             "SELECT id FROM workflow_runs
-             WHERE status IN ('pending','running')
+             WHERE (status IN ('pending','running') OR {HOLD_SQL})
                AND json_valid(input_json)
                AND json_extract(input_json, '$.channel') = ?
                AND json_extract(input_json, '$.chat') = ?
                AND (json_extract(input_json, '$.origin_workspace_id') = ? OR workspace_id = ?)
              ORDER BY (json_extract(input_json, '$.thread') IS ?) DESC, started_at DESC
-             LIMIT 1",
-        )
+             LIMIT 1"
+        )))
         .bind(channel)
         .bind(chat)
         .bind(workspace_id)
@@ -1251,7 +1286,7 @@ impl WorkflowsRepo {
         let sql = format!(
             "UPDATE workflow_runs
              SET status = ?, nodes_json = ?, progress_json = ?, error = ?,
-                 attention = ?, overview_json = NULL,
+                 attention = ?, overview_json = NULL, hold_json = NULL,
                  finished_at = COALESCE(?, finished_at),
                  resume_scope_json = CASE WHEN ? IS NULL
                                           THEN resume_scope_json ELSE NULL END,
@@ -1310,7 +1345,7 @@ impl WorkflowsRepo {
                  finished_at = ?,
                  resume_scope_json = NULL,
                  waiting_approval = 0, approval_node_id = NULL,
-                 attention = 0, overview_json = NULL,
+                 attention = 0, overview_json = NULL, hold_json = NULL,
                  rev = rev + 1
              WHERE id = ? AND status IN ('pending','running')
              RETURNING rev",
@@ -1419,7 +1454,7 @@ impl WorkflowsRepo {
         let n = sqlx::query(
             "UPDATE workflow_runs SET status = 'pending', finished_at = NULL, error = NULL,
              waiting_approval = 0, approval_node_id = NULL, resume_attempts = 0,
-             attention = 0, overview_json = NULL,
+             attention = 0, overview_json = NULL, hold_json = NULL,
              rev = rev + 1, checkpoint_generation = checkpoint_generation + 1
              WHERE id = ? AND status IN ('success','error','canceled')",
         )
@@ -1633,6 +1668,181 @@ impl WorkflowsRepo {
         Ok(raw.flatten().and_then(|j| serde_json::from_str(&j).ok()))
     }
 
+    /// Pause: hold the run durably BEFORE anything unwinds (DR-106). One
+    /// statement flips a `pending`/`running` run to `canceled` with `hold`
+    /// (`node_ids` usually empty; the driver fills them via [`Self::write_hold`]),
+    /// then the cancel is announced so running nodes wake. `None`: the run
+    /// had already settled.
+    pub async fn request_pause(
+        &self,
+        id: &Id,
+        hold: &otto_core::workflows::RunHold,
+    ) -> Result<Option<i64>> {
+        let json = serde_json::to_string(hold).map_err(|e| Error::Internal(e.to_string()))?;
+        let rev: Option<i64> = sqlx::query_scalar(
+            "UPDATE workflow_runs
+             SET status = 'canceled', error = ?, hold_json = ?, finished_at = ?,
+                 resume_scope_json = NULL, waiting_approval = 0, approval_node_id = NULL,
+                 attention = 0, overview_json = NULL, rev = rev + 1
+             WHERE id = ? AND status IN ('pending','running')
+             RETURNING rev",
+        )
+        .bind(&hold.reason)
+        .bind(json)
+        .bind(fmt(Utc::now()))
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(dberr("pause run"))?;
+        if rev.is_some() {
+            announce_cancel(id);
+        }
+        Ok(rev)
+    }
+
+    /// Settle a run as held: status from the kind (paused → `canceled`,
+    /// blocked / exhausted → `error`), `error` = the reason, the hold and the
+    /// node states, in one statement. A compare-and-set: it writes only while
+    /// the run is in flight or still holds a hold, so a Cancel that cleared
+    /// the hold (or canceled the run) first wins. `None`: nothing written.
+    pub async fn write_hold(
+        &self,
+        id: &Id,
+        hold: &otto_core::workflows::RunHold,
+        nodes: &[NodeRunState],
+    ) -> Result<Option<i64>> {
+        let status = match hold.kind {
+            otto_core::workflows::HoldKind::Paused => RunStatus::Canceled,
+            _ => RunStatus::Error,
+        };
+        let json = serde_json::to_string(hold).map_err(|e| Error::Internal(e.to_string()))?;
+        let (run, owned) = (id.to_string(), nodes.to_vec());
+        let (nodes_json, projection) = tokio::task::spawn_blocking(move || {
+            crate::workflow_progress::progress_write(&run, &owned)
+        })
+        .await
+        .map_err(|e| Error::Internal(format!("workflow hold write: {e}")))??;
+        sqlx::query_scalar(
+            "UPDATE workflow_runs
+             SET status = ?, error = ?, hold_json = ?, nodes_json = ?, progress_json = ?,
+                 finished_at = COALESCE(finished_at, ?), resume_scope_json = NULL,
+                 waiting_approval = 0, approval_node_id = NULL,
+                 attention = 0, overview_json = NULL, rev = rev + 1
+             WHERE id = ? AND (hold_json IS NOT NULL OR status IN ('pending','running'))
+             RETURNING rev",
+        )
+        .bind(status.as_str())
+        .bind(&hold.reason)
+        .bind(json)
+        .bind(&nodes_json)
+        .bind(&projection)
+        .bind(fmt(Utc::now()))
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(dberr("write run hold"))
+    }
+
+    /// Stop a held run (Cancel): drop the hold, keep the settled status.
+    /// `false` when it held none.
+    pub async fn clear_hold(&self, id: &Id) -> Result<bool> {
+        let done = sqlx::query(
+            "UPDATE workflow_runs SET hold_json = NULL, overview_json = NULL, rev = rev + 1
+             WHERE id = ? AND hold_json IS NOT NULL",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("clear run hold"))?;
+        Ok(done.rows_affected() == 1)
+    }
+
+    /// Run-level loop limits (Resume / Extend).
+    pub async fn set_run_limits(
+        &self,
+        id: &Id,
+        limits: &otto_core::workflows::RunLimits,
+    ) -> Result<()> {
+        let json = serde_json::to_string(limits).map_err(|e| Error::Internal(e.to_string()))?;
+        sqlx::query("UPDATE workflow_runs SET limits_json = ? WHERE id = ?")
+            .bind(json)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("set run limits"))?;
+        Ok(())
+    }
+
+    /// The run's queue lane: `None` = normal, `Some("long")`.
+    pub async fn set_run_lane(&self, id: &Id, lane: Option<&str>) -> Result<()> {
+        sqlx::query("UPDATE workflow_runs SET lane = ? WHERE id = ?")
+            .bind(lane)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("set run lane"))?;
+        Ok(())
+    }
+
+    pub async fn run_lane(&self, id: &Id) -> Result<Option<String>> {
+        let lane: Option<Option<String>> =
+            sqlx::query_scalar("SELECT lane FROM workflow_runs WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(dberr("run lane"))?;
+        Ok(lane.flatten())
+    }
+
+    /// Where a workflow came from (server-set: `goal` + `review:<id>` …).
+    pub async fn set_origin(
+        &self,
+        id: &Id,
+        origin: Option<&str>,
+        origin_ref: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query("UPDATE workflows SET origin = ?, origin_ref = ? WHERE id = ?")
+            .bind(origin)
+            .bind(origin_ref)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("set workflow origin"))?;
+        Ok(())
+    }
+
+    /// The goal workflow a source already started (`origin_ref`, e.g.
+    /// `review:<id>`) in this workspace, newest first.
+    pub async fn find_goal_by_origin_ref(
+        &self,
+        workspace_id: &Id,
+        origin_ref: &str,
+    ) -> Result<Option<Workflow>> {
+        let row = sqlx::query(
+            "SELECT * FROM workflows WHERE workspace_id = ? AND origin_ref = ? AND origin = 'goal'
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(workspace_id)
+        .bind(origin_ref)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(dberr("goal by origin"))?;
+        row.as_ref().map(row_to_workflow).transpose()
+    }
+
+    /// The workflow's newest run.
+    pub async fn latest_run_of(&self, workflow_id: &Id) -> Result<Option<WorkflowRun>> {
+        let row = sqlx::query(
+            "SELECT * FROM workflow_runs WHERE workflow_id = ?
+             ORDER BY started_at DESC, id DESC LIMIT 1",
+        )
+        .bind(workflow_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(dberr("latest run"))?;
+        row.as_ref().map(row_to_run).transpose()
+    }
+
     pub async fn set_chat_status(&self, id: &Id, status: Option<&serde_json::Value>) -> Result<()> {
         sqlx::query("UPDATE workflow_runs SET chat_status_json = ? WHERE id = ?")
             .bind(status.map(serde_json::Value::to_string))
@@ -1700,7 +1910,7 @@ impl WorkflowsRepo {
     pub async fn prune_runs(&self, keep: i64, older_than_days: i64) -> Result<PrunedRuns> {
         let keep = keep.max(1);
         let cutoff = fmt(Utc::now() - chrono::Duration::days(older_than_days.max(1)));
-        let ids: Vec<String> = sqlx::query_scalar(
+        let scan = format!(
             "SELECT id FROM (
                  SELECT r.id, r.started_at,
                         ROW_NUMBER() OVER (PARTITION BY r.workflow_id
@@ -1709,17 +1919,18 @@ impl WorkflowsRepo {
                  FROM workflow_runs r LEFT JOIN workflows w ON w.id = r.workflow_id
                  WHERE r.status IN ('success','error','canceled')
                    AND COALESCE(r.waiting_approval, 0) = 0
-                   AND r.hold_json IS NULL
+                   AND NOT {HOLD_SQL}
              ) t
              WHERE t.rn > t.keep AND t.started_at < ?
                AND NOT EXISTS (SELECT 1 FROM scheduled_task_runs s
-                               WHERE s.workflow_run_id = t.id)",
-        )
-        .bind(keep)
-        .bind(&cutoff)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(dberr("prune runs: scan"))?;
+                               WHERE s.workflow_run_id = t.id)"
+        );
+        let ids: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(scan))
+            .bind(keep)
+            .bind(&cutoff)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("prune runs: scan"))?;
         let mut pruned = PrunedRuns::default();
         for chunk in ids.chunks(RUN_PRUNE_BATCH) {
             let marks = vec!["?"; chunk.len()].join(",");
@@ -1751,7 +1962,7 @@ impl WorkflowsRepo {
             // between the scan and here is live again and must survive.
             let q = format!(
                 "DELETE FROM workflow_runs WHERE id IN ({marks}) \
-                 AND status IN ('success','error','canceled') RETURNING id"
+                 AND status IN ('success','error','canceled') AND NOT {HOLD_SQL} RETURNING id"
             );
             let mut del = sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(q.as_str()));
             for id in chunk {
@@ -1934,6 +2145,7 @@ mod tests {
             "edit",
             Some(&editor),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -2024,6 +2236,7 @@ mod tests {
                     Some("fail"),
                     "save",
                     None,
+                    None,
                     None
                 ),
                 repo.publish(
@@ -2034,6 +2247,7 @@ mod tests {
                     None,
                     Some("resume"),
                     "save or restore",
+                    None,
                     None,
                     None
                 ),
@@ -2105,6 +2319,7 @@ mod tests {
                 None,
                 "conflict",
                 None,
+                None,
                 None
             )
             .await
@@ -2151,7 +2366,7 @@ mod tests {
             error: None,
             logs: vec![],
             updated_at: Utc::now(),
-            active_ms: 0,
+            ..Default::default()
         };
         repo.save_checkpoint(&run.id, &cp).await.unwrap();
         let scope = otto_core::workflows::RunScope {
@@ -2268,6 +2483,7 @@ mod tests {
                 None,
                 "edited graph",
                 Some(&"u1".into()),
+                None,
                 None,
             )
             .await

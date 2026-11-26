@@ -412,9 +412,11 @@ pub async fn progress(pool: &DbPool, id: &Id, after_rev: Option<i64>) -> Result<
             rev,
         );
         run.insert("overview".into(), json!(overview));
+        let status = otto_core::workflows::RunStatus::parse(&row.get::<String, _>("status"));
         let hold = row
             .get::<Option<String>, _>("hold_json")
-            .and_then(|h| serde_json::from_str::<Value>(&h).ok());
+            .and_then(|h| serde_json::from_str::<otto_core::workflows::RunHold>(&h).ok())
+            .filter(|h| status.is_some_and(|s| h.is_effective(s)));
         run.insert("hold".into(), json!(hold));
         run.insert("summary".into(), json!(true));
         run.insert("input".into(), Value::Null);
@@ -692,7 +694,7 @@ mod tests {
                     error: None,
                     logs: vec![],
                     updated_at: chrono::Utc::now(),
-                    active_ms: 0,
+                    ..Default::default()
                 },
             )
             .await
@@ -734,7 +736,7 @@ mod tests {
             error: None,
             logs: vec!["line".into()],
             updated_at: chrono::Utc::now(),
-            active_ms: 0,
+            ..Default::default()
         }
     }
     #[tokio::test]

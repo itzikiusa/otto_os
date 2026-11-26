@@ -9,10 +9,14 @@ pub mod catalog;
 pub mod chat;
 pub mod chat_rejected;
 pub mod chat_resolve;
+pub mod checkout;
 pub mod checkpoint;
 pub mod context;
+pub mod criteria;
+pub mod deliverables;
 pub mod http;
 pub mod location;
+pub mod optimize;
 pub mod prepare;
 pub mod rereview;
 pub mod retry;
@@ -26,6 +30,13 @@ pub mod templates;
 pub mod trigger_outcome;
 pub mod triggers;
 pub mod validation;
+
+// The pure engine core (engine.md §13.1): run order and node decisions, the
+// restart policy, the scheduler's decision core and the run overview.
+pub mod graph;
+pub mod overview;
+pub mod resume;
+pub mod schedule;
 
 use otto_core::domain::Workspace;
 use otto_core::event::Event;

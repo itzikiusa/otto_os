@@ -1,5 +1,5 @@
 // The phone's light version (lib/lightMode.svelte.ts): an opt-in, per-device
-// trim to five modules. These tests pin the module set, the routes it still
+// trim to six modules. These tests pin the module set, the routes it still
 // opens, that the scope narrows every navigation surface fed by
 // availableModules / goToEntries (but not the unscoped bookkeeping), that it
 // needs a phone-sized screen, and that pageKeyOf gates hidden modules before
@@ -68,16 +68,17 @@ function loadLight(opts: {
   return { light, viewport, store, went, router };
 }
 
-test('the light version is exactly Threads, Connections, Git, API and Usage, Threads first', () => {
+test('the light version is exactly Threads, Workflows, Connections, Git, API and Usage, Threads first; five are tabs', () => {
   const { light } = loadLight();
-  assert.deepEqual([...light.LIGHT_MODULES], ['threads', 'connections', 'git', 'api', 'usage']);
+  assert.deepEqual([...light.LIGHT_MODULES], ['threads', 'workflows', 'connections', 'git', 'api', 'usage']);
   assert.equal(light.LIGHT_HOME, 'threads');
+  assert.equal(light.LIGHT_BAR_TABS, 5, 'a sixth tab does not fit a 360 px phone beside the ⋯');
   setModuleScope(null);
 });
 
-test('routes: the five (and Connections’ own views), Settings and guides; nothing else, never the bare route', () => {
+test('routes: the six (and Connections’ own views), Settings and guides; nothing else, never the bare route', () => {
   const { light } = loadLight();
-  for (const r of ['threads', 'connections', 'database', 'brokers', 'git', 'api', 'usage', 'settings', 'walkthroughs']) {
+  for (const r of ['threads', 'workflows', 'connections', 'database', 'brokers', 'git', 'api', 'usage', 'settings', 'walkthroughs']) {
     assert.ok(light.lightRouteAllowed(r), r);
   }
   for (const r of ['', 'agents', 'home', 'kubernetes', 'aws', 'plugin', 'rooms', 'product', 'design', 'vault', 'projects']) {
@@ -94,10 +95,10 @@ test('default is the full app: nothing is scoped until the person turns light on
   setModuleScope(null);
 });
 
-test('light on a phone: availableModules, ⌘K Go-to and their extras narrow to the five; unscoped keeps every module', () => {
+test('light on a phone: availableModules, ⌘K Go-to and their extras narrow to the six; unscoped keeps every module', () => {
   const { light } = loadLight({ stored: '1' });
   assert.equal(light.lightMode.active, true);
-  assert.deepEqual(ids(availableModules(all, [{ id: 'plugin/demo', icon: 'box', label: 'Demo' }])).sort(), ['api', 'connections', 'git', 'threads', 'usage']);
+  assert.deepEqual(ids(availableModules(all, [{ id: 'plugin/demo', icon: 'box', label: 'Demo' }])).sort(), ['api', 'connections', 'git', 'threads', 'usage', 'workflows']);
   const goto = goToEntries(availableModules(all, [])).map((e) => e.id);
   assert.ok(goto.includes('core.go-threads') && goto.includes('core.go-usage'));
   assert.ok(goto.includes('core.go-brokers'), 'Message Brokers belongs to Connections');
@@ -196,7 +197,7 @@ function loadPages(active: boolean) {
       LIGHT_HOME: 'threads',
       lightMode,
       lightRouteAllowed: (first: string) =>
-        first !== '' && (['settings', 'walkthroughs'].includes(first) || ['threads', 'connections', 'git', 'api', 'usage'].includes(navIdForModule(first))),
+        first !== '' && (['settings', 'walkthroughs'].includes(first) || ['threads', 'workflows', 'connections', 'git', 'api', 'usage'].includes(navIdForModule(first))),
     },
   });
   return { pages, lightMode };

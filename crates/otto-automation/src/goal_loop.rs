@@ -1742,7 +1742,7 @@ async fn evaluate(
         if crit.verify_kind == "command" {
             match verify_command(crit.verify_cmd.as_deref()) {
                 Some(cmd) => {
-                    let run = crate::goal_loop_commands::run_with_sandbox(
+                    let run = crate::verify_command::run_with_sandbox(
                         wt,
                         cmd,
                         per_phase_secs,

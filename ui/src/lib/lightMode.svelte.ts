@@ -1,11 +1,11 @@
-// Mobile & tablet light version: an opt-in, per-device trim of Otto to five
-// core modules — Threads, Connections, Git, API and Usage — for the occasions a
+// Mobile & tablet light version: an opt-in, per-device trim of Otto to six
+// core modules — Threads, Workflows, Connections, Git, API and Usage — for the occasions a
 // thinner app on a phone or tablet helps. The full app stays the default
 // everywhere; the person turns light on from the bottom nav's More sheet,
 // Navigator / ShortNavDrawer, Settings ▸ Appearance, or ⌘K, and back the same ways.
 //
 // While it is on (and on any phone/tablet or coarse-pointer touch device):
-// - every navigation surface offers only the five (lib/sidebar.ts
+// - every navigation surface offers only the six (lib/sidebar.ts
 //   `setModuleScope`, read by availableModules: the bottom nav, the
 //   Navigator/Rail, ⌘K "Go to");
 // - a route to any other module is the route gate ("not in the light
@@ -21,14 +21,17 @@ import { navIdForModule, setModuleScope } from './sidebar';
 import { router } from './router.svelte';
 
 /** The light version's modules, in bottom-nav order (sidebar ids). */
-export const LIGHT_MODULES: readonly string[] = ['threads', 'connections', 'git', 'api', 'usage'];
+export const LIGHT_MODULES: readonly string[] = ['threads', 'workflows', 'connections', 'git', 'api', 'usage'];
+/** How many of them are bottom-nav tabs; the rest sit in the ⋯ sheet (a sixth
+ *  tab doesn't fit a 360 px phone beside the ⋯). */
+export const LIGHT_BAR_TABS = 5;
 /** Where the light version lands (the bare route, "Go to Threads"). */
 export const LIGHT_HOME = 'threads';
 /** This device's choice: '1' = light, anything else = the full app. */
 export const LS_PHONE_LIGHT = 'otto_phone_light';
 
 const LIGHT_SET = new Set(LIGHT_MODULES);
-/** Routes outside the five that the light version still opens: Settings (the
+/** Routes outside the six that the light version still opens: Settings (the
  *  More sheet's) and the guides Settings links to. Not modules, so never in
  *  the bottom nav or ⌘K "Go to". */
 const LIGHT_EXTRA_ROUTES = new Set(['settings', 'walkthroughs']);

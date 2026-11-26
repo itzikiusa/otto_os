@@ -2785,7 +2785,7 @@ workspace from the workflow/run row.
 | PATCH /workflows/{id} | ws editor | UpdateWorkflowReq (`expected_version?`: the version the edit started from) | Workflow — a graph change records a new `workflow_versions` row by the caller; trigger/schedule/webhook/chat runs then act as the latest changer (PC-3). **409** when `expected_version` is set and the stored version differs (saved elsewhere); nothing is saved |
 | DELETE /workflows/{id} | ws editor | — | 204; **409** while the workflow has a `pending`/`running` run (cancel it first — the cascade would orphan the live driver). In the same transaction it pauses (`enabled=false`, `last_status='error'`) every scheduled task whose `workflow_id` is this workflow and records a "workflow deleted – task paused" error run on each |
 | POST /workflows/{id}/run | ws editor | `RunWorkflowReq? {input?, start_node?, only_node?, review_mode?}` | WorkflowRun — created immediately; may start **queued** (see Run queue) — `review_mode` ("fan_out"\|"orchestrator") seeds `input.review_mode` (400 on an unknown value or a non-object `input`); the engine reads it from the run input and it takes precedence over every `review_run` node's `params.mode`, regardless of graph position (order: run input → node `mode` → stored `ReviewConfig.mode` → `fan_out`). **Run location (S3-302):** `input.working_directory` (comma-separated paths, `~` ok), `input.repos[]` (each `repo` a registered id/name/path, a `worktree`-type `name` path, `worktree`, `repo_id`) and `input.repo_id` must name a repo registered in Otto — in **any** workspace, so one workflow can work on a repo another workspace registered — or a linked git worktree of one, or the workflow's workspace root, and paths inside them; an unregistered folder, a relative path, a `..` escape or anything else is **400** naming the value, and no run row is created. A **manual** run on a person's credential, when that person is the root user, may instead name an existing absolute directory (`~` expanded, no `..` component, not `/`, not a file, not a path that does not exist yet). A path that still fails for that caller says it must already exist, be a directory, contain no `..`, and not be the filesystem root. An agent credential of that same root user keeps the registered-repo refusal and does not get that explanation. Workspace Admin and a Workflows capability do not grant that. The same registered-repo rule refuses a chat `Working Directory:` / repos, including when the workflow owner is root: nothing starts and the reply in the thread says why (`⚠️ Can't start **<workflow>**: <reason>.`) |
-| POST /workflows/{id}/validate | ws viewer | `{graph?: WorkflowGraph}` (omitted uses saved graph) | `{valid: boolean, issues: WorkflowValidationIssue[]}`; each issue has `field`, `message`, optional `node_id`/`edge_id`; no execution |
+| POST /workflows/{id}/validate | ws viewer | `{graph?: WorkflowGraph}` (omitted uses saved graph) | `{valid: boolean, issues: WorkflowValidationIssue[]}`; each issue has `field`, `message`, `class` (`save` — the definition is invalid; `run` — a draft's missing piece, it saves but Run and triggers refuse it; `warning` — never blocks, DR-028), optional `node_id`/`edge_id`; no execution |
 | POST /workflows/{id}/triggers/preview | ws viewer | `{kind, spec}` | `{kind, next_fire_times: string[]}`; validates trigger and returns next five schedule times (UTC timestamps), empty list for other kinds; does not save or advance cursor |
 | GET /workflows/{id}/runs | ws viewer | `?summary=true` (rows without node/input bodies); `?q=&status=&limit=&cursor=` | `WorkflowRun[]` (newest 50). With any of `q` / `status` / `cursor` it answers the workspace history search below, scoped to this workflow: a `RunListPage` |
 | GET /workspaces/{wid}/workflow-runs | ws viewer | `?q=` open text (≤ 200 chars, ≤ 8 whitespace-separated terms, every term must match), `status=` comma list of run statuses, `workflow_id=`, `limit=` (1–100, default 30; larger values clamp), `cursor=` (opaque, from the previous page), `attention=1` (only runs waiting on a person: `running` with a step on a person or an approval pause, or held `blocked` / `exhausted` — the Runs inbox "Needs you") | `RunListPage {items: RunListItem[], next_cursor?}` — the workspace's run history, newest first; each row carries `overview?` (see Run view). Each term matches (ASCII case-insensitive substring) the workflow name, the run input (trigger message / prompt / goals / repo / branch / PR…), the run error, the workflow's step names and the run's step summaries (phases, step errors). Scans the newest 5000 runs of the workspace. `400` for a too-long `q`, too many terms, an unknown status or a bad cursor |
@@ -2967,7 +2967,7 @@ different step or settles the current one.
 `RunStatus` / `NodeStatus` and the `workflow_runs.status` CHECK are unchanged, every
 new field is omitted when empty, and a node that uses none of them serializes exactly
 as before, so the previous build reads every row. New enums end in a catch-all
-(`unknown`, `other` for attention kinds) so a later value decodes.
+(`unknown`) so a later value decodes.
 
 - `NodeRunState` gains `step_no?` (the stable N of `stepN-…`), `step_file?`
   (`step3-checkout-pr-branch`, no extension), `phase?: StepPhase` (`queued | waiting |
@@ -2975,7 +2975,7 @@ as before, so the previous build reads every row. New enums end in a catch-all
   (`{phase, at, note?}`, ≤ 40), `wait?: WaitReason` (`{code: slots|memory|load|run_slots|run_order,
   text, since, detail?: {live, max?, floor?, ahead?, holders?: string[]}}`), `attention?:
   Attention` (`{kind: approval|question|usage_limit|verify, via?: provider|mcp, text ≤ 300,
-  since, thread_id?, request_id?, resets_at?}`; answered through `POST
+  since, thread_id?, request_id?, resets_at?, criterion_id?}` — `criterion_id` for `verify`; answered through `POST
   /runtime-sessions/{id}/requests/{request_id}`), `error_class?` (runner: `usage_limit ·
   rate_limit · auth · provider · stalled · timeout · spawn · server_restart · canceled`;
   engine: `script · outcome_unknown`; `error` stays the step's own words), `thread?:
@@ -3009,24 +3009,53 @@ as before, so the previous build reads every row. New enums end in a catch-all
   number of running steps on a person).
 - `WorkflowRun` also gains `hold?: RunHold` (`{kind: paused|blocked|exhausted, reason ≤ 300,
   since, by?, node_ids, iteration?}`; a held run is settled — paused = `canceled`,
-  blocked/exhausted = `error` — and is never pruned by run retention), `limits?: RunLimits`
+  blocked/exhausted = `error`). **One effective-hold rule:** a stored hold counts only while
+  its kind matches the status (paused with `canceled`, blocked/exhausted with `error`); any
+  other pair — a hold the previous build left on a row it retried — is never sent and is
+  ignored by every query. The new build's status writers (`write_run`, retry, reopen,
+  cancel) clear `hold_json`. An effectively held run is never pruned, stays in
+  `GET /workspaces/{wid}/workflow-runs/active` (status `canceled`/`error`, with its
+  overview's `hold`) and is the run a chat `resume` / `note` in its thread finds; the
+  orphan sweep still sees only `pending`/`running`. Pausing writes the hold in the same
+  statement that settles the run, before any step unwinds. `limits?: RunLimits`
   (`{loops: {<node id>: {max_iterations?, max_active_s?, unblocked_at?}}}`, written only by
-  Resume) and `steering_queued?: string[]` (notes queued for the next agent step; filled
-  from the run's context dir, not stored). `Workflow` gains `origin?` (`goal` or absent) and
+  Resume), `steering_queued?: string[]` (notes queued for the next agent step; filled
+  from the run's context dir, not stored) and `attachments?: AttachmentRef[]` (`{name, mime,
+  size_bytes?, path? (context-relative `attachments/<name>`), error?, source: start|steer}` —
+  files sent with the starting and steering chat messages; not stored on the row). `Workflow` gains `origin?` (`goal` or absent) and
   `origin_ref?` (`review:<id>` · `insights` · `goal_loop:<id>` · `mcp`), both server-set.
   `WorkflowCheckpoint` gains `active_ms?` (the attempt's time minus its time on a person;
-  omitted at 0).
+  omitted at 0), `thread_id?` and `start_ordinal?` (the inner step's thread, resumed after a
+  restart mid-iteration). A `check` step's output is `CheckOutput {criteria: [{id, text,
+  verify, met, evidence, verified_by}], all_met, met, total, progress_pct, verdict:
+  achieved|continue|blocked, feedback, feedback_md, repeat_signature, repeated_failures,
+  review?: {approved, findings}}`.
+- `PATCH /workflows/{id}` checks `expected_version` in the same statement that saves, so two
+  saves from one base never both land (the second answers **409**).
 - Run retention: goal workflows keep no run by count (the 30-day age rule still keeps recent
   ones) and a goal workflow left with no run is deleted in the same pass.
 - Backed by migrations **0233** (`workflow_runs.overview_json`, `attention INTEGER NOT NULL
   DEFAULT 0`, `hold_json`, `chat_status_json`, partial index
-  `idx_workflow_runs_ws_attention`) and **0234** (`workflows.origin`, `origin_ref`,
-  `workflow_runs.limits_json`).
+  `idx_workflow_runs_ws_attention`), **0234** (`workflows.origin`, `origin_ref`,
+  `workflow_runs.limits_json`, `workflow_runs.lane` — `NULL` normal, `long`; the long lane's
+  cap is env `OTTO_WF_MAX_LONG_RUNS`) and **0235** (index
+  `idx_agent_runtime_sessions_parent` on `agent_runtime_sessions(parent_id)`).
 
 **Node kinds (catalog).** `GET /workflows/node-types` returns each kind's
 `NodeTypeSpec`, now including `output_schema` (declared output shape; drives UI
-expression hints + warn-only runtime validation) and `params_schema` (which now
-declares `review_run`'s `mode`). The control flow / wired kinds added in this
+expression hints + warn-only runtime validation) and `params_schema` (declared
+for `review_run` (`mode`, `scope_assessment`, `timeout_s`), `agent_prompt`
+(`effort`, `timeout_s`, `continue_from`), `manual_trigger` (`chat_updates`,
+`inputs` — UI-only, never seeded into the run input —, `lane`), `loop`
+(`steps[].same_thread`, `max_active_s`, `stop_on_repeat_failure`,
+`hold_when_unmet`) and the new kinds `git_checkout` (`mode: pr|branch`),
+`script` (`command`, `timeout_s` required; `foreach`, `cwd`, `output_file`,
+`ok_exit_codes`, `allow_failure`, `idempotent`), `post_review_comments`
+(`review_from`, `inline`, `info`, `summary`, `summary_intro_from`,
+`summary_files`, `max_inline`) and `check` (`criteria`, `evaluator`,
+`instructions`, `final_review`); `null` for the rest). Context-file names
+(`script.output_file`, `post_review_comments.summary_files[]`) must be bare file
+names (no `/`, `\\`, `..`, NUL, not absolute) — a `save` issue otherwise (DR-002). The control flow / wired kinds added in this
 wave: `condition`, `loop`, `product_analyze`, `product_rewrite`, `product_plan`,
 `product_publish`, `review_run`, `canvas`, `git_pr`, `prepare_context` (see the
 Workflows feature doc for each kind's params/output).
