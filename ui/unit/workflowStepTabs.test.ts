@@ -8,6 +8,8 @@ test('each kind of step opens on its own first tab', () => {
   assert.deepEqual(paneTabs({ kind: 'agent_prompt' }), ['conversation', 'output', 'files']);
   assert.deepEqual(paneTabs({ kind: 'review_run' }), ['summary', 'summarizer', 'log', 'files']);
   assert.deepEqual(paneTabs({ child: true, kind: 'review_run' }), ['conversation', 'findings', 'files']);
+  // A loop's iteration has no findings of its own.
+  assert.deepEqual(paneTabs({ child: true, kind: 'loop' }), ['conversation', 'files']);
   assert.deepEqual(paneTabs({ kind: 'script' }), ['log', 'output']);
   assert.deepEqual(paneTabs({ kind: 'human_approval' }), ['preview', 'log']);
   assert.deepEqual(paneTabs({ kind: 'post_review_comments', node: node('a', 'running', 0, null, { attention: { kind: 'approval', text: 'x', since: at(1) } }) }), ['preview', 'log']);

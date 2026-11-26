@@ -15,7 +15,7 @@ export const TAB_LABEL: Record<PaneTab, string> = {
 /** The pane's tabs, the first one the default. `goal`: the Result of a goal run. */
 export function paneTabs(what: { result?: boolean; goal?: boolean; child?: boolean; kind?: string; node?: NodeRunState }): PaneTab[] {
   if (what.result) return what.goal ? ['result', 'criteria', 'files', 'input'] : ['result', 'files', 'input'];
-  if (what.child) return ['conversation', 'findings', 'files'];
+  if (what.child) return what.kind === 'review_run' ? ['conversation', 'findings', 'files'] : ['conversation', 'files'];
   const kind = what.kind ?? '';
   if (kind.endsWith('_trigger')) return ['input'];
   if (kind === 'review_run') return ['summary', 'summarizer', 'log', 'files'];

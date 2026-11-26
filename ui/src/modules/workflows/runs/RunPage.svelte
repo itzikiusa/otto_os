@@ -28,7 +28,7 @@
   import StepPane from './StepPane.svelte';
   import { cancelQueued, pauseRun, rereview, resumeRun, retryStep, steerRun, stopRun } from './runActions';
   import { fallbackState, runTitle, runWord } from './runWords';
-  import { defaultSelection, entrySteps, orderSteps, RESULT } from './stepOrder';
+  import { defaultSelection, entrySteps, loopChildren, orderSteps, RESULT } from './stepOrder';
   import { markRunOpened } from './seenRuns';
   import { registry } from '../../../lib/commands.svelte';
   import { workflowsUi } from '../workflowsUiState.svelte';
@@ -111,7 +111,9 @@
     workflowsUi.shownRun = run;
   });
   $effect(() => () => (workflowsUi.shownRun = null));
-  const entries = $derived(run ? orderSteps(run.nodes, graph, now) : []);
+  // A loop step's iterations are its child rows (from the run's checkpoints).
+  const nodes = $derived(run ? run.nodes.map((n) => (!n.children?.length && run.checkpoints?.some((c) => c.loop_id === n.node_id) ? { ...n, children: loopChildren(run.checkpoints, n.node_id) } : n)) : []);
+  const entries = $derived(run ? orderSteps(nodes, graph, now) : []);
   const steps = $derived(entries.flatMap(entrySteps));
   const selected = $derived(nodeId ? { node: nodeId, child: childId } : defaultSelection(runState, entries, run?.overview?.failed_step?.node_id));
   const openStep = $derived(selected.node === RESULT ? null : (steps.find((s) => s.id === selected.node) ?? null));

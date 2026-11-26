@@ -28,6 +28,9 @@
   import { toasts } from '../../lib/toast.svelte';
   import { toastError } from '../../lib/toastError';
   import { workflowsPagePort } from '../../lib/uiCommands/workflows';
+  import GoalHost from './goal/GoalHost.svelte';
+  import OlderLoopsLink from './goal/OlderLoopsLink.svelte';
+  import { openGoal } from './goal/goalLauncher.svelte';
   import WorkflowList from './list/WorkflowList.svelte';
   import { createBlankWorkflow, deleteWorkflow, duplicateWorkflow, renameWorkflow } from './list/workflowActions';
   import { EditorLazy, NewWorkflowLazy, OptimizeLazy, RunPageLazy, StartRunLazy } from './lazyViews';
@@ -216,6 +219,7 @@
     {:else if tab === 'runs'}
       <RunsInbox workspaceId={ws.currentId ?? ''} active={ws.activeWorkflowRuns} workflows={workflows} bind:workflowFilter={workflowsUi.runsFilter}
         onopen={(wf, run) => router.go(runRoutePath(wf, run))} menu={runMenu} onrun={() => startRun()} onnewworkflow={viewport.isPhone ? undefined : () => (creating = true)} />
+      {#if ws.currentId}<div class="read-col wf-older"><OlderLoopsLink workspaceId={ws.currentId} /></div>{/if}
     {:else}
       <WorkflowList {workflows} {loading} {error} onretry={() => void load()} onopen={(wf) => router.go(`workflows/${wf.id}`)} menu={workflowMenu} onnew={viewport.isPhone ? undefined : () => (creating = true)} />
     {/if}
@@ -242,8 +246,11 @@
 
 {#if starting}
   <LazyMount lazy={StartRunLazy} what="the start form" quiet onerror={() => (starting = null)}
-    props={{ workflow: starting.workflow, workflows: workflows.filter((w) => w.origin !== 'goal'), prefill: starting.prefill ?? null, typicalMs: starting.typicalMs ?? null, onclose: () => (starting = null) }} />
+    props={{ workflow: starting.workflow, workflows: workflows.filter((w) => w.origin !== 'goal'), prefill: starting.prefill ?? null, typicalMs: starting.typicalMs ?? null, onclose: () => (starting = null),
+      ongoal: () => { starting = null; openGoal(); } }} />
 {/if}
+<!-- The Goal form: "A goal…", ⌘K "New goal…" and every staged hand-off (Insights, the Automate guide, an older loop's Continue). -->
+{#if ws.currentId}<GoalHost workspaceId={ws.currentId} />{/if}
 {#if creating && ws.currentId}
   <LazyMount lazy={NewWorkflowLazy} what="New workflow" quiet onerror={() => (creating = false)} props={{ workspaceId: ws.currentId, oncreated: created, onclose: () => (creating = false) }} />
 {/if}
@@ -254,6 +261,9 @@
     flex-direction: column;
     block-size: 100%;
     min-block-size: 0;
+  }
+  .wf-older {
+    padding-block-end: var(--sp-6);
   }
   .wf-guide {
     padding-block-start: var(--sp-6);
