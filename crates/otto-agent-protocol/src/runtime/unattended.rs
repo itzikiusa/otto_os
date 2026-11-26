@@ -614,6 +614,18 @@ impl AgentRuntime {
         out
     }
 
+    /// Record who is about to answer `request_id` (a person's user id, or
+    /// `thread:<id>` for a parent agent): the resolved request carries it as
+    /// `resolved_by`, so a step's run can say who answered.
+    pub async fn note_resolver(&self, id: &Id, request_id: &str, by: &str) {
+        if let Ok(live) = self.live(id).await {
+            live.resolvers
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(request_id.to_string(), by.to_string());
+        }
+    }
+
     /// The thread's latest turn ordinal (a new turn gets the next one).
     pub async fn turn_ordinal(&self, id: &Id) -> Result<u32> {
         Ok(self.live(id).await?.lock().proj.next_turn_ordinal)
@@ -646,6 +658,14 @@ impl Live {
     pub(super) fn pending_wakes(&self) -> MutexGuard<'_, Vec<String>> {
         self.pending_wakes.lock().unwrap_or_else(|e| e.into_inner())
     }
+}
+
+/// Who answered `request_id` ([`AgentRuntime::note_resolver`]), once.
+pub(super) fn take_resolver(live: &Live, request_id: &str) -> Option<Id> {
+    live.resolvers
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(request_id)
 }
 
 /// Note a wake a sub-thread is about to queue on `parent` (`key` = the

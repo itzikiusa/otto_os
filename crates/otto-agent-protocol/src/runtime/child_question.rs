@@ -111,6 +111,8 @@ impl AgentRuntime {
                     .into(),
             ));
         }
+        self.note_resolver(&p.id, request_id, &format!("thread:{caller}"))
+            .await;
         self.respond_question(&p.id, request_id, answers).await
     }
 }

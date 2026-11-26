@@ -544,6 +544,8 @@ pub(super) struct Live {
     pub(super) detaching_for_restart: std::sync::atomic::AtomicBool,
     /// Sub-threads' wakes announced but not queued yet (`unattended`).
     pending_wakes: Mutex<Vec<String>>,
+    /// Who is answering a request (`RuntimeRequest::resolved_by`), by id.
+    resolvers: Mutex<HashMap<Id, Id>>,
 }
 
 impl Live {
@@ -1110,6 +1112,7 @@ impl AgentRuntime {
                 persist: tx,
                 detaching_for_restart: std::sync::atomic::AtomicBool::new(false),
                 pending_wakes: Mutex::new(Vec::new()),
+                resolvers: Mutex::default(),
             });
             let entry = self.inner.live.entry(id.clone()).or_insert_with(|| {
                 tokio::spawn(persister(self.inner.repo.clone(), id.clone(), rx));
@@ -2992,6 +2995,9 @@ fn resolve_request(
     req.resolved_at = Some(now);
     req.decision = decision;
     req.cancel_reason = cancel_reason;
+    req.resolved_by = (status == RuntimeRequestStatus::Resolved)
+        .then(|| unattended::take_resolver(live, request_id))
+        .flatten();
     emit(
         inner,
         live,

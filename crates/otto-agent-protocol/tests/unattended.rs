@@ -351,6 +351,7 @@ async fn a_question_and_an_approval_need_you_then_resume_with_the_answer() {
         question_id: r.questions[0].id.clone(),
         text: "main".into(),
     }];
+    rig.rt.note_resolver(&id, &r.id, "u1").await;
     rig.rt.respond_question(&id, &r.id, answer).await.unwrap();
     let a = need(&mut rx).await;
     assert_eq!(a.kind, AttentionKind::Approval);
@@ -367,11 +368,21 @@ async fn a_question_and_an_approval_need_you_then_resume_with_the_answer() {
     assert_eq!(out.ended, Ended::Settled);
     assert!(out.answer.contains("finished"), "{}", out.answer);
     let mut resumed = Vec::new();
+    let mut by = Vec::new();
     while let Ok(e) = rx.try_recv() {
-        if let StepEvent::Resumed { answer, .. } = e {
+        if let StepEvent::Resumed {
+            answer, by: who, ..
+        } = e
+        {
             resumed.push(answer.unwrap_or_default());
+            by.push(who);
         }
     }
+    assert_eq!(
+        by,
+        [Some("u1".to_string()), None],
+        "the answering person, then nobody named"
+    );
     assert!(
         resumed.iter().any(|a| a.contains("Which branch?: main")),
         "{resumed:?}"
@@ -945,5 +956,60 @@ async fn a_pending_mcp_approval_card_needs_you_until_it_is_decided() {
     };
     assert_eq!((request_id, by), (Some(card.id.clone()), Some("u1".into())));
     watch.abort();
+    rig.rt.shutdown().await;
+}
+
+/// A continued step whose provider cannot resume the conversation fails as
+/// `provider` — never a fresh agent that remembers nothing; a person's
+/// thread keeps today's fresh start.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refused_resume_fails_the_step_instead_of_starting_fresh() {
+    let rig = Rig::new(true).await;
+    let runner = rig.runner();
+    let (first, _) = run(&runner, rig.turn("claude", &fake(&["reply one"]))).await;
+    assert_eq!(first.error, None);
+    runner.release_process(&first.thread_id).await;
+    tokio::fs::remove_dir_all(rig.root.join(".fake-claude"))
+        .await
+        .unwrap();
+    let mut next = rig.turn("claude", &fake(&["reply two"]));
+    next.continue_thread = Some(first.thread_id.clone());
+    let (out, _) = run(&runner, next).await;
+    let e = out.error.unwrap();
+    assert_eq!(e.class, StepErrorClass::Provider);
+    assert!(e.message.contains("could not resume"), "{}", e.message);
+    // A person's thread: the same refusal starts fresh, as today.
+    let person = rig
+        .rt
+        .create(
+            &"u1".into(),
+            &"w1".into(),
+            CreateRuntimeSessionReq {
+                title_auto: false,
+                provider: Some(RuntimeProvider::Claude),
+                cwd: Some(rig.root.display().to_string()),
+                title: None,
+                model: None,
+                access_mode: None,
+                meta: None,
+            },
+        )
+        .await
+        .unwrap()
+        .id;
+    rig.rt
+        .run_turn(&person, &script(&["reply hi"]), opts(), |_| {})
+        .await
+        .unwrap();
+    rig.rt.release_process(&person).await.unwrap();
+    tokio::fs::remove_dir_all(rig.root.join(".fake-claude"))
+        .await
+        .unwrap();
+    let out = rig
+        .rt
+        .run_turn(&person, &script(&["reply again"]), opts(), |_| {})
+        .await
+        .unwrap();
+    assert!(out.answer.contains("again"), "{}", out.answer);
     rig.rt.shutdown().await;
 }
