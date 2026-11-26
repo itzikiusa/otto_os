@@ -1718,3 +1718,48 @@ async fn pause_racing_completion_never_runs_a_step_twice() {
         }
     }
 }
+
+/// CR2-013: a held run reports where its Start step says — the seeded input
+/// carries `result_chat`, the stored row's does not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn a_held_run_reports_to_the_start_steps_destination() {
+    use otto_channels::test_util::{Recorded, RecordingAdapter};
+    let to = json!({"result_channel": "slack", "result_chat": "C-held"});
+    let graph = WorkflowGraph {
+        nodes: vec![
+            node("start", "manual_trigger", to),
+            node("d", "delay", json!({"ms": 4000})),
+        ],
+        edges: vec![edge("start", "d")],
+    };
+    let mut fx = setup("held-result", graph).await;
+    let rec = RecordingAdapter::new(Channel::Slack, &fx.ws.id, "C-held", None);
+    fx.ctx.outbound = rec.factory();
+    fx.ctx
+        .integrations_store
+        .upsert(
+            &fx.ws.id,
+            Channel::Slack,
+            true,
+            Some("held-bot".into()),
+            None,
+            "root",
+            false,
+            "",
+            "C-held",
+            "",
+        )
+        .await
+        .unwrap();
+    let driver = fx.drive();
+    until(&fx, "d", |n| n.status == NodeStatus::Running).await;
+    hold::pause(&fx.ctx, &fx.run_id, &fx.user).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(4), driver)
+        .await
+        .unwrap()
+        .unwrap();
+    let told = rec.recorded().into_iter().any(|r| {
+        matches!(r, Recorded::Upload { chat, name, .. } if chat == "C-held" && name == "summary.md")
+    });
+    assert!(told, "{:?}", rec.recorded());
+}

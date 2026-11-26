@@ -1684,7 +1684,7 @@ async fn finalize_canceled_run(
     input: &Value,
 ) {
     // A Pause that landed after the driver's own hold check holds the run.
-    if run::hold::settle_held(ctx, repo, workflow, run_id, states).await {
+    if run::hold::settle_held(ctx, repo, workflow, run_id, states, input).await {
         return;
     }
     stop_run_reviews(ctx, repo, &workflow.workspace_id, run_id, states).await;

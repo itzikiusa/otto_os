@@ -37,7 +37,7 @@ pub(in crate::workflow_engine) async fn finish(
     if let Some(h) = progress_pump {
         let _ = h.await;
     }
-    if super::hold::settle_held(&ctx, &repo, &workflow, &run_id, &mut states).await {
+    if super::hold::settle_held(&ctx, &repo, &workflow, &run_id, &mut states, &input).await {
         return;
     }
 

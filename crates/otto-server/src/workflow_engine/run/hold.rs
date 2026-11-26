@@ -57,13 +57,15 @@ pub(crate) async fn resume(
 
 /// Settle a held run — paused (the row says so) or stopped by a loop
 /// (`_workflow_hold`): in-flight steps back to pending, the hold written
-/// (CAS), no delivery, no reap. `false`: not held, or a Cancel won.
+/// (CAS) and told where the run reports (`input`: the seeded one), no reap.
+/// `false`: not held, or a Cancel won.
 pub(in crate::workflow_engine) async fn settle_held(
     ctx: &ServerCtx,
     repo: &WorkflowsRepo,
     workflow: &Workflow,
     run_id: &Id,
     states: &mut [NodeRunState],
+    input: &Value,
 ) -> bool {
     let row = repo.get_run(run_id).await.ok();
     let paused = row
@@ -93,9 +95,8 @@ pub(in crate::workflow_engine) async fn settle_held(
     // thread tell the person (goal.md §6.4; the live style posts the hold).
     let at = (&workflow.workspace_id, run_id, status.as_str(), rev);
     emit_run_updated_with(ctx, at, None, None, states, false, ov.as_ref());
-    if let Some(r) = &row {
-        deliver_run_result(ctx, workflow, run_id, states, status, &r.input, None).await;
-    }
+    // The seeded input: the Start step's result destinations are not on the row.
+    deliver_run_result(ctx, workflow, run_id, states, status, input, None).await;
     clear_skip_markers(ctx, run_id);
     true
 }
