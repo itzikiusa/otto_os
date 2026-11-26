@@ -792,6 +792,12 @@ pub use questions::{
     validate_question_answers, QuestionAnswer, QuestionKind, QuestionOption, RuntimeQuestion,
 };
 
+mod step;
+pub use step::{
+    clip, Attention, AttentionKind, AttentionVia, DigestItem, OutwardAction, OutwardOutcome,
+    SubThreadUse, TranscriptDigest, WaitDetail, WaitReason, ATTENTION_TEXT_MAX,
+};
+
 mod outcome;
 pub use outcome::{
     error_class, TurnOutcome, ERROR_CLASS_AUTH, ERROR_CLASS_PROVIDER, ERROR_CLASS_USAGE_LIMIT,

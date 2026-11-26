@@ -4012,6 +4012,7 @@ dependencies = [
 name = "otto-agent-run"
 version = "0.6.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "futures-util",
  "libc",
@@ -4022,6 +4023,7 @@ dependencies = [
  "otto-state",
  "otto-telemetry",
  "otto-transcript",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
