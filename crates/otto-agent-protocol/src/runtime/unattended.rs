@@ -136,6 +136,8 @@ struct Look {
     descendants_busy: bool,
     waits: Vec<Wait>,
     descendants: Vec<(Id, Arc<Live>)>,
+    /// The step's sub-agents (`Subagent` items of its turns), by start.
+    subagents: Vec<otto_core::workflows::SubagentActivity>,
 }
 
 impl Look {
@@ -294,6 +296,7 @@ impl AgentRuntime {
         let root = self.live(id).await?;
         let mut descendants: Vec<(Id, Arc<Live>)> = Vec::new();
         let mut reported: Vec<Wait> = Vec::new();
+        let mut shown = Vec::new();
         let mut sideband_after: Option<u64> = None;
         let mut background_since: Option<Instant> = None;
         let ended = loop {
@@ -312,7 +315,7 @@ impl AgentRuntime {
                     n
                 })
                 .collect();
-            let mut look = self.look(id, &root);
+            let mut look = self.look(id, &root, since);
             let ids = |d: &[(Id, Arc<Live>)]| d.iter().map(|(i, _)| i.clone()).collect::<Vec<_>>();
             if ids(&look.descendants) != ids(&descendants) {
                 descendants = look.descendants;
@@ -335,6 +338,11 @@ impl AgentRuntime {
                     answer,
                     by,
                 });
+            }
+            // The step's sub-agent rows (the PTY path's phase feed has them too).
+            if look.subagents != shown {
+                shown = std::mem::take(&mut look.subagents);
+                on(StepEvent::Activity(sub_activity(&shown)));
             }
             let waiting = !look.waits.is_empty();
             reported = std::mem::take(&mut look.waits);
@@ -432,10 +440,11 @@ impl AgentRuntime {
     }
 
     /// The thread and its open agent-opened descendants, as they are now.
-    fn look(&self, id: &Id, root: &Arc<Live>) -> Look {
+    fn look(&self, id: &Id, root: &Arc<Live>, since: u32) -> Look {
         let mut look = Look::default();
         {
             let st = root.lock();
+            look.subagents = subagents(&st.proj, since);
             look.closed = st.session.status == RuntimeSessionStatus::Closed;
             look.turn = st.turn.is_some() || st.starting > 0;
             look.background = !st.session.background_tasks.is_empty();
@@ -770,3 +779,59 @@ pub(super) fn wake_done(inner: &Inner, parent: &Id, key: &str) {
 #[cfg(test)]
 #[path = "unattended_tests.rs"]
 mod tests;
+
+/// The `Subagent` items of the turns after `since`, oldest first.
+fn subagents(proj: &Projection, since: u32) -> Vec<otto_core::workflows::SubagentActivity> {
+    use otto_core::agent_runtime::{TurnItemKind, TurnItemStatus};
+    let mut rows: Vec<_> = proj
+        .items
+        .values()
+        .filter(|i| {
+            let turn = i.turn_id.as_ref().and_then(|t| proj.turns.get(t));
+            turn.is_some_and(|t| t.ordinal > since)
+        })
+        .filter_map(|i| {
+            let TurnItemKind::Subagent { description, .. } = &i.kind else {
+                return None;
+            };
+            let status = match i.status {
+                TurnItemStatus::Completed => "done",
+                s if s.is_open() => "running",
+                _ => "failed",
+            };
+            Some((
+                i.ordinal,
+                otto_core::workflows::SubagentActivity {
+                    id: i.id.to_string(),
+                    description: description
+                        .clone()
+                        .or_else(|| i.title.clone())
+                        .unwrap_or_default(),
+                    status: status.into(),
+                    started_at: i.started_at,
+                    finished_at: i.completed_at,
+                },
+            ))
+        })
+        .collect();
+    rows.sort_by_key(|(ordinal, _)| *ordinal);
+    rows.into_iter().map(|(_, r)| r).collect()
+}
+
+/// A step's activity from its sub-agent rows.
+fn sub_activity(
+    rows: &[otto_core::workflows::SubagentActivity],
+) -> otto_core::workflows::NodeActivity {
+    let running = rows.iter().filter(|r| r.status == "running").count();
+    otto_core::workflows::NodeActivity {
+        phase: match running {
+            0 => "sub-agents done".into(),
+            n => format!("waiting on {n} sub-agent(s)"),
+        },
+        updated_at: chrono::Utc::now(),
+        last_progress_at: None,
+        pending_tasks: running as u32,
+        subagents: rows.to_vec(),
+        hold_reason: None,
+    }
+}

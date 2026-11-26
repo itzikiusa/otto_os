@@ -1389,3 +1389,24 @@ async fn a_usage_limit_past_the_steps_time_fails_it_without_needs_you() {
     );
     rig.rt.shutdown().await;
 }
+
+/// A step's sub-agents reach the engine as activity rows, as the PTY path's
+/// phase feed sends them (the thread path sent none).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_steps_sub_agents_are_reported_as_activity() {
+    let rig = Rig::new(false).await;
+    let (_, evs) = run(&rig.runner(), rig.turn("claude", "agent 0.5")).await;
+    let rows: Vec<_> = evs
+        .iter()
+        .filter_map(|e| match e {
+            StepEvent::Activity(a) => Some(a.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        rows.iter()
+            .any(|a| a.subagents.iter().any(|s| s.description == "PR sweep")),
+        "{rows:?}"
+    );
+    assert!(rows.iter().any(|a| a.pending_tasks == 1), "{rows:?}");
+}

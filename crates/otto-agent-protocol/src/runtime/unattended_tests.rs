@@ -113,7 +113,7 @@ async fn a_sub_threads_events_and_auto_turn_grace_are_the_steps() {
         st.last_activity = later;
         st.background_ended_idle_at = Some(later);
     }
-    let look = rt.look(&step, &root);
+    let look = rt.look(&step, &root, 0);
     assert_eq!(
         look.last_activity,
         Some(later),
@@ -145,7 +145,7 @@ async fn a_reply_the_loop_guard_holds_below_the_step_ends_it_as_loop_guard() {
             error: Some(loop_guard::PAUSED_QUEUED.into()),
         });
     let root = rt.live(&step).await.unwrap();
-    let look = rt.look(&step, &root);
+    let look = rt.look(&step, &root, 0);
     assert!(look.held_wake, "the held reply below the step is seen");
     assert!(!look.settled(Instant::now() + AUTO_TURN_GRACE));
     let out = rt
@@ -165,7 +165,7 @@ async fn a_closed_sub_thread_does_not_hide_a_busy_one_below_it() {
     let c = rt.live(&grandchild).await.unwrap();
     c.lock().starting = 1;
     let root = rt.live(&step).await.unwrap();
-    let look = rt.look(&step, &root);
+    let look = rt.look(&step, &root, 0);
     assert!(look.descendants_busy, "the grandchild still works");
     assert!(look.descendants.iter().any(|(id, _)| *id == grandchild));
     c.lock().starting = 0;
