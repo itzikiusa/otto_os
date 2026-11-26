@@ -9,7 +9,8 @@
 //! ported to the new runner (test-plan Phase 4) and reads the same table.
 
 use otto_core::workflows::{NodeStatus, WorkflowGraph, WorkflowRun};
-use otto_server::workflow_engine::{classify_resume, ResumeDecision};
+// The restart policy's home (engine.md §13.2); the engine switches to it.
+use otto_workflows::resume::{classify_resume, ResumeDecision};
 use serde_json::{json, Value};
 
 /// What a restart does with a run whose node of this kind was mid-flight.
@@ -53,6 +54,11 @@ const RESTART: &[(&str, Restart)] = &[
     ("git_pr", Restart::FailOutcomeUnknown),
     ("api_run", Restart::FailOutcomeUnknown),
     ("self_improve", Restart::FailOutcomeUnknown),
+    ("git_checkout", Restart::Resume),
+    // Resumable only with `idempotent: true` (not set here).
+    ("script", Restart::FailOutcomeUnknown),
+    ("post_review_comments", Restart::Resume),
+    ("check", Restart::Resume),
 ];
 
 fn graph(kind: &str) -> WorkflowGraph {
