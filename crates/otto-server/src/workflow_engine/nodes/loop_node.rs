@@ -244,18 +244,7 @@ pub(in crate::workflow_engine) async fn execute(
                     // Capture any repo reference this step published —
                     // for the loop's own output AND the run registry.
                     merge_published_refs(&env.files, &out);
-                    if let Some(rid) = out.get("repo_id").and_then(Value::as_str) {
-                        if !rid.trim().is_empty() {
-                            refs_by_repo.insert(
-                                rid.to_string(),
-                                json!({
-                                    "repo_id": rid,
-                                    "base": out.get("base").cloned().unwrap_or(Value::Null),
-                                    "worktree": out.get("worktree").cloned().unwrap_or(Value::Null),
-                                }),
-                            );
-                        }
-                    }
+                    keep_repo_ref(&mut refs_by_repo, &out);
                     if let Some(error) = outcome_error(&out) {
                         failed = Some((sname.clone(), error.to_string()));
                         last_iteration_error = Some(format!(
@@ -413,6 +402,18 @@ pub(in crate::workflow_engine) async fn execute(
         out.insert("repos".into(), Value::Array(repos));
     }
     Ok((Value::Object(out), logs))
+}
+
+/// The repo reference an inner step published, by repo_id (latest wins).
+fn keep_repo_ref(refs_by_repo: &mut serde_json::Map<String, Value>, out: &Value) {
+    let Some(rid) = out.get("repo_id").and_then(Value::as_str) else {
+        return;
+    };
+    if !rid.trim().is_empty() {
+        let field = |k: &str| out.get(k).cloned().unwrap_or(Value::Null);
+        let r = json!({"repo_id": rid, "base": field("base"), "worktree": field("worktree")});
+        refs_by_repo.insert(rid.to_string(), r);
+    }
 }
 
 /// The time budget before an inner step starts (only for a budgeted loop).
