@@ -21,6 +21,10 @@ otto-issues = { workspace = true }
 otto-channels = { workspace = true }
 # Optimize derives "outward effect" from the outward catalog's mutating tools.
 otto-mcp = { workspace = true }
+# The `script` step runs through otto-automation's `verify_command` (one
+# command runner for script and check), Seatbelt-wrapped.
+otto-automation = { workspace = true }
+otto-sandbox = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 # Trigger-spec validation (`triggers::validate_spec`): IANA timezones and the

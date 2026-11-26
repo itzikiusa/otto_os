@@ -611,7 +611,7 @@ fn gates_command(n: &WorkflowNode) -> Result<Value, String> {
         return Err("output file name in the prompt is not a plain file name".into());
     }
     let command = format!(
-        "if [ -z \"$(git -C \"$OTTO_WORKTREE\" diff --name-only \"$OTTO_BASE\" HEAD -- '*.go')\" ]; then echo \"$OTTO_REPO_NAME: no Go changes — gates NOT RUN\"; exit 0; fi\n\
+        "if [ -z \"$(git -C \"$OTTO_WORKTREE\" diff --name-only \"$OTTO_BASE\" HEAD -- '*.go')\" ]; then echo \"$OTTO_REPO_NAME: no Go changes — gates NOT RUN\" >> \"$OTTO_CONTEXT_DIR/$OTTO_OUT\"; exit 0; fi\n\
          {script} \"$OTTO_WORKTREE\" \"$OTTO_BASE\" --main \"$OTTO_REPO\" --out \"$OTTO_CONTEXT_DIR/$OTTO_REPO_NAME-$OTTO_OUT\"\n\
          cat \"$OTTO_CONTEXT_DIR/$OTTO_REPO_NAME-$OTTO_OUT\" >> \"$OTTO_CONTEXT_DIR/$OTTO_OUT\""
     );
