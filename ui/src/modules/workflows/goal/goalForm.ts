@@ -190,8 +190,3 @@ export function fromLoop(loop: GoalLoop, repos: readonly Pick<Repo, 'id' | 'path
     continueLoop: { id: loop.id, path: loop.worktree_path || loop.repo_path, research },
   };
 }
-
-/** Loops a person may continue: not finished, not already continued. */
-export function canContinue(loop: Pick<GoalLoop, 'status'>): boolean {
-  return ['draft', 'paused', 'blocked', 'exhausted'].includes(loop.status);
-}

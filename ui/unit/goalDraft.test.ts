@@ -23,6 +23,13 @@ test('a goal draft is taken once', () => {
   assert.equal(takeStagedGoalDraft(), null);
 });
 
+test('a blank draft and a loop to continue are taken too', () => {
+  store.set('otto:automation-draft', JSON.stringify({ target: 'goal', title: '', prompt: '' }));
+  assert.deepEqual(takeStagedGoalDraft(), { title: '', prompt: '' });
+  store.set('otto:automation-draft', JSON.stringify({ target: 'goal', loop_id: 'L1' }));
+  assert.deepEqual(takeStagedGoalDraft(), { title: '', prompt: '', loopId: 'L1' });
+});
+
 test('a Scheduled Task draft is left for its own page', () => {
   stageAutomationDraft(buildAutomationDraft('scheduled_task', action));
   assert.equal(takeStagedGoalDraft(), null);

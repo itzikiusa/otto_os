@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  applyTemplate, canContinue, emptyFields, firstProblem, fromLoop, fromStaged, moveCriterion, newCriterion, setGoal, titleFromGoal, toSpec, willLine,
+  applyTemplate, emptyFields, firstProblem, fromLoop, fromStaged, moveCriterion, newCriterion, setGoal, titleFromGoal, toSpec, willLine,
 } from '../src/modules/workflows/goal/goalForm.ts';
 import type { GoalLoop } from '../src/lib/api/types.ts';
 
@@ -127,7 +127,3 @@ test('a used-up loop still continues with at least 1 iteration and 15 minutes; r
   assert.deepEqual(toSpec(f).work, { kind: 'research' });
 });
 
-test('only an unfinished loop can be continued', () => {
-  for (const s of ['draft', 'paused', 'blocked', 'exhausted']) assert.equal(canContinue({ status: s as GoalLoop['status'] }), true, s);
-  for (const s of ['running', 'succeeded', 'failed', 'stopped']) assert.equal(canContinue({ status: s as GoalLoop['status'] }), false, s);
-});

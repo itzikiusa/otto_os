@@ -29,7 +29,7 @@ test('latestOnly: a superseded ticket is not current and its signal aborts', () 
   assert.equal(b.current, false);
 });
 
-test('loops: a background poll landing after Pause cannot restore "running"', async () => {
+test('loops: an older detail read landing last cannot replace a newer one', async () => {
   const { api, calls } = transport();
   const { loops } = loadSource(new URL('../src/lib/stores/loops.svelte.ts', import.meta.url), {
     '../api/client': { api },
@@ -39,9 +39,9 @@ test('loops: a background poll landing after Pause cannot restore "running"', as
     '../latest': latest(),
   });
   const detail = (status: string) => ({ loop: { id: 'L1', status }, iterations: [] });
-  // A poll (bg lane) is in flight…
-  const poll = (loops as any).fetchDetail('L1', true);
-  // …then the user's action re-fetches the detail.
+  // A read is in flight…
+  const poll = (loops as any).fetchDetail('L1');
+  // …then a newer one re-fetches the detail.
   const action = loops.loadDetail('L1');
   const [bg, fg] = calls;
   fg.d.resolve(detail('paused'));
@@ -50,19 +50,6 @@ test('loops: a background poll landing after Pause cannot restore "running"', as
   await poll;
   assert.equal(loops.detail.loop.status, 'paused');
   assert.equal(loops.loadingDetail, false);
-});
-
-test('loops: answerQuestion encodes the question id', async () => {
-  const { api, calls } = transport();
-  const { loops } = loadSource(new URL('../src/lib/stores/loops.svelte.ts', import.meta.url), {
-    '../api/client': { api },
-    '../loadError': { loadErrorText: (e: unknown) => String(e) },
-    '../live': { liveQuery: () => ({ stop() {}, now() {} }) },
-    '../lazyModule': { announceModule() {} },
-    '../latest': latest(),
-  });
-  void loops.answerQuestion('L1', 'q/../x', 'yes');
-  assert.equal(calls[0].path, '/goal-loops/L1/questions/q%2F..%2Fx/answer');
 });
 
 test('scheduled tasks: the start snapshot landing after the finish one is dropped', async () => {

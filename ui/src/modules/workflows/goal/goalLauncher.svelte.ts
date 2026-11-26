@@ -1,6 +1,6 @@
 // Opens the Goal form from anywhere a goal starts (the Run… picker's "A
-// goal…", ⌘K "New goal…", an old loop's Continue as a goal). GoalHost, mounted
-// on the Workflows page and the older-loops page, renders the form.
+// goal…", ⌘K "New goal…"). GoalHost, mounted on the Workflows page, renders
+// the form.
 import type { GoalFields } from './goalForm';
 
 class GoalLauncher {

@@ -97,7 +97,6 @@ test('events: reconnect / restart / periodic events peek page stores instead of 
     aws: 'lib/stores/aws.svelte.ts',
     scheduledTasks: 'lib/stores/scheduledTasks.svelte.ts',
     product: 'lib/stores/product.svelte.ts',
-    loops: 'lib/stores/loops.svelte.ts',
     browser: 'lib/stores/browser.svelte.ts',
     browserLive: 'lib/stores/browserLive.svelte.ts',
   };
