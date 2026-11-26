@@ -3,11 +3,12 @@
   // met, one row per criterion with its word, method and evidence (the
   // latest settled check's output), and the loop's budget. On the run page
   // when nothing more urgent has a card; in the Result's Criteria tab otherwise.
+  import { untrack } from 'svelte';
   import { workflowCheckpointDetail, workflowCheckpointPage } from '../../../lib/api/workflows';
   import { elapsed } from '../../../lib/statusWords';
   import type { Criterion, GoalProgress, WorkflowCheckpoint, WorkflowRun } from '../../../lib/api/types';
   import CriteriaTable from '../goal/CriteriaTable.svelte';
-  import { criterionRows, isCheckOutput, latestCheck, newestCheckpoint } from '../goal/goalCheck';
+  import { criterionRows, isCheckOutput, latestCheck, newestCheckpoint, readsCheckpoints } from '../goal/goalCheck';
 
   interface Props {
     goal: GoalProgress;
@@ -17,11 +18,11 @@
   }
   let { goal, run, criteria = [] }: Props = $props();
 
-  // The run read carries the loop's checkpoints; a live run (progress
-  // projection) does not, so read them when the goal moves.
+  // The run read carries the loop's checkpoints as they were when it loaded;
+  // a live run's go stale, so read them when the goal moves.
   let fetched = $state.raw<WorkflowCheckpoint[] | null>(null);
   $effect(() => {
-    if (run.checkpoints?.length) return;
+    if (!readsCheckpoints(run, untrack(() => fetched !== null))) return;
     const id = run.id;
     void [goal.iteration, goal.criteria_met, goal.awaiting?.length, run.status];
     let alive = true;
@@ -42,7 +43,7 @@
     };
   });
 
-  const check = $derived(latestCheck(run.nodes, run.checkpoints?.length ? run.checkpoints : (fetched ?? undefined)));
+  const check = $derived(latestCheck(run.nodes, fetched ?? run.checkpoints));
   const rows = $derived(criterionRows(criteria, check, goal.awaiting ?? []));
   const settled = $derived(run.status !== 'pending' && run.status !== 'running');
   const kept = $derived.by(() => {
