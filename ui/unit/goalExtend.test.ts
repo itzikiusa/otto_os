@@ -22,6 +22,23 @@ test('the proposal stays inside the limits a goal accepts', () => {
 
 test('totals that leave no room are refused with what is used', () => {
   assert.match(extendProblem(goal(6, 6, 60, 60), 6, 60)!, /6 iterations and 60 minutes/);
-  assert.equal(extendProblem(goal(6, 6, 60, 60), 7, 60), null);
-  assert.equal(extendProblem(goal(6, 6, 60, 60), 6, 61), null);
+  assert.equal(extendProblem(goal(6, 6, 60, 60), 7, 61), null);
+});
+
+test('both totals must stay above what is used: the server refuses either one at or below it (CR1-060)', () => {
+  // crates/otto-workflows/src/criteria.rs resume_limits: an exhausted loop resumes
+  // only when iterations AND active time both leave room — and the dialog sends both.
+  const outOfIterations = goal(10, 10, 30, 120);
+  assert.match(extendProblem(outOfIterations, 10, 120)!, /10 iterations/);
+  assert.equal(extendProblem(outOfIterations, 11, 120), null);
+  assert.match(extendProblem(goal(6, 6, 60, 60), 7, 60)!, /60 minutes/);
+  assert.match(extendProblem(goal(6, 6, 60, 60), 6, 61)!, /6 iterations/);
+});
+
+test('totals outside what a goal accepts are refused: 1–50 iterations, 15–480 minutes (CR1-060)', () => {
+  const g = goal(3, 4, 10, 60);
+  assert.match(extendProblem(g, 999, 60)!, /1 to 50 iterations/);
+  assert.match(extendProblem(g, 5, 900)!, /15 to 480 minutes/);
+  assert.match(extendProblem(g, 5, 5)!, /15 to 480 minutes/);
+  assert.equal(extendProblem(g, 50, 480), null);
 });
