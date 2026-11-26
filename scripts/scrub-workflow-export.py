@@ -91,6 +91,7 @@ TRACE_KEYS = [
     # the chat transcript's record headers
     "scenario", "step_numbers", "context_files", "prompts", "passed", "failed", "no-ticket",
     "ticket-unreadable", "send", "edit", "upload", "formatted", "plain", "dur", "time", "sha",
+    "passed-with-files", "slack", "files", "txt", "pdf", "text", "application",
     "Bool",  # serde_json's Debug text inside an engine error the goldens record
 ]
 # Every param key the five definitions use (Otto's own names).
@@ -107,7 +108,7 @@ BUCKETS = [(1000, 600), (4000, 2500), (8000, 6000), (16000, 12000), (10**9, 2000
 VOCAB_SOURCES = [
     "crates/otto-workflows/src", "crates/otto-server/src/workflow_engine",
     "crates/otto-server/src/workflow_engine.rs", "crates/otto-core/src/workflows.rs",
-    "crates/otto-orchestrator/src/e2e_stub.rs",
+    "crates/otto-orchestrator/src/e2e_stub.rs", "crates/otto-channels/src/slack.rs",
 ]
 TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.\-]*")
 # Placeholder shapes the fixtures may carry besides vocabulary words.
@@ -117,6 +118,7 @@ PLACEHOLDERS = [re.compile(p) for p in (
     r"step\d+-\*(\.md|\.output\.json)?", r"missing-(skill|lens)-\d+",
     r"(run|session|review|repo|id)-\d+", r"\d+(\.\d+)*[a-zA-Z]{0,2}", r"202[67]-\d\d-\d\dT[0-9:.]+Z?",
     r"[0-9a-f]{64}", r"sha256", r"m\d+", r"short-\d+", r"COMPAT-\d+", r"jira-COMPAT-\d+\.md",
+    r"otto-slack-F\d+-[a-z]+\.[a-z]+", r"F\d+",
 )]
 ERROR_CLASSES = [
     ("auth", ("login expired", "/login", "not logged in", "unauthorized")),

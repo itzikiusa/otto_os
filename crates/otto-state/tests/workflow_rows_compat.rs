@@ -178,7 +178,7 @@ fn old_checkpoint() -> old::WorkflowCheckpoint {
     }
 }
 
-/// proves: X3 — rows written by the 0.6 types (definition, pinned version,
+/// Test plan X3: rows written by the 0.6 types (definition, pinned version,
 /// run nodes in every status, input, resume scope, loop checkpoint) decode
 /// into today's types with every field kept, through the repo readers the run
 /// view, retry and the restart reconciler use.

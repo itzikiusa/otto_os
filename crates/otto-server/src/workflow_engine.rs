@@ -436,7 +436,7 @@ fn spawn_progress_pump(
         };
         // One adapter for the whole run (texts + file uploads), built once: one
         // Keychain read and the shared HTTP pool, not one per progress line.
-        let adapter = otto_channels::improve_notify::build_adapter(&ctx.secrets, &integ).await;
+        let adapter = ctx.outbound.adapter(&integ).await;
         while let Some(item) = rx.recv().await {
             match item {
                 ProgressItem::Text(msg) => {
@@ -1243,8 +1243,10 @@ impl otto_workflows::WorkflowCtx for ServerCtx {
     fn issues_store(&self) -> &otto_state::IssuesRepo {
         &self.issues_store
     }
-    fn secrets(&self) -> &std::sync::Arc<dyn otto_core::secrets::SecretStore> {
-        &self.secrets
+    fn outbound(
+        &self,
+    ) -> &std::sync::Arc<dyn otto_channels::improve_notify::OutboundAdapterFactory> {
+        &self.outbound
     }
     fn spawn_run(&self, ws: Workspace, wf: Workflow, run_id: Id, input: Value, scope: RunScope) {
         spawn_run(self.clone(), ws, wf, run_id, input, scope, None);
@@ -2176,22 +2178,16 @@ async fn deliver_run_result(
                 .await
             {
                 Ok(Some(integ)) => {
-                    let sent = otto_channels::improve_notify::send_to(
-                        &ctx.secrets,
-                        &integ,
-                        chat,
-                        thread,
-                        &brief,
-                    )
-                    .await;
-                    if sent {
-                        if let Some(adapter) =
-                            otto_channels::improve_notify::build_adapter(&ctx.secrets, &integ).await
-                        {
-                            if let Err(e) = adapter.upload(chat, thread, attach_name, &bytes).await
-                            {
-                                tracing::debug!("workflow result: summary upload failed: {e}");
-                            }
+                    let adapter = ctx.outbound.adapter(&integ).await;
+                    let sent = match &adapter {
+                        Some(a) if !chat.trim().is_empty() => {
+                            a.send_formatted(chat, thread, &brief).await.is_ok()
+                        }
+                        _ => false,
+                    };
+                    if let (true, Some(adapter)) = (sent, adapter) {
+                        if let Err(e) = adapter.upload(chat, thread, attach_name, &bytes).await {
+                            tracing::debug!("workflow result: summary upload failed: {e}");
                         }
                     } else {
                         tracing::debug!("workflow result: chat send failed (token missing?)");
