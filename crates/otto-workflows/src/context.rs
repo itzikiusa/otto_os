@@ -1501,6 +1501,7 @@ mod tests {
     /// Engine writers run side by side now: every `update_repos` lands, and a
     /// reader of `repos.json` never sees a half-written file.
     #[test]
+    #[allow(clippy::disallowed_methods)] // a sync test
     fn concurrent_registry_writes_all_land_and_readers_never_see_a_partial_file() {
         for round in 0..20 {
             let td = tempfile::tempdir().unwrap();
