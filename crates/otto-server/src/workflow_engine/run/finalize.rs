@@ -29,7 +29,7 @@ pub(in crate::workflow_engine) async fn finish(
     if canceled || timed_out {
         stop_run_reviews(&ctx, &repo, &workflow.workspace_id, &run_id, &states).await;
         kill_run_sessions(&ctx, &states).await;
-        step_thread::retain_run(&ctx, &states, false).await;
+        step_thread::retain_run(&ctx, &mut states, false).await;
     }
     // Flush all streamed progress lines (close the channel, await the pump) so the
     // per-step updates land in the thread BEFORE the final summary is delivered.
@@ -154,7 +154,7 @@ pub(in crate::workflow_engine) async fn finish(
     // file, only on outright success — an errored run has no coherent "answer"
     // to hand back, so delivery falls back to the per-step summary.md instead.
     store_overview(&repo, &workflow, &run_id, rev).await;
-    step_thread::retain_run(&ctx, &states, final_status == RunStatus::Success).await;
+    step_thread::retain_run(&ctx, &mut states, final_status == RunStatus::Success).await;
     let final_output = if final_status == RunStatus::Success {
         files.write_final_output()
     } else {

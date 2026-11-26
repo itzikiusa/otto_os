@@ -68,6 +68,9 @@ pub(super) fn forget(run_id: &Id) {
     if let Ok(mut m) = latched().lock() {
         m.remove(run_id);
     }
+    if let Ok(mut m) = resumes().lock() {
+        m.retain(|(id, _), _| id != run_id);
+    }
 }
 
 #[cfg(test)]
@@ -163,9 +166,20 @@ pub(super) async fn run(
             let _ = log_tx.send(format!("thread of {src} was removed — started a fresh one"));
         }
     }
-    if let Some(df) = &done_file {
+    let resume = resumes()
+        .lock()
+        .ok()
+        .and_then(|mut m| m.remove(&(run_id.clone(), node.id.clone())));
+    // A resumed thread may have written its handoff while the daemon was down.
+    if let Some(df) = done_file.as_ref().filter(|_| resume.is_none()) {
         let _ = std::fs::remove_file(df);
     }
+    let workflow_id = WorkflowsRepo::new(ctx.pool.clone())
+        .run_head(run_id, false)
+        .await
+        .ok()
+        .flatten()
+        .map(|h| h.workflow_id);
     let label = node_display_name(node);
     let t = StepTurn {
         user_id: user.id.clone(),
@@ -181,7 +195,7 @@ pub(super) async fn run(
         meta: json!({
             "source": "workflow", "run_id": run_id, "wf_name": wf_name,
             "node_id": node.id, "node_kind": node.kind, "cwd": cwd,
-            "work": {"kind": "workflow_run", "id": run_id},
+            "work": {"kind": "workflow_run", "id": run_id, "workflow_id": workflow_id},
         }),
         prompt: format!("{prompt}{WF_STEP_RULES}"),
         continue_thread,
@@ -196,10 +210,6 @@ pub(super) async fn run(
     let _ = log_tx.send(format!("⏳ starting {provider} thread"));
     let (ev_tx, mut ev_rx) = tokio::sync::mpsc::unbounded_channel::<StepEvent>();
     let runner = runner(ctx, Some(user));
-    let resume = resumes()
-        .lock()
-        .ok()
-        .and_then(|mut m| m.remove(&(run_id.clone(), node.id.clone())));
     let cancel = otto_core::cancel_signal::CancelSignal::new();
     let fut = async {
         match &resume {
@@ -285,14 +295,15 @@ pub(crate) async fn fill_thread_available(ctx: &ServerCtx, nodes: &mut [NodeRunS
 /// them after retention deleted the thread. Each settled turn of a node
 /// writes one file, so the next number is the attempt.
 async fn keep_digest_items(ctx: &ServerCtx, run_id: &Id, node_id: &str, thread_id: &Id) {
+    let Some(prefix) = digest_prefix(node_id) else {
+        return;
+    };
     let Ok(items) = ctx.agent_runtime.digest_items(thread_id, 50).await else {
         return;
     };
     let dir = otto_workflows::attachments::context_dir(&ctx.data_dir, run_id).join(".threads");
-    let node_id = node_id.to_string();
     crate::offload::blocking(move || {
         let _ = std::fs::create_dir_all(&dir);
-        let prefix = format!("{node_id}-");
         #[allow(clippy::disallowed_methods)] // runs inside offload::blocking
         let n = std::fs::read_dir(&dir).map_or(0, |rd| {
             rd.flatten()
@@ -303,6 +314,13 @@ async fn keep_digest_items(ctx: &ServerCtx, run_id: &Id, node_id: &str, thread_i
         let _ = std::fs::write(dir.join(format!("{prefix}{}.json", n + 1)), body);
     })
     .await;
+}
+
+/// `<node>-`, the digest files' prefix — none for an id that is no plain file
+/// name (an imported graph's `../x` must not write outside the folder).
+pub(super) fn digest_prefix(node_id: &str) -> Option<String> {
+    let id = otto_core::paths::safe_component(node_id).filter(|n| !n.starts_with('.'))?;
+    Some(format!("{id}-"))
 }
 
 /// The thread of the step `src` this run recorded, unless retention removed it.
@@ -405,25 +423,42 @@ pub(super) async fn close_settled(
     }
 }
 
-/// The run ended: a stopped run's open threads are closed, and every thread
-/// of the run is kept for the success or the failed period from now (§6.5).
-pub(super) async fn retain_run(ctx: &ServerCtx, states: &[NodeRunState], success: bool) {
+/// The run ended (or is held): a stopped run's open threads are closed —
+/// and marked so, so a Resume starts the step afresh instead of awaiting a
+/// stopped turn — and every thread of the run is kept for the success or
+/// the failed period from now (§6.5).
+pub(super) async fn retain_run(ctx: &ServerCtx, states: &mut [NodeRunState], success: bool) {
     let r = runner(ctx, None);
+    let (ok_h, failed_h) = retention_hours(ctx).await;
+    let now = chrono::Utc::now();
+    let until = now + chrono::Duration::hours(if success { ok_h } else { failed_h });
     let mut ids = vec![];
-    for s in states {
-        if let Some(t) = s.thread.as_ref().filter(|t| t.runner == "threads") {
+    for s in states.iter_mut() {
+        if let Some(t) = s.thread.as_mut().filter(|t| t.runner == "threads") {
             if t.closed_at.is_none() {
-                r.close(&t.thread_id, chrono::Utc::now()).await;
+                r.close(&t.thread_id, until).await;
+                t.closed_at = Some(now);
             }
             ids.push(t.thread_id.clone());
         }
         ids.extend(s.children.iter().filter_map(|c| c.thread_id.clone()));
     }
-    if ids.is_empty() {
-        return;
+    if !ids.is_empty() {
+        r.set_retain_until(&ids, until).await;
     }
-    let (ok_h, failed_h) = retention_hours(ctx).await;
-    let hours = if success { ok_h } else { failed_h };
-    r.set_retain_until(&ids, chrono::Utc::now() + chrono::Duration::hours(hours))
+}
+
+/// A skipped step's thread stops with it (the run goes on without it).
+pub(super) async fn close_open(ctx: &ServerCtx, st: &mut NodeRunState) {
+    let Some(t) = st
+        .thread
+        .as_mut()
+        .filter(|t| t.runner == "threads" && t.closed_at.is_none())
+    else {
+        return;
+    };
+    runner(ctx, None)
+        .close(&t.thread_id, retain_until(ctx, false).await)
         .await;
+    t.closed_at = Some(chrono::Utc::now());
 }

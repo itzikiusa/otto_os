@@ -1235,7 +1235,15 @@ pub fn spawn_run(
         RUN_PERMIT
             .scope(
                 std::cell::RefCell::new((gate, Some(permit))),
-                run_workflow(ctx, ws, workflow, run_id, input, scope, prior_nodes),
+                Box::pin(run_workflow(
+                    ctx,
+                    ws,
+                    workflow,
+                    run_id,
+                    input,
+                    scope,
+                    prior_nodes,
+                )),
             )
             .await;
     });
@@ -2492,10 +2500,11 @@ pub async fn sweep_stale_run_worktrees(ctx: &ServerCtx) {
             .unwrap_or_default()
             .to_string_lossy()
             .to_string();
-        // Active runs keep their worktrees.
-        let active: Option<String> = sqlx::query_scalar(
-            "SELECT id FROM workflow_runs WHERE id = ? AND status IN ('pending','running')",
-        )
+        // Active and held runs keep their worktrees (a held run resumes in them).
+        let active: Option<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT id FROM workflow_runs WHERE id = ? AND (status IN ('pending','running') OR {})",
+            otto_state::workflows::HOLD_SQL
+        )))
         .bind(&run_id)
         .fetch_optional(&ctx.pool)
         .await

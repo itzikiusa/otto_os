@@ -481,6 +481,11 @@ async fn a_parked_check_wakes_on_the_persons_record() {
 struct Fake {
     turns: std::sync::Mutex<Vec<otto_agent_run::step::StepTurn>>,
     resumed: std::sync::Mutex<Vec<(Id, u32)>>,
+    closed: std::sync::Mutex<Vec<Id>>,
+    /// The first turn hangs once its thread started (a step to pause or skip).
+    hang_first: std::sync::atomic::AtomicBool,
+    /// A resumed turn finds its handoff already written (restart meanwhile).
+    quiet_resume: std::sync::atomic::AtomicBool,
 }
 
 #[async_trait::async_trait]
@@ -501,6 +506,12 @@ impl otto_agent_run::step::StepRunner for Fake {
             thread_id: thread_id.clone(),
             start_ordinal: 0,
         });
+        if self
+            .hang_first
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            std::future::pending::<()>().await;
+        }
         let h = t.handoff.clone().unwrap();
         let body = if h.to_string_lossy().ends_with(".output.json") {
             r#"{"criteria":[{"id":"judged","met":true,"evidence":""}],"verdict":"achieved"}"#
@@ -535,9 +546,27 @@ impl otto_agent_run::step::StepRunner for Fake {
             .lock()
             .unwrap()
             .push((id.clone(), start_ordinal));
+        if self.quiet_resume.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(otto_agent_run::step::StepOutcome {
+                thread_id: id.clone(),
+                reply: "done".into(),
+                handoff_written: true,
+                turn_status: "completed".into(),
+                error: None,
+                context_usage: None,
+                turns: 1,
+                usage: Default::default(),
+                model: None,
+                effort: None,
+                sub_threads: vec![],
+                digest: None,
+            });
+        }
         self.run(t.clone(), ev, cancel).await
     }
-    async fn close(&self, _: &Id, _: chrono::DateTime<chrono::Utc>) {}
+    async fn close(&self, id: &Id, _: chrono::DateTime<chrono::Utc>) {
+        self.closed.lock().unwrap().push(id.clone());
+    }
     async fn set_retain_until(&self, _: &[Id], _: chrono::DateTime<chrono::Utc>) {}
     async fn release_process(&self, _: &Id) {}
     async fn delete(&self, _: &Id) {}
@@ -698,4 +727,291 @@ async fn a_research_goal_works_in_its_own_folder() {
         "{} does not end with {want}",
         turns[0].cwd.display()
     );
+}
+
+/// CR1-002: a node's future is a few pointers wide. The node kinds' bodies
+/// are boxed, so a resumed goal's loop → check → command chain does not carry
+/// every kind's frame inline; together they overflowed a 2 MiB worker stack.
+#[tokio::test]
+async fn a_node_future_does_not_carry_every_kinds_frame() {
+    let fx = setup(
+        "goal-size",
+        goal_graph(json!([check(json!([]))]), json!({})),
+    )
+    .await;
+    let env = RunEnv {
+        budget: budget::ActiveBudget::new(RUN_WALL_CLOCK_TIMEOUT),
+        run_id: fx.run_id.clone(),
+        wf_name: fx.wf.name.clone(),
+        run_cwd: String::new(),
+        run_base: None,
+        files: std::sync::Arc::new(crate::workflow_context::RunContextFiles::disabled(
+            &fx.run_id,
+        )),
+        default_provider: "claude".into(),
+        run_input: json!({}),
+    };
+    let (sessions, _sr) = tokio::sync::mpsc::unbounded_channel();
+    let (logs, _lr) = tokio::sync::mpsc::unbounded_channel();
+    let (activity, _ar) = tokio::sync::mpsc::unbounded_channel();
+    let progress = ProgressSink::disabled();
+    let scope = StepScope {
+        step_no: 1,
+        iter: None,
+        inner_idx: None,
+    };
+    let node = &fx.wf.graph.nodes[1];
+    let fut = execute_node(
+        &fx.ctx,
+        &fx.ws,
+        &fx.user,
+        node,
+        json!({}),
+        &env,
+        &scope,
+        &sessions,
+        &logs,
+        &activity,
+        &progress,
+    );
+    // 19 KiB inline before the kinds were boxed, 592 bytes after.
+    let node_size = std::mem::size_of_val(&fut);
+    assert!(node_size < 2048, "a node future is {node_size} bytes");
+}
+
+/// CR1-001: a held run keeps its worktrees through the sweep that runs at
+/// boot and after every finished run; it resumes in them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn a_held_runs_worktrees_survive_the_sweep() {
+    let steps = json!([check(
+        json!([{"id": "no", "text": "never", "verify": "command", "command": "exit 1"}])
+    )]);
+    let fx = setup(
+        "goal-sweep",
+        goal_graph(steps, json!({"max_iterations": 1, "hold_when_unmet": true})),
+    )
+    .await;
+    let run = fx.run().await;
+    assert!(run.hold.is_some(), "held");
+    let dir = fx
+        .ctx
+        .data_dir
+        .join("workflow-runs")
+        .join(fx.run_id.as_str());
+    std::fs::create_dir_all(&dir).unwrap();
+    sweep_stale_run_worktrees(&fx.ctx).await;
+    assert!(dir.exists(), "the held run's worktree dir was reaped");
+    assert!(hold::cancel_held(&fx.ctx, &fx.run_id).await.unwrap());
+    assert!(!dir.exists(), "a canceled hold reaps it");
+}
+
+fn agent(id: &str) -> WorkflowNode {
+    let mut n = node(
+        id,
+        "agent_prompt",
+        json!({"prompt": "do it", "provider": "claude"}),
+    );
+    n.name = "Analyze".into();
+    n
+}
+
+fn open_thread(id: &str, ordinal: u64) -> otto_core::workflows::StepThread {
+    otto_core::workflows::StepThread {
+        thread_id: id.into(),
+        runner: "threads".into(),
+        provider: "claude".into(),
+        model: None,
+        effort: None,
+        continued_from: None,
+        start_ordinal: Some(ordinal),
+        turns: 0,
+        usage: Default::default(),
+        digest: None,
+        closed_at: None,
+        available: None,
+    }
+}
+
+/// Wait until node `id` satisfies `f` in the stored run.
+async fn until(fx: &Fx, id: &str, f: impl Fn(&NodeRunState) -> bool) -> WorkflowRun {
+    let t0 = Instant::now();
+    loop {
+        let run = fx.repo.get_run(&fx.run_id).await.unwrap();
+        if run.nodes.iter().any(|n| n.node_id == id && f(n)) {
+            return run;
+        }
+        assert!(
+            t0.elapsed() < Duration::from_secs(10),
+            "{id} never got there: {:#?}",
+            run.nodes
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// CR1-005: a thread step a restart caught resumes its thread, and the
+/// handoff its agent wrote while the daemon was down is the step's answer —
+/// neither deleted before the resume nor overwritten by the engine's summary.
+#[tokio::test]
+async fn a_restarted_thread_step_keeps_the_handoff_its_agent_wrote_meanwhile() {
+    let f = fake();
+    f.quiet_resume
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let graph = WorkflowGraph {
+        nodes: vec![node("start", "log", json!({})), agent("a")],
+        edges: vec![edge("start", "a")],
+    };
+    let fx = setup("thread-restart", graph).await;
+    let earlier = chrono::Utc::now() - chrono::Duration::seconds(60);
+    let prior = vec![
+        NodeRunState {
+            node_id: "start".into(),
+            status: NodeStatus::Success,
+            step_no: Some(1),
+            started_at: Some(earlier),
+            output: Some(json!({})),
+            ..Default::default()
+        },
+        NodeRunState {
+            node_id: "a".into(),
+            status: NodeStatus::Pending,
+            step_no: Some(2),
+            started_at: Some(earlier),
+            thread: Some(open_thread("th-9", 3)),
+            ..Default::default()
+        },
+    ];
+    let dir = fx
+        .ctx
+        .data_dir
+        .join("workflow-context")
+        .join(fx.run_id.as_str());
+    std::fs::create_dir_all(&dir).unwrap();
+    let handoff = dir.join(format!(
+        "{}.md",
+        crate::workflow_context::step_base_name(2, "Analyze", None, None)
+    ));
+    std::fs::write(&handoff, "# what the agent wrote\n").unwrap();
+    let scope = RunScope {
+        continue_unfinished: true,
+        ..Default::default()
+    };
+    let drive = run_workflow(
+        fx.ctx.clone(),
+        fx.ws.clone(),
+        fx.wf.clone(),
+        fx.run_id.clone(),
+        json!({}),
+        scope,
+        Some(prior),
+    );
+    tokio::time::timeout(Duration::from_secs(15), tokio::spawn(drive))
+        .await
+        .unwrap()
+        .unwrap();
+    let run = fx.repo.get_run(&fx.run_id).await.unwrap();
+    assert_eq!(run.status, RunStatus::Success, "{:?}", run.error);
+    assert_eq!(*f.resumed.lock().unwrap(), [("th-9".to_string(), 3)]);
+    assert_eq!(
+        std::fs::read_to_string(&handoff).unwrap(),
+        "# what the agent wrote\n"
+    );
+}
+
+/// CR1-006: a step paused on its thread is closed and marked so; Resume
+/// runs it on a fresh thread instead of awaiting the stopped turn.
+#[tokio::test]
+async fn a_paused_thread_step_starts_afresh_on_resume() {
+    let f = fake();
+    f.hang_first
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let graph = WorkflowGraph {
+        nodes: vec![node("start", "log", json!({})), agent("a")],
+        edges: vec![edge("start", "a")],
+    };
+    let fx = setup("thread-pause", graph).await;
+    let driver = fx.drive();
+    until(&fx, "a", |n| n.thread.is_some()).await;
+    hold::pause(&fx.ctx, &fx.run_id, &fx.user).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(4), driver)
+        .await
+        .unwrap()
+        .unwrap();
+    let run = fx.repo.get_run(&fx.run_id).await.unwrap();
+    let t = state(&run, "a").thread.clone().unwrap();
+    assert!(t.closed_at.is_some(), "the paused step's thread is closed");
+    assert!(f.closed.lock().unwrap().contains(&"th-1".to_string()));
+    hold::resume(&fx.ctx, &fx.run_id, None).await.unwrap();
+    let run = fx.settled().await;
+    assert_eq!(run.status, RunStatus::Success, "{:?}", run.error);
+    assert!(
+        f.resumed.lock().unwrap().is_empty(),
+        "no resume of a stopped turn"
+    );
+    assert_eq!(f.turns.lock().unwrap().len(), 2);
+}
+
+/// CR1-008: skipping a running thread step stops its thread before the run
+/// goes on — the agent must not keep editing the worktree beside the next step.
+#[tokio::test]
+async fn a_skipped_thread_step_closes_its_thread() {
+    let f = fake();
+    f.hang_first
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let graph = WorkflowGraph {
+        nodes: vec![
+            node("start", "log", json!({})),
+            agent("a"),
+            node("b", "delay", json!({"ms": 3000})),
+        ],
+        edges: vec![edge("start", "a"), edge("a", "b")],
+    };
+    let fx = setup("thread-skip", graph).await;
+    let driver = fx.drive();
+    until(&fx, "a", |n| n.thread.is_some()).await;
+    fx.ctx
+        .wf_skip_current
+        .lock()
+        .unwrap()
+        .insert(skip_marker_key(&fx.run_id, "a"));
+    until(&fx, "b", |n| n.status == NodeStatus::Running).await;
+    assert_eq!(*f.closed.lock().unwrap(), ["th-1".to_string()]);
+    tokio::time::timeout(Duration::from_secs(10), driver)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+/// CR1-055 / CR1-056: a resume the run never took dies with the run (the
+/// next execution starts the step fresh), and a step thread names its
+/// workflow in `meta.work`.
+#[tokio::test]
+async fn a_finished_run_forgets_a_resume_it_never_took() {
+    let f = fake();
+    let graph = WorkflowGraph {
+        nodes: vec![node("start", "log", json!({})), agent("a")],
+        edges: vec![edge("start", "a")],
+    };
+    let fx = setup("thread-forget", graph).await;
+    super::super::super::step_thread::mark_resume(&fx.run_id, "a", &open_thread("th-9", 1));
+    super::super::super::step_thread::forget(&fx.run_id);
+    let run = fx.run().await;
+    assert_eq!(run.status, RunStatus::Success, "{:?}", run.error);
+    assert!(f.resumed.lock().unwrap().is_empty());
+    let turns = f.turns.lock().unwrap().clone();
+    assert_eq!(
+        turns[0].meta["work"],
+        json!({"kind": "workflow_run", "id": fx.run_id, "workflow_id": fx.wf.id})
+    );
+}
+
+/// CR1-009: a digest file is named by the node id only when that id is a
+/// plain file name; `../` in an imported graph writes nothing.
+#[test]
+fn a_digest_file_never_leaves_the_threads_folder() {
+    use super::super::super::step_thread::digest_prefix;
+    assert_eq!(digest_prefix("goal#1.0").as_deref(), Some("goal#1.0-"));
+    for bad in ["../../../tmp/pwn", "a/b", "..", ".hidden", ""] {
+        assert_eq!(digest_prefix(bad), None, "{bad}");
+    }
 }

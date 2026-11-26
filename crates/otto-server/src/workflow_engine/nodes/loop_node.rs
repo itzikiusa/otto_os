@@ -173,7 +173,7 @@ pub(in crate::workflow_engine) async fn execute(
             let checkpoint = loop_checkpoint(&sub, &node.id, i, k, step_input.clone());
             let checkpoint_repo = WorkflowsRepo::new(ctx.pool.clone());
             let clock = AttemptClock::default();
-            match crate::workflow_checkpoint::execute_timed(
+            match Box::pin(crate::workflow_checkpoint::execute_timed(
                 &checkpoint_repo,
                 run_id,
                 checkpoint,
@@ -207,7 +207,7 @@ pub(in crate::workflow_engine) async fn execute(
                     let _ = log_tx.send(line);
                 },
                 &clock,
-            )
+            ))
             .await
             {
                 Ok(outcome) => {

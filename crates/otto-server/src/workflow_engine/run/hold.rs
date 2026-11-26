@@ -44,9 +44,9 @@ pub(crate) async fn resume(
     }
     let repo = WorkflowsRepo::new(ctx.pool.clone());
     let ext = extend.map_or((None, None), |e| (e.iterations, e.active_s));
-    let r = rules::prepare_resume(&repo, run_id, ext).await?;
+    let mut r = rules::prepare_resume(&repo, run_id, ext).await?;
     // A long hold must not let retention delete the threads it continues.
-    step_thread::retain_run(ctx, &r.nodes, false).await;
+    step_thread::retain_run(ctx, &mut r.nodes, false).await;
     let ws = ctx.workspaces.get(&r.workflow.workspace_id).await?;
     let input = r.run.input;
     spawn_run(
