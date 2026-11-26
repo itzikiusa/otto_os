@@ -5,7 +5,7 @@
 // `refreshActiveWorkflowRuns`, `applyWorkflowRunEvent`) for existing callers.
 
 import { listActiveWorkflowRuns } from '../api/workflows';
-import type { ActiveWorkflowRun, Id } from '../api/types';
+import type { ActiveWorkflowRun, Id, RunOverview } from '../api/types';
 
 /** The `workflow_run_updated` fields the list needs. */
 export interface WorkflowRunEvent {
@@ -17,6 +17,8 @@ export interface WorkflowRunEvent {
   waiting_approval?: boolean;
   /** The changed node's summary (only its id + status are read here). */
   node?: { node_id: string; status: string } | null;
+  /** The run's computed overview (Runs inbox words, Needs you). */
+  overview?: RunOverview | null;
 }
 
 const TERMINAL = new Set(['success', 'error', 'canceled']);
@@ -52,13 +54,15 @@ class WorkflowRunsStore {
   }
 
   /** Apply a `workflow_run_updated` WS event IN PLACE: update a known run's
-   *  status/progress/approval flag, drop it on a terminal status, and fall back
+   *  status/progress/approval flag/overview, drop it on a terminal status —
+   *  unless the overview says it is held (paused, blocked, out of budget: a
+   *  held run is settled but stays in the Runs inbox, DR-101) — and fall back
    *  to a full refetch only for runs the list doesn't know yet (or events from
    *  an older daemon without progress fields, signalled by `nodes_total` 0/absent). */
   apply(ev: WorkflowRunEvent, currentWorkspaceId: Id | null): void {
     if (ev.workspace_id !== currentWorkspaceId) return;
     const idx = this.list.findIndex((r) => r.run_id === ev.run_id);
-    if (TERMINAL.has(ev.status)) {
+    if (TERMINAL.has(ev.status) && !ev.overview?.hold) {
       if (idx >= 0) this.list.splice(idx, 1);
       return;
     }
@@ -75,6 +79,7 @@ class WorkflowRunsStore {
       r.nodes_total = ev.nodes_total;
     }
     if (ev.waiting_approval !== undefined) r.waiting_approval = ev.waiting_approval;
+    if (ev.overview) r.overview = ev.overview;
     // The current step changed (a new step started, or the current one
     // settled): refetch for its name. A few times per run, not per log line.
     const n = ev.node;

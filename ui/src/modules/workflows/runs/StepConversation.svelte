@@ -1,0 +1,174 @@
+<script lang="ts">
+  // A step's (or reviewer's) conversation (ux.md §4.4): the step's runtime
+  // thread embedded READ-ONLY (no composer, no "Open in Threads"; its approval
+  // and question cards stay answerable), or — once retention deleted the
+  // thread, or the embed reports it gone or forbidden — the digest the run
+  // kept. A step run on the PTY runner (an older run) lists its sessions,
+  // which open in Agents.
+  import type { Component } from 'svelte';
+  import Icon from '../../../lib/components/Icon.svelte';
+  import LoadState from '../../../lib/components/LoadState.svelte';
+  import { readRunContext } from '../../../lib/api/workflows';
+  import { loadErrorText } from '../../../lib/loadError';
+  import { loadRuntimeThreadView, type RuntimeThreadViewProps } from '../../../lib/runtimeThreadPort';
+  import { ws } from '../../../lib/stores/workspace.svelte';
+  import type { DigestItem, StepThread, TranscriptDigest } from '../../../lib/api/types';
+
+  /** The embed's read-only props (agreed-names.md §9b; added to
+   *  RuntimeThreadViewProps by the editor package — typed here until then). */
+  type ReadOnlyEmbedProps = RuntimeThreadViewProps & { readOnly?: boolean; onunavailable?: (reason: 'deleted' | 'forbidden') => void };
+
+  interface Props {
+    thread?: StepThread | null;
+    /** PTY session ids (an older run). */
+    sessions?: readonly string[];
+    /** The kept digest (the full node's `thread.digest`). */
+    digest?: TranscriptDigest | null;
+    workspaceId: string;
+    runId: string;
+    nodeId: string;
+    attempt: number;
+  }
+  let { thread = null, sessions = [], digest = null, workspaceId, runId, nodeId, attempt }: Props = $props();
+
+  let gone = $state<'deleted' | 'forbidden' | null>(null);
+  const live = $derived(thread?.runner === 'threads' && thread.available !== false && !gone);
+
+  let View = $state<Component<ReadOnlyEmbedProps> | null>(null);
+  let viewError = $state<string | null>(null);
+  $effect(() => {
+    if (!live || View) return;
+    loadRuntimeThreadView().then((m) => (View = m.default as Component<ReadOnlyEmbedProps>), (e) => (viewError = loadErrorText(e)));
+  });
+
+  // The digest's timeline, kept beside the run's files.
+  let items = $state<DigestItem[] | null>(null);
+  let itemsError = $state<string | null>(null);
+  $effect(() => {
+    if (live || thread?.runner !== 'threads') return;
+    const path = `.threads/${nodeId}-${attempt}.json`;
+    readRunContext(runId, path).then(
+      (f) => {
+        const v = JSON.parse(f.content) as { items?: DigestItem[] } | DigestItem[];
+        items = Array.isArray(v) ? v : (v.items ?? []);
+      },
+      (e) => (itemsError = loadErrorText(e)),
+    );
+  });
+</script>
+
+{#if live && View}
+  <div class="embed" data-testid="wf-step-conversation">
+    <View sessionId={thread!.thread_id} {workspaceId} readOnly hideEmbedBarWhenUnlinked onunavailable={(reason) => (gone = reason)} />
+  </div>
+  <p class="note"><Icon name="lock" size={12} />Read-only: this conversation belongs to the run. It is kept for 24 hours after the run ends (7 days if the run fails).</p>
+{:else if live}
+  <LoadState what="the conversation" loading={!viewError} error={viewError} empty />
+{:else if thread?.runner === 'threads'}
+  <div class="digest" data-testid="wf-step-digest">
+    <p class="note"><Icon name="info" size={12} />{gone === 'forbidden' ? 'You can’t open this conversation. The answer, files and usage are kept — summary below.' : 'The conversation was removed after the run ended. The answer, files and usage are kept — summary below.'}</p>
+    {#if items?.length}
+      <ol class="items">
+        {#each items as it, i (i)}
+          <li><span class="role">{it.tool ? `${it.role} · ${it.tool}` : it.role}</span><span class="text" dir="auto">{it.text}</span></li>
+        {/each}
+      </ol>
+    {:else if itemsError && !digest}
+      <LoadState what="the conversation summary" variant="compact" error={itemsError} empty />
+    {/if}
+    {#if digest}
+      {#if digest.last_answer_excerpt}<h4>The last answer</h4><pre class="answer" dir="auto">{digest.last_answer_excerpt}</pre>{/if}
+      {#if digest.files_changed.length}<h4>Files changed</h4><ul class="files">{#each digest.files_changed as f (f)}<li><code>{f}</code></li>{/each}</ul>{/if}
+      {#if digest.errors.length}<h4>Errors</h4><ul class="files">{#each digest.errors as e, i (i)}<li dir="auto">{e}</li>{/each}</ul>{/if}
+      <p class="note">{digest.turns} turns · {digest.tool_calls} tool calls</p>
+    {/if}
+  </div>
+{:else if sessions.length || thread?.runner === 'pty'}
+  <ul class="sessions">
+    {#each sessions.length ? sessions : [thread!.thread_id] as id (id)}
+      <li>
+        <span>Session · {thread?.provider ?? 'agent'} · {id.slice(-6)}</span>
+        <button type="button" class="btn small" onclick={() => ws.navigateToSession(id)}>Open in Agents</button>
+      </li>
+    {/each}
+  </ul>
+{:else}
+  <p class="note">This step has no conversation.</p>
+{/if}
+
+<style>
+  .embed {
+    display: flex;
+    flex-direction: column;
+    min-block-size: 360px;
+    block-size: 100%;
+  }
+  .note {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-3);
+    margin: 0;
+    padding-block: var(--sp-4);
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+  }
+  .items {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-3);
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  .items li {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-1);
+    padding: var(--sp-4);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
+    background: var(--surface);
+  }
+  .role {
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+  }
+  .text {
+    font-size: var(--fs-m);
+    overflow-wrap: anywhere;
+  }
+  h4 {
+    margin: 0;
+    margin-block-start: var(--sp-5);
+    font-size: var(--fs-m);
+  }
+  .answer {
+    margin: 0;
+    margin-block-start: var(--sp-3);
+    padding: var(--sp-5);
+    border-radius: var(--radius-m);
+    background: var(--surface-2);
+    font-family: var(--font-ui);
+    font-size: var(--fs-m);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .files {
+    margin: 0;
+    padding-inline-start: var(--sp-6);
+    font-size: var(--fs-s);
+  }
+  .sessions {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  .sessions li {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--sp-4);
+    padding-block: var(--sp-3);
+    font-size: var(--fs-m);
+  }
+</style>

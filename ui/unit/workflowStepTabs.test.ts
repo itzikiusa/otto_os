@@ -1,0 +1,25 @@
+// The step pane's tabs by step kind and its phase bar (ux.md §4.4) — runs/stepTabs.ts.
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { paneTabs, phaseSegments } from '../src/modules/workflows/runs/stepTabs.ts';
+import { at, node, T0 } from './workflowRunFixtures.ts';
+
+test('each kind of step opens on its own first tab', () => {
+  assert.deepEqual(paneTabs({ kind: 'agent_prompt' }), ['conversation', 'output', 'files']);
+  assert.deepEqual(paneTabs({ kind: 'review_run' }), ['summary', 'summarizer', 'log', 'files']);
+  assert.deepEqual(paneTabs({ child: true, kind: 'review_run' }), ['conversation', 'files']);
+  assert.deepEqual(paneTabs({ kind: 'script' }), ['log', 'output']);
+  assert.deepEqual(paneTabs({ kind: 'human_approval' }), ['preview', 'log']);
+  assert.deepEqual(paneTabs({ kind: 'post_review_comments', node: node('a', 'running', 0, null, { attention: { kind: 'approval', text: 'x', since: at(1) } }) }), ['preview', 'log']);
+  assert.deepEqual(paneTabs({ kind: 'manual_trigger' }), ['input']);
+  assert.deepEqual(paneTabs({ result: true }), ['result', 'files', 'input']);
+  assert.deepEqual(paneTabs({ result: true, goal: true }), ['result', 'criteria', 'files', 'input']);
+  // A deterministic kind that still ran an agent (a thread) shows its conversation.
+  assert.equal(paneTabs({ kind: 'git_checkout', node: node('a', 'success', 0, 1, { thread: { thread_id: 't', runner: 'threads', provider: 'claude', turns: 1, usage: {} as never } }) })[0], 'conversation');
+});
+
+test('phase segments run until the next phase, the last until the end', () => {
+  const s = phaseSegments([{ phase: 'starting', at: at(0) }, { phase: 'waiting', at: at(0.1), note: 'memory' }, { phase: 'working', at: at(5) }], T0 + 11 * 60_000);
+  assert.deepEqual(s.map((x) => [x.label, Math.round(x.ms / 1000)]), [['Starting', 6], ['Waited', 294], ['Working', 360]]);
+  assert.equal(s[1].note, 'memory');
+});

@@ -7,18 +7,23 @@
 export interface RunRoute {
   workflowId: string;
   runId: string;
+  /** The step open on the run page (`…/runs/<run>/<node>`). */
+  nodeId?: string;
+  /** A reviewer of that step (`…/<node>/<child>`). */
+  childId?: string;
 }
 
-/** `['workflows', wf, 'runs', run]` (router.parts) → the run it names. */
+/** `['workflows', wf, 'runs', run, node?, child?]` (router.parts) → the run it names. */
 export function parseRunRoute(parts: readonly string[]): RunRoute | null {
-  const [mod, workflowId, sub, runId] = parts;
+  const [mod, workflowId, sub, runId, nodeId, childId] = parts;
   if (mod !== 'workflows' || !workflowId || sub !== 'runs' || !runId) return null;
-  return { workflowId, runId };
+  return { workflowId, runId, ...(nodeId ? { nodeId } : {}), ...(nodeId && childId ? { childId } : {}) };
 }
 
-/** The router path of a run (no leading `#/`). */
-export function runRoutePath(workflowId: string, runId: string): string {
-  return `workflows/${encodeURIComponent(workflowId)}/runs/${encodeURIComponent(runId)}`;
+/** The router path of a run, or of one of its steps (no leading `#/`). */
+export function runRoutePath(workflowId: string, runId: string, nodeId?: string | null, childId?: string | null): string {
+  const step = nodeId ? `/${encodeURIComponent(nodeId)}${childId ? `/${encodeURIComponent(childId)}` : ''}` : '';
+  return `workflows/${encodeURIComponent(workflowId)}/runs/${encodeURIComponent(runId)}${step}`;
 }
 
 /** The absolute link to a run on this Otto (`origin` + `pathname` of the page
