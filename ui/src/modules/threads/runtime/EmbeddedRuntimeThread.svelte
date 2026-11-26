@@ -68,7 +68,7 @@
   let gone = $state<RuntimeEmbedUnavailable | null>(null);
   // Told per thread, and kept: the view forgets "unavailable" once the thread
   // view closes, which must not bring the embed back for the same thread.
-  let told = $state<{ id: string; r: RuntimeEmbedUnavailable } | null>(null);
+  let told = $state<{ id: string | null; r: RuntimeEmbedUnavailable } | null>(null);
   const lost = $derived.by((): RuntimeEmbedUnavailable | null => {
     if (!onunavailable || !sessionId) return null;
     if (!runtimeThreads.get(sessionId) && runtimeThreads.removed(sessionId)) return 'deleted';
