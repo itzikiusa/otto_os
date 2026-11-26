@@ -500,6 +500,10 @@ struct Fake {
     /// The first turn asks a question, is answered once `answer` is set, then hangs.
     ask: std::sync::atomic::AtomicBool,
     answer: std::sync::atomic::AtomicBool,
+    /// With `ask`: once answered, the turn asks a second question.
+    ask_again: std::sync::atomic::AtomicBool,
+    /// With `ask`: the turn fails instead of taking its answer.
+    fail_asked: std::sync::atomic::AtomicBool,
 }
 
 #[async_trait::async_trait]
@@ -521,26 +525,35 @@ impl otto_agent_run::step::StepRunner for Fake {
             start_ordinal: 0,
         });
         if self.ask.swap(false, std::sync::atomic::Ordering::SeqCst) {
-            let _ = ev.send(otto_agent_run::step::StepEvent::NeedsYou(
-                otto_core::agent_runtime::Attention {
-                    kind: otto_core::agent_runtime::AttentionKind::Question,
-                    via: Some(otto_core::agent_runtime::AttentionVia::Provider),
-                    text: "Which one?".into(),
-                    since: chrono::Utc::now(),
-                    thread_id: Some(thread_id.clone()),
-                    request_id: None,
-                    resets_at: None,
-                    criterion_id: None,
-                },
-            ));
+            let ask = |text: &str| {
+                let _ = ev.send(otto_agent_run::step::StepEvent::NeedsYou(
+                    otto_core::agent_runtime::Attention {
+                        kind: otto_core::agent_runtime::AttentionKind::Question,
+                        via: Some(otto_core::agent_runtime::AttentionVia::Provider),
+                        text: text.into(),
+                        since: chrono::Utc::now(),
+                        thread_id: Some(thread_id.clone()),
+                        request_id: None,
+                        resets_at: None,
+                        criterion_id: None,
+                    },
+                ));
+            };
+            ask("Which one?");
             while !self.answer.load(std::sync::atomic::Ordering::SeqCst) {
                 tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            if self.fail_asked.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(otto_core::Error::Upstream("the provider dropped".into()));
             }
             let _ = ev.send(otto_agent_run::step::StepEvent::Resumed {
                 request_id: None,
                 answer: Some("this one".into()),
                 by: None,
             });
+            if self.ask_again.load(std::sync::atomic::Ordering::SeqCst) {
+                ask("And then?");
+            }
             std::future::pending::<()>().await;
         }
         let hang_now = self
@@ -1939,4 +1952,78 @@ async fn a_step_that_starts_again_drops_its_old_error_class() {
     let run = fx.repo.get_run(&fx.run_id).await.unwrap();
     assert_eq!(run.status, RunStatus::Success, "{:?}", run.error);
     assert_eq!(state(&run, "a").error_class, None);
+}
+
+/// A run on `spawn_run` whose agent step asked its question, with every run
+/// slot then taken by the test (the parked run gave its own back).
+async fn asked_with_the_run_gate_full(
+    ws: &str,
+    f: &Fake,
+) -> (Fx, Vec<tokio::sync::SemaphorePermit<'static>>) {
+    f.ask.store(true, std::sync::atomic::Ordering::SeqCst);
+    let graph = WorkflowGraph {
+        nodes: vec![node("start", "log", json!({})), agent("a")],
+        edges: vec![edge("start", "a")],
+    };
+    let fx = setup(ws, graph).await;
+    spawn_run(
+        fx.ctx.clone(),
+        fx.ws.clone(),
+        fx.wf.clone(),
+        fx.run_id.clone(),
+        json!({}),
+        RunScope::default(),
+        None,
+    );
+    until(&fx, "a", |n| n.attention.is_some()).await;
+    let gate =
+        otto_workflows::run_queue::gate_for(otto_workflows::run_queue::lane_of(&fx.wf.graph));
+    let t0 = Instant::now();
+    let mut held = vec![];
+    while held.len() < otto_workflows::run_queue::max_parallel_runs() {
+        held.extend(gate.try_acquire().ok());
+        assert!(
+            t0.elapsed() < Duration::from_secs(5),
+            "the parked run gives its slot back"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    (fx, held)
+}
+
+/// CR1-022: a step that asks again while its last answer still waits for a
+/// run slot is parked, not half back: a slot that frees then is not taken by
+/// a run that waits on a person (it held it, and burnt its time budget).
+#[tokio::test]
+async fn a_step_asking_again_before_it_retook_its_slot_stays_parked() {
+    let (f, _fake) = fake();
+    f.ask_again.store(true, std::sync::atomic::Ordering::SeqCst);
+    let (fx, mut held) = asked_with_the_run_gate_full("retake-again", &f).await;
+    f.answer.store(true, std::sync::atomic::Ordering::SeqCst);
+    let again = |n: &NodeRunState| n.attention.as_ref().is_some_and(|a| a.text == "And then?");
+    until(&fx, "a", again).await;
+    held.pop();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let gate =
+        otto_workflows::run_queue::gate_for(otto_workflows::run_queue::lane_of(&fx.wf.graph));
+    assert_eq!(gate.available_permits(), 1, "the parked run took no slot");
+    fx.repo.request_cancel(&fx.run_id).await.unwrap();
+    assert_eq!(fx.settled().await.status, RunStatus::Canceled);
+}
+
+/// CR1-022: an attempt that failed while it waited on a person is retried;
+/// with every run slot taken, the retry waits for its slot beside the cancel
+/// watch, so a Cancel still stops the run at once.
+#[tokio::test]
+async fn a_cancel_stops_a_retry_waiting_to_retake_its_slot() {
+    let (f, _fake) = fake();
+    f.fail_asked
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let (fx, _held) = asked_with_the_run_gate_full("retake-retry", &f).await;
+    f.answer.store(true, std::sync::atomic::Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    fx.repo.request_cancel(&fx.run_id).await.unwrap();
+    let t0 = Instant::now();
+    assert_eq!(fx.settled().await.status, RunStatus::Canceled);
+    assert!(t0.elapsed() < Duration::from_secs(10), "{:?}", t0.elapsed());
 }

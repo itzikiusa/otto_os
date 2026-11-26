@@ -522,6 +522,9 @@ async fn run_attempts(
                     // A step waiting on a person parks (§2.4); its answer unparks it.
                     match &sid {
                         AgentAssociation::Step(StepNote::NeedsYou(a)) => {
+                            // Asked again before the last answer's slot came:
+                            // that re-take is off, the step waits on a person.
+                            unpark = None;
                             if park.is_none() {
                                 park = Some(env.budget.park());
                                 super::chat::needs_you(cx, node, a).await;
@@ -631,9 +634,11 @@ async fn run_attempts(
                 let Some((sleep_ms, max_eff, reason)) = plan else {
                     break Err(e);
                 };
-                // The retry works: a park of the failed attempt ends with it.
+                // The retry works: a park of the failed attempt ends with it,
+                // its slot re-taken beside the next attempt's watch (a full
+                // run gate must not hold a Cancel back here).
                 if let Some(p) = park.take() {
-                    p.unpark().await;
+                    unpark = Some(Box::pin(p.unpark()));
                 }
                 attempt_limit = max_eff + 1;
                 st.logs.push(otto_workflows::retry::retry_log_line(
