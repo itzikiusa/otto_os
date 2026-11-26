@@ -465,11 +465,13 @@ including behaviour changes to know before upgrading.
 - **Broadcast & Peer Messaging** — send one literal message to many live agent
   sessions at once (⌘⇧B, no AI in the loop) or relay structured session-to-session
   messages with full sender attribution.
-- **Goal Loops** — give a **goal**, machine-checkable acceptance criteria, and a
-  **budget** (max iterations + active time). A team of agents iterates
-  **Plan → Execute → Evaluate → Digest** on an isolated `goal-loop/<id>` branch,
-  repeating until the criteria pass or the budget runs out — with live
-  phase/iteration monitoring and openable executor sessions.
+- **Goals** (inside Workflows) — give a **goal**, criteria and a **budget**
+  (iterations + active time). An agent works in an isolated worktree (branch
+  `otto-wf/<run>`) or a research folder, and a check step decides every
+  criterion with evidence — a command, a checker agent, or you — repeating
+  until all are met or the run is held (**Paused**, **Blocked**, **Out of
+  budget**), where you **Resume** or **Extend and resume…**. Loops made with
+  the earlier Goal Loops feature are a read-only history.
 - **Connections** — open SSH / MySQL / PostgreSQL / Redis / MongoDB / ClickHouse
   sessions side-by-side with agents. One sidebar entry holds the **unified
   hub**: every connection and Kafka cluster in one folder tree with per-kind
@@ -617,15 +619,19 @@ including behaviour changes to know before upgrading.
   settings in **MCP → Otto Server**.
 - **Workflows** — a visual workflow engine that chains steps (agent prompts, HTTP
   requests, DB queries, broker peeks, channel notifications, human approvals,
-  …) into runnable graphs, with per-workflow instructions +
-  `prompt.md` context files, per-step retry / re-run-from-here, a stall
-  watchdog, and a concurrency cap with queueing. Runs **survive daemon
-  restarts**: finished steps are adopted from the persisted per-node state and
-  the interrupted step resumes (side-effect steps are never blindly re-fired;
-  a per-workflow toggle opts out). A comma-separated Working Directory declares
-  a **multi-repo run**. Manual, webhook, **chat** (run a workflow from a bound
-  Slack/Telegram channel), **schedule** (interval / daily / weekly / cron) and
-  event triggers fire today; a few Product/Review nodes are still being wired.
+  …) into runnable graphs. Agent steps run as **threads** (provider · model ·
+  effort per step), **independent steps run side by side**, and steps that
+  need no agent check out a PR, run a script, post review comments or check
+  criteria. A **Runs** inbox shows what **needs you**; each run has its own
+  page with every step's conversation. Per-workflow instructions +
+  `prompt.md` context files, **Retry step**, and a run queue. Runs **survive
+  daemon restarts**: finished steps are adopted from the persisted per-node
+  state and an interrupted agent step goes on in the same conversation
+  (side-effect steps are never blindly re-fired; a per-workflow toggle opts
+  out). A comma-separated Working Directory declares a **multi-repo run**.
+  Manual, webhook, **chat** (run a workflow from a bound Slack/Telegram
+  channel, with one live status message in the thread), **schedule**
+  (interval / daily / weekly / cron) and event triggers fire today.
 - **Scheduled Tasks & Personal Agents (Unified Hub)** — one sidebar entry with
   three tabs (**Tasks · Agents · Agent channels**):
   - **Tasks:** recurring agent jobs on an **interval / daily / weekly** schedule

@@ -175,8 +175,10 @@ infix `contains` / `in`, unary `! -`, parentheses, dotted/indexed paths
 (`output.result`, `input.rows[0]`), literals, and functions `len, lower, upper,
 default, has, int, float, str, bool, not`. Missing path segments resolve to `null`
 (never an error). For edge conditions the context is
-`{ output, input, node:{id,kind,name}, run:{input, repos, prs} }` (`run.repos` / `run.prs` are the run's `repos.json` and `prs.json` entries — §7); a condition that fails to
-parse or evaluate is treated as **not taken** (and logged), never a crash.
+`{ output, input, node:{id,kind,name}, run:{input, repos, prs} }` (`run.repos`
+/ `run.prs` are the run's `repos.json` and `prs.json` entries — §7); a
+condition that fails to parse or evaluate is treated as **not taken** (and
+logged), never a crash.
 Nesting is bounded: more than 64 levels of `!`/`-`, parentheses, call arguments or
 `[ ]` indexes is a parse error (*"expression nests too deeply"*), and so is a chain
 of more than 1,024 binary operators (*"expression is too long"*) — the parser and
@@ -1979,7 +1981,9 @@ build on.
 | `GET /workflows/{id}/versions/{v}` | ws viewer | one snapshot (404 if unknown) |
 | `POST /workflows/{id}/versions/{v}/restore` | ws editor | `{note?}` → copies `v`'s graph in as a **new** version |
 
-Engine settings (`PUT /api/v1/settings`, the root user on a person's credential; the first four are range-checked and a bad value is refused) and environment:
+Engine settings (`PUT /api/v1/settings`, the root user on a person's
+credential; the first four are range-checked and a bad value is refused) and
+environment:
 
 | Key | Default | What it does |
 |---|---|---|
