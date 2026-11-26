@@ -428,6 +428,7 @@ colour alone**:
 | Session rows elsewhere (Home, Agents) | Needs you / Approval / Question · Failed · Limited · Working 18s · Done · Idle · Stopped | `sessionWord` |
 | Subagents | Working · Needs you · Done · Failed · Limited · Stopped | `subagentWord` |
 | Resources (connections, accounts, clusters) | Connected · Can’t connect · Needs sign-in · Not checked | `resourceWord` |
+| Runs and steps (Workflows) | Approval / Question / Verify / Limited / Needs you · Blocked · Out of budget · Failed · Working 12m · Waiting · Queued · 2nd · Paused · Done · Canceled; steps add Starting · Finishing · Timed out · Signed out · Skipped · Stopped · Not run | `runWord` / `stepWord` (`modules/workflows/runs/runWords.ts`, with their own tones) |
 
 `wordTone(word)` gives the one tone: `--warning` (Approval, Question, Needs
 you, Limited, Needs sign-in), `--danger` (Failed, Can’t connect),
