@@ -1535,9 +1535,10 @@ instead of failing it:
 - **Runs from before this release** open on the run page as they are: steps
   in order, logs, outputs and files. They have no phases and no thread, so
   they carry an **Older run** chip ("phase timings and conversations are not
-  available; logs and outputs are") and their steps list the terminal
-  sessions they ran in (**Open in Agents**, for as long as that session still
-  exists).
+  available; logs and outputs are") and a step's Conversation lists the
+  terminal sessions it ran in with **Open in Agents** — or, when none of them
+  is kept any more, "This step ran in a terminal session that is no longer
+  kept."
 - **A Goal Loop running at the update** is paused once, with one notice
   ("… was paused by the update …"); its work is kept and **Continue as a
   goal** picks it up ([Goals](./goal-loops.md)).
