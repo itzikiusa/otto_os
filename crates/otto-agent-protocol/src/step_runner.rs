@@ -49,6 +49,12 @@ pub trait StepHost: Send + Sync {
     ) -> Option<String> {
         None
     }
+    /// Report the governed Otto MCP approval cards `thread`'s calls wait on
+    /// as `NeedsYou` (`via: mcp`) and their decision as `Resumed`, for as
+    /// long as the turn runs (the runner drops this future at settle).
+    async fn watch_mcp(&self, _thread: &Id, _ev: UnboundedSender<StepEvent>) {
+        std::future::pending::<()>().await
+    }
     /// When `provider`'s plan usage limit resets, when Otto knows
     /// (`otto_usage::limits`); `meta` names the account.
     async fn usage_resets_at(&self, _provider: &str, _meta: &Value) -> Option<DateTime<Utc>> {
@@ -76,6 +82,11 @@ impl StepHost for NoStepHost {
 /// (`otto_usage::limits::reset_for` over the owner's limits), when given.
 pub struct DaemonStepHost {
     pub manager: Arc<otto_sessions::SessionManager>,
+    /// The approval cards and the daemon bus that says when one changes.
+    pub approvals: Option<(
+        otto_state::McpApprovalRepo,
+        tokio::sync::broadcast::Sender<otto_core::event::Event>,
+    )>,
     #[allow(clippy::type_complexity)]
     pub resets: Option<
         Arc<
@@ -106,6 +117,49 @@ impl StepHost for DaemonStepHost {
         match otto_sessions::provider_models::check_pick(reg, provider, model, effort).await {
             otto_sessions::provider_models::PickCheck::Invalid(m) => Some(m),
             _ => None,
+        }
+    }
+    async fn watch_mcp(&self, thread: &Id, ev: UnboundedSender<StepEvent>) {
+        let Some((repo, bus)) = &self.approvals else {
+            return std::future::pending().await;
+        };
+        let mut reported: Vec<otto_state::McpApproval> = Vec::new();
+        loop {
+            let mut rx = bus.subscribe();
+            let pending = repo.pending_for_session(thread).await.unwrap_or_default();
+            for a in pending
+                .iter()
+                .filter(|a| !reported.iter().any(|r| r.id == a.id))
+            {
+                let mut att = Attention::new(AttentionKind::Approval, &a.title, Utc::now());
+                att.via = Some(otto_core::agent_runtime::AttentionVia::Mcp);
+                att.request_id = Some(a.id.clone());
+                att.thread_id = Some(thread.clone());
+                let _ = ev.send(StepEvent::NeedsYou(att));
+            }
+            for gone in reported
+                .iter()
+                .filter(|r| !pending.iter().any(|a| a.id == r.id))
+            {
+                let decided = repo.get(&gone.id).await.ok();
+                let _ = ev.send(StepEvent::Resumed {
+                    request_id: Some(gone.id.clone()),
+                    answer: decided.as_ref().map(|d| d.status.clone()),
+                    by: decided.and_then(|d| d.decided_by),
+                });
+            }
+            reported = pending;
+            let changed = async {
+                loop {
+                    match rx.recv().await {
+                        Ok(otto_core::event::Event::McpApprovalChanged { .. })
+                        | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => return,
+                        Ok(_) => continue,
+                        Err(_) => return std::future::pending().await,
+                    }
+                }
+            };
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(30), changed).await;
         }
     }
     async fn usage_resets_at(&self, provider: &str, meta: &Value) -> Option<DateTime<Utc>> {
@@ -243,23 +297,31 @@ impl ThreadStepRunner {
         let mut opts = TurnOpts::new(cancel.clone());
         opts.no_progress = t.no_progress;
         opts.deadline = t.timeout.map(|d| d.saturating_sub(tally.started.elapsed()));
-        let ev = ev.clone();
-        self.rt
-            .run_turn(id, &req, opts, move |e| {
-                let _ = ev.send(e);
-            })
-            .await
-            .map_err(|e| {
-                let m = e.to_string();
-                if m.contains(RESUME_REFUSED) {
-                    StepError::new(
-                        StepErrorClass::Provider,
-                        "could not resume the conversation of the earlier step",
-                    )
-                } else {
-                    StepError::new(StepErrorClass::Spawn, m)
-                }
-            })
+        let ev2 = ev.clone();
+        let run = self.rt.run_turn(id, &req, opts, move |e| {
+            let _ = ev2.send(e);
+        });
+        tokio::pin!(run);
+        let watch = self.host.watch_mcp(id, ev.clone());
+        tokio::pin!(watch);
+        let mut watching = true;
+        let res = loop {
+            tokio::select! {
+                r = &mut run => break r,
+                _ = &mut watch, if watching => watching = false,
+            }
+        };
+        res.map_err(|e| {
+            let m = e.to_string();
+            if m.contains(RESUME_REFUSED) {
+                StepError::new(
+                    StepErrorClass::Provider,
+                    "could not resume the conversation of the earlier step",
+                )
+            } else {
+                StepError::new(StepErrorClass::Spawn, m)
+            }
+        })
     }
 
     /// The class a settled wait ends with, if it failed.

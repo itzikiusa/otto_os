@@ -1460,6 +1460,20 @@ impl McpApprovalRepo {
         Ok(row_to_approval(&r))
     }
 
+    /// The pending approvals a session's calls are waiting on (a workflow
+    /// step's thread shows "Needs you" for them), oldest first.
+    pub async fn pending_for_session(&self, session_id: &str) -> Result<Vec<McpApproval>> {
+        let rows = sqlx::query(
+            "SELECT * FROM mcp_approvals WHERE requested_by_session_id = ? \
+             AND status = 'pending' ORDER BY created_at",
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("pending approvals"))?;
+        Ok(rows.iter().map(row_to_approval).collect())
+    }
+
     /// Several approvals in ONE statement (perf W4: the personal-agent
     /// activity feed did one `get` per waiting item). Missing ids are simply
     /// absent; order is unspecified.

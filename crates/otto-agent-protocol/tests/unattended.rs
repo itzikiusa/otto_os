@@ -885,3 +885,65 @@ async fn a_steps_sub_threads_inherit_its_run_and_are_capped() {
     );
     rig.rt.shutdown().await;
 }
+
+/// A governed Otto MCP call the step's thread made waits on an approval
+/// card: the run hears "Needs you" (via mcp) and the decision.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pending_mcp_approval_card_needs_you_until_it_is_decided() {
+    use otto_agent_protocol::step_runner::DaemonStepHost;
+    let rig = Rig::new(false).await;
+    let (bus, _keep) = tokio::sync::broadcast::channel(16);
+    let repo = otto_state::McpApprovalRepo::new(rig.pool.clone());
+    let card = repo
+        .create(otto_state::NewApproval {
+            workspace_id: Some("w1".into()),
+            kind: "tool_call".into(),
+            server_id: None,
+            server_name: Some("otto".into()),
+            tool: Some("otto.comment_pr".into()),
+            title: "Comment on PR #12".into(),
+            detail: None,
+            args_redacted_json: "{}".into(),
+            args_hash: None,
+            risk_label: None,
+            requested_by: Some("agent".into()),
+            requested_by_kind: Some("session".into()),
+            requested_by_session_id: Some("t1".into()),
+            expires_at: None,
+        })
+        .await
+        .unwrap();
+    let manager = otto_sessions::SessionManager::new(
+        otto_state::SessionsRepo::new(rig.pool.clone()),
+        bus.clone(),
+        otto_sessions::ProviderRegistry::new(None),
+    );
+    let host = Arc::new(DaemonStepHost {
+        manager: Arc::new(manager),
+        approvals: Some((repo.clone(), bus.clone())),
+        resets: None,
+    });
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let h = Arc::clone(&host);
+    let watch = tokio::spawn(async move { h.watch_mcp(&"t1".into(), tx).await });
+    let a = need(&mut rx).await;
+    assert_eq!(a.via, Some(otto_core::agent_runtime::AttentionVia::Mcp));
+    assert_eq!(a.request_id.as_ref(), Some(&card.id));
+    assert_eq!(a.text, "Comment on PR #12");
+    repo.decide(&card.id, true, "u1", None).await.unwrap();
+    let _ = bus.send(otto_core::event::Event::McpApprovalChanged {
+        approval_id: Some(card.id.clone()),
+        workspace_id: Some("w1".into()),
+        status: "approved".into(),
+    });
+    let resumed = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let StepEvent::Resumed { request_id, by, .. } = resumed else {
+        panic!("{resumed:?}");
+    };
+    assert_eq!((request_id, by), (Some(card.id.clone()), Some("u1".into())));
+    watch.abort();
+    rig.rt.shutdown().await;
+}

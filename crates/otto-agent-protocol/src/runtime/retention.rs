@@ -9,6 +9,7 @@ use chrono::{DateTime, Utc};
 use super::*;
 
 pub const RETAIN_UNTIL_KEY: &str = "retain_until";
+const SWEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 /// Rows one sweep deletes at most.
 const SWEEP_MAX: u32 = 200;
 
@@ -65,6 +66,32 @@ impl AgentRuntime {
             }
         }
         Ok(())
+    }
+
+    /// The sweep every 10 minutes for the daemon's life, skipping a pass
+    /// while the machine is busy (`SessionManager::defer_maintenance`). The
+    /// daemon's boot starts it once.
+    pub fn spawn_retention_sweep(
+        &self,
+        manager: Arc<otto_sessions::SessionManager>,
+    ) -> tokio::task::JoinHandle<()> {
+        let rt = self.clone();
+        tokio::spawn(async move {
+            let mut deferred = None;
+            loop {
+                tokio::time::sleep(SWEEP_EVERY).await;
+                if manager.defer_maintenance(&mut deferred).await {
+                    continue;
+                }
+                match rt.sweep_retained(Utc::now()).await {
+                    Ok(0) => {}
+                    Ok(n) => {
+                        tracing::info!(deleted = n, "retention: engine threads past their date")
+                    }
+                    Err(e) => tracing::warn!("retention sweep: {e}"),
+                }
+            }
+        })
     }
 
     /// Delete the closed threads past their `retain_until` (at most 200 a
