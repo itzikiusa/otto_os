@@ -1,6 +1,6 @@
-//! The run's mutable bookkeeping (`RunState`) and the node loop's control
-//! signal (`NodeFlow`). Admission builds the state, the scheduler mutates it
-//! node by node, and finalize consumes it — one owner, threaded through.
+//! The run's mutable bookkeeping (`RunState`). Admission builds the state,
+//! the scheduler mutates it as nodes settle, and finalize consumes it — one
+//! owner, threaded through.
 
 use super::super::*;
 
@@ -12,10 +12,6 @@ pub(in crate::workflow_engine) struct RunState {
     pub(in crate::workflow_engine) outputs: HashMap<String, Value>,
     /// node_id -> resolved state for persistence (graph order).
     pub(in crate::workflow_engine) states: Vec<NodeRunState>,
-    /// 1-based number of the NEXT executed step — drives step-file naming.
-    /// Skipped nodes don't consume a number; adopted ones do (their files are
-    /// re-linked so the trail stays complete).
-    pub(in crate::workflow_engine) step_counter: usize,
     /// Nodes that errored (or were poisoned by an errored upstream) — these
     /// propagate failure. A node pruned by an edge condition (or downstream of
     /// a pruned one) is only marked Skipped: it does NOT fail the run, and
@@ -27,15 +23,6 @@ pub(in crate::workflow_engine) struct RunState {
     pub(in crate::workflow_engine) canceled: bool,
     /// The run's active time budget ran out.
     pub(in crate::workflow_engine) timed_out: bool,
-}
-
-/// What the node loop does after one node.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::workflow_engine) enum NodeFlow {
-    /// Go on to the next node in topological order.
-    Next,
-    /// Leave the loop for finalize (canceled or out of time budget).
-    Stop,
 }
 
 impl RunState {
@@ -52,7 +39,6 @@ impl RunState {
         Self {
             outputs: HashMap::new(),
             states,
-            step_counter: 0,
             errored: HashSet::new(),
             inactive_edges: HashSet::new(),
             canceled: false,

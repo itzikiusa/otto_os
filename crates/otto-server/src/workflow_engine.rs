@@ -42,10 +42,7 @@ use crate::turn_oracle::{self, cap_node_logs, CompleteVia, Phase};
 use otto_workflows::catalog::validate_node_output;
 pub use otto_workflows::catalog::{is_known_kind, node_catalog};
 pub(crate) use otto_workflows::graph::descendants_inclusive;
-use otto_workflows::graph::{
-    assemble_input, decide_node, dependency_is_relevant, eval_outgoing, incoming_edges,
-    outgoing_edges, topo_order, EdgeView, NodeDecision,
-};
+use otto_workflows::graph::{assemble_input, eval_outgoing, outgoing_edges, topo_order};
 pub(crate) use otto_workflows::location::{
     ensure_path_in_workspace, git_main_worktree, looks_like_path, match_repo_path,
 };
@@ -1567,9 +1564,8 @@ pub async fn run_workflow(
 
 /// The run driver: admission (graph, scope, identity, input, repo isolation,
 /// context files — `run/admission.rs`), adoption of a retry's prior states,
-/// the Pending→Running CAS, then one `run::schedule::step` per node in
-/// topological order until the order runs out or a step says stop, and
-/// finally `run::finalize::finish`. The run's mutable bookkeeping is one
+/// the Pending→Running CAS, then the scheduler (`run::schedule::drive`,
+/// nodes side by side in run order) and finally `run::finalize::finish`. The run's mutable bookkeeping is one
 /// `RunState` (`run/state.rs`).
 #[allow(clippy::too_many_arguments)]
 async fn run_workflow_with_budget(
@@ -1644,11 +1640,7 @@ async fn run_workflow_with_budget(
         prior_nodes: prior_nodes.as_deref(),
         continue_unfinished,
     };
-    for node_id in order {
-        if run::schedule::step(cx, &mut rs, node_id).await == run::state::NodeFlow::Stop {
-            break;
-        }
-    }
+    run::schedule::drive(cx, &mut rs, &order).await;
 
     run::finalize::finish(
         ctx,
