@@ -17,8 +17,9 @@
 //! * `sleep <ms>`, `stream <bytes> <ms>`, `reply <text>`, `usage <in> <out>`.
 //! * `ask <question>` (answered: "answer: <text>"), `approve <tool>`
 //!   ("approved: <tool>" / "denied: <tool>").
-//! * `fail provider|auth|usage_limit|crash|hang` (`hang`: ends only when
-//!   interrupted); `fail-attempts <n> <class>` fails the first `n` turns of
+//! * `fail provider|auth|usage_limit|usage_limit_no_reset|crash|hang`
+//!   (`usage_limit_no_reset`: the limit's text names no reset; `hang`: ends
+//!   only when interrupted); `fail-attempts <n> <class>` fails the first `n` turns of
 //!   the same handoff (or session).
 //! * `background <ms>` — the turn ends with background work running; `<ms>`
 //!   later the CLI starts its own follow-up turn, which runs the verbs after it.
@@ -66,6 +67,8 @@ pub enum FailClass {
     Provider,
     Auth,
     UsageLimit,
+    /// A plan limit whose text names no reset (Otto then knows none).
+    UsageLimitNoReset,
     Crash,
     Hang,
 }
@@ -76,6 +79,7 @@ impl FailClass {
             "provider" => Self::Provider,
             "auth" => Self::Auth,
             "usage_limit" => Self::UsageLimit,
+            "usage_limit_no_reset" => Self::UsageLimitNoReset,
             "crash" => Self::Crash,
             "hang" => Self::Hang,
             _ => return None,
@@ -89,6 +93,7 @@ impl FailClass {
             Self::Provider => "API Error: 500 Internal server error (fake)",
             Self::Auth => "Not logged in · Please run /login",
             Self::UsageLimit => "You've hit your usage limit · resets 3pm",
+            Self::UsageLimitNoReset => "You've hit your usage limit",
             Self::Crash => "crashing on purpose",
             Self::Hang => "",
         }

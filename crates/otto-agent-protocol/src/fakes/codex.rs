@@ -235,7 +235,7 @@ impl Wire for CodexWire<'_> {
 
     fn fail(&mut self, class: FailClass, message: &str) {
         let info = match class {
-            FailClass::UsageLimit => "usageLimitExceeded",
+            FailClass::UsageLimit | FailClass::UsageLimitNoReset => "usageLimitExceeded",
             FailClass::Auth => "unauthorized",
             _ => "internalServerError",
         };
