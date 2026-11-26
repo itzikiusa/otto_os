@@ -9,6 +9,7 @@
 use super::super::*;
 use super::NodeCall;
 
+use otto_workflows::review_plan::{label_tail, prior_run_context};
 pub(in crate::workflow_engine) use otto_workflows::review_scoring::{
     aggregate, blended_score, goals_from_reply, review_score, review_verdict, ScoreWeights,
 };
@@ -251,7 +252,8 @@ async fn plan_review<'a>(
                 .collect()
         })
         .unwrap_or_default();
-    let (jira_context, run_context) = prior_run_context(env, p, &mut logs);
+    let (jira_context, run_context, context_log) = prior_run_context(&env.files, p);
+    logs.extend(context_log);
     let plan = ReviewPlan {
         ctx,
         ws,
@@ -330,127 +332,6 @@ async fn review_config(
         otto_review::engine::apply_node_review_params(cfg, p);
     }
     cfg_override
-}
-
-/// Progress-post label fragments shared by every target.
-fn label_tail(
-    reviewers: &[Value],
-    lenses: &[String],
-    providers: &[String],
-    check_specs: &[(String, String)],
-) -> String {
-    let lens_list: Vec<String> = if reviewers.is_empty() {
-        lenses.to_vec()
-    } else {
-        reviewers
-            .iter()
-            .filter_map(|r| {
-                r.get("lens")
-                    .or_else(|| r.get("skill"))
-                    .or_else(|| r.get("name"))
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            })
-            .collect()
-    };
-    let lens_txt = if lens_list.is_empty() {
-        String::new()
-    } else {
-        format!(" · lenses: {}", lens_list.join(", "))
-    };
-    let prov_txt = if providers.is_empty() {
-        String::new()
-    } else {
-        format!(" · providers: {}", providers.join(", "))
-    };
-    let chk_txt = if check_specs.is_empty() {
-        String::new()
-    } else {
-        format!(
-            " · {} check(s) delegated to the reviewer",
-            check_specs.len()
-        )
-    };
-    format!("{lens_txt}{prov_txt}{chk_txt}")
-}
-
-/// What this run already established about the change, handed to the
-/// reviewers: `(ticket, step briefs)`.
-///
-/// Every OTHER node kind gets the run context directory named in its
-/// preamble and reads it; `review_run` is not an agent node, so its
-/// reviewers used to see the diff and nothing else — no ticket, no brief
-/// from the steps that ran before them. They then re-derive the system from
-/// raw hunks, and behavior that is documented, ticketed and intentional
-/// comes back as a defect of whichever change happened to touch its line.
-/// The engine already renders both blocks into every reviewer prompt
-/// (`run_review_core`); only this caller withheld them.
-///
-/// `include_context: false` opts out.
-fn prior_run_context(
-    env: &RunEnv,
-    p: &Value,
-    logs: &mut Vec<String>,
-) -> (Option<String>, Option<String>) {
-    let want_context = p
-        .get("include_context")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
-    let (jira_context, run_context) = if want_context {
-        let jira = env.files.read_jira_md();
-        // The step handoffs, oldest first, capped — the reviewer prompt
-        // also carries the whole diff, so this must not grow unbounded.
-        let mut brief = String::new();
-        for name in env.files.list_step_mds() {
-            let Some(body) = env.files.read_named(&name) else {
-                continue;
-            };
-            if brief.len() + body.len() > REVIEW_CONTEXT_CAP {
-                brief.push_str(
-                    "\n\n[remaining step files omitted — context cap reached; \
-                             they are in the run context directory]\n",
-                );
-                break;
-            }
-            brief.push_str(&format!("\n\n### {name}\n\n{body}"));
-        }
-        if let Some(previous) = env.files.read_named("previous-review.md") {
-            brief.push_str(&format!(
-                "\n\nHISTORICAL PRIOR ITERATION (not current authority):\n{previous}"
-            ));
-        }
-        let framed = (!brief.trim().is_empty()).then(|| {
-            format!(
-                "The current-run steps below ran BEFORE this review over this same \
-                         change. The explicitly marked HISTORICAL PRIOR ITERATION is different: verify its findings against current code and do not treat it as current authority. Treat them as established fact about the system — not as claims \
-                         to re-verify from the diff. In particular: behavior they record as \
-                         existing, documented or intentional was NOT introduced by this change, \
-                         and impact they already assessed is not yours to re-litigate. Use them \
-                         so you do not reconstruct the system from hunks alone.{brief}"
-            )
-        });
-        (jira, framed)
-    } else {
-        (None, None)
-    };
-    if jira_context.is_some() || run_context.is_some() {
-        logs.push(format!(
-            "review_run: reviewers given prior run context ({}{}{} chars)",
-            if jira_context.is_some() {
-                "ticket + "
-            } else {
-                ""
-            },
-            if run_context.is_some() {
-                "step briefs, "
-            } else {
-                ""
-            },
-            jira_context.as_ref().map_or(0, |s| s.len())
-                + run_context.as_ref().map_or(0, |s| s.len()),
-        ));
-    }
-    (jira_context, run_context)
 }
 
 /// One target whose review was started (or adopted).

@@ -396,11 +396,6 @@ enum ProgressItem {
     Post(String),
 }
 
-/// Cap on the prior-step context handed to reviewers. Their prompt already
-/// carries the whole diff; the briefs are there to stop them re-deriving the
-/// system, not to become the bulk of the prompt.
-const REVIEW_CONTEXT_CAP: usize = 48_000;
-
 /// Cap on an attached step file — a runaway reply shouldn't turn into a
 /// multi-megabyte chat upload; the full file stays in the run's context dir.
 const PROGRESS_FILE_CAP: usize = 1024 * 1024;
@@ -2166,32 +2161,7 @@ async fn stop_step_session(ctx: &ServerCtx, sid: &Id, run_id: &Id, logs: &mut Ve
     }
 }
 
-/// R2: the review mode a `review_run` step was TOLD to use, with the source for
-/// its log line — the run's own input first (the run dialog's override, which
-/// must beat a node that sets its own), then the node's `params.mode`. `None`
-/// when neither names a valid mode; the caller then falls back to the repo's
-/// stored config. Unparseable values are treated as absent (never an error).
-///
-/// Note the signature: there is no node-INPUT parameter. Node inputs lose
-/// run-level keys hop by hop, so a `review_mode` riding one is ignored by
-/// construction.
-pub(crate) fn resolve_review_mode_source(
-    run_input: &Value,
-    params: &Value,
-) -> Option<(otto_core::domain::ReviewMode, &'static str)> {
-    if let Some(m) = run_input
-        .get("review_mode")
-        .and_then(Value::as_str)
-        .and_then(otto_core::domain::ReviewMode::parse)
-    {
-        return Some((m, "run override"));
-    }
-    params
-        .get("mode")
-        .and_then(Value::as_str)
-        .and_then(otto_core::domain::ReviewMode::parse)
-        .map(|m| (m, "node"))
-}
+pub(crate) use otto_workflows::review_plan::resolve_review_mode_source;
 
 /// Resolve the user a run acts as. Falls back to a synthetic user for system /
 /// trigger-initiated runs whose `created_by` isn't a real account.
