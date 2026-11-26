@@ -375,6 +375,7 @@ pub async fn run_agent_thread(
     lens_slugs: &[String],
     prompt_file: Option<&Path>,
     cancel: Option<&Arc<AtomicBool>>,
+    failure: &std::sync::Mutex<Option<String>>,
 ) -> RunOutcome {
     let path = crate::session::findings_path(review_id, agent_index);
     let _ = std::fs::remove_file(&path);
@@ -425,6 +426,8 @@ pub async fn run_agent_thread(
     let Some(o) = outcome else {
         return RunOutcome::failed(None, FailReason::CreateFailed);
     };
+    *failure.lock().unwrap_or_else(|p| p.into_inner()) =
+        o.error.as_ref().map(|e| e.message.clone());
     match result_text(&path, &o) {
         Some(raw) => RunOutcome::ok(raw, o.thread_id),
         None => RunOutcome::failed(Some(o.thread_id.clone()), fail_reason(&o)),

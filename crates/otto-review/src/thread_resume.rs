@@ -83,6 +83,7 @@ async fn resume_row(c: &ResumeCtx, states: &SharedStates, i: usize, row: &Review
             &row.lens_slugs,
             outcome,
             false,
+            None,
         )
     };
     if let (true, Some(thread)) = (row.thread, row.session_id.clone()) {

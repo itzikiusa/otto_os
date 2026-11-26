@@ -913,6 +913,8 @@ pub async fn run_agent_session_with_recovery(
         .ok();
     let prompt_path = prompt_file.as_ref().map(|f| f.path());
     let prompt_refused = std::sync::atomic::AtomicBool::new(false);
+    // A thread attempt's failure in the runner's words (the row note names it).
+    let failure = std::sync::Mutex::new(None::<String>);
     let outcome = run_with_recovery_until(
         manager,
         attempts,
@@ -959,6 +961,7 @@ pub async fn run_agent_session_with_recovery(
                 lens_slugs,
                 prompt_path.as_deref(),
                 cancel,
+                &failure,
             )
             .await
         },
@@ -966,6 +969,8 @@ pub async fn run_agent_session_with_recovery(
     .await;
     drop(prompt_file);
     let refused = prompt_refused.load(std::sync::atomic::Ordering::Relaxed);
+    let failure = failure.into_inner().unwrap_or_default();
+    let (refused, failure) = (refused, failure.as_deref());
     settle_run(
         states,
         reviews,
@@ -974,6 +979,7 @@ pub async fn run_agent_session_with_recovery(
         lens_slugs,
         outcome,
         refused,
+        failure,
     )
     .await
 }
@@ -989,6 +995,8 @@ pub async fn settle_run(
     lens_slugs: &[String],
     outcome: RunOutcome,
     refused: bool,
+    // The thread runner's own words for the last attempt's failure.
+    failure: Option<&str>,
 ) -> AgentRunResult {
     // Persist terminal state ONCE (parse findings from the final raw result).
     if let Some(raw) = outcome.raw.as_deref() {
@@ -1050,10 +1058,14 @@ pub async fn settle_run(
             reason,
         }
     } else {
-        let note = if refused && outcome.reason == Some(FailReason::Exited) {
-            PROMPT_REFUSED_NOTE.to_string()
-        } else {
-            review_error_note(outcome.reason)
+        let note = match failure {
+            _ if refused && outcome.reason == Some(FailReason::Exited) => {
+                PROMPT_REFUSED_NOTE.to_string()
+            }
+            Some(why) if outcome.reason != Some(FailReason::Stopped) => {
+                format!("{}: {why}", review_error_note(outcome.reason))
+            }
+            _ => review_error_note(outcome.reason),
         };
         let reason = Some(note.clone());
         persist_agent(states, reviews, review_id, agent_index, move |s| {

@@ -925,6 +925,10 @@ pub(crate) async fn run_pr_review_inner(
     result
 }
 
+#[cfg(all(test, feature = "test-util"))]
+#[path = "thread_review_tests.rs"]
+mod thread_review_tests;
+
 #[cfg(test)]
 mod review_cleanup_tests {
     use super::*;

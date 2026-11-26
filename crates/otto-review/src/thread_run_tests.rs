@@ -329,7 +329,7 @@ async fn a_reviewer_that_times_out_every_attempt_ends_in_error() {
     assert_eq!(row.status, "error");
     assert_eq!(
         row.note,
-        "timed out (grace period elapsed and the agent went quiet)"
+        "timed out (grace period elapsed and the agent went quiet): timeout"
     );
     assert!(row.findings.is_empty());
 }
