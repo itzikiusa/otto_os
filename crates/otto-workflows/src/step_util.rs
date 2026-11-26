@@ -221,6 +221,70 @@ pub fn canvas_node_ext(mode: &str) -> &'static str {
     }
 }
 
+/// Collect openable session id(s) from a node's output (`session_id` string
+/// and/or `sessions` array) into `into`, de-duplicated. Used so a node whose
+/// session id rode in its output — including a *cached* re-run — still surfaces
+/// the session on the run, complementing the live channel report.
+pub fn harvest_session_ids(output: &Value, into: &mut Vec<String>) {
+    if let Some(s) = output.get("session_id").and_then(Value::as_str) {
+        if !s.is_empty() && !into.iter().any(|x| x == s) {
+            into.push(s.to_string());
+        }
+    }
+    if let Some(arr) = output.get("sessions").and_then(Value::as_array) {
+        for v in arr {
+            if let Some(s) = v.as_str() {
+                if !s.is_empty() && !into.iter().any(|x| x == s) {
+                    into.push(s.to_string());
+                }
+            }
+        }
+    }
+}
+
+/// The node's human name (falls back to its kind) — drives step-file names.
+pub fn node_display_name(node: &WorkflowNode) -> &str {
+    if node.name.trim().is_empty() {
+        &node.kind
+    } else {
+        &node.name
+    }
+}
+
+/// Last 6 chars of a run id — a compact, human-scannable tag that disambiguates
+/// concurrent runs of the same workflow in session titles / lists.
+pub fn short_id(id: &Id) -> String {
+    let n = id.chars().count();
+    id.chars().skip(n.saturating_sub(6)).collect()
+}
+
+/// Merge a node output's published repo reference(s) into the run's repos
+/// registry (`repos.json`) — the "each step adds to the repos file" contract:
+/// the top-level `repo_id`+`base`/`worktree`, plus every entry of a published
+/// `repos[]` array (a multi-repo review/loop). Only the explicit `worktree`
+/// key counts (a bare `working_directory` is too ambient to be authoritative).
+pub fn merge_published_refs(files: &crate::context::RunContextFiles, out: &Value) {
+    let merge_one = |v: &Value| {
+        if let Some(rid) = v
+            .get("repo_id")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+        {
+            files.merge_published(
+                rid,
+                v.get("base").and_then(Value::as_str),
+                v.get("worktree").and_then(Value::as_str),
+            );
+        }
+    };
+    merge_one(out);
+    if let Some(arr) = out.get("repos").and_then(Value::as_array) {
+        for v in arr {
+            merge_one(v);
+        }
+    }
+}
+
 /// What a step's thread reports to its node state (`otto-server` sends it
 /// over the node's association channel, in order with its sessions).
 pub enum StepNote {

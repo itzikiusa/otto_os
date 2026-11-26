@@ -197,6 +197,7 @@ struct FakeRunner {
     turns: std::sync::Mutex<Vec<otto_agent_run::step::StepTurn>>,
     closed: std::sync::Mutex<Vec<Id>>,
     retained: std::sync::Mutex<Vec<Id>>,
+    resumed: std::sync::Mutex<Vec<(Id, u32)>>,
 }
 
 #[async_trait::async_trait]
@@ -263,13 +264,17 @@ impl otto_agent_run::step::StepRunner for FakeRunner {
     }
     async fn resume(
         &self,
-        _: &Id,
-        _: u32,
-        _: &otto_agent_run::step::StepTurn,
-        _: tokio::sync::mpsc::UnboundedSender<otto_agent_run::step::StepEvent>,
-        _: otto_core::cancel_signal::CancelSignal,
+        id: &Id,
+        start_ordinal: u32,
+        t: &otto_agent_run::step::StepTurn,
+        ev: tokio::sync::mpsc::UnboundedSender<otto_agent_run::step::StepEvent>,
+        cancel: otto_core::cancel_signal::CancelSignal,
     ) -> Result<otto_agent_run::step::StepOutcome> {
-        unreachable!("no restart in this test")
+        self.resumed
+            .lock()
+            .unwrap()
+            .push((id.clone(), start_ordinal));
+        self.run(t.clone(), ev, cancel).await
     }
     async fn close(&self, id: &Id, _: chrono::DateTime<chrono::Utc>) {
         self.closed.lock().unwrap().push(id.clone());
@@ -375,4 +380,83 @@ async fn an_agent_step_runs_on_a_thread_and_leaves_its_record_on_the_run() {
     assert_eq!(turn.meta["work"]["kind"], "workflow_run");
     assert!(fake.closed.lock().unwrap().contains(&"th-1".to_string()));
     assert!(fake.retained.lock().unwrap().contains(&"th-1".to_string()));
+}
+
+/// Test plan §5 restart (DR-006): a thread step a restart caught mid-flight
+/// went back to pending with its thread; the re-entered run awaits that
+/// thread through `resume` (no fresh prompt), stops the step's old PTY
+/// session and keeps the step's number.
+#[tokio::test]
+async fn a_step_caught_by_a_restart_resumes_its_thread() {
+    let fake = std::sync::Arc::new(FakeRunner::default());
+    super::super::super::step_thread::FAKE_RUNNER.with(|f| *f.borrow_mut() = Some(fake.clone()));
+    let graph = WorkflowGraph {
+        nodes: vec![
+            node("start", "log", json!({})),
+            node(
+                "agent",
+                "agent_prompt",
+                json!({"prompt": "do it", "provider": "claude"}),
+            ),
+        ],
+        edges: vec![edge("start", "agent")],
+    };
+    let (ctx, ws, wf, run_id, repo, _tmp) = setup("restart-ws", graph).await;
+    let start = NodeRunState {
+        node_id: "start".into(),
+        status: NodeStatus::Success,
+        step_no: Some(1),
+        output: Some(json!({})),
+        ..Default::default()
+    };
+    let agent = NodeRunState {
+        node_id: "agent".into(),
+        status: NodeStatus::Pending,
+        started_at: Some(chrono::Utc::now()),
+        step_no: Some(2),
+        sessions: vec!["pty-before-the-restart".into()],
+        thread: Some(otto_core::workflows::StepThread {
+            thread_id: "th-1".into(),
+            runner: "threads".into(),
+            provider: "claude".into(),
+            model: None,
+            effort: None,
+            continued_from: None,
+            start_ordinal: Some(3),
+            turns: 0,
+            usage: Default::default(),
+            digest: None,
+            closed_at: None,
+            available: None,
+        }),
+        ..Default::default()
+    };
+    let scope = RunScope {
+        continue_unfinished: true,
+        ..Default::default()
+    };
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        run_workflow(
+            ctx,
+            ws,
+            wf,
+            run_id.clone(),
+            json!({}),
+            scope,
+            Some(vec![start, agent]),
+        ),
+    )
+    .await
+    .expect("the run settles");
+    let run = repo.get_run(&run_id).await.unwrap();
+    assert_eq!(run.status, RunStatus::Success, "{:?}", run.error);
+    assert_eq!(*fake.resumed.lock().unwrap(), [("th-1".to_string(), 3)]);
+    let st = state(&run, "agent");
+    assert_eq!(st.step_no, Some(2));
+    assert!(
+        st.sessions.is_empty(),
+        "the old PTY session is stopped and dropped"
+    );
+    assert_eq!(st.thread.as_ref().unwrap().thread_id, "th-1");
 }

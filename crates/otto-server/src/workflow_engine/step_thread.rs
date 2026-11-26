@@ -6,7 +6,7 @@
 use super::*;
 use otto_agent_protocol::step_runner::{DaemonStepHost, ThreadStepRunner};
 use otto_agent_run::step::{StepErrorClass, StepEvent, StepRunner, StepTurn};
-use otto_core::workflows::StepPhase;
+use otto_core::workflows::{StepPhase, StepThread};
 use otto_workflows::step_util::Settled;
 pub(super) use otto_workflows::step_util::{record, StepNote};
 
@@ -42,6 +42,25 @@ pub(super) async fn runner_for(ctx: &ServerCtx, run_id: &Id, provider: &str) -> 
 fn latched() -> &'static std::sync::Mutex<HashMap<Id, &'static str>> {
     static L: OnceLock<std::sync::Mutex<HashMap<Id, &'static str>>> = OnceLock::new();
     L.get_or_init(Default::default)
+}
+
+/// Steps a restart caught on an open thread: `(run, node)` → `(thread, start ordinal)`.
+type Resumes = std::sync::Mutex<HashMap<(Id, String), (Id, u32)>>;
+
+fn resumes() -> &'static Resumes {
+    static R: OnceLock<Resumes> = OnceLock::new();
+    R.get_or_init(Default::default)
+}
+
+/// The re-entered step awaits its recorded thread instead of a fresh one.
+pub(super) fn mark_resume(run_id: &Id, node_id: &str, t: &StepThread) {
+    let ordinal = t.start_ordinal.unwrap_or(0) as u32;
+    if let Ok(mut m) = resumes().lock() {
+        m.insert(
+            (run_id.clone(), node_id.to_string()),
+            (t.thread_id.clone(), ordinal),
+        );
+    }
 }
 
 /// The run ended: its next execution latches the runner again.
@@ -144,7 +163,17 @@ pub(super) async fn run(
     let _ = log_tx.send(format!("⏳ starting {provider} thread"));
     let (ev_tx, mut ev_rx) = tokio::sync::mpsc::unbounded_channel::<StepEvent>();
     let runner = runner(ctx);
-    let fut = runner.run(t, ev_tx, otto_core::cancel_signal::CancelSignal::new());
+    let resume = resumes()
+        .lock()
+        .ok()
+        .and_then(|mut m| m.remove(&(run_id.clone(), node.id.clone())));
+    let cancel = otto_core::cancel_signal::CancelSignal::new();
+    let fut = async {
+        match &resume {
+            Some((id, ordinal)) => runner.resume(id, *ordinal, &t, ev_tx, cancel).await,
+            None => runner.run(t.clone(), ev_tx, cancel).await,
+        }
+    };
     tokio::pin!(fut);
     let note = |n: StepNote| {
         let _ = session_tx.send(AgentAssociation::Step(n));

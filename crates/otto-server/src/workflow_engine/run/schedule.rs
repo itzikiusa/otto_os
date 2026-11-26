@@ -215,6 +215,21 @@ async fn run_node(
         return done;
     }
     let step_file_base = step_file(node, step_no);
+    // Re-entered after a restart (DR-006): the old agent may live on in its
+    // holder beside the fresh step — stop it; a thread step resumes its thread.
+    if st.started_at.is_some() {
+        let mut logs = vec![];
+        for sid in std::mem::take(&mut st.sessions) {
+            stop_step_session(cx.ctx, &sid, cx.run_id, &mut logs).await;
+        }
+        if let Some(t) = st
+            .thread
+            .as_ref()
+            .filter(|t| t.runner == "threads" && t.closed_at.is_none())
+        {
+            super::super::step_thread::mark_resume(cx.run_id, &node.id, t);
+        }
+    }
     // The preamble lists the settled ancestors' step files (and this node's
     // own, for a loop's earlier iterations), never a sibling's (§5.2).
     let mut listed = board.step_nos_of(&otto_workflows::graph::ancestors(

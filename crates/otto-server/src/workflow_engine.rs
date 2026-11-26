@@ -53,8 +53,9 @@ use otto_workflows::run_queue::{
     max_parallel_runs, resolve_chat_target, result_workspace, run_gate, ChatTarget,
 };
 use otto_workflows::step_util::{
-    brief_summary, canvas_node_ext, extract_code_block, is_reportable, node_label,
-    node_skill_names, normalize_prompt, param_str_list, seed_input_from_entries,
+    brief_summary, canvas_node_ext, extract_code_block, harvest_session_ids, is_reportable,
+    merge_published_refs, node_display_name, node_label, node_skill_names, normalize_prompt,
+    param_str_list, seed_input_from_entries, short_id,
 };
 
 /// Session and review associations share the ordered progress stream. Reviews
@@ -2249,13 +2250,6 @@ async fn resolve_run_user(ctx: &ServerCtx, created_by: &Id) -> User {
         })
 }
 
-/// Last 6 chars of a run id — a compact, human-scannable tag that disambiguates
-/// concurrent runs of the same workflow in session titles / lists.
-fn short_id(id: &Id) -> String {
-    let n = id.chars().count();
-    id.chars().skip(n.saturating_sub(6)).collect()
-}
-
 /// Clamp an activity snapshot to the documented bounds (§2): ≤ 40 sub-agents,
 /// ids ≤ 64 chars, descriptions ≤ 80 — so even a 40-agent sweep adds under
 /// 12 KiB to `nodes_json` and the WS frame, well inside
@@ -2589,42 +2583,6 @@ fn checks_review_agent(
         model: String::new(),
         prompt,
         skill: String::new(),
-    }
-}
-
-/// The node's human name (falls back to its kind) — drives step-file names.
-fn node_display_name(node: &WorkflowNode) -> &str {
-    if node.name.trim().is_empty() {
-        &node.kind
-    } else {
-        &node.name
-    }
-}
-
-/// Merge a node output's published repo reference(s) into the run's repos
-/// registry (`repos.json`) — the "each step adds to the repos file" contract:
-/// the top-level `repo_id`+`base`/`worktree`, plus every entry of a published
-/// `repos[]` array (a multi-repo review/loop). Only the explicit `worktree`
-/// key counts (a bare `working_directory` is too ambient to be authoritative).
-fn merge_published_refs(files: &crate::workflow_context::RunContextFiles, out: &Value) {
-    let merge_one = |v: &Value| {
-        if let Some(rid) = v
-            .get("repo_id")
-            .and_then(Value::as_str)
-            .filter(|s| !s.trim().is_empty())
-        {
-            files.merge_published(
-                rid,
-                v.get("base").and_then(Value::as_str),
-                v.get("worktree").and_then(Value::as_str),
-            );
-        }
-    };
-    merge_one(out);
-    if let Some(arr) = out.get("repos").and_then(Value::as_array) {
-        for v in arr {
-            merge_one(v);
-        }
     }
 }
 
@@ -3106,27 +3064,6 @@ fn node_cwd(node: &WorkflowNode, input: &Value, run_cwd: &str) -> String {
     match pick {
         Some(s) => expand_tilde(s),
         None => run_cwd.to_string(),
-    }
-}
-
-/// Collect openable session id(s) from a node's output (`session_id` string
-/// and/or `sessions` array) into `into`, de-duplicated. Used so a node whose
-/// session id rode in its output — including a *cached* re-run — still surfaces
-/// the session on the run, complementing the live channel report.
-fn harvest_session_ids(output: &Value, into: &mut Vec<String>) {
-    if let Some(s) = output.get("session_id").and_then(Value::as_str) {
-        if !s.is_empty() && !into.iter().any(|x| x == s) {
-            into.push(s.to_string());
-        }
-    }
-    if let Some(arr) = output.get("sessions").and_then(Value::as_array) {
-        for v in arr {
-            if let Some(s) = v.as_str() {
-                if !s.is_empty() && !into.iter().any(|x| x == s) {
-                    into.push(s.to_string());
-                }
-            }
-        }
     }
 }
 

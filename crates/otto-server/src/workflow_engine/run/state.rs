@@ -64,7 +64,10 @@ impl RunState {
                 ps.status,
                 NodeStatus::Success | NodeStatus::Skipped | NodeStatus::Error
             );
-            if !(out_of_scope || continue_unfinished && settled) {
+            // A step a restart caught mid-flight went back to pending with its
+            // thread, sessions and number kept (DR-006): it re-enters from them.
+            let interrupted = ps.status == NodeStatus::Pending && ps.started_at.is_some();
+            if !(out_of_scope || continue_unfinished && (settled || interrupted)) {
                 continue;
             }
             if let Some(idx) = self.states.iter().position(|s| s.node_id == ps.node_id) {
