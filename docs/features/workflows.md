@@ -1,52 +1,60 @@
 # Workflows & Automations
 
 > **Maturity: a real orchestrator.** Otto's Workflows feature is a working
-> node-graph engine: you build a directed graph of nodes, run it (whole graph, or
-> "from here" / "only this"), and watch live per-node progress — including the
-> openable agent **sessions** each step spawns — over WebSocket. Every node kind
-> now executes against a real Otto subsystem: the four formerly-stub
-> product/review kinds (`product_analyze`, `product_rewrite`, `product_plan`,
-> `review_run`) are **wired** (real single-agent turns + the local-review engine
-> with a 0–100 score), and the engine gained **branching** (edge conditions + a
-> `condition` node), **bounded loops** (`loop`, iterate-until), **retry/backoff**,
-> **typed outputs** (warn-only validation), **versioning** (graph snapshot
-> history), a per-run **Proof Pack** link, plus `canvas`, `git_pr`, and
-> `product_publish` nodes. A workflow can also carry **standing `instructions`**
-> (free-text guidance every step follows, versioned alongside the graph), and a
-> `prepare_context` node does app-side Jira-ticket fetching into the run's
-> context dir. **All trigger kinds fire unattended now** — webhook, event, and
-> schedule (the cadence scheduler is spawned at daemon boot, with cron +
-> IANA-timezone parity), plus a **`chat`-kind trigger** (channel bindings,
-> evaluated live by the channels Bridge, not polled). A structured
-> `Action: Workflow` chat message, the simplified **`run <name>: <prompt>`**
-> command, or a channel binding can all start a run by name — and such a run now
-> **streams live per-step progress back into the same chat thread** (start line,
-> per-step ▶/✅/❌, and a `🔍` review block for the fix→review loop), flushed
-> before the final result (the run's `final-output.md` deliverable when it
-> produced one, else `summary.md`). Agent steps can inline named **skills**;
-> `review_run` selects relevant lenses through the **PR-review engine**
-> and scores verified findings, and `git_pr` can **auto-open the PR** once the review passes
-> (the review is the approval — no human gate). The separate **API-client
+> node-graph engine: you build a directed graph of steps, run it (whole graph, or
+> "from here" / "only this"), and follow the run on its own page — what it is
+> doing in words, what it waits on, and each agent step's **conversation**.
+> Agent steps run as **threads on the structured runtime** (the runtime behind
+> Threads) by default; the terminal runner stays behind a switch (§3).
+> **Independent steps run side by side**, and each keeps the step number the
+> one-at-a-time engine gave it. Every node kind executes against a real Otto
+> subsystem: agents, the PR-review engine (0–100 score), product stories, git,
+> HTTP, databases, brokers and channels, plus four **steps that need no agent**
+> (`git_checkout`, `script`, `post_review_comments`, `check`). The engine has
+> **branching** (edge conditions + a `condition` node, also on the run's
+> repositories), **bounded loops** (`loop`, with an optional active-time
+> budget), **retry/backoff**, **typed outputs** (warn-only validation),
+> **versioning** (graph snapshot history), a per-run **Proof Pack** link,
+> **standing `instructions`** every step follows, and **Goals**: a goal is a
+> workflow of one fixed shape — work, check the criteria, repeat within a
+> budget — that replaced the separate Goal Loops feature (§6,
+> [Goals](./goal-loops.md)). **All trigger kinds fire unattended** — webhook,
+> event, schedule (cron + IANA timezone) and a **`chat`-kind trigger** (channel
+> bindings, evaluated live by the channels Bridge). A structured
+> `Action: Workflow` chat message, the **`run <name>: <prompt>`** command, or a
+> channel binding starts a run by name; the run then keeps **one live status
+> message** in that thread (edited in place), still posts every step's file,
+> and delivers the result there (§5). A run that waits on a person — an
+> approval, a question, a check only you can make, a usage limit — is listed
+> under **Needs you**; a usage limit with a known reset parks the step until
+> the reset and continues by itself. **Optimize** drafts a faster version of a
+> stored workflow from rules alone (§6). The separate **API-client
 > "Automations"** surface (a multi-step saved-request runner) is also fully
-> functional. A couple of honest caveats remain (the game `game_engine`/`verifier`
-> are scaffolds) — stated inline; do not assume full parity with mature
-> n8n/Zapier engines. Agent-backed steps finish on a **turn oracle** (sub-agent-
-> and handoff-aware — §3). Adaptive review uses bounded managed fan-out, with
-> one provider per selected lens unless cross-provider comparison is enabled — §4.
+> functional. A couple of honest caveats remain (the game
+> `game_engine`/`verifier` are scaffolds) — stated inline; do not assume full
+> parity with mature n8n/Zapier engines.
 
-The doc is grounded in the code in `crates/otto-server/src/workflow_engine.rs`,
-`crates/otto-workflows/src/context.rs` (run context files; the node catalog,
-graph validation, retry policy, loop checkpoints and event triggers also live in
-`crates/otto-workflows`),
-`crates/otto-workflows/src/prepare.rs` (`prepare_context`),
-`crates/otto-server/src/routes/workflows.rs`,
+The doc is grounded in the code in `crates/otto-server/src/workflow_engine.rs`
+and `workflow_engine/` (`run/schedule.rs` — the scheduler driver,
+`step_thread.rs` / `step_pty.rs` — the two step runners, `run/chat.rs`,
+`run/hold.rs`, `nodes/`), `crates/otto-agent-protocol/src/step_runner.rs` and
+`runtime/{unattended,retention}.rs` (a step on a thread),
+`crates/otto-workflows/src/` (`schedule.rs` — the start rule, `context.rs` —
+run context files, `chat.rs` / `chat_status.rs` — chat triggers and the status
+message, `optimize.rs`, `goal.rs` / `criteria.rs` — goals and the `check`
+step, `prepare.rs`, the node catalog, validation, retry policy, loop
+checkpoints and event triggers),
+`crates/otto-server/src/routes/workflows.rs` (+ `workflows_ext.rs`,
+`workflow_progress.rs`, `workflow_run_files.rs`, `goals.rs`),
 `crates/otto-server/src/workflow_trigger_scheduler.rs`,
-`crates/otto-workflows/src/chat.rs`, `crates/otto-core/src/expr.rs`,
-`ui/src/modules/workflows/`, `ui/src/modules/api/AutomationsView.svelte`, the
-migrations under `crates/otto-state/migrations/` (incl. **0089** — versioning +
-run→proof link, **0096** — standing `instructions`), and the authoritative contracts `docs/contracts/api.md`
-(§ "Workflow engine", § "API client", Wave-3/Wave-4 routes) and
-`docs/contracts/ws.md` (Workflow run progress).
+`crates/otto-core/src/expr.rs`, `ui/src/modules/workflows/`,
+`ui/src/modules/api/AutomationsView.svelte`, the migrations under
+`crates/otto-state/migrations/` (incl. **0089** — versioning + run→proof link,
+**0096** — standing `instructions`, **0233–0235** — run overview, holds,
+goals, lanes) and the authoritative contracts `docs/contracts/api.md`
+(§ "Workflow engine", § "Goals", "Steps side by side and the step runner",
+"Engine threads", § "API client") and `docs/contracts/ws.md` (Workflow run
+progress).
 
 ---
 
@@ -79,10 +87,16 @@ ui/src/modules/workflows/TriggersPanel.svelte   — list/add/edit/preview/toggle
 ui/src/modules/api/AutomationsView.svelte       — API-client collection runner (the *other* "automations")
 
 crates/otto-server/src/workflow_engine.rs              — the executor: thin run driver, per-node exec, branching/retry, proof
-crates/otto-server/src/workflow_engine/run/           — run phases: admission.rs (graph, scope, identity, input, repo isolation, Running CAS), state.rs (RunState + NodeFlow), schedule.rs (one node per step: decision, attempts, outcome), finalize.rs
-crates/otto-server/src/workflow_engine/nodes/         — one file per large node kind (review_run.rs keeps its pure gate: review_score / review_verdict / aggregate)
-crates/otto-workflows/src/                             — server-free pieces: node catalog, validation, retry, checkpoints, run context files, event-trigger listener (`WorkflowCtx`)
+crates/otto-server/src/workflow_engine/run/           — run phases: admission.rs (graph, scope, identity, input, repo isolation, Running CAS), schedule.rs (the scheduler driver: steps side by side, attempts, outcome), board.rs (node states + publish), chat.rs (chat style, needs-you post), hold.rs (paused / blocked / out-of-budget runs), finalize.rs
+crates/otto-server/src/workflow_engine/step_thread.rs  — an agent step on a runtime thread: the runner switch, phases, thread record, close + retention
+crates/otto-server/src/workflow_engine/step_pty.rs     — the terminal (PTY) step runner, behind the switch
+crates/otto-server/src/workflow_engine/nodes/         — one file per large node kind (review_run.rs keeps its pure gate: review_score / review_verdict / aggregate; git_checkout.rs, script.rs, post_review_comments.rs, check.rs are glue over otto-workflows)
+crates/otto-agent-protocol/src/step_runner.rs          — ThreadStepRunner: machine place, thread, turn to settle, handoff nudge, usage-limit wait
+crates/otto-agent-protocol/src/runtime/                — unattended.rs (a thread has "settled"), retention.rs (closed engine threads are deleted after their date)
+crates/otto-workflows/src/                             — server-free pieces: node catalog, validation, retry, checkpoints, run context files, schedule.rs (which step starts, with which number), overview.rs (the run's state and headline), chat_status.rs (the live status message), optimize.rs, goal.rs + criteria.rs + check_run.rs (goals and the check step), checkout*.rs / script_run.rs / post_comments.rs (the steps that need no agent), attachments.rs, steering.rs, event-trigger listener (`WorkflowCtx`)
 crates/otto-server/src/routes/workflows.rs             — HTTP handlers: CRUD, generate, run, versions, triggers, webhook, approve, templates
+crates/otto-server/src/routes/workflows_ext.rs         — skip a step, Optimize (draft + apply)
+crates/otto-server/src/routes/goals.rs                 — goals, pause / resume / steer / verify, the older goal loops' history
 crates/otto-server/src/workflow_trigger_scheduler.rs   — schedule scheduler + boot glue for the event-bus listener (both spawned at boot)
 crates/otto-workflows/src/chat.rs                      — `Action: Workflow` chat-message parser + WorkflowChatTrigger impl
 crates/otto-core/src/expr.rs                           — the safe expression language (edge conditions, condition/loop, {{ }} templating)
@@ -97,11 +111,6 @@ crates/otto-state/migrations/0015_api_automations.sql     — API-client automat
 
 The Svelte UI talks only HTTP+WS to `ottod` on `127.0.0.1:7700`. The TypeScript
 types in `ui/src/lib/api/types.ts` mirror `otto_core::workflows`.
-
-> **README note:** as of this writing the `README.md` feature tour does **not**
-> mention Workflows or the workflow engine by name (it lists git/PRs, review,
-> product, connections, API client, usage, channels). This doc and
-> `docs/contracts/api.md` are the source of truth for the feature.
 
 ---
 
@@ -133,16 +142,17 @@ interface WorkflowEdge {
 - **Edges** are directed `source → target` connections between node ids, with an
   optional `condition` (an expression — see below); an edge with no condition is
   always active (the legacy behavior).
-- The graph is executed in **topological order** (`topo_order`). A cycle makes
-  the whole run fail immediately with an error (no nodes execute).
+- The graph is executed in **run order** (`topo_order`), and steps whose
+  inputs have settled run **side by side** (see *Scheduling* below). A cycle
+  makes the whole run fail immediately with an error (no nodes execute).
 
 ### Standing instructions (`workflow.instructions`)
 A `Workflow` carries a second free-text field alongside `description`:
 `instructions` — standing guidance every run/step should follow "by the letter"
 (e.g. spec-framework conventions, house style, things to never do), distinct
 from `description` (a one-line summary shown in lists). It is:
-- **Edited in the UI** via the canvas top-bar's collapsible **Instructions**
-  panel (an "unsaved" badge + **Save** button — same pattern as the graph).
+- **Edited in the UI** via the editor's ⋯ → **Instructions** (it opens in the
+  inspector column, with its own **Save**).
 - **Versioned like the graph.** An instructions-only `PATCH /workflows/{id}`
   bumps `version` and snapshots exactly like a graph-changing edit (note
   `"edited"`); restoring an older `WorkflowVersion` restores its `instructions`
@@ -165,7 +175,7 @@ infix `contains` / `in`, unary `! -`, parentheses, dotted/indexed paths
 (`output.result`, `input.rows[0]`), literals, and functions `len, lower, upper,
 default, has, int, float, str, bool, not`. Missing path segments resolve to `null`
 (never an error). For edge conditions the context is
-`{ output, input, node:{id,kind,name}, run:{input} }`; a condition that fails to
+`{ output, input, node:{id,kind,name}, run:{input, repos, prs} }` (`run.repos` / `run.prs` are the run's `repos.json` and `prs.json` entries — §7); a condition that fails to
 parse or evaluate is treated as **not taken** (and logged), never a crash.
 Nesting is bounded: more than 64 levels of `!`/`-`, parentheses, call arguments or
 `[ ]` indexes is a parse error (*"expression nests too deeply"*), and so is a chain
@@ -180,17 +190,125 @@ sleep, clamped ≤60000), factor (multiplier, default 2.0) }`. An absent policy 
 An explicit zero always means one attempt, even for transient failures. The UI
 keeps zero distinct from **Use default**. The policy can also be
 supplied as a `params.retry` object. `human_approval` and `manual_trigger` are
-never retried. `NodeRunState.attempts` records how many attempts ran.
+never retried, and a `loop` retries its inner steps through its own checkpoints
+(§7), not as a whole. `NodeRunState.attempts` records how many attempts ran; a
+retry shows on the step as a `queued` phase noted "attempt 2 of 3 — <reason>".
+A step stopped by a **plan usage limit** is never retried by backoff (below).
 
-### Step completion & the stall watchdog (agent-backed steps)
+### How an agent step runs
 An agent-backed step (`agent_prompt`, `prepare_context`'s analysis phase, the
-`product_*` / `canvas` / `git_pr` turns) is **not** done when the CLI ends a
-turn. A claude parent ends a turn every time a sub-agent reports back, and it
-ends one the instant it has *launched* them ("waiting on the four sweep
-agents") — so "the first `end_turn` wins" used to cut steps off mid-flight. The
-engine instead runs a **turn oracle**
-(`crates/otto-agent-run/src/turn_oracle.rs`) over the provider's own transcript.
-A step completes only when **all three** hold:
+`product_*` / `canvas` / `git_pr` turns, a `check`'s checker, a goal's Work
+step) runs as **a thread on the structured runtime** — the runtime Threads
+uses — unless the runner switch says otherwise. The engine opens a thread
+titled `WF <workflow> · <step> · run <short id>`, sends the step's prompt
+(preamble + prompt + the completion protocol) as one turn and waits until the
+thread has **settled** (`ThreadStepRunner` in
+`crates/otto-agent-protocol/src/step_runner.rs`):
+
+1. **A valid pick.** A model or effort the provider no longer offers fails the
+   step before anything starts, and the error says which.
+2. **A machine place.** The step waits its turn at the machine's agent
+   admission gate; while it waits its phase is `waiting` and the step says why
+   (*Scheduling* below).
+3. **The turn, to settle.** Settled means: no turn running, no background
+   work, nothing queued, no request waiting on a person, and no busy
+   sub-thread the agent opened, at any depth (`runtime/unattended.rs`).
+   After background work ends the agent gets 10 s to start its own follow-up
+   turn. Background work may keep a finished turn open for at most 45 minutes;
+   past that the step fails ("background work was still running at the
+   limit").
+4. **The handoff file.** When the thread settles and the step's `.md` (§7) is
+   missing, the engine sends one more turn — "You did not write <path>. Write
+   it now; nothing else." — and then takes what is there: the file, else the
+   agent's final answer (the engine writes it to the step file).
+
+There is no idle confirm and no transcript polling on this runner: the
+runtime reports the turn's end and what is still pending. The step logs
+`⏳ starting <provider> thread` and `✓ step complete`; where its time went is
+kept as **phases** on the step (`queued` · `waiting` · `starting` · `working`
+· `needs_you` · `finishing`), which the run page draws as a bar. The step's
+output is `{ reply, thread_id }` (`session_id` on the terminal runner), and
+the run keeps the thread's record on the step (`NodeRunState.thread`:
+provider, the model and effort that ran, turns, token usage, a digest).
+
+**Model and effort.** Each agent step picks **provider · model · effort**
+with the same picker as Threads (the inspector's **Agent** chips). Empty means
+**Default**: the provider's own setting, as in Threads. The model is set when
+the thread is created and the effort rides the first turn; a step that
+continues an earlier thread keeps that thread's model unless it names its own.
+Reviewers and the summarizer of a review step, and a goal's Work and Check,
+are picked the same way.
+
+**Time limit.** `timeout_s` (the inspector's "Fail the step if it hasn't
+finished after (minutes)", 1–600 min; none by default) is the step's hard
+budget, time waiting on a person included. A step past it fails with class
+`timeout` (the run page says **Timed out**); the step's retry policy applies
+to it like any other failure, each attempt with the full limit again. Without
+a limit a thread step is bounded by the run's 10-hour active-time budget and
+the 45-minute background limit. The no-progress trip (`wf_step_stall_secs`)
+belongs to the terminal runner only.
+
+**Waiting on a person.** A provider approval, a governed Otto MCP call that
+needs approval, or a question the agent asks puts the step in `needs_you`
+with what it asks (`attention`); the run moves to **Needs you** (§7). The
+answer is given on the run page and the same turn goes on. An engine thread
+cannot ask for a secret: `otto.request_secret` is refused at once.
+
+**Usage limits.** When the provider's plan limit stops the turn, the runner
+reads the reset time from the CLI's own message, else from Otto's usage meter
+for the step's account. **Known reset:** the step parks in `needs_you`
+(`attention.kind: usage_limit`, `resets_at`; the run page says **Limited**
+and "Otto continues it at 14:02, when the limit resets."), its agent process
+is released, and at the reset the runner sends "Continue the step where you
+stopped." on the same thread. **No known reset**, or a limit that comes back
+right after its reset: the step fails with class `usage_limit` and **Retry
+step** is the way on. A wait that would outlast the step's time limit fails
+it as `timeout` instead. A plan limit is never retried by backoff. A per-minute rate limit (`rate_limit`) is
+an ordinary retry class.
+
+**Error classes.** A failed step carries `error_class`: from the runner
+`usage_limit` · `rate_limit` · `auth` (**Signed out**) · `provider` ·
+`stalled` · `timeout` (**Timed out**) · `spawn` · `server_restart` ·
+`canceled` (**Stopped**); from the engine `script` and `outcome_unknown`.
+
+**Sub-agents are allowed.** The step preamble (`WF_STEP_RULES`) is a
+*completion protocol*, not a ban: delegate to sub-agents / background tasks
+freely, but fold every result back in, write the handoff **last** (never while
+something you launched is still running), never end with "waiting for …", and
+stop every background process you started. On a thread, a provider's own
+sub-agents and the threads the agent opens with `otto.thread_open` both count:
+the step is not settled while one of them works. At most **4** sub-threads of
+one step are open at once (the fifth open answers 409 "a workflow step may
+have 4 open sub-threads at once …"), and none opens while the machine is
+critically short of memory; the agent closes one with
+`otto.thread_close`, and `remove: true` also deletes a sub-thread that agent
+opened once it has answered (refused while it works or has open sub-threads
+of its own). Sub-threads show as rows under the step, their usage is added to
+the step's, and they close with it.
+
+#### The runner switch (`wf_step_runner`)
+| Where | Values | Notes |
+|---|---|---|
+| Daemon setting `wf_step_runner` | `threads` (default) · `pty` | Set with `PUT /api/v1/settings` `{"wf_step_runner": "pty"}` — the root user, on a person's credential. Any other value is refused. There is no control for it in Settings. |
+| Environment `OTTO_WF_STEP_RUNNER` | `pty` (anything else = threads) | Read by the daemon; wins over the setting. |
+
+The switch is read **once per run execution**: every agent step of that
+execution — and the reviewers and summarizer of its review steps — uses the
+runner the run started with, so flipping the switch never changes a run in
+flight. A retry, a Resume or a restart resume is a new execution and reads it
+again; a step that was already on a thread when the daemon restarted goes on
+with that thread. A provider the structured runtime has no driver for always
+runs on the terminal runner. Reviews started from the Git page read the same
+switch. The terminal runner is planned to be removed one release after the
+thread runner has run without it.
+
+#### The terminal runner (behind the switch)
+With `pty`, a step is a real terminal session (openable in Agents) and is
+**not** done when the CLI ends a turn. A claude parent ends a turn every time
+a sub-agent reports back, and it ends one the instant it has *launched* them —
+so the engine runs a **turn oracle**
+(`crates/otto-agent-run/src/turn_oracle.rs`) over the provider's own
+transcript. A step completes only when **all three** hold:
 
 1. **The turn ended natively.** *claude:* the last message-bearing line is an
    assistant `end_turn`, **nothing it launched is still pending** (async `Agent`
@@ -219,69 +337,97 @@ fallback is **bounded**, so a missing signal can never hang a run:
 | Provider with no transcript artifact (agy / custom) | explicit final handoff, subject to the stall and absolute deadlines | completes only after the nonempty final handoff is written; silence never counts as success |
 | Anything | `TURN_TIMEOUT` (10 h) | the turn is abandoned |
 
-**Sub-agents are allowed.** The step preamble (`WF_STEP_RULES`) is a *completion
-protocol*, not a ban: delegate to sub-agents / background tasks freely, but fold
-every result back in, write the handoff **last** (never while something you
-launched is still running), never end with "waiting for …" (the harness wakes
-you when a task finishes), and stop every background process you started. The
-run-context preamble (§7) adds that the handoff file *is* the done signal —
-write it once, at the very end.
-
 **Evaluation order vs the stall trip.** Each 1 s tick the oracle's verdict is
 computed **first**. The **no-real-progress trip** (`wf_step_stall_secs` setting;
 default **300 s**, `0` disables) is consulted **only** while the step is in the
 `working` or `sub-agents` phase — never during the idle confirm, the
 missing-handoff grace, the handoff linger or the background-task linger, which
-carry their own bounds above. (Otherwise the 5-minute trip would kill a parent
-that had *already* written its handoff and re-run the whole step — a retry
-deletes the handoff first.) In those two phases "progress" is measured on
+carry their own bounds above. In those two phases "progress" is measured on
 signals a stuck agent can't fake: the newest mtime across the main transcript,
 `subagents/*.jsonl` **and** the harness's `tasks/*.output` files, or the
 session's child processes burning CPU (a long quiet build/test). PTY output
 deliberately does **not** count — a hung TUI keeps repainting its spinner
-forever, which is exactly how stuck codex steps used to sit undetected for
-hours. When the trip does fire the step fails with a retryable "stuck" error
+forever. When the trip does fire the step fails with a retryable "stuck" error
 (`✗ step made no progress for 5m (agent looks stuck; 0 tasks pending)`) and the
 per-node retry policy re-runs it in a fresh session.
 
 **Sessions are stopped when the step succeeds.** The engine **suspends** the
-step's session (kills the PTY, leaves the row `Reconnectable` so "Open session"
-on a finished step still resumes the transcript), or kills it outright for
-providers that can't resume. Only sessions belonging to *this* run's step are
-touched. Set `keep_session: true` on the node's params to leave it running;
-`review_run` is exempt (its reviewer sessions belong to the review, which tears
-them down itself when it reaches `done`/error).
+step's session (kills the PTY, leaves the row `Reconnectable` so **Open in
+Agents** on a finished step still resumes the transcript), or kills it
+outright for providers that can't resume. Only sessions belonging to *this*
+run's step are touched. `keep_session: true` on the node's params leaves it
+running — on this runner only; `review_run` is exempt (its reviewer sessions
+belong to the review, which tears them down itself when it reaches
+`done`/error).
+
+### A step's thread: closed, kept, removed
+- **Not in your Threads lists.** A step's thread (and a reviewer's, the
+  summarizer's, and every sub-thread they open) is an *engine thread*: it is
+  left out of every Threads list and is read from the run page, read-only.
+- **Closed when the step settles** — its agent process stops — unless a later
+  step that has not settled yet continues it (below); then the last continuer
+  closes it. A step skipped while it runs closes its thread at once.
+- **Closed and dated when the run ends.** At the run's end (also when a run
+  is paused or held) every thread of the run is closed, and all of them —
+  sub-threads and reviewers' threads included — are kept for **24 hours**
+  after a successful run and **7 days** after a failed, canceled or held one
+  (settings `workflow_thread_retention_success_hours`, default 24, and
+  `workflow_thread_retention_failed_hours`, default 168; `0` success hours =
+  a step's thread goes as soon as the step succeeds). Every 10 minutes the
+  daemon deletes closed engine threads past their date (at most 200 a pass,
+  skipped while the machine is busy). A person's thread is never touched.
+- **What stays after removal.** The step keeps its answer, its step file, its
+  usage and a digest (turns, tool calls, files changed, the last answer's
+  excerpt, errors), and the newest 50 timeline items as
+  `<context>/.threads/<node id>-<attempt>.json`. The run page then shows "The
+  conversation was removed after the run ended. The answer, files and usage
+  are kept — summary below."
+- **`continue_from`** (the inspector's **Conversation → Continue the thread of
+  an earlier step**) makes an agent step send its turn into an earlier agent
+  step's thread instead of a new one, so the agent keeps what it read. The
+  editor offers earlier agent steps on the same provider. Between the two
+  steps the thread holds no process unless the continuer is the very next
+  step. A source thread that retention already removed starts a fresh one
+  (log: `thread of <step> was removed — started a fresh one`); a provider that
+  cannot resume the conversation fails the step ("could not resume the
+  conversation of the earlier step") rather than going on with an agent that
+  remembers nothing. Inside a loop, `steps[].same_thread` continues the
+  step's own thread from the previous iteration.
 
 **Retry classes.** On top of the node's own `retry` policy the engine classifies
 the error string: `529`, "overloaded", rate limits, file-descriptor exhaustion
 ("Too many open files" / "dup of fd") and spawn failures get a **20 s floor plus
 0–5 s jitter** and up to **5 attempts** (the ≤5 clamp is unchanged), logged as
 `↻ retry 2/5 in 23s (provider overloaded: 529)`. Every other error keeps the
-node's policy verbatim.
+node's policy verbatim. A retry opens a fresh thread (the failed attempt's is
+closed and kept for the failed period).
 
 ### Retrying steps of a finished run (`POST /workflow-runs/{id}/retry-node`)
 A **finished** run can be re-entered in place without re-running the earlier
 (possibly hours-long) steps: the run reopens, out-of-scope nodes keep their
-prior state/output/sessions, in-scope nodes re-execute — against the same run
-context dir and the same provisioned `otto-wf/<run_id>` worktree/branch — and
-the run's final status is recomputed. Two scopes, both on the run-view step
-cards once the run has finished:
-- **Retry step** (errored steps only) — re-run just that step.
-- **Re-run from here** (any settled step) — re-run the step and everything
+prior state/output/thread record, in-scope nodes re-execute — against the same
+run context dir and the same provisioned `otto-wf/<run_id>` worktree/branch —
+and the run's final status is recomputed. On the run page:
+- **Retry step** (a failed run's primary button) — re-runs the failed step and
+  everything after it.
+- **Retry only this step** (the run's ⋯ and a failed step's ⋯) — re-runs just
+  that step. If steps after it never ran because it failed, they run too;
+  otherwise the run would end `success` with its later steps never run.
+- **Retry from here** (a settled step's ⋯) — re-runs that step and everything
   downstream of it.
 
-⚠ This is different from the **canvas** "Run from here" (`RunWorkflowReq.
-start_node`): that mints a **fresh run** — new context dir, new worktree cut
-from base — so files produced by the original run's steps are NOT there. To
-redo part of a run that produced files (implementations, test changes), use the
-run view's retry actions, which keep the original worktree.
+⚠ This is different from a fresh **Run…** with `start_node`
+(`RunWorkflowReq.start_node`): that mints a **fresh run** — new context dir,
+new worktree cut from base — so files produced by the original run's steps are
+NOT there. To redo part of a run that produced files (implementations, test
+changes), use the run page's retry actions, which keep the original worktree.
 
 A retry is refused (409, *"still stopping"*) while a just-canceled run's engine
 driver is still winding down — it would otherwise run a second driver in the same
-worktree. A cancel also wakes a step sleeping in its retry backoff at once (it used
-to sleep out up to a minute and then settle the step as *failed*), and the stale
-driver's cancel finalize never overwrites a retry that reopened the run. A retry
-starts a fresh restart-resume budget.
+worktree. A cancel also wakes a step sleeping in its retry backoff at once, and
+the stale driver's cancel finalize never overwrites a retry that reopened the
+run. A retry starts a fresh restart-resume budget and a fresh thread for each
+agent step it re-runs.
 
 ### How node inputs flow (`assemble_input`)
 Each node's input is assembled from its **predecessors' outputs**:
@@ -296,6 +442,50 @@ Each node's input is assembled from its **predecessors' outputs**:
 Beyond input assembly, the [expression language](#the-expression-language-otto_coreexpr)
 handles conditions and `{{ }}` templating; `channel_notify` and `swarm_task` also
 do simple `{key}` substitution from the incoming object (see §4).
+
+### Scheduling: steps side by side
+- **The start rule** (`otto_workflows::schedule`). The engine walks the steps
+  in run order. A step starts as soon as every step it depends on has settled
+  **and** every step before it in run order has started or been skipped. So
+  two branches with no path between them run at the same time, while each
+  step still gets the **step number** — and the `step<N>-<name>.md` file
+  name — it had when steps ran one at a time, whatever order they finish in.
+  The number is stored on the step when it is given (`step_no`, `step_file`)
+  and shown as "Step 4 of 9".
+- **Step slots.** At most `wf_max_parallel_steps` steps of one run hold an
+  agent or a process at once (daemon setting, default **4**, 1–8; `1` = one at
+  a time). The kinds that take a slot: `agent_prompt`, `review_run`,
+  `script`, `git_checkout`, `post_review_comments`, `loop`, `check`,
+  `canvas`, `git_pr`, the `product_*` kinds and a `prepare_context` with a
+  prompt. Everything else (conditions, transforms, HTTP, DB…) runs without
+  one. A step over the cap is **Queued** (phase `queued`, log `waiting for a
+  step slot (4 of 4 in use)`).
+- **Run order.** A ready step held back only because an earlier one has not
+  started yet logs `waiting for <step> to start (run order)`.
+- **The machine.** An agent step then waits for a place at the machine's
+  admission gate, shared with every background agent Otto runs. While it
+  waits it is **Waiting 2m** (phase `waiting`) and its second line is the
+  reason: "Waiting for a free agent slot — 3 ahead in line", "Waiting for a
+  free agent slot — 5 of 5 running", "Waiting for the machine — load 9.2
+  (limit 8.0), 3 Otto agents are running" or "Waiting for memory — 3 Otto
+  agents are running". The step's phase bar keeps how long it waited, and a
+  finished run whose steps waited a quarter of its time or more says so ("4m
+  of it waiting for the machine").
+- **What a step is told to read.** A step's `[workflow context]` preamble
+  lists the step files of the steps it descends from (and its own earlier
+  loop iterations) — never a sibling's that happens to have finished.
+- **One fails, one is stopped.** When a step fails, the steps running beside
+  it finish; only what depends on the failed step is skipped. **Stop run…**
+  stops every running step at once; **Skip this step** (a running step's ⋯,
+  or `skip <step name>` in the chat thread) stops just that one and the run
+  goes on.
+- **Order of outward steps.** Two steps with no path between them may run at
+  the same time. Connect steps that post, publish or open a PR one after
+  another when their order matters (the bundled templates do; a test guards
+  them).
+- **Waiting on a person costs no slot.** While every running step of a run
+  waits on a person, the run gives its run-queue slot back and its active-time
+  budget stops; the first step to work again takes both back first.
 
 ### Run-time graph behavior
 - **Two kinds of skip (`decide_node`, pure + unit-tested):** the engine now
@@ -322,19 +512,22 @@ do simple `{key}` substitution from the incoming object (see §4).
   external state, so a multi-repo run could replay a prior single-repo run's
   checkout verbatim and review the wrong scope. `workflow_node_cache` survives
   only as a dormant table: migrations are append-only.)
-- **Global wall clock:** a run cannot execute forever. At each node boundary the
-  engine checks an overall `RUN_WALL_CLOCK_TIMEOUT` (10 hours of active time);
-  exceeding it marks the RUNNING step `error` ("workflow active time budget
-  exhausted", still retryable), the un-run steps `skipped`, and fails the run with
-  "run exceeded the 10-hour time limit". Individual agent/approval nodes also have their own `NODE_AGENT_TIMEOUT`.
+- **Global wall clock:** a run cannot execute forever. The engine holds an
+  overall `RUN_WALL_CLOCK_TIMEOUT` (10 hours of **active** time — time while
+  every running step waits on a person is not counted); exceeding it marks the
+  RUNNING steps `error` ("workflow active time budget exhausted"), the un-run
+  steps `skipped`, and fails the run with "run exceeded the 10-hour time
+  limit". An agent step can carry its own `timeout_s` (above); a
+  `human_approval` waits 24 hours by default (`params.timeout_s`, minimum 60).
 - **Typed-output validation (warn-only):** after a node succeeds, its output is
   checked against the kind's declared `output_schema` (`validate_node_output`);
   mismatches are appended to the node log as `⚠ …` lines and **never fail the run**.
-- **Visible sessions per step:** agent / product / canvas / loop-inner nodes run as
-  **real, openable Otto sessions** (not the headless PTY). Each session id is
-  reported the moment it's created and recorded on `NodeRunState.sessions`, so the
-  run view can open it **while the step is still running** (`review_run` also
-  surfaces a `review_id` in its output).
+- **A conversation per step:** agent / product / canvas / loop-inner steps
+  each run on their own thread (or terminal session on the terminal runner).
+  The thread id is recorded on `NodeRunState.thread` the moment it exists, so
+  the run page shows the step's **Conversation** **while the step is still
+  running**; terminal session ids go to `NodeRunState.sessions` (`review_run`
+  also surfaces a `review_id` in its output).
 - **Run → Proof Pack:** on completion the engine assembles a Proof Pack from the
   run (each node output → a `log` artifact with the node's pass/fail status; each
   `human_approval` → an `approval` artifact) and links it on the run
@@ -347,10 +540,11 @@ do simple `{key}` substitution from the incoming object (see §4).
 ## 4. Node types
 
 The catalog is returned by `GET /workflows/node-types` (`node_catalog()` in
-`workflow_engine.rs`). Each descriptor (`NodeTypeSpec`) carries
-`kind, label, category, description, inputs, outputs, color, icon`. The UI's
-"+ Node" palette is built directly from this list, and per-kind parameter forms
-live in `inspector/NodeParams.svelte`.
+`crates/otto-workflows/src/catalog.rs`). Each descriptor (`NodeTypeSpec`) carries
+`kind, label, category, description, inputs, outputs, color, icon` plus a
+declared `output_schema` and, for some kinds, a `params_schema`. The editor's
+**+ Step** menu is built from this list, and per-kind parameter forms live in
+`ui/src/modules/workflows/inspector/`.
 
 **Status legend:** **Real** = executes against a live subsystem · **Real
 (scaffold)** = runs and produces real structured output but emits a canned spec
@@ -359,8 +553,8 @@ any "not wired" stub kinds** — the four former product/review stubs are now wi
 
 | Kind | Label / category | Purpose | Params (UI form) | Status |
 |---|---|---|---|---|
-| `manual_trigger` | Manual Trigger / Triggers | Entry node; emits the run input. `inputs:0`. | — | **Real** |
-| `agent_prompt` | Agent / AI | Runs an agent turn as a **real, openable session**; output `{ "reply", "session_id" }`. `skill`/`skills` inline a skill body ahead of the prompt (see *Per-step skills*). | `prompt`, `provider?` (empty ⇒ the run's resolved default agent), `model?`, `skill?`, `skills?`, `keep_session?` (default `false` — leave the session running after the step succeeds, §3) | **Real** |
+| `manual_trigger` | Manual Trigger / Triggers | Entry node ("Start"); emits the run input. `inputs:0`. | The run input's defaults (`msg`, `working_directory`, `repo_id`, `base`, `story_id`, `jira_ticket`, `goals`); `chat_updates` (`per_step` = a message and a file per step in the chat thread; absent = one live message — §5); `inputs[]` (the start form's declared fields, read by the UI only); `lane` (`long` = the long-run queue, §7) | **Real** |
+| `agent_prompt` | Agent / AI | Runs an agent turn on **its own thread** (§3); output `{ "reply", "thread_id" }` (`session_id` on the terminal runner). `skill`/`skills` inline a skill body ahead of the prompt (see *Per-step skills*). | `prompt`, `provider?` (empty ⇒ the run's resolved default agent), `model?`, `effort?` (empty ⇒ the provider's default), `skill?`, `skills?`, `timeout_s?` (60–36,000), `continue_from?` (an earlier agent step's id: continue its thread), `keep_session?` (terminal runner only — leave the session running after the step succeeds, §3) | **Real** |
 | `prepare_context` | Prepare relevant data / AI | App-side context gathering: resolves + fetches a referenced Jira ticket into `jira-<KEY>.md`, then optionally runs an analysis agent turn over it (see *Prepare relevant data*). | `key?`, `require?`, `account_id?`, `prompt?`, `provider?`, `model?` | **Real** |
 | `http_request` | HTTP Request / Network | Calls an HTTP endpoint, captures response `{ status, body }`. | `method`, `url`, `body` (JSON) | **Real** |
 | `transform` | Set / Transform / Data | Merges a static JSON object into the data flowing through. | `json` (object) | **Real** |
@@ -372,19 +566,23 @@ any "not wired" stub kinds** — the four former product/review stubs are now wi
 | `broker_peek` | Broker Peek / Data | Consumes up to N recent messages from a Kafka topic on a saved broker cluster (read-only). | `cluster_id`, `topic`, `limit` (default 20, cap 50) | **Real** |
 | `channel_notify` | Channel Notify / Integrations | Sends a message to a configured Slack/Telegram integration. Supports `{key}` substitution from the incoming object. | `message`, `channel` (`slack`/`telegram`/any) | **Real** |
 | `budget_gate` | Budget Gate / Flow | Checks the provider spend cap: **errors the run if blocked**; otherwise passes (`exceeded` is warn-only). | `provider` (whose usage budget; empty ⇒ run's resolved default) | **Real** |
-| `human_approval` | Human Approval / Flow | **Pauses the run**; sets `waiting_approval=1` and polls until an operator approves/rejects via the approve endpoint (or times out at `NODE_AGENT_TIMEOUT`). | `prompt` | **Real** |
+| `human_approval` | Human Approval / Flow | **Pauses the run**; sets `waiting_approval=1` and waits until an operator approves/rejects on the run page or via the approve endpoint (or times out after `timeout_s`, default 24 h). The run is listed under **Needs you** meanwhile. | `prompt`, `timeout_s?` (minimum 60) | **Real** |
 | `condition` | Condition / Flow | Evaluates an `expr` on its input; outputs `{ result, value }` merged onto the input. Pair with **edge conditions** to branch. | `expr` (default `true`) | **Real** |
-| `loop` | Repeat (Until) / Flow | Bounded **iterate-until**: re-runs inner `steps[]` until `until` holds or `max_iterations`. Reuses inner-node execution; threads run-level keys + prev-step output to each step. Output `{ iterations, satisfied, last, history }`. No nested loops. | `max_iterations` (1–10, default 3), `until` (expr), `steps[]` ({kind,name,params,retry}), `continue_on_error` | **Real** |
+| `loop` | Repeat (Until) / Flow | Bounded **iterate-until**: re-runs inner `steps[]` until `until` holds, an inner `check` passes, or the budget ends. Reuses inner-node execution; threads run-level keys + prev-step output to each step. Output `{ iterations, satisfied, last, history }`. No nested loops. | `max_iterations` (1–10, default 3; up to 50 with `max_active_s`), `max_active_s?` (300–28,800 s of active time), `until` (expr), `steps[]` ({kind,name,params,retry, `same_thread?`}), `continue_on_error`, `stop_on_repeat_failure?`, `hold_when_unmet?` (*Goals* in §6) | **Real** |
 | `swarm_task` | Swarm Task / AI | Enqueues a task in a running Agent-Swarm project (`todo` status; coordinator picks it up). | `swarm_id`, `project_id`, `title`, `description` | **Real** |
 | `api_run` | API Run / Network | Executes an HTTP request **through the API-client engine** so env-var substitution + auth apply. | `method`, `url`, `headers`, `body` | **Real** |
-| `product_analyze` | Product Analyze / Product | Runs a real single-agent turn (the **`grill`** lens) over the story's built context; outputs `{ story_id, analysis, session_id }`. | `story_id`, `instruction?` | **Real** ² |
-| `product_rewrite` | Product Rewrite / Product | Rewrites the story (**`jira-story-writer`**); outputs `{ story_id, body_md, session_id }`; `persist:true` saves a `suggested` product version. | `story_id`, `persist?`, `instruction?` | **Real** ² |
-| `product_plan` | Product Plan / Product | Breaks the story into a plan (**`story-task-breakdown`**); outputs `{ story_id, plan_md, session_id }`; `persist:true` saves a `plan` version. | `story_id`, `persist?`, `instruction?` | **Real** ² |
+| `product_analyze` | Product Analyze / Product | Runs a real single-agent turn (the **`grill`** lens) over the story's built context; outputs `{ story_id, analysis, thread_id }` (`session_id` on the terminal runner). | `story_id`, `instruction?` | **Real** ² |
+| `product_rewrite` | Product Rewrite / Product | Rewrites the story (**`jira-story-writer`**); outputs `{ story_id, body_md, thread_id }`; `persist:true` saves a `suggested` product version. | `story_id`, `persist?`, `instruction?` | **Real** ² |
+| `product_plan` | Product Plan / Product | Breaks the story into a plan (**`story-task-breakdown`**); outputs `{ story_id, plan_md, thread_id }`; `persist:true` saves a `plan` version. | `story_id`, `persist?`, `instruction?` | **Real** ² |
 | `product_publish` | Product Publish / Product | Publishes a story as a Confluence **RFC** or a **Jira** issue. **`dry_run` defaults true** and captures a real content/destination preview; configure `story_id`, `account_id` and `project_key`/`space_key` before preview. Connect Preview → Human Approval → live Product Publish; live publication consumes that exact approved snapshot. | `kind` (`rfc`/`jira`), `dry_run`, `account_id`, … | **Real** |
-| `review_run` | Review Run / AI | Runs the **PR-review engine** (scope-selected reviewer lenses + an evidence-checking summarizer), polls to completion, emits a **0–100 `score`** (`100−20×must-fix−5×should-fix; optional findings deduct 0 by default`), optional `goals` assessment blended in, `passed` requires a complete review, nonempty diff, no open must-fix findings and `score≥threshold`. `require_pass:true` **errors** the step when the review cannot pass. Output also carries `blocking`/`advisory`/`findings`/`providers`/`lenses`. See *`review_run`, gating & auto-PR* below. | `repo_id`, `base` (default `main`), `providers[]`, `lenses[]` (alias `skills[]`), `threshold` (default 80), `require_pass`, `await`, `timeout_s`, `goals[]`, `mode?` (`fan_out`/`orchestrator` — *Execution compatibility* below) | **Real** |
+| `review_run` | Review Run / AI | Runs the **PR-review engine** (scope-selected reviewer lenses + an evidence-checking summarizer), waits for it, emits a **0–100 `score`** (`100−20×must-fix−5×should-fix; optional findings deduct 0 by default`), optional `goals` assessment blended in, `passed` requires a complete review, nonempty diff, no open must-fix findings and `score≥threshold`. `require_pass:true` **errors** the step when the review cannot pass. Output also carries `blocking`/`advisory`/`findings`/`providers`/`lenses`. Reviewers and the summarizer run on threads like agent steps and show as named rows under the step. See *`review_run`, gating & auto-PR* below. | `repo_id`, `base` (default `main`), `providers[]`, `lenses[]` (alias `skills[]`), `reviewers[]` (per-lens provider, `model`, `effort`, `picks`), `picks` (a model and effort per provider for the whole review), `summarizer.{provider, model, effort}`, `threshold` (default 80), `require_pass`, `await`, `timeout_s`, `goals[]`, `scope_assessment?` (`configured` = the scope assessment may drop declared lenses, never add one), `chain_iterations?` (in a loop: each review checks the previous iteration's findings), `mode?` (`fan_out`/`orchestrator` — *Execution compatibility* below) | **Real** |
 | `canvas` | Canvas Diagram / Product | Asks an agent for a **mermaid/excalidraw** diagram and writes it under the data dir (`workflow-canvas/{run}/{node}.{ext}`); output `{ scene_id, path, diagram, … }`. | `prompt`, `mode` (`mermaid`/`excalidraw`), `provider?`, `model?` | **Real** |
 | `self_improve` | Self-Improve (offer) / AI | Runs the **self-improvement engine** in OFFER-ONLY mode (`Autonomy::Propose` — every skill/memory edit is queued for approval, **never** applied) over recent sessions and posts the offered list to the trigger's chat thread; output `{ run_id, summary, offered, edits }`. | `providers[]` or `provider?` (empty ⇒ the workspace's configured Self-Improvement providers) | **Real** |
 | `git_pr` | Git PR / Network | **Drafts** a pull request for a repo branch — the title/description are crafted by an agent (the node's `provider`/`model`, empty ⇒ run's resolved default; not the claude-only orchestrator). Default is draft-only (`opened:false`); **`open:true`** actually OPENS the PR on the remote (outward-facing, per-step opt-in) — gate it on the incoming edge (e.g. the review passing). | `repo_id`, `base` (default `main`), `open` (default `false`), `worktree_path?`, `provider?`, `model?` | **Real** |
+| `git_checkout` | Check out PR / branch / Network | **No agent.** For each repository of the run: finds the pull request (or branch) by fixed rules, checks its head out detached, and writes `source`, `base` (the merge-base) and `base_branch` to `repos.json`. See *Steps that need no agent* below. | `mode` (`pr` default · `branch`) | **Real** |
+| `script` | Run script / Flow | **No agent.** Runs a shell command (once, or once per repository) with a time limit; run values arrive as `OTTO_*` environment variables. Its output file becomes the step's answer. | `command` (required), `timeout_s` (10–7,200, default 900), `foreach` (`repos`), `cwd` (`worktree` · `context`), `output_file` (a bare file name), `ok_exit_codes` (default `[0]`), `allow_failure`, `idempotent` | **Real** |
+| `post_review_comments` | Post review comments / Network | **No agent.** Posts a review step's findings on the PR: bugs and warnings inline, notes in one combined comment, a summary with the score — each at most once. | `review_from`, `inline` (default `["bug","warn"]`), `info` (`combined` · `skip`), `summary` (default true), `summary_intro_from`, `summary_files[]`, `max_inline` (default 150) | **Real** |
+| `check` | Check criteria / Flow | Checks each criterion and records the evidence: a command's exit status, a rule, an agent that must cite evidence, or a person. Only agent criteria use an agent. See *Goals* in §6 and [Goals](./goal-loops.md). | `criteria[]` (`{id, text, verify: command\|agent\|human\|expr, how?, command?, expr?, timeout_s?}`), `evaluator.{provider, model, effort}`, `instructions`, `final_review` | **Real** |
 
 > **¹ `game_engine` / `verifier` are real but "scaffold" nodes.** They execute
 > and produce usable structured output — they do real work, and `verifier`
@@ -400,13 +598,13 @@ any "not wired" stub kinds** — the four former product/review stubs are now wi
 > **² The four product/review nodes are now wired (formerly stubs).** They run a
 > **real single-agent turn** over the story's built context (`ctx.product.
 > build_agent_context`) with the matching product **skill inlined** (`grill` /
-> `jira-story-writer` / `story-task-breakdown`), as a visible session; `product_*`
-> can optionally `persist` a product version. `review_run` calls the in-process
-> **local-review engine** (`run_review_for_branch`), polls it to completion, and
-> computes a deterministic 0–100 score from the blocking/advisory finding counts
-> (`review_findings_counts`), optionally blending in an agent goals-assessment.
-> They no longer emit a `{"stub": true}` marker — older docs/UI hints about "not
-> wired" are obsolete.
+> `jira-story-writer` / `story-task-breakdown`), on a thread of the run like
+> any agent step; `product_*` can optionally `persist` a product version.
+> `review_run` calls the in-process **local-review engine**
+> (`run_review_for_branch`), waits for it, and computes a deterministic 0–100
+> score from the blocking/advisory finding counts (`review_findings_counts`),
+> optionally blending in an agent goals-assessment. They no longer emit a
+> `{"stub": true}` marker — older docs/UI hints about "not wired" are obsolete.
 
 > **Heads-up — wired nodes still have prerequisites.** `db_query` (a saved
 > DB-Explorer connection), `broker_peek` (a broker cluster), `swarm_task` (a
@@ -438,8 +636,8 @@ unreliable Jira fetch never eats an agent's context or turn budget):
    `{ jira: { found, key?, fetched?, summary?, status?, url?, error? } }`.
 3. **Optional analysis phase.** When `params.prompt` is set, the node runs a
    second phase identical to `agent_prompt` (same preamble, skills, provider
-   default `claude`) over the gathered context as a real, openable session; its
-   `reply`/`session_id`/`working_directory` merge into the output.
+   default `claude`) over the gathered context on a thread of the run; its
+   `reply`/`thread_id`/`working_directory` merge into the output.
 
 Every run re-fetches (there is no cross-run cache, §3), so a ticket edited since
 the last run is always picked up. The `ui-test-authoring` and
@@ -467,9 +665,9 @@ to Claude, and the configured model is preserved.
 
 The run page keeps discovering review records even when a step uses `await:false`
 or a summarizer is retried after the workflow finishes. Reloading the run restores
-the review association and current summarizer; session IDs already captured by
-the workflow remain in its history. Completed attempts release their live PTYs
-while retaining the session record.
+the review association and current summarizer. Reviewer and summarizer threads
+are engine threads (§3): closed when their turn ends, kept for the run's
+retention period, never in your Threads lists.
 
 Failures, the finding-count timeout (5–30 minutes), and empty summaries
 when findings exist can preserve a deterministic summary. This is not independently
@@ -587,9 +785,101 @@ is unchanged and still uses `human_approval`.
 - **`loop`** runs its inner `steps[]` (each a `{kind, name, params, retry}` object,
   executed by the **same `execute_node`** path as top-level nodes) up to
   `max_iterations`, stopping early when the `until` expression holds against
-  `{ iteration, last, steps, input }`. The previous step's output threads into the
-  next step, and run-level keys (e.g. `repo_id`, `goals`) flow to every step. The
-  built-in flow templates use a `fix → review_run until last.passed == true` loop.
+  `{ iteration, last, steps, input }` or when an inner `check` step finds every
+  criterion met. The previous step's output threads into the next step, and
+  run-level keys (e.g. `repo_id`, `goals`) flow to every step. The built-in
+  flow templates use the loop "Review → fix until passing":
+  `review_run → check (rule: the review passes) → fix`, which ends the moment
+  a review passes. Each iteration is a child row of the loop step on the run
+  page.
+
+### Steps that need no agent
+Four kinds do in code what an agent used to do by recipe. They take a step
+slot but no agent, no model and no quota, and they finish in seconds.
+
+**Check out PR / branch (`git_checkout`).** For each repository in the run's
+`repos.json`:
+- **The pull request** (`mode: pr`, the default) is found from, in order:
+  the `pr` input (authoritative — a PR that is not open is reported, never
+  "corrected"); the open PRs whose source branch is the `pr_branch` input; the
+  open PRs whose source branch is `feature/<Jira key>` (or starts with it) or
+  whose title names the key. If that does not leave exactly one open PR, the
+  repository is left unresolved and the candidates are listed.
+- **A branch (no pull request)** (`mode: branch`): the first that exists on
+  `origin` of the `pr_branch` input, the repository's declared `source`,
+  `feature/<Jira key>`; else the single remote branch naming the key. The
+  base is the `base` input, else the repository's default branch.
+- It fetches, checks the head out **detached** in the run's worktree, takes
+  the merge-base, and rewrites the entry's `source`, `base` (the merge-base
+  commit) and `base_branch`; PRs found by rule are added to `prs.json`. An
+  unresolved repository keeps its reason in `repos.json`; the step fails only
+  when no repository resolved. Branch names from the input are checked before
+  git sees them. The step file is the result table.
+
+**Run script (`script`).** One command under `/bin/sh -c`, in its own process
+group (killed on timeout, cancel, skip and when the shell exits), with the
+daemon's environment scrubbed, `PATH` from your login shell, and the same
+Seatbelt confinement as a scheduled shell task.
+- **Run in** — each repository's worktree, one after another
+  (`foreach: repos`; a repository that did not resolve is left out, and with
+  none the step succeeds with "no repositories to run on"); the run's working
+  folder, once (default); or the run folder with its step files, once
+  (`cwd: context`).
+- **Values arrive as environment variables, never pasted into the command**:
+  `OTTO_RUN_ID`, `OTTO_CONTEXT_DIR`, and per repository `OTTO_WORKTREE`,
+  `OTTO_BASE`, `OTTO_BASE_BRANCH`, `OTTO_SOURCE`, `OTTO_REPO` (the main
+  clone's path), `OTTO_REPO_NAME`, `OTTO_REPO_ID`; with an output file,
+  `OTTO_OUT` is its name.
+- **Output file (optional)** — a bare file name in the run folder
+  (`$OTTO_CONTEXT_DIR/$OTTO_OUT`). Its text becomes the step's answer and
+  what the next steps read; without one the answer is the command's output.
+  All output also goes to `<step>.log` beside the step file. A re-run starts
+  the output file afresh.
+- **When it exits with an error** — an exit code outside `ok_exit_codes`
+  fails the step with the last 20 lines of output ("Fail the step"), or with
+  `allow_failure` is recorded and the run continues ("Record it and
+  continue"). A timeout fails it: "timed out after 900 s".
+- A script caught mid-flight by a daemon restart is re-run only with
+  `idempotent: true`; otherwise its outcome is unknown and the run stops for
+  you (§7 *Restart resume*).
+
+**Post review comments (`post_review_comments`).** Posts the findings of the
+nearest review step before it (or the one named in `review_from`) on the
+run's pull request, taken from `prs.json`: bugs and warnings as inline
+comments (at most `max_inline`, default 150 — the rest go into one "More
+findings" comment), notes as one combined comment, then a summary comment
+with the score (its opening text can be an earlier agent step's answer,
+`summary_intro_from`, and it can append run files, `summary_files`). A
+comment already on the PR (same file, line and first line) is skipped and
+every posted draft is marked, so a retry or a re-run never posts twice. A
+local review with no PR posts nothing and says so; an incomplete review posts
+nothing. What was posted is on the run as **Delivered** (§7).
+
+**Check criteria (`check`).** Decides each criterion and keeps the evidence:
+command criteria run first, one after another, in the run's working directory
+(exit 0 = met; the evidence keeps the exit status and the last 8 KB of
+output, everything in `<step>.<criterion id>.log`); rule criteria
+(`verify: expr`) are evaluated on `{iteration, steps, last, input}`; agent
+criteria get one checker turn on a fresh thread, and a "met" without evidence
+counts as not met; a criterion **you** check makes the step wait for you
+(*Needs you*, §7) once everything else is met. With `final_review`, an
+independent review turn must approve with no findings. Output:
+`{criteria: [{id, text, verify, met, evidence, verified_by}], all_met, met,
+total, progress_pct, verdict: achieved|continue|blocked, feedback, …}`. Inside
+a loop a passing check ends the loop.
+
+### Conditions on the run's repositories
+Edge conditions and the `condition` node read the run itself through `run`:
+`run.input`, `run.repos` (the entries of `repos.json` as they are now — after
+a `git_checkout` they carry `source`, `base`, `base_branch` and any
+`error`) and `run.prs` (`prs.json`). So a graph can branch on what the run
+works on without an agent step: `len(run.repos) > 1` for "more than one
+repository", `len(run.prs) == 0` for "no pull request". The `condition`
+step's inspector offers this as **Field · operator · value** with the
+expression it writes shown under it; **Write an expression instead** keeps
+the free form. A step that rewrites `repos.json` and a condition that reads
+it should be connected one after the other, not side by side (validation
+warns).
 
 ---
 
@@ -610,7 +900,7 @@ interface WorkflowTrigger { id; workflow_id; kind; spec: object; enabled; create
 | **webhook** | `{ token }` (32-byte URL-safe token auto-generated server-side on create) | An external system calls `POST /workflows/{id}/webhook/{token}`. The token **is** the credential — no bearer auth required. The trigger row's copy button copies the full URL. | The request body (JSON), or `null`. | **Yes** — handler `webhook_trigger` spawns the run. |
 | **event** | `{ event_kind, filter_json? }` | A daemon event whose mapped name equals `event_kind` fires on the event bus. | `{ "trigger": "event", "event_kind": "..." }` | **Yes** — `spawn_workflow_event_trigger_listener` is started at daemon boot (`ottod` main, "workflow event-trigger listener started"). |
 | **schedule** | `{ cadence, every_min, at, weekday, expr, timezone, last_run, enabled, prompt? }` (the **shared cadence** format — same as Scheduled Tasks; `prompt` is new — see *Prompts & chat bindings*) | Cadence comes due: `interval` (every N min, default 60), `daily` (at `HH:MM`), `weekly` (weekday 0=Mon at `HH:MM`), or **`cron`** (`expr`, 5-field). All interpreted in the spec's IANA **`timezone`** (default UTC). | `{ "trigger": "schedule" }`, plus `"prompt"` when `spec.prompt` is set. | **Yes** — `workflow_trigger_scheduler::start` is started at daemon boot (`ottod` main, "workflow schedule-trigger scheduler started"). |
-| **chat** | `{ channel: "slack"\|"telegram", chat: "<id>", thread?: "<ts>", mention_only?: bool }` | Any inbound message that matches the binding (channel/chat exact, thread pinned or open, `@mention` if `mention_only`) — see *Prompts & chat bindings* below. | `{ trigger: "chat", origin_workspace_id, channel, chat, thread, user, prompt, msg, raw }` | **Yes** — evaluated **live** by the channels `Bridge` on every inbound message (not polled, unlike the other three kinds). |
+| **chat** | `{ channel: "slack"\|"telegram", chat: "<id>", thread?: "<ts>", mention_only?: bool, chat_updates?: "live"\|"per_step" }` | Any inbound message that matches the binding (channel/chat exact, thread pinned or open, `@mention` if `mention_only`) — see *Prompts & chat bindings* below. | `{ trigger: "chat", origin_workspace_id, channel, chat, thread, user, prompt, msg, raw }` (+ `chat_updates` when the binding sets it) | **Yes** — evaluated **live** by the channels `Bridge` on every inbound message (not polled, unlike the other three kinds). |
 
 ### Editing and previewing triggers
 
@@ -711,8 +1001,8 @@ rest of the graph — and replies in-thread with where the run landed:
 A name that only matched after normalisation adds *"ℹ️ No workflow is named
 exactly "…" — matched **X**."*. The run's page in Otto
 (`#/workflows/<workflow id>/runs/<run id>`, **Copy link** in the run header)
-shows *Started from Slack — <channel>* with the trigger message in a
-disclosure.
+says who started it and where ("Started from Slack", or the person and the
+channel), and keeps the run input under **Result → Input**.
 
 `Name:` is matched case-insensitively first (`name = ? COLLATE NOCASE`), then
 after normalising both sides (dash variants — a typed `-` finds an em dash —
@@ -754,58 +1044,104 @@ Goals:
 `implement-feature` and `po-lifecycle` use the same shape (add a `story_id` for the
 product steps). Slack carries `msg`/`jira_ticket`/`working_directory`/`goals` to
 every node; the `review_run` / `git_pr` steps additionally need a **`repo_id`**,
-which the chat message doesn't carry — either run those templates from the UI
-**Run…** editor (it pre-fills `repo_id`/`base`/`goals`) or have the first
+which the chat message doesn't carry — either run those templates from the
+**Run…** start form (it carries `repo_id`/`base`/`goals`) or have the first
 "prepare relevant info" node resolve the repo from `working_directory`.
 
-**Live progress (streamed while the run executes).** A run started from a chat
-**streams brief, well-formatted progress lines back into the same thread** as it
-goes (Slack/Telegram). A single pump task posts them in order, so the engine never
-blocks on chat latency:
+**Updates in the thread (while the run executes).** A run started from a chat
+reports back into the same thread (Slack/Telegram). A single pump task posts in
+order, so the engine never blocks on chat latency. There are two styles; the
+Start step's **Updates in the chat thread** picks one (`chat_updates`, also
+accepted in the run input and on a chat binding's spec):
 
-- a **run-start** line — `🚀 <name> started — N step(s) queued.` (plus `Goals: …`
-  when the trigger carried goals);
-- per **meaningful** step, `▶ <step> started` then `✅ <step> done (<dur>)` with a
-  short summary of the work product (or `❌ <step> failed — <err>` on failure);
-- for the **fix→review loop**: a `🔁 Iteration N/M` header, the inner sub-steps as
+- **One live message, plus each step's file** (the default, `live`). The run
+  keeps **one status message** and edits it in place (at most one edit every
+  3 s). Its first line reads
+  `*<workflow>* · <working|reviewing|…> · 5 of 9 steps · 6m 40s (usually 12m)`,
+  then one line per step: `◻ <step>` (not started), `▶ <step> · 2m 10s`
+  (running, with what it is doing), `⏳ <step> — <why it waits> since 10:42`,
+  `⚠️ <step> — <what it asks>`, `✅ <step> · 14s — <one line of what it
+  did>`, `❌ <step> failed — <error>`, `⏭ <step> — skipped (<why>)`,
+  `⏹ <step> — stopped`. Past 3,000 characters the finished steps fold into
+  `✅ N steps done`. A run still queued for a run slot already has its message
+  (`*<workflow>* · queued` / `⏳ Queued — 2nd in line`), and one canceled
+  there is edited to `⏹ *<workflow>* — canceled while queued`. The message's
+  id is stored on the run, so a restart, a Resume or a retry edits the same
+  message. **Every step's file is still posted** to the thread, captioned
+  `✅ <step> · <duration>` or `❌ <step> failed — <error>` (loop iterations:
+  `› ✅ <step> · iteration K`). **New posts** — the ones that notify — are
+  made only when the run needs a person
+  (`⚠️ @you *<workflow>* needs you — *<step>* is waiting for an approval — … Approve it in Otto (Workflows → Runs).`;
+  a usage limit says "Otto continues it when the limit resets."), when it is
+  held (`⏸ *<workflow>* paused — …`, `⚠️ *<workflow>* is blocked — …`,
+  `⚠️ *<workflow>* is out of budget — …`) and for the final result.
+- **A message and a file per step, as before** (`per_step`). The thread of
+  earlier releases, byte for byte: a **run-start** line
+  (`🚀 <name> started — N step(s) queued.`, plus `Goals: …`); per
+  **meaningful** step `▶ <step> started` then `✅ <step> done (<dur>)` with a
+  short summary (or `❌ <step> failed — <err>`) and the step's file; for the
+  **fix→review loop** a `🔁 Iteration N/M` header, the inner sub-steps as
   `› ▶ …` / `› ✅ …` / `› ❌ …`, and a review block
   `🔍 Review #N done — score X/100 (pass ≥ T) — ✅ passed` / `⚠️ <reason>`
   followed by the per-lens scores and a bulleted findings list (or *"Findings:
-  none 🎉"*, said only of a review that finished with none). A review that did not
-  complete posts `🔍 Review #N — ⚠️ Review incomplete — not a verdict` instead,
-  with `Why:` (which step failed and why, naming any failed lens with its
-  reason), the verification coverage, how many findings are stored unverified
-  (not posted to the PR), the lenses that did not finish, a `Partial score` when
-  the verifier ran, and how to finish it: **Retry step** re-runs only the
-  summarizer when every reviewer finished (above), the review's own page can
-  retry the summarizer or a failed reviewer, and re-running the workflow starts
-  a full new review.
+  none 🎉"*, said only of a review that finished with none). A review that did
+  not complete posts `🔍 Review #N — ⚠️ Review incomplete — not a verdict`
+  instead, with `Why:`, the verification coverage, how many findings are
+  stored unverified, the lenses that did not finish, a `Partial score` when
+  the verifier ran, and how to finish it (**Retry step**, the review's own
+  page, or a new run). With steps running side by side the lines arrive in
+  the order things happen.
 
-Structural/plumbing nodes (`log`, `transform`, `delay`, `condition`,
-`manual_trigger`) are intentionally **not** announced, to keep the thread readable;
-`review_run` is also excluded from the generic ▶/✅ lines because it streams its own
-richer `🔍` block. All streamed lines are **flushed before the final result is
-delivered** (below), and every line is redacted. Manual UI runs and webhook-only
-triggers **do not stream** (there is no chat target). The target is the trigger
-origin (`channel`/`chat`/`thread`), or an explicit `result_chat` (+
-`result_channel` / `result_thread`) override; the integration token is resolved
-**per-workspace** (from the origin/trigger workspace — workflows themselves are
-global).
+In both styles structural/plumbing nodes (`log`, `transform`, `delay`,
+`condition`, `manual_trigger`) are not listed, everything is **flushed before
+the final result is delivered**, and every line, caption and file is redacted.
+Manual UI runs and webhook-only triggers **do not report** (there is no chat
+target). The target is the trigger origin (`channel`/`chat`/`thread`), or an
+explicit `result_chat` (+ `result_channel` / `result_thread`) override; the
+integration token is resolved **per-workspace** (from the origin/trigger
+workspace).
+
+**Controlling a run from its thread.** Reply in the run's thread: `status`
+(`progress`, `?` — in the live style the answer is the status message's
+text), `skip` (`next` — skips the running step; with several running it asks
+"Several steps are running: A, B — reply `skip <step name>`.", and a name
+prefix or part of the name picks one while the others keep running), `abort`
+(`cancel`, `stop`), `re-review` (`review again`) and `help`. Approvals,
+answers, pausing and resuming are done in Otto, not by reply.
+
+**Files sent with the starting message (Slack).** Files attached to the Slack
+message that starts a run reach the run as before — the message text names
+where each was saved, so the agents read them — and the run now also keeps
+its own copy: each file is copied to `<context>/attachments/<safe name>`
+before the run can queue (names reduced to `[A-Za-z0-9._-]`, at most 10 files
+and 50 MiB per run) and listed in `attachments.json`. The run page shows them
+under **Result → Input → Files sent with the run**, with **Preview** for text
+files and **Download** for any; a file that could not be received says why.
+Telegram receives no files.
 
 **Result delivery (done/failed + deliverable).** When a run that was started from
 a chat **finishes**, the engine replies in the **same channel + thread** it was
-triggered from with a brief status (`✅/❌` + `N/M steps ok · failed · skipped`,
-the review score if any, the proof-pack id) and attaches **one file**: on a
-successful run that produced one, that's `final-output.md` — the run's actual
-deliverable (see *Final output* in §7); otherwise it's the always-generated
-`summary.md` (every step, its status/duration/attempts, and a peek at each
-output). Both are redacted the same way before they leave the machine. This is
-origin-driven (`deliver_run_result` reads `channel`/`chat`/`thread` from the run
-input), so manual UI runs don't post anything. To also POST the result to an
-external system, include a `result_webhook` (or `callback_url`) in the run input —
+triggered from and attaches **one file**: on a successful run that produced
+one, that's `final-output.md` — the run's actual deliverable (see *Final
+output* in §7); otherwise it's the always-generated `summary.md` (every step,
+its status/duration/attempts, and a peek at each output). In the live style
+the post says what happened and what was delivered, in words —
+`✅ *<workflow>* passed — 92/100 · 12m 05s`,
+`⚠️ *<workflow>* done — review 62/100, not passed · …`,
+`✅ *<workflow>* done · …`, `❌ *<workflow>* failed at *<step>* — <error>`,
+`⏹ *<workflow>* canceled at *<step>* · …` — followed by one line per
+deliverable (`• <what>: posted`, `• <what>: not posted (<why>)`, `• <what>: pending approval`) and, for
+a failed run on a PR that got nothing, "Nothing was posted on PR #N.". In the
+per-step style it is the earlier brief status (`✅/❌` +
+`N/M steps ok · failed · skipped`, the review score if any, the proof-pack
+id). Both are redacted the same way before they leave the machine. This is
+origin-driven (`deliver_run_result` reads `channel`/`chat`/`thread` from the
+run input), so manual UI runs don't post anything unless **Send the result
+to** in the start form names a chat. To also POST the result to an external
+system, include a `result_webhook` (or `callback_url`) in the run input —
 it's delivered through the SSRF-guarded webhook path, with the same
-final-output/summary choice. Cancellations and time-outs report too (always with
-`summary.md` — only a `success` run can have a `final-output.md`).
+final-output/summary choice. Cancellations and time-outs report too (always
+with `summary.md` — only a `success` run can have a `final-output.md`).
 
 ### Prompts & chat bindings
 Two more ways to start a run by chat, both handled by `otto_workflows::chat`
@@ -848,7 +1184,8 @@ hijack a message that wasn't meant for it).
 **every** matching inbound message, no keyword required — good for a
 workflow that IS the channel's purpose (e.g. a #test-requests channel where
 every message is a test-writing ask). Spec: `{channel, chat, thread?,
-mention_only?}`. `channel` + `chat` must match exactly; an absent `thread` in
+mention_only?, chat_updates?}` (`chat_updates` is copied into the run input).
+`channel` + `chat` must match exactly; an absent `thread` in
 the spec matches any thread, a present one requires an exact match (a
 thread-pinned binding wins over an unpinned one when both match); `mention_only`
 (default `false`) requires the message to @-mention someone (an `@word` —
@@ -888,9 +1225,9 @@ blocked: <workflow>* — that opens the workflow. A message that is no workflow
 trigger, or names a workflow that has no binding on that chat, stamps
 nothing (an explicit one is still logged at warn).
 
-**Queue in the app.** The Running list shows a queued run's place —
-*2nd in line*, with *"Queued · 2nd in line, behind PR Reviewer"* on hover —
-and one line, *"Up to 2 at once — other workflow runs wait in line."*, from
+**Queue in the app.** A queued run's word on the Runs tab is its place —
+**Queued · 2nd** — and its run page says "Both run slots are busy" (or "All N
+run slots are busy"), with **Cancel run**; the place comes from
 `GET /workspaces/{wid}/workflow-runs/queue`.
 
 **Loop guard.** Slack drops any event carrying a `bot_id` (including the nested
@@ -905,8 +1242,8 @@ retrigger itself off its own replies.
 
 > **Ordering note.** `implement-feature`/`po-lifecycle`-style templates that need
 > a `repo_id` still don't get one from a bare chat message or binding (chat
-> carries `msg`/`prompt`/`jira_ticket` only) — run those from the UI **Run…**
-> editor, or have the first node resolve the repo from `working_directory`, same
+> carries `msg`/`prompt`/`jira_ticket` only) — run those from the **Run…**
+> start form, or have the first node resolve the repo from `working_directory`, same
 > as the `Action: Workflow` worked example above.
 
 ### Human approval is **not** a trigger
@@ -930,7 +1267,7 @@ opens the new workflow in the editor.
    with the full node catalog and asks for a JSON graph. The result is then:
    - **sanitized** — nodes with unknown kinds are dropped; edges referencing
      missing nodes are dropped;
-   - **laid out** left-to-right by topological layer;
+   - **laid out** (the editor lays every graph out itself, top to bottom);
    - and, if the LLM is unavailable or returns junk, replaced by a **fallback
      graph** of `manual_trigger → agent_prompt` (the agent node pre-seeded with
      your description). So generation **never fails** to produce a runnable graph.
@@ -1023,21 +1360,28 @@ writes. Ticking a change asks the daemon again for that selection's draft.
 **Apply as version N…** confirms and saves a new version (the old one stays in
 Versions); only a person can apply (an agent credential gets 403); a save made
 meanwhile asks you to **Check again**.
-### Goals (Goal Loops folded in)
-A **goal** is a workflow of a fixed shape — work, then check the criteria, in a
-budgeted loop — started from **Run… → A goal…**, ⌘K **New goal…**, Insights'
-"Hand off as a goal…" or an older loop's **Continue as a goal**. The Goal form
-(`ui/src/modules/workflows/goal/`, mounted on the page by `GoalHost`) takes the
-goal, the criteria (each checked by a command, an agent, or a person), where it
-works (a repository or research), the budget (iterations, active time) and the
-models that work and check. It starts with `POST /workspaces/{wid}/goals` and
-opens the run page, which shows the goal card (criteria met, budget left), the
-loop's **iterations as child rows** of the loop step (one ring tick each), the
-**Criteria** tab, and the hold cards: **Resume**, **Extend and resume…**, a
-"you check it" criterion's **Record** / **Not met…**. Goal workflows fold under
-**Goals** in the Workflows tab; the old Goal Loops page is a read-only history
-reached from **Older goal loops** at the foot of Runs (`#/loops` links keep
-working). Details: [Goal Loops](./goal-loops.md).
+
+### Goals
+A **goal** is a workflow of one fixed shape — **Start → "Work toward the
+goal" { Work → Check criteria }** — a budgeted loop that works, checks every
+criterion with evidence, and repeats until all are met or the budget ends.
+Goal Loops, which used to be a feature of its own, is this now. Start one from
+**Run… → A goal…**, ⌘K **New goal…**, Insights' **Hand off as a goal…**, the
+a review's **Run agent to fix…** in Git, or an older loop's **Continue as a goal**. The
+**New goal** form (`ui/src/modules/workflows/goal/`) takes the **Goal**, a
+**Title**, **Done when** (each criterion checked by *A command passes*, *An
+agent finds evidence* or *I check it*), **Work in** (*A repository*, from a
+branch or the current commit, or *Research — no repository*), the **Budget**
+("Up to N iterations and 1h of active time") and the **Models** for **Work**
+and **Check**. **Start goal** creates the goal's workflow
+(`POST /workspaces/{wid}/goals`) and opens its run page: the goal card
+("Criteria 2 of 3 met", each criterion's evidence, "Iteration 2 of 5 · 18m of
+1h active"), the loop's iterations as rows under the loop step, the
+**Criteria** tab, and — when the run is held — **Resume**, **Extend and
+resume…**, or **Record** / **Not met…** for a criterion you check. Goal
+workflows fold under **Goals** in the Workflows tab. Loops made before this
+release are a read-only history behind **Older goal loops** at the foot of
+Runs. The full guide: [Goals](./goal-loops.md).
 
 ## 7. Running & monitoring
 
@@ -1058,13 +1402,17 @@ working). Details: [Goal Loops](./goal-loops.md).
   follows it; **Retry only this step** (⋯) just the step. A running step's ⋯ has
   **Skip this step**.
 - **Stop run…** → `POST /workflow-runs/{id}/cancel`. The cancel is announced to the
-  engine, which stops the **running node at once** (its sessions are killed), then
-  marks the remaining nodes `skipped` (status `canceled`). A running node reads
-  only the run's status as a backstop (first tick, then every 30 s) — never the
-  run body — so a long agent step costs no DB reads while it works (perf W1).
-  Live step changes reach the open run view as a node summary on
-  `workflow_run_updated` and are applied in place, without a `/progress` GET,
-  when the event is the next revision (perf W5).
+  engine, which stops **every running step at once** (its agents are stopped;
+  files written so far are kept), marks each `skipped` with class `canceled`
+  (**Stopped**) and the remaining steps `skipped` (status `canceled`). A
+  queued run has **Cancel run** instead (nothing started, no confirmation).
+  A running node reads only the run's status as a backstop (first tick, then
+  every 30 s) — never the run body — so a long agent step costs no DB reads
+  while it works (perf W1). Live step changes reach the open run page as a
+  node summary on `workflow_run_updated` and are applied in place, without a
+  `/progress` GET, when the event is the next revision (perf W5).
+- **Pause** and **Add a note for the next step…** (a running run's ⋯) — see
+  *Needs you, holds and notes* below.
 
 A run executes in a background task (`run_workflow`) and persists progress to the
 `workflow_runs` row after **every** node transition.
@@ -1072,20 +1420,31 @@ A run executes in a background task (`run_workflow`) and persists progress to th
 ### Run queue (parallel-run cap)
 
 At most **2** runs execute at once, daemon-wide (`OTTO_WF_MAX_PARALLEL_RUNS`
-overrides, minimum 1). A single run can fan out dozens of agent PTYs — one
+overrides, minimum 1). A single run can fan out dozens of agents — one
 `review_run` node launches the entire reviewer fleet — so uncapped parallel
-runs exhausted the daemon's file descriptors (`spawn claude: Too many open
-files`) and starved interactive sessions. Every trigger path (manual run,
-retry-node, webhook, schedule/event trigger, chat, scheduled task) shares one
-FIFO gate (`workflow_engine::spawn_run`):
+runs exhausted the daemon's file descriptors and starved interactive work.
+Every trigger path (manual run, retry-node, webhook, schedule/event trigger,
+chat, scheduled task) shares one FIFO gate (`workflow_engine::spawn_run`):
 
-- A run beyond the cap keeps its `pending` status — shown as **queued** in the
-  UI — and starts automatically, in creation order, when a slot frees.
+- A run beyond the cap keeps its `pending` status — shown as **Queued · 2nd** —
+  and starts automatically, in creation order, when a slot frees.
 - The queue is **persistent** with no extra table: the still-`pending`
   `workflow_runs` row *is* the queue entry. On daemon restart, queued runs
   re-enqueue in creation order (`resume_queued_runs`).
-- **Stop** on a queued run works: the gate re-checks the run's status when a
-  slot frees and a canceled run never starts.
+- **Cancel run** on a queued run works: the gate re-checks the run's status
+  when a slot frees and a canceled run never starts.
+- **A run waiting on a person holds no slot.** While every running step of a
+  run waits on an approval, an answer or a usage-limit reset, the run hands
+  its slot to the next queued run and takes one back, in line, when a step
+  works again.
+- **The long lane.** A run whose Start step has `lane: "long"` — every goal —
+  waits on its own gate (`OTTO_WF_MAX_LONG_RUNS`, default 2, 1–4), so an
+  hours-long goal never blocks a quick review, and the other way round. Queue
+  places count within the lane.
+
+This cap is about **runs**. Inside a run, steps run side by side up to
+`wf_max_parallel_steps`, and every agent still waits its turn at the
+machine's admission gate (§3 *Scheduling*).
 
 ### Validation, pinned versions and durable loops
 
@@ -1097,53 +1456,94 @@ saved. Loop steps are checked too; nested loops remain unsupported.
 
 A run pins its definition when queued. Queue delays, workflow edits, restarts and
 step retries all keep that same graph, instructions and restart policy. The run
-view shows when the current editor differs from the pinned version. Use a fresh
+page's facts line shows the version it ran (`· version 3`). Use a fresh
 Run to execute the latest saved graph. A missing pinned snapshot fails the run
 instead of silently executing a different definition.
 
-Loop attempts now have durable checkpoints (migration **0127**). The run view
-shows each iteration's inner step, status, attempts, logs and output. Completed
-steps retain their output through recovery, and inner failures use their own
-retry policy. An interrupted external action has an unknown outcome and stops
-for inspection; it is never automatically repeated. **Retry step** acknowledges
-that outcome, resets failed attempts and retains successful inner work.
-**Re-run from here** intentionally clears the selected loop checkpoints and can
-repeat completed actions. Old interrupted loops without checkpoints fail safely.
-Recovered handoff files retain their contents and their step numbering.
+Loop attempts have durable checkpoints (migration **0127**). The run page
+shows each iteration as a row under the loop step, with its inner steps,
+status, attempts, logs and output. Completed steps retain their output through
+recovery, and inner failures use their own retry policy. An interrupted
+external action has an unknown outcome and stops for inspection; it is never
+automatically repeated. **Retry step** acknowledges that outcome, resets
+failed attempts and retains successful inner work. **Retry from here**
+intentionally clears the selected loop checkpoints and can repeat completed
+actions. Old interrupted loops without checkpoints fail safely. Recovered
+handoff files retain their contents and their step numbering.
 
 ### Restart resume
 
-A daemon restart (or a computer reboot) no longer cancels executing runs.
-Per-node progress is persisted after every step, so on startup a reconciler
-(`reconcile_interrupted_runs`) re-enters each interrupted run instead of
-failing it:
+A daemon restart (or a computer reboot, or an update) does not cancel
+executing runs. Per-node progress is persisted after every step, so on startup
+a reconciler (`reconcile_interrupted_runs`) re-enters each interrupted run
+instead of failing it:
 
-- **Adoption**: steps that already finished keep their status/output/sessions
-  and run scope. The run continues all unfinished nodes, including pending
-  sibling branches, reusing its context dir and `otto-wf/<run_id>` worktrees
-  (the startup worktree sweep runs after reconciliation, so resumable runs
-  keep theirs).
+- **Adoption**: steps that already finished keep their status/output/thread
+  record and run scope. The run continues all unfinished nodes, including
+  pending sibling branches, reusing its context dir and `otto-wf/<run_id>`
+  worktrees (the startup worktree sweep runs after reconciliation, so
+  resumable runs keep theirs). Several steps may have been running side by
+  side: the run re-enters only when **every** one of them is safe to re-enter.
+- **An agent step on a thread goes on in the same conversation.** A thread
+  whose agent process survived the restart (the runtime holds agent processes
+  across a daemon restart) is simply awaited again from where it was. A
+  thread whose turn the restart cut gets one turn — "Otto restarted while you
+  were working on this step. Check what you already did and finish it." — on
+  the same conversation; a restart that came before the prompt went out sends
+  the prompt now. A handoff the agent wrote while the daemon was down counts.
+  If the provider cannot resume the conversation the step fails (class
+  `provider`) rather than starting an agent that remembers nothing. A step on
+  the terminal runner whose handoff file proves it finished is **adopted as
+  done**; otherwise it re-runs in a fresh session.
 - **Side-effect safety**: a step with external side effects (`git_pr`,
   `channel_notify`, `swarm_task`, `product_publish`, `api_run`,
-  `http_request`, `self_improve`) caught **mid-flight** is never replayed —
-  its outcome is unknown, so it's marked `error` and the run fails with a
-  pointer at the manual *retry from this step* flow. Idempotent/agent kinds
-  re-run automatically; an interrupted `agent_prompt` whose handoff step file
-  proves it actually finished is **adopted as done** instead of re-running.
+  `http_request`, `self_improve`, a `script` without `idempotent: true`)
+  caught **mid-flight** is never replayed — its outcome is unknown, so it's
+  marked `error` and the run fails with a pointer at **Retry step**.
+  `git_checkout` (its work repeats harmlessly), `post_review_comments` (every
+  comment is claimed before it is posted) and `check` re-run automatically,
+  as do pure and read-only kinds.
 - **Human approval**: a run paused at a `human_approval` node survives the
   restart — it resumes at the approval node and re-parks, re-awaiting the
   operator.
-- **Opt-out & caps**: the workflow editor's Instructions panel has a
+- **Held runs** (paused, blocked, out of budget) are not running, so a
+  restart leaves them as they are; **Resume** works after it.
+- **Chat**: the live status message's id is stored on the run, so the
+  resumed run goes on editing the same message.
+- **Opt-out & caps**: the workflow's Instructions panel has a
   *"Resume after a daemon restart"* toggle (`on_restart: 'resume' | 'fail'`;
   `'fail'` restores the old hard-fail). Automatic resumes are capped at 2 per
   run (`resume_attempts`) — a restart while the run waits at a human approval
   re-parks it without spending the budget, and a user retry resets it; the run
-  view shows *"Resumed after a daemon
-  restart (attempt N)"*. A retry-node re-entry persists its scope
-  (`resume_scope_json`) so even a restart mid-retry resumes with the same
-  scope. The 10h run time budget is per execution (fresh run, retry,
-  restart resume) and excludes time parked at an approval gate; crash-loop
-  resumes are bounded by the resume cap. (Migration `0108_workflow_resume`.)
+  page's facts line says *"Resumed after Otto restarted"*. A retry-node
+  re-entry persists its scope (`resume_scope_json`) so even a restart
+  mid-retry resumes with the same scope. The 10h run time budget is per
+  execution (fresh run, retry, restart resume) and excludes time waiting on a
+  person; crash-loop resumes are bounded by the resume cap. (Migration
+  `0108_workflow_resume`.)
+
+### Upgrading and rolling back
+
+- **A run in flight when you update** is resumed by the new build like any
+  restart. Each execution reads the runner switch again, so a step the old
+  build was running in a terminal session re-runs on a thread, with the same
+  step number and step file name.
+- **Runs from before this release** open on the run page as they are: steps
+  in order, logs, outputs and files. They have no phases and no thread, so
+  they carry an **Older run** chip ("phase timings and conversations are not
+  available; logs and outputs are") and their steps list the terminal
+  sessions they ran in (**Open in Agents**, for as long as that session still
+  exists).
+- **A Goal Loop running at the update** is paused once, with one notice
+  ("… was paused by the update …"); its work is kept and **Continue as a
+  goal** picks it up ([Goals](./goal-loops.md)).
+- **Rolling back to the previous build** is safe for stored data: the three
+  migrations of this release (0233–0235) only add columns and an index, so
+  the previous build boots on the newer database, lists every workflow and
+  opens every run — including runs this build wrote. It ignores what it does
+  not know: a run's hold (a paused, blocked or out-of-budget run reads there
+  as canceled or failed), the overview, and the retention date on threads (it
+  deletes none of them).
 
 ### Run repos & branches (`repos[]` input)
 
@@ -1179,25 +1579,30 @@ loop's worktree) **merge it back into `repos.json`** as the run progresses.
 ### Run context files (file-based step handoff)
 
 Every run owns `<data_dir>/workflow-context/<run_id>/` (`otto-workflows/src/context.rs`)
-— browsable in the run view under **Context files** (same tree + viewer as the
-agent Files panel, scoped to this run). The tree and the **Final output** panel
-read it through run-scoped routes, `GET /workflow-runs/{id}/context/browse?path=`
-and `…/context/read?path=` (paths relative to the context dir), gated at ws
-**Viewer** on the run's workspace like the run itself — not through `/fs/*`, which
-refuses Otto's data dir to every non-root caller. An absolute path, `..` or a
-symlink escaping the dir is 400. Every write here is best-effort — a
-failure logs a warning and the run continues; context files never fail a node:
+— browsable on the run page under **Files** (the run's Result, and each
+step's own tab). The tree and the **Result** read it through run-scoped
+routes, `GET /workflow-runs/{id}/context/browse?path=` and
+`…/context/read?path=` (paths relative to the context dir; `&download=1`
+returns the file's bytes), gated at ws **Viewer** on the run's workspace like
+the run itself — not through `/fs/*`, which refuses Otto's data dir to every
+non-root caller. An absolute path, `..` or a symlink escaping the dir is 400.
+Every write here is best-effort — a failure logs a warning and the run
+continues; context files never fail a node:
 
 ```
 instructions.md                 # workflow.instructions, verbatim — only when non-empty
 prompt.md                       # this run's ask, verbatim — only when a prompt exists
 run-brief.md                    # mission brief: trigger, mission, repos table, planned steps
-                                 #   (renamed from the old wf-<run_id>-instruction.md)
 repos.json                      # live registry of repos/branches — only when repos declared
+prs.json                        # the run's pull requests (from the run input and git_checkout)
 jira-<KEY>.md                   # a prepare_context node's fetched ticket (or fetch-failed notice)
 step1-gather-info.md            # per-step handoff summary
 step1-gather-info.output.json   # the step's raw output (5 MiB cap, truncation marker if hit)
+step2-go-gates.log              # a script step's full output (a check: <step>.<criterion id>.log)
 step3-review-iter2.md           # loop inner steps, per iteration
+attachments/  attachments.json  # files sent with the chat message that started the run
+steering.json                   # notes waiting for the next agent step
+.threads/<node id>-<attempt>.json  # the newest 50 timeline items of a step's thread (kept after the thread is removed)
 final-output.md                 # on a successful run: the deliverable (see Final output below)
 ```
 
@@ -1206,20 +1611,24 @@ text**: each agent-backed step is pointed at the directory and told to read,
 **in order**, `instructions.md` → `prompt.md` → `run-brief.md` → `repos.json`
 → the prior `step*.md` files it needs (each named only when it exists — a run
 with no standing instructions never tells a step to go read a file that isn't
-there), then write its own `step{N}-{name}.md` summary before finishing. If it
-doesn't, the engine writes a full-fidelity fallback — an agent's reply lands
-**untruncated**, `review_run` files carry the score breakdown + findings, and
-failed steps (including failed loop iterations) leave their error in the
-trail. A retried step only trusts a summary written during the **winning**
-attempt (a stale file left by an earlier failed attempt is replaced). The
-inline `[input data]` excerpt in prompts remains as a quick glance; the files
-are the complete channel.
+there), then write its own `step{N}-{name}.md` summary before finishing. With
+steps running side by side, "prior" means the steps this one **descends
+from** (and its own earlier loop iterations) — a sibling's file is not listed,
+even when it is already there. If the step doesn't write its file, the engine
+writes a full-fidelity fallback — an agent's reply lands **untruncated**,
+`review_run` files carry the score breakdown + findings, and failed steps
+(including failed loop iterations) leave their error in the trail. A retried
+step only trusts a summary written during the **winning** attempt (a stale
+file left by an earlier failed attempt is replaced). The inline
+`[input data]` excerpt in prompts remains as a quick glance; the files are
+the complete channel. Steps that run side by side change `repos.json` through
+one guarded update, so neither loses the other's entry.
 
-Chat-triggered runs attach each meaningful step's `.md` handoff file to its
-per-step progress message (success *and* failure, loop iterations included) —
-the thread carries the brief, the attachment the full detail. Attachments are
-redacted like `summary.md` and capped at 1 MiB (the full file always remains
-in the run's context directory).
+Chat-triggered runs post each meaningful step's `.md` handoff file to the
+thread (success *and* failure, loop iterations included), in both chat styles
+— captioned in the live style, attached to the step's line in the per-step
+style (§5). Posted files are redacted like `summary.md` and capped at 1 MiB
+(the full file always remains in the run's context directory).
 
 ### Final output
 
@@ -1233,29 +1642,58 @@ deliverable, as opposed to `summary.md`'s per-step bookkeeping. A run whose
 only successful steps are all utility kinds (e.g. it errored before any real
 work ran) produces no `final-output.md`.
 
-The run view's **Final output** panel (a sandboxed `<iframe>`, shown only when
-`run.status === 'success'` and the run has a `context_dir`) fetches
-`final-output.md` once per run (`GET /workflow-runs/{id}/context/read?path=final-output.md`) and renders it — it just stays hidden when the
+The run page's **Result** (the last row of the steps; a sandboxed `<iframe>`,
+for a `success` run that has a `context_dir`) fetches
+`final-output.md` once per run (`GET /workflow-runs/{id}/context/read?path=final-output.md`) and renders it — it says "This run wrote no final output." when the
 file doesn't exist. Chat/webhook delivery prefers it too: see *Result delivery*
 in §5. This is why the `ui-test-authoring`/`api-acceptance-test-authoring`
 templates' last step is an explicit "Final report" `agent_prompt` (§6) — it's
 what ends up as the deliverable both in the UI panel and in the chat/webhook
 attachment.
 
-### Statuses
+### Statuses, states and words
 ```ts
 RunStatus  = 'pending' | 'running' | 'success' | 'error' | 'canceled';
 NodeStatus = 'pending' | 'running' | 'success' | 'error' | 'skipped';
 ```
-A run is `error` if **any** node errored ("one or more nodes failed"). `pending`
-means the run is **queued** behind the parallel-run cap (the UI labels it
-"queued"); it flips to `running` the moment a gate slot frees.
+The stored statuses are unchanged. A run is `error` if **any** node errored
+("one or more nodes failed"). `pending` means the run is **queued** behind the
+parallel-run cap; it flips to `running` the moment a gate slot frees.
+
+What a person reads comes from the run's **overview** (`WorkflowRun.overview`,
+computed by `otto_workflows::overview::run_overview` on every change and sent
+with every event): `state`, a one-sentence `headline`, `steps_done` /
+`steps_total`, who waits (`attention[]`), the queue place, the failed step,
+`deliverables`, usage, where the time went, and for a goal its progress and
+hold.
+
+| `overview.state` | The run's word | When |
+|---|---|---|
+| `queued` | **Queued · 2nd** | waiting for a run slot |
+| `running` | **Working 12m** | at least one step works |
+| `waiting` | **Waiting** | every running step waits for a step slot or the machine |
+| `needs_you` | **Approval** · **Question** · **Verify** · **Limited** | a step waits on a person, or on a usage-limit reset (the oldest wait names it) |
+| `succeeded` | **Done** | |
+| `failed` | **Failed** | |
+| `canceled` | **Canceled** | stopped by a person |
+| `paused` | **Paused** | held by **Pause** |
+| `blocked` | **Blocked** | a goal's loop stopped and needs a person |
+| `exhausted` | **Out of budget** | a goal's loop used its iterations or active time |
+
+A step's word: **Queued** · **Waiting 2m** · **Starting** · **Working 4m** ·
+**Finishing** · **Approval** / **Question** / **Verify** / **Limited** while
+it waits on you; then its duration (a condition shows **Yes** / **No**),
+**Failed** · **Timed out** · **Signed out**, **Skipped**, **Stopped** (it was
+running when the run was stopped), **Not run**. A reviewer or sub-thread row:
+**Queued** · **Working** · **Done** · **Failed** · **Skipped** · **Needs
+you**.
 
 ### Live progress over WebSocket (`workflow_run_updated`)
 The engine emits `Event::WorkflowRunUpdated` on the shared event bus at **every
-node transition** (start, finish, skip, session spawn), on the
-**human-approval pause** and the **approve/reject decision**, on **cancel**,
-and at **run completion**:
+node transition** (start, phase change, finish, skip, thread or session
+start), when a step starts or stops **waiting on a person**, on the
+**human-approval pause** and the **approve/reject decision**, on **pause**,
+**cancel** and **hold**, and at **run completion**:
 
 ```json
 { "type": "workflow_run_updated",
@@ -1263,53 +1701,108 @@ and at **run completion**:
   "status": "running|success|error|canceled",
   "node_id": "<node_id | null>",
   "rev": 7, "node": { "node_id": "…", "status": "…" },
-  "nodes_done": 2, "nodes_total": 5, "waiting_approval": false }
+  "nodes_done": 2, "nodes_total": 5, "waiting_approval": false,
+  "overview": { "rev": 7, "state": "needs_you", "headline": "…" } }
 ```
 - `rev` is the run's monotonic revision (also on `WorkflowRun.rev`); `node` is
-  the changed node's full state (omitted when > 32 KiB serialized).
-- The UI (`events.svelte.ts` → `workflowRunBus.apply()` → `WorkflowsPage`)
+  the changed node's summary (the shape `…/progress` serves: no log, input or
+  output bodies); `overview` is the run's state, headline and waits (≤ 4 KiB).
+- The UI (`events.svelte.ts` → `workflowRunBus.apply()` → `RunSync`)
   **merges the change into the viewed run in place** when the event carries the
   node + the contiguous rev — no network at all. On a rev gap, a run-level
   event, or a missing payload it converges with **one single-flight,
-  rev-guarded** `GET /workflow-runs/{id}`. The viewed run object is **never
-  replaced wholesale**, so an expanded step, the timeline selection, and scroll
-  positions all survive every update, and stale/out-of-order responses can
-  never regress the view.
+  rev-guarded** read. The viewed run object is **never replaced wholesale**,
+  so the open step, its tab and scroll positions all survive every update,
+  and stale/out-of-order responses can never regress the view.
 - A **2.5s fallback poll** (while the viewed run is non-terminal, uncapped)
-  keeps the UI live if the WS connection is unavailable. The sidebar "Running"
-  list updates in place from the event's `nodes_done`/`nodes_total`/
-  `waiting_approval` (full refetch only for unknown run ids).
+  keeps the UI live if the WS connection is unavailable. The Runs tab's
+  **Needs you** and **Running** rows and the sidebar badge update in place
+  from the event's `overview` (a full refetch only for unknown run ids);
+  **Recent** refetches only when a run ends.
 
 ### Inspect: Runs and the run page
-**Workflows opens on Runs** (`#/workflows`): **Needs you** (approvals,
-questions, usage limits, held goals — oldest first), **Running** (queued last,
-by position) and **Recent** (search, a **Failed** chip, a workflow filter;
-"Runs of this workflow" sets it). Each row says in words what the run is doing,
-whose it is and what it is about. The **Workflows** tab (`#/workflows/all`)
-lists the definitions with their last run's word and **New workflow**
-(describe it and **Generate**, a template, or **Start blank**); goals fold
-under **Goals**.
+**Workflows opens on Runs** (`#/workflows`), one reading column:
+- **Needs you** — runs waiting on a person (an approval, a question, a
+  criterion you check, a usage limit) and goals held **Blocked** or **Out of
+  budget**, the oldest wait first. The tab shows how many.
+- **Running** — working, waiting and paused runs; queued ones last, by place.
+- **Recent** — finished runs, unread failures first, with **Search runs…**
+  (the workflow's name, the ask, repository, branch, PR, step names and
+  errors), a **Failed** chip and a workflow filter ("Runs of this workflow"
+  sets it).
+
+Each row says in words what the run is doing, what it is about (the PR or
+ticket, else the branch or the ask) and who started it. A row's menu: **Copy
+link**, **Open workflow**, **Run again with these inputs…**, **Stop run…**.
+The **Workflows** tab (`#/workflows/all`) lists the definitions with their
+last run's word and **New workflow** (describe it and **Generate**, a
+template, or **Start blank**); goals fold under **Goals**. **Older goal loops
+(n)** at the foot of Runs opens the read-only history.
 
 A run has its own page, `#/workflows/<wf>/runs/<run>` (the address notices,
-chat links and **Copy link** hand out). It leads with one sentence — the
-engine's headline — and a ring of the steps, then the state card (the failing
-step's **own** error with **Retry step**; an approval with **Approve** /
-**Deny…**; a question; a usage limit; the delivered result), the facts in names
-(who, where, the PR and ticket, when, which version), and the steps **in
-execution order**, parallel steps grouped and reviewers as named rows. A step
-opens beside the list on a wide screen and as a pushed screen on a phone
-(`…/runs/<run>/<node>[/<child>]`): its **Conversation** (the step's thread,
-read-only; kept for the retention settings' hours after the run ends, then a
-digest), **Output**, **Log** and **Files** by kind; a review step's **Summary**
-(score, counts, reviewers, **Open review**) and **Summarizer**; a reviewer's
-**Conversation · Findings · Files**; the run's **Result · Files · Input**.
-While the event socket reconnects the run's word is **Reconnecting…** and the
-sub line says when the page last heard of it.
+chat links and **Copy link** hand out):
+- **The top**: a ring of the steps with the elapsed time, one sentence — the
+  engine's headline — and a sub line that ticks ("Usually about 12m · 2
+  waiting", "Waiting 4m · the run continues when you decide", "Otto continues
+  it at 14:02", "Both run slots are busy", "Finished at 14:20 · 2m faster
+  than usual").
+- **One card** for the run's state: the failing step's **own** error; an
+  approval ("<step> asks to go ahead", where it goes and who sees it,
+  **Approve** / **Deny…**); a question (**Answer in the conversation**); a
+  usage limit; a criterion to **Record**; a hold (**Resume**, **Extend and
+  resume…**); what was **Delivered** (each outward result: Posted · Partly
+  posted · Not posted: why · Waiting for approval · Not confirmed); or a
+  goal's criteria.
+- **The facts** in names: who started it and where, the PR or branch, the
+  ticket, when, which version, notes waiting for the next step, "Resumed
+  after Otto restarted".
+- **The steps in execution order** with their numbers, words and times;
+  steps that ran side by side are grouped under **In parallel**; reviewers,
+  the summarizer, sub-threads and a loop's iterations are named rows under
+  their step; **Result** is the last row.
+- **The header**: the run's word, **Copy link**, **Stop run…** while it runs
+  (**Cancel run** while queued) and one primary for its state — **Retry
+  step**, **Resume** or **Run again…**. ⋯ holds Open workflow · Run again with
+  these inputs… · Retry only this step · Re-review · Pause · Add a note for
+  the next step… · Stop run….
 
-#### Phase lines (agent-backed steps)
-The turn oracle (§3) narrates itself into the step's log as it goes, and those
-lines are **kept after the step succeeds** (they used to be overwritten by the
-final result). The vocabulary is fixed:
+A step opens beside the list on a wide screen (880 px or more) and as a
+pushed screen on a narrow one (`…/runs/<run>/<node>[/<child>]`). Its header
+has "Step 4 of 9", the word, **what ran** (provider · model · effort — the
+ones the thread actually used) and a bar of **where the step's time went**
+("Queued 3s · Waited 40s — Waiting for a free agent slot … · Working 4m ·
+With you 2m · Finishing 5s"). Its tabs depend on the kind:
+
+| Step | Tabs |
+|---|---|
+| An agent step | **Conversation** (the step's thread, read-only; its approval and question cards are answerable there) · **Output** · **Files** |
+| A review step | **Summary** (score, counts, reviewers, **Open review**) · **Summarizer** · **Log** · **Files** |
+| A reviewer (a row under a review) | **Conversation** · **Findings** · **Files** |
+| Another sub-thread | **Conversation** · **Files** |
+| A check, a goal's loop | **Criteria** · **Log** · **Output** |
+| An approval | **Preview** · **Log** |
+| A step with no agent | **Log** · **Output** |
+| The run's **Result** | **Result** (`final-output.md`) · **Criteria** (a goal) · **Files** · **Input** (the run input and the files sent with the run) |
+
+Under a conversation the page says how long it is kept: "Read-only: this
+conversation belongs to the run. It is kept for 24 hours after the run ends
+(7 days if the run fails)." A step's ⋯: **Retry only this step** (a failed
+step of a finished run), **Retry from here** (any other step that ran),
+**Copy step output**, **Skip this step** (while it runs). **Maximize
+conversation** folds the run column away. While the event socket reconnects
+the run's word is **Reconnecting…** and the sub line says when the page last
+heard of it.
+
+#### Phases and log lines
+On a thread, a step's progress is its **phases** (§3) — the bar on the step —
+and the run's words; its log holds the engine's own lines: `⏳ starting
+<provider> thread`, `✓ step complete`, `waiting for a step slot (4 of 4 in
+use)`, `waiting for <step> to start (run order)`, `thread of <step> was
+removed — started a fresh one`, the retry, edge and persist lines.
+
+On the **terminal runner** the turn oracle (§3) narrates itself into the
+step's log as it goes, and those lines are kept after the step succeeds. The
+vocabulary is fixed:
 
 | Line | Means |
 |---|---|
@@ -1322,25 +1815,24 @@ final result). The vocabulary is fixed:
 | `📄 handoff written — waiting for the turn to end (up to 15m)` | the handoff is on disk and the agent is finishing its turn, with nothing pending — normal |
 | `✓ step complete (handoff + idle turn)` / `✓ step complete (codex task_complete + handoff)` | the oracle accepted the step |
 | `⚠ …` | a bounded fallback fired — see the table in §3 and §12 |
-| `↻ retry 2/5 in 23s (provider overloaded: 529)` | the step failed and is being retried |
 | `✗ step made no progress for 5m (agent looks stuck; 0 tasks pending)` | the stall trip |
 
-`✓ step complete …` is **not** the last line — the turn's own
-`agent turn complete`, the handoff-persist line and the `edge → …` lines follow
-it. A step's log list is capped at **200 entries**; the cap evicts only *phase*
-lines (the `⏳ ✉ ⚙ 🧩 ⏸ 📄` prefixes), oldest first — `▶`, `✓`, `⚠`, `↻`, `✗`,
-retry, edge and persist lines are never dropped.
+On both runners `↻ retry 2/5 in 23s (provider overloaded: 529)` means the
+step failed and is being retried. A step's log list is capped at **200
+entries**; the cap evicts only *phase* lines (the `⏳ ✉ ⚙ 🧩 ⏸ 📄` prefixes),
+oldest first — `▶`, `✓`, `⚠`, `↻`, `✗`, retry, edge and persist lines are
+never dropped.
 
 #### Live sub-agent view (`NodeRunState.activity`)
 While an agent step runs it also carries an `activity` snapshot (phase,
 `pending_tasks`, and one entry per sub-agent / background task with
 `id`, `description`, `status`, `started_at`, `finished_at`), refreshed at most
 every 5 s and capped at 40 entries. The run page shows the current phase as
-the running step's second line.
+the running step's second line; threads the agent opened are rows under the
+step (`NodeRunState.children`), each with its own conversation.
 
 `activity` is **cleared when the step finishes** — a settled step carries no
-`activity` key at all, so the chip and the phase line only ever show on a
-running step.
+`activity` key at all, so the phase line only ever shows on a running step.
 
 ### Run → Proof Pack
 On completion the run links a **Proof Pack** (`WorkflowRun.proof_pack_id`)
@@ -1356,16 +1848,64 @@ event, so the run moves to **Needs you** and the sidebar badge counts it at once
 leads with the approval card (what asks, where it posts, the preview) with
 **Approve** / **Deny…** (→ `POST /workflow-runs/{id}/approve` with
 `{node_id, approved}`). Approve resumes the run (records `approved_by`; the
-engine's resume poll runs every 2s); reject errors the node
-("rejected — &lt;note&gt;"). Both decisions re-emit the event so open views
-drop the card at once. If no decision arrives within the node timeout, the
-node errors ("timed out").
+step wakes on the decision, with a 30 s safety re-check); reject errors the
+node ("rejected — &lt;note&gt;"). Both decisions re-emit the event so open
+views drop the card at once. If no decision arrives within the node's
+timeout (24 hours unless `timeout_s` says otherwise), the node errors
+("timed out waiting for operator decision"). While it waits, the run holds no
+run slot and its active-time budget does not run.
 
 A cancel while parked is not a decision: the approval step waits for the run's
-cancel to stop it (it used to read the cleared flag as *"approved by"* the previous
-approver, or as a rejection). A chat `skip` is refused for an approval step **and**
-for a loop parked at an approval inside it — skipping it would let the steps after
-the gate run unapproved.
+cancel to stop it. A `skip` (chat or **Skip this step**) is refused for an
+approval step **and** for a loop parked at an approval inside it — skipping it
+would let the steps after the gate run unapproved.
+
+### Needs you, holds and notes
+- **A step waits on you.** Besides the approval step above, an agent step
+  waits when its agent asks to run something that needs approval (the
+  provider's own request, or a governed Otto MCP call), asks a question, or a
+  `check` reaches a criterion only you can check. The run moves to **Needs
+  you** with the word **Approval**, **Question** or **Verify**; Otto raises
+  one notification per wait ("Workflow “…” needs you"), and a chat-started
+  run posts one new message in its thread (§5). Approve or deny on the card;
+  answer a question in the step's conversation; for a criterion write what
+  you checked and press **Record**, or **Not met…** with what is still wrong
+  (the next iteration reads it as the reason). The step goes on from where it
+  was; the answer is kept on the step.
+- **Limited.** A usage limit with a known reset parks the step (§3): no
+  buttons, "Otto continues it at 14:02, when the limit resets." Nothing to do
+  but wait — or **Stop run…**.
+- **Pause** (a running run's ⋯) stops the running steps and holds the run:
+  its word is **Paused**, the reason "Paused by <you>", and its primary is
+  **Resume**. The run's worktrees stay. **Resume** re-enters the run: finished steps and finished loop iterations are kept,
+  the steps that were in flight start again.
+- **Blocked** and **Out of budget** are a goal's holds ([Goals](./goal-loops.md)):
+  **Resume** (after **Add a note first**, if you want to tell it something),
+  or **Extend and resume…** with new totals.
+- **Add a note for the next step…** (a running run's ⋯; **Add a note first**
+  on a held one) queues a note — up to 4,000 characters, at most 20 waiting.
+  The next agent step that starts reads every waiting note as a `[steering]`
+  section of its prompt, and the note is recorded on that step. The facts
+  line shows "1 note waiting for the next step" meanwhile.
+- **Stop run…** on a held run drops the hold; the run stays as it ended and
+  its worktrees are cleaned up.
+- A held run is never pruned with old runs, and stays in the Runs tab until
+  it is resumed or stopped.
+
+### On a phone
+Workflows is one of the six modules of the [phone's light version](./phone-light-version.md)
+and works in the full app on a phone too:
+- **Runs** is the same inbox in one column; the search and filters sit under
+  **Recent**.
+- **A run page** is one column: the header keeps the title, the state's one
+  primary and ⋯; a step opens as a pushed screen with **Back to the run**;
+  the cards' buttons are full-width. **Extend and resume** and the start form
+  are bottom sheets.
+- **Run…** and **A goal…** work as on the desktop.
+- **The editor** is a read-only outline of the steps ("The graph is edited on
+  a larger screen. Tap a step to change its settings."); a step's settings
+  open in a bottom sheet (**Done** saves). **New workflow** needs a larger
+  screen.
 
 ---
 
@@ -1424,11 +1964,32 @@ build on.
 | `GET /workflow-runs/{id}` | ws viewer | one run (poll/refresh target) |
 | `GET /workflow-runs/{id}/context/browse?path=` | ws viewer (the run's workspace) | `FsBrowse` of the run's context dir; `path` and entry paths are relative to it (empty = its root). 400 absolute / `..` / escaping symlink; 404 unknown run or path |
 | `GET /workflow-runs/{id}/context/read?path=` | ws viewer (the run's workspace) | `FsRead` of one context file (~400 KiB bound); the deliverable is `?path=final-output.md` |
-| `POST /workflow-runs/{id}/cancel` | ws editor | cancel a run |
-| `POST /workflows/{id}/validate` | ws viewer | `{graph?}` → `{valid, issues}`; no execution |
+| `POST /workflow-runs/{id}/cancel` | ws editor | cancel a run; on a held run it drops the hold |
+| `POST /workflow-runs/{id}/retry-node` | ws editor | `{node_id, include_downstream?}` — re-enter a finished run in place (§3) |
+| `POST /workflow-runs/{id}/nodes/{node_id}/skip` | ws editor | skip that one running step; 409 when it is not running or is the approval gate |
+| `POST /workflow-runs/{id}/pause` · `…/resume` | ws editor | hold a run / re-enter a held one (`{extend?: {iterations?, active_s?}}` = a goal's new totals) |
+| `POST /workflow-runs/{id}/steer` | ws editor, a person's credential | `{note}` — queue a note for the next agent step |
+| `POST /workflow-runs/{id}/nodes/{node_id}/criteria/{criterion_id}/verify` | ws editor, a person's credential | `{met, evidence}` — record a criterion you check |
+| `GET /workflow-runs/{id}/progress?after_rev=` · `…/nodes/{node_id}` | ws viewer | the lightweight run (with `overview`, no bodies) / one step in full (output, logs, the thread's digest) |
+| `GET /workspaces/{wid}/workflow-runs` · `…/active` · `…/queue` | ws viewer | run history with search (`q`, `status`, `workflow_id`, `attention=1`) / runs in flight and held runs / queue places |
+| `POST /workflows/{id}/validate` | ws viewer | `{graph?}` → `{valid, issues}` (each issue `save` · `run` · `warning`); no execution |
+| `POST /workflows/{id}/optimize` · `…/optimize/apply` | ws viewer · ws editor on a person's credential | the Optimize draft / apply it as a new version (409 when the workflow changed meanwhile) |
+| `POST /workspaces/{wid}/goals` · `GET …/goals` | ws editor · ws viewer | start a goal / list goal runs and older loops ([Goals](./goal-loops.md)) |
 | `GET /workflows/{id}/versions` | ws viewer | `WorkflowVersion[]` (snapshot history, newest first) |
 | `GET /workflows/{id}/versions/{v}` | ws viewer | one snapshot (404 if unknown) |
 | `POST /workflows/{id}/versions/{v}/restore` | ws editor | `{note?}` → copies `v`'s graph in as a **new** version |
+
+Engine settings (`PUT /api/v1/settings`, the root user on a person's credential; the first four are range-checked and a bad value is refused) and environment:
+
+| Key | Default | What it does |
+|---|---|---|
+| `wf_step_runner` (env `OTTO_WF_STEP_RUNNER` wins) | `threads` | `threads` or `pty` — how agent steps and review agents run (§3) |
+| `wf_max_parallel_steps` | `4` (1–8) | steps of one run that hold an agent or a process at once; `1` = one at a time |
+| `workflow_thread_retention_success_hours` | `24` | how long a successful run's threads are kept after it ends; `0` = a step's thread goes when the step succeeds |
+| `workflow_thread_retention_failed_hours` | `168` | the same for a failed, canceled or held run |
+| `wf_step_stall_secs` | `300` | the terminal runner's no-progress trip; `0` disables |
+| env `OTTO_WF_MAX_PARALLEL_RUNS` | `2` | runs executing at once, daemon-wide (read at start) |
+| env `OTTO_WF_MAX_LONG_RUNS` | `2` (1–4) | the same for the long lane (goals) |
 
 Plus, on the Scheduled-Tasks surface: `POST /scheduled-tasks/{id}/convert-to-workflow`
 (`{disable_task?}` → `{workflow_id, trigger_id?}`) materializes a task as a Workflow
@@ -1488,6 +2049,15 @@ report synchronously from the run endpoint and have no dedicated WS event.
 - **0097** widens `workflow_triggers.kind` CHECK to `schedule|webhook|event|chat`
   (table rebuild — SQLite can't `ALTER` a CHECK) so `chat`-kind channel
   bindings can be persisted.
+- **0108** restart resume (`resume_attempts`, `resume_scope_json`, `on_restart`);
+  **0127** durable loop checkpoints.
+- **0233** `workflow_runs.overview_json`, `attention`, `hold_json`,
+  `chat_status_json` (the live status message's id) + a partial index for the
+  Needs-you list; **0234** `workflows.origin` / `origin_ref` (a goal and where
+  it came from), `workflow_runs.limits_json` (a resumed goal's new totals) and
+  `workflow_runs.lane`; **0235** an index on
+  `agent_runtime_sessions(parent_id)`. All three only add (§7 *Upgrading and
+  rolling back*).
 - **0014/0015** `api_client` base + `api_automations` (name, `steps_json`).
 - `retry` and edge `condition` need **no migration** — they live inside
   `graph_json`. Run context files (§7) are plain files under
@@ -1503,53 +2073,95 @@ are **append-only** — never edit or renumber an existing one.
 
 **What works today**
 - Build graphs by description (AI), template (orchestrator flows + game pipelines),
-  or hand; pan/zoom canvas editor.
-- Topological execution with failure propagation, partial runs (from-here / only),
-  run cancellation, and a global wall-clock timeout.
+  or hand; an auto-laid-out canvas editor; a rule-based **Optimize** draft.
+- Execution in run order with **independent steps side by side** (step
+  numbers as in a one-at-a-time run), failure propagation, partial runs
+  (from-here / only), run cancellation, skipping one running step, and a
+  global active-time limit.
+- **Agent steps on threads** — the structured runtime by default, the
+  terminal runner behind a switch; a step finishes when its thread has
+  settled (turn ended, nothing it started still running, no request pending),
+  with one nudge for a missing handoff file; **provider · model · effort**
+  per step, an optional time limit, and continuing an earlier step's thread.
+- **Steps that need no agent:** `git_checkout`, `script`,
+  `post_review_comments`, `check`, and conditions on the run's repositories.
 - **Branching & loops:** edge `condition`s + a `condition` node (if/else, with clean
-  branch-skip vs failure-poison semantics), and a bounded `loop` (iterate-until)
-  that reuses inner-node execution — all driven by the safe `otto_core::expr`
-  language (also available as `{{ }}` templating).
+  branch-skip vs failure-poison semantics), and a bounded `loop` (iterate-until,
+  optionally with an active-time budget) that reuses inner-node execution —
+  all driven by the safe `otto_core::expr` language (also available as
+  `{{ }}` templating).
+- **Goals:** a budgeted work → check loop with criteria checked by a command,
+  an agent, a rule or a person; Pause, Resume, Extend and notes for the next
+  step ([Goals](./goal-loops.md)).
+- **Needs you:** approvals, questions and criteria wait on the run page, in a
+  notification and in the chat thread; a usage limit with a known reset parks
+  the step and continues it at the reset.
 - **Retry/backoff** per node (`retry`), and **typed outputs** (warn-only validation
   against each kind's `output_schema`).
 - **All node kinds are real:** `manual_trigger`, `agent_prompt`, `prepare_context`
   (app-side Jira fetch + optional analysis agent), `http_request`,
   `transform`, `delay`, `log`, `db_query` (read-only), `broker_peek`,
   `channel_notify`, `budget_gate`, `human_approval`, `condition`, `loop`,
-  `swarm_task`, `api_run`, and the **now-wired** `product_analyze`,
-  `product_rewrite`, `product_plan`, `product_publish`, `review_run` (adaptive
-  PR-review engine, 0–100 scored, `require_pass`), `canvas`, `git_pr`
-  (PR draft, or `open:true` to auto-open on a passing review).
-- **Visible sessions per step** (openable while running) and a **Proof Pack** linked
-  to each completed run.
-- **Sub-agent-aware step completion** — the turn oracle (§3): a step finishes only
-  once its agent's turn ended natively with nothing it launched still pending, the
-  handoff file is written, and a 20 s idle confirm passes; every fallback is
-  bounded, the live phase + sub-agent counts are visible in the run view, and the
-  session is suspended (resumable) when the step succeeds.
+  `swarm_task`, `api_run`, `product_analyze`, `product_rewrite`,
+  `product_plan`, `product_publish`, `review_run` (adaptive PR-review engine,
+  0–100 scored, `require_pass`), `canvas`, `git_pr` (PR draft, or `open:true`
+  to auto-open on a passing review), `self_improve`, `git_checkout`,
+  `script`, `post_review_comments`, `check`.
+- **A conversation per agent step** (readable while it runs, read-only; a
+  summary after the thread is removed) and a **Proof Pack** linked to each
+  completed run.
 - **Proportionate review** — scope assessment selects relevant lenses; bounded
   fan-out runs one provider per lens by default. Cross-provider comparison is
   explicit; legacy execution-mode fields remain compatible (§4).
-- **Versioning:** graph snapshot history with view + restore (append-only), now
+- **Versioning:** graph snapshot history with view + restore (append-only),
   covering **standing `instructions`** alongside the graph.
-- Live WS run progress + per-step logs/output/"work product", plus a **Final
-  output** panel that renders the run's `final-output.md` deliverable on success.
+- A **Runs** inbox (Needs you · Running · Recent, with search) and a page per
+  run, live over WS, with per-step conversation/output/log/files and the
+  run's **Result** (its `final-output.md` deliverable on success).
 - **All trigger kinds fire in the running daemon** — webhook, event, and schedule
   (spawned at boot; cron + IANA timezone via the shared cadence engine), plus a
   **`chat`-kind** channel binding evaluated live on every inbound message.
 - Three ways to start a run by chat: the structured `Action: Workflow` message,
-  the simplified **`run <name>: <prompt>`** command, or a channel binding — all
-  **stream live per-step progress** (▶/✅/❌ + a `🔍` review block) back into the
-  thread, then deliver `final-output.md` (or `summary.md` if the run made none).
+  the simplified **`run <name>: <prompt>`** command, or a channel binding — the
+  run keeps **one live status message** in the thread (or a message per step,
+  `chat_updates: per_step`), posts every step's file, then delivers
+  `final-output.md` (or `summary.md` if the run made none). Files attached to
+  the starting Slack message reach the run and are kept with it.
   **Convert** a scheduled task into a workflow + schedule trigger.
 - **Per-step skills** (`skill`/`skills` on an `agent_prompt` step inline a skill body
   ahead of the prompt) and **threshold-gated auto-PR** (`review_run` →
   `git_pr open:true` via an `output.satisfied == true` edge — the review is the
   approval, no human gate).
-- Human-approval pause/resume.
+- Human-approval pause/resume; **restart resume** (a step on a thread goes on
+  in the same conversation); usable on a phone.
 - API-client automations: ordered request runner with assertions + extracts.
 
-**Caveats (still honest about the edges)**
+**Limits (still honest about the edges)**
+- **The runner switch has no control in the app.** `wf_step_runner` is set
+  through the settings API or the daemon's environment (§3), and a run in
+  flight keeps the runner it started with.
+- **A thread is kept for a time, not for good.** 24 hours after a successful
+  run and 7 days after a failed one (both settings), then the conversation is
+  removed and the run keeps a summary. Copy what you need, or raise the
+  settings. `keep_session` ("Keep this step's thread open after it finishes")
+  only affects the terminal runner: a thread step's thread is closed when the
+  step settles.
+- **A step's time limit is not the end of it.** A step past its `timeout_s`
+  fails as **Timed out**, and its retry policy then applies (an
+  `agent_prompt` retries twice by default, each attempt with the full limit).
+  Set the step's retries to 0 for a hard stop.
+- **Answering from chat is not possible.** Approvals, answers, a criterion's
+  record, Pause, Resume and notes are given in Otto; the thread accepts
+  `status`, `skip`, `abort`, `re-review` and `help` only. Telegram receives no
+  files.
+- **At most 4 sub-threads** of one step are open at once, and an engine
+  thread cannot request a secret.
+- **Step slots and the machine gate bound parallelism**, not the graph: four
+  steps per run by default, two runs at once, and every agent still waits
+  for a machine place — a wide fork on a loaded Mac runs partly one after
+  another, and says so on each waiting step.
+- **Two steps with no path between them may run together.** Order outward
+  steps with an edge.
 - **`game_engine` / `verifier` are scaffolds** — real, runnable, useful for the
   game-pipeline templates, but they emit canned specs / scaffold reports awaiting
   a real external game engine + certifier (see footnote ¹ in §4).
@@ -1562,24 +2174,20 @@ are **append-only** — never edit or renumber an existing one.
 - **`git_pr` defaults to draft-only** (`opened:false`) — set **`open:true`** (gate it
   on the incoming edge so it only fires when the review passed) to actually open the
   PR on the remote; the `write-tests`/`implement-feature` templates do exactly this
-  on a passing fix→review loop.
+  on a passing review→fix loop.
 - **Wired nodes have prerequisites** — `db_query`/`broker_peek`/`swarm_task`/
   `review_run`/`git_pr`/`product_*` need their backing connection/cluster/swarm/repo/
   story set up, or the node errors (and downstream active-path nodes skip).
+  `git_checkout` and `post_review_comments` need a git account bound to the
+  repository; a `script` needs its tools on your login shell's `PATH`.
 - **Typed-output validation is warn-only** — schema mismatches log `⚠` but never
   fail a run; a kind's `params_schema` is a UI hint and never gates a run.
 - API-client automations have **no scheduler** — run-on-demand only.
-- **A silent *grandchild* can still slip past the idle confirm.** A sub-agent's
-  own sub-agent is recorded only in the child's transcript, and a child that
-  ends its turn "waiting" delivers its `completed` notification to the parent
-  early. The flat `subagents/` directory keeps the grandchild's JSONL visible to
-  the 20 s idle confirm and the progress clock (any movement resets them), which
-  is the only guard — a grandchild sitting inside one long, silent tool call can
-  still let the step finish ahead of it. Tell the child agent to wait for its own
-  delegates before reporting back.
-- **agy / custom providers must write the final handoff file.** Silence alone
-  never completes a step. Claude and Codex also provide native turn evidence
-  to the turn oracle (§3).
+- **Terminal runner only:** a silent *grandchild* can still slip past the idle
+  confirm (a sub-agent's own sub-agent is recorded only in the child's
+  transcript; any movement of the flat `subagents/` files resets the 20 s
+  idle confirm, which is the only guard), and agy / custom providers must
+  write the final handoff file — silence alone never completes a step there.
 
 ---
 
@@ -1614,8 +2222,7 @@ are **append-only** — never edit or renumber an existing one.
   workflow's latest changer — see *Run identity* above — falling back to a
   synthetic "Workflow" user for system-initiated runs). Anyone who can post to a wired channel can start any
   workflow in that workspace by name — treat channel access as run-start
-  capability. This is unaffected by the `workflow_triggers.kind` `CHECK` bug
-  (§10) — the message-based paths never touch that table.
+  capability.
 - **`prepare_context` fetches through the run's resolved Jira account** —
   `params.account_id`, else the run user's own account, else any Jira account
   configured on the daemon (§4). The fetched ticket (description, comments,
@@ -1623,6 +2230,31 @@ are **append-only** — never edit or renumber an existing one.
   can end up in the chat thread via a step's `.md` attachment or
   `final-output.md` — treat a bound channel's audience as the ticket's
   effective audience for that run.
+- **Engine threads.** A step's thread runs as the run's user in the run's
+  working directory, like the terminal session it replaced, and is read from
+  the run page by whoever may read that thread (someone who may not sees "You
+  can't open this conversation" and the kept summary). It cannot request a
+  secret (`otto.request_secret` is refused at once); a governed Otto MCP call
+  it makes waits for a person's approval as a person's session would; an
+  untrusted read-only reviewer thread gets no MCP servers at all. Sub-threads
+  inherit the step's identity and limits.
+- **`script` runs your command, confined.** `/bin/sh -c` under the same
+  Seatbelt policy as a scheduled shell task, with the daemon's environment
+  scrubbed. Run values (branch names, repository names from a chat message)
+  reach it only as `OTTO_*` environment variables — never interpolated into
+  the command — and file names it is given must be bare names in the run
+  folder. `git_checkout` checks every branch name from the input before git
+  sees it and passes refs as full `refs/…` names.
+- **Only a person changes a graph or steers a run.** Applying an Optimize
+  draft, queueing a note (`/steer`) and recording a criterion (`/verify`)
+  need a person's credential — an agent credential gets 403. From MCP,
+  `otto.control_workflow_run` (pause / resume / extend) is off by default and
+  approval-gated ([MCP control plane](./mcp-control-plane.md)).
+- **Reserved run-input keys.** `attachments` and a non-boolean
+  `research_dir` are set by the engine only and dropped from every trigger's
+  input; `chat_updates` is dropped from a webhook body. Files sent with a
+  chat message are copied under sanitised names, never through a symlink, and
+  served for download as attachments (`nosniff`).
 - **`db_query` is read-only by construction** — the engine forces
   `confirm_write = false`, so a workflow can never silently issue DB writes (a
   graph that genuinely needs a write must set the param explicitly).
@@ -1650,14 +2282,29 @@ are **append-only** — never edit or renumber an existing one.
 | A `review_run` node "passes" too easily / never passes | `score = 100 − 20×must-fix − 5×should-fix (optional findings deduct 0 by default)` (optionally blended with a goals score), `passed` needs `score ≥ threshold` **and** complete reviewer coverage, a nonempty diff, and no open must-fix findings. Tune `threshold` (default 80) or check the finding counts in the node output. |
 | A Slack/Telegram workflow trigger does nothing — no reply, no run | Almost always the integration's `allowed_users` list: the sender is not on it, and the bridge drops the message silently before any parsing (by design; it never answers strangers). The binding's Triggers row reads *Last attempt rejected: sender … is not on the integration's allowed users* and the bell shows *Workflow trigger blocked*; add the sender's id in Settings → Channels (the rejected sender is listed there with an **Allow** action). A trigger with no binding on that chat leaves only a warn log line. |
 | A scheduled run never starts | The schedule scheduler **is** spawned at boot now (§5). Check the trigger is **enabled**, the cadence/`timezone` is right, and `last_run` shows it isn't mid-window; for cron, validate the `expr`. |
-| Step log: `⚠ handoff file missing — accepted the agent's final reply after 90s idle` | The agent ended its turn but never wrote the step's `.md` handoff (§3), so the engine accepted its final reply after the 90 s grace (a nudge was sent at +10 s). The step's "work product" is the chat reply, not a file — tighten the step prompt to write the handoff, or accept the reply. |
-| Step log: `⚠ handoff written but 3 tasks still pending — waiting (up to 15m)` | The agent wrote its handoff **while** sub-agents / background tasks it launched were still running — against the step protocol (§3). The engine waits up to 15 min for them rather than cutting them off. Fix the prompt so the handoff is written last. |
-| Step log: `⚠ handoff written; 1 sub-agent never reported after 15m — moving on` | The 15 min handoff linger expired: a sub-agent never delivered its `<task-notification>`. The step completes on the handoff and its session is stopped. Check that sub-agent's transcript under `subagents/` — it was probably killed or is genuinely stuck. |
-| Step log: `⚠ background task b5gvqf675 never finished after 15m — moving on` | The parent went idle with only a `run_in_background` bash left (a dev server, a `--watch`, a `tail`). The engine completes the step after 15 min and suspends the session, which hangs up the task. Add "stop every background process you started" work to the step, or don't background it. |
-| agy / custom step is idle without a final handoff | The step remains active until it writes its handoff or reaches its stall/absolute deadline. Silence is not evidence that the work finished (§10). |
-| Step log: `↻ retry 2/3 in 2s (codex turn aborted)`, then `✗ codex turn aborted` | codex wrote a `turn_aborted` for the turn we submitted and started no new one within 90 s (usually a dropped upstream connection or a cancelled TUI). The node's retry policy re-runs the step; with no retries left the step errors. |
+| A step says **Waiting 6m** — "Waiting for a free agent slot — 5 of 5 running" / "Waiting for the machine — load …" / "Waiting for memory — …" | The machine's agent admission gate (§3 *Scheduling*): other background agents hold the places, or the Mac is under load or memory pressure. The step starts by itself; its phase bar keeps how long it waited. Fewer agents at once (a lower `wf_max_parallel_steps`, fewer reviewers) shortens the wait for the rest. |
+| A step says **Queued** — log `waiting for a step slot (4 of 4 in use)` | Four steps of this run already hold an agent or a process (`wf_max_parallel_steps`). It starts when one settles. |
+| The run says **Limited** — "Otto continues it at 14:02, when the limit resets." | The provider's plan limit stopped a step and the reset time is known: the step is parked and continues on the same thread at the reset (§3). Nothing to do. |
+| A step failed with `usage_limit` | The plan limit hit and no reset time was known (or it came straight back). **Retry step** when the limit has reset, or give the step another provider. |
+| A step is **Timed out** | It passed its own time limit (`timeout_s`), waiting on a person included. Its retry policy applies; raise the limit, or answer sooner. |
+| A step is **Signed out** | The provider's CLI is not signed in (class `auth`). Sign in on the Mac, then **Retry step**. |
+| "The conversation was removed after the run ended. …" | Retention deleted the step's thread (24 h after a successful run, 7 days after a failed one). The answer, files, usage and a summary are kept. Raise `workflow_thread_retention_*_hours` to keep conversations longer. |
+| Step log: `thread of <step> was removed — started a fresh one` | A `continue_from` step ran after retention removed the earlier step's thread (a retry days later). It ran on a new thread with the step files as its context. |
+| A step failed: "could not resume the conversation of the earlier step" | The provider could not resume the thread this step continues. **Retry from here** on the earlier step so both run again, or switch the step to **New thread**. |
+| An agent reports "a workflow step may have 4 open sub-threads at once" | The step's agent tried to open a fifth sub-thread. It closes one (`otto.thread_close`) or does that part itself; raise nothing — the cap is fixed. |
+| A step failed: "background work was still running at the limit" | The agent ended its turn with background work that ran past 45 minutes. Have the step stop what it starts, or run that work as a `script` step. |
+| A `git_checkout` step left a repository unresolved | It never guesses: no open PR (or more than one) matched the `pr` / `pr_branch` input or the Jira key. The candidates are in the step file and `repos.json`; start the run with `pr` set. |
+| A `script` step: "exit code N" / "timed out after 900 s" | The command failed or ran past its time limit. The last lines are in the error, everything in `<step>.log` under **Files**. `command not found` usually means the tool is not on your login shell's `PATH`. |
+| `post_review_comments` posted nothing | The review was local (no PR in `prs.json`), incomplete, or every finding was already on the PR. The step's output and the **Delivered** card say which. |
+| The chat thread shows one message that keeps changing, not a line per step | That is the default (**One live message, plus each step's file**). Pick **A message and a file per step, as before** on the Start step for the earlier style. |
+| *(terminal runner)* Step log: `⚠ handoff file missing — accepted the agent's final reply after 90s idle` | The agent ended its turn but never wrote the step's `.md` handoff (§3), so the engine accepted its final reply after the 90 s grace (a nudge was sent at +10 s). Tighten the step prompt to write the handoff, or accept the reply. |
+| *(terminal runner)* Step log: `⚠ handoff written but 3 tasks still pending — waiting (up to 15m)` | The agent wrote its handoff **while** sub-agents / background tasks it launched were still running — against the step protocol (§3). The engine waits up to 15 min for them rather than cutting them off. Fix the prompt so the handoff is written last. |
+| *(terminal runner)* Step log: `⚠ handoff written; 1 sub-agent never reported after 15m — moving on` | The 15 min handoff linger expired: a sub-agent never delivered its `<task-notification>`. The step completes on the handoff and its session is stopped. Check that sub-agent's transcript under `subagents/` — it was probably killed or is genuinely stuck. |
+| *(terminal runner)* Step log: `⚠ background task b5gvqf675 never finished after 15m — moving on` | The parent went idle with only a `run_in_background` bash left (a dev server, a `--watch`, a `tail`). The engine completes the step after 15 min and suspends the session, which hangs up the task. Add "stop every background process you started" work to the step, or don't background it. |
+| *(terminal runner)* agy / custom step is idle without a final handoff | The step remains active until it writes its handoff or reaches its stall/absolute deadline. Silence is not evidence that the work finished (§10). |
+| *(terminal runner)* Step log: `↻ retry 2/3 in 2s (codex turn aborted)`, then `✗ codex turn aborted` | codex wrote a `turn_aborted` for the turn we submitted and started no new one within 90 s (usually a dropped upstream connection or a cancelled TUI). The node's retry policy re-runs the step; with no retries left the step errors. |
 | Step log: `↻ retry 2/5 in 23s (provider overloaded: 529)` | An overload / rate-limit / fd-exhaustion / spawn error — the engine forces a ≥ 20 s backoff (plus jitter) and up to 5 attempts when retries are enabled (§3). Nothing to do but let it retry; repeated hits mean too many concurrent agents. |
-| Step log: `✗ step made no progress for 5m (agent looks stuck; 0 tasks pending)` | The stall trip fired (§3): no transcript, sub-agent or `tasks/*.output` movement for `wf_step_stall_secs`. The step is retried in a fresh session. Raise the setting for genuinely long quiet work, or `0` to disable. The trip is never consulted while a bounded hold (idle confirm / handoff grace / linger) is running. |
+| *(terminal runner)* Step log: `✗ step made no progress for 5m (agent looks stuck; 0 tasks pending)` | The stall trip fired (§3): no transcript, sub-agent or `tasks/*.output` movement for `wf_step_stall_secs`. The step is retried in a fresh session. Raise the setting for genuinely long quiet work, or `0` to disable. |
 | A review launches fewer agents than the configured lens/provider combinations | Expected: scope assessment selects applicable lenses and uses one provider per lens by default. Inspect **Review scope**. Enable cross-provider comparison only when the added comparison is useful. |
 | A branch I expected to run was `skipped (branch not taken)` | An incoming edge's `condition` evaluated false (or its upstream was branch-skipped). Inspect the `edge → … not taken` log line and the source node's output the condition tested. |
 | Run fails immediately, no node ran | The graph has a **cycle** (topo-sort failed) — remove the back-edge. |
@@ -1668,10 +2315,11 @@ are **append-only** — never edit or renumber an existing one.
 | Run UI stops updating but isn't finished | WS dropped → the uncapped 2.5s fallback poll keeps the viewed run converging; the run still runs server-side. If the view is genuinely frozen, re-open the run or reload. |
 | Webhook returns 401 | Token doesn't match an **enabled** webhook trigger on that workflow id. Re-check the token / re-enable the trigger. |
 | Run "exceeded the 10-hour time limit" (running step: "workflow active time budget exhausted") | The global wall-clock fired; the graph (often an `agent_prompt` chain) is too long. Split it or reduce work. |
-| Approve/Reject button does nothing | The run must actually be paused at a `human_approval` node (`waiting_approval`), and you need `Workflows:Edit`. |
+| **Approve** / **Deny…** does nothing | The run must actually wait at that step, and you need `Workflows:Edit`. A publish gate's **Approve** stays off until its preview has loaded ("Load and review the publication preview before approving."). |
 | API-client automation step fails on a 2xx | It has a failing assertion. With **no** assertions a step passes on any 2xx; check the assertion `desc` in the report. |
 | `prepare_context` node errors "required Jira fetch failed" | `params.require: true` and the fetch failed (no matching Jira key, no configured Jira account, or the API call errored) — check `jira-<KEY>.md` in the run's context dir for the reason, or drop `require`. |
-| A run finished but the **Final output** panel is empty/hidden | The run isn't `success`, or every successful step was a utility kind (`log`/`delay`/`channel_notify`/`budget_gate`/`human_approval`/`manual_trigger` — §7 *Final output*) — add a content-bearing step (e.g. a closing `agent_prompt` "report" node) if you want a deliverable. |
+| A run finished but its **Result** says "This run wrote no final output." | The run isn't `success`, or every successful step was a utility kind (`log`/`delay`/`channel_notify`/`budget_gate`/`human_approval`/`manual_trigger` — §7 *Final output*) — add a content-bearing step (e.g. a closing `agent_prompt` "report" node) if you want a deliverable. |
+| A paused, blocked or out-of-budget run does nothing | It is **held**: it waits for **Resume** (or **Extend and resume…**) on its run page, however long that takes; **Stop run…** ends it. |
 
 ---
 
@@ -1682,9 +2330,16 @@ are **append-only** — never edit or renumber an existing one.
   build on.
 - `./daemon-http-api.md` — how the daemon's HTTP+WS surface, auth tokens, and
   RBAC feature grants work (the `Workflows:View/Edit` grants used here).
-- `./agent-sessions.md` — agent sessions, which the `agent_prompt` / product /
-  `canvas` nodes run as **openable** sessions (and which AI workflow generation
-  uses).
+- [Goals](./goal-loops.md) — goals inside Workflows: the Goal form, the check
+  step, budgets, holds, and the older goal loops' history.
+- [Threads](./threads.md) and
+  [the structured runtime](./threads-structured-runtime.md) — the runtime
+  agent steps run on; engine threads are read from the run page, not listed
+  in Threads.
+- `./agent-sessions.md` — terminal agent sessions: what the terminal runner
+  uses, and what AI workflow generation runs.
+- [Phone version (light)](./phone-light-version.md) — Workflows is one of its
+  six modules.
 - `./scheduled-tasks.md` — recurring agent jobs; the **convert-to-workflow** bridge
   materializes a task as a workflow + schedule trigger, and Workflows borrow its
   shared cadence engine (cron + timezone).
@@ -1700,7 +2355,7 @@ are **append-only** — never edit or renumber an existing one.
 
 ## Re-review a PR after fixes
 
-A finished run with a review exposes **Re-review** in its run bar. In the
+A succeeded run with a review step has **Re-review** in its ⋯ menu. In the
 original Slack/Telegram review thread, reply **`re-review`** or **`review again`**.
 This creates a new run and retains the old report. The workflow's current
 configuration is used, source PR refs are refreshed, and all configured approval,
