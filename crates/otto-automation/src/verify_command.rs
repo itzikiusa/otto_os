@@ -1,5 +1,13 @@
-//! Bounded verification commands with cancellation and process-tree cleanup.
+//! The one command runner of the `script` and `check` nodes (engine.md §7.2,
+//! goal.md §2.1, DR-029) — and, until the goal wave removes it, of Goal
+//! Loops' verify commands: `/bin/sh -c` in its own process group (the whole
+//! group is killed on timeout, cancel or drop), the daemon's environment
+//! scrubbed, optional Seatbelt confinement, values passed as environment and
+//! never spliced into the command text, bounded in-memory output with the
+//! whole of it optionally written to a log file.
 use otto_core::domain::CmdRun;
+use std::future::Future;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -12,47 +20,115 @@ impl Drop for ProcessGroup {
     }
 }
 
-pub async fn run(cwd: &str, command: &str, timeout_secs: u64, cancelled: &AtomicBool) -> CmdRun {
-    run_with_sandbox(cwd, command, timeout_secs, cancelled, None, None).await
+/// What to run.
+pub struct Spec<'a> {
+    pub cwd: &'a str,
+    pub command: &'a str,
+    pub timeout: Duration,
+    /// Set after the scrub (`PATH` from the cached login shell, `OTTO_*`).
+    pub env: &'a [(String, String)],
+    pub sandbox: Option<&'a otto_sandbox::SandboxPolicy>,
+    /// Names the sandbox's agent-cache directory.
+    pub cache_tag: Option<&'a str>,
+    /// Bytes of each stream kept in memory — the newest ones.
+    pub output_cap: usize,
+    /// Every byte of stdout and stderr, appended as it arrives.
+    pub log_file: Option<&'a Path>,
 }
 
-/// Run a verification command in `cwd`, scrubbing inherited daemon environment
-/// variables and optionally confining the child with `sandbox` (matching
-/// scheduled `shell` tasks).
-pub async fn run_with_sandbox(
-    cwd: &str,
-    command: &str,
-    timeout_secs: u64,
-    cancelled: &AtomicBool,
-    sandbox: Option<&otto_sandbox::SandboxPolicy>,
-    cache_tag: Option<&str>,
-) -> CmdRun {
+impl<'a> Spec<'a> {
+    pub fn new(cwd: &'a str, command: &'a str, timeout: Duration) -> Self {
+        Self {
+            cwd,
+            command,
+            timeout,
+            env: &[],
+            sandbox: None,
+            cache_tag: None,
+            output_cap: crate::command_output::STREAM_BYTES,
+            log_file: None,
+        }
+    }
+}
+
+/// How the command ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum End {
+    /// Its exit code (-1 when a signal ended it).
+    Exited(i32),
+    TimedOut,
+    Canceled,
+    /// It could not be started or read (the message says why).
+    Failed(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct Finished {
+    pub end: End,
+    /// stdout, then `--- stderr ---` and stderr, each cut to its newest
+    /// `output_cap` bytes.
+    pub output: String,
+    pub duration_ms: u64,
+}
+
+impl Finished {
+    pub fn exited_with(&self, ok: &[i32]) -> bool {
+        matches!(self.end, End::Exited(c) if ok.contains(&c))
+    }
+
+    /// The Goal Loops shape (messages as before).
+    pub fn into_cmd_run(self, timeout: Duration) -> CmdRun {
+        let (success, exit_code, output) = match self.end {
+            End::Exited(c) => (c == 0, c, self.output),
+            End::TimedOut => (
+                false,
+                -1,
+                format!("verification timed out after {}s", timeout.as_secs()),
+            ),
+            End::Canceled => (false, -1, "verification cancelled".into()),
+            End::Failed(m) => (false, -1, m),
+        };
+        CmdRun {
+            success,
+            exit_code,
+            output,
+            duration_ms: self.duration_ms,
+        }
+    }
+}
+
+/// Run `spec`; `cancel` resolving stops it (checked before the spawn too).
+pub async fn execute(spec: &Spec<'_>, cancel: impl Future<Output = ()>) -> Finished {
     let start = Instant::now();
-    let failure = |message: String| CmdRun {
-        success: false,
-        exit_code: -1,
-        output: message,
+    let done = |end: End, output: String| Finished {
+        end,
+        output,
         duration_ms: start.elapsed().as_millis() as u64,
     };
-    if cancelled.load(Ordering::Relaxed) {
-        return failure("verification cancelled".into());
+    tokio::pin!(cancel);
+    tokio::select! {
+        biased;
+        _ = &mut cancel => return done(End::Canceled, String::new()),
+        _ = std::future::ready(()) => {}
     }
-    let mut command_spec = match sandbox {
+    let mut command_spec = match spec.sandbox {
         Some(policy) => {
-            let tag = cache_tag.filter(|t| !t.is_empty()).unwrap_or("verify");
+            let tag = spec.cache_tag.filter(|t| !t.is_empty()).unwrap_or("verify");
             let cache = std::env::temp_dir()
                 .join("otto-agent-cache")
                 .join(format!("goal-loop-{tag}"));
             if let Some(home) = std::env::var_os("HOME") {
-                otto_sandbox::seed_agent_cache(&cache, std::path::Path::new(&home), |k| {
-                    std::env::var(k).ok()
-                });
+                otto_sandbox::seed_agent_cache(&cache, Path::new(&home), |k| std::env::var(k).ok());
             }
             let mut argv: Vec<String> = otto_sandbox::agent_cache_env(&cache)
                 .into_iter()
                 .map(|(k, v)| format!("{k}={v}"))
                 .collect();
-            argv.extend(["/bin/sh".to_string(), "-c".to_string(), command.to_string()]);
+            argv.extend([
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                spec.command.to_string(),
+            ]);
             let (program, args) = policy.wrap("/usr/bin/env", &argv);
             let mut c = tokio::process::Command::new(program);
             c.args(args);
@@ -60,22 +136,37 @@ pub async fn run_with_sandbox(
         }
         None => {
             let mut c = tokio::process::Command::new("/bin/sh");
-            c.arg("-c").arg(command);
+            c.arg("-c").arg(spec.command);
             c
         }
     };
     crate::scheduled_tasks_engine::scrub_shell_env(&mut command_spec);
     command_spec
-        .current_dir(cwd)
+        .envs(spec.env.iter().map(|(k, v)| (k, v)))
+        .current_dir(spec.cwd)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
     #[cfg(unix)]
     command_spec.process_group(0);
+    let log = match spec.log_file.map(std::fs::File::create).transpose() {
+        Ok(f) => f.map(std::sync::Mutex::new),
+        Err(e) => {
+            return done(
+                End::Failed(format!("failed to open the output log: {e}")),
+                String::new(),
+            )
+        }
+    };
     let mut child = match command_spec.spawn() {
         Ok(child) => child,
-        Err(error) => return failure(format!("failed to spawn verification: {error}")),
+        Err(error) => {
+            return done(
+                End::Failed(format!("failed to spawn verification: {error}")),
+                String::new(),
+            )
+        }
     };
     // Own a distinct group before waiting: dropping the output future alone
     // kills only the shell and would leave its child tests running.
@@ -86,42 +177,58 @@ pub async fn run_with_sandbox(
         .map(ProcessGroup);
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
+    let cap = spec.output_cap;
     let capture = async {
-        let (status, stdout, stderr) = tokio::try_join!(
+        tokio::try_join!(
             child.wait(),
-            crate::command_output::drain(stdout),
-            crate::command_output::drain(stderr)
-        )?;
-        Ok::<_, std::io::Error>(std::process::Output {
-            status,
-            stdout,
-            stderr,
-        })
+            crate::command_output::drain_tail(stdout, cap, log.as_ref()),
+            crate::command_output::drain_tail(stderr, cap, log.as_ref())
+        )
     };
     let output = tokio::select! {
         biased;
-        // Parks on the loop flag bell (perf W8) instead of a 25 ms poll.
-        _ = crate::goal_loop::until_flag(|| cancelled.load(Ordering::Relaxed))
-            => return failure("verification cancelled".into()),
-        result = tokio::time::timeout(Duration::from_secs(timeout_secs), capture) => result,
+        _ = &mut cancel => return done(End::Canceled, String::new()),
+        result = tokio::time::timeout(spec.timeout, capture) => result,
     };
     match output {
-        Ok(Ok(output)) => {
-            let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-            if !output.stderr.is_empty() {
+        Ok(Ok((status, stdout, stderr))) => {
+            let mut text = String::from_utf8_lossy(&stdout).into_owned();
+            if !stderr.is_empty() {
                 text.push_str("\n--- stderr ---\n");
-                text.push_str(&String::from_utf8_lossy(&output.stderr));
+                text.push_str(&String::from_utf8_lossy(&stderr));
             }
-            CmdRun {
-                success: output.status.success(),
-                exit_code: output.status.code().unwrap_or(-1),
-                output: text,
-                duration_ms: start.elapsed().as_millis() as u64,
-            }
+            done(End::Exited(status.code().unwrap_or(-1)), text)
         }
-        Ok(Err(error)) => failure(format!("verification failed: {error}")),
-        Err(_) => failure(format!("verification timed out after {timeout_secs}s")),
+        Ok(Err(error)) => done(
+            End::Failed(format!("verification failed: {error}")),
+            String::new(),
+        ),
+        Err(_) => done(End::TimedOut, String::new()),
     }
+}
+
+pub async fn run(cwd: &str, command: &str, timeout_secs: u64, cancelled: &AtomicBool) -> CmdRun {
+    run_with_sandbox(cwd, command, timeout_secs, cancelled, None, None).await
+}
+
+/// Goal Loops' verify command: [`execute`] with the controller's cancel flag.
+pub async fn run_with_sandbox(
+    cwd: &str,
+    command: &str,
+    timeout_secs: u64,
+    cancelled: &AtomicBool,
+    sandbox: Option<&otto_sandbox::SandboxPolicy>,
+    cache_tag: Option<&str>,
+) -> CmdRun {
+    let timeout = Duration::from_secs(timeout_secs);
+    let spec = Spec {
+        sandbox,
+        cache_tag,
+        ..Spec::new(cwd, command, timeout)
+    };
+    // Parks on the loop flag bell (perf W8) instead of a 25 ms poll.
+    let cancel = crate::goal_loop::until_flag(|| cancelled.load(Ordering::Relaxed));
+    execute(&spec, cancel).await.into_cmd_run(timeout)
 }
 
 #[cfg(test)]
@@ -145,6 +252,74 @@ mod tests {
             result.output.len()
         );
         assert!(result.output.contains("bytes omitted"));
+    }
+
+    #[tokio::test]
+    async fn env_and_cwd_reach_the_command_as_values_never_as_shell_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().to_str().unwrap();
+        let env = vec![
+            ("OTTO_OUT".to_string(), "a; touch injected".to_string()),
+            ("PATH".to_string(), "/usr/bin:/bin".to_string()),
+        ];
+        let spec = Spec {
+            env: &env,
+            ..Spec::new(
+                cwd,
+                "printf '%s|%s|' \"$OTTO_OUT\" \"$PATH\"; pwd -P",
+                Duration::from_secs(5),
+            )
+        };
+        let done = execute(&spec, std::future::pending()).await;
+        assert_eq!(done.end, End::Exited(0), "{}", done.output);
+        let real = std::fs::canonicalize(dir.path()).unwrap();
+        assert_eq!(
+            done.output.trim_end(),
+            format!("a; touch injected|/usr/bin:/bin|{}", real.display())
+        );
+        assert!(!dir.path().join("injected").exists());
+    }
+
+    #[tokio::test]
+    async fn output_keeps_the_newest_bytes_and_the_log_file_keeps_everything() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("step4.log");
+        let cmd =
+            "i=0; while [ $i -lt 2000 ]; do echo line$i; i=$((i+1)); done; echo boom >&2; exit 3";
+        let spec = Spec {
+            output_cap: 64,
+            log_file: Some(&log),
+            ..Spec::new(dir.path().to_str().unwrap(), cmd, Duration::from_secs(10))
+        };
+        let done = execute(&spec, std::future::pending()).await;
+        assert_eq!(done.end, End::Exited(3));
+        assert!(done.exited_with(&[0, 3]) && !done.exited_with(&[0]));
+        let (out, err) = done.output.split_once("\n--- stderr ---\n").unwrap();
+        assert!(
+            out.starts_with('[') && out.contains("bytes omitted]"),
+            "{out}"
+        );
+        assert!(out.ends_with("line1999\n"), "the tail is kept: {out}");
+        assert!(out.len() < 64 + 40, "{}", out.len());
+        assert_eq!(err, "boom\n");
+        let all = std::fs::read_to_string(&log).unwrap();
+        assert!(all.starts_with("line0\n") && all.contains("line1999\n") && all.contains("boom\n"));
+    }
+
+    #[tokio::test]
+    async fn a_timeout_kills_the_group_and_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = Spec::new(
+            dir.path().to_str().unwrap(),
+            "(sleep 2; touch late) & sleep 5",
+            Duration::from_millis(200),
+        );
+        let done = execute(&spec, std::future::pending()).await;
+        assert_eq!(done.end, End::TimedOut);
+        let run = done.into_cmd_run(Duration::from_secs(9));
+        assert_eq!(run.output, "verification timed out after 9s");
+        tokio::time::sleep(Duration::from_millis(2200)).await;
+        assert!(!dir.path().join("late").exists(), "the group was killed");
     }
 
     #[tokio::test]

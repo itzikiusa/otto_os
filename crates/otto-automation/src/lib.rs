@@ -14,7 +14,6 @@ pub mod cancel_signal;
 mod command_output;
 mod ctx;
 pub mod goal_loop;
-pub mod goal_loop_commands;
 pub mod goal_loop_graph;
 pub mod goal_loop_parse;
 pub mod goal_loop_policy;
@@ -24,5 +23,9 @@ pub mod goal_loop_workspace;
 pub mod report_delivery;
 pub mod scheduled_tasks_engine;
 pub mod scheduled_tasks_scheduler;
+pub mod verify_command;
+/// The old name, kept until the goal wave repoints its last caller
+/// (otto-server's `eval_score`).
+pub use verify_command as goal_loop_commands;
 
 pub use ctx::AutomationCtx;
