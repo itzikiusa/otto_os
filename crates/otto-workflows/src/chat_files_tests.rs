@@ -245,3 +245,22 @@ async fn a_run_command_without_files_writes_no_attachments() {
     );
     assert!(!attachments::context_dir(&t.ctx.data, &run_id).exists());
 }
+
+/// A run with no stored overview (queued for a slot, paused) answers
+/// `status` with its real state, not "working".
+#[tokio::test]
+async fn status_on_a_queued_run_says_queued() {
+    let (_dir, t, ws) = fixture(None).await;
+    t.try_start(&ws, "slack", "C1", Some("3.3"), "U1", START, &[])
+        .await
+        .expect("started");
+    let ack = t
+        .try_control(&ws, "slack", "C1", Some("3.3"), "U1", "status", &[])
+        .await
+        .expect("a status reply");
+    assert!(
+        ack.reply.contains("queued") && !ack.reply.contains("working"),
+        "{}",
+        ack.reply
+    );
+}
