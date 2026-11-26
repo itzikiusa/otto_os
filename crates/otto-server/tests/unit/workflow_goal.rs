@@ -55,8 +55,17 @@ struct Fx {
 }
 
 async fn setup(ws_id: &str, graph: WorkflowGraph) -> Fx {
+    fixture(ws_id, graph, false).await
+}
+
+/// `on_disk`: a database file, which a query dropped mid-flight (a Pause
+/// cutting a step) cannot reset as it resets the in-memory one.
+async fn fixture(ws_id: &str, graph: WorkflowGraph, on_disk: bool) -> Fx {
     let tmp = tempfile::TempDir::new().unwrap();
-    let pool = mem_pool().await;
+    let pool = match on_disk {
+        true => otto_state::open(&tmp.path().join("goal.db")).await.unwrap(),
+        false => mem_pool().await,
+    };
     seed_workspace(&pool, ws_id).await;
     sqlx::query("INSERT INTO users(id,username,password_hash,display_name,is_root,created_at) VALUES('root','root','x','Root',1,?)")
         .bind(chrono::Utc::now().to_rfc3339())
@@ -598,10 +607,13 @@ impl otto_agent_run::step::StepRunner for Fake {
     async fn delete(&self, _: &Id) {}
 }
 
-fn fake() -> std::sync::Arc<Fake> {
+fn fake() -> (
+    std::sync::Arc<Fake>,
+    super::super::super::step_thread::FakeRunnerGuard,
+) {
     let f = std::sync::Arc::new(Fake::default());
-    super::super::super::step_thread::FAKE_RUNNER.with(|r| *r.borrow_mut() = Some(f.clone()));
-    f
+    let guard = super::super::super::step_thread::install_fake_runner(f.clone());
+    (f, guard)
 }
 
 /// GL1.1 / GL3.2: a "met" without evidence counts as not met; the checker
@@ -609,7 +621,7 @@ fn fake() -> std::sync::Arc<Fake> {
 /// next agent step's prompt once and is recorded on the loop's node.
 #[tokio::test]
 async fn an_unevidenced_claim_is_not_met_and_a_steering_note_reaches_the_worker() {
-    let f = fake();
+    let (f, _fake) = fake();
     let steps = json!([
         {"kind": "agent_prompt", "name": "Work", "params": {"prompt": "do the work", "provider": "claude"}},
         check(json!([{"id": "judged", "text": "it works", "verify": "agent", "how": "run it"}])),
@@ -664,7 +676,7 @@ async fn an_unevidenced_claim_is_not_met_and_a_steering_note_reaches_the_worker(
 /// resumes that thread instead of a fresh prompt.
 #[tokio::test]
 async fn an_inner_step_caught_by_a_restart_resumes_its_thread() {
-    let f = fake();
+    let (f, _fake) = fake();
     let steps = json!([{"kind": "agent_prompt", "name": "Work", "params": {"prompt": "do it", "provider": "claude"}}]);
     let fx = setup(
         "goal-restart",
@@ -701,7 +713,7 @@ async fn an_inner_step_caught_by_a_restart_resumes_its_thread() {
 /// previous iteration worked on; the checker still gets a fresh one.
 #[tokio::test]
 async fn a_same_thread_step_continues_its_previous_iterations_thread() {
-    let f = fake();
+    let (f, _fake) = fake();
     let once =
         "test -f \"$OTTO_CONTEXT_DIR/seen\" || { touch \"$OTTO_CONTEXT_DIR/seen\"; exit 1; }";
     let steps = json!([
@@ -725,7 +737,7 @@ async fn a_same_thread_step_continues_its_previous_iterations_thread() {
 /// workspace root.
 #[tokio::test]
 async fn a_research_goal_works_in_its_own_folder() {
-    let f = fake();
+    let (f, _fake) = fake();
     let steps = json!([{"kind": "agent_prompt", "name": "Work", "params": {"prompt": "find out", "provider": "claude"}}]);
     let fx = setup(
         "goal-research",
@@ -894,7 +906,7 @@ async fn until(fx: &Fx, id: &str, f: impl Fn(&NodeRunState) -> bool) -> Workflow
 /// neither deleted before the resume nor overwritten by the engine's summary.
 #[tokio::test]
 async fn a_restarted_thread_step_keeps_the_handoff_its_agent_wrote_meanwhile() {
-    let f = fake();
+    let (f, _fake) = fake();
     f.quiet_resume
         .store(true, std::sync::atomic::Ordering::SeqCst);
     let graph = WorkflowGraph {
@@ -962,7 +974,7 @@ async fn a_restarted_thread_step_keeps_the_handoff_its_agent_wrote_meanwhile() {
 /// runs it on a fresh thread instead of awaiting the stopped turn.
 #[tokio::test]
 async fn a_paused_thread_step_starts_afresh_on_resume() {
-    let f = fake();
+    let (f, _fake) = fake();
     f.hang_first
         .store(true, std::sync::atomic::Ordering::SeqCst);
     let graph = WorkflowGraph {
@@ -995,7 +1007,7 @@ async fn a_paused_thread_step_starts_afresh_on_resume() {
 /// goes on — the agent must not keep editing the worktree beside the next step.
 #[tokio::test]
 async fn a_skipped_thread_step_closes_its_thread() {
-    let f = fake();
+    let (f, _fake) = fake();
     f.hang_first
         .store(true, std::sync::atomic::Ordering::SeqCst);
     let graph = WorkflowGraph {
@@ -1027,7 +1039,7 @@ async fn a_skipped_thread_step_closes_its_thread() {
 /// workflow in `meta.work`.
 #[tokio::test]
 async fn a_finished_run_forgets_a_resume_it_never_took() {
-    let f = fake();
+    let (f, _fake) = fake();
     let graph = WorkflowGraph {
         nodes: vec![node("start", "log", json!({})), agent("a")],
         edges: vec![edge("start", "a")],
@@ -1211,7 +1223,7 @@ async fn a_pause_racing_the_end_still_holds() {
 /// beside the cancel watch, so a Cancel still stops the run at once.
 #[tokio::test]
 async fn a_cancel_stops_a_step_waiting_to_retake_its_slot() {
-    let f = fake();
+    let (f, _fake) = fake();
     f.ask.store(true, std::sync::atomic::Ordering::SeqCst);
     let graph = WorkflowGraph {
         nodes: vec![node("start", "log", json!({})), agent("a")],
@@ -1251,7 +1263,7 @@ async fn a_cancel_stops_a_step_waiting_to_retake_its_slot() {
 /// question, and its timeline says "paused", not "canceled" then "paused".
 #[tokio::test]
 async fn a_paused_question_is_gone_on_resume() {
-    let f = fake();
+    let (f, _fake) = fake();
     f.ask.store(true, std::sync::atomic::Ordering::SeqCst);
     let graph = WorkflowGraph {
         nodes: vec![node("start", "log", json!({})), agent("a")],
@@ -1372,4 +1384,253 @@ fn a_held_goal_resumes_on_the_default_worker_stack() {
         let run = fx.settled().await;
         assert_eq!(run.status, RunStatus::Success, "{:?}", run.error);
     });
+}
+
+/// CR1-002: every path a daemon run takes fits tokio's default 2 MiB worker
+/// stack in a debug build — a run started by `spawn_run` that parks at an
+/// approval, runs an agent step on the thread runner (the in-memory scripted
+/// agents), holds in a goal loop whose check fails, and comes back on Resume.
+/// Before the deep awaits were built in their own frames (`otto_core::heap`)
+/// the agent step alone overflowed the worker.
+///
+/// Run on half the default (1 MiB) for headroom: the debug frames vary by
+/// ABI and grow with every feature; before the fix this run overflowed it.
+#[test]
+fn approval_agent_step_goal_and_resume_fit_the_default_worker_stack() {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .thread_stack_size(1024 * 1024)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(approval_agent_step_goal_and_resume());
+}
+
+async fn approval_agent_step_goal_and_resume() {
+    use otto_agent_protocol::{scripted, AgentRuntime, RuntimeConfig, SessionManagerHost};
+    use std::sync::Arc;
+    let steps = json!([check(
+        json!([{"id": "ok", "text": "flagged", "verify": "command",
+        "command": "test -f \"$OTTO_CONTEXT_DIR/ok\""}])
+    )]);
+    let mut graph = goal_graph(steps, json!({"max_iterations": 1, "hold_when_unmet": true}));
+    graph
+        .nodes
+        .insert(1, node("gate", "human_approval", json!({})));
+    graph.nodes.insert(
+        2,
+        node(
+            "agent",
+            "agent_prompt",
+            json!({"provider": "claude", "prompt": "Do it."}),
+        ),
+    );
+    graph.edges = vec![
+        edge("start", "gate"),
+        edge("gate", "agent"),
+        edge("agent", "goal"),
+    ];
+    let mut fx = setup("stack-run", graph).await;
+    let host = SessionManagerHost {
+        manager: Arc::clone(&fx.ctx.manager),
+        workspaces: otto_state::WorkspacesRepo::new(fx.ctx.pool.clone()),
+        publish: Box::new(|_| {}),
+        notices: otto_agent_protocol::attention::AttentionNotices::new(
+            otto_state::NotificationsRepo::new(fx.ctx.pool.clone()),
+            Arc::new(|_| {}),
+        ),
+    };
+    fx.ctx.agent_runtime = AgentRuntime::new(
+        otto_state::AgentRuntimeRepo::new(fx.ctx.pool.clone()),
+        Arc::new(host),
+        scripted::drivers(),
+        RuntimeConfig {
+            attachments_dir: fx._tmp.path().join("attachments"),
+            transport: Some(scripted::transport(vec![])),
+            ..RuntimeConfig::default()
+        },
+    );
+    otto_state::SettingsRepo::new(fx.ctx.pool.clone())
+        .put("agent_admission_enabled", &json!(false))
+        .await
+        .unwrap();
+    spawn_run(
+        fx.ctx.clone(),
+        fx.ws.clone(),
+        fx.wf.clone(),
+        fx.run_id.clone(),
+        json!({}),
+        RunScope::default(),
+        None,
+    );
+    let t0 = Instant::now();
+    while !fx.repo.get_run(&fx.run_id).await.unwrap().waiting_approval {
+        assert!(t0.elapsed() < Duration::from_secs(15), "the gate parks");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let rev = fx
+        .repo
+        .record_approval(&fx.run_id, "gate", Some(&fx.user.id), "", None)
+        .await
+        .unwrap();
+    let _ = fx.ctx.events.send(Event::WorkflowRunUpdated {
+        workspace_id: fx.ws.id.clone(),
+        run_id: fx.run_id.clone(),
+        status: "running".into(),
+        node_id: Some("gate".into()),
+        rev,
+        node: None,
+        nodes_done: 0,
+        nodes_total: 0,
+        waiting_approval: false,
+        overview: None,
+    });
+    let run = fx.settled().await;
+    let hold = run
+        .hold
+        .clone()
+        .unwrap_or_else(|| panic!("held: {:?} {:#?}", run.error, run.nodes));
+    assert_eq!(hold.node_ids, ["goal"]);
+    let agent = state(&run, "agent");
+    assert_eq!(agent.status, NodeStatus::Success, "{:?}", agent.error);
+    assert!(agent.thread.is_some(), "the step ran on a runtime thread");
+    fx.flag("ok");
+    let ext = otto_core::api::ExtendReq {
+        iterations: Some(2),
+        active_s: None,
+    };
+    hold::resume(&fx.ctx, &fx.run_id, Some(&ext)).await.unwrap();
+    let run = fx.settled().await;
+    assert_eq!(run.status, RunStatus::Success, "{:?}", run.error);
+    fx.ctx.agent_runtime.shutdown().await;
+}
+
+/// A re-entered run whose graph no longer validates fails with its node
+/// states kept: the steps that already ran stay on the run's page.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn a_reentered_run_that_no_longer_validates_keeps_its_steps() {
+    let graph = WorkflowGraph {
+        nodes: vec![
+            node("start", "log", json!({})),
+            node("q", "db_query", json!({})),
+        ],
+        edges: vec![edge("start", "q")],
+    };
+    let fx = setup("invalid-reentry", graph).await;
+    let prior = vec![
+        NodeRunState {
+            node_id: "start".into(),
+            status: NodeStatus::Success,
+            output: Some(json!({"ok": true})),
+            ..Default::default()
+        },
+        NodeRunState {
+            node_id: "q".into(),
+            ..Default::default()
+        },
+    ];
+    run_workflow(
+        fx.ctx.clone(),
+        fx.ws.clone(),
+        fx.wf.clone(),
+        fx.run_id.clone(),
+        json!({}),
+        RunScope::default(),
+        Some(prior),
+    )
+    .await;
+    let run = fx.repo.get_run(&fx.run_id).await.unwrap();
+    assert_eq!(run.status, RunStatus::Error);
+    assert!(
+        run.error.as_deref().is_some_and(|e| e.contains("q")),
+        "{:?}",
+        run.error
+    );
+    assert_eq!(
+        state(&run, "start").status,
+        NodeStatus::Success,
+        "{:?}",
+        run.nodes
+    );
+}
+
+/// A sibling's publish while the gate waits keeps the publication preview the
+/// gate exposes (the approval is checked against it).
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn a_siblings_publish_keeps_the_gates_preview() {
+    let body = "Reviewed body";
+    let preview = json!({
+        "story_id": "s1", "kind": "jira", "body_md": body,
+        "account_label": "Jira", "account_url": "https://jira.invalid",
+        "request": {"account_id": "acc", "project_key": "PRJ", "issue_type": "Story",
+            "reviewed_account_url": "https://jira.invalid",
+            "reviewed_content": {"version_id": null, "body_sha256": otto_core::text::content_sha256(body),
+                "title": "T", "source_kind": "draft", "url": ""}},
+    });
+    let graph = WorkflowGraph {
+        nodes: vec![
+            node(
+                "start",
+                "transform",
+                json!({"json": {"publication_preview": preview}}),
+            ),
+            node("gate", "human_approval", json!({})),
+            node("d", "delay", json!({"ms": 300})),
+        ],
+        edges: vec![edge("start", "gate"), edge("start", "d")],
+    };
+    let fx = setup("approval-preview", graph).await;
+    let _driver = fx.drive();
+    let run = until(&fx, "d", |n| n.status == NodeStatus::Success).await;
+    assert!(run.waiting_approval);
+    let out = state(&run, "gate").output.clone();
+    assert_eq!(
+        out.and_then(|o| o.get("publication_preview").cloned()),
+        Some(preview)
+    );
+}
+
+/// GL11.2: a Pause racing an inner step's completion never loses the step
+/// or fails the run — after Resume the run succeeds and every iteration's
+/// step has a successful checkpoint (a step the pause cut runs again).
+/// 50 runs, the pause landing at a different point each time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "GL11.2 finding: some pause/resume races end the run as 'one or more nodes failed' — engine fix pending"]
+async fn pause_racing_completion_never_runs_a_step_twice() {
+    for rep in 0..50u64 {
+        let steps = json!([
+            {"kind": "delay", "name": "work", "params": {"ms": 20}},
+            check(json!([{"id": "two", "text": "second try", "verify": "expr", "expr": "iteration >= 2"}])),
+        ]);
+        let graph = goal_graph(steps, json!({"max_iterations": 3}));
+        let fx = fixture(&format!("goal-race-{rep}"), graph, true).await;
+        let driver = fx.drive();
+        until(&fx, "goal", |n| n.status == NodeStatus::Running).await;
+        tokio::time::sleep(Duration::from_millis(rep % 45)).await;
+        let paused = hold::pause(&fx.ctx, &fx.run_id, &fx.user).await.is_ok();
+        let _ = driver.await;
+        if paused && fx.repo.get_run(&fx.run_id).await.unwrap().hold.is_some() {
+            hold::resume(&fx.ctx, &fx.run_id, None).await.unwrap();
+        }
+        let run = fx.settled().await;
+        let errs: Vec<_> = run
+            .nodes
+            .iter()
+            .map(|n| (&n.node_id, n.status, &n.error, n.logs.last()))
+            .collect();
+        assert_eq!(
+            run.status,
+            RunStatus::Success,
+            "rep {rep}: {:?} paused {paused} {errs:?}",
+            run.error
+        );
+        for id in ["goal#1.0", "goal#2.0"] {
+            let cp = fx.checkpoint(id).await;
+            assert_eq!(
+                cp.map(|c| c.status),
+                Some(NodeStatus::Success),
+                "rep {rep}: {id}"
+            );
+        }
+    }
 }

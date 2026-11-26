@@ -461,6 +461,9 @@ pub struct RunContextFiles {
     listed: Mutex<std::collections::HashMap<usize, std::collections::HashSet<u32>>>,
 }
 
+/// Most bytes [`RunContextFiles::read_confined`] returns (CR1-066).
+pub const READ_CONFINED_CAP: u64 = 1 << 20;
+
 /// Unique suffix for atomic writes' temp names (several writers per process).
 static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -666,7 +669,15 @@ impl RunContextFiles {
         if !canonical.starts_with(&root) {
             return None;
         }
-        std::fs::read_to_string(canonical).ok()
+        // Capped: a runaway file must not land whole in a post or a step's input.
+        let mut bytes = Vec::new();
+        let file = std::fs::File::open(canonical).ok()?;
+        std::io::Read::read_to_end(
+            &mut std::io::Read::take(file, READ_CONFINED_CAP),
+            &mut bytes,
+        )
+        .ok()?;
+        Some(String::from_utf8_lossy(&bytes).into_owned())
     }
 
     /// The `jira-<KEY>.md` this run fetched, if any. The engine writes exactly
@@ -1690,6 +1701,16 @@ mod tests {
             f.read_named("../../secret.txt").as_deref(),
             Some("SECRET"),
             "why read_named stays engine-internal"
+        );
+        // CR1-066: a runaway file is read up to the cap, not whole.
+        std::fs::write(
+            dir.join("big.md"),
+            "x".repeat(READ_CONFINED_CAP as usize + 10),
+        )
+        .unwrap();
+        assert_eq!(
+            f.read_confined("big.md").map(|s| s.len()),
+            Some(READ_CONFINED_CAP as usize)
         );
     }
 

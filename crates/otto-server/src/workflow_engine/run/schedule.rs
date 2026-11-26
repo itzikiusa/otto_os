@@ -774,6 +774,8 @@ async fn settle(
             };
             st.error = failure.clone();
             st.output = Some(out.clone());
+            // The step line's one-line summary (CR1-080), ≤ 200 chars.
+            st.brief = brief_summary(&out).map(|s| truncate(&s, 200).to_string());
             let built = otto_workflows::step_util::output_deliverables(&out);
             if !built.is_empty() {
                 st.deliverables = built;

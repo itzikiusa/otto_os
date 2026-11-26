@@ -2053,7 +2053,7 @@ impl AgentRuntime {
         // network blip, a busy transcript): resume once more before giving
         // the thread up (T3 Code #34762 keeps the native session too).
         if !resume_refused_for_good(&live.lock()) {
-            self.ensure_process(live).await?;
+            otto_core::heap(|| self.ensure_process(live)).await?;
             if self.wait_started(live).await {
                 return Ok(());
             }
@@ -2064,7 +2064,7 @@ impl AgentRuntime {
         }
         // Keep the old key until the fresh thread is up.
         live.lock().session.native_thread_id = None;
-        let fresh = self.ensure_process(live).await;
+        let fresh = otto_core::heap(|| self.ensure_process(live)).await;
         if fresh.is_err() || !self.wait_started(live).await {
             live.lock().session.native_thread_id = resume;
             fresh?;

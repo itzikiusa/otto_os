@@ -84,9 +84,28 @@ pub(super) fn forget(run_id: &Id) {
 
 #[cfg(test)]
 thread_local! {
-    /// A test's stand-in for the thread runner.
+    /// A test's stand-in for the thread runner ([`install_fake_runner`]).
     pub(super) static FAKE_RUNNER: std::cell::RefCell<Option<std::sync::Arc<dyn StepRunner>>> =
         const { std::cell::RefCell::new(None) };
+}
+
+/// Uninstalls the test's fake runner when dropped, so it never leaks into a
+/// later test on the same thread (`--test-threads=1` runs them inline).
+#[cfg(test)]
+#[must_use = "the fake runner is uninstalled when the guard drops"]
+pub(super) struct FakeRunnerGuard;
+
+#[cfg(test)]
+impl Drop for FakeRunnerGuard {
+    fn drop(&mut self) {
+        FAKE_RUNNER.with(|f| *f.borrow_mut() = None);
+    }
+}
+
+#[cfg(test)]
+pub(super) fn install_fake_runner(r: std::sync::Arc<dyn StepRunner>) -> FakeRunnerGuard {
+    FAKE_RUNNER.with(|f| *f.borrow_mut() = Some(r));
+    FakeRunnerGuard
 }
 
 /// The thread runner; given the run's user, a usage limit parks the step

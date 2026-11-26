@@ -268,14 +268,16 @@ pub fn dequeued_reply(name: &str, run_id: &str, waited: Duration) -> String {
 /// What to announce when a run leaves the queue, and where: `None` when the
 /// run never waited (`waited` is `None` — it got a slot at once and its
 /// acknowledgement already said "Started") or has no chat thread to tell
-/// (a manual UI run, a webhook-only trigger).
+/// (a manual UI run, a webhook-only trigger), and in the `live` style, whose
+/// status message says it already (CR1-036).
 pub fn dequeue_announcement(
     workflow: &Workflow,
     run_id: &str,
     input: &Value,
     waited: Option<Duration>,
+    style: crate::chat_status::ChatUpdates,
 ) -> Option<(ChatTarget, String)> {
-    let waited = waited?;
+    let waited = waited.filter(|_| style == crate::chat_status::ChatUpdates::PerStep)?;
     let target = resolve_chat_target(workflow, input)?;
     if target.chat.trim().is_empty() {
         return None;
@@ -297,8 +299,9 @@ pub async fn announce_dequeued<C: WorkflowCtx>(
     run_id: &str,
     input: &Value,
     waited: Option<Duration>,
+    style: crate::chat_status::ChatUpdates,
 ) {
-    let Some((target, text)) = dequeue_announcement(workflow, run_id, input, waited) else {
+    let Some((target, text)) = dequeue_announcement(workflow, run_id, input, waited, style) else {
         return;
     };
     let post = async {
@@ -426,10 +429,10 @@ mod tests {
     fn only_a_run_that_waited_and_has_a_thread_is_announced() {
         let slack = json!({ "channel": "slack", "chat": "C1", "thread": "169.1" });
         // Started at once: its acknowledgement already said "Started".
-        assert!(dequeue_announcement(&wf(), "r1", &slack, None).is_none());
+        assert!(dequeue_announcement(&wf(), "r1", &slack, None, PER_STEP).is_none());
         // Waited, from a Slack thread: announced in that thread.
         let (target, text) =
-            dequeue_announcement(&wf(), "r1", &slack, Some(Duration::from_secs(90)))
+            dequeue_announcement(&wf(), "r1", &slack, Some(Duration::from_secs(90)), PER_STEP)
                 .expect("a queued Slack run is announced");
         assert!(matches!(target.channel, Channel::Slack));
         assert_eq!(target.chat, "C1");
@@ -439,17 +442,35 @@ mod tests {
         assert!(text.ends_with("queued for 1 min."));
         // Waited, but a manual UI run: nobody to tell.
         let manual = json!({ "repo_id": "r" });
-        assert!(
-            dequeue_announcement(&wf(), "r1", &manual, Some(Duration::from_secs(90))).is_none()
-        );
+        assert!(dequeue_announcement(
+            &wf(),
+            "r1",
+            &manual,
+            Some(Duration::from_secs(90)),
+            PER_STEP
+        )
+        .is_none());
         // A schedule trigger reporting to a chat is told too.
         let scheduled =
             json!({ "trigger": "schedule", "result_channel": "slack", "result_chat": "C9" });
-        let (target, _) =
-            dequeue_announcement(&wf(), "r1", &scheduled, Some(Duration::from_secs(5)))
-                .expect("result chat is a target");
+        let (target, _) = dequeue_announcement(
+            &wf(),
+            "r1",
+            &scheduled,
+            Some(Duration::from_secs(5)),
+            PER_STEP,
+        )
+        .expect("result chat is a target");
         assert_eq!(target.chat, "C9");
+        // A live thread's status message already says it started.
+        let live = crate::chat_status::ChatUpdates::Live;
+        assert!(
+            dequeue_announcement(&wf(), "r1", &slack, Some(Duration::from_secs(90)), live)
+                .is_none()
+        );
     }
+
+    const PER_STEP: crate::chat_status::ChatUpdates = crate::chat_status::ChatUpdates::PerStep;
 
     #[test]
     fn chat_target_prefers_the_explicit_result_destination() {
