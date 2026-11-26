@@ -2,8 +2,8 @@
 
 Otto reviews pull requests and local changes by inspecting their scope, choosing
 relevant lenses, and verifying the resulting claims against the code. Reviews
-produce drafts for inspection. They can also start an isolated Goal Loop to fix
-verified PR findings and review the result again.
+produce drafts for inspection. They can also start a goal — a workflow that fixes
+verified PR findings in an isolated worktree and reviews the result again.
 
 The API and WebSocket contracts in [`../contracts/api.md`](../contracts/api.md)
 and [`../contracts/ws.md`](../contracts/ws.md) are authoritative. The engine lives
@@ -259,9 +259,12 @@ results stay in history because the working tree may have changed.
 ### Run an agent to fix
 
 A completed PR review offers **Run agent to fix…**. The dialog defaults to a 9.5/10
-reviewer target and starts a Goal Loop on an isolated worktree at the reviewed
-commit. Follow progress, evidence, Stop and Resume in Goal Loops. Fixes remain
-local and uncommitted for inspection; this action does not authorize publication.
+reviewer target and starts a [goal](goal-loops.md) on an isolated worktree at the
+reviewed commit — fix, review again, check that the review passes — for up to 6
+iterations or 2 hours of active time, and opens its run page in Workflows. Follow
+progress and evidence there; **Pause**, **Resume** and **Stop run…** are on the run
+page. Asking again for the same review opens the goal that already exists. Fixes
+remain local for inspection; this action does not authorize publication.
 
 The agent batches related must-fix and should-fix work, verifies previous findings,
 then performs a fresh review. Optional lows may be explicitly deferred. The score
