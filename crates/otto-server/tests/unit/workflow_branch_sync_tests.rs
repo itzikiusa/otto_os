@@ -91,7 +91,7 @@ async fn run_start_sync_resolves_remote_only_pr_branches_and_fast_forwards_a_sta
         source: None,
         worktree: Some(repo.path.clone()),
         base: Some("y".into()),
-        error: None,
+        ..Default::default()
     }];
 
     let synced = sync_run_branches(&ctx, &entries, Some("x"), &[]).await;

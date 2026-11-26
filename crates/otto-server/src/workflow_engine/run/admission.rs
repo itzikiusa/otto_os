@@ -311,7 +311,7 @@ async fn isolate_repos(
                     source: None,
                     worktree: None,
                     base: None,
-                    error: None,
+                    ..Default::default()
                 });
             }
         }
