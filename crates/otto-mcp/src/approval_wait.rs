@@ -42,6 +42,19 @@ pub fn hold_secs(cli_family: &str, interactive: bool) -> u64 {
     }
 }
 
+/// Whether a calling session holds as a person's would ([`hold_secs`]): a
+/// foreground session with no `run_id`, or a workflow step's runtime thread —
+/// its run shows "Needs you" with the card while the call waits. A personal
+/// agent's run (also a `run_id`) and a PTY step keep the headless wait.
+pub fn interactive_hold(session: &otto_core::domain::Session) -> bool {
+    let meta = &session.meta;
+    let text = |k: &str| meta.get(k).and_then(|v| v.as_str());
+    let step = text("runtime") == Some("structured")
+        && text("source") == Some("workflow")
+        && meta.get("run_id").is_some();
+    step || (session.is_foreground_agent() && meta.get("run_id").is_none())
+}
+
 /// `Some(true)` = approved, `Some(false)` = denied / expired / cancelled,
 /// `None` = still pending after `budget` (the caller resubmits later).
 ///
@@ -117,6 +130,39 @@ async fn wait_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_workflow_steps_thread_holds_like_a_person_and_other_runs_do_not() {
+        let session = |meta: serde_json::Value| otto_core::domain::Session {
+            id: "s".into(),
+            workspace_id: "w".into(),
+            kind: otto_core::domain::SessionKind::Agent,
+            provider: "claude".into(),
+            title: "t".into(),
+            status: otto_core::domain::SessionStatus::Running,
+            cwd: "/tmp".into(),
+            provider_session_id: None,
+            connection_id: None,
+            created_by: "u".into(),
+            created_at: chrono::Utc::now(),
+            last_active_at: chrono::Utc::now(),
+            archived: false,
+            meta,
+        };
+        let step =
+            serde_json::json!({"runtime": "structured", "source": "workflow", "run_id": "r1"});
+        assert!(interactive_hold(&session(step)));
+        let pty_step = serde_json::json!({"source": "workflow", "run_id": "r1"});
+        assert!(
+            !interactive_hold(&session(pty_step)),
+            "a PTY step stays headless"
+        );
+        let routine = serde_json::json!({"runtime": "structured", "source": "personal_agent", "run_id": "r1"});
+        assert!(!interactive_hold(&session(routine)));
+        assert!(interactive_hold(&session(
+            serde_json::json!({"runtime": "structured"})
+        )));
+    }
 
     #[test]
     fn only_a_person_s_session_holds_long_and_never_past_its_cli_timeout() {

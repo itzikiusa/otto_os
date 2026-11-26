@@ -2492,6 +2492,9 @@
       "properties": {
         "peer_session_id": {
           "type": "string"
+        },
+        "remove": {
+          "type": "boolean"
         }
       }
     },

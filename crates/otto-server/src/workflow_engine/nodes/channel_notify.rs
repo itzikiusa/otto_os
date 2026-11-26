@@ -88,7 +88,6 @@ pub(in crate::workflow_engine) async fn execute(
         ));
     }
 
-    let secrets = &ctx.secrets;
     let mut sent = 0usize;
     for integ in &targets {
         let ws_id = &integ.workspace_id;
@@ -98,40 +97,13 @@ pub(in crate::workflow_engine) async fn execute(
             origin_chat.as_deref(),
             origin_thread.as_deref(),
         );
-        // Build an outbound adapter reusing the same logic as
-        // improve_notify (avoids a public API surface on ChannelManager).
-        let send_result = match integ.channel {
-            Channel::Telegram => {
-                let key = format!("chan-bot-{ws_id}-telegram");
-                let token = otto_core::secrets::get_async(secrets, &key).await;
-                match token.ok().flatten().filter(|t| !t.is_empty()) {
-                    Some(token) => {
-                        let adapter = otto_channels::telegram::TelegramAdapter::new(token);
-                        adapter.send(chat, thread, &message).await.map(|_| ())
-                    }
-                    None => {
-                        tracing::debug!(workspace = %ws_id, "channel_notify: telegram token missing");
-                        continue;
-                    }
-                }
-            }
-            Channel::Slack => {
-                let key = format!("chan-bot-{ws_id}-slack");
-                let token = otto_core::secrets::get_async(secrets, &key).await;
-                match token.ok().flatten().filter(|t| !t.is_empty()) {
-                    Some(token) => {
-                        let adapter = otto_channels::slack::SlackAdapter::new(token);
-                        adapter.send(chat, thread, &message).await.map(|_| ())
-                    }
-                    None => {
-                        tracing::debug!(workspace = %ws_id, "channel_notify: slack token missing");
-                        continue;
-                    }
-                }
-            }
-            // Webhooks are inbound-only; excluded from `targets` above.
-            Channel::Webhook => continue,
+        // The context's outbound adapter (the bot token's; none when it is
+        // missing — or for a webhook, which `targets` already excludes).
+        let Some(adapter) = ctx.outbound.adapter(integ).await else {
+            tracing::debug!(workspace = %ws_id, channel = integ.channel.as_str(), "channel_notify: bot token missing");
+            continue;
         };
+        let send_result = adapter.send(chat, thread, &message).await.map(|_| ());
         match send_result {
             Ok(_) => sent += 1,
             Err(e) => {

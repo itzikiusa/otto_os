@@ -1224,6 +1224,10 @@ pub fn parse_grok_models_output(raw: &str) -> Vec<ProviderModelOption> {
     out
 }
 
+#[path = "provider_models_pick.rs"]
+mod pick;
+pub use pick::{check_against, check_pick, PickCheck};
+
 #[cfg(test)]
 #[path = "provider_models_tests.rs"]
 mod tests;

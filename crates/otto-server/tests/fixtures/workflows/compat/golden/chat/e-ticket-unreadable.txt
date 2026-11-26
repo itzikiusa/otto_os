@@ -1,0 +1,49 @@
+=== send m1 to chat-compat thread-compat formatted
+🚀 Started workflow **Compat E** (run `id-1`). Working through the steps now — goals: consectetur adipiscing. Reply `status` · `skip` · `abort` · `help` in this thread to control it.
+=== send m2 to chat-compat thread-compat formatted
+🚀 *Compat E* started — 11 step(s) queued.
+*Goals:* consectetur adipiscing
+=== send m3 to chat-compat thread-compat formatted
+▶ *Prepare 2* started
+=== send m4 to chat-compat thread-compat formatted
+❌ *Prepare 2* failed — invalid: prepare_context: required Jira fetch failed: {"found": Bool(true), "key": String("COMPAT-1"), "fetched": Bool(false), "error": String("no Jira account configured")}
+=== upload step2-prepare-2.md to chat-compat thread-compat
+# Prepare 2 (prepare_context)
+
+## Error
+
+invalid: prepare_context: required Jira fetch failed: {"found": Bool(true), "key": String("COMPAT-1"), "fetched": Bool(false), "error": String("no Jira account configured")}
+
+## Logs
+
+- ▶ prepare_context started
+- Prepare 2 — attempt 1/1
+- ✗ invalid: prepare_context: required Jira fetch failed: {"found": Bool(true), "key": String("COMPAT-1"), "fetched": Bool(false), "error": String("no Jira account configured")}
+
+
+=== send m5 to chat-compat thread-compat formatted
+❌ *Compat E* — error
+1/11 steps ok · 1 failed · 9 skipped
+_Full summary attached (summary.md)._
+=== upload summary.md to chat-compat thread-compat
+# Workflow run — Compat E
+
+- **Status:** ❌ error
+- **Steps:** 1/11 steps ok · 1 failed · 9 skipped
+
+## Steps
+
+1. **Start 1 (manual_trigger)** — success · <dur>
+   - {"trigger":"chat","origin_workspace_id":"ws-compat","channel":"slack","chat":"chat-compat","thread":"thread-compat","user":"user-compat","name":"Compat E","msg":"lorem ipsum dolor sit amet","prompt":"lorem ipsum dolor sit amet","jira_ticket…
+2. **Prepare 2 (prepare_context)** — error · <dur>
+   - error: invalid: prepare_context: required Jira fetch failed: {"found": Bool(true), "key": String("COMPAT-1"), "fetched": Bool(false), "error": String("no Jira account configured")}
+3. **Agent step 3 (agent_prompt)** — skipped
+4. **Agent step 4 (agent_prompt)** — skipped
+5. **Agent step 5 (agent_prompt)** — skipped
+6. **Agent step 6 (agent_prompt)** — skipped
+7. **Notify 7 (channel_notify)** — skipped
+8. **Log 8 (log)** — skipped
+9. **Agent step 9 (agent_prompt)** — skipped
+10. **Agent step 10 (agent_prompt)** — skipped
+11. **Agent step 11 (agent_prompt)** — skipped
+

@@ -49,13 +49,18 @@ jobs:
           fi
 
       - name: Build the test daemon
-        run: cargo build -p ottod --features otto-server/test-util
+        run: cargo build -p ottod -p otto-agent-protocol --bins --features otto-server/test-util
 
       - name: Upload the test daemon
         uses: actions/upload-artifact@v7.0.2
         with:
           name: ottod-debug
-          path: target/debug/ottod
+          # The daemon and the fake agent CLIs its E2E shims exec, flat in one artifact.
+          path: |
+            target/debug/ottod
+            target/debug/otto-fake-claude
+            target/debug/otto-fake-codex
+            target/debug/otto-fake-agent
           retention-days: 2
           if-no-files-found: error
 
@@ -131,7 +136,7 @@ jobs:
           path: target/debug
 
       - name: Make the test daemon executable
-        run: chmod +x target/debug/ottod
+        run: chmod +x target/debug/ottod target/debug/otto-fake-claude target/debug/otto-fake-codex target/debug/otto-fake-agent
 
       - name: Install Node
         uses: actions/setup-node@v7.0.0
@@ -175,6 +180,7 @@ jobs:
         working-directory: ui
         env:
           OTTO_E2E_BIN: ${{ github.workspace }}/target/debug/ottod
+          OTTO_E2E_REQUIRE_FAKES: '1'
           OTTO_E2E_FUNCTIONAL_ONLY: '1'
         run: >-
           npx playwright test
@@ -272,7 +278,7 @@ jobs:
           path: target/debug
 
       - name: Make the test daemon executable
-        run: chmod +x target/debug/ottod
+        run: chmod +x target/debug/ottod target/debug/otto-fake-claude target/debug/otto-fake-codex target/debug/otto-fake-agent
 
       - name: Install Node
         uses: actions/setup-node@v7.0.0
@@ -295,6 +301,7 @@ jobs:
         working-directory: ui
         env:
           OTTO_E2E_BIN: ${{ github.workspace }}/target/debug/ottod
+          OTTO_E2E_REQUIRE_FAKES: '1'
           OTTO_PERF_BUDGET_SCALE: '3'
         run: >-
           npx playwright test --project=desktop-webkit --workers=1
@@ -315,6 +322,7 @@ jobs:
         working-directory: ui
         env:
           OTTO_E2E_BIN: ${{ github.workspace }}/target/debug/ottod
+          OTTO_E2E_REQUIRE_FAKES: '1'
           OTTO_PERF_BUDGET_SCALE: '3'
         run: >-
           npx playwright test --project=desktop-webkit --workers=1
@@ -353,7 +361,7 @@ jobs:
           path: target/debug
 
       - name: Make the test daemon executable
-        run: chmod +x target/debug/ottod
+        run: chmod +x target/debug/ottod target/debug/otto-fake-claude target/debug/otto-fake-codex target/debug/otto-fake-agent
 
       - name: Install Node
         uses: actions/setup-node@v7.1.0
@@ -377,6 +385,7 @@ jobs:
         working-directory: ui
         env:
           OTTO_E2E_BIN: ${{ github.workspace }}/target/debug/ottod
+          OTTO_E2E_REQUIRE_FAKES: '1'
         run: npx playwright test --project=${{ matrix.project }} --retries=0
 
       - name: Fail on flaky tests

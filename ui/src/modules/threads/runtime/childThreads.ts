@@ -13,7 +13,7 @@ import type { RuntimeProjection } from './projection';
 import { latestTurn, workLabel } from './timeline';
 import { perfCount } from '../../../lib/perfCount.ts';
 
-export type ChildEvent = 'started' | 'finished' | 'failed' | 'stopped';
+export type ChildEvent = 'started' | 'finished' | 'failed' | 'stopped' | 'removed';
 
 /** A `system_notice` the daemon wrote about child threads. */
 export interface ThreadNotice {
@@ -25,7 +25,7 @@ export interface ThreadNotice {
 
 /** `… [otto-thread:<id>[,<id>…]:<event>]` (runtime/children.rs). */
 export function threadNoticeOf(message: string): ThreadNotice | null {
-  const m = /\s*\[otto-thread:([A-Za-z0-9_,-]+):(started|finished|failed|stopped)\]\s*$/.exec(message);
+  const m = /\s*\[otto-thread:([A-Za-z0-9_,-]+):(started|finished|failed|stopped|removed)\]\s*$/.exec(message);
   if (!m) return null;
   const ids = m[1].split(',').filter(Boolean);
   return ids.length ? { text: message.slice(0, m.index).trim(), ids, event: m[2] as ChildEvent } : null;
@@ -153,9 +153,42 @@ export function childrenOf(rows: readonly RuntimeSession[], parentId: string): R
 type SubagentItem = Extract<TurnItem, { type: 'subagent' }>;
 type Hint = { provider?: string | null; title?: string | null; model?: string | null; effort?: string | null };
 
+/** A subagent its parent's agent removed (`otto.thread_close` remove:true):
+ *  the last ended notice it left ("Codex finished: …") and its title. */
+export interface RemovedKid {
+  title: string;
+  /** The last "… finished|failed|stopped" notice's words ('' when none). */
+  ended: string;
+  event: ChildEvent | null;
+}
+
 /** One subagent under a turn: a thread opened from this one (by its agent or
  *  a person), or the provider's own subagent (Claude's Task, …). */
-export type Kid = { kind: 'thread'; id: string; hint?: Hint } | { kind: 'native'; item: SubagentItem };
+export type Kid = { kind: 'thread'; id: string; hint?: Hint; removed?: RemovedKid } | { kind: 'native'; item: SubagentItem };
+
+/** A removed subagent's state: how its last turn ended (its row is gone). */
+export function removedState(r: RemovedKid): ChildState {
+  return state(r.event === 'failed' ? 'failed' : r.event === 'finished' ? 'done' : 'stopped');
+}
+
+/** Its card's one line: "Codex finished: … · removed". */
+export const removedLine = (r: RemovedKid): string => (r.ended ? `${r.ended} · removed` : 'Removed');
+
+/** Every removed subagent in `items` by id, with the last ended notice before it. */
+function removedKids(items: readonly TurnItem[]): Map<string, RemovedKid> {
+  const ended = new Map<string, ThreadNotice>();
+  const out = new Map<string, RemovedKid>();
+  for (const i of items) {
+    if (i.parent_item_id || i.type !== 'system_notice') continue;
+    const n = threadNoticeOf(i.message);
+    if (!n || n.event === 'started') continue;
+    for (const id of n.ids) {
+      if (n.event !== 'removed') ended.set(id, n);
+      else out.set(id, { title: n.text.replace(/^\S+ removed /, ''), ended: ended.get(id)?.text ?? '', event: ended.get(id)?.event ?? null });
+    }
+  }
+  return out;
+}
 
 export const kidKey = (k: Kid): string => (k.kind === 'thread' ? k.id : k.item.id);
 
@@ -170,6 +203,11 @@ export function turnSubagents(items: readonly TurnItem[]): { groups: Map<string,
   const skip = new Set<string>();
   const anchorOf = new Map<string, string>();
   const seen = new Set<string>();
+  const removed = removedKids(items);
+  const thread = (id: string, hint?: Hint): Kid => {
+    const r = removed.get(id);
+    return { kind: 'thread', id, ...(hint ? { hint } : {}), ...(r ? { removed: r } : {}) };
+  };
   for (const i of items) {
     if (i.parent_item_id) continue;
     let kids: Kid[] = [];
@@ -177,10 +215,10 @@ export function turnSubagents(items: readonly TurnItem[]): { groups: Map<string,
     else if (i.type === 'system_notice') {
       const n = threadNoticeOf(i.message);
       // A start, or an end whose start is not in this timeline (paged out).
-      if (n) kids = n.ids.map((id) => ({ kind: 'thread', id }));
+      if (n) kids = n.ids.map((id) => thread(id));
     } else if (i.type === 'dynamic_tool' && !i.error && i.status !== 'running' && i.status !== 'pending') {
       const c = threadCall(i);
-      if (c?.verb === 'Opened' && c.targetId) kids = [{ kind: 'thread', id: c.targetId, hint: { provider: c.provider, title: c.title, model: c.model, effort: c.effort } }];
+      if (c?.verb === 'Opened' && c.targetId) kids = [thread(c.targetId, { provider: c.provider, title: c.title, model: c.model, effort: c.effort })];
     }
     kids = kids.filter((k) => !seen.has(kidKey(k)));
     if (kids.length === 0) continue;

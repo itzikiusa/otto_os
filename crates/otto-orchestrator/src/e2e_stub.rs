@@ -7,6 +7,7 @@
 
 /// Return a canned reply chosen by the `OTTO_TASK:` sentinel in `prompt`.
 pub fn canned_reply(prompt: &str) -> String {
+    record_prompt(prompt);
     if prompt.contains("OTTO_TASK: discovery_chat") {
         return discovery_chat_reply();
     }
@@ -36,6 +37,24 @@ pub fn canned_reply(prompt: &str) -> String {
     }
     // Generic fallback for any other agent call under E2E.
     "OK".to_string()
+}
+
+/// Test seam: when `OTTO_E2E_PROMPT_LOG` names a file, append every offline
+/// turn's prompt to it as one JSON string per line. The workflow
+/// characterization goldens read the exact step prompts from it.
+#[allow(clippy::disallowed_methods)] // synchronous test-only adapter, no provider work
+fn record_prompt(prompt: &str) {
+    use std::io::Write;
+    let Some(path) = std::env::var_os("OTTO_E2E_PROMPT_LOG") else {
+        return;
+    };
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(f, "{}", serde_json::Value::String(prompt.to_string()));
+    }
 }
 
 /// Emulate Vault's file result protocol ONLY for the daemon's offline E2E

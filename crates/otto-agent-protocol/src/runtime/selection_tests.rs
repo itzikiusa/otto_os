@@ -652,21 +652,24 @@ async fn a_switch_whose_request_is_dropped_still_ends() {
     assert_eq!(stored.provider, RuntimeProvider::Claude);
 }
 
-/// A subagent of `of`, opened by its agent.
+/// A subagent of `of`, opened by its agent (in `of`'s linked group, as
+/// `open_linked` makes it).
 async fn subagent(f: &Fixture, of: &Id) -> Id {
-    let cwd = f.rt.get(of).await.unwrap().cwd;
-    f.rt.create(
+    let opener = f.rt.get(of).await.unwrap();
+    let root = opener.parent_id.clone().unwrap_or_else(|| of.clone());
+    f.rt.create_linked(
         &"u1".into(),
         &"w1".into(),
         CreateRuntimeSessionReq {
             provider: Some(RuntimeProvider::Claude),
-            cwd: Some(cwd),
+            cwd: Some(opener.cwd),
             meta: Some(children::child_meta(
                 of,
                 otto_core::agent_runtime::ChildOpener::Agent,
             )),
             ..CreateRuntimeSessionReq::default()
         },
+        Some(root),
     )
     .await
     .unwrap()

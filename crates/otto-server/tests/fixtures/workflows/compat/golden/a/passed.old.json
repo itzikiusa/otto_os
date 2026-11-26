@@ -1,0 +1,341 @@
+{
+  "scenario": "a/passed",
+  "run": {
+    "status": "success",
+    "error": null
+  },
+  "step_numbers": {
+    "n1": 1,
+    "n10": 11,
+    "n11": 5,
+    "n12": 6,
+    "n2": 2,
+    "n3": 3,
+    "n4": 4,
+    "n5": 7,
+    "n6": 10,
+    "n7": 8,
+    "n8": 9,
+    "n9": null
+  },
+  "nodes": [
+    {
+      "id": "n1",
+      "status": "success",
+      "error": null,
+      "attempts": 1,
+      "sessions": 0,
+      "logs": [
+        "▶ manual_trigger started",
+        "Start 1 — attempt 1/1",
+        "context: wrote step1-start-1.output.json",
+        "context: wrote step1-start-1.md"
+      ],
+      "output": {
+        "trigger": "chat",
+        "origin_workspace_id": "ws-compat",
+        "channel": "slack",
+        "chat": "chat-compat",
+        "thread": "thread-compat",
+        "user": "user-compat",
+        "name": "Compat A",
+        "msg": "lorem ipsum dolor sit amet",
+        "prompt": "lorem ipsum dolor sit amet",
+        "jira_ticket": "COMPAT-1",
+        "working_directory": "<data>/workflow-runs/id-1/repo",
+        "base": "main",
+        "pr": null,
+        "pr_branch": null,
+        "relevant_info": [],
+        "goals": [
+          "consectetur adipiscing"
+        ],
+        "raw": "Action: Workflow\nName: Compat A\nMsg: lorem ipsum dolor sit amet\nWorking Directory: <repo>\nBranch: main\nGoals:\n  - consectetur adipiscing\nJira ticket: COMPAT-1\n",
+        "repo_id": "id-2",
+        "repos": [
+          {
+            "repo_id": "id-2",
+            "worktree": "<data>/workflow-runs/id-1/repo",
+            "base": "main"
+          }
+        ]
+      }
+    },
+    {
+      "id": "n2",
+      "status": "success",
+      "error": null,
+      "attempts": 1,
+      "sessions": 0,
+      "logs": [
+        "▶ prepare_context started",
+        "Prepare 2 — attempt 1/1",
+        "prepare_context: jira {\"found\":true,\"key\":\"COMPAT-1\",\"fetched\":false,\"error\":\"no Jira account configured\"}",
+        "context: wrote step2-prepare-2.output.json",
+        "context: wrote step2-prepare-2.md"
+      ],
+      "output": {
+        "jira": {
+          "found": true,
+          "key": "COMPAT-1",
+          "fetched": false,
+          "error": "no Jira account configured"
+        }
+      }
+    },
+    {
+      "id": "n3",
+      "status": "success",
+      "error": null,
+      "attempts": 1,
+      "sessions": 1,
+      "logs": [
+        "▶ agent_prompt started",
+        "Agent step 3 — attempt 1/3",
+        "⏳ starting claude session",
+        "agent turn complete",
+        "context: wrote step3-agent-step-3.output.json",
+        "context: wrote step3-agent-step-3.md"
+      ],
+      "output": {
+        "reply": "OK",
+        "session_id": "id-3",
+        "working_directory": "<data>/workflow-runs/id-1/repo"
+      }
+    },
+    {
+      "id": "n4",
+      "status": "success",
+      "error": null,
+      "attempts": 1,
+      "sessions": 1,
+      "logs": [
+        "▶ agent_prompt started",
+        "Agent step 4 — attempt 1/3",
+        "⏳ starting claude session",
+        "agent turn complete",
+        "context: wrote step4-agent-step-4.output.json",
+        "context: wrote step4-agent-step-4.md"
+      ],
+      "output": {
+        "reply": "OK",
+        "session_id": "id-4",
+        "working_directory": "<data>/workflow-runs/id-1/repo"
+      }
+    },
+    {
+      "id": "n5",
+      "status": "success",
+      "error": null,
+      "attempts": 1,
+      "sessions": 1,
+      "logs": [
+        "▶ transform started",
+        "Review 5 — attempt 1/1",
+        "context: wrote step7-review-5.output.json",
+        "context: wrote step7-review-5.md"
+      ],
+      "output": {
+        "reply": "OK",
+        "session_id": "id-5",
+        "working_directory": "<data>/workflow-runs/id-1/repo",
+        "review_id": "review-1",
+        "status": "done",
+        "outcome": "passed",
+        "score": 100,
+        "passed": true,
+        "threshold": 80,
+        "total": 3,
+        "blocking": 0,
+        "advisory": 3,
+        "severity": {
+          "bug": 0,
+          "warn": 0,
+          "info": 3
+        },
+        "findings": []
+      }
+    },
+    {
+      "id": "n6",
+      "status": "success",
+      "error": null,
+      "attempts": 1,
+      "sessions": 1,
+      "logs": [
+        "▶ agent_prompt started",
+        "Agent step 6 — attempt 1/3",
+        "⏳ starting claude session",
+        "agent turn complete",
+        "context: wrote step10-agent-step-6.output.json",
+        "context: wrote step10-agent-step-6.md"
+      ],
+      "output": {
+        "reply": "OK",
+        "session_id": "id-6",
+        "working_directory": "<data>/workflow-runs/id-1/repo"
+      }
+    },
+    {
+      "id": "n7",
+      "status": "success",
+      "error": null,
+      "attempts": 1,
+      "sessions": 1,
+      "logs": [
+        "▶ condition started",
+        "Condition 7 — attempt 1/1",
+        "condition `passed == true` → true",
+        "context: wrote step8-condition-7.output.json",
+        "context: wrote step8-condition-7.md",
+        "edge → n9 not taken (output.result == false)"
+      ],
+      "output": {
+        "reply": "OK",
+        "session_id": "id-5",
+        "working_directory": "<data>/workflow-runs/id-1/repo",
+        "review_id": "review-1",
+        "status": "done",
+        "outcome": "passed",
+        "score": 100,
+        "passed": true,
+        "threshold": 80,
+        "total": 3,
+        "blocking": 0,
+        "advisory": 3,
+        "severity": {
+          "bug": 0,
+          "warn": 0,
+          "info": 3
+        },
+        "findings": [],
+        "result": true,
+        "value": true
+      }
+    },
+    {
+      "id": "n8",
+      "status": "success",
+      "error": null,
+      "attempts": 1,
+      "sessions": 0,
+      "logs": [
+        "▶ channel_notify started",
+        "Notify 8 — attempt 1/1",
+        "channel_notify: sent to 1 integration(s)",
+        "context: wrote step9-notify-8.output.json",
+        "context: wrote step9-notify-8.md"
+      ],
+      "output": {
+        "sent": 1,
+        "message": "✅ elit labore minim — COMPAT-1 · <data>/workflow-runs/id-1/repo (nisi `main`)\naute 100/cillum (cupidatat 80) · 3 deserunt — 0 pretium, 3 maecenas\ndonec `review-1` · senectus integer gravida + odio porttitor sit eiusmod."
+      }
+    },
+    {
+      "id": "n9",
+      "status": "skipped",
+      "error": null,
+      "attempts": null,
+      "sessions": 0,
+      "logs": [
+        "skipped (branch not taken)"
+      ],
+      "output": null
+    },
+    {
+      "id": "n10",
+      "status": "success",
+      "error": null,
+      "attempts": 1,
+      "sessions": 1,
+      "logs": [
+        "▶ log started",
+        "Log 10 — attempt 1/1",
+        "log: {\"reply\":\"OK\",\"session_id\":\"id-6\",\"working_directory\":\"<data>/workflow-runs/id-1/repo\"}",
+        "context: wrote step11-log-10.output.json",
+        "context: wrote step11-log-10.md"
+      ],
+      "output": {
+        "reply": "OK",
+        "session_id": "id-6",
+        "working_directory": "<data>/workflow-runs/id-1/repo"
+      }
+    },
+    {
+      "id": "n11",
+      "status": "success",
+      "error": null,
+      "attempts": 1,
+      "sessions": 1,
+      "logs": [
+        "▶ agent_prompt started",
+        "Agent step 11 — attempt 1/3",
+        "⏳ starting claude session",
+        "agent turn complete",
+        "context: wrote step5-agent-step-11.output.json",
+        "context: wrote step5-agent-step-11.md"
+      ],
+      "output": {
+        "reply": "OK",
+        "session_id": "id-7",
+        "working_directory": "<data>/workflow-runs/id-1/repo"
+      }
+    },
+    {
+      "id": "n12",
+      "status": "success",
+      "error": null,
+      "attempts": 1,
+      "sessions": 1,
+      "logs": [
+        "▶ agent_prompt started",
+        "Agent step 12 — attempt 1/3",
+        "⏳ starting claude session",
+        "agent turn complete",
+        "context: wrote step6-agent-step-12.output.json",
+        "context: wrote step6-agent-step-12.md"
+      ],
+      "output": {
+        "reply": "OK",
+        "session_id": "id-5",
+        "working_directory": "<data>/workflow-runs/id-1/repo"
+      }
+    }
+  ],
+  "context_files": {
+    "final-output.md": "# Agent step 6 (agent_prompt)\n\n## Logs\n\n- ▶ agent_prompt started\n- Agent step 6 — attempt 1/3\n- ⏳ starting claude session\n- agent turn complete\n\n## Output\n\nOK\n\n```json\n{\n  \"working_directory\": \"<data>/workflow-runs/id-1/repo\",\n  \"session_id\": \"id-6\"\n}\n```\n",
+    "jira-COMPAT-1.md": "# ⚠ Could not fetch COMPAT-1\n\nno Jira account configured\n\nProceed from the prompt/instructions; treat ticket details as UNAVAILABLE.\n",
+    "prompt.md": "lorem ipsum dolor sit amet",
+    "repos.json": "[\n  {\n    \"repo\": \"<repo>\",\n    \"repo_id\": \"id-2\",\n    \"repo_name\": \"repo\",\n    \"type\": \"worktree\",\n    \"name\": \"<repo>\",\n    \"worktree\": \"<data>/workflow-runs/id-1/repo\",\n    \"base\": \"main\"\n  }\n]",
+    "run-brief.md": "# Workflow run: Compat A\n\nlorem elit labore minim nisi aute cillum cupidatat deserunt pretium maecenas donec senectus integer gravida odio porttitor sit eiusmod magna nostrud ea reprehenderit pariatur sunt id nunc purus pellentesque fames arcu placerat quam tellus adipiscing ut ad laboris duis esse occaecat officia curabitur viverra eleifend tristique egestas ultrices volutpat nullam dolor do dolore quis ex in nulla proident anim lacus lacinia sapien malesuada vivamus fusce mauris justo consectetur incididunt enim ullamco consequat velit sint qui laborum risus scelerisque morbi turpis bibendum eu potenti ipsum sed et veniam\n\n- Run id: `id-1`\n- Trigger: chat\n\n## Mission\n\n- **Prompt:** lorem ipsum dolor sit amet\n- **Jira ticket:** COMPAT-1\n- **Goals:**\n  - consectetur adipiscing\n\n## Repos & branches\n\n| repo | type | work | source | worktree |\n|---|---|---|---|---|\n| <repo> | worktree | <repo> | main | <data>/workflow-runs/id-1/repo |\n\nThe machine-readable version of this table is `repos.json` in this directory — it is kept up to date as the run progresses and is the authoritative list.\n\n## Planned steps\n\n1. Start 1 (manual_trigger)\n2. Prepare 2 (prepare_context)\n3. Agent step 3 (agent_prompt)\n4. Agent step 4 (agent_prompt)\n5. Agent step 11 (agent_prompt)\n6. Agent step 12 (agent_prompt)\n7. Review 5 (transform)\n8. Condition 7 (condition)\n9. Notify 8 (channel_notify)\n10. Notify 9 (channel_notify)\n11. Agent step 6 (agent_prompt)\n12. Log 10 (log)\n\n## How to use this directory\n\n- `prompt.md` — the ask that started this run.\n- This file (`run-brief.md`) is the run's mission brief.\n- `repos.json` — machine-readable registry of every repo/branch/worktree in play.\n- Each finished step leaves `step{N}-{name}.md` (its handoff summary) and `step{N}-{name}.output.json` (its raw output). Loop iterations add `-iter{X}`.\n- Read the prior step files you need before starting your own work — they are complete, unlike any inline excerpt in your prompt.\n- Before you finish, write YOUR step's `.md` file (the exact path is given in your prompt): what you did/found/changed, files touched, decisions, and anything the next step needs.\n",
+    "step1-start-1.md": "# Start 1 (manual_trigger)\n\n## Logs\n\n- ▶ manual_trigger started\n- Start 1 — attempt 1/1\n\n## Output\n\n```json\n{\n  \"trigger\": \"chat\",\n  \"origin_workspace_id\": \"ws-compat\",\n  \"channel\": \"slack\",\n  \"chat\": \"chat-compat\",\n  \"thread\": \"thread-compat\",\n  \"user\": \"user-compat\",\n  \"name\": \"Compat A\",\n  \"msg\": \"lorem ipsum dolor sit amet\",\n  \"prompt\": \"lorem ipsum dolor sit amet\",\n  \"jira_ticket\": \"COMPAT-1\",\n  \"working_directory\": \"<data>/workflow-runs/id-1/repo\",\n  \"base\": \"main\",\n  \"pr\": null,\n  \"pr_branch\": null,\n  \"relevant_info\": [],\n  \"goals\": [\n    \"consectetur adipiscing\"\n  ],\n  \"raw\": \"Action: Workflow\\nName: Compat A\\nMsg: lorem ipsum dolor sit amet\\nWorking Directory: <repo>\\nBranch: main\\nGoals:\\n  - consectetur adipiscing\\nJira ticket: COMPAT-1\\n\",\n  \"repo_id\": \"id-2\",\n  \"repos\": [\n    {\n      \"repo_id\": \"id-2\",\n      \"worktree\": \"<data>/workflow-runs/id-1/repo\",\n      \"base\": \"main\"\n    }\n  ]\n}\n```\n",
+    "step1-start-1.output.json": "{\n  \"trigger\": \"chat\",\n  \"origin_workspace_id\": \"ws-compat\",\n  \"channel\": \"slack\",\n  \"chat\": \"chat-compat\",\n  \"thread\": \"thread-compat\",\n  \"user\": \"user-compat\",\n  \"name\": \"Compat A\",\n  \"msg\": \"lorem ipsum dolor sit amet\",\n  \"prompt\": \"lorem ipsum dolor sit amet\",\n  \"jira_ticket\": \"COMPAT-1\",\n  \"working_directory\": \"<data>/workflow-runs/id-1/repo\",\n  \"base\": \"main\",\n  \"pr\": null,\n  \"pr_branch\": null,\n  \"relevant_info\": [],\n  \"goals\": [\n    \"consectetur adipiscing\"\n  ],\n  \"raw\": \"Action: Workflow\\nName: Compat A\\nMsg: lorem ipsum dolor sit amet\\nWorking Directory: <repo>\\nBranch: main\\nGoals:\\n  - consectetur adipiscing\\nJira ticket: COMPAT-1\\n\",\n  \"repo_id\": \"id-2\",\n  \"repos\": [\n    {\n      \"repo_id\": \"id-2\",\n      \"worktree\": \"<data>/workflow-runs/id-1/repo\",\n      \"base\": \"main\"\n    }\n  ]\n}",
+    "step10-agent-step-6.md": "# Agent step 6 (agent_prompt)\n\n## Logs\n\n- ▶ agent_prompt started\n- Agent step 6 — attempt 1/3\n- ⏳ starting claude session\n- agent turn complete\n\n## Output\n\nOK\n\n```json\n{\n  \"working_directory\": \"<data>/workflow-runs/id-1/repo\",\n  \"session_id\": \"id-6\"\n}\n```\n",
+    "step10-agent-step-6.output.json": "{\n  \"reply\": \"OK\",\n  \"session_id\": \"id-6\",\n  \"working_directory\": \"<data>/workflow-runs/id-1/repo\"\n}",
+    "step11-log-10.md": "# Log 10 (log)\n\n## Logs\n\n- ▶ log started\n- Log 10 — attempt 1/1\n- log: {\"reply\":\"OK\",\"session_id\":\"id-6\",\"working_directory\":\"<data>/workflow-runs/id-1/repo\"}\n\n## Output\n\nOK\n\n```json\n{\n  \"working_directory\": \"<data>/workflow-runs/id-1/repo\",\n  \"session_id\": \"id-6\"\n}\n```\n",
+    "step11-log-10.output.json": "{\n  \"reply\": \"OK\",\n  \"session_id\": \"id-6\",\n  \"working_directory\": \"<data>/workflow-runs/id-1/repo\"\n}",
+    "step2-prepare-2.md": "# Prepare 2 (prepare_context)\n\n## Logs\n\n- ▶ prepare_context started\n- Prepare 2 — attempt 1/1\n- prepare_context: jira {\"found\":true,\"key\":\"COMPAT-1\",\"fetched\":false,\"error\":\"no Jira account configured\"}\n\n## Output\n\n```json\n{\n  \"jira\": {\n    \"found\": true,\n    \"key\": \"COMPAT-1\",\n    \"fetched\": false,\n    \"error\": \"no Jira account configured\"\n  }\n}\n```\n",
+    "step2-prepare-2.output.json": "{\n  \"jira\": {\n    \"found\": true,\n    \"key\": \"COMPAT-1\",\n    \"fetched\": false,\n    \"error\": \"no Jira account configured\"\n  }\n}",
+    "step3-agent-step-3.md": "# Agent step 3 (agent_prompt)\n\n## Logs\n\n- ▶ agent_prompt started\n- Agent step 3 — attempt 1/3\n- ⏳ starting claude session\n- agent turn complete\n\n## Output\n\nOK\n\n```json\n{\n  \"working_directory\": \"<data>/workflow-runs/id-1/repo\",\n  \"session_id\": \"id-3\"\n}\n```\n",
+    "step3-agent-step-3.output.json": "{\n  \"reply\": \"OK\",\n  \"session_id\": \"id-3\",\n  \"working_directory\": \"<data>/workflow-runs/id-1/repo\"\n}",
+    "step4-agent-step-4.md": "# Agent step 4 (agent_prompt)\n\n## Logs\n\n- ▶ agent_prompt started\n- Agent step 4 — attempt 1/3\n- ⏳ starting claude session\n- agent turn complete\n\n## Output\n\nOK\n\n```json\n{\n  \"working_directory\": \"<data>/workflow-runs/id-1/repo\",\n  \"session_id\": \"id-4\"\n}\n```\n",
+    "step4-agent-step-4.output.json": "{\n  \"reply\": \"OK\",\n  \"session_id\": \"id-4\",\n  \"working_directory\": \"<data>/workflow-runs/id-1/repo\"\n}",
+    "step5-agent-step-11.md": "# Agent step 11 (agent_prompt)\n\n## Logs\n\n- ▶ agent_prompt started\n- Agent step 11 — attempt 1/3\n- ⏳ starting claude session\n- agent turn complete\n\n## Output\n\nOK\n\n```json\n{\n  \"working_directory\": \"<data>/workflow-runs/id-1/repo\",\n  \"session_id\": \"id-7\"\n}\n```\n",
+    "step5-agent-step-11.output.json": "{\n  \"reply\": \"OK\",\n  \"session_id\": \"id-7\",\n  \"working_directory\": \"<data>/workflow-runs/id-1/repo\"\n}",
+    "step6-agent-step-12.md": "# Agent step 12 (agent_prompt)\n\n## Logs\n\n- ▶ agent_prompt started\n- Agent step 12 — attempt 1/3\n- ⏳ starting claude session\n- agent turn complete\n\n## Output\n\nOK\n\n```json\n{\n  \"working_directory\": \"<data>/workflow-runs/id-1/repo\",\n  \"session_id\": \"id-5\"\n}\n```\n",
+    "step6-agent-step-12.output.json": "{\n  \"reply\": \"OK\",\n  \"session_id\": \"id-5\",\n  \"working_directory\": \"<data>/workflow-runs/id-1/repo\"\n}",
+    "step7-review-5.md": "# Review 5 (transform)\n\n## Logs\n\n- ▶ transform started\n- Review 5 — attempt 1/1\n\n## Output\n\nOK\n\n```json\n{\n  \"findings\": [],\n  \"session_id\": \"id-5\",\n  \"working_directory\": \"<data>/workflow-runs/id-1/repo\",\n  \"review_id\": \"review-1\",\n  \"status\": \"done\",\n  \"outcome\": \"passed\",\n  \"score\": 100,\n  \"passed\": true,\n  \"threshold\": 80,\n  \"total\": 3,\n  \"blocking\": 0,\n  \"advisory\": 3,\n  \"severity\": {\n    \"bug\": 0,\n    \"warn\": 0,\n    \"info\": 3\n  }\n}\n```\n",
+    "step7-review-5.output.json": "{\n  \"reply\": \"OK\",\n  \"session_id\": \"id-5\",\n  \"working_directory\": \"<data>/workflow-runs/id-1/repo\",\n  \"review_id\": \"review-1\",\n  \"status\": \"done\",\n  \"outcome\": \"passed\",\n  \"score\": 100,\n  \"passed\": true,\n  \"threshold\": 80,\n  \"total\": 3,\n  \"blocking\": 0,\n  \"advisory\": 3,\n  \"severity\": {\n    \"bug\": 0,\n    \"warn\": 0,\n    \"info\": 3\n  },\n  \"findings\": []\n}",
+    "step8-condition-7.md": "# Condition 7 (condition)\n\n## Logs\n\n- ▶ condition started\n- Condition 7 — attempt 1/1\n- condition `passed == true` → true\n\n## Output\n\nOK\n\n```json\n{\n  \"value\": true,\n  \"session_id\": \"id-5\",\n  \"working_directory\": \"<data>/workflow-runs/id-1/repo\",\n  \"review_id\": \"review-1\",\n  \"status\": \"done\",\n  \"outcome\": \"passed\",\n  \"score\": 100,\n  \"passed\": true,\n  \"threshold\": 80,\n  \"total\": 3,\n  \"blocking\": 0,\n  \"advisory\": 3,\n  \"severity\": {\n    \"bug\": 0,\n    \"warn\": 0,\n    \"info\": 3\n  },\n  \"findings\": [],\n  \"result\": true\n}\n```\n",
+    "step8-condition-7.output.json": "{\n  \"reply\": \"OK\",\n  \"session_id\": \"id-5\",\n  \"working_directory\": \"<data>/workflow-runs/id-1/repo\",\n  \"review_id\": \"review-1\",\n  \"status\": \"done\",\n  \"outcome\": \"passed\",\n  \"score\": 100,\n  \"passed\": true,\n  \"threshold\": 80,\n  \"total\": 3,\n  \"blocking\": 0,\n  \"advisory\": 3,\n  \"severity\": {\n    \"bug\": 0,\n    \"warn\": 0,\n    \"info\": 3\n  },\n  \"findings\": [],\n  \"result\": true,\n  \"value\": true\n}",
+    "step9-notify-8.md": "# Notify 8 (channel_notify)\n\n## Logs\n\n- ▶ channel_notify started\n- Notify 8 — attempt 1/1\n- channel_notify: sent to 1 integration(s)\n\n## Output\n\n```json\n{\n  \"sent\": 1,\n  \"message\": \"✅ elit labore minim — COMPAT-1 · <data>/workflow-runs/id-1/repo (nisi `main`)\\naute 100/cillum (cupidatat 80) · 3 deserunt — 0 pretium, 3 maecenas\\ndonec `review-1` · senectus integer gravida + odio porttitor sit eiusmod.\"\n}\n```\n",
+    "step9-notify-8.output.json": "{\n  \"sent\": 1,\n  \"message\": \"✅ elit labore minim — COMPAT-1 · <data>/workflow-runs/id-1/repo (nisi `main`)\\naute 100/cillum (cupidatat 80) · 3 deserunt — 0 pretium, 3 maecenas\\ndonec `review-1` · senectus integer gravida + odio porttitor sit eiusmod.\"\n}"
+  },
+  "prompts": [
+    "[workflow context]\nContext directory: <data>/workflow-context/id-1\nRead, in order:\n- prompt.md — the ask that started this run.\n- run-brief.md — the run's mission, goals, and the repos/branches (source and destination) it operates on.\n- repos.json — machine-readable list of every repo/branch/worktree in play.\n- Prior step summaries: step1-start-1.md, step2-prepare-2.md\nRead the files you need before starting.\n\n[your handoff — required]\nWhen finished, write a complete summary of what you did/found/changed (files touched, decisions, anything the next step needs) to: <data>/workflow-context/id-1/step3-agent-step-3.md\n(the engine treats this file as your done signal — write it once, at the very end, after every sub-agent or background task you started has reported back)\n\n<stored prompt of n3>\n\n[input data]\n{\"jira\":{\"found\":true,\"key\":\"COMPAT-1\",\"fetched\":false,\"error\":\"no Jira account configured\"}}\n\n[workflow step — completion protocol]\nYou are one automated workflow step. You MAY delegate to sub-agents or background tasks.\n- The step is finished only when EVERY sub-agent / background task you launched has reported back and you have folded its result into your work.\n- Write your handoff file LAST — after all results are in. Never write it while anything you launched is still running.\n- Do not end with \"waiting for …\": if you are waiting, keep waiting (the harness will wake you when a task finishes).\n- Stop every background process you started (dev servers, watchers) before you finish.\n",
+    "<bundled skill okf-authoring>\n\n---\n\n[workflow context]\nContext directory: <data>/workflow-context/id-1\nRead, in order:\n- prompt.md — the ask that started this run.\n- run-brief.md — the run's mission, goals, and the repos/branches (source and destination) it operates on.\n- repos.json — machine-readable list of every repo/branch/worktree in play.\n- Prior step summaries: step1-start-1.md, step2-prepare-2.md, step3-agent-step-3.md\nRead the files you need before starting.\n\n[your handoff — required]\nWhen finished, write a complete summary of what you did/found/changed (files touched, decisions, anything the next step needs) to: <data>/workflow-context/id-1/step4-agent-step-4.md\n(the engine treats this file as your done signal — write it once, at the very end, after every sub-agent or background task you started has reported back)\n\n<stored prompt of n4>\n\n[input data]\n{\"reply\":\"OK\",\"session_id\":\"id-3\",\"working_directory\":\"<data>/workflow-runs/id-1/repo\"}\n\n[workflow step — completion protocol]\nYou are one automated workflow step. You MAY delegate to sub-agents or background tasks.\n- The step is finished only when EVERY sub-agent / background task you launched has reported back and you have folded its result into your work.\n- Write your handoff file LAST — after all results are in. Never write it while anything you launched is still running.\n- Do not end with \"waiting for …\": if you are waiting, keep waiting (the harness will wake you when a task finishes).\n- Stop every background process you started (dev servers, watchers) before you finish.\n",
+    "[workflow context]\nContext directory: <data>/workflow-context/id-1\nRead, in order:\n- prompt.md — the ask that started this run.\n- run-brief.md — the run's mission, goals, and the repos/branches (source and destination) it operates on.\n- repos.json — machine-readable list of every repo/branch/worktree in play.\n- Prior step summaries: step1-start-1.md, step2-prepare-2.md, step3-agent-step-3.md, step4-agent-step-4.md\nRead the files you need before starting.\n\n[your handoff — required]\nWhen finished, write a complete summary of what you did/found/changed (files touched, decisions, anything the next step needs) to: <data>/workflow-context/id-1/step5-agent-step-11.md\n(the engine treats this file as your done signal — write it once, at the very end, after every sub-agent or background task you started has reported back)\n\n<stored prompt of n11>\n\n[input data]\n{\"reply\":\"OK\",\"session_id\":\"id-4\",\"working_directory\":\"<data>/workflow-runs/id-1/repo\"}\n\n[workflow step — completion protocol]\nYou are one automated workflow step. You MAY delegate to sub-agents or background tasks.\n- The step is finished only when EVERY sub-agent / background task you launched has reported back and you have folded its result into your work.\n- Write your handoff file LAST — after all results are in. Never write it while anything you launched is still running.\n- Do not end with \"waiting for …\": if you are waiting, keep waiting (the harness will wake you when a task finishes).\n- Stop every background process you started (dev servers, watchers) before you finish.\n",
+    "[workflow context]\nContext directory: <data>/workflow-context/id-1\nRead, in order:\n- prompt.md — the ask that started this run.\n- run-brief.md — the run's mission, goals, and the repos/branches (source and destination) it operates on.\n- repos.json — machine-readable list of every repo/branch/worktree in play.\n- Prior step summaries: step1-start-1.md, step2-prepare-2.md, step3-agent-step-3.md, step4-agent-step-4.md, step5-agent-step-11.md\nRead the files you need before starting.\n\n[your handoff — required]\nWhen finished, write a complete summary of what you did/found/changed (files touched, decisions, anything the next step needs) to: <data>/workflow-context/id-1/step6-agent-step-12.md\n(the engine treats this file as your done signal — write it once, at the very end, after every sub-agent or background task you started has reported back)\n\n<stored prompt of n12>\n\n[input data]\n{\"reply\":\"OK\",\"session_id\":\"id-7\",\"working_directory\":\"<data>/workflow-runs/id-1/repo\"}\n\n[workflow step — completion protocol]\nYou are one automated workflow step. You MAY delegate to sub-agents or background tasks.\n- The step is finished only when EVERY sub-agent / background task you launched has reported back and you have folded its result into your work.\n- Write your handoff file LAST — after all results are in. Never write it while anything you launched is still running.\n- Do not end with \"waiting for …\": if you are waiting, keep waiting (the harness will wake you when a task finishes).\n- Stop every background process you started (dev servers, watchers) before you finish.\n",
+    "[workflow context]\nContext directory: <data>/workflow-context/id-1\nRead, in order:\n- prompt.md — the ask that started this run.\n- run-brief.md — the run's mission, goals, and the repos/branches (source and destination) it operates on.\n- repos.json — machine-readable list of every repo/branch/worktree in play.\n- Prior step summaries: step1-start-1.md, step2-prepare-2.md, step3-agent-step-3.md, step4-agent-step-4.md, step5-agent-step-11.md, step6-agent-step-12.md, step7-review-5.md, step8-condition-7.md, step9-notify-8.md\nRead the files you need before starting.\n\n[your handoff — required]\nWhen finished, write a complete summary of what you did/found/changed (files touched, decisions, anything the next step needs) to: <data>/workflow-context/id-1/step10-agent-step-6.md\n(the engine treats this file as your done signal — write it once, at the very end, after every sub-agent or background task you started has reported back)\n\n<stored prompt of n6>\n\n[input data]\n{\"sent\":1,\"message\":\"✅ elit labore minim — COMPAT-1 · <data>/workflow-runs/id-1/repo (nisi `main`)\\naute 100/cillum (cupidatat 80) · 3 deserunt — 0 pretium, 3 maecenas\\ndonec `review-1` · senectus integer gravida + odio porttitor sit eiusmod.\"}\n\n[workflow step — completion protocol]\nYou are one automated workflow step. You MAY delegate to sub-agents or background tasks.\n- The step is finished only when EVERY sub-agent / background task you launched has reported back and you have folded its result into your work.\n- Write your handoff file LAST — after all results are in. Never write it while anything you launched is still running.\n- Do not end with \"waiting for …\": if you are waiting, keep waiting (the harness will wake you when a task finishes).\n- Stop every background process you started (dev servers, watchers) before you finish.\n"
+  ]
+}

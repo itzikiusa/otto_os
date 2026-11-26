@@ -47,9 +47,11 @@ pub trait WorkflowCtx: Clone + Send + Sync + 'static {
     fn workspaces(&self) -> &WorkspacesRepo;
     /// Issue-tracker accounts (`prepare_context` resolves its Jira account).
     fn issues_store(&self) -> &IssuesRepo;
-    /// Secret store — the Slack/Telegram bot token a dequeued run's
-    /// "Started" post goes out with ([`run_queue::announce_dequeued`]).
-    fn secrets(&self) -> &std::sync::Arc<dyn otto_core::secrets::SecretStore>;
+    /// The adapter a dequeued run's "Started" post goes out through
+    /// ([`run_queue::announce_dequeued`]).
+    fn outbound(
+        &self,
+    ) -> &std::sync::Arc<dyn otto_channels::improve_notify::OutboundAdapterFactory>;
     /// Drive an already-admitted run on a background task — the engine's
     /// `spawn_run` entry point (it still lives in otto-server).
     fn spawn_run(&self, ws: Workspace, wf: Workflow, run_id: Id, input: Value, scope: RunScope);

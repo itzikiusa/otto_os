@@ -25,18 +25,31 @@ export function mockMachineStatus(m: string = mode()): MachineStatus {
     load_per_core: busy ? 1.775 : 0.3875,
     memory_pressure: busy ? 'warn' : 'normal',
     swap_used_bytes: busy ? 6 * GIB : 512 * 1024 * 1024,
+    ram_bytes: 32 * GIB,
     admission_enabled: true,
     max_load_per_core: 1.5,
     max_wait_secs: 300,
     background_live: busy ? 6 : 2,
     background_max_live: 6,
+    pressure_floor: 3,
     agents_live: busy ? 9 : 3,
     busy,
     busy_reason: busy ? 'memory pressure is high' : null,
+    admission: busy ? { kind: 'queue', ahead: 2 } : null,
     queued: busy
       ? [
-          { source: 'review', waiting_secs: 95, reason: 'memory pressure is high' },
-          { source: 'workflow', waiting_secs: 40, reason: 'waiting behind other background agents' },
+          {
+            source: 'review',
+            waiting_secs: 95,
+            reason: 'Waiting for memory — 6 Otto agents are running',
+            wait: { kind: 'memory_pressure', level: 'warn', live: 6, floor: 3 },
+          },
+          {
+            source: 'workflow',
+            waiting_secs: 40,
+            reason: 'Waiting for a free agent slot — 1 ahead in line',
+            wait: { kind: 'queue', ahead: 1 },
+          },
         ]
       : [],
     disk_free_bytes: m === 'low-disk' ? 6 * GIB : 142 * GIB,

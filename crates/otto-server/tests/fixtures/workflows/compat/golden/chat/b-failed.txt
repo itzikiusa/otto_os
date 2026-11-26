@@ -1,0 +1,213 @@
+=== send m1 to chat-compat thread-compat formatted
+🚀 Started workflow **Compat B** (run `id-1`). Working through the steps now — goals: consectetur adipiscing. Reply `status` · `skip` · `abort` · `help` in this thread to control it.
+=== send m2 to chat-compat thread-compat formatted
+🚀 *Compat B* started — 12 step(s) queued.
+*Goals:* consectetur adipiscing
+=== send m3 to chat-compat thread-compat formatted
+▶ *Prepare 2* started
+=== send m4 to chat-compat thread-compat formatted
+✅ *Prepare 2* done (<dur>)
+=== upload step2-prepare-2.md to chat-compat thread-compat
+# Prepare 2 (prepare_context)
+
+## Logs
+
+- ▶ prepare_context started
+- Prepare 2 — attempt 1/1
+- prepare_context: jira {"found":true,"key":"COMPAT-1","fetched":false,"error":"no Jira account configured"}
+
+## Output
+
+```json
+{
+  "jira": {
+    "found": true,
+    "key": "COMPAT-1",
+    "fetched": false,
+    "error": "no Jira account configured"
+  }
+}
+```
+
+=== send m5 to chat-compat thread-compat formatted
+▶ *Agent step 3* started
+=== send m6 to chat-compat thread-compat formatted
+✅ *Agent step 3* done (<dur>)
+OK
+=== upload step3-agent-step-3.md to chat-compat thread-compat
+# Agent step 3 (agent_prompt)
+
+## Logs
+
+- ▶ agent_prompt started
+- Agent step 3 — attempt 1/3
+- ⏳ starting claude session
+- agent turn complete
+
+## Output
+
+OK
+
+```json
+{
+  "working_directory": "<data>/workflow-runs/id-1/repo",
+  "session_id": "id-3"
+}
+```
+
+=== send m7 to chat-compat thread-compat formatted
+▶ *Agent step 4* started
+=== send m8 to chat-compat thread-compat formatted
+✅ *Agent step 4* done (<dur>)
+OK
+=== upload step4-agent-step-4.md to chat-compat thread-compat
+# Agent step 4 (agent_prompt)
+
+## Logs
+
+- ▶ agent_prompt started
+- Agent step 4 — attempt 1/3
+- ⏳ starting claude session
+- agent turn complete
+
+## Output
+
+OK
+
+```json
+{
+  "working_directory": "<data>/workflow-runs/id-1/repo",
+  "session_id": "id-4"
+}
+```
+
+=== send m9 to chat-compat thread-compat formatted
+▶ *Agent step 11* started
+=== send m10 to chat-compat thread-compat formatted
+✅ *Agent step 11* done (<dur>)
+OK
+=== upload step5-agent-step-11.md to chat-compat thread-compat
+# Agent step 11 (agent_prompt)
+
+## Logs
+
+- ▶ agent_prompt started
+- Agent step 11 — attempt 1/3
+- ⏳ starting claude session
+- agent turn complete
+
+## Output
+
+OK
+
+```json
+{
+  "working_directory": "<data>/workflow-runs/id-1/repo",
+  "session_id": "id-7"
+}
+```
+
+=== send m11 to chat-compat thread-compat formatted
+▶ *Agent step 12* started
+=== send m12 to chat-compat thread-compat formatted
+✅ *Agent step 12* done (<dur>)
+OK
+=== upload step6-agent-step-12.md to chat-compat thread-compat
+# Agent step 12 (agent_prompt)
+
+## Logs
+
+- ▶ agent_prompt started
+- Agent step 12 — attempt 1/3
+- ⏳ starting claude session
+- agent turn complete
+
+## Output
+
+OK
+
+```json
+{
+  "working_directory": "<data>/workflow-runs/id-1/repo",
+  "session_id": "id-5"
+}
+```
+
+=== send m13 to chat-compat thread-compat formatted
+▶ *Notify 9* started
+=== send m14 to chat-compat thread-compat plain
+❌ elit labore minim — COMPAT-1 · <data>/workflow-runs/id-1/repo (nisi `main`)
+aute 76/cillum (cupidatat 80) · 29 deserunt — 0 pretium, 29 maecenas
+donec `review-1` · senectus integer + gravida odio porttitor sit.
+=== send m15 to chat-compat thread-compat formatted
+✅ *Notify 9* done (<dur>)
+=== upload step9-notify-9.md to chat-compat thread-compat
+# Notify 9 (channel_notify)
+
+## Logs
+
+- ▶ channel_notify started
+- Notify 9 — attempt 1/1
+- channel_notify: sent to 1 integration(s)
+
+## Output
+
+```json
+{
+  "sent": 1,
+  "message": "❌ elit labore minim — COMPAT-1 · <data>/workflow-runs/id-1/repo (nisi `main`)\naute 76/cillum (cupidatat 80) · 29 deserunt — 0 pretium, 29 maecenas\ndonec `review-1` · senectus integer + gravida odio porttitor sit."
+}
+```
+
+=== send m16 to chat-compat thread-compat formatted
+▶ *Agent step 6* started
+=== send m17 to chat-compat thread-compat formatted
+✅ *Agent step 6* done (<dur>)
+OK
+=== upload step10-agent-step-6.md to chat-compat thread-compat
+# Agent step 6 (agent_prompt)
+
+## Logs
+
+- ▶ agent_prompt started
+- Agent step 6 — attempt 1/3
+- ⏳ starting claude session
+- agent turn complete
+
+## Output
+
+OK
+
+```json
+{
+  "working_directory": "<data>/workflow-runs/id-1/repo",
+  "session_id": "id-6"
+}
+```
+
+=== send m18 to chat-compat thread-compat formatted
+✅ *Compat B* — success
+11/12 steps ok · 0 failed · 1 skipped
+*Review score:* 76/100
+_Full summary attached (summary.md)._
+=== upload final-output.md to chat-compat thread-compat
+# Agent step 6 (agent_prompt)
+
+## Logs
+
+- ▶ agent_prompt started
+- Agent step 6 — attempt 1/3
+- ⏳ starting claude session
+- agent turn complete
+
+## Output
+
+OK
+
+```json
+{
+  "working_directory": "<data>/workflow-runs/id-1/repo",
+  "session_id": "id-6"
+}
+```
+

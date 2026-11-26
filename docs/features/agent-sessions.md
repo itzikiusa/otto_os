@@ -1466,18 +1466,33 @@ unattended background agent is spawned — `meta.source` one of `review`,
 `review_summarizer`, `skilleval`, `skillreview`, `product-analysis`,
 `workflow`, `vault-docs`, `vault-docs-review`, `insights`, `run_with_otto`,
 `goal_loop`, `scheduled_task`, `finding`, `personal_agent` (plus the headless
-turn labels below) — `create` waits
-until all of these hold:
+turn labels below) — `create` (or, for a structured-runtime thread, the
+engine's `admit_background_with` before it creates the thread) waits
+until both of these hold:
 
 - fewer than `agent_background_max_live` of those agents are running or
-  starting (a hard ceiling);
-- the 1-minute load average is at most `cores × agent_admission_max_load_per_core`;
-- macOS memory pressure is below *warn*.
+  starting (a hard ceiling; PTY sessions and runtime threads count alike);
+- the machine is not under pressure — the 1-minute load average at most
+  `cores × agent_admission_max_load_per_core` and macOS memory pressure below
+  *warn* — **or** fewer than `agent_admission_pressure_floor` of those agents
+  are live. Waiting only helps when Otto's own agents are the load: on a Mac
+  that stays loaded for other reasons, a lone workflow run's every step used to
+  wait the full 300 s and then start anyway. Under *critical* memory pressure
+  the floor is 1 (an agent starts only when no other one runs) and that wait
+  does not give way.
 
 Waiters queue first-in first-out; queued agents start at least 5 s apart (the
-load average lags the agents it cannot see yet). Nothing waits forever: a
-load or memory wait gives way after `agent_admission_max_wait_secs`, the
-ceiling after four times that, both with a logged warning. Sessions you start
+load average lags the agents it cannot see yet). Otherwise nothing waits
+forever: a load or *warn* memory wait gives way after
+`agent_admission_max_wait_secs`, the ceiling after four times that, both with
+a logged warning, and agents that give way start at least 60 s apart (several
+waiters reach the maximum together). Each wait is data with words — "Waiting
+for the machine — load 30.0 (limit 12.0), 2 Otto agents are running",
+"Waiting for memory — …", "Waiting for a free agent slot — 5 of 5 running"
+(naming the agents that fill it) — shown on `GET /machine/status`, in the
+notice below and to the engine that waits. A runtime thread's spawn itself
+never waits: it claims the place its engine was given, or (a person's prompt
+into a dormant engine thread, a sub-thread, a wake) takes one at once. Sessions you start
 yourself, terminals, connections and the interactive assists you are watching
 (canvas / design / db assists, PR and commit drafts, channel replies,
 discovery chats) never wait, and neither do swarm roles (they are started
@@ -1508,8 +1523,8 @@ evidence, and the next pass retries it.
 
 **Maintenance waits for a quiet tick.** The hourly retention / SQLite
 maintenance pass (backup-restore.md, "Data retention") checks the same load
-and memory thresholds first (`admission::machine_busy`; the live ceiling is
-ignored, and nothing is deferred while the gate is off). While the machine is
+and memory thresholds first (`admission::machine_busy`; the live ceiling and
+the pressure floor are ignored, and nothing is deferred while the gate is off). While the machine is
 over them it retries every 5 minutes instead of running; after 6 hours of
 continuous deferral it runs anyway, logged.
 
@@ -1523,8 +1538,8 @@ at most cores − 1). A variable already set — in the daemon's environment or
 the session's own env — is never replaced, and your shell profile still wins
 inside the agent's shell tool.
 
-**Lower CPU priority (background agents).** A gated background agent runs at
-`nice 10` (its builds and tests inherit it): no cost on an idle machine, but
+**Lower CPU priority (background agents).** A gated background agent — PTY
+session or runtime thread — runs at `nice 10` (its builds and tests inherit it): no cost on an idle machine, but
 under contention your own session and the app stay responsive. macOS
 background QoS was not used — it also throttles disk I/O and pins the work to
 the efficiency cores, which made a review crawl even on an idle machine.
@@ -1532,9 +1547,10 @@ the efficiency cores, which made a review crawl even on an idle machine.
 | Setting | Default | Meaning |
 |---|---|---|
 | `agent_admission_enabled` | `true` | the admission gate on/off (off releases anything queued) |
-| `agent_background_max_live` | `max(2, cores × 3/4)` (6 on 8 cores) | hard ceiling on running background agents; `0` = no ceiling |
+| `agent_background_max_live` | `max(2, min(cores × 3/4, ram_gb / 3))` (5 on 8 cores / 16 GB) | hard ceiling on running background agents; `0` = no ceiling |
+| `agent_admission_pressure_floor` | `max(1, ceiling / 2)` (2 on 8 cores / 16 GB) | load or memory pressure holds a new background agent only while at least this many run; `0` = always (the old rule) |
 | `agent_admission_max_load_per_core` | `1.5` | wait while the 1-minute load exceeds cores × this |
-| `agent_admission_max_wait_secs` | `300` | longest load / memory wait (the ceiling waits 4×) |
+| `agent_admission_max_wait_secs` | `300` | longest load / *warn* memory wait (the ceiling waits 4×; *critical* memory does not give way) |
 | `agent_background_low_priority` | `true` | run background agents at `nice 10` |
 | `agent_build_parallelism` | auto | `0`/absent = auto, a number = fixed workers, `"off"` = set no variable |
 | `session_auto_archive_background_days` | `7` | archive engine-owned background sessions (reviews, workflow steps, …) idle this many days, checked hourly, 200 per pass; live, attached and kept-alive sessions are skipped; `0` = never. Archiving deletes nothing: the history stays and the session can be unarchived and resumed |

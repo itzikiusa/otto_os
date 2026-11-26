@@ -1,5 +1,5 @@
 //! How busy the machine is right now: 1-minute load average, logical CPU
-//! count, macOS memory pressure and swap in use. The admission gate
+//! count, physical memory, macOS memory pressure and swap in use. The admission gate
 //! ([`crate::admission`]) reads it before it lets an engine-owned background
 //! agent start, so a review fan-out next to a nightly job no longer drives an
 //! 8-core / 16 GB Mac to a load of 60 and 22 GB of swap (2026-11-12).
@@ -57,6 +57,9 @@ pub struct MachineSample {
     pub pressure: MemoryPressure,
     /// Swap in use, bytes (macOS `vm.swapusage`); `None` elsewhere.
     pub swap_used_bytes: Option<u64>,
+    /// Physical memory, bytes (macOS `hw.memsize`); `None` elsewhere. Caps
+    /// the admission gate's default live ceiling.
+    pub ram_bytes: Option<u64>,
     /// When it was taken (drives the cache).
     pub taken: Instant,
 }
@@ -91,6 +94,7 @@ impl Sampler for OsSampler {
             cores: logical_cores(),
             pressure: os::pressure(),
             swap_used_bytes: os::swap_used(),
+            ram_bytes: os::ram_bytes(),
             taken: Instant::now(),
         }
     }
@@ -137,6 +141,10 @@ mod os {
         let zero: libc::xsw_usage = unsafe { std::mem::zeroed() };
         sysctl(c"vm.swapusage", zero).map(|x| x.xsu_used)
     }
+
+    pub fn ram_bytes() -> Option<u64> {
+        sysctl::<u64>(c"hw.memsize", 0).filter(|b| *b > 0)
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -155,6 +163,10 @@ mod os {
     }
 
     pub fn swap_used() -> Option<u64> {
+        None
+    }
+
+    pub fn ram_bytes() -> Option<u64> {
         None
     }
 }
@@ -219,6 +231,61 @@ mod disk {
     }
 }
 
+/// Test hook for the e2e daemon and the local harnesses: `busy`, `calm` or
+/// `<load1>,<normal|warn|critical>` replaces the OS reading — honoured only
+/// inside the isolated harness ([`otto_core::e2e::isolated`]), so the "lone
+/// run on a busy machine" state can be shown in a browser.
+pub const TEST_SAMPLE_ENV: &str = "OTTO_TEST_MACHINE_SAMPLE";
+
+/// A machine that always reads the same (the [`TEST_SAMPLE_ENV`] hook).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FixedSampler {
+    pub load1: f64,
+    pub pressure: MemoryPressure,
+}
+
+impl Sampler for FixedSampler {
+    fn sample(&self) -> MachineSample {
+        MachineSample {
+            load1: Some(self.load1),
+            cores: logical_cores(),
+            pressure: self.pressure,
+            swap_used_bytes: None,
+            ram_bytes: os::ram_bytes(),
+            taken: Instant::now(),
+        }
+    }
+}
+
+/// The [`TEST_SAMPLE_ENV`] value as a sampler; `None` outside the isolated
+/// harness or for a value it does not understand (the OS is read then).
+pub fn test_sampler(isolated: bool, value: Option<&str>) -> Option<FixedSampler> {
+    if !isolated {
+        return None;
+    }
+    let (load1, pressure) = match value?.trim() {
+        // Four times the default per-core ceiling, memory under pressure.
+        "busy" => (logical_cores() as f64 * 6.0, MemoryPressure::Warn),
+        "calm" => (0.0, MemoryPressure::Normal),
+        v => {
+            let (load, pressure) = v.split_once(',')?;
+            let load: f64 = load
+                .trim()
+                .parse()
+                .ok()
+                .filter(|l: &f64| l.is_finite() && *l >= 0.0)?;
+            let pressure = match pressure.trim() {
+                "normal" => MemoryPressure::Normal,
+                "warn" => MemoryPressure::Warn,
+                "critical" => MemoryPressure::Critical,
+                _ => return None,
+            };
+            (load, pressure)
+        }
+    };
+    Some(FixedSampler { load1, pressure })
+}
+
 /// A [`Sampler`] behind a [`SAMPLE_TTL`] cache.
 pub struct MachineMonitor {
     sampler: Arc<dyn Sampler>,
@@ -235,9 +302,14 @@ impl MachineMonitor {
         }
     }
 
-    /// The OS-backed monitor the daemon uses.
+    /// The OS-backed monitor the daemon uses (the [`TEST_SAMPLE_ENV`] hook
+    /// in the isolated harness).
     pub fn os() -> Self {
-        Self::new(Arc::new(OsSampler))
+        let value = std::env::var(TEST_SAMPLE_ENV).ok();
+        match test_sampler(otto_core::e2e::isolated(), value.as_deref()) {
+            Some(fixed) => Self::new(Arc::new(fixed)),
+            None => Self::new(Arc::new(OsSampler)),
+        }
     }
 
     /// The cached sample when it is younger than the TTL at `now`.
@@ -289,6 +361,7 @@ mod tests {
                 cores: 4,
                 pressure: MemoryPressure::Normal,
                 swap_used_bytes: None,
+                ram_bytes: None,
                 taken: Instant::now(),
             }
         }
@@ -327,6 +400,7 @@ mod tests {
             cores: 8,
             pressure: MemoryPressure::Unknown,
             swap_used_bytes: None,
+            ram_bytes: None,
             taken: Instant::now(),
         };
         assert!((s.load_per_core() - 1.5).abs() < 1e-9);
@@ -364,6 +438,30 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_test_sample_hook_reads_only_inside_the_isolated_harness() {
+        assert_eq!(test_sampler(false, Some("busy")), None, "never outside e2e");
+        assert_eq!(test_sampler(true, None), None);
+        let busy = test_sampler(true, Some("busy")).unwrap().sample();
+        assert!(busy.load_per_core() > 2.0 * crate::admission::DEFAULT_MAX_LOAD_PER_CORE);
+        assert!(busy.pressure.is_elevated());
+        let calm = test_sampler(true, Some(" calm ")).unwrap().sample();
+        assert_eq!(
+            (calm.load1, calm.pressure),
+            (Some(0.0), MemoryPressure::Normal)
+        );
+        assert_eq!(
+            test_sampler(true, Some("24.5,critical")),
+            Some(FixedSampler {
+                load1: 24.5,
+                pressure: MemoryPressure::Critical
+            })
+        );
+        for bad in ["loud", "3,hot", "-1,warn", "x,warn", "7"] {
+            assert_eq!(test_sampler(true, Some(bad)), None, "{bad}");
+        }
+    }
+
     /// The real sampler reads without panicking and reports sane values.
     #[test]
     fn the_os_sampler_reads_this_machine() {
@@ -372,5 +470,7 @@ mod tests {
         if let Some(l) = s.load1 {
             assert!(l >= 0.0 && l.is_finite());
         }
+        #[cfg(target_os = "macos")]
+        assert!(s.ram_bytes.is_some_and(|b| b >= 1 << 30), "hw.memsize");
     }
 }

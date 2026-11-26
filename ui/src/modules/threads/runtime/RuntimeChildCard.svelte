@@ -22,7 +22,7 @@
   import { toastError } from '../../../lib/toastError';
   import { formatDuration } from './workLog';
   import { toasts } from '../../../lib/toast.svelte';
-  import { activityOf, answerOf, childOf, childState, elapsedMs, firstLine, rowTone } from './childThreads';
+  import { activityOf, answerOf, childOf, childState, elapsedMs, firstLine, removedLine, removedState, rowTone, type RemovedKid } from './childThreads';
   import { answerHandoff } from './askAgents';
   import { stopThreadWork } from './taskStops.svelte';
   import { mainViewKey, openChildThread } from './childNav';
@@ -35,8 +35,10 @@
     id: string;
     /** What the opener said about it (an agent's `thread_open` input), until its row loads. */
     hint?: { provider?: string | null; title?: string | null; model?: string | null; effort?: string | null };
+    /** Its parent's agent removed it: what it left in the parent's timeline (no live row to follow). */
+    removed?: RemovedKid;
   }
-  let { id, hint = {} }: Props = $props();
+  let { id, hint = {}, removed }: Props = $props();
 
   let gone = $state(false);
   let open = $state(false);
@@ -44,11 +46,12 @@
 
   $effect(() => {
     const child = id;
+    if (removed) return;
     return untrack(() => runtimeViews.open(child));
   });
   $effect(() => {
     const child = id;
-    if (untrack(() => runtimeThreads.get(child))) return;
+    if (removed || untrack(() => runtimeThreads.get(child))) return;
     untrack(() => void runtimeThreads.loadOne(child).catch(() => (gone = true)));
   });
 
@@ -104,6 +107,12 @@
   }
 </script>
 
+{#if removed}
+  {@const rs = removedState(removed)}
+  <div class="rc" data-testid="runtime-child-{id}" data-state={rs.tone}>
+    <RuntimeAgentRow {provider} name={hint.title ?? removed.title} {sub} tone={rowTone(rs.tone)} status={rs.label} elapsed={null} result={removedLine(removed)} expanded={false} testid="runtime-child-row-{id}" />
+  </div>
+{:else}
 <div class="rc" data-testid="runtime-child-{id}" data-state={st.tone}>
   <RuntimeAgentRow
     {provider}
@@ -137,6 +146,7 @@
     </div>
   {/if}
 </div>
+{/if}
 
 <style>
   .rc {

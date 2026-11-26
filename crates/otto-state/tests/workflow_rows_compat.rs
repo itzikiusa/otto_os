@@ -178,7 +178,7 @@ fn old_checkpoint() -> old::WorkflowCheckpoint {
     }
 }
 
-/// proves: X3 — rows written by the 0.6 types (definition, pinned version,
+/// Test plan X3: rows written by the 0.6 types (definition, pinned version,
 /// run nodes in every status, input, resume scope, loop checkpoint) decode
 /// into today's types with every field kept, through the repo readers the run
 /// view, retry and the restart reconciler use.
@@ -237,7 +237,7 @@ async fn old_rows_decode() {
     );
 }
 
-/// proves: X4 (decode half) — what today's repo writes (definition, progress,
+/// Part of X4 (the decode half of a rollback): what today's repo writes (definition, progress,
 /// resume scope, checkpoint) decodes into the 0.6 types, so a rolled-back
 /// binary still reads the rows.
 #[tokio::test]

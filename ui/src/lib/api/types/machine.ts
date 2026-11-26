@@ -5,13 +5,35 @@
 /** macOS memory pressure (`unknown` off macOS or when unreadable). */
 export type MemoryPressure = 'unknown' | 'normal' | 'warn' | 'critical';
 
+/** A gated background agent filling the ceiling (`AgentHolder`). */
+export interface AgentHolder {
+  /** `null` for a place reserved before its session exists. */
+  session_id: string | null;
+  source: string;
+  label: string;
+  run_id: string | null;
+  since: string;
+}
+
+/** Why a background agent is not starting yet (`AdmissionWait`). `live` =
+ *  gated background agents running; `floor` = from how many pressure holds. */
+export type AdmissionWait =
+  | { kind: 'queue'; ahead: number }
+  | { kind: 'spacing' }
+  | { kind: 'live_ceiling'; live: number; max: number; holders: AgentHolder[] }
+  | { kind: 'load'; load1: number; limit: number; live: number; floor: number }
+  | { kind: 'memory_pressure'; level: MemoryPressure; live: number; floor: number };
+
 /** One background agent waiting for the machine (oldest first). */
 export interface QueuedAgent {
   /** Its `meta.source` (`review`, `workflow`, `scheduled_task`, …). */
   source: string;
   waiting_secs: number;
-  /** Why it is waiting ("load average 13.0 is above 12.0"), if known yet. */
+  /** Why it is waiting, in words ("Waiting for memory — 2 Otto agents are
+   *  running"), if known yet. */
   reason: string | null;
+  /** The same as data. Optional: a daemon from before this field omits it. */
+  wait?: AdmissionWait | null;
 }
 
 export interface MachineStatus {
@@ -21,18 +43,27 @@ export interface MachineStatus {
   load_per_core: number;
   memory_pressure: MemoryPressure;
   swap_used_bytes: number | null;
+  /** Physical memory (`null` = unknown). Optional: older daemons omit it. */
+  ram_bytes?: number | null;
   admission_enabled: boolean;
   max_load_per_core: number;
   max_wait_secs: number;
-  /** Gated background agents running or starting. */
+  /** Gated background agents running or starting (PTY and runtime threads). */
   background_live: number;
   /** The ceiling (`null` = none). */
   background_max_live: number | null;
+  /** Load / memory pressure holds a new background agent only while at least
+   *  this many run (0 = always). Optional: older daemons omit it. */
+  pressure_floor?: number;
   /** Every agent process Otto started that is still running. */
   agents_live: number;
-  /** A background agent arriving now would queue. */
+  /** The machine is under load or memory pressure (whatever Otto runs). */
   busy: boolean;
   busy_reason: string | null;
+  /** What a background agent arriving now would wait for (`null` = it starts
+   *  at once). Optional: a daemon from before this field omits it (then
+   *  `busy` meant "would wait"). */
+  admission?: AdmissionWait | null;
   queued: QueuedAgent[];
   /** Free bytes on the volume holding Otto's data dir (`null` = unknown).
    *  Optional: a daemon from before this field omits it. */

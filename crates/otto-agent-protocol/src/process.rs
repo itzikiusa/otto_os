@@ -76,6 +76,21 @@ pub fn signal_group(pid: u32, sig: i32) {
     }
 }
 
+/// Where a runtime's children start: the OS (`spawn_child`, or a holder)
+/// unless [`crate::RuntimeConfig::transport`] names another — the in-memory
+/// fake agents of `crate::scripted` (feature `test-util`), which never use
+/// holders. A child it returns with `pid` 0 is never signalled or scanned by
+/// pid.
+pub trait ChildTransport: Send + Sync + 'static {
+    fn spawn(&self, cmd: &ChildCommand) -> std::io::Result<ChildHandle>;
+}
+
+impl std::fmt::Debug for dyn ChildTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ChildTransport")
+    }
+}
+
 pub fn spawn_child(cmd: &ChildCommand) -> std::io::Result<ChildHandle> {
     let mut command = Command::new(&cmd.program);
     command

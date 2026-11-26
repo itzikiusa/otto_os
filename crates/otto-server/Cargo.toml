@@ -23,8 +23,9 @@ path = "tests/snips.rs"
 default = []
 # Test fixtures (`otto_server::test_support`, `ServerCtx::for_tests`). Enabled for
 # this crate's own integration tests by the self dev-dependency below; never in
-# a release build.
-test-util = []
+# a release build. It also turns on otto-agent-protocol's in-memory fake agents
+# (`otto_agent_protocol::scripted`) for this crate's integration suites.
+test-util = ["otto-channels/test-util", "otto-agent-protocol/test-util"]
 
 [dependencies]
 hex = { workspace = true }

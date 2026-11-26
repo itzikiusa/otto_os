@@ -546,6 +546,33 @@ pub async fn remaining_limits(
     remaining_limits_filtered(pool, user_id, is_root, data_dir, None).await
 }
 
+/// When `provider`'s exhausted plan window resets, from a limits answer: the
+/// login's row (`<provider>:account:<id>` for a named account, then
+/// `claude:<config dir>`, then `<provider>:default`), and in it the latest
+/// `resets_at` among the windows with nothing left — or the window
+/// `limit_reached` names. `None` when Otto does not know.
+pub fn reset_for(
+    resp: &LimitsResp,
+    provider: &str,
+    account_id: Option<&str>,
+    claude_dir: Option<&str>,
+) -> Option<DateTime<Utc>> {
+    let keys = [
+        account_id.map(|a| format!("{provider}:account:{a}")),
+        claude_dir.map(|d| format!("claude:{d}")),
+        Some(format!("{provider}:default")),
+    ];
+    let row = keys
+        .iter()
+        .flatten()
+        .find_map(|k| resp.accounts.iter().find(|a| &a.key == k))?;
+    row.windows
+        .iter()
+        .filter(|w| w.left_percent == Some(0.0) || row.limit_reached.as_deref() == Some(&w.id))
+        .filter_map(|w| w.resets_at)
+        .max()
+}
+
 /// [`remaining_limits`] scoped to the providers currently enabled in Settings.
 pub async fn remaining_limits_filtered(
     pool: &DbPool,
@@ -1548,5 +1575,64 @@ mod tests {
             .daily_models
             .iter()
             .all(|d| d.provider == "claudework" && d.total_tokens == 2));
+    }
+
+    #[test]
+    fn reset_for_reads_the_logins_exhausted_window() {
+        let at = |h: i64| Utc::now() + chrono::TimeDelta::hours(h);
+        let window = |id: &str, left: f64, resets: DateTime<Utc>| WindowLimit {
+            id: id.into(),
+            name: id.into(),
+            window_minutes: None,
+            used_percent: Some(100.0 - left),
+            left_percent: Some(left),
+            resets_at: Some(resets),
+            reset_since_snapshot: false,
+            active: true,
+            severity: None,
+        };
+        let row = |key: &str, windows: Vec<WindowLimit>| AccountLimits {
+            key: key.into(),
+            provider: "codex".into(),
+            account_id: None,
+            label: key.into(),
+            source: "default".into(),
+            status: LimitStatus::Ok,
+            reason: None,
+            plan: None,
+            taken_at: None,
+            windows,
+            credits: None,
+            limit_reached: None,
+            check: None,
+        };
+        let resp = LimitsResp {
+            accounts: vec![
+                row(
+                    "codex:default",
+                    vec![
+                        window("primary", 0.0, at(2)),
+                        window("secondary", 40.0, at(90)),
+                    ],
+                ),
+                row(
+                    "codex:account:a1",
+                    vec![
+                        window("primary", 0.0, at(1)),
+                        window("secondary", 0.0, at(30)),
+                    ],
+                ),
+            ],
+            generated_at: Utc::now(),
+            stale_after_secs: 600,
+        };
+        let r = |a| reset_for(&resp, "codex", a, None).map(|t| (t - Utc::now()).num_hours());
+        assert_eq!(r(None), Some(1), "the default login's exhausted window");
+        assert_eq!(
+            r(Some("a1")),
+            Some(29),
+            "the account's latest exhausted window"
+        );
+        assert_eq!(reset_for(&resp, "claude", None, None), None);
     }
 }

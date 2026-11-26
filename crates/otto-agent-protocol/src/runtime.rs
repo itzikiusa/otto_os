@@ -23,6 +23,7 @@ mod children;
 mod client_calls;
 pub mod council;
 mod delegation;
+mod digest;
 mod drain;
 mod family;
 pub use secret_request::{answer_secret_request, pending_secret_requests};
@@ -39,17 +40,23 @@ mod peers;
 mod provider_lists;
 mod reopen;
 mod request_ids;
+mod retention;
 mod secret_request;
 mod selection;
 mod swarm_resume;
 mod task_stop;
+mod unattended;
 mod usage_hook;
 pub use admission::{HANDSHAKE_TIMEOUT, MAX_QUEUED_BYTES, MAX_QUEUED_PROMPTS};
 pub use archive::settle_archived_entity_json;
 pub use loop_guard::{AGENT_HOPS_MAX, PAUSED_ERROR, PAUSED_NOTICE, PAUSED_QUEUED};
 use request_ids::RequestIds;
+pub use retention::{retain_stamp, RETAIN_UNTIL_KEY};
 pub use selection::check_effort;
 pub use task_stop::{TaskStopAllResp, TaskStopEntry, TaskStopOutcome, TaskStopResp};
+pub use unattended::{
+    Ended, SettledTurn, TurnOpts, AUTO_TURN_GRACE, BACKGROUND_LIMIT, RESUME_REFUSED,
+};
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -126,6 +133,8 @@ pub struct RuntimeConfig {
     /// A spawned CLI that has not answered its handshake after this long
     /// is stopped with a clear error ([`HANDSHAKE_TIMEOUT`]). Zero disables.
     pub handshake_timeout: Duration,
+    /// Where children start; `None` = the OS (holders when configured).
+    pub transport: Option<Arc<dyn crate::process::ChildTransport>>,
 }
 
 impl Default for RuntimeConfig {
@@ -144,6 +153,7 @@ impl Default for RuntimeConfig {
             holders_dir: None,
             holder_launcher: None,
             handshake_timeout: HANDSHAKE_TIMEOUT,
+            transport: None,
         }
     }
 }
@@ -504,6 +514,9 @@ pub(super) struct State {
     /// The idle release stopped its process: once that process is gone,
     /// nothing of the thread stays loaded (T3 Code #39049).
     released: bool,
+    /// Background work ended with no turn running: the agent may start its
+    /// own turn within `unattended::AUTO_TURN_GRACE`.
+    background_ended_idle_at: Option<Instant>,
 }
 
 impl State {
@@ -532,6 +545,10 @@ pub(super) struct Live {
     /// Set during `shutdown_for_restart` so `descendants::watch` does not kill
     /// Claude background processes when `st.proc` is detached.
     pub(super) detaching_for_restart: std::sync::atomic::AtomicBool,
+    /// Sub-threads' wakes announced but not queued yet (`unattended`).
+    pending_wakes: Mutex<Vec<String>>,
+    /// Who is answering a request (`RuntimeRequest::resolved_by`), by id.
+    resolvers: Mutex<HashMap<Id, Id>>,
 }
 
 impl Live {
@@ -556,6 +573,8 @@ pub(super) struct Inner {
     /// The armed "Resume at reset" timer per session; its lock makes a
     /// timer's check-and-clear atomic against a re-arm or cancel.
     resume_timers: tokio::sync::Mutex<HashMap<Id, tokio::task::AbortHandle>>,
+    /// Threads whose turn the last boot's recovery cut off (`unattended`).
+    restart_cut: Mutex<std::collections::HashSet<Id>>,
 }
 
 /// Cheap to clone.
@@ -583,6 +602,7 @@ impl AgentRuntime {
                 usage: std::sync::OnceLock::new(),
                 loop_guard: Default::default(),
                 resume_timers: Default::default(),
+                restart_cut: Default::default(),
             }),
         }
     }
@@ -734,6 +754,13 @@ impl AgentRuntime {
             if !rows.is_empty() {
                 touched += 1;
                 self.inner.repo.upsert_entities(&sid, &rows).await?;
+            }
+            if rows.iter().any(|r| r.kind == K_TURN) {
+                self.inner
+                    .restart_cut
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(sid);
             }
             if let Some((_, turn)) = cut {
                 cut_children.push((rec.session, turn));
@@ -1083,9 +1110,12 @@ impl AgentRuntime {
                     model_from_provider: false,
                     switch_from: None,
                     released: false,
+                    background_ended_idle_at: None,
                 }),
                 persist: tx,
                 detaching_for_restart: std::sync::atomic::AtomicBool::new(false),
+                pending_wakes: Mutex::new(Vec::new()),
+                resolvers: Mutex::default(),
             });
             let entry = self.inner.live.entry(id.clone()).or_insert_with(|| {
                 tokio::spawn(persister(self.inner.repo.clone(), id.clone(), rx));
@@ -1174,7 +1204,8 @@ impl AgentRuntime {
             cwd: session.cwd.clone(),
             env: spec.env,
         };
-        if let Some(holders_dir) = self.inner.config.holders_dir.as_deref() {
+        let transport = self.inner.config.transport.as_ref();
+        if let (None, Some(holders_dir)) = (transport, self.inner.config.holders_dir.as_deref()) {
             if !self.inner.host.network_profile_active(&session)
                 && self.inner.host.session_persistence_enabled().await
             {
@@ -1209,7 +1240,8 @@ impl AgentRuntime {
                 }
             }
         }
-        let child = spawn_child(&cmd)
+        let child = transport
+            .map_or_else(|| spawn_child(&cmd), |t| t.spawn(&cmd))
             .map_err(|e| map_spawn_error(session.provider.as_str(), &spec.program, e))?;
         let cli_pid = child.pid;
         let (epoch, flushed) = {
@@ -1244,7 +1276,7 @@ impl AgentRuntime {
             apply_step_opts(&self.inner, live, &mut st, step, true, true);
             (epoch, frx)
         };
-        if claude_login.is_some() {
+        if claude_login.is_some() && cli_pid != 0 {
             // Claude Code moves some jobs out of its group (see the module).
             descendants::watch(
                 Arc::clone(&self.inner),
@@ -1483,6 +1515,7 @@ impl AgentRuntime {
             None,
         );
         st.session.last_active_at = now;
+        st.background_ended_idle_at = None;
         apply_step_opts(&self.inner, live, &mut st, step, true, true);
         let stop = std::mem::take(&mut st.stop_requested);
         drop(st);
@@ -1996,6 +2029,10 @@ impl AgentRuntime {
                 return Ok(());
             }
         }
+        // An engine thread never forgets silently: its step fails instead.
+        if otto_core::agent_runtime::is_engine_thread(live.lock().session.meta.as_ref()) {
+            return Err(Error::Invalid(unattended::RESUME_REFUSED.into()));
+        }
         // Keep the old key until the fresh thread is up.
         live.lock().session.native_thread_id = None;
         let fresh = self.ensure_process(live).await;
@@ -2162,9 +2199,22 @@ fn check_can_prompt(st: &State) -> Result<()> {
 /// and the auto-close sweep treats it alike. A daemon caller's own `source`
 /// (a delegated personal agent) is left as it is.
 fn inherit_embedded_origin(opener: &RuntimeSession, meta: &mut Option<serde_json::Value>) {
-    if !otto_core::agent_runtime::is_embedded_thread(opener.meta.as_ref()) {
+    // An engine thread's sub-thread belongs to its run: hidden from the
+    // person's lists, deleted with the step, counted with it.
+    let keys: &[&str] = if otto_core::agent_runtime::is_engine_thread(opener.meta.as_ref()) {
+        &[
+            "source",
+            "run_id",
+            "node_id",
+            "wf_name",
+            "review_id",
+            "work",
+        ]
+    } else if otto_core::agent_runtime::is_embedded_thread(opener.meta.as_ref()) {
+        &["source", "origin"]
+    } else {
         return;
-    }
+    };
     let Some(from) = opener.meta.as_ref().and_then(|m| m.as_object()) else {
         return;
     };
@@ -2175,7 +2225,7 @@ fn inherit_embedded_origin(opener: &RuntimeSession, meta: &mut Option<serde_json
     if o.contains_key("source") {
         return;
     }
-    for key in ["source", "origin"] {
+    for &key in keys {
         if let Some(v) = from.get(key) {
             o.insert(key.into(), v.clone());
         }
@@ -2556,6 +2606,7 @@ fn open_agent_turn(inner: &Inner, live: &Live, st: &mut State, turn_id: String) 
     };
     set_session_status(inner, live, st, status, None);
     st.session.last_active_at = now;
+    st.background_ended_idle_at = None;
 }
 
 /// The process (and so its background work) is gone: settle every
@@ -2949,6 +3000,9 @@ fn resolve_request(
     req.resolved_at = Some(now);
     req.decision = decision;
     req.cancel_reason = cancel_reason;
+    req.resolved_by = (status == RuntimeRequestStatus::Resolved)
+        .then(|| unattended::take_resolver(live, request_id))
+        .flatten();
     emit(
         inner,
         live,
@@ -3016,6 +3070,7 @@ fn finish_turn(
     let Some(active) = st.turn.take() else {
         return;
     };
+    st.session.last_active_at = Utc::now();
     let reason = if active.stalled {
         Some("stalled".to_string())
     } else {
@@ -3255,6 +3310,7 @@ pub(super) fn apply_step_opts(
                     question_title: None,
                     answers: None,
                     for_person: false,
+                    resolved_by: None,
                 };
                 let mut item = item(
                     format!("{}:approval:{id}", turn_id.as_deref().unwrap_or_default()),
@@ -3305,6 +3361,7 @@ pub(super) fn apply_step_opts(
                     question_title: title,
                     answers: None,
                     for_person,
+                    resolved_by: None,
                 };
                 emit(
                     inner,
@@ -3416,6 +3473,11 @@ pub(super) fn apply_step_opts(
             DriverEvent::BackgroundTasks(tasks) => {
                 let tasks = task_stop::carry_marks(&st.session.background_tasks, tasks);
                 if st.session.background_tasks != tasks {
+                    // The idle release waits as long after background work as after a turn.
+                    st.session.last_active_at = Utc::now();
+                    st.background_ended_idle_at = (tasks.is_empty() && st.turn.is_none())
+                        .then(Instant::now)
+                        .or(st.background_ended_idle_at.filter(|_| tasks.is_empty()));
                     st.session.background_tasks = tasks;
                     let (status, last_error) = current_status(st);
                     set_session_status(inner, live, st, status, last_error);

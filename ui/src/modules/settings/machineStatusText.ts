@@ -87,6 +87,21 @@ export function queuedLine(q: QueuedAgent): string {
   return parts.join(' · ');
 }
 
+/** A background agent arriving now would wait: something is queued, or the
+ *  daemon's `admission` names a wait (a daemon from before that field: `busy`). */
+export function wouldWait(s: MachineStatus): boolean {
+  return s.queued.length > 0 || (s.admission === undefined ? s.busy : s.admission != null);
+}
+
+/** The details dialog's busy note (`null` while the machine is not busy). */
+export function busyNote(s: MachineStatus): string | null {
+  if (!s.busy || !s.busy_reason) return null;
+  if (wouldWait(s) || s.pressure_floor == null) {
+    return `Busy: ${s.busy_reason}. New background agents wait their turn; your own sessions never do.`;
+  }
+  return `Busy: ${s.busy_reason}. Background agents still start while fewer than ${s.pressure_floor} run — waiting would not help; your own sessions never wait.`;
+}
+
 export type ChipTone = 'calm' | 'busy' | 'low-disk';
 
 export interface ChipState {
@@ -98,12 +113,13 @@ export interface ChipState {
 }
 
 /** The status-bar chip: an icon alone while calm; "Machine busy · N queued"
- *  (warning tone) while background agents would wait; "Low disk · 12.0 GB
+ *  (warning tone) while background agents would wait ([`wouldWait`] — a
+ *  loaded Mac where they still start is not "busy" here); "Low disk · 12.0 GB
  *  free" below the floor. `null` until the first read (nothing shown). */
 export function chipState(s: MachineStatus | null): ChipState | null {
   if (!s) return null;
   const disk = s.low_disk ? ` Only ${formatGiB(s.disk_free_bytes)} free on disk.` : '';
-  if (s.busy || s.queued.length > 0) {
+  if (wouldWait(s)) {
     const n = s.queued.length;
     const why = s.busy_reason ? ` (${s.busy_reason})` : '';
     return {
