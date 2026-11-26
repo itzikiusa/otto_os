@@ -265,8 +265,8 @@ is released, and at the reset the runner sends "Continue the step where you
 stopped." on the same thread. **No known reset**, or a limit that comes back
 right after its reset: the step fails with class `usage_limit` and **Retry
 step** is the way on. A wait that would outlast the step's time limit fails
-it as `timeout` instead. A plan limit is never retried by backoff. A per-minute rate limit (`rate_limit`) is
-an ordinary retry class.
+it as `timeout` instead. A plan limit is never retried by backoff. A
+per-minute rate limit (`rate_limit`) is an ordinary retry class.
 
 **Error classes.** A failed step carries `error_class`: from the runner
 `usage_limit` · `rate_limit` · `auth` (**Signed out**) · `provider` ·
