@@ -516,6 +516,24 @@ pub fn ensure_valid(graph: &WorkflowGraph) -> otto_core::Result<()> {
     refuse(graph, |c| c != IssueClass::Warning)
 }
 
+/// The engine's settings (engine.md §10.1): a value outside its range is
+/// refused by `PUT /settings` instead of being read as the default.
+pub fn engine_setting(key: &str, v: &serde_json::Value) -> Result<(), String> {
+    let int_in = |lo: u64, hi: u64| v.as_u64().is_some_and(|n| (lo..=hi).contains(&n));
+    let ok = match key {
+        "wf_step_runner" => matches!(v.as_str(), Some("threads" | "pty")),
+        "wf_max_parallel_steps" => int_in(1, 8),
+        "workflow_thread_retention_success_hours" | "workflow_thread_retention_failed_hours" => {
+            int_in(0, 24 * 365)
+        }
+        _ => true,
+    };
+    match ok || v.is_null() {
+        true => Ok(()),
+        false => Err(format!("{key}: invalid value {v}")),
+    }
+}
+
 /// The save gate (create, update, import): refuse only Save problems, so a
 /// blank new workflow or a half-configured step saves (DR-028).
 pub fn ensure_savable(graph: &WorkflowGraph) -> otto_core::Result<()> {

@@ -402,6 +402,8 @@ fn detect(
                     .into_iter()
                     .filter(|f| g.nodes.iter().any(|w| w.id != n.id && io(w).writes.iter().any(|x| glob_eq(x, f))))
                     .filter(|f| !f.contains('*'))
+                    // The run's registries are engine data, not summary text.
+                    .filter(|f| !matches!(f.as_str(), "repos.json" | "prs.json"))
                     .collect();
                 let mut params = json!({"review_from": review, "summary_files": files});
                 if p.contains("no info") {
@@ -611,7 +613,7 @@ fn gates_command(n: &WorkflowNode) -> Result<Value, String> {
         return Err("output file name in the prompt is not a plain file name".into());
     }
     let command = format!(
-        "if [ -z \"$(git -C \"$OTTO_WORKTREE\" diff --name-only \"$OTTO_BASE\" HEAD -- '*.go')\" ]; then echo \"$OTTO_REPO_NAME: no Go changes — gates NOT RUN\"; exit 0; fi\n\
+        "if [ -z \"$(git -C \"$OTTO_WORKTREE\" diff --name-only \"$OTTO_BASE\" HEAD -- '*.go')\" ]; then echo \"$OTTO_REPO_NAME: no Go changes — gates NOT RUN\" >> \"$OTTO_CONTEXT_DIR/$OTTO_OUT\"; exit 0; fi\n\
          {script} \"$OTTO_WORKTREE\" \"$OTTO_BASE\" --main \"$OTTO_REPO\" --out \"$OTTO_CONTEXT_DIR/$OTTO_REPO_NAME-$OTTO_OUT\"\n\
          cat \"$OTTO_CONTEXT_DIR/$OTTO_REPO_NAME-$OTTO_OUT\" >> \"$OTTO_CONTEXT_DIR/$OTTO_OUT\""
     );

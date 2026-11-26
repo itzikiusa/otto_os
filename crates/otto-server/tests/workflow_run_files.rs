@@ -268,6 +268,35 @@ async fn escaping_paths_are_400() {
     }
 }
 
+/// DR-114: `?download=1` hands over the exact bytes as an attachment, under
+/// the same confinement and credential deny as a read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn download_returns_the_bytes_as_an_attachment() {
+    let d = boot().await;
+    let get = |token: &str, path: &str| {
+        d.http
+            .get(format!(
+                "{}/api/v1/workflow-runs/{}/context/read",
+                d.base, d.run
+            ))
+            .query(&[("path", path), ("download", "1")])
+            .bearer_auth(token.to_string())
+            .send()
+    };
+    let resp = get(&d.viewer, "blob.bin").await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let h = resp.headers();
+    assert_eq!(
+        h["content-disposition"],
+        "attachment; filename=\"blob.bin\""
+    );
+    assert_eq!(h["x-content-type-options"], "nosniff");
+    assert_eq!(h["content-type"], "application/octet-stream");
+    assert_eq!(&resp.bytes().await.unwrap()[..], b"PK\x03\x04\0\0binary");
+    assert_eq!(get(&d.viewer, "id_rsa").await.unwrap().status(), 403);
+    assert_eq!(get(&d.viewer, "../secret.txt").await.unwrap().status(), 400);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_credential_file_is_root_only() {
     let d = boot().await;

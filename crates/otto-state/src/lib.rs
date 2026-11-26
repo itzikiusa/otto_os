@@ -68,6 +68,7 @@ pub mod skill_reviews;
 pub mod slack_as_me_defaults;
 pub mod users;
 pub mod vault_docs_runs;
+pub mod workflow_last_runs;
 pub mod workflow_run_search;
 pub mod workflow_triggers;
 pub mod workflows;

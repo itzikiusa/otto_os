@@ -304,3 +304,27 @@ fn the_clones_have_no_issue() {
         assert!(validate(&g).is_empty(), "{:?}", validate(&g));
     }
 }
+
+#[test]
+fn engine_settings_out_of_range_are_refused() {
+    for (k, v) in [
+        ("wf_step_runner", json!("threads")),
+        ("wf_step_runner", json!("pty")),
+        ("wf_max_parallel_steps", json!(1)),
+        ("wf_max_parallel_steps", json!(8)),
+        ("workflow_thread_retention_success_hours", json!(24)),
+        ("wf_max_parallel_steps", Value::Null),
+        ("theme", json!("anything")),
+    ] {
+        assert!(engine_setting(k, &v).is_ok(), "{k}={v}");
+    }
+    for (k, v) in [
+        ("wf_step_runner", json!("tmux")),
+        ("wf_max_parallel_steps", json!(0)),
+        ("wf_max_parallel_steps", json!(9)),
+        ("wf_max_parallel_steps", json!("4")),
+        ("workflow_thread_retention_failed_hours", json!(-1)),
+    ] {
+        assert!(engine_setting(k, &v).is_err(), "{k}={v}");
+    }
+}
