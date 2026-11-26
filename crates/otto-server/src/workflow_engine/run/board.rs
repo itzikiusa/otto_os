@@ -75,12 +75,21 @@ impl RunBoard {
         st: &NodeRunState,
     ) {
         let _w = self.write.lock().await;
-        let states = {
+        let mut states = {
             let mut all = self.lock();
             all[idx] = st.clone();
             all.clone()
         };
-        let gate = super::super::nodes::human_approval::waiting_gate(cx.run_id);
+        let waiting = super::super::nodes::human_approval::waiting_gate(cx.run_id);
+        let gate = waiting.as_ref().map(|(id, _)| id.clone());
+        if let Some((id, Some(out))) = &waiting {
+            if let Some(s) = states
+                .iter_mut()
+                .find(|s| &s.node_id == id && s.output.is_none())
+            {
+                s.output = Some(out.clone());
+            }
+        }
         let mut overview = self.base.as_ref().map(|base| {
             let run = WorkflowRun {
                 nodes: states.clone(),

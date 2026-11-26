@@ -1500,3 +1500,39 @@ async fn a_reentered_run_that_no_longer_validates_keeps_its_steps() {
         run.nodes
     );
 }
+
+/// A sibling's publish while the gate waits keeps the publication preview the
+/// gate exposes (the approval is checked against it).
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn a_siblings_publish_keeps_the_gates_preview() {
+    let body = "Reviewed body";
+    let preview = json!({
+        "story_id": "s1", "kind": "jira", "body_md": body,
+        "account_label": "Jira", "account_url": "https://jira.invalid",
+        "request": {"account_id": "acc", "project_key": "PRJ", "issue_type": "Story",
+            "reviewed_account_url": "https://jira.invalid",
+            "reviewed_content": {"version_id": null, "body_sha256": otto_core::text::content_sha256(body),
+                "title": "T", "source_kind": "draft", "url": ""}},
+    });
+    let graph = WorkflowGraph {
+        nodes: vec![
+            node(
+                "start",
+                "transform",
+                json!({"json": {"publication_preview": preview}}),
+            ),
+            node("gate", "human_approval", json!({})),
+            node("d", "delay", json!({"ms": 300})),
+        ],
+        edges: vec![edge("start", "gate"), edge("start", "d")],
+    };
+    let fx = setup("approval-preview", graph).await;
+    let _driver = fx.drive();
+    let run = until(&fx, "d", |n| n.status == NodeStatus::Success).await;
+    assert!(run.waiting_approval);
+    let out = state(&run, "gate").output.clone();
+    assert_eq!(
+        out.and_then(|o| o.get("publication_preview").cloned()),
+        Some(preview)
+    );
+}
