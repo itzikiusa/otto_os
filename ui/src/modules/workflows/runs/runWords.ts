@@ -173,7 +173,8 @@ export function runContext(r: Pick<InboxRun, 'overview' | 'workflowName' | 'repo
 
 /** "3m ago", "just now". */
 export function ago(ms: number): string {
-  return ms < 60_000 ? 'just now' : `${elapsed(ms)} ago`;
+  if (ms < 60_000) return 'just now';
+  return ms < 86_400_000 ? `${elapsed(ms)} ago` : `${Math.floor(ms / 86_400_000)}d ago`;
 }
 
 /** The engine's headline, or the UI's fallback for a row without an overview. */
@@ -192,7 +193,8 @@ export function headline(r: Pick<InboxRun, 'overview' | 'state' | 'currentStep' 
  *  "usually ~{typical}" while running, who started it and where, and how long
  *  ago a finished run ended. */
 export function runLine3(r: InboxRun, now: number): string {
-  const parts = [headline(r).replace(/^(Needs you|Queued) — /, '')];
+  const head = headline(r).replace(/^(Needs you|Queued) — /, '');
+  const parts = [head.charAt(0).toUpperCase() + head.slice(1)];
   const ov = r.overview;
   const live = r.state === 'running' || r.state === 'waiting';
   if (live && ov?.typical_ms) parts.push(`usually ~${elapsed(ov.typical_ms)}`);

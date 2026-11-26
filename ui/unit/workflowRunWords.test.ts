@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  attentionWord, childWord, deliverableWord, deliverablesInOrder, errorParts, inboxFolds, ordinal, runLine3, runTitle, runWord,
+  ago, attentionWord, childWord, deliverableWord, deliverablesInOrder, errorParts, inboxFolds, ordinal, runLine3, runTitle, runWord,
   stepDuration, stepWord, subLine, type InboxRun,
 } from '../src/modules/workflows/runs/runWords.ts';
 import type { RunOverview, RunState } from '../src/lib/api/types';
@@ -129,6 +129,10 @@ test('row titles and line 3 say what the run is about, in names', () => {
   assert.equal(runLine3(row('a', 'queued', { overview: ov('queued', { headline: 'Queued — 2nd in line' }) }), NOW), '2nd in line');
   assert.equal(runLine3(row('a', 'succeeded', { finishedAt: at(10), overview: ov('succeeded', { headline: 'Passed — 86/100' }) }), ms(130)), 'Passed — 86/100 · 2h ago');
   assert.equal(runLine3(row('a', 'failed', { error: 'boom\nstack' }), NOW), 'Failed: boom');
+  const waits = ov('needs_you', { headline: 'Needs you — approve posting 6 comments', attention: [approval] });
+  assert.equal(runLine3(row('a', 'needs_you', { overview: waits }), NOW), 'Approve posting 6 comments · 3m ago', 'the word says "needs you"; the rest starts a sentence');
+  assert.equal(ago(25 * 3_600_000), '1d ago');
+  assert.equal(ago(30_000), 'just now');
 });
 
 test('the error card leads with the step’s own first sentence', () => {
