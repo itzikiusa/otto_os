@@ -88,7 +88,17 @@ impl AgentRuntime {
     /// confused agent must not fan out without bound: `group` lists the OPEN
     /// threads of this linked group, the root included.
     pub(super) async fn ensure_group_room(&self, c: &RuntimeSession) -> Result<()> {
-        if self.group(c).await?.len() > MAX_LINKED_OPEN {
+        let open = self.group(c).await?.len();
+        if otto_core::agent_runtime::is_engine_thread(c.meta.as_ref())
+            && open > otto_core::agent_runtime::ENGINE_SUB_THREADS_MAX
+        {
+            return Err(Error::Conflict(format!(
+                "a workflow step may have {} open sub-threads at once — close one \
+                 (otto_thread_close) or do this part yourself",
+                otto_core::agent_runtime::ENGINE_SUB_THREADS_MAX
+            )));
+        }
+        if open > MAX_LINKED_OPEN {
             return Err(Error::Conflict(format!(
                 "this thread group already has {MAX_LINKED_OPEN} open linked threads — close \
                  one (otto_thread_close) before opening another"

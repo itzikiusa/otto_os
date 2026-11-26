@@ -2191,9 +2191,22 @@ fn check_can_prompt(st: &State) -> Result<()> {
 /// and the auto-close sweep treats it alike. A daemon caller's own `source`
 /// (a delegated personal agent) is left as it is.
 fn inherit_embedded_origin(opener: &RuntimeSession, meta: &mut Option<serde_json::Value>) {
-    if !otto_core::agent_runtime::is_embedded_thread(opener.meta.as_ref()) {
+    // An engine thread's sub-thread belongs to its run: hidden from the
+    // person's lists, deleted with the step, counted with it.
+    let keys: &[&str] = if otto_core::agent_runtime::is_engine_thread(opener.meta.as_ref()) {
+        &[
+            "source",
+            "run_id",
+            "node_id",
+            "wf_name",
+            "review_id",
+            "work",
+        ]
+    } else if otto_core::agent_runtime::is_embedded_thread(opener.meta.as_ref()) {
+        &["source", "origin"]
+    } else {
         return;
-    }
+    };
     let Some(from) = opener.meta.as_ref().and_then(|m| m.as_object()) else {
         return;
     };
@@ -2204,7 +2217,7 @@ fn inherit_embedded_origin(opener: &RuntimeSession, meta: &mut Option<serde_json
     if o.contains_key("source") {
         return;
     }
-    for key in ["source", "origin"] {
+    for &key in keys {
         if let Some(v) = from.get(key) {
             o.insert(key.into(), v.clone());
         }

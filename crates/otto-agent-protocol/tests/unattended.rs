@@ -839,3 +839,49 @@ async fn resume_after_a_restart_finishes_the_step_on_the_same_thread() {
     );
     rt.shutdown().await;
 }
+
+/// A step agent's sub-threads belong to its run: they inherit the run's
+/// keys (so no person's list shows them), at most 4 are open at once, and
+/// a step cannot ask for a secret nobody is there to type.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_steps_sub_threads_inherit_its_run_and_are_capped() {
+    let rig = Rig::new(false).await;
+    let step = rig.thread(RuntimeProvider::Claude).await;
+    let open = || OpenPeerReq {
+        provider: RuntimeProvider::Codex,
+        prompt: None,
+        title: None,
+        model: None,
+        effort: None,
+        cwd: None,
+        meta: None,
+    };
+    let mut subs = Vec::new();
+    for _ in 0..4 {
+        subs.push(rig.rt.open_peer(&step, open()).await.unwrap());
+    }
+    let meta = subs[0].meta.clone().unwrap();
+    assert_eq!(
+        (meta["source"].as_str(), meta["run_id"].as_str()),
+        (Some("workflow"), Some("r1"))
+    );
+    let fifth = rig.rt.open_peer(&step, open()).await.unwrap_err();
+    assert!(fifth.to_string().contains("4 open sub-threads"), "{fifth}");
+    let listed = rig.rt.list(&"w1".into(), None).await.unwrap();
+    assert!(
+        listed.is_empty(),
+        "{:?}",
+        listed.iter().map(|s| &s.id).collect::<Vec<_>>()
+    );
+    let (events, _) = tokio::sync::broadcast::channel(4);
+    let refused = rig
+        .rt
+        .request_secret(&events, &json!({"prompt": "the deploy token"}), Some(&step))
+        .await
+        .unwrap_err();
+    assert!(
+        refused.to_string().contains("cannot ask for a secret"),
+        "{refused}"
+    );
+    rig.rt.shutdown().await;
+}

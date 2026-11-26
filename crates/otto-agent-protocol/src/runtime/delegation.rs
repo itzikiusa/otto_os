@@ -71,6 +71,11 @@ fn with_rules<'a>(
         || !first
         || session.child_of().is_some()
         || session.council().is_some()
+        // A reviewer's prompt stays byte-identical, and it does not delegate.
+        || matches!(
+            session.meta.as_ref().and_then(|m| m.get("source")).and_then(|v| v.as_str()),
+            Some("review" | "review_summarizer")
+        )
         || req.text.trim_start().starts_with('/');
     if plain {
         return Cow::Borrowed(req);
@@ -142,6 +147,19 @@ mod tests {
         assert_eq!(with_rules(false, &s, &req, true).text, req.text);
         let slash = RuntimePromptReq::of("/review");
         assert_eq!(with_rules(true, &s, &slash, true).text, "/review");
+    }
+
+    #[test]
+    fn review_threads_get_no_rules_and_workflow_steps_keep_them() {
+        let req = RuntimePromptReq::of("review this diff");
+        for source in ["review", "review_summarizer"] {
+            let s = session(Some(serde_json::json!({ "source": source })));
+            assert_eq!(with_rules(true, &s, &req, true).text, req.text, "{source}");
+        }
+        let step = session(Some(serde_json::json!({"source": "workflow"})));
+        assert!(with_rules(true, &step, &req, true)
+            .text
+            .starts_with(RULES_OPEN));
     }
 
     #[test]

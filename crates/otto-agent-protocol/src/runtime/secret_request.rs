@@ -17,6 +17,10 @@ use tokio::sync::{broadcast, oneshot};
 
 use super::AgentRuntime;
 
+/// Nobody watches a workflow step or a review: its agent cannot wait 170 s
+/// for a secret only its owner could type.
+pub const ENGINE_SECRET_REFUSED: &str = "an unattended workflow step cannot ask for a secret — \
+     store it as a connection or a workflow secret";
 /// How long a request waits for the person (inside the governed run budget).
 const WAIT: Duration = Duration::from_secs(170);
 const PROMPT_MAX: usize = 300;
@@ -82,6 +86,9 @@ impl AgentRuntime {
             .get(session_id)
             .await
             .map_err(|_| Error::Invalid("otto.request_secret works in Otto Threads only".into()))?;
+        if otto_core::agent_runtime::is_engine_thread(thread.meta.as_ref()) {
+            return Err(Error::Invalid(ENGINE_SECRET_REFUSED.into()));
+        }
         let prompt = clip(
             args.get("prompt").and_then(Value::as_str).unwrap_or(""),
             PROMPT_MAX,
