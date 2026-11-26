@@ -30,6 +30,7 @@ pub mod validation;
 // The pure engine core (engine.md §13.1): run order and node decisions, the
 // restart policy, the scheduler's decision core and the run overview.
 pub mod graph;
+pub mod overview;
 pub mod resume;
 pub mod schedule;
 
