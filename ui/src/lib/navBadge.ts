@@ -33,9 +33,9 @@ export function navBadge(id: string): NavBadge | null {
     if (ws.threadsWorkingCount > 0) return badge(ws.threadsWorkingCount, 'working', 'working');
   } else if (id === 'workflows') {
     // Active runs: the ones waiting on you outrank the running ones; a paused
-    // run is neither (an older daemon sends no overview: running).
+    // run is neither (an older daemon sends no overview: its approval flag).
     const runs = ws.activeWorkflowRuns;
-    const needs = runs.filter((r) => r.overview && RUN_NEEDS.has(r.overview.state)).length;
+    const needs = runs.filter((r) => (r.overview ? RUN_NEEDS.has(r.overview.state) : !!r.waiting_approval)).length;
     if (needs > 0) return badge(needs, 'needs', 'waiting on you');
     const running = runs.filter((r) => r.overview?.state !== 'paused').length;
     if (running > 0) return badge(running, 'working', 'running');
