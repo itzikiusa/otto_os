@@ -796,7 +796,7 @@ async fn a_research_goal_works_in_its_own_folder() {
 /// folder, never the workspace root.
 #[tokio::test]
 async fn a_research_goal_whose_kept_folder_is_gone_works_in_a_fresh_one() {
-    let f = fake();
+    let (f, _fake) = fake();
     let steps = json!([{"kind": "agent_prompt", "name": "Work", "params": {"prompt": "find out", "provider": "claude"}}]);
     let fx = setup(
         "goal-research-gone",
