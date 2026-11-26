@@ -221,6 +221,7 @@ pub(super) async fn run(
             start_ordinal,
             provider: provider.to_string(),
             continued_from: continued_from.clone(),
+            label: otto_workflows::step_util::iteration_label(&node.id, &label),
         }),
         StepEvent::Working => note(StepNote::Phase(StepPhase::Working, None)),
         StepEvent::NeedsYou(a) => note(StepNote::NeedsYou(a)),
@@ -358,7 +359,8 @@ pub(super) async fn close_settled(
     for c in st
         .children
         .iter()
-        .filter(|c| c.status == "success" && c.label.ends_with("earlier turn"))
+        .filter(|c| c.status == "success")
+        .filter(|c| c.label.ends_with("earlier turn") || c.label.contains(" · iteration "))
     {
         if let Some(id) = &c.thread_id {
             r.close(id, until).await;

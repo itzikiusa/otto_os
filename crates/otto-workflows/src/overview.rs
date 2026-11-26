@@ -179,7 +179,7 @@ pub fn run_overview(
         subject: prev.and_then(|o| o.subject.clone()),
         elapsed_ms: millis(run.started_at, end),
         typical_ms,
-        goal: goal_progress(run, graph).or_else(|| prev.and_then(|o| o.goal.clone())),
+        goal: goal_progress(run, graph, prev.and_then(|o| o.goal.as_ref())),
         hold,
     };
     overview.headline = clip(&headline(run, graph, &overview), MAX_HEADLINE);
@@ -192,6 +192,7 @@ pub fn run_overview(
 fn goal_progress(
     run: &WorkflowRun,
     graph: &WorkflowGraph,
+    prev: Option<&otto_core::workflows::GoalProgress>,
 ) -> Option<otto_core::workflows::GoalProgress> {
     let lp = graph.nodes.iter().find(|n| {
         n.kind == "loop"
@@ -200,7 +201,25 @@ fn goal_progress(
                 .is_some_and(|s| s.iter().any(|s| s["kind"] == "check"))
     })?;
     let st = run.nodes.iter().find(|n| n.node_id == lp.id)?;
-    let out = st.output.as_ref()?;
+    let awaiting = st
+        .attention
+        .iter()
+        .filter_map(|a| a.criterion_id.clone())
+        .collect();
+    let Some(out) = st.output.as_ref() else {
+        // While the loop runs: the iteration it is in (its "🔁 iteration i/n"
+        // log line), the last check's counts carried from before.
+        let at: Option<(u32, u32)> = st.logs.iter().rev().find_map(|l| {
+            let (i, n) = l.strip_prefix("🔁 iteration ")?.split_once('/')?;
+            Some((i.parse().ok()?, n.trim().parse().ok()?))
+        });
+        let mut g = prev.cloned().unwrap_or_default();
+        if let Some((i, n)) = at {
+            (g.iteration, g.max_iterations) = (i, n);
+        }
+        g.awaiting = awaiting;
+        return (g.max_iterations > 0).then_some(g);
+    };
     let num = |k: &str| out.get(k).and_then(Value::as_u64);
     let last_check = out["history"]
         .as_array()
@@ -215,11 +234,7 @@ fn goal_progress(
         criteria_total: count("total"),
         active_ms: num("active_ms").unwrap_or(0),
         max_active_ms: num("max_active_s").map(|s| s * 1000),
-        awaiting: st
-            .attention
-            .iter()
-            .filter_map(|a| a.criterion_id.clone())
-            .collect(),
+        awaiting,
     })
 }
 
@@ -289,7 +304,18 @@ fn headline(run: &WorkflowRun, graph: &WorkflowGraph, o: &RunOverview) -> String
         },
         RunState::Running => match running.as_slice() {
             [] => "Working".into(),
-            [n] => format!("{} — {}", name(&n.node_id), activity(graph, n)),
+            [n] => match o.goal.as_ref().filter(|g| g.iteration > 0) {
+                // A goal's loop: which iteration it is in (goal.md §3.5).
+                Some(g) if step_kind(graph, &n.node_id) == "loop" => {
+                    format!(
+                        "Iteration {} of {} — {}",
+                        g.iteration,
+                        g.max_iterations,
+                        activity(graph, n)
+                    )
+                }
+                _ => format!("{} — {}", name(&n.node_id), activity(graph, n)),
+            },
             several => {
                 let names: Vec<String> = several.iter().take(3).map(|n| name(&n.node_id)).collect();
                 let more = if several.len() > 3 { " …" } else { "" };
@@ -572,6 +598,14 @@ fn phase_rank(p: StepPhase) -> u8 {
 }
 
 /// A node's display name: its name, else its kind, else its id.
+fn step_kind<'a>(graph: &'a WorkflowGraph, id: &str) -> &'a str {
+    graph
+        .nodes
+        .iter()
+        .find(|n| n.id == id)
+        .map_or("", |n| n.kind.as_str())
+}
+
 fn step_name(graph: &WorkflowGraph, id: &str) -> String {
     graph
         .nodes

@@ -72,7 +72,9 @@ pub(in crate::workflow_engine) async fn settle_held(
     states: &mut [NodeRunState],
 ) -> bool {
     let row = repo.get_run(run_id).await.ok();
-    let paused = row.and_then(|r| r.hold.filter(|h| h.is_effective(r.status)));
+    let paused = row
+        .as_ref()
+        .and_then(|r| r.hold.clone().filter(|h| h.is_effective(r.status)));
     let Some(mut hold) = paused.or_else(|| states.iter().find_map(rules::loop_hold)) else {
         return false;
     };
@@ -81,23 +83,19 @@ pub(in crate::workflow_engine) async fn settle_held(
     let Ok(Some(rev)) = repo.write_hold(run_id, &hold, states).await else {
         return false;
     };
-    super::finalize::store_overview(repo, workflow, run_id, rev).await;
+    let ov = super::finalize::store_overview(repo, workflow, run_id, rev).await;
     let status = if hold.kind == HoldKind::Paused {
-        "canceled"
+        RunStatus::Canceled
     } else {
-        "error"
+        RunStatus::Error
     };
-    emit_run_updated(
-        ctx,
-        &workflow.workspace_id,
-        run_id,
-        status,
-        None,
-        rev,
-        None,
-        states,
-        false,
-    );
+    // The overview carries the hold: the notice centre and the run's chat
+    // thread tell the person (goal.md §6.4; the live style posts the hold).
+    let at = (&workflow.workspace_id, run_id, status.as_str(), rev);
+    emit_run_updated_with(ctx, at, None, None, states, false, ov.as_ref());
+    if let Some(r) = &row {
+        deliver_run_result(ctx, workflow, run_id, states, status, &r.input, None).await;
+    }
     clear_skip_markers(ctx, run_id);
     true
 }

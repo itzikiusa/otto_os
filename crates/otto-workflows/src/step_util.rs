@@ -295,6 +295,8 @@ pub enum StepNote {
         start_ordinal: u32,
         provider: String,
         continued_from: Option<String>,
+        /// A loop's inner step: its child row's label ("Work · iteration 2").
+        label: Option<String>,
     },
     Phase(StepPhase, Option<WaitReason>),
     NeedsYou(Attention),
@@ -319,6 +321,12 @@ pub struct Settled {
     pub sub_threads: Vec<SubThreadUse>,
 }
 
+/// A loop's inner step (`<loop>#<i>.<k>`): its row label, "Work · iteration 2".
+pub fn iteration_label(node_id: &str, name: &str) -> Option<String> {
+    let i = node_id.split_once('#')?.1.split('.').next()?;
+    Some(format!("{name} · iteration {i}"))
+}
+
 /// Apply a [`StepNote`] to the node; `true` = publish now.
 pub fn record(st: &mut NodeRunState, n: StepNote) -> bool {
     match n {
@@ -327,23 +335,59 @@ pub fn record(st: &mut NodeRunState, n: StepNote) -> bool {
             start_ordinal,
             provider,
             continued_from,
+            label,
         } => {
             // An earlier thread of this node (a retry, a loop's earlier
             // iteration) stays on record as a child, so it is closed and kept too.
             if let Some(old) = st.thread.take().filter(|o| o.thread_id != thread_id) {
-                st.children.push(ChildThread {
-                    id: old.thread_id.clone(),
-                    thread_id: Some(old.thread_id),
-                    label: format!("{} · earlier turn", old.provider),
-                    provider: old.provider,
-                    model: old.model,
-                    effort: old.effort,
-                    status: "success".into(),
-                    started_at: None,
-                    ended_at: None,
-                    note: None,
-                    usage: old.usage,
-                });
+                let row = st
+                    .children
+                    .iter_mut()
+                    .find(|c| c.thread_id.as_ref() == Some(&old.thread_id));
+                if let Some(c) = row {
+                    if c.status == "running" {
+                        c.status = "success".into();
+                    }
+                    c.usage = old.usage.clone();
+                    c.ended_at = Some(chrono::Utc::now());
+                } else {
+                    st.children.push(ChildThread {
+                        id: old.thread_id.clone(),
+                        thread_id: Some(old.thread_id),
+                        label: format!("{} · earlier turn", old.provider),
+                        provider: old.provider,
+                        model: old.model,
+                        effort: old.effort,
+                        status: "success".into(),
+                        started_at: None,
+                        ended_at: None,
+                        note: None,
+                        usage: old.usage,
+                    });
+                }
+            }
+            // A loop's inner step shows as its own row, newest iteration last.
+            if let Some(label) = label {
+                match st
+                    .children
+                    .iter_mut()
+                    .find(|c| c.thread_id.as_ref() == Some(&thread_id))
+                {
+                    Some(c) => (c.label, c.status) = (label, "running".into()),
+                    None => st.children.push(ChildThread {
+                        id: thread_id.clone(),
+                        thread_id: Some(thread_id.clone()),
+                        label,
+                        provider: provider.clone(),
+                        model: None,
+                        effort: None,
+                        status: "running".into(),
+                        started_at: Some(chrono::Utc::now()),
+                        ended_at: None,
+                        note: None,
+                        usage: Default::default(),
+                    }),
+                }
             }
             st.thread = Some(StepThread {
                 thread_id,
@@ -396,6 +440,21 @@ pub fn record(st: &mut NodeRunState, n: StepNote) -> bool {
             true
         }
         StepNote::Settled(o) => {
+            if let Some(t) = &st.thread {
+                let row = st
+                    .children
+                    .iter_mut()
+                    .find(|c| c.thread_id.as_ref() == Some(&t.thread_id));
+                if let Some(c) = row.filter(|c| c.status == "running") {
+                    c.status = if o.error_class.is_some() {
+                        "error"
+                    } else {
+                        "success"
+                    }
+                    .into();
+                    (c.usage, c.ended_at) = (o.usage.clone(), Some(chrono::Utc::now()));
+                }
+            }
             if let Some(t) = st.thread.as_mut() {
                 t.turns = o.turns;
                 t.usage = o.usage.clone();
@@ -843,5 +902,51 @@ mod tests {
             .collect();
         assert_eq!(kept, ["v0", "v1", "v2"]);
         assert_eq!(log.last().unwrap().text, "n24");
+    }
+}
+
+#[cfg(test)]
+mod iteration_row_tests {
+    use super::*;
+
+    fn started(id: &str, label: Option<&str>) -> StepNote {
+        StepNote::Thread {
+            thread_id: id.into(),
+            start_ordinal: 0,
+            provider: "claude".into(),
+            continued_from: None,
+            label: label.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn a_loops_inner_threads_are_rows_named_by_step_and_iteration() {
+        assert_eq!(
+            iteration_label("goal#2.0", "Work").as_deref(),
+            Some("Work · iteration 2")
+        );
+        assert_eq!(iteration_label("work", "Work"), None);
+        let mut st = NodeRunState::default();
+        record(&mut st, started("a", Some("Work · iteration 1")));
+        record(&mut st, StepNote::Settled(Box::default()));
+        record(&mut st, started("b", Some("Check criteria · iteration 1")));
+        record(&mut st, started("a", Some("Work · iteration 2")));
+        let rows: Vec<_> = st
+            .children
+            .iter()
+            .map(|c| (c.label.as_str(), c.status.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("Work · iteration 2", "running"),
+                ("Check criteria · iteration 1", "success")
+            ]
+        );
+        // An unlabelled step keeps today's "earlier turn" archive.
+        let mut st = NodeRunState::default();
+        record(&mut st, started("x", None));
+        record(&mut st, started("y", None));
+        assert_eq!(st.children[0].label, "claude · earlier turn");
     }
 }

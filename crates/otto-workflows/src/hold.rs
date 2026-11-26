@@ -61,6 +61,8 @@ pub fn settle_states(graph: &WorkflowGraph, states: &mut [NodeRunState], hold: &
         if in_flight || stopped || skipped {
             s.status = NodeStatus::Pending;
             s.error = None;
+            // A paused step is not "canceled" when it resumes.
+            s.error_class = None;
         }
         if in_flight || stopped {
             s.phases.push(PhaseMark {
