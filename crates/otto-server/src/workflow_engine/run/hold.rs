@@ -3,7 +3,6 @@
 //! at the driver's end. The rules and SQL are otto-workflows' (`hold`,
 //! `steering`, `check_run`) and otto-state's; a Cancel always wins (DR-106).
 //! The goal routes call the `pub(crate)` entry points.
-#![allow(dead_code)] // until the goal routes (wf-goal-src) call them
 
 use super::super::*;
 use otto_core::api::{ExtendReq, VerifyCriterionReq};

@@ -998,6 +998,7 @@ pub async fn get_run(
     crate::auth::require_ws_role(&ctx, &user, &run.workspace_id, WorkspaceRole::Viewer).await?;
     run.checkpoints = repo(&ctx).checkpoints(&id).await.map_err(ApiError)?;
     crate::workflow_engine::fill_thread_available(&ctx, &mut run.nodes).await;
+    run.steering_queued = crate::workflow_engine::hold::steering_queued(&ctx, &id);
     Ok(Json(with_context_dir(&ctx, run)))
 }
 

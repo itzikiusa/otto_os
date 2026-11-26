@@ -269,12 +269,18 @@ async fn starting_a_goal_stores_a_goal_workflow_and_a_long_lane_run() {
         .collect();
     assert_eq!(kinds, [json!("manual_trigger"), json!("loop")]);
     let run = body["run"]["id"].as_str().unwrap();
-    assert_eq!(
-        d.scalar("SELECT lane FROM workflow_runs WHERE id = ?", run)
-            .await
-            .as_deref(),
-        Some("long")
-    );
+    // The driver stamps the lane from the Start node as it queues the run.
+    let mut lane = None;
+    for _ in 0..50 {
+        lane = d
+            .scalar("SELECT lane FROM workflow_runs WHERE id = ?", run)
+            .await;
+        if lane.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(lane.as_deref(), Some("long"));
     assert_eq!(body["run"]["input"]["research_dir"], true);
 
     // Insights' handoff is recorded as the origin; nothing else from the client is.

@@ -368,3 +368,36 @@ fn continuing_a_loop_carries_its_digest_next_action_and_tasks() {
     carry_loop_context(&mut s, &lp);
     assert!(s.goal.ends_with("Tasks, in order:\n- Parse: parse it\n\nWhere the earlier loop got to: half done\n\nNext action: wire it"), "{}", s.goal);
 }
+
+#[tokio::test]
+async fn a_research_run_works_in_its_folder_and_never_outside_goal_loops() {
+    let data = tempfile::tempdir().unwrap();
+    let ctx = data.path().join("workflow-context/run1");
+    let ctx_s = ctx.to_string_lossy().into_owned();
+    let got = research_cwd(&json!({"research_dir": true}), Some(&ctx_s), data.path())
+        .await
+        .unwrap();
+    assert!(
+        got.ends_with("run1/research") && ctx.join("research").is_dir(),
+        "{got}"
+    );
+    let kept = data.path().join("goal-loops/l1/work");
+    std::fs::create_dir_all(&kept).unwrap();
+    let kept_s = kept.to_string_lossy().into_owned();
+    assert!(
+        research_cwd(&json!({"research_dir": kept_s}), None, data.path())
+            .await
+            .is_some()
+    );
+    let outside = data.path().join("elsewhere");
+    std::fs::create_dir_all(&outside).unwrap();
+    let escape = format!("{}/goal-loops/../elsewhere", data.path().display());
+    assert_eq!(
+        research_cwd(&json!({"research_dir": escape}), None, data.path()).await,
+        None
+    );
+    assert_eq!(
+        research_cwd(&json!({}), Some(&ctx_s), data.path()).await,
+        None
+    );
+}

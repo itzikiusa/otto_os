@@ -641,3 +641,27 @@ async fn an_inner_step_caught_by_a_restart_resumes_its_thread() {
         cp.active_ms
     );
 }
+
+/// GL24.8 / DR-111: a loop step with `same_thread` continues the thread its
+/// previous iteration worked on; the checker still gets a fresh one.
+#[tokio::test]
+async fn a_same_thread_step_continues_its_previous_iterations_thread() {
+    let f = fake();
+    let once =
+        "test -f \"$OTTO_CONTEXT_DIR/seen\" || { touch \"$OTTO_CONTEXT_DIR/seen\"; exit 1; }";
+    let steps = json!([
+        {"kind": "agent_prompt", "name": "Work", "same_thread": true, "params": {"prompt": "do it", "provider": "claude"}},
+        check(json!([{"id": "twice", "text": "second time lucky", "verify": "command", "command": once}])),
+    ]);
+    let fx = setup("goal-same", goal_graph(steps, json!({"max_iterations": 2}))).await;
+    let run = fx.run().await;
+    assert_eq!(run.status, RunStatus::Success, "{:?}", run.error);
+    let turns = f.turns.lock().unwrap().clone();
+    assert_eq!(turns.len(), 2, "one Work turn per iteration");
+    assert_eq!(turns[0].continue_thread, None);
+    assert_eq!(
+        turns[1].continue_thread.as_deref(),
+        Some("th-1"),
+        "iteration 2 continues iteration 1"
+    );
+}

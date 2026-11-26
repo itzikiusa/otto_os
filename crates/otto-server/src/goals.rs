@@ -48,7 +48,6 @@ pub async fn start_built(
     let run = repo
         .create_run(&wf.id, ws_id, &built.input, Some(&user.id))
         .await?;
-    repo.set_run_lane(&run.id, Some("long")).await?;
     let id = run.id.clone();
     workflow_engine::spawn_run(
         ctx.clone(),

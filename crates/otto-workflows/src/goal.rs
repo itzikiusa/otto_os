@@ -560,6 +560,33 @@ pub fn carry_loop_context(spec: &mut GoalSpec, loop_: &GoalLoop) {
     spec.goal = spec.goal.chars().take(8_000).collect();
 }
 
+/// A research goal's working folder (goal.md §2.5, DR-109): `research_dir:
+/// true` → `<context>/research` (created); a path (only the server's
+/// Continue sets one) only when, canonicalized, it is under
+/// `<data_dir>/goal-loops/`. `None`: not a research run, or refused.
+pub async fn research_cwd(
+    input: &Value,
+    context_dir: Option<&str>,
+    data_dir: &std::path::Path,
+) -> Option<String> {
+    let dir = match input.get("research_dir")? {
+        Value::Bool(true) => {
+            let d = std::path::Path::new(context_dir?).join("research");
+            tokio::fs::create_dir_all(&d).await.ok()?;
+            d
+        }
+        Value::String(p) => {
+            let root = tokio::fs::canonicalize(data_dir.join("goal-loops"))
+                .await
+                .ok()?;
+            let d = tokio::fs::canonicalize(p).await.ok()?;
+            d.starts_with(&root).then_some(d)?
+        }
+        _ => return None,
+    };
+    Some(dir.to_string_lossy().into_owned())
+}
+
 #[cfg(test)]
 #[path = "goal_tests.rs"]
 mod tests;

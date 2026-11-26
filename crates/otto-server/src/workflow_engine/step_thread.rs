@@ -152,8 +152,12 @@ pub(super) async fn run(
             .map(str::to_string)
     };
     let continued_from = text("continue_from");
-    let mut continue_thread = None;
-    if let Some(src) = &continued_from {
+    // A loop step with `same_thread` names the previous iteration's thread.
+    let mut continue_thread = text("continue_thread").map(Id::from);
+    if let Some(src) = continued_from
+        .as_ref()
+        .filter(|_| continue_thread.is_none())
+    {
         continue_thread = source_thread(ctx, run_id, src).await;
         if continue_thread.is_none() {
             let _ = log_tx.send(format!("thread of {src} was removed — started a fresh one"));

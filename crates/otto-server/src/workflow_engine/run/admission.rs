@@ -504,6 +504,10 @@ async fn prepare_input(
         .filter(|s| !s.trim().is_empty())
         .map(expand_tilde)
         .unwrap_or_else(|| ws.root_path.clone());
+    // A research goal works in its own folder (goal.md §2.5).
+    let dir = files.dir_str();
+    let research = otto_workflows::goal::research_cwd(&input, dir.as_deref(), &ctx.data_dir).await;
+    let run_cwd = research.unwrap_or(run_cwd);
     // Run-level base branch: the ambient PR/review base for the whole run, so a
     // `review_run`/`git_pr` is aware of the run's base even after intervening
     // agent nodes (which return `{reply}`) drop it from the data flow. Per-node

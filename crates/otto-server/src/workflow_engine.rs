@@ -52,7 +52,7 @@ use otto_workflows::retry::{
     is_outer_retryable as is_retryable, outcome_error, resolve_retry, retry_backoff,
 };
 use otto_workflows::run_queue::{
-    max_parallel_runs, resolve_chat_target, result_workspace, run_gate, ChatTarget,
+    max_parallel_runs, resolve_chat_target, result_workspace, ChatTarget,
 };
 use otto_workflows::step_util::{
     brief_summary, canvas_node_ext, extract_code_block, harvest_session_ids, is_reportable,
@@ -63,7 +63,6 @@ use otto_workflows::step_util::{
     build_run_summary, canvas_rel, collect_pr_targets, find_step_handoff, loop_checkpoint,
     node_cwd, parse_checks, skipped_hooks_note,
 };
-#[allow(unused_imports)] // the goal routes call it (wf-goal-src)
 pub(crate) use run::hold;
 
 /// Session and review associations share the ordered progress stream. Reviews
@@ -913,7 +912,8 @@ tokio::task_local! {
     /// it after the decision ([`reacquire_run_permit`]): a run parked for
     /// approval (up to 24h) used to hold one of the 2 daemon-wide slots the
     /// whole time, queueing every other workflow behind it.
-    static RUN_PERMIT: std::cell::RefCell<Option<tokio::sync::SemaphorePermit<'static>>>;
+    /// Beside it, the gate it came from: a long-lane run re-takes from its own lane.
+    static RUN_PERMIT: std::cell::RefCell<(&'static tokio::sync::Semaphore, Option<tokio::sync::SemaphorePermit<'static>>)>;
 }
 
 /// Give this task's run-gate permit back while the run is parked. Returns
@@ -921,7 +921,7 @@ tokio::task_local! {
 /// was already released) — pass it to [`reacquire_run_permit`].
 fn release_run_permit() -> bool {
     RUN_PERMIT
-        .try_with(|cell| cell.borrow_mut().take())
+        .try_with(|cell| cell.borrow_mut().1.take())
         .ok()
         .flatten()
         .is_some()
@@ -933,8 +933,11 @@ async fn reacquire_run_permit(released: bool) {
     if !released {
         return;
     }
-    if let Ok(permit) = run_gate().acquire().await {
-        let _ = RUN_PERMIT.try_with(|cell| *cell.borrow_mut() = Some(permit));
+    let Ok(gate) = RUN_PERMIT.try_with(|cell| cell.borrow().0) else {
+        return;
+    };
+    if let Ok(permit) = gate.acquire().await {
+        let _ = RUN_PERMIT.try_with(|cell| cell.borrow_mut().1 = Some(permit));
     }
 }
 
@@ -1107,7 +1110,12 @@ pub fn spawn_run(
                 return;
             }
         }
-        let (gate, mut parked_at) = (run_gate(), None);
+        // Goals and `lane: long` runs queue in their own lane (G12, DR-111).
+        let lane = otto_workflows::run_queue::lane_of(&workflow.graph);
+        let _ = WorkflowsRepo::new(ctx.pool.clone())
+            .set_run_lane(&run_id, lane)
+            .await;
+        let (gate, mut parked_at) = (otto_workflows::run_queue::gate_for(lane), None);
         let permit = match gate.try_acquire() {
             Ok(p) => p,
             Err(_) => {
@@ -1226,7 +1234,7 @@ pub fn spawn_run(
         // it back (see RUN_PERMIT); it is released when the run ends.
         RUN_PERMIT
             .scope(
-                std::cell::RefCell::new(Some(permit)),
+                std::cell::RefCell::new((gate, Some(permit))),
                 run_workflow(ctx, ws, workflow, run_id, input, scope, prior_nodes),
             )
             .await;
