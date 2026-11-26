@@ -552,6 +552,8 @@ export interface WorkflowValidationIssue {
   edge_id: string | null;
   field: string;
   message: string;
+  /** `save`: the definition is invalid · `run`: a draft's missing piece (saves, does not run) · `warning`: never blocks (DR-028). */
+  class: 'save' | 'run' | 'warning';
 }
 
 /** `POST /workflows/{id}/run` body. `review_mode` seeds `input.review_mode` and overrides every

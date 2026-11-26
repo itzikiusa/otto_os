@@ -208,7 +208,7 @@ mod tests {
             source: None,
             worktree: Some(dir.path().to_string_lossy().into()),
             base: Some("base".into()),
-            error: None,
+            ..Default::default()
         }];
         let key = tracked_dependencies(&entries, &["context.md"])
             .await

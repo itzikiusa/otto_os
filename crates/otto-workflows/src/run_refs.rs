@@ -267,7 +267,7 @@ mod tests {
             source: None,
             worktree: Some(path.into()),
             base: None,
-            error: None,
+            ..Default::default()
         }
     }
 

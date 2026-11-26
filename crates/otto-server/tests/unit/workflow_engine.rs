@@ -1364,6 +1364,7 @@ fn entry(
         worktree: worktree.map(str::to_string),
         base: base.map(str::to_string),
         error: error.map(str::to_string),
+        base_branch: None,
     }
 }
 
