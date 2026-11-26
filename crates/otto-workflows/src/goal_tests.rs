@@ -23,7 +23,7 @@ fn repo() -> GoalRepo<'static> {
     GoalRepo {
         id: "r1",
         path: "/src/app",
-        source: "abc123",
+        source: "abc",
     }
 }
 
@@ -109,7 +109,7 @@ fn a_build_goal_is_start_then_one_loop_of_work_and_check() {
     assert_eq!(
         built.input,
         json!({"goal": {"title": "Green build"},
-        "repos": [{"repo": "r1", "type": "worktree", "name": "/src/app", "source": "abc123"}]})
+        "repos": [{"repo": "r1", "type": "worktree", "name": "/src/app", "source": "abc"}]})
     );
     assert_eq!(blocking(g), Vec::<String>::new());
 }
@@ -134,6 +134,17 @@ fn a_research_goal_has_a_research_folder_and_no_repository() {
         .clone();
     let names: Vec<_> = steps.iter().map(|s| s["name"].as_str().unwrap()).collect();
     assert_eq!(names, ["Work", "Second", "Check criteria"]);
+    // A research goal checks its report (goal.md §2.5).
+    let last = steps[2]["params"]["criteria"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        (last["id"].clone(), last["command"].clone()),
+        (json!("report"), json!("test -s findings.md"))
+    );
 }
 
 fn review() -> Review {
@@ -147,7 +158,7 @@ fn review() -> Review {
 
 #[test]
 fn fix_review_fixes_first_then_reviews_against_the_merge_base_chained_to_the_review() {
-    let built = fix_review_workflow(&review(), 9.5, "codex", "/src/app", "head40").unwrap();
+    let built = fix_review_workflow(&review(), 9.5, "codex", "/src/app", "abc").unwrap();
     assert_eq!(built.name, "Goal · Fix PR #3 review findings");
     let lp = &built.graph.nodes[1];
     assert_eq!(
@@ -191,7 +202,7 @@ fn fix_review_fixes_first_then_reviews_against_the_merge_base_chained_to_the_rev
     );
     assert_eq!(
         built.input["repos"],
-        json!([{"repo": "repo", "type": "worktree", "name": "/src/app", "source": "head40"}])
+        json!([{"repo": "repo", "type": "worktree", "name": "/src/app", "source": "abc"}])
     );
     assert_eq!(blocking(&built.graph), Vec::<String>::new());
     assert!(fix_review_workflow(&review(), 10.5, "codex", "/p", "h").is_err());
@@ -339,6 +350,106 @@ fn goal_loop_args_map_onto_a_goal_spec() {
     assert!(goal_spec_from_loop_args(&d, &l, &c, Some("r1"))
         .unwrap_err()
         .contains("max_cost_usd"));
+}
+
+fn held_run(hold: Value, goal: Option<Value>) -> otto_core::workflows::WorkflowRun {
+    serde_json::from_value(json!({"id": "run", "workflow_id": "wf", "workspace_id": "ws", "status": "error",
+        "input": {}, "started_at": "2026-11-07T00:00:00Z", "hold": hold,
+        "overview": goal.map(|g| json!({"goal": g})),
+        "nodes": [{"node_id": "goal", "status": "running"}, {"node_id": "done", "status": "success"}]}))
+    .unwrap()
+}
+
+#[test]
+fn resume_needs_a_hold_and_room_and_writes_the_extension() {
+    let graph = goal_workflow(&spec(), Some(&repo())).graph;
+    let exhausted = json!({"kind": "exhausted", "reason": "Out of iterations", "since": "2026-11-07T00:00:00Z", "node_ids": ["goal"], "iteration": 7});
+    let used = json!({"iteration": 7, "max_iterations": 7, "criteria_met": 1, "criteria_total": 3, "active_ms": 3_600_000, "max_active_ms": 7_200_000});
+    let run = held_run(exhausted, Some(used));
+    let none = ExtendReq::default();
+    assert_eq!(
+        resume_plan(&run, &graph, &none).unwrap_err(),
+        "Raise the iteration limit to resume: 7 of 7 iterations are used."
+    );
+    let more = ExtendReq {
+        iterations: Some(9),
+        active_s: Some(3_000),
+    };
+    assert!(resume_plan(&run, &graph, &more)
+        .unwrap_err()
+        .starts_with("Raise the active-time limit to resume: 60 of 50 minutes"));
+    let more = ExtendReq {
+        iterations: Some(9),
+        active_s: None,
+    };
+    let plan = resume_plan(&run, &graph, &more).unwrap();
+    let l = &plan.limits.unwrap().loops["goal"];
+    assert_eq!(
+        (l.max_iterations, l.max_active_s, l.unblocked_at),
+        (Some(9), None, None)
+    );
+    // A crash left the loop running: it re-enters as pending, the rest is adopted.
+    assert_eq!(plan.unsettled, ["goal"]);
+    assert_eq!(plan.nodes[0].status, NodeStatus::Pending);
+
+    let blocked = json!({"kind": "blocked", "reason": "stuck", "since": "2026-11-07T00:00:00Z", "node_ids": [], "iteration": 4});
+    let plan = resume_plan(&held_run(blocked, None), &graph, &none).unwrap();
+    assert_eq!(plan.limits.unwrap().loops["goal"].unblocked_at, Some(4));
+    let mut free = held_run(json!(null), None);
+    free.hold = None;
+    assert!(resume_plan(&free, &graph, &none).is_err());
+}
+
+#[test]
+fn a_person_records_only_the_criterion_the_check_waits_on() {
+    let graph = goal_workflow(&spec(), Some(&repo())).graph;
+    assert_eq!(
+        check_criteria(&graph, "goal")
+            .iter()
+            .map(|c| c.id.as_str())
+            .collect::<Vec<_>>(),
+        ["tests", "docs", "ok"]
+    );
+    assert!(check_criteria(&graph, "trigger").is_empty());
+    let mut run = held_run(
+        json!(null),
+        Some(json!({"iteration": 2, "max_iterations": 7, "criteria_met": 2, "criteria_total": 3})),
+    );
+    let at = ("goal", "ok");
+    let err = verify_entry(&run, &graph, at, true, "saw it", "Dana").unwrap_err();
+    assert!(matches!(err, Error::Conflict(_)), "{err:?}");
+    run.nodes[0].attention = Some(serde_json::from_value(json!({"kind": "verify", "text": "Check it", "since": "2026-11-07T00:00:00Z", "criterion_id": "ok"})).unwrap());
+    assert!(matches!(
+        verify_entry(&run, &graph, at, true, "  ", "Dana"),
+        Err(Error::Invalid(_))
+    ));
+    assert!(matches!(
+        verify_entry(&run, &graph, ("goal", "docs"), true, "x", "Dana"),
+        Err(Error::Conflict(_))
+    ));
+    let e = verify_entry(&run, &graph, at, false, " not yet ", "Dana").unwrap();
+    assert_eq!(
+        (
+            e.kind.as_str(),
+            e.ask.as_deref(),
+            e.text.as_str(),
+            e.met,
+            e.iteration,
+            e.by.as_str()
+        ),
+        (
+            "verify",
+            Some("ok"),
+            "not yet",
+            Some(false),
+            Some(2),
+            "Dana"
+        )
+    );
+    assert_eq!(
+        e.revision.unwrap(),
+        crate::criteria::revision(&spec().criteria[2])
+    );
 }
 
 #[test]

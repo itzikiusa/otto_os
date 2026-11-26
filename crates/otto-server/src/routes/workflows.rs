@@ -864,6 +864,9 @@ pub async fn cancel_run(
                 overview: None,
             });
         }
+    } else if run.hold.is_some() {
+        // A held run is settled: Cancel only drops its hold (goal.md §2.3).
+        repo(&ctx).clear_hold(&id).await.map_err(ApiError)?;
     }
     repo(&ctx).get_run(&id).await.map(Json).map_err(ApiError)
 }

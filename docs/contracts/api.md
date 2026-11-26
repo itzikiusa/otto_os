@@ -4289,99 +4289,50 @@ just MySQL), a server-side schema-children `filter`, and a `mask` flag that reda
 cells / broker payloads server-side via `otto_core::redact` (the response carries a `masked`
 flag) — all on the EXISTING query/consume routes.
 
-## Goal Loops
+## Goals
 
-Bounded, goal-directed multi-agent iteration. A loop runs Plan → Execute → Evaluate →
-Digest cycles on an isolated git branch (`goal-loop/<id>`) or research directory until the goal's
-acceptance criteria are met or a hard limit (iterations / active time) is hit. Live
-updates arrive over `/ws/events` (`goal_loop_updated`). Item routes resolve the
-workspace from the loop row; every handler enforces ws Viewer/Editor.
-
-DTOs are `otto_core::api::{DefineGoalReq, GoalLoopDraft, CreateGoalLoopReq,
-UpdateGoalLoopReq}` and domain types `otto_core::domain::{GoalLoop, GoalLoopDetail}`.
-
-| # | Method & path | Auth | Request | Response |
-|---|---|---|---|---|
-| 91 | POST /api/v1/workspaces/{id}/goal-loops/define | ws editor | DefineGoalReq | GoalLoopDraft (runs the AI definer; creates a managed definer session; `feedback` refines) |
-| 92 | GET /api/v1/workspaces/{id}/goal-loops | ws viewer | — | `GoalLoop[]` |
-| 93 | POST /api/v1/workspaces/{id}/goal-loops | ws editor | CreateGoalLoopReq | GoalLoop (validates non-empty `verify`; limits must be positive and `per_phase_timeout_secs` at most 86400, else 400; starts when `autostart`) |
-| 94 | GET /api/v1/goal-loops/{id}?summary= | ws viewer | — | GoalLoopDetail (`{loop, iterations, spent_usd?, steering_notes}`). `summary=true` (additive): `plan`, `context_in` and `context_out` are `""` on every iteration except the newest — read one via row 94a |
-| 94a | GET /api/v1/goal-loops/{id}/iterations/{idx} | ws viewer | — | GoalLoopIteration — one iteration in full (`idx` is 1-based) |
-| 95 | PATCH /api/v1/goal-loops/{id} | ws editor; a `config` change needs the loop's creator, a ws admin or root (else 403) | UpdateGoalLoopReq | GoalLoop (`name` non-terminal; `limits` not while Running; `config` Draft-only with at least one executor). All fields are validated before a single atomic update; rejection preserves every prior field. |
-| 96 | POST /api/v1/goal-loops/{id}/start | ws editor | — | GoalLoop |
-| 97 | POST /api/v1/goal-loops/{id}/pause | ws editor | — | GoalLoop |
-| 98 | POST /api/v1/goal-loops/{id}/resume | ws editor | — | GoalLoop. Paused, blocked or exhausted. An `exhausted` loop resumes only when its limits leave room (iterations started < `max_iterations`, unless a pending human-only re-evaluation needs no new iteration; active time < `max_runtime_secs`); otherwise 409 naming the limit to raise. A loop the 4 h run cap stopped has room and starts a new run window |
-| 99 | POST /api/v1/goal-loops/{id}/stop | ws editor | — | GoalLoop |
-| 99a | POST /api/v1/goal-loops/{id}/steer | human + ws editor | `SteerGoalLoopReq {note}` | `SteerGoalLoopResp {loop_id, note, queued_notes}` (queues a human steering note for the next iteration; 409 on terminal loops) |
-| 99b | GET /api/v1/goal-loops/{id}/diff | ws viewer | — | `GoalLoopDiff` (bounded worktree diff against the loop's base ref) |
-| 100 | POST /api/v1/goal-loops/{id}/iterations/{idx}/agents/{agent}/retry | ws editor | — | 202 (re-run a stuck executor) |
-| 101 | DELETE /api/v1/goal-loops/{id} | ws editor | — | 204 (stops and deletes history; **retains working files and branch**) |
-
-### Goal execution and verification contract
-
-`GoalLoopConfig` adds optional `allow_commits` (default false), `mode` (`build` default or
-`research`), `source_links: string[]`, `skills: string[]`, and `require_review` (default false).
-Local commits are instructed only when explicitly enabled; push/publish are separately
-permissioned. Selected skills and source links enter the role context. Missing skills must
-be reported by agents; there is no preflight availability guarantee for custom skills.
-Research requires no repository and writes `findings.md` inside the retained research directory.
-Planner/evaluator/digester sessions append to each iteration's `agents` after executor slots;
-existing executor indices remain stable. Every role honors its configured provider/model.
-The definer accepts optional `provider`, `model`, and `mode` in `DefineGoalReq`.
-
-Criterion `verify_kind` accepts `command`, `agent`, `human`, and legacy `manual` (agent-assessed).
-The model cannot satisfy `human`; approval requires an authenticated explicit action from a
-person. Both human-decision endpoints reject managed session credentials (including author
-API tokens and internal MCP tokens) with 403:
+A goal is a workflow of one fixed shape (goal.md §3.2): Start (`lane: long`) → loop
+"Work toward the goal" { Work (agent, keeps its thread across iterations) → Check criteria
+(`check`) }. Each goal is its own workflow row with `origin = "goal"` and a server-set
+`origin_ref` (`review:<id>`, `insights`, `goal_loop:<id>`, `mcp` or none); its run is an
+ordinary workflow run (`GET /workflow-runs/{id}`, `workflow_run_updated`). Built by
+`otto_workflows::goal`, started by `otto_server::goals`. DTOs: `otto_core::api::{GoalSpec,
+GoalWork, GoalBudget, AgentChoice, NamedAgentChoice, GoalStartResp, ResumeReq, ExtendReq,
+SteerReq, VerifyCriterionReq}`.
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| POST /api/v1/goal-loops/{id}/criteria/{criterion}/verify | ws editor | `{ "evidence": "Observed the expected result" }` | GoalLoop; only paused/blocked/exhausted human criteria |
-| POST /api/v1/goal-loops/{id}/questions/{question}/answer | ws editor | `{ "answer": "Use the existing endpoint" }` | GoalLoop; only an unanswered question on a blocked loop |
+| POST /api/v1/workspaces/{wid}/goals | ws editor (Workflows Edit) | `GoalSpec` (+ `from?: "insights"`) | `GoalStartResp {workflow, run}`. 400 naming the field (`title` 1–120, `goal` 1–8,000, `criteria` 1–40 with unique `[a-z0-9-]` ids, a command / rule criterion needs its command / rule, `budget.iterations` 1–50, `budget.active_s` 900–28,800, `budget.step_timeout_s` 300–7,200), or naming the invalid built graph; 400 when the workspace budget is blocked. Build: `work.repo_id` must be a repository of the workspace; the run input is `{goal: {title}, repos: [{repo, type: "worktree", name: <repo path>, source: <base or HEAD sha>}]}` (DR-102). Research: `{goal: {title}, research_dir: true}` and the check gains `report` (`test -s findings.md`) |
+| GET /api/v1/workspaces/{wid}/goals | ws viewer (Workflows View) | — | Array: goal runs (each goal workflow's latest run, newest goal first, at most 50: `{id: <run id>, run_id, workflow_id, name, state, started_at, ended_at}`) followed by the workspace's older loops (`{id, name, status, legacy: true}`). The directory list route of kind `goal` |
+| POST /api/v1/workspaces/{wid}/goals/from-loop | ws editor (Workflows Edit) | `CreateGoalLoopReq` (MCP `otto.run_goal_loop`; `autostart` ignored) | `{workflow, run, workflow_id, run_id, ignored: ["planner", "digester", "definer"]}`; `origin_ref = "mcp"`. Criteria: `command` → command (`verify_cmd`, else `verify`), `agent` / legacy `manual` → agent with `how = verify`, `human` → human; ids lower-cased to `[a-z0-9-]`; limits clamped into the goal ranges; `executors[0]` → worker, the rest → extra workers; `evaluator` → checker; `require_review` → `final_review`; `mode: research` → research. 400: `config.graph` ("Engineering-graph goals are not supported any more: put the tasks on a workflow canvas"), a non-null `max_cost_usd`, or a build `repo_path` that is not a registered repository of the workspace |
+| POST /api/v1/goal-loops/{id}/continue | ws editor | `GoalSpec` (the form prefilled from the loop) | `GoalStartResp`; `origin_ref = "goal_loop:<id>"`. Only for a `draft`, `paused`, `blocked` or `exhausted` loop (else 409; 409 when it was continued already). The working place comes from the loop row, never the client: build → `repos: [{repo: <registered repo of repo_path>, type: "worktree", name: <worktree_path, else the repo path>, source: <base_commit, else HEAD>}]`; research → `research_dir: <worktree_path, else <data_dir>/goal-loops/<id>/work>`. Surviving executor sessions of the loop are killed first; the goal text gains "Where the earlier loop got to: …", "Next action: …" and a graph loop's "Tasks, in order: …". The loop is then `stopped` with summary "Continued as a goal — run <id>" |
+| POST /api/v1/reviews/{review_id}/fix-goal | human credential + ws editor | `{target_score?}` | see Code review (`{workflow_id, run_id}`) |
 
-Invalid/empty input returns 400; unknown criterion/question returns 404; workspace permission
-failures use the usual authorization error. `GoalLoop.ledger` holds `verifications[]`
-(`criterion_id`, exact serialized `criterion_revision`, server-derived `verified_by`, `evidence`,
-`verified_at`), `questions[]` (`id`, `question`, nullable `answer`, `answered_by`, `answered_at`),
-`next_action`, `last_failure_signature`, `repeated_failures`, `review_summary`, `review_passed`,
-and nullable `resume_evaluation_iteration` (server-owned pending evaluation after an executor retry).
-Legacy rows default to an empty ledger. Answers do not auto-resume; unanswered questions block Resume.
-Lifecycle and human-decision mutations serialize per loop. Approval/Resume while execution is
-still stopping returns 409. Explicit executor retry owns Running state, cancels with Pause/Stop,
-clears old output/evaluation/approvals, and returns to Blocked for fresh evaluation. Only the
-current iteration can be retried. Resume evaluates that iteration without another planner or
-executor fleet and without spending an iteration; pause/restart preserves this continuation.
-Active runtime bounds the entire controller, including retries, and each executor attempt has
-an absolute phase deadline with bounded cleanup. Build/Research mode cannot change after creation.
-Further executor work invalidates human approvals; changed criterion contracts cannot reuse them.
-Final human verification rechecks the current iteration without rerunning executors or consuming
-another iteration, subject to the active-time and phase limits.
+**Any workflow run** (goals included; Workflows class of `/workflow-runs/*`):
 
-Two identical unmet-criterion/evidence outcomes block the loop with a persisted question
-(compared on the evidence headline, without any verify output).
-Optional completion review must return approval with no unresolved findings before success.
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| POST /api/v1/workflow-runs/{id}/pause | ws editor | — | `WorkflowRun` with `hold {kind: "paused", reason: "Paused by <name>", by}`, status `canceled`. The hold is written before the cancel is announced (`request_pause`, DR-106). 409 when the run is not `pending` / `running` |
+| POST /api/v1/workflow-runs/{id}/resume | ws editor | `ResumeReq {extend?: {iterations?, active_s?}}` (new totals) | `WorkflowRun` re-entered: every step not settled re-runs (a step left `running` by a crash is `pending` again), the rest is adopted. Extend merges into `limits.loops[<loop>]` (`max_iterations`, `max_active_s`; a blocked hold also sets `unblocked_at` = its iteration). 409: no effective hold; the driver is still stopping; an exhausted run whose limits leave no room ("Raise the iteration limit to resume: 6 of 6 iterations are used." / "Raise the active-time limit to resume: …") |
+| POST /api/v1/workflow-runs/{id}/steer | human credential + ws editor | `SteerReq {note}` (trimmed, ≤ 4,000 chars) | `{queued: [String]}` — queued in `<context>/steering.json` for the next agent step (`otto_workflows::steering`). 400 empty / too long; 409 when the run finished without a hold or 20 notes wait |
+| POST /api/v1/workflow-runs/{id}/nodes/{node_id}/criteria/{criterion_id}/verify | human credential + ws editor | `VerifyCriterionReq {met, evidence}` (evidence non-empty, ≤ 2,000) | `{ok: true}`. `node_id` is the top-level node: the check itself, or the loop around it (DR-107). 400 bad evidence; 409 when that node's attention is not `verify` on `criterion_id`; 404 unknown criterion. The record (`HumanEntry {kind: "verify", ask: <criterion id>, met, revision: criteria::revision, iteration}`) goes to the parked check |
+| POST /api/v1/workflow-runs/{id}/cancel | ws editor | — | as before; on a held run it drops the hold (`clear_hold`) and keeps the settled status |
 
-`GoalLoopIteration.evaluation.criteria[].evidence` is never blank for a met criterion: a met
-claim with blank evidence is stored as not met with the evidence "Marked met without evidence,
-…". A command criterion's evidence is `verify command exited 0` or
-`verify command failed (exit N)`, followed by `"\n--- verify output ---\n"` and the last 8 KB of
-the command's output when it printed anything (`ledger.graph_nodes` keep the headline only).
-When every criterion is met with evidence, a `continue` verdict becomes `achieved` and the
-evaluator's request is kept in `rationale`; `blocked` is never overridden. One run (start or
-resume until it settles) stops after at most 4 h of active time (`MAX_RUN_ACTIVE_SECS`),
-whatever `max_runtime_secs` says; the loop is then `exhausted` with summary
-"time cap reached: Otto stops a run after 4 hours of active time".
+## Older goal loops (read-only history)
 
-Stop, failure, success, restart and history deletion retain working files. Boot recovery pauses
-active loops and preserves blocked questions (a blocked loop keeps its own `error` and
-`finished_at`), allowing explicit Resume; sessions are reaped.
-A loop the restart paused keeps `error` = "Interrupted by a daemon restart — Resume to continue
-with preserved work." (`RESTART_PAUSE_NOTE`; Resume clears it), emits `goal_loop_updated`
-`paused`, and gets one notice (`automation:goal_loop_restart:<id>`, route `loops/<id>`).
-Per-loop token and cost totals are not recorded: iteration `tokens_input`/`tokens_output`/`cost_usd`
-and loop `cost_usd` stay 0.
-Per-loop cost accounting is not wired: non-null `max_cost_usd` is rejected at create/patch;
-legacy loops carrying one block before execution. Workspace usage-budget gates remain in force.
+The Goal Loops controller is gone; its tables stay. These routes serve the history page
+(`#/loops`); every other `/goal-loops` route answers 404. Handlers enforce ws Viewer/Editor
+(the policy exempts `/goal-loops*`).
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /api/v1/workspaces/{id}/goal-loops | ws viewer | — | `GoalLoop[]` |
+| GET /api/v1/goal-loops/{id}?summary= | ws viewer | — | GoalLoopDetail (`{loop, iterations, spent_usd, steering_notes}`; `spent_usd` is always `null`, it was never tracked). `summary=true`: `plan`, `context_in` and `context_out` are `""` on every iteration except the newest |
+| GET /api/v1/goal-loops/{id}/iterations/{idx} | ws viewer | — | GoalLoopIteration in full (`idx` 1-based) |
+| GET /api/v1/goal-loops/{id}/diff | ws viewer | — | `GoalLoopDiff` (bounded diff of the kept worktree against the loop's base ref) |
+| DELETE /api/v1/goal-loops/{id} | ws editor | — | 204 (deletes history; **retains working files and branch**) |
+| POST /api/v1/goal-loops/{id}/continue | ws editor | `GoalSpec` | see Goals |
+
 
 ## Canvas Studio
 
