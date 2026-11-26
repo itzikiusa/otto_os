@@ -5,7 +5,8 @@
 //
 //   node scripts/workflows/live-check.mjs --fakes --ottod <ottod> --out <dir> [--fakes-dir <dir>] [--real-home]
 //   node scripts/workflows/live-check.mjs --live --i-am-the-coordinator --ottod <ottod> --out <dir>
-//     [--only smoke|pty|compare] [--port 7951]
+//     [--only smoke|pty|compare] [--spent <turns an earlier invocation used>] [--port 7951]
+//   node scripts/workflows/live-check.mjs --live --preflight --ottod <ottod>   (which CLIs, which turns; starts nothing)
 //
 // --fakes runs the same steps on the fake agents (otto-fake-* through shims, a
 // temporary HOME): it proves the harness, not the CLIs. --live runs the real
@@ -59,6 +60,8 @@ const OTTOD = path.resolve(a.ottod ?? 'target/debug/ottod');
 if (!fs.existsSync(OTTOD)) refuse('no ottod at ' + OTTOD + ' (--ottod <path>)');
 const FAKES_DIR = path.resolve(a['fakes-dir'] ?? path.dirname(OTTOD));
 const CAP = Number(a['test-cap'] ?? SPEC.cap);
+const SPENT = Number(a.spent ?? 0); // a re-run of one part counts on from what was already used
+if (!Number.isInteger(SPENT) || SPENT < 0) refuse('--spent takes the number of turns already used');
 const TEST_FAIL = a['test-fail'];
 const REAL_HOME = os.userInfo().homedir;
 const OWNER_HOME = LIVE || a['real-home'] === 'true'; // the daemon runs on the real HOME
@@ -292,7 +295,7 @@ function countChildren(run, wf) {
     if (id && !(had?.turns > 0)) ledger.set(id, { runner: 'threads', id, provider: c.provider, source: had?.source || 'workflow', run: run.id, node: n.node_id, turns: 1, step: had?.step ?? currentStep });
   }
 }
-const used = () => [...ledger.values()].reduce((n, r) => n + r.turns, 0);
+const used = () => SPENT + [...ledger.values()].reduce((n, r) => n + r.turns, 0);
 const usedBy = (pred) => [...ledger.values()].filter(pred).reduce((n, r) => n + r.turns, 0);
 const perProvider = (rows) => Object.entries(rows.reduce((m, r) => ({ ...m, [r.provider]: (m[r.provider] ?? 0) + r.turns }), {})).map(([p, n]) => p + ' ' + n).join(', ');
 
@@ -703,7 +706,7 @@ async function finish(aborted) {
     const same = (f) => (f === MAP ? text(f) === JSON.stringify({ '/somewhere/else': 'kept-1' }) : f.endsWith('.json') ? JSON.stringify(canon(JSON.parse(text(f) || 'null'))) === JSON.stringify(canon(JSON.parse(seeded[f]))) : text(f) === seeded[f]);
     const ours = Object.keys(seeded).filter((f) => f.includes('ours'));
     const others = Object.keys(seeded).filter((f) => !ours.includes(f));
-    check(P, 'the folder-trust entries the daemon wrote are removed; the config files are as planted', wrote.some((f) => f === '.claude.json') && removed.length > 0 && others.every(same), (removed.join('; ') || 'nothing removed') + '; differing from the planted text: ' + (others.filter((f) => !same(f)).join(', ') || 'none'));
+    check(P, 'the folder-trust entries the daemon wrote are removed; the config files are as planted', (!wrote.some((f) => f === '.claude.json' || f === '.codex/config.toml') || removed.length > 0) && others.every(same), (removed.join('; ') || 'nothing removed') + '; differing from the planted text: ' + (others.filter((f) => !same(f)).join(', ') || 'none'));
     check(P, 'only the transcripts of the root are deleted; a neighbour\'s stay', ours.every((f) => !fs.existsSync(path.join(d.home, f))) && others.every((f) => fs.existsSync(path.join(d.home, f))), 'left of ours: ' + (ours.filter((f) => fs.existsSync(path.join(d.home, f))).join(', ') || 'none'));
   }
   for (const f of fs.readdirSync(d.logs)) fs.copyFileSync(path.join(d.logs, f), path.join(OUT, f));
@@ -726,7 +729,7 @@ function report(aborted) {
     '',
     aborted ? '**ABORTED: ' + aborted + '**' : checks.every((c) => c.ok) ? '**Every pass line holds.**' : '**' + checks.filter((c) => !c.ok).length + ' pass line(s) FAILED.**',
     '',
-    'Turns: **' + used() + ' of ' + CAP + '** (' + (perProvider(rows) || 'none') + '). Parts run: ' + (ONLY === 'all' ? PARTS.join(', ') : ONLY) + '. Daemon ' + OTTOD + ', port ' + PORT + ', root ' + ROOT + ' (removed).',
+    'Turns: **' + used() + ' of ' + CAP + '** (' + (perProvider(rows) || 'none') + (SPENT ? '; ' + SPENT + ' from earlier invocations' : '') + '). Parts run: ' + (ONLY === 'all' ? PARTS.join(', ') : ONLY) + '. Daemon ' + OTTOD + ', port ' + PORT + ', root ' + ROOT + ' (removed).',
     '',
     '## Providers', table(['provider', 'used', 'why'], Object.entries(providers).map(([p, v]) => [p, v.available ? 'yes' : '**left out**', v.why])),
     '',
