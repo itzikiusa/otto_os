@@ -15,6 +15,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::Id;
 
+/// The words right before a reviewer's findings path in its prompt
+/// (`otto_review::session::augment_prompt`): the next line is the path. The
+/// fake agents' review persona finds the file by it, so both read this one
+/// constant.
+pub const FINDINGS_PATH_INTRO: &str =
+    "to this absolute file path, overwriting any existing content:";
+
 // ---------------------------------------------------------------------------
 // Status — the 6-value workflow disposition + machine-checked transitions
 // ---------------------------------------------------------------------------

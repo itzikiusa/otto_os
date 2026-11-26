@@ -24,6 +24,17 @@ pub mod claude;
 pub mod codex;
 pub(crate) mod diff_compact;
 pub mod driver;
+#[cfg(any(test, feature = "test-util"))]
+pub mod fake_io;
+#[cfg(any(test, feature = "test-util"))]
+pub mod fake_script;
+/// The fake agents' programs (the `otto-fake-*` binaries are thin mains over them).
+#[cfg(any(test, feature = "test-util"))]
+pub mod fakes {
+    pub mod agent;
+    pub mod claude;
+    pub mod codex;
+}
 pub mod holder;
 pub mod host;
 mod http;
@@ -33,6 +44,8 @@ pub mod process;
 mod questions;
 pub mod ring;
 pub mod runtime;
+#[cfg(any(test, feature = "test-util"))]
+pub mod scripted;
 mod tool_images;
 #[cfg(test)]
 mod tool_images_tests;

@@ -1,0 +1,859 @@
+//! Test double: a tiny `claude` speaking the Agent SDK's stream-json over
+//! stdio (`--input-format stream-json --output-format stream-json`), with
+//! the frame shapes of Claude Code 2.1.318. Behaviour by prompt text:
+//!
+//! * `bg <secs>`   — a `run_in_background` Bash (`task_started`, the launch
+//!   tool result naming a real output file, "tick 1\ntick 2"), "Waiting
+//!   for it." and `result`; `<secs>` later the task's
+//!   `task_notification`, then a turn of its own (lasting ~0.8 s):
+//!   "Background done: ok".
+//! * `agent <secs>` — a background `Agent` call: its `subagent` frames (a
+//!   text and a `Read`), the "Async agent launched" result, `result`;
+//!   `<secs>` later `task_notification` + an own turn "Agent reported".
+//! * `slow <secs>` — "Working…", then waits `<secs>`; a user message arriving
+//!   meanwhile (a steer) is answered in the same turn: "steered: <text>".
+//! * `silent`      — emits nothing until interrupted.
+//! * `retrying <secs>` — an `api_retry` frame every 200 ms for `<secs>`,
+//!   nothing else, until interrupted.
+//! * `stream <n> <ms>` — `c0 `…`c<n-1> ` as text deltas, one per `<ms>`.
+//! * `ask`         — a `can_use_tool` request for Bash `ls`; the answer
+//!   decides: "allowed" or "denied", then `result`.
+//! * `escape`      — starts `sleep 600` in a process group of its own (as
+//!   Claude Code does with some jobs), writes its pid to
+//!   `.fake-claude/escaped.pid`, then answers like `echo`.
+//! * `mcp <server> <tool> [json]` — a real MCP call: launches `<server>` from
+//!   the `--mcp-config` file (its `${NAME:-}` env references expanded from
+//!   this process), runs `initialize` + `tools/call` off the main loop, and
+//!   reports it as Claude Code does: a `mcp__<server>__<tool>` tool_use, its
+//!   tool_result (the MCP `content`, `is_error`), "mcp done", `result`.
+//! * (every start) `system init` lists `mcp_servers`: the `--mcp-config`
+//!   servers ("connected" when the command exists, else "failed") and
+//!   `own-docs` ("needs-auth", as if from Claude Code's own config).
+//! * Otto's commit-draft prompt — `feat(app): greet the world` + a body line,
+//!   streamed in four pieces (1.5 s apart with `fake-draft: slow` in the
+//!   diff; `fake-draft: fail` answers a "Not logged in" error result).
+//! * anything else — `echo: <text>` as stream events + `assistant`.
+//!
+//! A prompt with `OTTO_FAKE:` lines acts out that script instead
+//! (src/fake_script.rs): `ask` is an `AskUserQuestion`, `approve` a
+//! `can_use_tool`, `background` a background Bash and its own follow-up
+//! turn, `child` / `finish-child` Otto's `otto_thread_*` tools through the
+//! `otto` server of `--mcp-config`.
+//!
+//! An `interrupt` control request ends the running turn as interrupted; a
+//! `stop_task` one kills that background task (`task_notification` killed).
+//! `--resume <id>` works only for a session this binary started in the same
+//! cwd (`.fake-claude/<id>` exists); otherwise it exits 1 like the CLI
+//! ("No conversation found"). A `.fake-claude/<id>.flaky` marker fails the
+//! next resume once with a passing error (the marker is removed). stdin EOF
+//! ends the process.
+
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
+
+use serde_json::{json, Value};
+
+use crate::{fake_io, fake_script};
+
+use crate::fake_script::{FailClass, Turn, Wire};
+
+/// `<tmp>/claude-<uid>/otto-fake/<session>/tasks/<task>.output` with two
+/// lines of output, as Claude Code lays out a background command's output.
+fn task_output_file(session: &str, task: &str) -> std::path::PathBuf {
+    let tmp =
+        fake_io::var("CLAUDE_CODE_TMPDIR").map_or_else(|| "/tmp".into(), std::path::PathBuf::from);
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    let dir = tmp.join(format!("claude-{uid}/otto-fake/{session}/tasks"));
+    let file = dir.join(format!("{task}.output"));
+    let _ = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&file, "tick 1\ntick 2\n"));
+    file
+}
+
+fn out(v: Value) {
+    fake_io::out(&v.to_string());
+}
+
+fn text_message(id: &str, text: &str) {
+    out(
+        json!({"type":"stream_event","event":{"type":"message_start","message":{"id":id}},"parent_tool_use_id":null}),
+    );
+    out(
+        json!({"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}},"parent_tool_use_id":null}),
+    );
+    out(
+        json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":text}},"parent_tool_use_id":null}),
+    );
+    out(
+        json!({"type":"stream_event","event":{"type":"content_block_stop","index":0},"parent_tool_use_id":null}),
+    );
+    out(
+        json!({"type":"assistant","message":{"id":id,"content":[{"type":"text","text":text}]},"parent_tool_use_id":null}),
+    );
+}
+
+/// Otto's commit draft (`claude -p`): a Conventional Commits message in
+/// pieces; `fake-draft: slow` / `fake-draft: fail` in the diff steer it (Stop
+/// mid-stream, a failed draft). False for any other prompt.
+fn fake_draft(mid: &str, text: &str) -> bool {
+    if !text.contains("You are writing a git commit message") {
+        return false;
+    }
+    if text.contains("fake-draft: fail") {
+        out(
+            json!({"type":"result","subtype":"success","is_error":true,"result":"Not logged in · Please run /login"}),
+        );
+        return true;
+    }
+    let gap = Duration::from_millis(if text.contains("fake-draft: slow") {
+        1500
+    } else {
+        40
+    });
+    out(
+        json!({"type":"stream_event","event":{"type":"message_start","message":{"id":mid}},"parent_tool_use_id":null}),
+    );
+    out(
+        json!({"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}},"parent_tool_use_id":null}),
+    );
+    for piece in [
+        "feat(app): ",
+        "greet the world",
+        "\n\n- say hello",
+        " world",
+    ] {
+        stream_delta(0, piece);
+        std::thread::sleep(gap);
+    }
+    out(
+        json!({"type":"stream_event","event":{"type":"content_block_stop","index":0},"parent_tool_use_id":null}),
+    );
+    result_ok();
+    true
+}
+
+fn result_ok() {
+    out(
+        json!({"type":"result","subtype":"success","is_error":false,"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}),
+    );
+}
+
+fn result_interrupted() {
+    out(
+        json!({"type":"result","subtype":"error_during_execution","is_error":true,"errors":["Request was interrupted"]}),
+    );
+}
+
+fn wait_for_file(path: &std::path::Path) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline {
+        if path.exists() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    false
+}
+
+fn stream_delta(index: u64, chunk: &str) {
+    out(
+        json!({"type":"stream_event","event":{"type":"content_block_delta","index":index,"delta":{"type":"text_delta","text":chunk}},"parent_tool_use_id":null}),
+    );
+}
+
+fn user_text(msg: &Value) -> String {
+    match msg.pointer("/message/content") {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Array(parts)) => parts
+            .iter()
+            .filter_map(|p| p.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+enum In {
+    Line(Value),
+    Eof,
+    /// An `mcp` call's outcome: (tool_use id, MCP result or error text).
+    McpDone(String, Result<Value, String>),
+}
+
+/// `${NAME:-}` / `${NAME}` from this process's env (Claude Code expands
+/// `.mcp.json` env the same way).
+fn expand_env(v: &str) -> String {
+    let mut out = String::new();
+    let mut rest = v;
+    while let Some(i) = rest.find("${") {
+        out.push_str(&rest[..i]);
+        let Some(end) = rest[i..].find('}') else {
+            break;
+        };
+        let name = rest[i + 2..i + end].split(":-").next().unwrap_or_default();
+        out.push_str(&fake_io::var(name).unwrap_or_default());
+        rest = &rest[i + end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `system init`'s `mcp_servers`: each `--mcp-config` server "connected"
+/// when its command exists, else "failed", plus one server of the CLI's own
+/// config waiting for a sign-in (`own-docs`, "needs-auth").
+fn init_mcp_servers(config: &str) -> Value {
+    let raw = std::fs::read_to_string(config).unwrap_or_default();
+    let doc: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
+    let mut list: Vec<Value> = doc["mcpServers"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(name, spec)| {
+            let cmd = spec["command"].as_str().unwrap_or_default();
+            let found = std::path::Path::new(cmd).is_file()
+                || fake_io::var("PATH")
+                    .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(cmd).is_file()));
+            json!({"name": name, "status": if found { "connected" } else { "failed" }})
+        })
+        .collect();
+    list.push(json!({"name": "own-docs", "status": "needs-auth"}));
+    Value::Array(list)
+}
+
+/// One stdio MCP call against `server` from the `--mcp-config` document.
+fn mcp_call(config: &str, server: &str, tool: &str, args: Value) -> Result<Value, String> {
+    let raw = std::fs::read_to_string(config).unwrap_or_else(|_| config.to_string());
+    let doc: Value = serde_json::from_str(&raw).map_err(|e| format!("mcp config: {e}"))?;
+    let spec = doc
+        .pointer(&format!("/mcpServers/{server}"))
+        .ok_or_else(|| format!("no MCP server {server}"))?;
+    let argv: Vec<String> = spec["args"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|a| a.as_str().unwrap_or_default().to_string())
+        .collect();
+    let env: Vec<(String, String)> = spec["env"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(k, v)| (k.clone(), expand_env(v.as_str().unwrap_or_default())))
+        .collect();
+    fake_script::mcp_call(
+        spec["command"].as_str().unwrap_or_default(),
+        &argv,
+        &env,
+        tool,
+        args,
+    )
+}
+
+/// What the fake owes later: a background task's completion.
+struct Due {
+    at: Instant,
+    task_id: String,
+    tool_use_id: String,
+    agent: bool,
+    /// A script's verbs after its `background`: the follow-up turn runs them.
+    rest: Option<Turn>,
+}
+
+struct ClaudeWire<'a> {
+    rx: &'a mpsc::Receiver<In>,
+    n: &'a mut u32,
+    dues: &'a mut Vec<Due>,
+    mcp_config: &'a str,
+    session: &'a str,
+    usage: (u64, u64),
+}
+
+impl ClaudeWire<'_> {
+    fn id(&mut self) -> String {
+        *self.n += 1;
+        format!("m{}", self.n)
+    }
+
+    /// The answer to control request `rid` (`Ok`), `Err(true)` when the turn
+    /// was interrupted, `Err(false)` when `until` came first.
+    fn wait_for(&mut self, rid: Option<&str>, until: Option<Instant>) -> Result<Value, bool> {
+        loop {
+            let msg = match until {
+                Some(at) => match self
+                    .rx
+                    .recv_timeout(at.saturating_duration_since(Instant::now()))
+                {
+                    Ok(m) => m,
+                    Err(mpsc::RecvTimeoutError::Timeout) => return Err(false),
+                    Err(mpsc::RecvTimeoutError::Disconnected) => fake_io::exit(0),
+                },
+                None => self.rx.recv().unwrap_or(In::Eof),
+            };
+            let msg = match msg {
+                In::Line(v) => v,
+                In::Eof => fake_io::exit(0),
+                In::McpDone(..) => continue,
+            };
+            match msg.get("type").and_then(Value::as_str) {
+                Some("control_request") => {
+                    let id = msg.get("request_id").cloned().unwrap_or(Value::Null);
+                    out(
+                        json!({"type":"control_response","response":{"subtype":"success","request_id":id,"response":{}}}),
+                    );
+                    if msg.pointer("/request/subtype").and_then(Value::as_str) == Some("interrupt")
+                    {
+                        result_interrupted();
+                        return Err(true);
+                    }
+                }
+                Some("control_response")
+                    if rid.is_some()
+                        && msg.pointer("/response/request_id").and_then(Value::as_str) == rid =>
+                {
+                    return Ok(msg)
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn can_use_tool(&mut self, tool: &str, input: Value) -> Option<Value> {
+        let rid = format!("perm-f{}", self.n);
+        out(
+            json!({"type":"control_request","request_id":rid,"request":{"subtype":"can_use_tool","tool_name":tool,"input":input,"tool_use_id":format!("tu-f{}", self.n)}}),
+        );
+        self.wait_for(Some(&rid), None).ok()
+    }
+}
+
+impl Wire for ClaudeWire<'_> {
+    fn say(&mut self, text: &str) {
+        let id = self.id();
+        text_message(&id, text);
+    }
+
+    fn wait(&mut self, d: Duration) -> bool {
+        self.wait_for(None, Some(Instant::now() + d)) == Err(false)
+    }
+
+    fn ask(&mut self, question: &str) -> Option<String> {
+        let input = json!({"questions": [{"question": question, "header": "Question", "multiSelect": false}]});
+        let m = self.can_use_tool("AskUserQuestion", input)?;
+        let answers = m.pointer("/response/response/updatedInput/answers");
+        Some(
+            answers
+                .and_then(|a| a.get(question).or_else(|| a.as_object()?.values().next()))
+                .and_then(Value::as_str)
+                .unwrap_or("declined")
+                .to_string(),
+        )
+    }
+
+    fn approve(&mut self, tool: &str) -> Option<bool> {
+        let m = self.can_use_tool(tool, json!({"command": "ls"}))?;
+        Some(
+            m.pointer("/response/response/behavior")
+                .and_then(Value::as_str)
+                == Some("allow"),
+        )
+    }
+
+    fn usage(&mut self, input: u64, output: u64) {
+        self.usage = (self.usage.0 + input, self.usage.1 + output);
+    }
+
+    fn fail(&mut self, class: FailClass, message: &str) {
+        let _ = class;
+        out(json!({"type":"result","subtype":"success","is_error":true,"result":message}));
+    }
+
+    fn background(&mut self, after: Duration, rest: Turn) {
+        let mid = self.id();
+        let (tu, task) = (format!("tu{}", self.n), format!("b{}", self.n));
+        out(
+            json!({"type":"assistant","message":{"id":mid,"content":[{"type":"tool_use","id":tu,"name":"Bash","input":{"command":"sleep 300","run_in_background":true}}]},"parent_tool_use_id":null}),
+        );
+        out(
+            json!({"type":"system","subtype":"task_started","task_id":task,"tool_use_id":tu,"description":"sleep 300","task_type":"local_bash"}),
+        );
+        let file = task_output_file(self.session, &task);
+        out(
+            json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":tu,"content":format!("Command running in background with ID: {task}. Output is being written to: {}", file.display())}]},"parent_tool_use_id":null}),
+        );
+        self.say("Working in the background.");
+        self.done();
+        self.dues.push(Due {
+            at: Instant::now() + after,
+            task_id: task,
+            tool_use_id: tu,
+            agent: false,
+            rest: Some(rest),
+        });
+    }
+
+    fn mcp(&mut self, tool: &str, args: Value) -> Result<Value, String> {
+        let mid = self.id();
+        let tu = format!("tu{}", self.n);
+        out(
+            json!({"type":"assistant","message":{"id":mid,"content":[{"type":"tool_use","id":tu,"name":format!("mcp__otto__{tool}"),"input":args}]},"parent_tool_use_id":null}),
+        );
+        let res = mcp_call(self.mcp_config, "otto", tool, args);
+        let (content, is_error) = match &res {
+            Ok(r) => (
+                r["content"].clone(),
+                r["isError"].as_bool().unwrap_or(false),
+            ),
+            Err(e) => (json!([{"type":"text","text":e}]), true),
+        };
+        out(
+            json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":tu,"content":content,"is_error":is_error}]},"parent_tool_use_id":null}),
+        );
+        res
+    }
+
+    fn done(&mut self) {
+        out(
+            json!({"type":"result","subtype":"success","is_error":false,"stop_reason":"end_turn","usage":{"input_tokens":self.usage.0,"output_tokens":self.usage.1}}),
+        );
+        self.usage = (0, 0);
+    }
+}
+
+fn arg_after(args: &[String], flag: &str) -> Option<String> {
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+}
+
+/// `stream <n> <ms>`: `c0 `…`c<n-1> ` as text deltas, one per `<ms>`.
+fn stream_turn(mid: &str, count: usize, ms: u64) {
+    out(
+        json!({"type":"stream_event","event":{"type":"message_start","message":{"id":mid}},"parent_tool_use_id":null}),
+    );
+    out(
+        json!({"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}},"parent_tool_use_id":null}),
+    );
+    let mut all = String::new();
+    for i in 0..count {
+        let d = format!("c{i} ");
+        all.push_str(&d);
+        out(
+            json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":d}},"parent_tool_use_id":null}),
+        );
+        std::thread::sleep(Duration::from_millis(ms));
+    }
+    out(
+        json!({"type":"stream_event","event":{"type":"content_block_stop","index":0},"parent_tool_use_id":null}),
+    );
+    out(
+        json!({"type":"assistant","message":{"id":mid,"content":[{"type":"text","text":all}]},"parent_tool_use_id":null}),
+    );
+    result_ok();
+}
+
+/// `gated <dir>`: a turn that streams in steps the test releases by files in `<dir>`.
+fn gated_turn(gate_dir: &str, mid: &str) {
+    let gate = std::path::Path::new(gate_dir);
+    let _ = std::fs::write(gate.join("pid_turn1"), fake_io::pid().to_string());
+    out(
+        json!({"type":"stream_event","event":{"type":"message_start","message":{"id":mid}},"parent_tool_use_id":null}),
+    );
+    out(
+        json!({"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}},"parent_tool_use_id":null}),
+    );
+    stream_delta(0, "alpha beta ");
+    let _ = std::fs::write(gate.join("phase1_ready"), b"1");
+    if !wait_for_file(&gate.join("emit_gap")) {
+        fake_io::exit(2);
+    }
+    stream_delta(0, "gamma ");
+    let _ = std::fs::write(gate.join("gap_emitted"), b"1");
+    if !wait_for_file(&gate.join("finish_turn")) {
+        fake_io::exit(2);
+    }
+    stream_delta(0, "delta");
+    out(
+        json!({"type":"stream_event","event":{"type":"content_block_stop","index":0},"parent_tool_use_id":null}),
+    );
+    out(
+        json!({"type":"assistant","message":{"id":mid,"content":[{"type":"text","text":"alpha beta gamma delta"}]},"parent_tool_use_id":null}),
+    );
+    result_ok();
+}
+
+pub fn main() {
+    fake_script::log_start();
+    let cfg = fake_script::Config::from_env("claude", &[]);
+    let cwd = fake_io::cwd();
+    let args: Vec<String> = fake_io::args().into_iter().collect();
+    let mut mode = arg_after(&args, "--permission-mode").unwrap_or_default();
+    let mut cost = 0.0f64;
+    let store = &fake_io::cwd().join(".fake-claude");
+    let session = match arg_after(&args, "--resume") {
+        Some(id) => {
+            if !store.join(&id).exists() {
+                eprintln!("No conversation found with session ID: {id}");
+                fake_io::exit(1);
+            }
+            if std::fs::remove_file(store.join(format!("{id}.flaky"))).is_ok() {
+                eprintln!("API Error: Connection error.");
+                fake_io::exit(1);
+            }
+            id
+        }
+        None => {
+            let id = arg_after(&args, "--session-id").unwrap_or_else(|| "fake-session".into());
+            let _ = std::fs::create_dir_all(store);
+            let _ = std::fs::write(store.join(&id), b"");
+            id
+        }
+    };
+    let mcp_config = arg_after(&args, "--mcp-config").unwrap_or_default();
+    let (tx, rx) = mpsc::channel::<In>();
+    let mcp_tx = tx.clone();
+    let lines = fake_io::stdin_lines();
+    fake_io::spawn(move || {
+        for line in lines {
+            if let Ok(v) = serde_json::from_str::<Value>(&line) {
+                let _ = tx.send(In::Line(v));
+            }
+        }
+        let _ = tx.send(In::Eof);
+    });
+    let mut dues: Vec<Due> = Vec::new();
+    let mut n = 0u32;
+    // A turn that waits: (until, steerable) — `None` until = until interrupted.
+    let mut waiting: Option<(Option<Instant>, bool)> = None;
+    // The `can_use_tool` request an `ask` turn waits on.
+    let mut asking: Option<String> = None;
+    loop {
+        let next_due = dues.iter().map(|d| d.at).min();
+        let wake = [next_due, waiting.and_then(|w| w.0)]
+            .into_iter()
+            .flatten()
+            .min();
+        let msg = match wake {
+            Some(at) => match rx.recv_timeout(at.saturating_duration_since(Instant::now())) {
+                Ok(m) => Some(m),
+                Err(mpsc::RecvTimeoutError::Timeout) => None,
+                Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            },
+            None => match rx.recv() {
+                Ok(m) => Some(m),
+                Err(_) => return,
+            },
+        };
+        let now = Instant::now();
+        let Some(msg) = msg else {
+            if let Some((Some(until), _)) = waiting {
+                if until <= now {
+                    waiting = None;
+                    result_ok();
+                    continue;
+                }
+            }
+            if waiting.is_some() {
+                continue; // a background completion waits for the turn
+            }
+            if let Some(i) = dues.iter().position(|d| d.at <= now) {
+                let d = dues.remove(i);
+                out(
+                    json!({"type":"system","subtype":"task_notification","task_id":d.task_id,
+                    "tool_use_id":d.tool_use_id,"status":"completed","output_file":"",
+                    "summary": if d.agent { "Found 2 open PRs" } else { "exit 0" }}),
+                );
+                if let Some(mut rest) = d.rest {
+                    // The script's follow-up turn: the verbs after `background`.
+                    let mut wire = ClaudeWire {
+                        rx: &rx,
+                        n: &mut n,
+                        dues: &mut dues,
+                        mcp_config: &mcp_config,
+                        session: &session,
+                        usage: (0, 0),
+                    };
+                    wire.say("Background done: ok");
+                    rest.resumed(*wire.n);
+                    fake_script::drive(rest, &mut wire);
+                    continue;
+                }
+                // The notification reaches the model: a turn of its own.
+                n += 1;
+                let reply = if d.agent {
+                    "Agent reported"
+                } else {
+                    "Background done: ok"
+                };
+                text_message(&format!("m{n}"), reply);
+                // It lasts a moment (a message sent meanwhile must wait).
+                waiting = Some((Some(Instant::now() + Duration::from_millis(800)), false));
+            }
+            continue;
+        };
+        let msg = match msg {
+            In::Line(v) => v,
+            In::Eof => return,
+            In::McpDone(tu, res) => {
+                waiting = None;
+                let (content, is_error) = match res {
+                    Ok(r) => (
+                        r["content"].clone(),
+                        r["isError"].as_bool().unwrap_or(false),
+                    ),
+                    Err(e) => (json!([{"type":"text","text":e}]), true),
+                };
+                out(
+                    json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":tu,"content":content,"is_error":is_error}]},"parent_tool_use_id":null}),
+                );
+                n += 1;
+                text_message(&format!("m{n}"), "mcp done");
+                result_ok();
+                continue;
+            }
+        };
+        match msg.get("type").and_then(Value::as_str) {
+            Some("control_response")
+                if asking.is_some()
+                    && msg.pointer("/response/request_id").and_then(Value::as_str)
+                        == asking.as_deref() =>
+            {
+                asking = None;
+                let allow = msg
+                    .pointer("/response/response/behavior")
+                    .and_then(Value::as_str)
+                    == Some("allow");
+                n += 1;
+                text_message(&format!("m{n}"), if allow { "allowed" } else { "denied" });
+                result_ok();
+            }
+            Some("control_request") => {
+                let rid = msg.get("request_id").cloned().unwrap_or(Value::Null);
+                let sub = msg.pointer("/request/subtype").and_then(Value::as_str);
+                if sub == Some("set_permission_mode") {
+                    mode = msg
+                        .pointer("/request/mode")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                }
+                // `initialize` lists its slash commands, as Claude Code does.
+                let body = if sub == Some("initialize") {
+                    json!({"commands": [
+                        {"name": "review", "description": "Review the current changes", "argumentHint": "[focus]"},
+                        {"name": "compact", "description": "Clear history but keep a summary", "argumentHint": ""}
+                    ]})
+                } else {
+                    json!({})
+                };
+                out(
+                    json!({"type":"control_response","response":{"subtype":"success","request_id":rid,"response":body}}),
+                );
+                if sub == Some("initialize") {
+                    out(
+                        json!({"type":"system","subtype":"init","session_id":session,"model":"fake-claude","mcp_servers":init_mcp_servers(&mcp_config)}),
+                    );
+                }
+                if sub == Some("interrupt") && waiting.take().is_some() {
+                    result_interrupted();
+                }
+                // `stop_task`: the background task is killed at once.
+                if sub == Some("stop_task") {
+                    let task = msg.pointer("/request/task_id").and_then(Value::as_str);
+                    if let Some(i) = dues.iter().position(|d| Some(d.task_id.as_str()) == task) {
+                        let d = dues.remove(i);
+                        out(
+                            json!({"type":"system","subtype":"task_notification","task_id":d.task_id,
+                            "tool_use_id":d.tool_use_id,"status":"killed","output_file":"","summary":"stopped"}),
+                        );
+                    }
+                }
+            }
+            Some("user") => {
+                let text = user_text(&msg);
+                // Otto's delegation rules ride a thread's first prompt (runtime::delegation).
+                let text = match text.split_once("</otto_instructions>\n\n") {
+                    Some((_, t)) => t.to_string(),
+                    None => text,
+                };
+                // A subagent's task header (runtime::delegation): act on the task.
+                let text = match text.split_once("]\n\n") {
+                    Some((h, t)) if h.starts_with("[Subagent task from thread ") => t.to_string(),
+                    _ => text,
+                };
+                n += 1;
+                let mid = format!("m{n}");
+                if let Some((_, steerable)) = waiting {
+                    if steerable {
+                        text_message(&mid, &format!("steered: {text}"));
+                    }
+                    continue;
+                }
+                if fake_draft(&mid, &text) {
+                    continue;
+                }
+                if let Some(script) = Turn::start(&text, &cwd, &session, n, &cfg) {
+                    let mut wire = ClaudeWire {
+                        rx: &rx,
+                        n: &mut n,
+                        dues: &mut dues,
+                        mcp_config: &mcp_config,
+                        session: &session,
+                        usage: (0, 0),
+                    };
+                    fake_script::drive(script, &mut wire);
+                    continue;
+                }
+                if let Some(gate_dir) = text.strip_prefix("gated ").map(str::trim) {
+                    gated_turn(gate_dir, &mid);
+                    continue;
+                }
+                if let Some(pid_path) = text.strip_prefix("pid ").map(str::trim) {
+                    let _ = std::fs::write(pid_path, fake_io::pid().to_string());
+                    text_message(&mid, "second-turn-ok");
+                    result_ok();
+                    continue;
+                }
+                let mut words = text.split_whitespace();
+                let cmd = words.next().unwrap_or_default();
+                let secs: f64 = words.next().and_then(|w| w.parse().ok()).unwrap_or(1.0);
+                let later = now + Duration::from_secs_f64(secs);
+                match cmd {
+                    "bg" => {
+                        let (tu, task) = (format!("tu{n}"), format!("b{n}"));
+                        out(
+                            json!({"type":"assistant","message":{"id":mid,"content":[{"type":"tool_use","id":tu,"name":"Bash","input":{"command":"sleep 300","run_in_background":true}}]},"parent_tool_use_id":null}),
+                        );
+                        out(
+                            json!({"type":"system","subtype":"task_started","task_id":task,"tool_use_id":tu,"description":"sleep 300","task_type":"local_bash"}),
+                        );
+                        // Where Claude Code writes it (the daemon reads it back).
+                        let file = task_output_file(&session, &task);
+                        out(
+                            json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":tu,"content":format!("Command running in background with ID: {task}. Output is being written to: {}", file.display())}]},"parent_tool_use_id":null}),
+                        );
+                        text_message(&format!("{mid}b"), "Waiting for it.");
+                        result_ok();
+                        dues.push(Due {
+                            at: later,
+                            task_id: task,
+                            tool_use_id: tu,
+                            agent: false,
+                            rest: None,
+                        });
+                    }
+                    "agent" => {
+                        let (tu, task) = (format!("tu{n}"), format!("a{n}"));
+                        out(
+                            json!({"type":"assistant","message":{"id":mid,"content":[{"type":"tool_use","id":tu,"name":"Agent","input":{"description":"PR sweep","prompt":"Sweep the open PRs","subagent_type":"general-purpose","run_in_background":true}}]},"parent_tool_use_id":null}),
+                        );
+                        out(
+                            json!({"type":"system","subtype":"task_started","task_id":task,"tool_use_id":tu,"description":"PR sweep","task_type":"local_agent","subagent_type":"general-purpose","is_backgrounded":true}),
+                        );
+                        out(
+                            json!({"type":"assistant","message":{"id":format!("{mid}s"),"content":[{"type":"text","text":"Looking at PRs"},{"type":"tool_use","id":format!("{tu}r"),"name":"Read","input":{"file_path":"/w/README.md"}}]},"parent_tool_use_id":tu}),
+                        );
+                        out(
+                            json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":format!("{tu}r"),"content":"# readme"}]},"parent_tool_use_id":tu}),
+                        );
+                        out(
+                            json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":tu,"content":"Async agent launched successfully. agentId: x1 (internal ID)"}]},"parent_tool_use_id":null}),
+                        );
+                        text_message(
+                            &format!("{mid}b"),
+                            "I'm waiting for the PR sweep to come back.",
+                        );
+                        result_ok();
+                        dues.push(Due {
+                            at: later,
+                            task_id: task,
+                            tool_use_id: tu,
+                            agent: true,
+                            rest: None,
+                        });
+                    }
+                    "stream" => {
+                        let count: usize = secs as usize;
+                        let ms: u64 = words.next().and_then(|w| w.parse().ok()).unwrap_or(0);
+                        stream_turn(&mid, count, ms);
+                    }
+                    "ask" => {
+                        let rid = format!("perm-{n}");
+                        out(
+                            json!({"type":"control_request","request_id":rid,"request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"},"tool_use_id":format!("tu{n}")}}),
+                        );
+                        asking = Some(rid);
+                    }
+                    "slow" => {
+                        text_message(&mid, "Working…");
+                        waiting = Some((Some(later), true));
+                    }
+                    "silent" => {
+                        waiting = Some((None, false));
+                    }
+                    "retrying" => {
+                        fake_io::spawn(move || {
+                            let mut attempt = 0;
+                            while Instant::now() < later {
+                                attempt += 1;
+                                out(
+                                    json!({"type":"system","subtype":"api_retry","attempt":attempt,"max_retries":10,"retry_delay_ms":200,"error_status":529,"error":"overloaded"}),
+                                );
+                                std::thread::sleep(Duration::from_millis(200));
+                            }
+                        });
+                        waiting = Some((None, false));
+                    }
+                    "escape" => {
+                        use std::os::unix::process::CommandExt;
+                        use std::process::{Command, Stdio};
+                        if let Ok(job) = Command::new("sleep")
+                            .arg("600")
+                            .process_group(0)
+                            .stdin(Stdio::null())
+                            .stdout(Stdio::null())
+                            .stderr(Stdio::null())
+                            .spawn()
+                        {
+                            let _ = std::fs::write(store.join("escaped.pid"), job.id().to_string());
+                        }
+                        text_message(&mid, &format!("echo: {text}"));
+                        result_ok();
+                    }
+                    "mcp" => {
+                        let mut parts = text.splitn(4, ' ').skip(1);
+                        let server = parts.next().unwrap_or_default().to_string();
+                        let tool = parts.next().unwrap_or_default().to_string();
+                        let args: Value = parts
+                            .next()
+                            .and_then(|a| serde_json::from_str(a).ok())
+                            .unwrap_or_else(|| json!({}));
+                        let tu = format!("tu{n}");
+                        out(
+                            json!({"type":"assistant","message":{"id":mid,"content":[{"type":"tool_use","id":tu,"name":format!("mcp__{server}__{tool}"),"input":args}]},"parent_tool_use_id":null}),
+                        );
+                        let (config, done) = (mcp_config.clone(), mcp_tx.clone());
+                        fake_io::spawn(move || {
+                            let res = mcp_call(&config, &server, &tool, args);
+                            let _ = done.send(In::McpDone(tu, res));
+                        });
+                        waiting = Some((None, false));
+                    }
+                    // `mode`: the permission mode it runs in (plan, default…).
+                    "mode" => {
+                        text_message(&mid, &format!("mode: {mode}"));
+                        result_ok();
+                    }
+                    _ => {
+                        text_message(&mid, &format!("echo: {text}"));
+                        // Claude Code sums the process's cost on every result.
+                        cost += 0.0125;
+                        out(
+                            json!({"type":"result","subtype":"success","is_error":false,"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1},"total_cost_usd":cost}),
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}

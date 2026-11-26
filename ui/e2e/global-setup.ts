@@ -78,11 +78,20 @@ export default async function globalSetup(_config: FullConfig): Promise<void> {
   // `slow <s>` and `silent`.
   const fakeClaude = join(dirname(OTTOD), 'otto-fake-claude');
   // The ACP agents with a stand-in here (`gemini --acp`, `agy acp`, `grok …
-  // agent stdio`) get `otto-fake-agent`: echo, `ask` (a
-  // permission request), `hang` (Stop), `plan`, and two slash commands. It
-  // has no steer, like every ACP agent but Grok's interject.
+  // agent stdio`, `opencode acp`, `muse acp`) get `otto-fake-agent`: echo,
+  // `ask` (a permission request), `hang` (Stop), `plan`, and two slash
+  // commands. It has no steer, like every ACP agent but Grok's interject.
   const fakeAcp = join(dirname(OTTOD), 'otto-fake-agent');
-  const ACP = ['agy', 'gemini', 'grok'];
+  const ACP = ['agy', 'gemini', 'grok', 'opencode', 'muse'];
+  // Every fake also acts out the `OTTO_FAKE:` step scripts
+  // (crates/otto-agent-protocol/src/fake_script.rs); the daemon inherits this
+  // process's env, so `OTTO_FAKE_*` reach them. CI sets
+  // OTTO_E2E_REQUIRE_FAKES=1: a missing fake fails here instead of every
+  // runtime spec hanging on the `exec cat` stand-in.
+  const missing = [fakeCodex, fakeClaude, fakeAcp].filter((f) => !existsSync(f));
+  if (process.env.OTTO_E2E_REQUIRE_FAKES === '1' && missing.length) {
+    throw new Error(`[e2e] OTTO_E2E_REQUIRE_FAKES=1 but the fake agents are missing: ${missing.join(', ')} (build them with cargo build -p otto-agent-protocol --bins)`);
+  }
   for (const cli of ['claude', 'codex', ...ACP]) {
     const shim = join(fakeBin, cli);
     const runtime =
