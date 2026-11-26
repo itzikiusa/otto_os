@@ -39,7 +39,9 @@ async fn post_fixture(posting: u16) -> Post {
         assert!(ok.success());
     }
     let forge = MockServer::start().await;
-    f.ctx.secrets.put("gl-post", "glpat-test").unwrap();
+    otto_core::secrets::put_async(&f.ctx.secrets, "gl-post", "glpat-test")
+        .await
+        .unwrap();
     let account = f
         .ctx
         .git_store

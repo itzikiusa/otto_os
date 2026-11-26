@@ -106,7 +106,9 @@ async fn checkout() -> Checkout {
         ],
     );
     let forge = MockServer::start().await;
-    f.ctx.secrets.put("gl-checkout", "glpat-test").unwrap();
+    otto_core::secrets::put_async(&f.ctx.secrets, "gl-checkout", "glpat-test")
+        .await
+        .unwrap();
     let account = f
         .ctx
         .git_store
