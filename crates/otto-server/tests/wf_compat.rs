@@ -400,10 +400,41 @@ fn describe(
     s: &Scenario,
 ) -> Value {
     let ctx_dir = h.data.join("workflow-context").join(&run.id);
+    // New beside today's files (DR-201): the starting message's files are
+    // copied into the run's context dir. Asserted here, left out of the
+    // Phase-0 listing.
+    let attached = otto_workflows::attachments::read(&ctx_dir);
+    if s.slack_files {
+        let got: Vec<(&str, Option<&str>, bool)> = attached
+            .iter()
+            .map(|a| (a.name.as_str(), a.path.as_deref(), a.error.is_some()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("lorem.txt", Some("attachments/lorem.txt"), false),
+                ("ipsum.pdf", None, true),
+            ]
+        );
+        assert_eq!(
+            std::fs::read(ctx_dir.join("attachments/lorem.txt")).unwrap(),
+            b"lorem ipsum\n",
+            "the run keeps its own copy of the file"
+        );
+    } else {
+        assert!(attached.is_empty(), "{attached:?}");
+    }
     let mut files = BTreeMap::new();
     if let Ok(entries) = std::fs::read_dir(&ctx_dir) {
         for e in entries.flatten() {
             let name = e.file_name().to_string_lossy().into_owned();
+            if matches!(
+                name.as_str(),
+                otto_workflows::attachments::ATTACHMENTS_DIR
+                    | otto_workflows::attachments::ATTACHMENTS_FILE
+            ) {
+                continue;
+            }
             files.insert(
                 name,
                 Value::String(std::fs::read_to_string(e.path()).unwrap_or_default()),
