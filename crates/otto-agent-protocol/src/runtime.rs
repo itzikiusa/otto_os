@@ -23,6 +23,7 @@ mod children;
 mod client_calls;
 pub mod council;
 mod delegation;
+mod digest;
 mod drain;
 mod family;
 pub use secret_request::{answer_secret_request, pending_secret_requests};
@@ -39,6 +40,7 @@ mod peers;
 mod provider_lists;
 mod reopen;
 mod request_ids;
+mod retention;
 mod secret_request;
 mod selection;
 mod swarm_resume;
@@ -49,9 +51,12 @@ pub use admission::{HANDSHAKE_TIMEOUT, MAX_QUEUED_BYTES, MAX_QUEUED_PROMPTS};
 pub use archive::settle_archived_entity_json;
 pub use loop_guard::{AGENT_HOPS_MAX, PAUSED_ERROR, PAUSED_NOTICE, PAUSED_QUEUED};
 use request_ids::RequestIds;
+pub use retention::{retain_stamp, RETAIN_UNTIL_KEY};
 pub use selection::check_effort;
 pub use task_stop::{TaskStopAllResp, TaskStopEntry, TaskStopOutcome, TaskStopResp};
-pub use unattended::{Ended, SettledTurn, TurnOpts, AUTO_TURN_GRACE, BACKGROUND_LIMIT};
+pub use unattended::{
+    Ended, SettledTurn, TurnOpts, AUTO_TURN_GRACE, BACKGROUND_LIMIT, RESUME_REFUSED,
+};
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -2015,6 +2020,10 @@ impl AgentRuntime {
             if self.wait_started(live).await {
                 return Ok(());
             }
+        }
+        // An engine thread never forgets silently: its step fails instead.
+        if otto_core::agent_runtime::is_engine_thread(live.lock().session.meta.as_ref()) {
+            return Err(Error::Invalid(unattended::RESUME_REFUSED.into()));
         }
         // Keep the old key until the fresh thread is up.
         live.lock().session.native_thread_id = None;

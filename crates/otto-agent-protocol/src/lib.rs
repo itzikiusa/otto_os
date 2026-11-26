@@ -37,6 +37,7 @@ pub mod ring;
 pub mod runtime;
 #[cfg(any(test, feature = "test-util"))]
 pub mod scripted;
+pub mod step_runner;
 mod tool_images;
 #[cfg(test)]
 mod tool_images_tests;

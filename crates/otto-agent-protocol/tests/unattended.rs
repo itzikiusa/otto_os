@@ -113,6 +113,7 @@ impl Rig {
             env: vec![
                 ("OTTO_FAKE_STATE_DIR".into(), path("state")),
                 ("CLAUDE_CODE_TMPDIR".into(), path("claude-tmp")),
+                ("OTTO_FAKE_ARGV_LOG".into(), path("argv.log")),
             ],
             events: Mutex::default(),
         });
@@ -509,5 +510,332 @@ async fn a_restart_that_cut_the_turn_ends_the_wait_as_server_restart() {
         .await
         .unwrap();
     assert_eq!(out.ended, Ended::Settled);
+    rt.shutdown().await;
+}
+
+// ---- ThreadStepRunner (runtime.md §1.5–§1.9) --------------------------------
+
+use otto_agent_protocol::step_runner::{
+    NoStepHost, StepHost, ThreadStepRunner, CONTINUE_AFTER_LIMIT,
+};
+use otto_agent_run::step::{StepErrorClass, StepOutcome, StepRunner, StepTurn};
+
+impl Rig {
+    fn runner(&self) -> ThreadStepRunner {
+        ThreadStepRunner::new(self.rt.clone(), Arc::new(NoStepHost))
+    }
+
+    fn turn(&self, provider: &str, prompt: &str) -> StepTurn {
+        StepTurn {
+            user_id: "u1".into(),
+            workspace_id: "w1".into(),
+            provider: provider.into(),
+            model: None,
+            effort: None,
+            cwd: self.root.clone(),
+            title: "WF test · step · run abc123".into(),
+            meta: json!({"source": "workflow", "run_id": "r1", "node_id": "n1"}),
+            prompt: prompt.into(),
+            continue_thread: None,
+            handoff: None,
+            read_only: false,
+            timeout: None,
+            no_progress: None,
+        }
+    }
+
+    fn starts(&self) -> usize {
+        std::fs::read_to_string(self.root.join("argv.log"))
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| l.contains("\"argv\""))
+            .count()
+    }
+}
+
+fn fake(verbs: &[&str]) -> String {
+    verbs.iter().map(|v| format!("OTTO_FAKE: {v}\n")).collect()
+}
+
+async fn run(runner: &ThreadStepRunner, t: StepTurn) -> (StepOutcome, Vec<StepEvent>) {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let out = runner.run(t, tx, CancelSignal::new()).await.unwrap();
+    let mut evs = Vec::new();
+    while let Ok(e) = rx.try_recv() {
+        evs.push(e);
+    }
+    (out, evs)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_step_runs_in_order_and_a_missing_handoff_gets_one_nudge() {
+    let rig = Rig::new(false).await;
+    let runner = rig.runner();
+    let handoff = rig.root.join("step1-a.md");
+    let mut t = rig.turn("claude", &fake(&["usage 10 5", "reply looked around"]));
+    t.handoff = Some(handoff.clone());
+    let (out, evs) = run(&runner, t.clone()).await;
+    assert!(
+        matches!(
+            &evs[0],
+            StepEvent::Started {
+                start_ordinal: 0,
+                ..
+            }
+        ),
+        "{evs:?}"
+    );
+    assert_eq!(evs[1], StepEvent::Working);
+    assert!(evs.contains(&StepEvent::Finishing), "{evs:?}");
+    assert_eq!(out.error, None);
+    assert_eq!(out.turns, 2, "the step's turn and exactly one nudge");
+    assert!(!out.handoff_written);
+    assert!(
+        out.reply.starts_with("echo: You did not write"),
+        "{}",
+        out.reply
+    );
+    assert_eq!(out.usage.input_tokens, 10);
+    let digest = out.digest.unwrap();
+    assert_eq!(digest.turns, 2);
+    assert!(serde_json::to_vec(&digest).unwrap().len() <= 8 * 1024);
+    // Written in the first turn: no nudge.
+    t.prompt = fake(&[
+        &format!("write {} the summary", handoff.display()),
+        "reply done",
+    ]);
+    let (out, _) = run(&runner, t).await;
+    assert_eq!((out.turns, out.handoff_written), (1, true));
+    assert_eq!(out.reply, "done");
+    rig.rt.shutdown().await;
+}
+
+/// `continue_from`: the same warm process, a closed thread reopened, a
+/// released one respawned with resume; a deleted one or another provider
+/// is refused with `spawn`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn continuing_an_earlier_steps_thread() {
+    let rig = Rig::new(true).await;
+    let runner = rig.runner();
+    let (first, _) = run(
+        &runner,
+        rig.turn("claude", &fake(&["remember blue", "reply one"])),
+    )
+    .await;
+    assert_eq!(first.error, None);
+    let starts = rig.starts();
+    let mut next = rig.turn("claude", &fake(&["recall", "reply two"]));
+    next.continue_thread = Some(first.thread_id.clone());
+    let (out, evs) = run(&runner, next.clone()).await;
+    assert_eq!(out.thread_id, first.thread_id);
+    assert!(
+        matches!(
+            &evs[0],
+            StepEvent::Started {
+                start_ordinal: 1,
+                ..
+            }
+        ),
+        "{evs:?}"
+    );
+    assert_eq!(out.turns, 1);
+    assert_eq!(rig.starts(), starts, "the warm process, no second spawn");
+    // Released between steps: the next turn respawns, resuming the conversation.
+    runner.release_process(&first.thread_id).await;
+    let (out, _) = run(&runner, next.clone()).await;
+    assert_eq!(out.error, None, "{:?}", out.error);
+    assert_eq!(rig.starts(), starts + 1);
+    // Closed but retained: reopened first.
+    runner
+        .close(&first.thread_id, Utc::now() + chrono::TimeDelta::hours(1))
+        .await;
+    let (out, _) = run(&runner, next.clone()).await;
+    assert_eq!(out.error, None, "{:?}", out.error);
+    // Another provider.
+    let mut other = next.clone();
+    other.provider = "codex".into();
+    let (out, _) = run(&runner, other).await;
+    assert_eq!(out.error.unwrap().class, StepErrorClass::Spawn);
+    // Deleted by retention.
+    runner.delete(&first.thread_id).await;
+    let (out, _) = run(&runner, next).await;
+    let e = out.error.unwrap();
+    assert_eq!(e.class, StepErrorClass::Spawn);
+    assert!(e.message.contains("deleted by retention"), "{}", e.message);
+    rig.rt.shutdown().await;
+}
+
+struct ResetsSoon(chrono::DateTime<Utc>);
+
+#[async_trait::async_trait]
+impl StepHost for ResetsSoon {
+    async fn admit(
+        &self,
+        _: &str,
+        _: &str,
+        on_wait: &(dyn Fn(otto_core::agent_runtime::WaitReason) + Send + Sync),
+    ) -> Box<dyn Send> {
+        on_wait(otto_core::agent_runtime::WaitReason {
+            code: "slots".into(),
+            text: "Waiting for a free agent slot — 1 ahead in line".into(),
+            since: Utc::now(),
+            detail: None,
+        });
+        Box::new(())
+    }
+    async fn usage_resets_at(
+        &self,
+        _: &str,
+        _: &serde_json::Value,
+    ) -> Option<chrono::DateTime<Utc>> {
+        Some(self.0)
+    }
+}
+
+/// A plan limit whose reset Otto knows parks the step and continues the same
+/// thread at the reset; without one the step fails as `usage_limit`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_usage_limit_with_a_known_reset_waits_and_continues_the_same_thread() {
+    let rig = Rig::new(false).await;
+    let t = rig.turn("claude", &fake(&["fail usage_limit"]));
+    let (out, _) = run(&rig.runner(), t.clone()).await;
+    assert_eq!(out.error.unwrap().class, StepErrorClass::UsageLimit);
+    let at = Utc::now() + chrono::TimeDelta::seconds(2);
+    let runner = ThreadStepRunner::new(rig.rt.clone(), Arc::new(ResetsSoon(at)));
+    let started = Instant::now();
+    let (out, evs) = run(&runner, t).await;
+    assert!(started.elapsed() >= Duration::from_millis(1500));
+    assert!(
+        matches!(&evs[0], StepEvent::Waiting(w) if w.code == "slots"),
+        "{evs:?}"
+    );
+    let limit = evs.iter().find_map(|e| match e {
+        StepEvent::NeedsYou(a) if a.kind == AttentionKind::UsageLimit => Some(a.clone()),
+        _ => None,
+    });
+    assert_eq!(limit.unwrap().resets_at, Some(at));
+    assert!(evs.iter().any(|e| matches!(e, StepEvent::Resumed { .. })));
+    assert_eq!(out.error, None, "{:?}", out.error);
+    assert_eq!(out.turns, 2);
+    assert_eq!(out.reply, format!("echo: {CONTINUE_AFTER_LIMIT}"));
+    rig.rt.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_step_timeout_while_an_approval_waits_names_it() {
+    let rig = Rig::new(false).await;
+    let mut t = rig.turn("claude", &fake(&["approve git push --force"]));
+    t.timeout = Some(Duration::from_millis(800));
+    let (out, evs) = run(&rig.runner(), t).await;
+    assert!(evs.iter().any(|e| matches!(e, StepEvent::NeedsYou(_))));
+    let e = out.error.unwrap();
+    assert_eq!(e.class, StepErrorClass::Timeout);
+    assert!(e.message.contains("git push --force"), "{}", e.message);
+    rig.rt.shutdown().await;
+}
+
+/// Close stamps `retain_until` on the step and its sub-threads; the run's
+/// end moves it; the sweep deletes closed threads past it and nothing else.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn retention_stamps_closes_and_sweeps_only_what_is_due() {
+    let rig = Rig::new(false).await;
+    let runner = rig.runner();
+    let (step, _) = run(&runner, rig.turn("claude", &fake(&["reply ok"]))).await;
+    let open = OpenPeerReq {
+        provider: RuntimeProvider::Codex,
+        prompt: Some("OTTO_FAKE: reply sub".into()),
+        title: None,
+        model: None,
+        effort: None,
+        cwd: None,
+        meta: None,
+    };
+    let sub = rig.rt.open_peer(&step.thread_id, open).await.unwrap();
+    let person = rig.thread(RuntimeProvider::Claude).await;
+    rig.rt.close(&person).await.unwrap();
+    let soon = Utc::now() + chrono::TimeDelta::minutes(5);
+    runner.close(&step.thread_id, soon).await;
+    for id in [&step.thread_id, &sub.id] {
+        let s = rig.rt.get(id).await.unwrap();
+        assert_eq!(
+            s.status,
+            otto_core::agent_runtime::RuntimeSessionStatus::Closed,
+            "{id}"
+        );
+        assert_eq!(
+            s.meta.unwrap()["retain_until"],
+            otto_agent_protocol::runtime::retain_stamp(soon)
+        );
+    }
+    assert_eq!(rig.rt.sweep_retained(Utc::now()).await.unwrap(), 0);
+    // The run failed: kept longer. Unknown ids are skipped.
+    let later = soon + chrono::TimeDelta::days(7);
+    runner
+        .set_retain_until(&[step.thread_id.clone(), "gone".into()], later)
+        .await;
+    assert_eq!(
+        rig.rt
+            .sweep_retained(soon + chrono::TimeDelta::hours(1))
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        rig.rt
+            .sweep_retained(later + chrono::TimeDelta::seconds(1))
+            .await
+            .unwrap(),
+        2
+    );
+    assert!(rig.rt.get(&step.thread_id).await.is_err());
+    assert!(rig.rt.get(&sub.id).await.is_err());
+    assert!(
+        rig.rt.get(&person).await.is_ok(),
+        "a person's thread has no date"
+    );
+    rig.rt.shutdown().await;
+}
+
+/// After a restart that cut an unheld step's turn, `resume` tells the agent
+/// and finishes on the same thread; usage counts every turn of the step.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn resume_after_a_restart_finishes_the_step_on_the_same_thread() {
+    let rig = Rig::new(false).await;
+    let runner = rig.runner();
+    let t = rig.turn("claude", &fake(&["usage 7 3", "sleep 20000"]));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let r2 = rig.runner();
+    let t2 = t.clone();
+    let task = tokio::spawn(async move { r2.run(t2, tx, CancelSignal::new()).await });
+    let (id, start) = loop {
+        match rx.recv().await {
+            Some(StepEvent::Started {
+                thread_id,
+                start_ordinal,
+            }) => break (thread_id, start_ordinal),
+            Some(_) => continue,
+            None => panic!("no start"),
+        }
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    rig.rt.shutdown().await;
+    task.abort();
+    drop(runner);
+    let rt = Rig::runtime(&rig.pool, &rig.host, &rig.drivers, &rig.root);
+    rt.recover().await.unwrap();
+    let runner = ThreadStepRunner::new(rt.clone(), Arc::new(NoStepHost));
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let out = runner
+        .resume(&id, start, &t, tx, CancelSignal::new())
+        .await
+        .unwrap();
+    assert_eq!(out.error, None, "{:?}", out.error);
+    assert_eq!(out.thread_id, id);
+    assert_eq!(out.turns, 2, "the cut turn and the restart turn");
+    assert!(
+        out.reply.starts_with("echo: Otto restarted"),
+        "{}",
+        out.reply
+    );
     rt.shutdown().await;
 }

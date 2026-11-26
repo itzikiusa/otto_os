@@ -24,6 +24,9 @@ use super::*;
 /// How long a thread whose background work ended may take to start the
 /// agent's own follow-up turn before it counts as settled.
 pub const AUTO_TURN_GRACE: Duration = Duration::from_secs(10);
+/// An engine thread's provider could not resume its conversation: the step
+/// fails rather than going on with an agent that remembers nothing.
+pub const RESUME_REFUSED: &str = "the agent could not resume its earlier conversation";
 /// Background work a settled step may still wait on, at most.
 pub const BACKGROUND_LIMIT: Duration = Duration::from_secs(45 * 60);
 
@@ -609,6 +612,19 @@ impl AgentRuntime {
             });
         }
         out
+    }
+
+    /// The thread's latest turn ordinal (a new turn gets the next one).
+    pub async fn turn_ordinal(&self, id: &Id) -> Result<u32> {
+        Ok(self.live(id).await?.lock().proj.next_turn_ordinal)
+    }
+
+    /// What the turns above `since` did, as they are now (no wait).
+    pub async fn settled_since(&self, id: &Id, since: u32) -> Result<SettledTurn> {
+        let live = self.live(id).await?;
+        let mut out = self.settled_turn(&live, since, Ended::Settled);
+        out.sub_threads = self.sub_thread_use(id).await;
+        Ok(out)
     }
 
     /// Stop a thread's agent process now (as the idle release does), leaving
