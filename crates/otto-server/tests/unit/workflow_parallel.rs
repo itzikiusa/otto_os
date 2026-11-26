@@ -690,7 +690,7 @@ impl otto_agent_run::step::StepRunner for NoResetRunner {
     ) -> Result<otto_agent_run::step::StepOutcome> {
         use otto_agent_run::step::{StepError, StepErrorClass, StepOutcome};
         let n = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let thread_id: Id = format!("th-{n}").into();
+        let thread_id: Id = format!("th-{n}");
         let _ = ev.send(otto_agent_run::step::StepEvent::Started {
             thread_id: thread_id.clone(),
             start_ordinal: 0,
