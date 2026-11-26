@@ -93,6 +93,8 @@
     agentChat?: string;
     hostCommands?: RuntimeHostCommands;
     compact?: boolean;
+    /** No composer: another feature drives this thread (its cards stay answerable). */
+    readOnly?: boolean;
     accessModeOverride?: RuntimeAccessMode | null;
     onaccessmodechange?: (mode: RuntimeAccessMode) => void;
     fallbackCwd?: string | null;
@@ -110,7 +112,7 @@
   }
 
   let {
-    sessionId, focused, onswitch, agentChat, hostCommands, compact = false, accessModeOverride = null,
+    sessionId, focused, onswitch, agentChat, hostCommands, compact = false, readOnly = false, accessModeOverride = null,
     onaccessmodechange, fallbackCwd = null, hasExternalContext = false, transformOutgoingText,
     transformRestoredQueuedText, onExternalContextConsumed, onopenpath, formatAssistantText,
     assistantFooter, composerTopSlot, composerFootLeadSlot, testIds,
@@ -477,7 +479,7 @@
               workspaceId={session?.workspace_id}
               onrespond={respond}
               hideItemId={failedError?.id ?? null}
-              onedituser={closed ? undefined : (m) => void restoreFailedTurnToDraft({ sessionId, draft, text: m.text, attachments: m.attachments, transformText: transformRestoredQueuedText, focusComposer })}
+              onedituser={closed || readOnly ? undefined : (m) => void restoreFailedTurnToDraft({ sessionId, draft, text: m.text, attachments: m.attachments, transformText: transformRestoredQueuedText, focusComposer })}
               {onopenpath}
               onopendiff={hostCommands?.openDiff ? (path) => hostCommands.openDiff!(sessionId, path) : undefined}
               {formatAssistantText}
@@ -493,8 +495,8 @@
             {outcome}
             {failure}
             {agentName}
-            revive={failedQuiet && !draft.reopening ? () => void reopen() : undefined}
-            disabled={closed}
+            revive={failedQuiet && !draft.reopening && !readOnly ? () => void reopen() : undefined}
+            disabled={closed || readOnly}
             onedit={(t, atts) => void restoreFailedTurnToDraft({ sessionId, draft, text: t, attachments: atts, transformText: transformRestoredQueuedText, focusComposer })}
             onresend={async (t, atts) => {
               try {
@@ -562,6 +564,7 @@
     <RuntimeChildApprovals {sessionId} />{#if p && session && !closed}<RuntimeMcpChanged {sessionId} workspaceId={session?.workspace_id} idle={!running} />{/if}
     {#if composerTopSlot}{@render composerTopSlot({ focusComposer })}{/if}
 
+    {#if !readOnly}
     <div class="rt-composer" class:rt-folded={composerFolded} style:border-color={planOn ? 'color-mix(in srgb, var(--warning) 42%, var(--border))' : undefined} bind:this={composerBoxEl}>
       {#if suggestions.length > 0 && StageSlashView.component}
         <StageSlashView.component id={popId} items={suggestions} active={cmdIdx} onaccept={acceptCmd} onhover={(i) => (cmdIdx = i)} />
@@ -648,6 +651,7 @@
         />
       </div>
     </div>
+    {/if}
   </div>
 </section>
 

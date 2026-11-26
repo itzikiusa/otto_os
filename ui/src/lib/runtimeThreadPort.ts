@@ -42,6 +42,13 @@
 //     state and the working dot stay true.
 //   - `contextOnFresh()`: text put before the first message after `/clear`,
 //     so the agent knows again what it is looking at.
+//   - `readOnly` (default false): a thread another feature drives (a workflow
+//     step's): no composer and no "Open in Threads"; its approval and question
+//     cards stay answerable.
+//   - `onunavailable(reason)`: the thread is gone ('deleted': 404, or removed
+//     while shown) or not readable by this person ('forbidden': 403). Called
+//     once; the embed then shows nothing of its own, so the host swaps in its
+//     own fallback (a workflow step's digest) instead of an error.
 import type { Component, Snippet } from 'svelte';
 import type {
   ApprovalDecision,
@@ -125,6 +132,9 @@ export interface RuntimeHostCommands {
   showTasks?: (sessionId: string) => void;
 }
 
+/** Why an embed's thread can't be shown (`onunavailable`). */
+export type RuntimeEmbedUnavailable = 'deleted' | 'forbidden';
+
 /** An embedded thread's state as its host sees it (`onstatus`). */
 export type RuntimeEmbedStatus = 'idle' | 'working' | 'needs-you' | 'background' | 'closed';
 
@@ -185,6 +195,9 @@ export type RuntimeThreadViewProps = {
   /** Notifies the host when the user picks an access mode inside the embed chip. */
   onaccessmodechange?: (mode: RuntimeAccessMode) => void;
   hideEmbedBarWhenUnlinked?: boolean;
+  /** No composer and no "Open in Threads" (a thread another feature drives). */
+  readOnly?: boolean;
+  onunavailable?: (reason: RuntimeEmbedUnavailable) => void;
   fallbackCwd?: string | null;
   hasExternalContext?: boolean;
   /** `fresh`: the message starts a fresh context (`/clear`). */
