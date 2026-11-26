@@ -121,6 +121,25 @@ test('a failed step under another card says its failure in the pane (CR1-047)', 
   await expect(stepPane(page).getByTestId('wf-step-error')).toContainText('API Error: 500');
 });
 
+test('a step thread offers neither an agent restart nor Open in Threads (CR2-009)', async ({ page }) => {
+  const wf = await createWorkflow(api, 'E2E Live step thread', chain(agentStep('slow', 'Slow step', ['sleep 60000'])));
+  const run = await startRun(api, wf);
+  const live = await waitRun(api, run, (r) => !!r.nodes.find((n) => n.node_id === 'slow')?.thread?.thread_id);
+  const thread = live.nodes.find((n) => n.node_id === 'slow')!.thread!.thread_id;
+  // The workspace's servers now differ from the ones the step's agent started with…
+  await page.route(`**/api/v1/workspaces/${api.ws}/mcp-servers`, (route) => route.fulfill({ json: [{ name: 'late-probe', enabled: true }] }));
+  // …and the step's agent opened a thread of its own.
+  await api.post(`/runtime-sessions/${thread}/children`, { prompt: 'hi', targets: [{ provider: 'claude' }], title: 'Step subagent' });
+  await openRun(page, wf, run, 'slow');
+  const conv = page.getByTestId('wf-step-conversation');
+  await conv.getByTestId('runtime-linked').click({ timeout: 20_000 });
+  const list = page.getByRole('list', { name: 'Subagents' });
+  await expect(list).toContainText('Step subagent');
+  await expect(list.getByRole('button', { name: /in Threads$/ })).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  await expect(conv.getByTestId('runtime-mcp-changed')).toHaveCount(0);
+});
+
 test('Stop run… asks first; Stop is never beside a primary', async ({ page }) => {
   const wf = await createWorkflow(api, 'E2E Long step', chain(agentStep('slow', 'Slow step', ['sleep 60000'])));
   const run = await startRun(api, wf);
