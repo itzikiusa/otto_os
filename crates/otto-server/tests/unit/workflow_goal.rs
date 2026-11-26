@@ -1892,3 +1892,51 @@ async fn a_siblings_publish_does_not_notify_the_approval_again() {
     assert_eq!(notices.len(), 1, "{notices:?}");
     assert!(notices[0].ends_with(":gate"), "{notices:?}");
 }
+
+/// CR1-024: a step that starts again drops the error class its earlier
+/// execution left — a canceled run's step, retried, must not stay
+/// "canceled" once it succeeded.
+#[tokio::test]
+async fn a_step_that_starts_again_drops_its_old_error_class() {
+    let graph = WorkflowGraph {
+        nodes: vec![node("start", "log", json!({})), node("a", "log", json!({}))],
+        edges: vec![edge("start", "a")],
+    };
+    let fx = setup("class-again", graph).await;
+    let prior = vec![
+        NodeRunState {
+            node_id: "start".into(),
+            status: NodeStatus::Success,
+            step_no: Some(1),
+            output: Some(json!({})),
+            ..Default::default()
+        },
+        NodeRunState {
+            node_id: "a".into(),
+            status: NodeStatus::Pending,
+            step_no: Some(2),
+            error_class: Some("canceled".into()),
+            ..Default::default()
+        },
+    ];
+    let scope = RunScope {
+        continue_unfinished: true,
+        ..Default::default()
+    };
+    let drive = run_workflow(
+        fx.ctx.clone(),
+        fx.ws.clone(),
+        fx.wf.clone(),
+        fx.run_id.clone(),
+        json!({}),
+        scope,
+        Some(prior),
+    );
+    tokio::time::timeout(Duration::from_secs(15), tokio::spawn(drive))
+        .await
+        .unwrap()
+        .unwrap();
+    let run = fx.repo.get_run(&fx.run_id).await.unwrap();
+    assert_eq!(run.status, RunStatus::Success, "{:?}", run.error);
+    assert_eq!(state(&run, "a").error_class, None);
+}

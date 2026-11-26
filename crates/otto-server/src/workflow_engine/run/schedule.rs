@@ -266,8 +266,9 @@ async fn run_node(
     st.started_at = Some(chrono::Utc::now());
     st.logs = vec![format!("▶ {} started", node.kind)];
     st.phase = None;
-    // A wait or a question from before a pause or a restart is over.
-    (st.attention, st.wait) = (None, None);
+    // A wait, a question or an error class from before a pause, a restart
+    // or a retry is over.
+    (st.attention, st.wait, st.error_class) = (None, None, None);
     st.step_no = Some(step_no);
     st.step_file = Some(step_file_base.clone());
     // Signal node start so the UI can show live progress immediately.
