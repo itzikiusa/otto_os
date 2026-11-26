@@ -272,3 +272,15 @@ async fn a_sub_threads_background_work_pauses_no_progress_and_meets_the_limit() 
     rt.shutdown().await;
 }
 
+/// CR1-031: the family runs through a closed sub-thread to the open one
+/// below it, asked from the step or from a sub-thread.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_family_reaches_below_a_closed_sub_thread_from_any_member() {
+    let dir = tempfile::tempdir().unwrap();
+    let (rt, step, sub) = family(&dir).await;
+    let grandchild = rt.open_peer(&sub, open()).await.unwrap().id;
+    assert_eq!(rt.family(&sub).await, [sub.clone(), grandchild.clone()]);
+    rt.close(&sub).await.unwrap();
+    assert_eq!(rt.family(&step).await, [step.clone(), grandchild.clone()]);
+    rt.shutdown().await;
+}
