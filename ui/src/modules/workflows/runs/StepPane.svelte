@@ -21,7 +21,9 @@
   import { cardKind } from './StateCards.svelte';
   import StepConversation from './StepConversation.svelte';
   import StepFiles from './StepFiles.svelte';
-  import { retryStep, skipStep } from './runActions';
+  import { openReview, retryStep, skipStep } from './runActions';
+  import { reviewIds } from '../reviewAgents';
+  import { runReviews } from '../runReviews.svelte';
   import { childWord, stepDuration, stepWord } from './runWords';
   import type { StepItem } from './stepOrder';
   import { paneTabs, phaseSegments, TAB_LABEL, type PaneTab } from './stepTabs';
@@ -97,6 +99,17 @@
   const summarizer = $derived(node?.children?.find((c) => /^summar/i.test(c.label) || c.id === 'summarizer') ?? null);
   const output = $derived(body?.output);
   const reviewOut = $derived((output ?? {}) as { score_text?: string; outcome?: string; blocking?: unknown[]; advisory?: unknown[]; findings?: unknown[] });
+  // A review step's records: the reviewer's own findings, "Open review".
+  const reviews = $derived(step?.kind === 'review_run' && node ? reviewIds(body ?? node) : []);
+  $effect(() => runReviews.watch(child || tab === 'summary' ? reviews : []));
+  const agent = $derived(child ? reviews.flatMap((id) => runReviews.reviews[id]?.agents ?? []).find((a) => a.name === child.id || a.name === child.label || (!!child.thread_id && a.session_id === child.thread_id)) ?? null : null);
+  const findings = $derived(agent?.findings ?? []);
+  /** The summary came from the deterministic fallback, not a verified summarizer. */
+  const fallback = $derived(reviews.some((id) => runReviews.reviews[id]?.agents.some((a) => a.fallback)));
+  const repoOf = (out: unknown): string | null => {
+    const r = (out as { repo_id?: unknown } | null)?.repo_id ?? (run.input as { repo_id?: unknown } | null)?.repo_id;
+    return typeof r === 'string' && r ? r : null;
+  };
   const attachments = $derived((run as WorkflowRun & { attachments?: { name: string; mime: string; size_bytes?: number; source: string; error?: string }[] }).attachments ?? []);
 
   function stepMenu(e: MouseEvent): void {
@@ -141,7 +154,7 @@
   </header>
 
   {#if tabs.length > 1}
-    <Tabs label="Step details" tabs={tabs.map((id) => ({ id, label: TAB_LABEL[id], testid: `wf-step-tab-${id}`, count: id === 'files' ? undefined : undefined }))} value={tab} onchange={(id) => (picked = id)} idBase="wf-step" />
+    <Tabs label="Step details" tabs={tabs.map((id) => ({ id, label: TAB_LABEL[id], testid: `wf-step-tab-${id}`, count: id === 'findings' && findings.length ? findings.length : undefined }))} value={tab} onchange={(id) => (picked = id)} idBase="wf-step" />
   {/if}
 
   <div class="body" role="tabpanel" id="wf-step-panel-{tab}" aria-labelledby="wf-step-tab-{tab}">
@@ -152,6 +165,17 @@
         <StepConversation thread={{ thread_id: summarizer.thread_id, runner: 'threads', provider: summarizer.provider, turns: 0, usage: {} as StepThread['usage'] }} {workspaceId} runId={run.id} nodeId={node?.node_id ?? ''} attempt={node?.attempts ?? 1} />
       {:else}
         <p class="none">The summarizer starts after the reviewers.</p>
+      {/if}
+    {:else if tab === 'findings'}
+      {#if findings.length}
+        <ul class="kids findings">
+          {#each findings as f, i (i)}
+            <li><span class="word {f.severity === 'bug' ? 'danger' : f.severity === 'warn' ? 'warning' : ''}">{f.severity === 'bug' ? 'Bug' : f.severity === 'warn' ? 'Warning' : 'Info'}</span>
+              <span class="ftext"><span class="fpath" dir="ltr">{f.path ?? 'General'}{f.line != null ? `:${f.line}` : ''}</span><span dir="auto">{f.body}</span></span></li>
+          {/each}
+        </ul>
+      {:else}
+        <p class="none">{child?.status === 'success' ? 'This reviewer reported no findings.' : agent ? 'Findings appear when this reviewer finishes.' : 'No findings recorded for this reviewer.'}</p>
       {/if}
     {:else if tab === 'files'}
       <StepFiles runId={run.id} contextDir={run.context_dir} stepFile={step ? (node?.step_file ?? null) : null} />
@@ -185,10 +209,14 @@
       <LoadState what="the step" loading={!body && !detailError} error={detailError} empty={!body}>
         {#if tab === 'summary'}
           <p class="score">{reviewOut.score_text ?? (node?.status === 'running' ? 'Reviewing…' : '—')}{reviewOut.outcome ? ` · ${reviewOut.outcome}` : ''}</p>
+          {#if fallback}<p class="dim" data-testid="summarizer-fallback">Deterministic fallback — the reviewers’ findings, not a verified summary.</p>{/if}
           <p class="dim">{reviewOut.blocking?.length ?? 0} must-fix · {reviewOut.advisory?.length ?? 0} advisory · {reviewOut.findings?.length ?? 0} findings</p>
           {#if node?.children?.length}
             <h4>Reviewers</h4>
             <ul class="kids">{#each node.children as c (c.id)}{@const w = childWord(c, now)}<li><span class="ellipsis" dir="auto">{c.label}</span><span class="word {w.tone}">{w.word}</span></li>{/each}</ul>
+          {/if}
+          {#if reviews.length}
+            <button type="button" class="btn small" onclick={() => void openReview(reviews[0], repoOf(output))}><Icon name="eye" size={12} /> Open review</button>
           {/if}
           {#if body?.logs.length}<h4>Log</h4><pre class="log">{body.logs.slice(-4).join('\n')}</pre>{/if}
         {:else if tab === 'log'}
@@ -361,5 +389,25 @@
   }
   .att .dim {
     font-size: var(--fs-s);
+  }
+  .findings li {
+    align-items: flex-start;
+  }
+  .findings li .word {
+    flex: none;
+    min-inline-size: 56px;
+  }
+  .ftext {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-1);
+    min-inline-size: 0;
+    overflow-wrap: anywhere;
+  }
+  .fpath {
+    font-family: var(--font-mono);
+    font-size: var(--fs-s);
+    color: var(--text-dim);
   }
 </style>

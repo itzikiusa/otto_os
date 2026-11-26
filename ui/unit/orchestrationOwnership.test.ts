@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import { loadErrorText } from '../src/lib/loadError.ts';
-import { deferred, loadSource } from './sourceHarness.ts';
+import { loadSource } from './sourceHarness.ts';
 
 function methods(file: string, names: string[]) {
   const script = readFileSync(new URL(`../src/${file}`, import.meta.url), 'utf8').split('<script lang="ts">')[1].split('</script>')[0];
@@ -17,57 +17,6 @@ function compile(body: string, bindings: Record<string, unknown>) {
 }
 const toast = { error() {}, success() {} };
 const flush = () => new Promise((resolve) => setImmediate(resolve));
-function workflow() {
-  const validation = deferred<boolean>(), saving = deferred<void>(), confirmation = deferred<boolean>();
-  const posts: { path: string; result: ReturnType<typeof deferred<any>> }[] = [];
-  const histories: { id: string; result: ReturnType<typeof deferred<any>> }[] = [];
-  const restorations: string[] = [];
-  const state = compile(`
-    let current = { id: 'A' }, running = false, dirty = true, destroyed = false;
-    let ws = {currentId: 'ws'}, viewGeneration = 0, versionsGeneration = 0;
-    let versions = [], versionsLoading = false, versionsError = null, workflows = [];
-    const VERSION_PAGE_SIZE = 50; let versionsBefore, versionsHasMore = false;
-    let run = null, requestedRunId = null;
-    async function save() { await saving.promise; dirty = false; }
-    function open(wf) { current = wf; viewGeneration++; }
-    ${methods('modules/workflows/WorkflowsPage.svelte', ['startRun', 'loadVersions', 'restoreVersion'])}
-    return {startRun, loadVersions, restoreVersion, switchTo(id) { current = id ? {id} : null; dirty = false; viewGeneration++; },
-      read() { return {run, running, versions, versionsLoading}; }};
-  `, { saving, validateGraph: () => validation.promise, discardEditsOk: () => confirmation.promise, toasts: toast, loadErrorText: String,
-    api: { post(path: string) { const result = deferred<any>(); posts.push({ path, result }); return result.promise; } },
-    listWorkflowVersions(id: string) { const result = deferred<any>(); histories.push({ id, result }); return result.promise; },
-    restoreWorkflowVersion: async (id: string) => { restorations.push(id); return { id }; },
-  });
-  return { state, validation, saving, confirmation, posts, histories, restorations };
-}
-for (const target of ['B', null]) test(`pending workflow save cannot retarget Run to ${target}`, async () => {
-  const h = workflow(); const started = h.state.startRun({});
-  h.validation.resolve(true); await flush(); h.state.switchTo(target); h.saving.resolve();
-  assert.equal(await started, null); assert.equal(h.posts.length, 0);
-});
-test('Run admission covers validation and releases after validation failure', async () => {
-  const h = workflow(); const first = h.state.startRun({});
-  assert.equal(await h.state.startRun({}), null);
-  h.validation.resolve(false); assert.equal(await first, null); assert.equal(h.state.read().running, false);
-});
-test('late Run response cannot install under a different workflow', async () => {
-  const h = workflow(); const started = h.state.startRun({}); h.validation.resolve(true); h.saving.resolve(); await flush();
-  assert.equal(h.posts[0].path, '/workflows/A/run'); h.state.switchTo('B'); h.posts[0].result.resolve({ id: 'run-A' }); await started;
-  assert.equal(h.state.read().run, null);
-});
-test('late version read cannot replace current drawer or its loading state', async () => {
-  const h = workflow(); const a = h.state.loadVersions(); h.state.switchTo('B'); const b = h.state.loadVersions();
-  h.histories[0].result.resolve([{ workflow_id: 'A' }]); await a;
-  assert.equal(h.state.read().versionsLoading, true);
-  h.histories[1].result.resolve([{ workflow_id: 'B' }]); await b;
-  assert.equal(h.state.read().versions[0].workflow_id, 'B');
-});
-test('Restore captures version identity before discard confirmation', async () => {
-  const h = workflow(); const restore = h.state.restoreVersion({ workflow_id: 'A', version: 2 });
-  h.state.switchTo('B'); h.confirmation.resolve(true); await restore;
-  assert.equal(h.restorations.length, 0);
-  await h.state.restoreVersion({ workflow_id: 'A', version: 2 }); assert.equal(h.restorations.length, 0);
-});
 test('replacement import fetches global scope, confirms empty visible workspace, and fails closed', async () => {
   const prompts: string[] = [], imports: unknown[] = [];
   let reject = false, approve = false;

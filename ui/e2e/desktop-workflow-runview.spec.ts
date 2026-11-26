@@ -1,14 +1,15 @@
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace, seedGitRepo } from './seed';
+import { openRun, runsTab, stepPane, stepRow } from './workflowsUi';
 
-// Workflow run-view UI E2E (design 2026-07-02). Focused on the run-detail
-// affordances added for this work:
-//   - R1: the Context-files sidebar (agents-style file viewer, files-only) shows
-//     a run's context dir, opens a file, and collapses/expands.
-//   - R6: the run detail is resizable (maximize toggle) and a step can be zoomed
-//     into a large modal to read its full JSON output.
-//   - R7: an active run can be canceled from the run view (no session needed).
-//   - R8: the run timeline top row renders un-clipped.
+// Workflow run-page UI E2E (design 2026-07-02, re-pointed to the run page of
+// ux.md §4). Focused on the run affordances added for this work:
+//   - R1: the run's context files are browsable from the run (the Result's
+//     Files tab) and a file opens read-only in place.
+//   - R6: the step pane maximizes (the run column folds behind "Run") and a
+//     step's full JSON output is readable in its Output tab.
+//   - R7: an active run can be stopped from its page (no session needed).
+//   - R8: the step rows render un-clipped.
 // Desktop-browser only. Runs drive the ISOLATED OTTO_E2E daemon (agent turns are
 // stubbed) so they complete offline.
 
@@ -64,14 +65,10 @@ async function waitRun(runId: string, deadlineMs = 90_000): Promise<{ status: st
   }
 }
 
-// Open a specific COMPLETED run in the run detail via the Runs dropdown.
-async function openCompletedRun(page: Page, wfId: string): Promise<void> {
-  await page.goto('/#/workflows');
-  await page.getByTestId(`wf-row-${wfId}`).locator('.row-main').click();
-  await page.getByRole('button', { name: 'More actions', exact: true }).click();
-  await page.getByRole('menuitem', { name: 'Runs', exact: true }).click();
-  await page.getByTestId('run-item').first().click();
-  await expect(page.locator('.timeline')).toBeVisible({ timeout: 15_000 });
+// Open a specific COMPLETED run on its page.
+async function openCompletedRun(page: Page, wfId: string, runId: string): Promise<void> {
+  const run = await openRun(page, wfId, runId);
+  await expect(run).toHaveAttribute('data-state', 'succeeded', { timeout: 15_000 });
 }
 
 test.beforeEach(async ({ page }, testInfo) => {
@@ -79,7 +76,6 @@ test.beforeEach(async ({ page }, testInfo) => {
   await page.addInitScript((wsId) => {
     localStorage.setItem('otto_workspace', wsId as string);
     localStorage.setItem('otto_rail_expanded', '0');
-    localStorage.setItem('otto_wf_ctx_open', '1');
   }, ws);
 });
 
@@ -95,7 +91,7 @@ test.afterAll(async () => {
   await ctx?.dispose();
 });
 
-test('context-files sidebar shows the run dir, opens a file, and collapses (R1)', async ({
+test('the run\'s context files are browsable from the run and open in place (R1)', async ({
   page,
 }) => {
   const { dir } = await seedGitRepo(ctx, base, ws);
@@ -107,27 +103,21 @@ test('context-files sidebar shows the run dir, opens a file, and collapses (R1)'
   const runId = await startRun(wfId, { repos: [{ repo: dir, type: 'worktree', name: dir }] });
   expect((await waitRun(runId)).status).toBe('success');
 
-  await openCompletedRun(page, wfId);
+  await openCompletedRun(page, wfId, runId);
 
-  const sidebar = page.getByTestId('ctx-sidebar');
-  await expect(sidebar).toBeVisible({ timeout: 15_000 });
-  // The run's context dir is browsable — repos.json is a top-level file.
-  await expect(sidebar.getByText('repos.json')).toBeVisible({ timeout: 10_000 });
-  // Opening it shows the read-only viewer pane.
-  await sidebar.getByText('repos.json').click();
-  await expect(sidebar.locator('.viewer-pane')).toBeVisible({ timeout: 10_000 });
-
-  // The header toggle collapses the sidebar entirely (no separate rail — that
-  // used to double up against the shell's right bar) and re-expands it. The
-  // toggle is always present with the run; the in-sidebar close button is a
-  // distinct `ctx-collapse`.
-  await page.getByTestId('ctx-sidebar-toggle').click();
-  await expect(page.getByTestId('ctx-sidebar')).toHaveCount(0);
-  await page.getByTestId('ctx-sidebar-toggle').click();
-  await expect(page.getByTestId('ctx-sidebar')).toBeVisible();
+  // A finished run opens on its Result; its Files tab is the run's context dir —
+  // repos.json is a top-level file.
+  const pane = stepPane(page);
+  await expect(pane).toHaveAttribute('data-node-id', '_result', { timeout: 15_000 });
+  await pane.getByTestId('wf-step-tab-files').click();
+  const file = pane.getByRole('button', { name: 'repos.json' });
+  await expect(file).toBeVisible({ timeout: 10_000 });
+  // Opening it shows its text, read-only, in place.
+  await file.click();
+  await expect(pane.locator('pre.content')).toBeVisible({ timeout: 10_000 });
 });
 
-test('run detail: un-clipped timeline, maximize toggle, and step zoom modal (R6/R8)', async ({
+test('run page: un-clipped step rows, the pane\'s maximize, and a step\'s full output (R6/R8)', async ({
   page,
 }) => {
   const wfId = await createWorkflow(
@@ -139,40 +129,38 @@ test('run detail: un-clipped timeline, maximize toggle, and step zoom modal (R6/
     ],
     [edge('trigger', 'set'), edge('set', 'tail')],
   );
-  expect((await waitRun(await startRun(wfId))).status).toBe('success');
+  const runId = await startRun(wfId);
+  expect((await waitRun(runId)).status).toBe('success');
 
-  await openCompletedRun(page, wfId);
+  await openCompletedRun(page, wfId, runId);
 
-  // R8: the timeline row renders at full height (overflow-x used to zero its flex
-  // min-height and let the column compress it — a clipped first line).
-  const box = await page.locator('.timeline').boundingBox();
-  expect(box, 'timeline has a box').not.toBeNull();
+  // R8: a step row renders at full height (a compressed flex row used to clip
+  // its first line).
+  const box = await stepRow(page, 'set').boundingBox();
+  expect(box, 'step row has a box').not.toBeNull();
   expect(box!.height).toBeGreaterThanOrEqual(24);
 
-  // R6: maximize toggles the run detail.
-  const maxBtn = page.getByTestId('run-detail-max');
-  await expect(maxBtn).toHaveAttribute('aria-pressed', 'false');
-  await maxBtn.click();
-  await expect(maxBtn).toHaveAttribute('aria-pressed', 'true');
-  await maxBtn.click();
-  await expect(maxBtn).toHaveAttribute('aria-pressed', 'false');
+  // R6: open the transform step; its Output tab holds the full JSON output.
+  await stepRow(page, 'set').click();
+  const pane = stepPane(page);
+  await expect(pane).toHaveAttribute('data-node-id', 'set');
+  await pane.getByTestId('wf-step-tab-output').click();
+  await expect(pane.getByText('deposit_bonus')).toBeVisible({ timeout: 10_000 });
 
-  // R6: zoom the transform step (2nd) → a large modal with its full JSON output.
-  await page.locator('.zoom-btn').nth(1).click();
-  const dialog = page.locator('.sheet[role="dialog"]');
-  await expect(dialog).toBeVisible();
-  await expect(dialog.locator('h2')).toContainText('Step ·');
-  await expect(dialog.getByText('deposit_bonus')).toBeVisible();
-  await page.keyboard.press('Escape');
-  await expect(dialog).toHaveCount(0);
+  // R6: maximize folds the run column behind "Run"; it comes back.
+  await pane.getByRole('button', { name: 'Maximize conversation' }).click();
+  await expect(stepRow(page, 'set')).toHaveCount(0);
+  await expect(pane.getByRole('button', { name: 'Show the run' })).toBeVisible();
+  await page.getByRole('button', { name: 'Run', exact: true }).click();
+  await expect(stepRow(page, 'set')).toBeVisible();
+  await expect(pane.getByRole('button', { name: 'Maximize conversation' })).toBeVisible();
 });
 
-test('cancel a running run from the run view (R7)', async ({ page }) => {
+test('stop a running run from its page (R7)', async ({ page }) => {
   // The engine caps ONE delay node at 10s, so a single `ms: 15000` node kept
   // the run active for only 10s — less than a cold page load under a full
-  // parallel e2e run, after which the run had already finished and the
-  // Running list was (correctly) gone. Three capped delays keep it active for
-  // ~30s; the cancel below ends it long before.
+  // parallel e2e run, after which the run had already finished. Three capped
+  // delays keep it active for ~30s; the stop below ends it long before.
   const wfId = await createWorkflow(
     'E2E RunView Cancel',
     [
@@ -185,26 +173,26 @@ test('cancel a running run from the run view (R7)', async ({ page }) => {
     [edge('trigger', 'wait1'), edge('wait1', 'wait2'), edge('wait2', 'wait3'), edge('wait3', 'done')],
   );
 
-  // Load the page first, THEN start the run: the Running list must pick a
-  // run up live (WS `workflow_run_updated`), and the run's clock no longer
-  // races the page load.
-  await page.goto('/#/workflows');
-  await expect(page.getByTestId(`wf-row-${wfId}`)).toBeVisible({ timeout: 30_000 });
+  // Load the page first, THEN start the run: the Runs inbox must pick a run
+  // up live (WS `workflow_run_updated`), and the run's clock no longer races
+  // the page load.
+  await runsTab(page);
+  await expect(page.getByTestId('wf-tab-runs')).toHaveAttribute('aria-selected', 'true', { timeout: 30_000 });
   const runId = await startRun(wfId);
 
-  // Open from the Running list (it's an active run).
-  const running = page.getByTestId('running-workflows');
-  await expect(running).toBeVisible({ timeout: 15_000 });
-  await running.getByText('E2E RunView Cancel').click();
+  // Open it from the Running fold (it's an active run).
+  const running = page.getByTestId('wf-runs-running');
+  const row = running.locator(`[data-testid="wf-run-row"][data-run-id="${runId}"]`);
+  await expect(row).toBeVisible({ timeout: 15_000 });
+  await row.click();
 
-  // The Cancel affordance appears for an active run…
-  const cancel = page.getByTestId('run-cancel');
-  await expect(cancel).toBeVisible({ timeout: 10_000 });
-  // One Stop, saying what it does (A13: two buttons said "finishes the current step").
+  // The Stop affordance appears for an active run — one Stop, saying what it does.
+  const stop = page.getByTestId('wf-run-stop');
+  await expect(stop).toBeVisible({ timeout: 10_000 });
   await expect(page.getByRole('button', { name: /Stop run/ })).toHaveCount(1);
-  await expect(cancel).toHaveAttribute('title', /stop.* now/i);
-  await cancel.click();
-  // Cancelling can't be undone, so it asks first.
+  await expect(stop).toHaveText(/Stop run…/);
+  await stop.click();
+  // Stopping can't be undone, so it asks first.
   await page.getByRole('dialog').getByRole('button', { name: 'Stop run', exact: true }).click();
 
   // …and the run reaches the canceled terminal state (poll well before the
@@ -215,8 +203,10 @@ test('cancel a running run from the run view (R7)', async ({ page }) => {
       { timeout: 12_000 },
     )
     .toBe('canceled');
-  // The Running list lets go of it.
-  await expect(running.getByText('E2E RunView Cancel')).toHaveCount(0, { timeout: 10_000 });
+  await expect(page.locator(`[data-testid="wf-run-page"][data-run-id="${runId}"]`)).toHaveAttribute('data-state', 'canceled', { timeout: 10_000 });
+  // The Running fold lets go of it.
+  await page.getByRole('button', { name: 'Back to runs' }).click();
+  await expect(running.locator(`[data-testid="wf-run-row"][data-run-id="${runId}"]`)).toHaveCount(0, { timeout: 10_000 });
 });
 
 // R5.5 (workflows batch): `NodeRunState.activity` is a LIVE field — the engine

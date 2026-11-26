@@ -1,6 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
 import { expectNoHorizontalOverflow, expectFullyInViewport } from './helpers';
+import { openEditor } from './workflowsUi';
 
 async function workspace(page: Page) {
   const { ctx, base } = await apiCtx();
@@ -142,19 +143,18 @@ test.describe('loaded automation visual and interaction fixtures', () => {
       await page.goto('/#/scheduled-tasks');
       await expect(page.getByText('Weekly review — security and release readiness', { exact: true }).first()).toBeVisible();
       await shot('scheduled-tasks');
-      await page.goto('/#/workflows');
-      await page.getByTestId(`wf-row-${workflowId}`).locator('.row-main').click();
+      await openEditor(page, workflowId);
       await shot('workflow');
-      // Runs lives in the workflow's ⋯ menu; on a narrow header that ⋯ is
-      // itself folded into the page header's overflow as "More actions…".
+      // "Runs of this workflow" (the editor's ⋯; on a narrow header that ⋯ is
+      // itself folded into the overflow as "More actions…") opens Runs filtered.
       await page.getByRole('button', { name: 'More actions', exact: true }).first().click();
-      const runsItem = page.getByRole('menuitem', { name: 'Runs', exact: true });
+      const runsItem = page.getByRole('menuitem', { name: 'Runs of this workflow', exact: true });
       const nested = page.getByRole('menuitem', { name: 'More actions…', exact: true });
       await runsItem.or(nested).first().waitFor();
       if (await nested.isVisible()) await nested.click();
       await runsItem.click();
-      await page.getByTestId('run-item').first().click();
-      await expect(page.locator('.timeline')).toBeVisible();
+      await page.getByTestId('wf-run-row').first().getByRole('button').first().click();
+      await expect(page.getByTestId('wf-run-page')).toBeVisible();
       await shot('workflow-run');
       await page.route(`**/api/v1/workspaces/${wsId}/goal-loops`, route => route.fulfill({ json: Array.from({ length: 12 }, (_, i) => ({
         id: `loop-${i}`, workspace_id: wsId, name: `Release readiness ${i + 1} ${'long goal title '.repeat(8)}`, definition: { summary: 'Verify every delivery condition and preserve the evidence. '.repeat(6), acceptance_criteria: [] },

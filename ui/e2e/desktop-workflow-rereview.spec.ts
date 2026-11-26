@@ -2,10 +2,13 @@ import { test, expect } from '@playwright/test';
 import type { Workflow, WorkflowRun } from '../src/lib/api/types';
 import { apiCtx, seedWorkspace } from './seed';
 import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
+import { openRun } from './workflowsUi';
 
-// Real run UI, mocked workflow boundary: no provider or outbound comment runs.
-test('re-review keeps the previous report and opens the new iteration after confirmation', async ({ page }, info) => {
-  test.skip(info.project.name !== 'desktop-browser', 'desktop workflow run bar');
+// Real run page, mocked workflow boundary: no provider or outbound comment runs.
+// Re-review lives in a finished review run's ⋯; it starts exactly one new
+// iteration and the previous report stays as it was.
+test('re-review starts one new iteration and keeps the previous report', async ({ page }, info) => {
+  test.skip(info.project.name !== 'desktop-browser', 'desktop workflow run page');
   const { ctx, base } = await apiCtx();
   try {
     const workspace = await seedWorkspace(ctx, base, 'Re-review fixture');
@@ -28,7 +31,6 @@ test('re-review keeps the previous report and opens the new iteration after conf
       localStorage.setItem('otto_workspace', id);
       localStorage.setItem('otto_firstrun_dismissed', '1');
       localStorage.setItem('otto_rail_expanded', '0');
-      localStorage.setItem('otto_wf_ctx_open', '0');
     }, workspace);
     await page.route('**/api/v1/workspaces/*/workflows', route => route.fulfill({ json: [workflow] }));
     await page.route('**/api/v1/workflows/wf-rereview', route => route.fulfill({ json: workflow }));
@@ -43,12 +45,10 @@ test('re-review keeps the previous report and opens the new iteration after conf
       if (path.endsWith('/nodes/review')) return route.fulfill({ json: { rev: run.rev, detail_version: '1', body: previous.nodes[0] } });
       return route.fulfill({ json: run });
     });
-    await page.goto('/#/workflows');
-    await page.getByTestId(`wf-row-${workflow.id}`).locator('.row-main').click();
-    await page.getByRole('button', { name: 'More actions', exact: true }).click();
-    await page.getByRole('menuitem', { name: 'Runs', exact: true }).click();
-    await page.getByTestId('run-item').first().click();
-    const action = page.getByTestId('workflow-re-review');
+    const runView = await openRun(page, workflow.id, previous.id);
+    await expect(runView).toHaveAttribute('data-state', 'succeeded');
+    await page.getByTestId('page-header').first().getByRole('button', { name: 'More actions' }).click();
+    const action = page.locator('.ctx-menu').getByRole('menuitem', { name: 'Re-review' });
     await expect(action).toBeVisible();
     for (const scheme of ['light', 'dark'] as const) {
       await page.emulateMedia({ colorScheme: scheme, reducedMotion: 'reduce' });
@@ -57,16 +57,14 @@ test('re-review keeps the previous report and opens the new iteration after conf
       await expectNoHorizontalOverflow(page);
       await info.attach(`workflow-rereview-${scheme}`, { body: await page.screenshot({ fullPage: true }), contentType: 'image/png' });
     }
-    await action.click();
-    await expect(page.getByRole('dialog')).toContainText('configured notifications and PR comments');
-    expect(requests).toBe(0);
-    await page.getByRole('dialog').getByRole('button', { name: 'Cancel', exact: true }).click();
     expect(requests).toBe(0);
     await action.click();
-    await page.getByRole('dialog').getByRole('button', { name: 'Re-review', exact: true }).click();
     await expect.poll(() => requests).toBe(1);
-    await expect(action).toHaveCount(0);
-    await expect(page.getByTestId('run-cancel')).toBeVisible();
+    await expect(page.getByText('Re-review started')).toBeVisible();
+    // The previous report is untouched: the run it came from is still done.
+    await expect(runView).toHaveAttribute('data-state', 'succeeded');
+    await expect(page.locator('[data-testid="wf-step"][data-node-id="review"]')).toHaveAttribute('data-status', 'success');
+    expect(requests).toBe(1);
     expect(previous.status).toBe('success');
   } finally { await ctx.dispose(); }
 });

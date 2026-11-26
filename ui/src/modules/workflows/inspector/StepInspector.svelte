@@ -55,7 +55,7 @@
   <label class="si-name-l" for="{ids}-name">Name</label>
   <input dir="auto" id="{ids}-name" class="si-name" type="text" value={node.name} oninput={(e) => { const v = e.currentTarget.value; onedit((n) => (n.name = v)); }} />
 
-  <NodeParams {node} {set} setParams={(p) => onedit((n) => (n.params = p))} {wsId} {pickers} {workflowName} {onzoom} universalModel={false}
+  <NodeParams {node} {set} setParams={(p) => onedit((n) => (n.params = p))} {wsId} {pickers} {workflowName} {onzoom}
     body={OWN.has(node.kind) ? editorForm : undefined} />
 
   {#if node.kind !== 'manual_trigger' && node.kind !== 'agent_prompt'}

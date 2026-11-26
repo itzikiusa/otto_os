@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
+import { workflowRow } from './workflowsUi';
 
 // "Design every state": a FAILED list load must render inline ("Couldn’t load
 // X" + Retry, via the shared LoadState), never masquerade as the empty state
@@ -129,8 +130,9 @@ test('workflows: a failed list load says so ONCE, and a workspace switch never k
       const { ws } = await import(/* @vite-ignore */ path);
       await ws.select(wid);
     }, id);
+  await page.getByTestId('wf-tab-workflows').click();
   await select(otherWs);
-  await expect(page.getByTestId(`wf-row-${otherWfId}`)).toBeVisible({ timeout: 15_000 });
+  await expect(workflowRow(page, otherWfId)).toBeVisible({ timeout: 15_000 });
 
   // …then back to a workspace whose load fails: the old workspace's row (and
   // its open editor) must not linger unflagged — gone, and the failure said once.
@@ -147,7 +149,7 @@ test('workflows: a failed list load says so ONCE, and a workspace switch never k
   );
   await select(wsId);
   await expect(page.getByTestId('load-error')).toHaveCount(1, { timeout: 30_000 });
-  await expect(page.getByTestId(`wf-row-${otherWfId}`)).toHaveCount(0);
+  await expect(workflowRow(page, otherWfId)).toHaveCount(0);
   await expect(page.getByText('Other-workspace workflow')).toHaveCount(0);
   broken = false;
 });

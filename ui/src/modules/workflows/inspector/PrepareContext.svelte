@@ -3,7 +3,6 @@
   // (with a prompt) run an agent to consolidate a brief.
   import type { WorkflowNode } from '../../../lib/api/types';
   import IdPicker from './IdPicker.svelte';
-  import ProviderModel from './ProviderModel.svelte';
   import type { InspectorOptions } from './options.svelte';
   import { jiraAccountOptions, listValue, paramBool, paramList, paramStr, type SetParam } from './util';
 
@@ -24,7 +23,6 @@
   value={paramStr(node, 'prompt')}
   oninput={(e) => set('prompt', e.currentTarget.value)}
 ></textarea>
-<ProviderModel {node} {set} />
 <label for="np-pc-skills">Skills (comma-separated)</label>
 <input dir="auto"
   id="np-pc-skills"

@@ -1,6 +1,7 @@
-// A single workflow run's address: `#/workflows/<workflow id>/runs/<run id>`
-// selects the workflow and opens that run (RunRouteSync.svelte follows it),
-// and the run header's "Copy link" hands it out. Also where a run came from,
+// The Workflows module's addresses (ux.md §1.1): `#/workflows` (Runs),
+// `#/workflows/all` (the definitions), `#/workflows/<wf>` (the editor),
+// `#/workflows/<wf>/optimize` and `#/workflows/<wf>/runs/<run>[/<node>[/<child>]]`
+// (the run page — the run header's "Copy link" and every notice hand it out). Also where a run came from,
 // read from its input (a Slack/Telegram trigger stamps channel/chat/thread and
 // the triggering message `raw`). Pure; unit-tested in unit/workflowRunRoute.test.ts.
 
@@ -11,6 +12,24 @@ export interface RunRoute {
   nodeId?: string;
   /** A reviewer of that step (`…/<node>/<child>`). */
   childId?: string;
+}
+
+/** What `#/workflows/…` shows. `all` cannot be a workflow id (ids are ULIDs). */
+export type WorkflowsView =
+  | { view: 'runs' }
+  | { view: 'list' }
+  | { view: 'editor'; workflowId: string }
+  | { view: 'optimize'; workflowId: string }
+  | ({ view: 'run' } & RunRoute);
+
+/** router.parts → the screen. */
+export function parseWorkflowsRoute(parts: readonly string[]): WorkflowsView {
+  const run = parseRunRoute(parts);
+  if (run) return { view: 'run', ...run };
+  const [, id, sub] = parts;
+  if (!id) return { view: 'runs' };
+  if (id === 'all') return { view: 'list' };
+  return sub === 'optimize' ? { view: 'optimize', workflowId: id } : { view: 'editor', workflowId: id };
 }
 
 /** `['workflows', wf, 'runs', run, node?, child?]` (router.parts) → the run it names. */

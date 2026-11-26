@@ -67,15 +67,14 @@ API-client automations are a thin, self-contained feature covered in §8.
 ## 2. Overview & where it lives
 
 ```
-ui/src/modules/workflows/WorkflowsPage.svelte   — the page: generate / list / edit / run / inspect
-ui/src/modules/workflows/WorkflowCanvas.svelte  — n8n-style pan/zoom node-graph canvas (SVG + cards)
-ui/src/modules/workflows/RunSteps.svelte        — per-step run detail (status, logs, "work product")
-ui/src/modules/workflows/RunMonitor.svelte      — the inspector's run view: run bar, timeline, steps, final output
+ui/src/modules/workflows/WorkflowsPage.svelte   — the route switch: Runs · Workflows tabs, run page, editor, Optimize; the start form, ⌘K, the agent UI port
+ui/src/modules/workflows/runs/                  — the Runs inbox (RunsInbox, RunRow), the run page (RunPage, RunOverview, StateCards, StepList, StepPane, StepConversation, StepFiles, RunOrbit) and the start form (StartRunModal, startForm.ts); words in runWords.ts
+ui/src/modules/workflows/list/                  — the Workflows tab (WorkflowList), New workflow (NewWorkflowModal), Duplicate / Rename / Delete (workflowActions.ts)
+ui/src/modules/workflows/editor/                — the editor (EditorPage, EditorCanvas — auto-laid-out top to bottom, PhoneOutline)
+ui/src/modules/workflows/inspector/             — the step inspector (StepInspector, per-kind forms, StepModel = provider · model · effort)
+ui/src/modules/workflows/optimize/              — the Optimize review page (OptimizePage, optimizeView.ts)
 ui/src/modules/workflows/runSync.svelte.ts      — RunSync (run state): live run sync (WS fast path + safety poll), approvals, final output
-ui/src/modules/workflows/RunApprovals.svelte    — the approval gate preview + Approve / Reject
-ui/src/modules/workflows/RunContextSidebar.svelte — the run's context files (shared <Tabs>)
 ui/src/modules/workflows/RunFinalOutput.svelte  — the run's final deliverable (one view for mobile and desktop)
-ui/src/modules/workflows/RunInputPanel.svelte   — manual-run input editor (state in runInputForm.svelte.ts)
 ui/src/modules/workflows/TriggersPanel.svelte   — list/add/edit/preview/toggle/delete schedule|webhook|event|chat triggers
 ui/src/modules/api/AutomationsView.svelte       — API-client collection runner (the *other* "automations")
 
@@ -460,12 +459,13 @@ lens* skills (below) rather than prompt-prepended text.
 
 ### Watching the review summarizer
 
-The run's **Agents** panel includes each review's **Summarizer**, its configured
-provider, actual review status, and elapsed time while it runs. Expand the row to
-watch its live terminal. All providers use managed sessions; an empty provider
-setting defaults to Claude, and the configured model is preserved.
+On the run page a review step lists its reviewers and its **Summarizer** as named
+rows under the step, each with its word (Working 6m, Done · 14 findings…); the
+step's **Summarizer** tab shows the summarizer's conversation, and a reviewer
+opens its own conversation and **Findings**. An empty provider setting defaults
+to Claude, and the configured model is preserved.
 
-The panel keeps discovering review sessions even when a step uses `await:false`
+The run page keeps discovering review records even when a step uses `await:false`
 or a summarizer is retried after the workflow finishes. Reloading the run restores
 the review association and current summarizer; session IDs already captured by
 the workflow remain in its history. Completed attempts release their live PTYs
@@ -474,7 +474,7 @@ while retaining the session record.
 Failures, the finding-count timeout (5–30 minutes), and empty summaries
 when findings exist can preserve a deterministic summary. This is not independently
 verified output: adaptive reviews remain incomplete and cannot pass on fallback
-alone. The Agents panel labels this
+alone. The run labels this
 **Deterministic fallback**. Cancelling a review stops its summarizer and leaves
 the review cancelled, without creating a fallback summary. Each retry uses a new
 session and result file; incomplete JSON is never a completion signal.
@@ -918,8 +918,9 @@ is a node, not a trigger (migration 0058 comment makes this explicit).
 
 ## 6. Building a workflow (UI walkthrough)
 
-Open the **Workflows** page (`#/workflows`). The left sidebar offers three ways
-to create a workflow; the center is the canvas editor.
+Open **Workflows** → the **Workflows** tab (`#/workflows/all`) → **New workflow**
+(a modal; not on a phone). It offers three ways to create a workflow, and each
+opens the new workflow in the editor.
 
 ### Create
 1. **Generate from a description (the primary path).** Type a natural-language
@@ -974,59 +975,88 @@ to create a workflow; the center is the canvas editor.
    - **Game pipelines** (`game-slots` / `game-crash` / `game-scratch`), each chaining
      an agent design step into the game engine + verifier scaffold.
 
-### Edit on the canvas (`WorkflowCanvas.svelte`)
-- **Pan**: drag the background. **Zoom**: mouse wheel (0.3×–2×), or the HUD
-  `+ / − / reset` controls.
-- **Add a node**: top-bar **+ Node** opens the palette (built from
-  `node-types`); click a kind to drop it.
-- **Connect**: drag from a node's **right (output) port** to another node's
-  **left (input) port**. Click an edge to delete it.
-- **Move/select**: drag a node to reposition; click to select (opens the
-  inspector). **Trash** removes the selected node (and its edges).
-- **Configure params**: the bottom **inspector** shows a per-kind form for the
-  selected node (e.g. `agent_prompt` → prompt + provider; `http_request` →
-  method/url/body; `review_run` → repo_id/base/threshold/goals). Kinds without a
-  bespoke form yet — including `prepare_context` as of this writing — fall back
-  to a **raw-JSON params editor**.
-- **Save**: edits set an "unsaved" badge; **Save** (`PATCH /workflows/{id}` with
-  the new `graph` and the `expected_version` the editor loaded) persists. If the
-  workflow was saved elsewhere meanwhile the daemon answers 409 and the editor
-  asks **Reload theirs** or **Overwrite with mine**. Running while dirty
-  auto-saves first.
-- **Instructions**: a separate top-bar toggle opens the collapsible standing-
-  instructions panel (its own "unsaved" badge + **Save**, independent of the
-  graph editor) — see *Standing instructions* in §3.
+### Edit (`editor/EditorPage.svelte`, `#/workflows/<wf>`)
+- The canvas lays the graph out **top to bottom** on every render (no dragging
+  steps around, no "Tidy") and fits it on open; **+ / − / Fit** in the zoom pill,
+  pinch or ⌘-wheel to zoom, drag the background to pan.
+- **+ Step** (header) adds a step after the selected one (else the last one),
+  wired in. **Connect** by dragging from a card's bottom port onto another card,
+  or with the port's "Connect to…" menu. **Delete** removes the selected step or
+  connection.
+- **The inspector** (right column, 360 px) is the selected step's form: agent
+  steps get the prompt, provider · model · **effort** (the Threads model picker;
+  empty = Default), skills, "continue the conversation of an earlier step" and
+  a time limit; a review step gets per-reviewer model and effort; the
+  deterministic steps (check out a PR, run a script, post review comments, a
+  data condition) their own forms. Only steps that run an agent show a model.
+- **Save** (⌘S) validates first (`POST /workflows/{id}/validate`; problems show
+  in one line above the canvas) and saves with `expected_version`; a save made
+  elsewhere meanwhile asks **Reload theirs** or **Overwrite with mine**.
+- **⋯** holds Runs of this workflow · Optimize… · Triggers · Instructions ·
+  Versions (newest first, **Show older**, **Restore**) · Validate · Rename… ·
+  Duplicate · Delete workflow…. Triggers, Instructions and Versions open in the
+  inspector column.
+- On a **phone** the editor is a read-only outline of the steps; tapping one
+  opens its settings in a bottom sheet (**Done** saves). Adding, connecting or
+  deleting steps needs a larger screen.
 
 ### Triggers
-Top-bar **Triggers** toggles the `TriggersPanel`: add/enable/disable/delete
+⋯ → **Triggers** opens the `TriggersPanel` in the inspector column: add/enable/disable/delete
 schedule, webhook, event, or **chat binding** triggers — all four fire
 unattended in the running daemon (see §5; the chat kind is evaluated live by
 the channels Bridge on every message, not polled like the other three). The
 **Chat binding** form (channel, chat id, optional thread, "@mention only")
 maps directly onto the `{channel, chat, thread?, mention_only?}` spec.
 
----
+### Optimize (`#/workflows/<wf>/optimize`)
+**Optimize…** (editor ⋯, a Workflows-tab row's menu, ⌘K) drafts a faster
+version of the workflow from rules alone — no agent, no quota — and shows it
+before anything is saved: the expected saving from the workflow's own
+successful runs (no minutes under 3 runs), what was checked (validation, the
+step numbers prompts mention, every file a step reads still written before it,
+outward steps in their order), the changes grouped as **Same result, faster** ·
+**Faster; the output may read differently** · **May change findings** (ticked as
+Otto pre-selects them; holding a review to its declared lenses never is), what
+was **Not offered** and why, **Before | After**, and what each step reads and
+writes. Ticking a change asks the daemon again for that selection's draft.
+**Apply as version N…** confirms and saves a new version (the old one stays in
+Versions); only a person can apply (an agent credential gets 403); a save made
+meanwhile asks you to **Check again**.
+### Goals (Goal Loops folded in)
+A **goal** is a workflow of a fixed shape — work, then check the criteria, in a
+budgeted loop — started from **Run… → A goal…**, ⌘K **New goal…**, Insights'
+"Hand off as a goal…" or an older loop's **Continue as a goal**. The Goal form
+(`ui/src/modules/workflows/goal/`, mounted on the page by `GoalHost`) takes the
+goal, the criteria (each checked by a command, an agent, or a person), where it
+works (a repository or research), the budget (iterations, active time) and the
+models that work and check. It starts with `POST /workspaces/{wid}/goals` and
+opens the run page, which shows the goal card (criteria met, budget left), the
+loop's **iterations as child rows** of the loop step (one ring tick each), the
+**Criteria** tab, and the hold cards: **Resume**, **Extend and resume…**, a
+"you check it" criterion's **Record** / **Not met…**. Goal workflows fold under
+**Goals** in the Workflows tab; the old Goal Loops page is a read-only history
+reached from **Older goal loops** at the foot of Runs (`#/loops` links keep
+working). Details: [Goal Loops](./goal-loops.md).
 
 ## 7. Running & monitoring
 
 ### Run
-- **Run…** opens the run panel with an **empty** run input: the annotated
-  template (repos, story, `msg`, goals, `result_channel`/`result_chat`) is only
-  the textarea's placeholder. **Suggest** inserts just the keys this graph needs
-  as `<…>` slots. A value that is still a placeholder (`<…>`, `PROJ-0000`,
-  `~/path/to/repo`) is refused inline ("Replace the placeholder in
-  `result_chat`…"), and when the input names a `result_chat` (+ channel) or
-  `result_webhook` the panel says **"Results will be posted to Slack chat …"**
-  above Run.
-- **Run** (top bar) → `POST /workflows/{id}/run` with `{}` → runs the whole graph.
-  The top bar follows the **viewed** run: while it is active its *Cancel run…*
-  replaces *Run…*; other workflows (and finished runs) can be started meanwhile —
-  the daemon queues them. A failed run shows its run-level error under the status
-  (an invalid graph, an exhausted resume, a queued run that couldn't start).
-- From the inspector of a selected node: **▶ From here**
-  (`{ start_node, only_node:false }`) or **Only this**
-  (`{ start_node, only_node:true }`).
-- **Stop** → `POST /workflow-runs/{id}/cancel`. The cancel is announced to the
+- **Run…** (the Runs tab, the editor, a Workflows-tab row, ⌘K "Run workflow…")
+  opens the **start form**: fields built from the Start step's declared
+  `inputs` (else the keys chat runs use — Pull request, Jira ticket, Branch,
+  Base branch, Goals, Message to the agents), the review mode when the graph has
+  a review step, **This run will** (every outward step in words) and **Send the
+  result to** (Only this page, or a configured chat destination). JSON is behind
+  **Input as JSON**, two-way. **Run** validates the graph, starts the run
+  (`POST /workflows/{id}/run`) and opens its run page; a refusal stays in the
+  form.
+- **Run again…** (a finished run's header, a run row's menu) opens the same form
+  filled from that run's input; the original chat thread is offered as a
+  destination, never preselected.
+- **Retry step** (a failed run's primary) re-runs the failed step and what
+  follows it; **Retry only this step** (⋯) just the step. A running step's ⋯ has
+  **Skip this step**.
+- **Stop run…** → `POST /workflow-runs/{id}/cancel`. The cancel is announced to the
   engine, which stops the **running node at once** (its sessions are killed), then
   marks the remaining nodes `skipped` (status `canceled`). A running node reads
   only the run's status as a backstop (first tick, then every 30 s) — never the
@@ -1249,17 +1279,31 @@ and at **run completion**:
   list updates in place from the event's `nodes_done`/`nodes_total`/
   `waiting_approval` (full refetch only for unknown run ids).
 
-### Inspect
-`RunSteps.svelte` renders each step's status, duration (a **live elapsed timer**
-while the step runs, from `NodeRunState.started_at`), `attempts` (when a retry
-policy ran), logs (including `⚠` typed-output warnings and `edge → … not taken`
-branch lines), error, and the **"work product"** (an agent `reply` string is
-rendered as text; everything else as pretty JSON, copyable). Step expansion is
-**user-owned**: a step that errors auto-opens once for visibility, but a manual
-open/collapse always wins afterward — live updates never fight it. Steps that
-spawned **openable sessions** (`NodeRunState.sessions` — agent / product /
-canvas / loop turns) link to them so you can watch/inspect the agent **while the
-step runs**; the timeline strip at the top jumps between steps.
+### Inspect: Runs and the run page
+**Workflows opens on Runs** (`#/workflows`): **Needs you** (approvals,
+questions, usage limits, held goals — oldest first), **Running** (queued last,
+by position) and **Recent** (search, a **Failed** chip, a workflow filter;
+"Runs of this workflow" sets it). Each row says in words what the run is doing,
+whose it is and what it is about. The **Workflows** tab (`#/workflows/all`)
+lists the definitions with their last run's word and **New workflow**
+(describe it and **Generate**, a template, or **Start blank**); goals fold
+under **Goals**.
+
+A run has its own page, `#/workflows/<wf>/runs/<run>` (the address notices,
+chat links and **Copy link** hand out). It leads with one sentence — the
+engine's headline — and a ring of the steps, then the state card (the failing
+step's **own** error with **Retry step**; an approval with **Approve** /
+**Deny…**; a question; a usage limit; the delivered result), the facts in names
+(who, where, the PR and ticket, when, which version), and the steps **in
+execution order**, parallel steps grouped and reviewers as named rows. A step
+opens beside the list on a wide screen and as a pushed screen on a phone
+(`…/runs/<run>/<node>[/<child>]`): its **Conversation** (the step's thread,
+read-only; kept for the retention settings' hours after the run ends, then a
+digest), **Output**, **Log** and **Files** by kind; a review step's **Summary**
+(score, counts, reviewers, **Open review**) and **Summarizer**; a reviewer's
+**Conversation · Findings · Files**; the run's **Result · Files · Input**.
+While the event socket reconnects the run's word is **Reconnecting…** and the
+sub line says when the page last heard of it.
 
 #### Phase lines (agent-backed steps)
 The turn oracle (§3) narrates itself into the step's log as it goes, and those
@@ -1290,13 +1334,8 @@ retry, edge and persist lines are never dropped.
 While an agent step runs it also carries an `activity` snapshot (phase,
 `pending_tasks`, and one entry per sub-agent / background task with
 `id`, `description`, `status`, `started_at`, `finished_at`), refreshed at most
-every 5 s and capped at 40 entries. The run view renders it in two places:
-- the step card shows a **chip** next to the live timer — `3 sub-agents ·
-  1 running` — plus the current phase as a muted line under the title;
-- the sidebar's **Agents** tab nests one row per sub-agent under that step —
-  `└ Sweep diff chunk aa — done in 1m12s` / `└ Sweep diff chunk ac — running
-  3m40s`. Sub-agents have no PTY of their own, so there is nothing to open; the
-  step appears in the tab even before its own session exists.
+every 5 s and capped at 40 entries. The run page shows the current phase as
+the running step's second line.
 
 `activity` is **cleared when the step finishes** — a settled step carries no
 `activity` key at all, so the chip and the phase line only ever show on a
@@ -1312,13 +1351,13 @@ approver). The run also records the workflow `version` it executed
 ### Human-approval pause
 When a run hits a `human_approval` node it pauses (`waiting_approval` +
 `approval_node_id` ride both the run row and a `workflow_run_updated` pause
-event, so the banner and the sidebar ⏸ badge appear immediately); the page
-shows a banner — *"Run paused — waiting for approval at &lt;node&gt;"* — with
-**Approve** / **Reject** (→ `POST /workflow-runs/{id}/approve` with
+event, so the run moves to **Needs you** and the sidebar badge counts it at once); the run page
+leads with the approval card (what asks, where it posts, the preview) with
+**Approve** / **Deny…** (→ `POST /workflow-runs/{id}/approve` with
 `{node_id, approved}`). Approve resumes the run (records `approved_by`; the
 engine's resume poll runs every 2s); reject errors the node
 ("rejected — &lt;note&gt;"). Both decisions re-emit the event so open views
-drop the banner at once. If no decision arrives within the node timeout, the
+drop the card at once. If no decision arrives within the node timeout, the
 node errors ("timed out").
 
 A cancel while parked is not a decision: the approval step waits for the run's
