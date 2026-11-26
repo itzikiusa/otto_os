@@ -56,8 +56,11 @@ test('fields come from inputs; a required one holds Run; JSON round-trips; Run o
 
 test('Run again… fills the form from the run; the chat thread is offered, not chosen', async ({ page }) => {
   const wf = await createWorkflow(api, 'E2E Run again', withInputs());
-  const run = await startRun(api, wf, { pr: '#77', msg: 'look at retries', channel: 'slack', chat: 'C1', thread: '1.2', user: 'U1' });
-  await waitRun(api, run, settled);
+  // A Manual run names its chat destination with the result_* keys (channel / chat /
+  // thread are a chat trigger's own and strip_reserved_input drops them here).
+  const run = await startRun(api, wf, { pr: '#77', msg: 'look at retries', result_channel: 'slack', result_chat: 'C1', result_thread: '1.2' });
+  const read = await waitRun(api, run, settled);
+  expect(read.input).toMatchObject({ result_channel: 'slack', result_chat: 'C1' });
   await openRun(page, wf, run);
   await page.getByTestId('wf-run-primary').click();
   const form = page.getByTestId('wf-start-form');

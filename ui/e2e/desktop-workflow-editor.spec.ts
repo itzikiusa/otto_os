@@ -51,11 +51,22 @@ test('choosing a model and effort saves them on the step', async ({ page }) => {
   await page.goto(`/#/workflows/${wf}`);
   await selectStep(page, 'a');
   const saved = page.waitForRequest((r) => r.method() === 'PATCH' && r.url().endsWith(`/workflows/${wf}`));
+  // The model: the first one the picker lists that is not the default.
+  await page.getByTestId('wf-step-model').click();
+  const picker = page.getByTestId('model-picker');
+  await expect(picker).toBeVisible();
+  await picker.locator('.mp-row:not([disabled])').filter({ hasNotText: 'Default model' }).first().click();
+  await page.keyboard.press('Escape');
+  await expect(picker).toBeHidden();
+  // The effort, from the same picker.
   await page.getByTestId('wf-step-effort').click();
-  await page.getByRole('menuitemradio', { name: /high/i }).or(page.getByRole('option', { name: /high/i })).first().click();
+  await picker.getByRole('group', { name: 'Reasoning effort' }).getByRole('button', { name: /^high$/i }).click();
+  await page.keyboard.press('Escape');
   await page.keyboard.press('Meta+s');
-  const body = (await saved).postDataJSON();
-  expect(body.graph.nodes.find((n: { id: string }) => n.id === 'a').params.effort).toBe('high');
+  const params = (await saved).postDataJSON().graph.nodes.find((n: { id: string }) => n.id === 'a').params;
+  expect(params.model, 'a model was chosen').toEqual(expect.any(String));
+  expect(params.model).not.toBe('');
+  expect(params.effort).toBe('high');
 });
 
 test('continue from lists only same-provider ancestors', async ({ page }) => {

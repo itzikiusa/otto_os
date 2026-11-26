@@ -1,16 +1,21 @@
 import { test, expect } from '@playwright/test';
 import { expectFullyInViewport } from './helpers';
-import { agentStep, chain, createWorkflow, needsYou, startRun, waitRun, wfApi, type WfApi } from './workflowsFixture';
+import { agentStep, cancelStarted, chain, createWorkflow, needsYou, node, settled, startRun, waitRun, wfApi, type WfApi } from './workflowsFixture';
 import { openRun, runsTab } from './workflowsUi';
 
-// Approving on a phone (ux.md §10, §16): approve by tap continues the run;
-// Deny… opens its sheet fully in the viewport and stops the run; the row
-// leaves Needs you. The step asks through the fake agent's `approve` verb.
+// Approving on a phone (ux.md §10, §16): approve by tap continues the run and
+// the row leaves Needs you (the step asks through the fake agent's `approve`
+// verb); Deny… on a human approval gate opens its sheet fully in the viewport
+// and stops the run. (Denying an agent's tool only tells the agent no — the
+// fake answers "denied: Bash" and finishes, fake_script.rs.)
 
 let api: WfApi;
 test.beforeAll(async ({}, info) => {
   if (!(/phone|iphone/.test(info.project.name))) return;
   api = await wfApi();
+});
+test.afterEach(async () => {
+  await cancelStarted(api);
 });
 test.afterAll(async () => {
   await api?.ctx.dispose();
@@ -45,8 +50,10 @@ test('Approve by tap: the run goes on and leaves Needs you', async ({ page }) =>
   void wf;
 });
 
-test('Deny… opens a sheet inside the screen and stops the run', async ({ page }) => {
-  const { wf, run } = await waitingRun();
+test('Deny… on an approval gate opens a sheet inside the screen and stops the run', async ({ page }) => {
+  const wf = await createWorkflow(api, 'E2E Phone gate', chain(node('gate', 'human_approval', 'Approve the post'), agentStep('post', 'Post the comments')));
+  const run = await startRun(api, wf);
+  await waitRun(api, run, needsYou);
   await openRun(page, wf, run);
   await page.locator('[data-testid="wf-run-card"][data-kind="approval"]').getByRole('button', { name: 'Deny…' }).tap();
   const sheet = page.getByRole('dialog');
@@ -54,4 +61,6 @@ test('Deny… opens a sheet inside the screen and stops the run', async ({ page 
   await expectFullyInViewport(page, sheet);
   await sheet.getByRole('button', { name: /^Deny/ }).last().tap();
   await expect(page.getByTestId('wf-run-page')).toHaveAttribute('data-state', /failed|canceled/, { timeout: 20_000 });
+  const done = await waitRun(api, run, settled);
+  expect(done.nodes.find((n) => n.node_id === 'post')?.status, 'nothing after the gate ran').not.toBe('success');
 });
