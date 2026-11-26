@@ -40,13 +40,14 @@ impl ProductionPlanner for FakePlanner {
 /// it reaches the CPU step), drawing `concept.png` in its work folder; on
 /// "queued" it waits a second in a `heavy.sh` of its own, as Forge does for
 /// a heavy slot. Rig fails like the engine on "fox" and hangs once on "stiff".
+/// The library holds its answer while `$LOG.hold-library` exists.
 const FAKE_FORGE: &str = "#!/bin/sh\nSTAGE=\"$1\"\nPROMPT=\"$2\"\nMESH=\"$3\"\nOUT=\"$4\"\nIMAGE=\"$5\"\n\
 if [ \"$PROMPT\" = --help ] || [ \"$STAGE\" = --help ]; then echo '$HELP'; exit 0; fi\n\
 if [ \"$STAGE\" = concept-server ]; then echo \"start server\" >> \"$LOG\"; trap 'echo \"server stopped\" >> \"$LOG\"; exit 0' TERM\n\
 printf '{\"ready\": true, \"url\": \"http://127.0.0.1:%s\"}\n' \"$3\"; while :; do sleep 0.1; done; fi\n\
 if [ \"$STAGE $PROMPT\" = \"generate --prompt\" ]; then P=\"$3\"; while [ $# -gt 0 ]; do case \"$1\" in --output) O=\"$2\"; shift;; --concept-server) U=\" $2\"; shift;; --kind) K=\" kind=$2\"; shift;; --body) echo \"body concept $P $2\" >> \"$LOG\"; shift;; esac; shift; done\n\
 echo \"start concept $P$U$K\" >> \"$LOG\"; sleep 0.3; printf '\\211PNG %s' \"$P\" > \"$O\"; echo \"end concept $P\" >> \"$LOG\"; exit 0; fi\n\
-if [ \"$STAGE\" = library ]; then echo \"library $3 $5 $9\" >> \"$LOG\"; case \"$3\" in *library*|Ranger*|\"Key. An old\"*)\n\
+if [ \"$STAGE\" = library ]; then echo \"library $3 $5 $9\" >> \"$LOG\"; n=0; while [ -f \"$LOG.hold-library\" ] && [ $n -lt 200 ]; do sleep 0.05; n=$((n+1)); done; case \"$3\" in *library*|Ranger*|\"Key. An old\"*)\n\
 printf 'glTF\\002\\000\\000\\000\\014\\000\\000\\000' > \"$7\"; printf '%s' \"$3\" >> \"$7\";\n\
 echo '{\"source\": \"library\", \"id\": \"fantasy-props-megakit/chest-wood\", \"licence\": \"CC0\"}' > \"$7.manifest.json\"; exit 0;; esac\n\
 echo '{\"error\": \"no library match\", \"best\": {}, \"score\": 0}' >&2; exit 1; fi\n\
@@ -2028,10 +2029,19 @@ async fn a_working_model_shows_its_step_its_engine_wait_and_its_picture() {
     let none = format!("/design/productions/{id}/items/rock/preview");
     let (st, _) = call_json(&rig.app, Method::GET, &none, None, false).await;
     assert_eq!(st, StatusCode::NOT_FOUND);
+    // The library answers within milliseconds, sooner than a busy machine's
+    // first poll: the engine holds its answer until the step has been seen.
+    let hold = format!("{}.hold-library", rig.log.display());
+    std::fs::write(&hold, "").unwrap();
     rig.post(&format!("/design/productions/{id}/start"), json!({}))
         .await;
-    let seen = watch(&rig, &id, |p| p["status"] == "done").await;
     let crate_at = |p: &Value| item(p, "queued-crate").clone();
+    let mut seen = watch(&rig, &id, |p| {
+        crate_at(p)["step"]["label"] == "Looking in the library"
+    })
+    .await;
+    std::fs::remove_file(&hold).unwrap();
+    seen.extend(watch(&rig, &id, |p| p["status"] == "done").await);
     let labels: Vec<String> = seen
         .iter()
         .filter_map(|p| Some(crate_at(p)["step"]["label"].as_str()?.to_string()))
