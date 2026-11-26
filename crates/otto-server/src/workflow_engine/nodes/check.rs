@@ -109,15 +109,17 @@ pub(in crate::workflow_engine) async fn execute(
     };
     while let Some(c) = waits_on(&d) {
         let (attention, mut rx, _parked) = check_run::park(run_id, &top, &c, iteration);
-        let note = |n| session_tx.send(AgentAssociation::Step(n));
-        let _ = note(StepNote::NeedsYou(attention));
+        let note = |n| {
+            let _ = session_tx.send(AgentAssociation::Step(n));
+        };
+        note(StepNote::NeedsYou(attention));
         let Some(entry) = rx.recv().await else {
             return Err(otto_core::Error::Internal(
                 "check: the wait for a person ended".into(),
             ));
         };
-        let _ = note(StepNote::Human(entry.clone()));
-        let _ = note(StepNote::Resumed {
+        note(StepNote::Human(entry.clone()));
+        note(StepNote::Resumed {
             answer: None,
             by: None,
         });
