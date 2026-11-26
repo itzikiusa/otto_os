@@ -69,6 +69,9 @@
     <span class="fact"><Icon name="ticket" size={13} /><a href={subject.ticket.url} target="_blank" rel="noreferrer noopener">{subject.ticket.key}</a></span>
   {/if}
   <span class="fact"><Icon name="clock" size={13} />{clockTime(run.started_at)}{run.workflow_version ? ` · version ${run.workflow_version}` : ''}</span>
+  {#if (run.resume_attempts ?? 0) > 0}
+    <span class="fact"><Icon name="refresh" size={13} />Resumed after Otto restarted</span>
+  {/if}
   {#if older}
     <span class="chip" title="This run finished before Workflows moved to threads: phase timings and conversations are not available; logs and outputs are.">Older run</span>
   {/if}

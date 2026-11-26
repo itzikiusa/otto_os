@@ -13,6 +13,7 @@
   import PageBody from '../../../lib/components/PageBody.svelte';
   import PageHeader from '../../../lib/components/PageHeader.svelte';
   import { api, ApiError } from '../../../lib/api/client';
+  import { events } from '../../../lib/events.svelte';
   import { copyWithToast } from '../../../lib/clipboard';
   import type { MenuItem } from '../../../lib/contextmenu.svelte';
   import { loadErrorText } from '../../../lib/loadError';
@@ -88,7 +89,13 @@
   const run = $derived(sync.run?.id === runId ? sync.run : null);
   const now = $derived(clockNow());
   const runState = $derived(run ? (run.overview?.state ?? fallbackState(run.status, run.waiting_approval)) : 'unknown');
-  const word = $derived(run ? runWord(run.overview ?? { state: runState, attention: [] }, { startedAt: run.started_at, now, raw: run.status }) : { word: '', tone: '' as const });
+  const live = $derived(run?.status === 'pending' || run?.status === 'running');
+  // The socket is reconnecting: what the page shows may be behind (ux.md §4.6).
+  const word = $derived(
+    !run ? { word: '', tone: '' as const }
+    : live && events.state === 'connecting' ? { word: 'Reconnecting…', tone: '' as const }
+    : runWord(run.overview ?? { state: runState, attention: [] }, { startedAt: run.started_at, now, raw: run.status }),
+  );
   const entries = $derived(run ? orderSteps(run.nodes, graph, now) : []);
   const steps = $derived(entries.flatMap(entrySteps));
   const selected = $derived(nodeId ? { node: nodeId, child: childId } : defaultSelection(runState, entries, run?.overview?.failed_step?.node_id));
