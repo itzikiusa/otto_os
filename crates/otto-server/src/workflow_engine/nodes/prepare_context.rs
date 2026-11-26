@@ -145,7 +145,8 @@ pub(in crate::workflow_engine) async fn execute(
         )
         .await?;
         out.insert("reply".into(), json!(reply));
-        out.insert("session_id".into(), json!(sid));
+        let key = super::super::step_thread::id_key(ctx, &env.run_id, provider).await;
+        out.insert(key.into(), json!(sid));
         out.insert("working_directory".into(), json!(acwd));
         for k in ["repo_id", "base", "repos", "worktree", "pr", "pr_branch"] {
             if let Some(v) = input.get(k) {

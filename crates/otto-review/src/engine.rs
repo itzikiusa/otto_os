@@ -624,13 +624,14 @@ pub fn orchestrator_runs(cfg: &ReviewConfig, library: &otto_context::Library) ->
                 .iter()
                 .find_map(|a| a.picks.get(&p).filter(|k| !k.is_empty()).cloned())
                 .or_else(|| {
-                    cfg.agents
-                        .iter()
-                        .find(|a| !a.model.trim().is_empty() && effective_providers(a).contains(&p))
-                        .map(|a| ModelPick {
-                            model: a.model.clone(),
-                            effort: a.effort.clone(),
-                        })
+                    // A lens's own model and effort belong to its own provider
+                    // (as `resolve_pick`): a Claude model on Codex fails its spawn.
+                    let own = cfg.agents.iter().filter(|a| a.provider == p);
+                    own.map(|a| ModelPick {
+                        model: a.model.clone(),
+                        effort: a.effort.clone(),
+                    })
+                    .find(|k| !k.is_empty())
                 })
                 .or_else(|| cfg.picks.get(&p).cloned())
                 .unwrap_or_default();
@@ -2022,9 +2023,9 @@ mod orchestrator_tests {
             runs[0].lens_slugs(),
             vec!["correctness-review", "security-review", "test-review"]
         );
-        // The model is the first configured one that applies to THIS provider.
+        // A lens's model is its own provider's only (CR1-011).
         assert_eq!(runs[0].model, "gpt-5");
-        assert_eq!(runs[1].model, "gpt-5");
+        assert_eq!(runs[1].model, "");
         // The prompt is composed per index in the spawn loop, not here.
         assert!(runs.iter().all(|r| r.prompt_lens.is_empty()));
     }

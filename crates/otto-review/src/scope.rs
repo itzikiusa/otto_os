@@ -27,6 +27,12 @@ pub fn selected_agents(
         } else { vec![pool[i % pool.len()].clone()] };
         let own = template.filter(|a| a.provider == providers[0]);
         let model = own.map(|a| a.model.clone()).unwrap_or_default();
+        // The template's own pick stays with its provider when another one leads.
+        let mut picks = template.map(|a| a.picks.clone()).unwrap_or_default();
+        if let Some(a) = template.filter(|a| own.is_none() && providers.contains(&a.provider)) {
+            let pick = otto_core::domain::ModelPick { model: a.model.clone(), effort: a.effort.clone() };
+            picks.entry(a.provider.clone()).or_insert(pick);
+        }
         otto_core::domain::ReviewAgentCfg {
             name: lens.name.clone(), provider: providers[0].clone(), providers,
             model,
@@ -34,7 +40,7 @@ pub fn selected_agents(
             // The method is the selected instructions. A skill is never required.
             skill: String::new(),
             effort: own.map(|a| a.effort.clone()).unwrap_or_default(),
-            picks: template.map(|a| a.picks.clone()).unwrap_or_default(),
+            picks,
         }
     }).collect()
 }

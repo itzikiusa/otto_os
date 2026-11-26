@@ -533,7 +533,7 @@ fn spawn_progress_pump(
                     text,
                     caption,
                 } => {
-                    let text = redact(&text);
+                    let (text, caption) = (redact(&text), redact(&caption));
                     thread.step_file(&name, text.as_bytes(), &caption).await;
                 }
                 ProgressItem::Status(text) => {
@@ -1235,7 +1235,15 @@ pub fn spawn_run(
         RUN_PERMIT
             .scope(
                 std::cell::RefCell::new((gate, Some(permit))),
-                run_workflow(ctx, ws, workflow, run_id, input, scope, prior_nodes),
+                Box::pin(run_workflow(
+                    ctx,
+                    ws,
+                    workflow,
+                    run_id,
+                    input,
+                    scope,
+                    prior_nodes,
+                )),
             )
             .await;
     });
@@ -1684,6 +1692,10 @@ async fn finalize_canceled_run(
     states: &mut [NodeRunState],
     input: &Value,
 ) {
+    // A Pause that landed after the driver's own hold check holds the run.
+    if run::hold::settle_held(ctx, repo, workflow, run_id, states).await {
+        return;
+    }
     stop_run_reviews(ctx, repo, &workflow.workspace_id, run_id, states).await;
     kill_run_sessions(ctx, states).await;
     for s in states.iter_mut() {
@@ -1715,6 +1727,7 @@ async fn finalize_canceled_run(
             0
         }
     };
+    let ov = run::finalize::store_overview(repo, workflow, run_id, rev).await;
     deliver_run_result(
         ctx,
         workflow,
@@ -1725,17 +1738,8 @@ async fn finalize_canceled_run(
         None,
     )
     .await;
-    emit_run_updated(
-        ctx,
-        &workflow.workspace_id,
-        run_id,
-        "canceled",
-        None,
-        rev,
-        None,
-        states,
-        false,
-    );
+    let at = (&workflow.workspace_id, run_id, "canceled", rev);
+    emit_run_updated_with(ctx, at, None, None, states, false, ov.as_ref());
     clear_skip_markers(ctx, run_id);
     reap_run_worktrees(ctx, run_id).await;
 }
@@ -2492,10 +2496,11 @@ pub async fn sweep_stale_run_worktrees(ctx: &ServerCtx) {
             .unwrap_or_default()
             .to_string_lossy()
             .to_string();
-        // Active runs keep their worktrees.
-        let active: Option<String> = sqlx::query_scalar(
-            "SELECT id FROM workflow_runs WHERE id = ? AND status IN ('pending','running')",
-        )
+        // Active and held runs keep their worktrees (a held run resumes in them).
+        let active: Option<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT id FROM workflow_runs WHERE id = ? AND (status IN ('pending','running') OR {})",
+            otto_state::workflows::HOLD_SQL
+        )))
         .bind(&run_id)
         .fetch_optional(&ctx.pool)
         .await

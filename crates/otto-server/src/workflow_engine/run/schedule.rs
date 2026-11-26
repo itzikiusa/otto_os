@@ -233,8 +233,11 @@ async fn run_node(
     }
     let step_file_base = step_file(node, step_no);
     // Re-entered after a restart (DR-006): the old agent may live on in its
-    // holder beside the fresh step — stop it; a thread step resumes its thread.
-    if st.started_at.is_some() {
+    // holder beside the fresh step — stop it; a thread step resumes its thread
+    // (a loop's inner steps resume their own), and the handoff its agent
+    // wrote since the step started is its answer.
+    let mut resumed_since = None;
+    if let Some(started) = st.started_at {
         let mut logs = vec![];
         for sid in std::mem::take(&mut st.sessions) {
             stop_step_session(cx.ctx, &sid, cx.run_id, &mut logs).await;
@@ -242,9 +245,10 @@ async fn run_node(
         if let Some(t) = st
             .thread
             .as_ref()
-            .filter(|t| t.runner == "threads" && t.closed_at.is_none())
+            .filter(|t| t.runner == "threads" && t.closed_at.is_none() && node.kind != "loop")
         {
             super::super::step_thread::mark_resume(cx.run_id, &node.id, t);
+            resumed_since = Some(std::time::SystemTime::from(started));
         }
     }
     // The preamble lists the settled ancestors' step files (and this node's
@@ -259,6 +263,8 @@ async fn run_node(
     st.started_at = Some(chrono::Utc::now());
     st.logs = vec![format!("▶ {} started", node.kind)];
     st.phase = None;
+    // A wait or a question from before a pause or a restart is over.
+    (st.attention, st.wait) = (None, None);
     st.step_no = Some(step_no);
     st.step_file = Some(step_file_base.clone());
     // Signal node start so the UI can show live progress immediately.
@@ -275,7 +281,11 @@ async fn run_node(
         inner_idx: None,
     };
     let mut ch = NodeChannels::new();
-    let attempts = run_attempts(cx, board, &mut st, node, idx, &node_input, &scope, &mut ch).await;
+    let mut attempts =
+        run_attempts(cx, board, &mut st, node, idx, &node_input, &scope, &mut ch).await;
+    if let Some(t) = resumed_since.filter(|_| attempts.attempt == 1) {
+        attempts.attempt_started = t;
+    }
     // Drain any session ids reported right as the node finished.
     while let Ok(sid) = ch.sess_rx.try_recv() {
         record_association(&mut st, sid);
@@ -436,6 +446,8 @@ async fn run_attempts(
     // the run continues to the next node.
     let mut skip_current = false;
     let mut park = None;
+    // A step's answer re-takes the run's slot beside the watch, not in it (CR1-022).
+    let mut unpark = None;
     let result = loop {
         attempt += 1;
         st.attempts = Some(attempt);
@@ -503,7 +515,7 @@ async fn run_attempts(
                         }
                         AgentAssociation::Step(StepNote::Resumed { .. }) => {
                             if let Some(p) = park.take() {
-                                p.unpark().await;
+                                unpark = Some(Box::pin(p.unpark()));
                             }
                         }
                         _ => {}
@@ -526,6 +538,9 @@ async fn run_attempts(
                     if log_persist.on_line(Instant::now()) {
                         board.publish(cx, idx, st).await;
                     }
+                }
+                () = async { unpark.as_mut().expect("guarded").await }, if unpark.is_some() => {
+                    unpark = None;
                 }
                 () = tokio::time::sleep_until(tokio::time::Instant::from_std(
                     log_persist.flush_at.unwrap_or_else(Instant::now),
@@ -599,6 +614,10 @@ async fn run_attempts(
                 let Some((sleep_ms, max_eff, reason)) = plan else {
                     break Err(e);
                 };
+                // The retry works: a park of the failed attempt ends with it.
+                if let Some(p) = park.take() {
+                    p.unpark().await;
+                }
                 attempt_limit = max_eff + 1;
                 st.logs.push(otto_workflows::retry::retry_log_line(
                     attempt + 1,
@@ -688,6 +707,7 @@ async fn skip_node(
             tracing::warn!("skip: failed to kill workflow session {sid}: {e}");
         }
     }
+    super::super::step_thread::close_open(ctx, st).await;
     st.status = NodeStatus::Skipped;
     st.logs.push("⏭ skipped via chat command".into());
     // A skipped step decided nothing, so none of its CONDITIONAL

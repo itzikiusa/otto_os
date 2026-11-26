@@ -24,7 +24,7 @@ pub async fn recover_before_serve(ctx: &ServerCtx, boot: &mut BootPhases) -> Res
     };
     restore_sessions(ctx, &adopted.live_ids).await?;
     boot.mark("restore");
-    fail_orphaned_reviews(ctx, &ctx.agent_runtime.held_reviews(&adopted).await).await;
+    fail_orphaned_reviews(ctx, &adopted).await;
     fail_orphaned_skill_evals(ctx).await;
     warn_on_err(
         "3D job and production recovery",
@@ -128,13 +128,31 @@ async fn restore_sessions(
 /// whose reviewers had all finished gets ONLY its summarizer re-run over
 /// their stored findings (at most twice per review — `otto_review::restart`);
 /// the rest fail as re-runnable, and every live agent row is settled too.
-async fn fail_orphaned_reviews(ctx: &ServerCtx, held: &std::collections::HashSet<otto_core::Id>) {
-    let settled = otto_review::restart::settle_after_restart(&ctx.reviews_store, held).await;
+async fn fail_orphaned_reviews(ctx: &ServerCtx, adopted: &otto_agent_protocol::Adopted) {
+    let held = ctx.agent_runtime.held_reviews(adopted).await;
+    let settled = otto_review::restart::settle_after_restart(&ctx.reviews_store, &held).await;
     let settled = settled
         .inspect_err(|e| tracing::warn!("review recovery: {e}"))
         .unwrap_or_default();
+    use otto_core::cancel::CancelRegistryExt as _;
+    // An adopted thread of a review that does not resume stops now (CR1-027).
+    let rt = &ctx.agent_runtime;
+    for id in &adopted.handled_ids {
+        let meta = rt.get(id).await.ok().and_then(|s| s.meta);
+        let review = meta.as_ref().and_then(|m| m.get("review_id")?.as_str());
+        if review.is_some_and(|r| !settled.resume_held.iter().any(|h| h == r)) {
+            let until = chrono::Utc::now() + chrono::Duration::hours(168);
+            let _ = rt.close_retained(id, until).await;
+        }
+    }
     for id in settled.resume_held {
-        tokio::spawn(crate::modules::review::resume_held_review(ctx.clone(), id));
+        // Registered before the task runs: a resumed workflow step sees it live.
+        let live = ctx.review_cancels.register(&id);
+        tokio::spawn(crate::modules::review::resume_held_review(
+            ctx.clone(),
+            id,
+            live,
+        ));
     }
     let users = otto_state::UsersRepo::new(ctx.pool.clone());
     for id in settled.summarizer_resume {

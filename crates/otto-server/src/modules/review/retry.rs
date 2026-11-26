@@ -653,9 +653,7 @@ pub(crate) async fn stop_review_agent(
     // (Stopped, not SessionGone-then-auto-retry) — same ordering as Product's
     // per-agent stop.
     signal_review_agent_cancel(&ctx.review_agent_cancels, &review_id, index);
-    if let Some(sid) = review.agents[index].session_id.as_ref() {
-        let _ = ctx.manager.kill_session(sid).await;
-    }
+    end_review_agent(&ctx, &review.agents[index]).await;
     // Persist the terminal row immediately so the UI reflects the stop without
     // waiting for the recovery loop to unwind (it re-persists the same
     // status/note via review_error_note(Stopped)).

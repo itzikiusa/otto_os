@@ -18,18 +18,12 @@ pub(crate) async fn pause(ctx: &ServerCtx, run_id: &Id, by: &User) -> Result<Wor
         return Err(otto_core::Error::Conflict("the run is not running".into()));
     };
     let run = repo.get_run(run_id).await?;
-    emit_run_updated(
-        ctx,
-        &run.workspace_id,
-        run_id,
-        "canceled",
-        None,
-        rev,
-        None,
-        &[],
-        false,
-    );
-    Ok(run)
+    // The overview carries the hold: a held run stays in the Runs inbox (DR-101).
+    let wf = repo.definition_for_run(&run).await?;
+    let overview = super::finalize::store_overview(&repo, &wf, run_id, rev).await;
+    let at = (&run.workspace_id, run_id, "canceled", rev);
+    emit_run_updated_with(ctx, at, None, None, &[], false, overview.as_ref());
+    Ok(WorkflowRun { overview, ..run })
 }
 
 /// Resume a held run, with new totals for the loop that ran out.
@@ -44,9 +38,9 @@ pub(crate) async fn resume(
     }
     let repo = WorkflowsRepo::new(ctx.pool.clone());
     let ext = extend.map_or((None, None), |e| (e.iterations, e.active_s));
-    let r = rules::prepare_resume(&repo, run_id, ext).await?;
+    let mut r = rules::prepare_resume(&repo, run_id, ext).await?;
     // A long hold must not let retention delete the threads it continues.
-    step_thread::retain_run(ctx, &r.nodes, false).await;
+    step_thread::retain_run(ctx, &mut r.nodes, false).await;
     let ws = ctx.workspaces.get(&r.workflow.workspace_id).await?;
     let input = r.run.input;
     spawn_run(
@@ -80,8 +74,14 @@ pub(in crate::workflow_engine) async fn settle_held(
     };
     rules::settle_states(&workflow.graph, states, &mut hold);
     step_thread::retain_run(ctx, states, false).await;
-    let Ok(Some(rev)) = repo.write_hold(run_id, &hold, states).await else {
-        return false;
+    let rev = match repo.write_hold(run_id, &hold, states).await {
+        Ok(Some(rev)) => rev,
+        Ok(None) => return false,
+        // A Pause already wrote the hold: finalizing a cancel would reap it.
+        Err(e) => {
+            tracing::warn!(%run_id, "workflow hold write failed: {e}");
+            return true;
+        }
     };
     let ov = super::finalize::store_overview(repo, workflow, run_id, rev).await;
     let status = if hold.kind == HoldKind::Paused {

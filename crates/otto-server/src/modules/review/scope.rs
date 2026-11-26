@@ -77,6 +77,12 @@ pub(super) async fn assess_scope(
         .filter_map(|a| a.session_id.clone())
         .collect::<Vec<_>>();
     otto_review::session::stop_review_sessions(&ctx.manager, &ids).await;
+    // A timed-out assessor's thread outlived its dropped runner: close it.
+    if let Some(t) = threads.as_ref().filter(|_| result.is_err()) {
+        for id in &ids {
+            t.close(id).await;
+        }
+    }
     if review_is_cancelled(ctx, review_id).await {
         return Err(Error::Invalid("review cancelled".into()));
     }

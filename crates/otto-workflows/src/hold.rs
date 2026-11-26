@@ -4,8 +4,8 @@
 //! retry re-entry) and a loop's banked time.
 
 use otto_core::workflows::{
-    HoldKind, NodeRunState, NodeStatus, PhaseMark, RunHold, RunScope, StepPhase, Workflow,
-    WorkflowGraph, WorkflowRun,
+    HoldKind, NodeRunState, NodeStatus, RunHold, RunScope, StepPhase, Workflow, WorkflowGraph,
+    WorkflowRun,
 };
 use otto_core::{Error, Id, Result};
 use otto_state::WorkflowsRepo;
@@ -61,15 +61,19 @@ pub fn settle_states(graph: &WorkflowGraph, states: &mut [NodeRunState], hold: &
         if in_flight || stopped || skipped {
             s.status = NodeStatus::Pending;
             s.error = None;
-            // A paused step is not "canceled" when it resumes.
-            s.error_class = None;
+            // A paused step is not "canceled", nor asking or waiting, when it resumes.
+            (s.error_class, s.attention, s.wait) = (None, None, None);
         }
         if in_flight || stopped {
-            s.phases.push(PhaseMark {
-                phase: StepPhase::Queued,
-                at: chrono::Utc::now(),
-                note: note.clone(),
-            });
+            // The run's unwind marked it "canceled"; it is held instead.
+            if s.phases
+                .last()
+                .is_some_and(|m| m.note.as_deref() == Some("canceled"))
+            {
+                s.phases.pop();
+            }
+            crate::step_util::note_mark(s, StepPhase::Queued, note.as_deref().unwrap_or(""));
+            s.phase = None;
         }
     }
 }

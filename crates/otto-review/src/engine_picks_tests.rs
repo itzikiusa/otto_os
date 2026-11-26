@@ -107,9 +107,10 @@ fn an_old_config_reads_and_runs_as_before() {
         runs(&c, ReviewMode::FanOut),
         vec![s("claude", "opus"), s("codex", "")]
     );
+    // CR1-011: the primary's model never reaches the Codex orchestrator.
     assert_eq!(
         runs(&c, ReviewMode::Orchestrator),
-        vec![s("claude", "opus"), s("codex", "opus")]
+        vec![s("claude", "opus"), s("codex", "")]
     );
     // …and writes back without the new keys (a rollback binary reads it).
     let back = serde_json::to_value(&c).unwrap();
@@ -267,5 +268,42 @@ fn codex_reviewers_start_first_and_rows_keep_their_order() {
     assert_eq!(
         order,
         vec![s(1, "codex"), s(3, "codex"), s(0, "claude"), s(2, "agy")]
+    );
+}
+
+/// CR1-011: an orchestrator takes a lens's own effort for its own provider
+/// even without a model, and never a model of another provider.
+#[test]
+fn an_orchestrator_takes_only_its_own_providers_model_and_effort() {
+    let c = cfg(vec![
+        lens("A", &["claude", "codex"], "claude-opus-4-6", "high"),
+        lens("B", &["codex"], "", "low"),
+    ]);
+    let s = |p: &str, m: &str, e: &str| (p.to_string(), m.to_string(), e.to_string());
+    assert_eq!(
+        runs(&c, ReviewMode::Orchestrator),
+        vec![
+            s("claude", "claude-opus-4-6", "high"),
+            s("codex", "", "low")
+        ]
+    );
+}
+
+/// CR1-070: a lens led by another provider (cross-provider check) keeps its
+/// own model and effort on its own provider.
+#[test]
+fn a_cross_checked_lens_keeps_its_own_pick_on_its_provider() {
+    let mut a = lens("Correctness", &["claude", "codex"], "gpt-5", "high");
+    a.provider = "codex".into();
+    let mut c = cfg(vec![a]);
+    c.cross_provider_check = true;
+    let plan = plan_with(&c, &["Correctness"]);
+    let mut c2 = c.clone();
+    c2.agents = selected_agents(&plan, &c);
+    let r = runs(&c2, ReviewMode::FanOut);
+    assert_eq!(
+        r[1],
+        ("codex".into(), "gpt-5".into(), "high".into()),
+        "{r:?}"
     );
 }

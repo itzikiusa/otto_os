@@ -5,8 +5,13 @@
 
 use super::*;
 
-pub(crate) async fn resume_held_review(ctx: ServerCtx, review_id: Id) {
-    let live = ctx.review_cancels.register(&review_id);
+/// `live`: the review's cancel flag, registered by boot before this task
+/// runs, so a resumed workflow step sees a live review at once (CR1-028).
+pub(crate) async fn resume_held_review(
+    ctx: ServerCtx,
+    review_id: Id,
+    live: otto_core::cancel::CancelGuard,
+) {
     let cancel = Arc::clone(live.flag());
     let review = match ctx.reviews_store.get_review(&review_id).await {
         Ok(r) => r,
@@ -41,15 +46,22 @@ pub(crate) async fn resume_held_review(ctx: ServerCtx, review_id: Id) {
             skills_dir: stage_all_review_skills(&ctx.context_library).await,
             cancel: Some(Arc::clone(&cancel)),
         };
+        let keep = resume.threads.clone();
         let findings = otto_review::thread_resume::resume_reviewers(resume).await?;
         let blocker = Some(otto_review::verification::SUMMARIZER_RETRY_BLOCKER);
         let pr = review.pr_number;
         summarize_and_persist(
             &ctx, &review_id, &cwd, &ws, &user, &repo.id, pr, &cfg, &findings, "", blocker,
         )
-        .await
+        .await?;
+        // A finished review's threads are kept for the success period.
+        if let Ok((_, rows)) = ctx.reviews_store.review_agents(&review_id).await {
+            keep.finished(&rows).await;
+        }
+        Ok::<(), Error>(())
     }
     .await;
+    remove_review_temp_files(&review_id).await;
     if review_is_cancelled(&ctx, &review_id).await {
         return;
     }

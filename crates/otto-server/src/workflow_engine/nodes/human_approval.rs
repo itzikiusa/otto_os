@@ -4,6 +4,27 @@
 use super::super::*;
 use super::NodeCall;
 
+/// The gate each run waits at, for the run's board: a sibling's publish must
+/// not compute the run as if nobody were asked (CR1-007).
+fn gates() -> &'static std::sync::Mutex<HashMap<Id, String>> {
+    static G: OnceLock<std::sync::Mutex<HashMap<Id, String>>> = OnceLock::new();
+    G.get_or_init(Default::default)
+}
+
+pub(in crate::workflow_engine) fn waiting_gate(run_id: &Id) -> Option<String> {
+    gates().lock().ok()?.get(run_id).cloned()
+}
+
+/// Leaves the gate on any end of the wait (decision, timeout, cancel).
+struct Waiting<'a>(&'a Id);
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut g) = gates().lock() {
+            g.remove(self.0);
+        }
+    }
+}
+
 pub(in crate::workflow_engine) async fn execute(
     call: NodeCall<'_>,
 ) -> Result<(Value, Vec<String>)> {
@@ -45,17 +66,18 @@ pub(in crate::workflow_engine) async fn execute(
     .await
     .map_err(|e| otto_core::Error::Internal(format!("human_approval mark: {e}")))?
     .ok_or_else(|| otto_core::Error::Conflict("human_approval: run is no longer running".into()))?;
-    emit_run_updated(
-        ctx,
-        &ws.id,
-        run_id,
-        "running",
-        Some(&node.id),
-        rev,
-        None,
-        &[],
-        true,
-    );
+    if let Ok(mut g) = gates().lock() {
+        g.insert(run_id.clone(), node.id.clone());
+    }
+    let _waiting = Waiting(run_id);
+    // The stored overview and the event say "needs you" at once.
+    let repo = WorkflowsRepo::new(pool.clone());
+    let wf = repo
+        .definition_for_run(&repo.get_run(run_id).await?)
+        .await?;
+    let ov = super::super::run::finalize::store_overview(&repo, &wf, run_id, rev).await;
+    let at = (&ws.id, run_id, "running", rev);
+    emit_run_updated_with(ctx, at, Some(&node.id), None, &[], true, ov.as_ref());
 
     // Poll for the operator's decision. Operators are HUMANS: the
     // deadline defaults to 24h and is node-tunable via
