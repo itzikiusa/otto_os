@@ -190,3 +190,73 @@ async fn a_fork_a_question_an_approval_and_a_continued_thread_run_on_the_thread_
 fn rig_ctx_dir(ctx: &ServerCtx, run_id: &Id) -> std::path::PathBuf {
     ctx.data_dir.join("workflow-context").join(run_id.as_str())
 }
+
+/// CR1-036: a loop's step files reach the run's chat thread captioned with
+/// their iteration, like a top-level step's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_loops_step_files_are_captioned_with_their_iteration() {
+    let rig = Rig::new().await;
+    let ctx = rig.life(None).await;
+    let edge =
+        |from: &str, to: &str| json!({"id": format!("{from}-{to}"), "source": from, "target": to});
+    let work = json!({"kind": "agent_prompt", "name": "Work",
+        "params": {"provider": "claude", "prompt": "Do.\nOTTO_FAKE: write $HANDOFF worked"}});
+    let graph: WorkflowGraph = serde_json::from_value(json!({
+        "nodes": [
+            {"id": "n1", "kind": "manual_trigger", "name": "Start"},
+            {"id": "l", "kind": "loop", "name": "Loop", "params": {"max_iterations": 2, "steps": [work]}},
+        ],
+        "edges": [edge("n1", "l")],
+    }))
+    .unwrap();
+    let repo = WorkflowsRepo::new(ctx.pool.clone());
+    let wf = repo
+        .create(
+            &"ws-restart".into(),
+            "Captions",
+            "",
+            "",
+            &graph,
+            &"root".into(),
+        )
+        .await
+        .unwrap();
+    let input = json!({"channel": "slack", "chat": "chat-restart", "thread": "1.1", "chat_updates": "live"});
+    let run = repo
+        .create_run(&wf.id, &"ws-restart".into(), &input, Some(&"root".into()))
+        .await
+        .unwrap();
+    let ws = ctx.workspaces.get(&"ws-restart".into()).await.unwrap();
+    otto_server::workflow_engine::run_workflow(
+        ctx.clone(),
+        ws,
+        wf,
+        run.id.clone(),
+        input,
+        Default::default(),
+        None,
+    )
+    .await;
+    let run = settled(&ctx, &run.id, false).await;
+    assert_eq!(
+        run.status,
+        RunStatus::Success,
+        "{:?} {:#?}",
+        run.error,
+        run.nodes
+    );
+    let captions: Vec<String> = rig
+        .rec
+        .recorded()
+        .into_iter()
+        .filter_map(|r| match r {
+            otto_channels::test_util::Recorded::Upload { caption, .. } => caption,
+            _ => None,
+        })
+        .collect();
+    for k in [1, 2] {
+        let want = format!("› ✅ Work · iteration {k}");
+        assert!(captions.contains(&want), "{want}: {captions:?}");
+    }
+    ctx.agent_runtime.shutdown().await;
+}

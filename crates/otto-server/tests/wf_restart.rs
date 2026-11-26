@@ -31,7 +31,7 @@ const WS: &str = "ws-restart";
 pub(crate) struct Rig {
     _tmp: tempfile::TempDir,
     root: PathBuf,
-    rec: Arc<otto_channels::test_util::RecordingAdapter>,
+    pub(crate) rec: Arc<otto_channels::test_util::RecordingAdapter>,
 }
 
 impl Rig {

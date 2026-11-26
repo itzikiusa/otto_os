@@ -7,6 +7,7 @@
 
 use super::super::*;
 use super::NodeCall;
+use otto_workflows::chat_status::step_caption;
 use otto_workflows::checkpoint::{caught_thread, continue_previous, observed, AttemptClock};
 use otto_workflows::criteria::{loop_stop, CheckOutput, LoopBudget, Stop, StopPoint};
 
@@ -281,9 +282,10 @@ pub(in crate::workflow_engine) async fn execute(
                             None => progress.post(format!("› ✅ {sname} done")),
                         }
                     }
-                    // Attach the iteration's handoff file too.
+                    // Attach the iteration's handoff file too, captioned (CR1-036).
                     if progress.enabled() && (is_reportable(&skind) || skind == "review_run") {
-                        progress.post_step_file(&env.files, &sub_file_base);
+                        let caption = iteration_caption(&sname, i, None);
+                        progress.post_step_file_as(&env.files, &sub_file_base, caption);
                     }
                     if stop.is_some() {
                         break;
@@ -316,7 +318,8 @@ pub(in crate::workflow_engine) async fn execute(
                     }
                     // The failed iteration's trace file rides along.
                     if progress.enabled() && (is_reportable(&skind) || skind == "review_run") {
-                        progress.post_step_file(&env.files, &sub_file_base);
+                        let caption = iteration_caption(&sname, i, Some(e.to_string()));
+                        progress.post_step_file_as(&env.files, &sub_file_base, caption);
                     }
                     failed = Some((sname.clone(), e.to_string()));
                     last_iteration_error =
@@ -447,4 +450,18 @@ fn step_note(a: &AgentAssociation) -> Option<&otto_workflows::step_util::StepNot
         AgentAssociation::Step(n) => Some(n),
         _ => None,
     }
+}
+
+/// The chat caption of an iteration's step file (`error`: it failed).
+fn iteration_caption(step: &str, iteration: u64, error: Option<String>) -> String {
+    let status = match error {
+        Some(_) => NodeStatus::Error,
+        None => NodeStatus::Success,
+    };
+    let st = NodeRunState {
+        status,
+        error,
+        ..Default::default()
+    };
+    step_caption(step, &st, Some(iteration as u32))
 }

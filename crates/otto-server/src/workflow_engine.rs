@@ -444,9 +444,6 @@ impl ProgressSink {
             self.send(ProgressItem::Post(text));
         }
     }
-    fn post_step_file(&self, files: &crate::workflow_context::RunContextFiles, base_name: &str) {
-        self.post_step_file_as(files, base_name, String::new());
-    }
     /// Queue a step's `.md` handoff file as a chat attachment, captioned in
     /// the live style (no-op when disabled or the file doesn't exist —
     /// attachments never fail a step).
@@ -537,7 +534,11 @@ fn spawn_progress_pump(
                         run::chat::persist(&ctx, &run_id, &thread).await;
                     }
                 }
-                ProgressItem::Post(text) => thread.post(&redact(&text)).await,
+                ProgressItem::Post(text) => {
+                    if thread.post(&redact(&text)).await {
+                        run::chat::persist(&ctx, &run_id, &thread).await;
+                    }
+                }
             }
         }
         if thread.flush().await {
@@ -1224,8 +1225,11 @@ pub fn spawn_run(
         };
         // A queued chat run's thread hears "Started" before any step does.
         let waited = parked_at.map(|t| t.elapsed());
-        otto_workflows::run_queue::announce_dequeued(&ctx, &workflow, &run_id, &input, waited)
-            .await;
+        let style = run::chat::style(&workflow, &input);
+        otto_workflows::run_queue::announce_dequeued(
+            &ctx, &workflow, &run_id, &input, waited, style,
+        )
+        .await;
         // The permit rides in a task-local so a parked approval gate can hand
         // it back (see RUN_PERMIT); it is released when the run ends.
         RUN_PERMIT

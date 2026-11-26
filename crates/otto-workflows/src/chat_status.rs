@@ -567,10 +567,12 @@ impl ChatThread {
     }
 
     /// A new post (needs-you, hold, the final message), after the status
-    /// message is brought up to date.
-    pub async fn post(&mut self, text: &str) {
-        self.flush().await;
+    /// message is brought up to date; `true` when that moved the status
+    /// message (store it, like [`Self::flush`]'s).
+    pub async fn post(&mut self, text: &str) -> bool {
+        let moved = self.flush().await;
         self.send(text).await;
+        moved
     }
 
     /// A file after a post (`final-output.md`), uncaptioned in both styles.
