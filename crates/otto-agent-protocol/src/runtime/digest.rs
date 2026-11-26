@@ -74,7 +74,7 @@ fn action(item: &TurnItem) -> Option<OutwardAction> {
         || out.to_lowercase().contains("pending approval")
     {
         OutwardOutcome::PendingApproval
-    } else if item.status == TurnItemStatus::Failed
+    } else if item.status != TurnItemStatus::Completed
         || item.error.is_some()
         || flat.contains(r#""decision":"denied""#)
         || flat.contains(r#""executed":false"#)
@@ -270,6 +270,25 @@ mod tests {
             outcome(r#"{"ok":true,"url":"https://x/pr/12"}"#),
             OutwardOutcome::Ok
         );
+    }
+
+    /// A call cut off (a cancel, a timeout, a restart) or still open says
+    /// nothing went out: only a completed call is `ok`.
+    #[test]
+    fn an_outward_call_that_did_not_complete_is_not_ok() {
+        use TurnItemStatus::{Cancelled, Interrupted, Running, Waiting};
+        for status in [Interrupted, Cancelled, Running, Waiting] {
+            let mut item = tool("otto.merge_pr", "");
+            item.status = status;
+            if let TurnItemKind::DynamicTool { output, .. } = &mut item.kind {
+                *output = None;
+            }
+            assert_eq!(
+                action(&item).unwrap().outcome,
+                OutwardOutcome::Failed,
+                "{status:?}"
+            );
+        }
     }
 
     /// Fifty long paths, five long errors, twenty actions and a long answer
