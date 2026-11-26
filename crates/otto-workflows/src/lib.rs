@@ -31,6 +31,7 @@ pub mod validation;
 // restart policy, the scheduler's decision core and the run overview.
 pub mod graph;
 pub mod resume;
+pub mod schedule;
 
 use otto_core::domain::Workspace;
 use otto_core::event::Event;
