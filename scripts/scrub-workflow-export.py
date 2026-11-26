@@ -93,6 +93,9 @@ TRACE_KEYS = [
     "ticket-unreadable", "send", "edit", "upload", "formatted", "plain", "dur", "time", "sha",
     "passed-with-files", "slack", "files", "txt", "pdf", "text", "application",
     "Bool",  # serde_json's Debug text inside an engine error the goldens record
+    # timing.json (scripts/workflows/timing-replay.py): era, keyed by trace name
+    "era", "success-median", "success-p90", "verdict-failed", "resumed", "error-canceled",
+    "error-auth", "error-fd", "error-checkout_unresolved", "error-review_incomplete",
 ]
 # Every param key the five definitions use (Otto's own names).
 PARAM_KEYS = [
