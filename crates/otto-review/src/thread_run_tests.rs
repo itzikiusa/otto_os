@@ -26,6 +26,7 @@ struct Fake {
     acts: StdMutex<Vec<Act>>,
     turns: StdMutex<Vec<StepTurn>>,
     closed: StdMutex<Vec<Id>>,
+    kept: StdMutex<Vec<(Vec<Id>, chrono::DateTime<Utc>)>>,
 }
 
 #[async_trait]
@@ -94,7 +95,9 @@ impl StepRunner for Fake {
     async fn close(&self, id: &Id, _: chrono::DateTime<Utc>) {
         self.closed.lock().unwrap().push(id.clone());
     }
-    async fn set_retain_until(&self, _: &[Id], _: chrono::DateTime<Utc>) {}
+    async fn set_retain_until(&self, ids: &[Id], at: chrono::DateTime<Utc>) {
+        self.kept.lock().unwrap().push((ids.to_vec(), at));
+    }
     async fn release_process(&self, _: &Id) {}
     async fn delete(&self, _: &Id) {}
 }
@@ -441,4 +444,89 @@ async fn the_summarizer_turn_on_a_thread_returns_its_validated_result_file() {
         .await
         .unwrap_err();
     assert_eq!(err, "provider");
+}
+
+#[test]
+fn review_rows_become_the_steps_children_and_merge_per_review() {
+    let rows = vec![
+        ReviewAgentState {
+            name: "Correctness · codex".into(),
+            provider: "codex".into(),
+            model: "gpt-5.5".into(),
+            effort: "high".into(),
+            status: "waiting".into(),
+            note: "needs you: which base?".into(),
+            session_id: Some("t-7".into()),
+            thread: true,
+            started_at: Some(Utc::now()),
+            ..Default::default()
+        },
+        ReviewAgentState {
+            name: "Security".into(),
+            provider: "claude".into(),
+            status: "done".into(),
+            note: "3 findings".into(),
+            session_id: Some("pty-1".into()),
+            ..Default::default()
+        },
+        ReviewAgentState {
+            name: "Summarizer".into(),
+            provider: "claude".into(),
+            status: "pending".into(),
+            ..Default::default()
+        },
+    ];
+    let kids = child_rows("r1", &rows);
+    assert_eq!(
+        kids.iter().map(|k| k.id.as_str()).collect::<Vec<_>>(),
+        ["r1.0", "r1.1", "r1.2"]
+    );
+    assert_eq!(
+        kids.iter().map(|k| k.status.as_str()).collect::<Vec<_>>(),
+        ["needs_you", "success", "pending"]
+    );
+    assert_eq!(kids[0].thread_id.as_deref(), Some("t-7"));
+    assert_eq!(
+        kids[1].thread_id, None,
+        "a terminal session is not a thread"
+    );
+    assert_eq!(
+        (kids[0].model.as_deref(), kids[0].effort.as_deref()),
+        (Some("gpt-5.5"), Some("high"))
+    );
+    assert!(kids[0].started_at.is_some() && kids[2].model.is_none() && kids[2].note.is_none());
+    let mut children = child_rows("r0", &rows[..1]);
+    assert!(merge_children(&mut children, "r1", kids.clone()));
+    assert!(
+        !merge_children(&mut children, "r1", kids.clone()),
+        "unchanged rows are no change"
+    );
+    assert!(merge_children(&mut children, "r1", kids[..1].to_vec()));
+    assert_eq!(
+        children.iter().map(|k| k.id.as_str()).collect::<Vec<_>>(),
+        ["r0.0", "r1.0"]
+    );
+}
+
+#[tokio::test]
+async fn a_finished_review_keeps_its_threads_for_the_success_period() {
+    let r = rig(vec![]).await;
+    let rows = vec![
+        ReviewAgentState {
+            session_id: Some("t-1".into()),
+            thread: true,
+            ..Default::default()
+        },
+        ReviewAgentState {
+            session_id: Some("pty-1".into()),
+            ..Default::default()
+        },
+        ReviewAgentState::default(),
+    ];
+    r.threads.finished(&rows).await;
+    let kept = r.fake.kept.lock().unwrap().clone();
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].0, vec![Id::from("t-1")], "only thread rows");
+    let hours = (kept[0].1 - Utc::now()).num_minutes();
+    assert!((23 * 60..=24 * 60).contains(&hours), "{hours} min");
 }

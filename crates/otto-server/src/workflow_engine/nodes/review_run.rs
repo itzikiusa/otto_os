@@ -1024,13 +1024,7 @@ async fn await_review(
             if let Ok((review_status, agents)) = ctx.reviews_store.review_agents(review_id).await {
                 use otto_core::cancel::CancelRegistryExt;
                 use otto_core::domain::ReviewStatus as RS;
-                for a in &agents {
-                    if let Some(sid) = &a.session_id {
-                        if seen_sessions.insert(sid.clone()) {
-                            let _ = session_tx.send(AgentAssociation::Session(sid.clone()));
-                        }
-                    }
-                }
+                publish_rows(session_tx, review_id, &agents, &mut seen_sessions);
                 match review_status {
                     RS::Done => {
                         status = "done".into();
@@ -1105,16 +1099,31 @@ async fn await_review(
         // Fire-and-forget review: still surface any reviewer sessions that
         // have already spawned so they're attributable under this step.
         if let Ok((_, agents)) = ctx.reviews_store.review_agents(review_id).await {
-            for a in &agents {
-                if let Some(sid) = &a.session_id {
-                    if seen_sessions.insert(sid.clone()) {
-                        let _ = session_tx.send(AgentAssociation::Session(sid.clone()));
-                    }
-                }
-            }
+            publish_rows(session_tx, review_id, &agents, &mut seen_sessions);
         }
     }
     Ok(status)
+}
+
+/// The review's rows to the step: every row as a sub-thread (`children`),
+/// and terminal sessions — never thread ids (DR-014) — into `sessions`.
+fn publish_rows(
+    tx: &tokio::sync::mpsc::UnboundedSender<AgentAssociation>,
+    review_id: &Id,
+    agents: &[otto_core::domain::ReviewAgentState],
+    seen: &mut std::collections::HashSet<String>,
+) {
+    for sid in agents
+        .iter()
+        .filter(|a| !a.thread)
+        .filter_map(|a| a.session_id.clone())
+    {
+        if seen.insert(sid.clone()) {
+            let _ = tx.send(AgentAssociation::Session(sid));
+        }
+    }
+    let rows = otto_review::thread_run::child_rows(review_id, agents);
+    let _ = tx.send(AgentAssociation::Children(review_id.clone(), rows));
 }
 
 #[cfg(test)]

@@ -19,6 +19,7 @@
 //! `RUN_WALL_CLOCK_TIMEOUT` before re-adding anything like it.
 //! `workflow_node_cache` is a dormant table.
 
+use otto_review::engine::checks_review_agent;
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -54,12 +55,17 @@ use otto_workflows::run_queue::{
 enum AgentAssociation {
     Session(String),
     Review(String),
+    /// A review's rows as the step's sub-threads: `(review_id, rows)`.
+    Children(String, Vec<otto_core::workflows::ChildThread>),
 }
 
 fn record_association(state: &mut NodeRunState, association: AgentAssociation) -> bool {
     let (ids, id) = match association {
         AgentAssociation::Session(id) => (&mut state.sessions, id),
         AgentAssociation::Review(id) => (&mut state.review_ids, id),
+        AgentAssociation::Children(review, rows) => {
+            return otto_review::thread_run::merge_children(&mut state.children, &review, rows)
+        }
     };
     if ids.contains(&id) {
         return false;
@@ -2545,6 +2551,7 @@ where
             match &association {
                 AgentAssociation::Session(id) => sessions.push(id.clone()),
                 AgentAssociation::Review(id) => reviews.push(id.clone()),
+                AgentAssociation::Children(..) => {}
             }
             let _ = session_tx.send(association);
         };
@@ -3517,46 +3524,6 @@ fn parse_checks(v: Option<&Value>) -> Vec<(String, String)> {
         }
     }
     out
-}
-
-/// Build a dedicated "Required checks" review agent: it RUNS each user-defined
-/// command in the reviewed worktree and reports any that fail (non-zero exit) as
-/// a blocking (`bug`) finding. Delegated to the review agent (which has the repo
-/// and the implementer's context) rather than executed by the engine — so it
-/// fans out through the same multi-agent review pipeline and its failures drop
-/// the score, keeping a fix→review loop iterating until the checks pass.
-fn checks_review_agent(
-    default_provider: &str,
-    checks: &[(String, String)],
-) -> otto_core::domain::ReviewAgentCfg {
-    let list = checks
-        .iter()
-        .map(|(n, c)| {
-            if n == c {
-                format!("- {c}")
-            } else {
-                format!("- {n}: {c}")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let prompt = format!(
-        "You are a CI gate for this change. RUN EACH command below in the repository root \
-         (your current working directory) and capture its exit status and output. For any \
-         command that FAILS (non-zero exit), output one finding object \
-         {{\"path\":\".\",\"line\":0,\"severity\":\"bug\",\"body\":\"check failed: <command>\\n<the last ~40 lines of its output>\"}}. \
-         Do NOT output anything for a command that passes. Output ONLY a JSON array (no prose, \
-         no markdown fence); output [] when every command passes.\n\nCommands:\n{list}"
-    );
-    otto_core::domain::ReviewAgentCfg {
-        name: crate::modules::CHECKS_REVIEWER_NAME.to_string(),
-        provider: default_provider.to_string(),
-        providers: vec![default_provider.to_string()],
-        model: String::new(),
-        prompt,
-        skill: String::new(),
-        ..Default::default()
-    }
 }
 
 /// The node's human name (falls back to its kind) — drives step-file names.

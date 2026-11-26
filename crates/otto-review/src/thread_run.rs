@@ -59,6 +59,17 @@ pub async fn keep_periods(
     )
 }
 
+/// The meta a workflow run's review threads carry (agreed `meta.work`
+/// shape): `{run_id, node_id, work: {kind: "workflow_run", id, workflow_id}}`
+/// — `node_id` without its `#review.<n>` target suffix.
+pub fn run_meta(run: &otto_core::workflows::WorkflowRun, node_id: &str) -> Value {
+    serde_json::json!({
+        "run_id": run.id,
+        "node_id": node_id.split('#').next().unwrap_or(node_id),
+        "work": {"kind": "workflow_run", "id": run.id, "workflow_id": run.workflow_id},
+    })
+}
+
 /// The review's [`Threads`] over `runner`, or `None` when the review runs
 /// on the terminal path ([`uses_threads`]); `cfg` carries the run's latch
 /// and thread meta.
@@ -114,6 +125,20 @@ impl Threads {
     pub fn retain_success(&self) -> chrono::DateTime<Utc> {
         Utc::now() + self.keep_success
     }
+    /// A finished review's threads are kept for the success period from now.
+    pub async fn finished(&self, rows: &[ReviewAgentState]) {
+        let ids: Vec<otto_core::Id> = rows
+            .iter()
+            .filter(|r| r.thread)
+            .filter_map(|r| r.session_id.clone().map(Into::into))
+            .collect();
+        if !ids.is_empty() {
+            self.runner
+                .set_retain_until(&ids, self.retain_success())
+                .await;
+        }
+    }
+
     /// Close a thread now, kept for the failed period.
     pub async fn close(&self, id: &otto_core::Id) {
         self.runner.close(id, self.retain_failed()).await;
@@ -243,6 +268,52 @@ pub fn apply_event(row: &mut ReviewAgentState, ev: &StepEvent) -> bool {
         _ => return false,
     }
     true
+}
+
+/// A review's rows as the review step's sub-threads (`NodeRunState.children`):
+/// the scope assessment, every reviewer and the summarizer, ids
+/// `<review_id>.<row>`; `thread_id` is set when the row ran on a thread.
+pub fn child_rows(
+    review_id: &str,
+    rows: &[ReviewAgentState],
+) -> Vec<otto_core::workflows::ChildThread> {
+    let some = |s: &str| Some(s.to_string()).filter(|s| !s.trim().is_empty());
+    rows.iter()
+        .enumerate()
+        .map(|(i, r)| otto_core::workflows::ChildThread {
+            id: format!("{review_id}.{i}"),
+            thread_id: r.session_id.clone().filter(|_| r.thread).map(Into::into),
+            label: r.name.clone(),
+            provider: r.provider.clone(),
+            model: some(&r.model),
+            effort: some(&r.effort),
+            status: match r.status.as_str() {
+                "done" => "success",
+                "waiting" => "needs_you",
+                "running" | "error" | "skipped" => r.status.as_str(),
+                _ => "pending",
+            }
+            .into(),
+            started_at: r.started_at,
+            ended_at: r.finished_at,
+            note: some(&r.note),
+            usage: Default::default(),
+        })
+        .collect()
+}
+
+/// Replace review `review_id`'s rows in a step's children (a step can review
+/// several targets, one review each); `true` when anything changed.
+pub fn merge_children(
+    children: &mut Vec<otto_core::workflows::ChildThread>,
+    review_id: &str,
+    rows: Vec<otto_core::workflows::ChildThread>,
+) -> bool {
+    let prefix = format!("{review_id}.");
+    let before = children.clone();
+    children.retain(|c| !c.id.starts_with(&prefix));
+    children.extend(rows);
+    *children != before
 }
 
 /// Why a settled turn left no findings, in the wrapper's terms (its notes

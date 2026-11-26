@@ -613,6 +613,13 @@ pub(crate) async fn run_review_core(
     for i in 0..run_count {
         otto_review::session::remove_lens_findings_files(&rid, i);
     }
+    if let (Some(t), Ok(()), Ok((_, rows))) = (
+        &threads,
+        &result,
+        ctx.reviews_store.review_agents(review_id).await,
+    ) {
+        t.finished(&rows).await;
+    }
     result
 }
 

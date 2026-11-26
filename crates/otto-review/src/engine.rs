@@ -376,6 +376,41 @@ pub fn spawn_plan(run_count: usize) -> Vec<(usize, usize)> {
     (0..run_count).map(|i| (i, run_count + i)).collect()
 }
 
+/// Build a dedicated "Required checks" review agent: it RUNS each user-defined
+/// command in the reviewed worktree and reports any that fail (non-zero exit) as
+/// a blocking (`bug`) finding. Delegated to the review agent (which has the repo
+/// and the implementer's context) rather than executed by the engine — so it
+/// fans out through the same multi-agent review pipeline and its failures drop
+/// the score, keeping a fix→review loop iterating until the checks pass.
+pub fn checks_review_agent(default_provider: &str, checks: &[(String, String)]) -> ReviewAgentCfg {
+    let list = checks
+        .iter()
+        .map(|(n, c)| {
+            if n == c {
+                format!("- {c}")
+            } else {
+                format!("- {n}: {c}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let prompt = format!(
+        "You are a CI gate for this change. RUN EACH command below in the repository root \
+         (your current working directory) and capture its exit status and output. For any \
+         command that FAILS (non-zero exit), output one finding object \
+         {{\"path\":\".\",\"line\":0,\"severity\":\"bug\",\"body\":\"check failed: <command>\\n<the last ~40 lines of its output>\"}}. \
+         Do NOT output anything for a command that passes. Output ONLY a JSON array (no prose, \
+         no markdown fence); output [] when every command passes.\n\nCommands:\n{list}"
+    );
+    ReviewAgentCfg {
+        name: CHECKS_REVIEWER_NAME.to_string(),
+        provider: default_provider.to_string(),
+        providers: vec![default_provider.to_string()],
+        prompt,
+        ..Default::default()
+    }
+}
+
 /// Pre-trust the checkout for every provider a review runs (reviewers + the
 /// claude summarizer), so no agent stalls on the "trust this folder?" prompt.
 pub fn trust_checkout(runs: &[AgentRun], repo_path: &str) {
