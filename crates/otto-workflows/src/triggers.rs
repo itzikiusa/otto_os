@@ -154,14 +154,16 @@ pub fn copy_result_destinations(spec: &Value, input: &mut serde_json::Map<String
 /// the inbound-chat origin (`origin_*`, `channel`/`chat`/`thread`) only the
 /// chat path sets. See "Reserved run-input keys" in `docs/contracts/api.md`.
 const ORIGIN_KEYS: [&str; 3] = ["channel", "chat", "thread"];
-/// Result destinations — a trigger SPEC (Editor-configured) or an Editor's
-/// manual run may set these; an untrusted webhook body may not.
-const DELIVERY_KEYS: [&str; 5] = [
+/// Result destinations and how a chat thread is told — a trigger SPEC
+/// (Editor-configured) or an Editor's manual run may set these; an untrusted
+/// webhook body may not.
+const DELIVERY_KEYS: [&str; 6] = [
     "result_channel",
     "result_chat",
     "result_thread",
     "result_webhook",
     "callback_url",
+    crate::chat_status::ChatUpdates::KEY,
 ];
 /// Where agents run / which worktrees a run provisions.
 const LOCATION_KEYS: [&str; 5] = [
@@ -176,6 +178,9 @@ const LOCATION_KEYS: [&str; 5] = [
 /// webhook body must not aim a run at an arbitrary registered repo (S3-302);
 /// the trigger spec supplies them instead (`copy_location_defaults`).
 const TARGET_KEYS: [&str; 4] = ["repo_id", "base", "pr", "pr_branch"];
+
+/// The reserved run-input key for files that came with a chat message.
+pub const ATTACHMENTS_KEY: &str = "attachments";
 
 /// Who supplied a run input, which decides the reserved keys it may carry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -195,8 +200,14 @@ pub fn strip_reserved_input(input: &mut Value, source: InputSource) -> Vec<Strin
     let Value::Object(map) = input else {
         return Vec::new();
     };
-    let reserved = |k: &str| {
+    // Only the engine sets these, whoever started the run (DR-109): the files
+    // copied from a chat message, and a goal's research folder (a boolean
+    // asks the engine for one; a path would aim the run anywhere).
+    let engine_only =
+        |k: &str, v: &Value| k == ATTACHMENTS_KEY || (k == "research_dir" && !v.is_boolean());
+    let reserved = |k: &str, v: &Value| {
         k == crate::rereview::PREVIOUS_RUN_KEY
+            || engine_only(k, v)
             || k.starts_with("origin_")
             || ORIGIN_KEYS.contains(&k)
             || (source == InputSource::Webhook
@@ -204,7 +215,11 @@ pub fn strip_reserved_input(input: &mut Value, source: InputSource) -> Vec<Strin
                     || LOCATION_KEYS.contains(&k)
                     || TARGET_KEYS.contains(&k)))
     };
-    let dropped: Vec<String> = map.keys().filter(|k| reserved(k)).cloned().collect();
+    let dropped: Vec<String> = map
+        .iter()
+        .filter(|(k, v)| reserved(k, v))
+        .map(|(k, _)| k.clone())
+        .collect();
     for k in &dropped {
         map.remove(k);
     }
@@ -606,6 +621,33 @@ mod tests {
         // Non-object input is untouched.
         let mut s = json!("text");
         assert!(strip_reserved_input(&mut s, InputSource::Webhook).is_empty());
+    }
+
+    /// DR-109: the engine-only keys go from every source's input; a webhook
+    /// body may not choose how the chat thread is told (chat_updates).
+    #[test]
+    fn engine_only_keys_are_stripped_from_every_source() {
+        let forged = json!({
+            "prompt": "p",
+            "attachments": [{"name": "id_rsa", "path": "/Users/x/.ssh/id_rsa"}],
+            "research_dir": "/Users/x/other-workspace",
+            "chat_updates": "per_step",
+        });
+        for source in [InputSource::Manual, InputSource::Webhook] {
+            let mut input = forged.clone();
+            let dropped = strip_reserved_input(&mut input, source);
+            assert!(input.get("attachments").is_none(), "{source:?}");
+            assert!(input.get("research_dir").is_none(), "{source:?}");
+            assert!(dropped.contains(&"attachments".to_string()));
+            assert_eq!(
+                input.get("chat_updates").is_some(),
+                source == InputSource::Manual,
+                "{source:?}: only an Editor's manual run picks the chat style"
+            );
+        }
+        let mut flag = json!({"research_dir": true});
+        assert!(strip_reserved_input(&mut flag, InputSource::Webhook).is_empty());
+        assert_eq!(flag, json!({"research_dir": true}));
     }
 
     #[test]

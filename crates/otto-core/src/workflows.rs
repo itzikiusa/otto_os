@@ -362,6 +362,34 @@ pub enum DeliverableState {
     Unknown,
 }
 
+/// A file that came with the chat message that started (`start`) or
+/// steered (`steer`) a run, as copied into its context dir
+/// (`<context>/attachments.json`; addendum-chat-optimize.md §1.2, DR-114).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AttachmentRef {
+    /// The sender's file name (display only).
+    pub name: String,
+    pub mime: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+    /// Context-relative copy, `attachments/<safe name>`; absent when the
+    /// file could not be received.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub source: AttachmentSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachmentSource {
+    Start,
+    Steer,
+    #[serde(other)]
+    Unknown,
+}
+
 /// Something a step put outside Otto (PR comments, a Jira comment, a page).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Deliverable {

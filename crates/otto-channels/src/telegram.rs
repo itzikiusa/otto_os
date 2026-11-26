@@ -290,6 +290,77 @@ impl TelegramAdapter {
             .map_err(|e| self.scrub(e))?;
         self.decode(resp).await
     }
+
+    /// `sendDocument`, with an optional `(caption, is_html)`.
+    async fn send_document(
+        &self,
+        chat: &str,
+        thread: Option<&str>,
+        filename: &str,
+        content: &[u8],
+        caption: Option<(&str, bool)>,
+    ) -> anyhow::Result<()> {
+        // Send the raw bytes verbatim so binary files are not corrupted. A
+        // generic content type lets Telegram/clients infer the kind from the
+        // filename extension rather than mislabelling everything as markdown.
+        let file_part = reqwest::multipart::Part::bytes(content.to_vec())
+            .file_name(filename.to_string())
+            .mime_str("application/octet-stream")?;
+
+        let mut form = reqwest::multipart::Form::new()
+            .text("chat_id", chat.to_string())
+            .part("document", file_part);
+        if let Some((caption, html)) = caption {
+            form = form.text("caption", caption.to_string());
+            if html {
+                form = form.text("parse_mode", "HTML");
+            }
+        }
+
+        if let Some(t) = thread {
+            if let Ok(mid) = t.parse::<i64>() {
+                form = form
+                    .text("reply_to_message_id", mid.to_string())
+                    .text("allow_sending_without_reply", "true");
+            }
+        }
+
+        let resp = self
+            .http_upload
+            .post(self.api_url("sendDocument"))
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| self.scrub(e))?;
+
+        let tg: TgResponse<serde_json::Value> = self.decode(resp).await?;
+        if !tg.ok {
+            return Err(anyhow::anyhow!(
+                "Telegram sendDocument failed: {}",
+                tg.description.unwrap_or_default()
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Telegram's longest message text, and longest file caption.
+const TEXT_MAX_CHARS: usize = 4_096;
+const CAPTION_MAX_CHARS: usize = 1_024;
+
+/// `gfm` as Telegram HTML no longer than `max` characters: the source is cut
+/// (and re-converted) until the markup fits, so no tag is ever cut in half.
+fn html_within(gfm: &str, max: usize) -> String {
+    let mut src = gfm.to_string();
+    loop {
+        let html = crate::gfm::to_telegram_html(&src);
+        let over = html.chars().count().saturating_sub(max);
+        if over == 0 {
+            return html;
+        }
+        let keep = src.chars().count().saturating_sub(over + 1);
+        src = crate::adapter::clip_chars(&src, keep);
+    }
 }
 
 #[async_trait::async_trait]
@@ -393,6 +464,35 @@ impl Adapter for TelegramAdapter {
         Ok(())
     }
 
+    /// `editMessageText` in HTML parse mode, cut to Telegram's 4,096 after
+    /// the conversion; a text the parse mode rejects is edited once more as
+    /// plain text.
+    async fn edit_formatted(&self, chat: &str, message_id: &str, text: &str) -> anyhow::Result<()> {
+        let body = serde_json::json!({
+            "chat_id": chat,
+            "message_id": message_id.parse::<i64>().unwrap_or(0),
+            "text": html_within(text, TEXT_MAX_CHARS),
+            "parse_mode": "HTML",
+        });
+        let tg: TgResponse<serde_json::Value> = self.post_json("editMessageText", &body).await?;
+        let desc = tg.description.unwrap_or_default();
+        if tg.ok || desc.contains("message is not modified") {
+            return Ok(());
+        }
+        if desc.contains("can't parse") || desc.contains("parse entities") {
+            return self
+                .edit(
+                    chat,
+                    message_id,
+                    &crate::adapter::clip_chars(text, TEXT_MAX_CHARS),
+                )
+                .await;
+        }
+        Err(anyhow::anyhow!(
+            "Telegram editMessageText (formatted) failed: {desc}"
+        ))
+    }
+
     fn channel(&self) -> Channel {
         Channel::Telegram
     }
@@ -408,41 +508,32 @@ impl Adapter for TelegramAdapter {
         filename: &str,
         content: &[u8],
     ) -> anyhow::Result<()> {
-        // Send the raw bytes verbatim so binary files are not corrupted. A
-        // generic content type lets Telegram/clients infer the kind from the
-        // filename extension rather than mislabelling everything as markdown.
-        let file_part = reqwest::multipart::Part::bytes(content.to_vec())
-            .file_name(filename.to_string())
-            .mime_str("application/octet-stream")?;
-
-        let mut form = reqwest::multipart::Form::new()
-            .text("chat_id", chat.to_string())
-            .part("document", file_part);
-
-        if let Some(t) = thread {
-            if let Ok(mid) = t.parse::<i64>() {
-                form = form
-                    .text("reply_to_message_id", mid.to_string())
-                    .text("allow_sending_without_reply", "true");
-            }
-        }
-
-        let resp = self
-            .http_upload
-            .post(self.api_url("sendDocument"))
-            .multipart(form)
-            .send()
+        self.send_document(chat, thread, filename, content, None)
             .await
-            .map_err(|e| self.scrub(e))?;
+    }
 
-        let tg: TgResponse<serde_json::Value> = self.decode(resp).await?;
-        if !tg.ok {
-            return Err(anyhow::anyhow!(
-                "Telegram sendDocument failed: {}",
-                tg.description.unwrap_or_default()
-            ));
+    /// [`Adapter::upload`] with an HTML `caption` (≤ 1,024); a caption the
+    /// parse mode rejects is sent once more as plain text.
+    async fn upload_with_caption(
+        &self,
+        chat: &str,
+        thread: Option<&str>,
+        filename: &str,
+        content: &[u8],
+        caption: &str,
+    ) -> anyhow::Result<()> {
+        let html = html_within(caption, CAPTION_MAX_CHARS);
+        match self
+            .send_document(chat, thread, filename, content, Some((&html, true)))
+            .await
+        {
+            Err(e) if e.to_string().contains("can't parse") => {
+                let plain = crate::adapter::clip_chars(caption, CAPTION_MAX_CHARS);
+                self.send_document(chat, thread, filename, content, Some((&plain, false)))
+                    .await
+            }
+            other => other,
         }
-        Ok(())
     }
 
     fn supports_typing(&self) -> bool {
@@ -777,6 +868,7 @@ fn tg_inbound(msg: &TgMessage, integ: &Integration, text: String) -> Inbound {
         user_name: msg.from.as_ref().and_then(TgUser::display),
         text,
         edited: false,
+        attachments: vec![],
     }
 }
 
@@ -1487,6 +1579,7 @@ mod tests {
             user_name: None,
             text: "spam".into(),
             edited: false,
+            attachments: vec![],
         };
         for _ in 0..32 {
             assert!(
@@ -1506,5 +1599,177 @@ mod tests {
             }
         }
         assert_eq!(permits.len(), 8);
+    }
+
+    /// An `editMessageText` fixture that records bodies; `reply(body)` answers.
+    async fn edit_fixture(
+        reply: fn(&serde_json::Value) -> (axum::http::StatusCode, serde_json::Value),
+    ) -> (String, Arc<std::sync::Mutex<Vec<serde_json::Value>>>) {
+        let seen = Arc::new(std::sync::Mutex::new(vec![]));
+        let s = Arc::clone(&seen);
+        let base = fixture(axum::Router::new().route(
+            "/botTOKEN/editMessageText",
+            axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+                let s = Arc::clone(&s);
+                async move {
+                    let (status, out) = reply(&body);
+                    s.lock().unwrap().push(body);
+                    (status, axum::Json(out))
+                }
+            }),
+        ))
+        .await;
+        (base, seen)
+    }
+
+    fn tg_ok(_: &serde_json::Value) -> (axum::http::StatusCode, serde_json::Value) {
+        (
+            axum::http::StatusCode::OK,
+            serde_json::json!({"ok": true, "result": true}),
+        )
+    }
+
+    fn tg_bad(desc: &str) -> (axum::http::StatusCode, serde_json::Value) {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            serde_json::json!({"ok": false, "error_code": 400, "description": desc}),
+        )
+    }
+
+    #[tokio::test]
+    async fn edit_formatted_sends_html_within_the_limit_after_conversion() {
+        let (base, seen) = edit_fixture(tg_ok).await;
+        let a = TelegramAdapter::with_base("TOKEN", base);
+        a.edit_formatted("1", "9", "**PR Reviewer** · <working>")
+            .await
+            .unwrap();
+        // Every `&` becomes `&amp;`: 3,000 source characters convert past 4,096.
+        a.edit_formatted("1", "9", &"&".repeat(3_000))
+            .await
+            .unwrap();
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen[0]["text"], "<b>PR Reviewer</b> · &lt;working&gt;");
+        assert_eq!(seen[0]["parse_mode"], "HTML");
+        assert_eq!(seen[0]["message_id"], 9);
+        let cut = seen[1]["text"].as_str().unwrap();
+        assert!(cut.chars().count() <= TEXT_MAX_CHARS, "{}", cut.len());
+        assert!(
+            cut.ends_with('…') && !cut.contains("&am…"),
+            "never cut inside an entity"
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_formatted_retries_a_rejected_markup_once_as_plain_text() {
+        let (base, seen) = edit_fixture(|body| {
+            if body.get("parse_mode").is_some() {
+                tg_bad("Bad Request: can't parse entities: unclosed tag")
+            } else {
+                tg_ok(body)
+            }
+        })
+        .await;
+        TelegramAdapter::with_base("TOKEN", base)
+            .edit_formatted("1", "9", "**x**")
+            .await
+            .unwrap();
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[1]["text"], "**x**");
+        assert!(seen[1].get("parse_mode").is_none());
+    }
+
+    #[tokio::test]
+    async fn edit_formatted_classifies_unchanged_and_lost_messages() {
+        let (base, _) = edit_fixture(|_| {
+            tg_bad(
+                "Bad Request: message is not modified: specified new message content is the same",
+            )
+        })
+        .await;
+        TelegramAdapter::with_base("TOKEN", base)
+            .edit_formatted("1", "9", "same")
+            .await
+            .expect("unchanged text is not a failure");
+        for reply in [
+            (|_: &serde_json::Value| tg_bad("Bad Request: message to edit not found"))
+                as fn(&_) -> _,
+            |_| tg_bad("Bad Request: message can't be edited"),
+        ] {
+            let (base, _) = edit_fixture(reply).await;
+            let err = TelegramAdapter::with_base("TOKEN", base)
+                .edit_formatted("1", "9", "x")
+                .await
+                .unwrap_err();
+            assert!(crate::adapter::edit_needs_new_post(&err), "{err}");
+        }
+        let (base, _) = edit_fixture(|_| {
+            (
+                axum::http::StatusCode::TOO_MANY_REQUESTS,
+                serde_json::json!({"ok": false, "description": "Too Many Requests",
+                    "parameters": {"retry_after": 7}}),
+            )
+        })
+        .await;
+        let err = TelegramAdapter::with_base("TOKEN", base)
+            .edit_formatted("1", "9", "x")
+            .await
+            .unwrap_err();
+        assert!(!crate::adapter::edit_needs_new_post(&err));
+        assert_eq!(
+            crate::mirror::retry_after_hint(&err),
+            Some(Duration::from_secs(7))
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_with_caption_sends_an_html_caption_then_plain_on_a_parse_error() {
+        let bodies = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let b = Arc::clone(&bodies);
+        let base = fixture(axum::Router::new().route(
+            "/botTOKEN/sendDocument",
+            axum::routing::post(move |body: axum::body::Bytes| {
+                let b = Arc::clone(&b);
+                async move {
+                    let text = String::from_utf8_lossy(&body).into_owned();
+                    let html = text.contains("name=\"parse_mode\"");
+                    let rejected = html && text.contains("&lt;bad");
+                    b.lock().unwrap().push(text);
+                    let (status, out) = if rejected {
+                        tg_bad("Bad Request: can't parse entities: bad tag")
+                    } else {
+                        tg_ok(&serde_json::Value::Null)
+                    };
+                    (status, axum::Json(out))
+                }
+            }),
+        ))
+        .await;
+        let a = TelegramAdapter::with_base("TOKEN", base);
+        a.upload_with_caption(
+            "1",
+            Some("5"),
+            "step3.md",
+            b"# body",
+            "✅ **Checkout** · 14s",
+        )
+        .await
+        .unwrap();
+        a.upload_with_caption("1", None, "step4.md", b"# body", "❌ <bad")
+            .await
+            .unwrap();
+        a.upload("1", None, "step5.md", b"# body").await.unwrap();
+        let bodies = bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 4, "the rejected caption is sent twice");
+        assert!(bodies[0].contains("<b>Checkout</b>") && bodies[0].contains("name=\"parse_mode\""));
+        assert!(bodies[2].contains("❌ <bad") && !bodies[2].contains("name=\"parse_mode\""));
+        assert!(!bodies[3].contains("name=\"caption\""));
+    }
+
+    #[test]
+    fn a_long_caption_is_cut_to_telegrams_limit() {
+        let html = html_within(&format!("**{}**", "a".repeat(2_000)), CAPTION_MAX_CHARS);
+        assert!(html.chars().count() <= CAPTION_MAX_CHARS);
+        assert!(html.starts_with("<b>") || html.starts_with("**"), "{html}");
     }
 }

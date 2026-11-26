@@ -1200,7 +1200,7 @@ fn reply_retry_delay(error: &anyhow::Error) -> Duration {
 
 /// The delay a rate-limit error asks for — `… (retry after Ns)`, as the Slack
 /// adapter words an HTTP 429 with its `Retry-After`. `None` when absent.
-pub(crate) fn retry_after_hint(e: &anyhow::Error) -> Option<Duration> {
+pub fn retry_after_hint(e: &anyhow::Error) -> Option<Duration> {
     let s = e.to_string();
     let rest = &s[s.find("retry after ")? + "retry after ".len()..];
     let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();

@@ -40,15 +40,17 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
+use otto_channels::adapter::InboundAttachment;
 use otto_channels::workflow_trigger::{WorkflowChatAck, WorkflowChatTrigger};
 use otto_core::event::Event;
-use otto_core::workflows::{NodeStatus, Workflow, WorkflowRun};
+use otto_core::workflows::{AttachmentSource, NodeStatus, Workflow, WorkflowRun};
 use otto_state::{TriggersRepo, WorkflowTrigger, WorkflowsRepo};
 use serde_json::{json, Value};
 
 use crate::chat_resolve::{
     ambiguous_reply, no_such_workflow_reply, resolve_name, NameMatch, SlotOutlook,
 };
+use crate::chat_status::{ChatUpdates, ChatView};
 use crate::run_queue::{max_parallel_runs, slot_outlook_now};
 use crate::trigger_outcome::{self, TriggerOutcome};
 use crate::WorkflowCtx;
@@ -297,6 +299,65 @@ pub fn parse_wf_control(text: &str) -> Option<WfControl> {
         }
     }
     None
+}
+
+/// The step a `skip <name>` names: what follows the longest skip synonym
+/// (`skip this step` names none). Lowercased.
+pub fn skip_target(text: &str) -> Option<String> {
+    let norm = text.to_lowercase();
+    let norm = norm.split_whitespace().collect::<Vec<_>>().join(" ");
+    let op = WF_OPS.iter().find(|o| o.variant == WfControl::Skip)?;
+    let syn = op
+        .synonyms
+        .iter()
+        .filter(|s| norm == **s || norm.starts_with(&format!("{s} ")))
+        .max_by_key(|s| s.len())?;
+    let rest = norm[syn.len()..].trim();
+    (!rest.is_empty()).then(|| rest.to_string())
+}
+
+/// Which running step (`(node_id, name)`) a skip targets: the only one when
+/// `target` is `None`; else the one whose name starts with `target`, then
+/// the one that contains it (case-insensitive). `Err` is the reply asking
+/// for a name.
+pub fn pick_skip(running: &[(String, String)], target: Option<&str>) -> Result<String, String> {
+    let names = running
+        .iter()
+        .map(|(_, n)| n.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let ask = || format!("Several steps are running: {names} — reply `skip <step name>`.");
+    let Some(t) = target else {
+        return match running {
+            [(id, _)] => Ok(id.clone()),
+            _ => Err(ask()),
+        };
+    };
+    let only = |hits: Vec<&String>| match hits.as_slice() {
+        [id] => Some((*id).clone()),
+        _ => None,
+    };
+    let lower = |n: &str| n.to_lowercase();
+    let by = |f: &dyn Fn(&str) -> bool| {
+        running
+            .iter()
+            .filter(|(_, n)| f(&lower(n)))
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>()
+    };
+    let prefix = by(&|n| n.starts_with(t));
+    if prefix.len() > 1 {
+        return Err(ask());
+    }
+    only(prefix)
+        .or_else(|| only(by(&|n| n.contains(t))))
+        .ok_or_else(|| {
+            if by(&|n| n.contains(t)).is_empty() {
+                format!("No running step is called “{t}”. Running now: {names} — reply `skip <step name>`.")
+            } else {
+                ask()
+            }
+        })
 }
 
 /// The static control guide (no agent): a copy-pasteable trigger template plus
@@ -728,7 +789,9 @@ impl<C: WorkflowCtx> WorkflowChatTriggerImpl<C> {
     /// already threaded into `input` by every call site). Every refusal is
     /// answered in the thread — an explicit trigger never ends in silence.
     /// `binding` is the chat-binding trigger that matched (path 3): what the
-    /// attempt came to is stamped on it ([`trigger_outcome`]).
+    /// attempt came to is stamped on it ([`trigger_outcome`]). `files` are the
+    /// message's attachments, copied into the run's context dir before it can
+    /// queue ([`crate::attachments`], DR-201).
     #[allow(clippy::too_many_arguments)]
     async fn start_named(
         &self,
@@ -739,10 +802,11 @@ impl<C: WorkflowCtx> WorkflowChatTriggerImpl<C> {
         channel: &str,
         chat: &str,
         binding: Option<&str>,
+        files: &[InboundAttachment],
     ) -> Option<WorkflowChatAck> {
         let repo = WorkflowsRepo::new(self.ctx.pool().clone());
         let (ack, outcome) = self
-            .admit_and_spawn(&repo, wf, input, goals, notes, channel, chat)
+            .admit_and_spawn(&repo, wf, input, goals, notes, channel, chat, files)
             .await;
         if let Some(trigger_id) = binding {
             trigger_outcome::stamp(self.ctx.pool(), trigger_id, &outcome).await;
@@ -761,6 +825,7 @@ impl<C: WorkflowCtx> WorkflowChatTriggerImpl<C> {
         notes: &[String],
         channel: &str,
         chat: &str,
+        files: &[InboundAttachment],
     ) -> (WorkflowChatAck, TriggerOutcome) {
         let rejected =
             |reason: String, reply: String| (refusal(reply), TriggerOutcome::Rejected(reason));
@@ -824,6 +889,29 @@ impl<C: WorkflowCtx> WorkflowChatTriggerImpl<C> {
                 );
             }
         };
+        if !files.is_empty() {
+            let context = crate::attachments::context_dir(self.ctx.data_dir(), &run.id);
+            let files = files.to_vec();
+            let copied = tokio::task::spawn_blocking(move || {
+                crate::attachments::copy_into(&context, &files, AttachmentSource::Start)
+            })
+            .await;
+            match copied {
+                Ok(Ok(refs)) => tracing::info!(
+                    "workflow chat: run {} received {} file(s) from the message",
+                    run.id,
+                    refs.iter().filter(|r| r.path.is_some()).count()
+                ),
+                Ok(Err(e)) => tracing::warn!(
+                    "workflow chat: run {}: copying its files failed: {e}",
+                    run.id
+                ),
+                Err(e) => tracing::warn!(
+                    "workflow chat: run {}: copying its files failed: {e}",
+                    run.id
+                ),
+            }
+        }
         self.ctx.spawn_run(
             ws,
             wf.clone(),
@@ -901,46 +989,6 @@ impl<C: WorkflowCtx> WorkflowChatTriggerImpl<C> {
             .ok()??;
         repo.get_run(&id).await.ok()
     }
-
-    /// A NON-INTRUSIVE status summary built purely from the run's persisted node
-    /// states — never prompts a running agent. Overall status, a per-step line,
-    /// and the running step's latest log line. `wf_name` is the looked-up
-    /// workflow name — only the legacy `Action: Workflow` path stamps `name`
-    /// into the run input, so without the fallback every `run <name>:` /
-    /// channel-binding run read as a generic "*workflow*".
-    fn run_status_summary(&self, run: &WorkflowRun, wf_name: Option<&str>) -> String {
-        let short = short_id(&run.id);
-        let name = run
-            .input
-            .get("name")
-            .and_then(Value::as_str)
-            .or(wf_name)
-            .unwrap_or("workflow");
-        let mut lines = vec![format!(
-            "📊 *{name}* — run `{short}` · {}",
-            run.status.as_str()
-        )];
-        for n in &run.nodes {
-            let icon = match n.status {
-                NodeStatus::Success => "✓",
-                NodeStatus::Running => "▶",
-                NodeStatus::Pending => "·",
-                NodeStatus::Error => "✗",
-                NodeStatus::Skipped => "⤼",
-            };
-            let dur = n
-                .duration_ms
-                .map(|ms| format!(" ({:.1}s)", ms as f64 / 1000.0))
-                .unwrap_or_default();
-            lines.push(format!("{icon} {}{}", n.node_id, dur));
-        }
-        if let Some(cur) = run.nodes.iter().find(|n| n.status == NodeStatus::Running) {
-            if let Some(last) = cur.logs.last() {
-                lines.push(format!("… {}", last.chars().take(160).collect::<String>()));
-            }
-        }
-        lines.join("\n")
-    }
 }
 
 #[async_trait]
@@ -953,6 +1001,7 @@ impl<C: WorkflowCtx> WorkflowChatTrigger for WorkflowChatTriggerImpl<C> {
         thread: Option<&str>,
         user: &str,
         text: &str,
+        attachments: &[InboundAttachment],
     ) -> Option<WorkflowChatAck> {
         let repo = WorkflowsRepo::new(self.ctx.pool().clone());
 
@@ -1022,7 +1071,16 @@ impl<C: WorkflowCtx> WorkflowChatTrigger for WorkflowChatTriggerImpl<C> {
                 notes.push(format!("⚠️ {note}"));
             }
             return self
-                .start_named(wf, input, Some(&goals_txt), &notes, channel, chat, None)
+                .start_named(
+                    wf,
+                    input,
+                    Some(&goals_txt),
+                    &notes,
+                    channel,
+                    chat,
+                    None,
+                    attachments,
+                )
                 .await;
         }
 
@@ -1044,7 +1102,7 @@ impl<C: WorkflowCtx> WorkflowChatTrigger for WorkflowChatTriggerImpl<C> {
                         "raw": text,
                     });
                     return self
-                        .start_named(*wf, input, None, &notes, channel, chat, None)
+                        .start_named(*wf, input, None, &notes, channel, chat, None, attachments)
                         .await;
                 }
                 Resolved::Missing(reply) | Resolved::Failed(reply) if explicit => {
@@ -1092,6 +1150,7 @@ impl<C: WorkflowCtx> WorkflowChatTrigger for WorkflowChatTriggerImpl<C> {
         let mut wf = None;
         let mut load_error = None;
         let mut binding_id = String::new();
+        let mut binding_style = None;
         for trigger in candidates {
             let candidate = match repo.get(&trigger.workflow_id).await {
                 Ok(w) => w,
@@ -1126,6 +1185,7 @@ impl<C: WorkflowCtx> WorkflowChatTrigger for WorkflowChatTriggerImpl<C> {
                 continue;
             }
             binding_id = trigger.id.clone();
+            binding_style = trigger.spec.get(ChatUpdates::KEY).cloned();
             wf = Some(candidate);
             break;
         }
@@ -1164,7 +1224,7 @@ impl<C: WorkflowCtx> WorkflowChatTrigger for WorkflowChatTriggerImpl<C> {
                 ),
             });
         }
-        let input = json!({
+        let mut input = json!({
             "trigger": "chat",
             "origin_workspace_id": workspace_id,
             "channel": channel,
@@ -1175,6 +1235,10 @@ impl<C: WorkflowCtx> WorkflowChatTrigger for WorkflowChatTriggerImpl<C> {
             "msg": stripped,
             "raw": text,
         });
+        // The binding's thread style wins over the Start node's (engine.md §9.5).
+        if let Some(style) = binding_style.filter(Value::is_string) {
+            input[ChatUpdates::KEY] = style;
+        }
         self.start_named(
             wf,
             input,
@@ -1183,6 +1247,7 @@ impl<C: WorkflowCtx> WorkflowChatTrigger for WorkflowChatTriggerImpl<C> {
             channel,
             chat,
             Some(binding_id.as_str()),
+            attachments,
         )
         .await
     }
@@ -1208,6 +1273,7 @@ impl<C: WorkflowCtx> WorkflowChatTrigger for WorkflowChatTriggerImpl<C> {
         thread: Option<&str>,
         _user: &str,
         text: &str,
+        _attachments: &[InboundAttachment],
     ) -> Option<WorkflowChatAck> {
         let control = parse_wf_control(text)?;
 
@@ -1269,41 +1335,60 @@ impl<C: WorkflowCtx> WorkflowChatTrigger for WorkflowChatTriggerImpl<C> {
         let short = short_id(&run.id);
         match control {
             WfControl::Status => {
-                let wf_name = repo.get(&run.workflow_id).await.ok().map(|w| w.name);
+                // The same text as the run's live status message (engine.md §9.4).
+                let wf = repo.definition_for_run(&run).await.ok();
+                let name = wf.as_ref().map_or("workflow", |w| w.name.as_str());
+                let graph = wf.as_ref().map(|w| w.graph.clone()).unwrap_or_default();
+                let view = ChatView {
+                    workflow: name,
+                    now: chrono::Utc::now(),
+                    tz: *chrono::Local::now().offset(),
+                };
+                let overview = run.overview.clone().unwrap_or_default();
                 Some(WorkflowChatAck {
-                    reply: self.run_status_summary(&run, wf_name.as_deref()),
+                    reply: crate::chat_status::render_status(&view, &overview, &run.nodes, &graph),
                 })
             }
             WfControl::Skip => {
-                // Target the step running NOW, by id: a run-wide marker set
+                // Target a step running NOW, by id: a run-wide marker set
                 // between steps (or while queued) used to skip the NEXT step
                 // the instant it started, and one left on a finished run fired
-                // on a later retry. An approval gate is never skippable — that
-                // would pass it unapproved.
-                let Some(current) = run
+                // on a later retry. With several running, `skip <name>` picks
+                // one (engine.md §3.6). An approval gate is never skippable —
+                // that would pass it unapproved.
+                let graph = repo
+                    .definition_for_run(&run)
+                    .await
+                    .map(|w| w.graph)
+                    .unwrap_or_default();
+                let running: Vec<(String, String)> = run
                     .nodes
                     .iter()
-                    .find(|n| n.status == NodeStatus::Running)
-                    .map(|n| n.node_id.clone())
-                else {
+                    .filter(|n| n.status == NodeStatus::Running)
+                    .map(|n| {
+                        let name = graph
+                            .nodes
+                            .iter()
+                            .find(|g| g.id == n.node_id)
+                            .map_or(n.node_id.as_str(), crate::chat_status::step_name);
+                        (n.node_id.clone(), name.to_string())
+                    })
+                    .collect();
+                if running.is_empty() {
                     return Some(WorkflowChatAck {
                         reply: format!(
                             "No step of run `{short}` is running right now — nothing to skip."
                         ),
                     });
+                }
+                let current = match pick_skip(&running, skip_target(text).as_deref()) {
+                    Ok(id) => id,
+                    Err(reply) => return Some(WorkflowChatAck { reply }),
                 };
-                let is_gate = repo
-                    .definition_for_run(&run)
-                    .await
-                    .ok()
-                    .and_then(|wf| {
-                        wf.graph
-                            .nodes
-                            .iter()
-                            .find(|n| n.id == current)
-                            .map(|n| n.kind == "human_approval")
-                    })
-                    .unwrap_or(false);
+                let is_gate = graph
+                    .nodes
+                    .iter()
+                    .any(|n| n.id == current && n.kind == "human_approval");
                 if is_gate {
                     return Some(WorkflowChatAck {
                         reply: format!(
@@ -1312,9 +1397,16 @@ impl<C: WorkflowCtx> WorkflowChatTrigger for WorkflowChatTriggerImpl<C> {
                     });
                 }
                 self.ctx.request_skip_current(&run.id, &current);
-                Some(WorkflowChatAck {
-                    reply: format!("⏭️ Skipping the current step of run `{short}`."),
-                })
+                let reply = if running.len() == 1 {
+                    format!("⏭️ Skipping the current step of run `{short}`.")
+                } else {
+                    let name = running
+                        .iter()
+                        .find(|(id, _)| *id == current)
+                        .map_or("", |(_, n)| n);
+                    format!("⏭️ Skipping *{name}* of run `{short}`; the other steps keep running.")
+                };
+                Some(WorkflowChatAck { reply })
             }
             WfControl::Abort => {
                 // Same as the Cancel button (routes::workflows::cancel_run): flip
@@ -1366,8 +1458,59 @@ fn abort_reply<E: std::fmt::Display>(
 }
 
 #[cfg(test)]
+#[path = "chat_files_tests.rs"]
+mod files_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn skip_names_a_step_only_after_the_skip_word() {
+        for (text, want) in [
+            ("skip", None),
+            ("skip this step", None),
+            ("Skip it", None),
+            ("skip Go PR gates", Some("go pr gates")),
+            ("skip  step   gather", Some("gather")),
+            ("next review", Some("review")),
+        ] {
+            assert_eq!(skip_target(text).as_deref(), want, "{text}");
+        }
+    }
+
+    #[test]
+    fn skip_picks_one_running_step_or_asks_which() {
+        let one = [("n4".to_string(), "Gather context".to_string())];
+        assert_eq!(pick_skip(&one, None), Ok("n4".into()));
+        let two = [
+            ("n4".to_string(), "Gather context".to_string()),
+            ("n6".to_string(), "Go PR gates".to_string()),
+            ("n7".to_string(), "Go lint gates".to_string()),
+        ];
+        let ask = "Several steps are running: Gather context, Go PR gates, Go lint gates — reply `skip <step name>`.";
+        assert_eq!(pick_skip(&two, None), Err(ask.into()));
+        assert_eq!(pick_skip(&two, Some("gather")), Ok("n4".into()), "prefix");
+        assert_eq!(
+            pick_skip(&two, Some("pr gates")),
+            Ok("n6".into()),
+            "substring"
+        );
+        assert_eq!(
+            pick_skip(&two, Some("go")),
+            Err(ask.into()),
+            "ambiguous prefix"
+        );
+        assert_eq!(
+            pick_skip(&two, Some("gates")),
+            Err(ask.into()),
+            "ambiguous substring"
+        );
+        assert_eq!(
+            pick_skip(&two, Some("deploy")),
+            Err("No running step is called “deploy”. Running now: Gather context, Go PR gates, Go lint gates — reply `skip <step name>`.".into())
+        );
+    }
 
     #[test]
     fn abort_reply_confirms_only_a_run_that_was_canceled() {

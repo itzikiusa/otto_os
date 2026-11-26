@@ -1234,6 +1234,9 @@ impl otto_workflows::WorkflowCtx for ServerCtx {
     fn pool(&self) -> &otto_state::DbPool {
         &self.pool
     }
+    fn data_dir(&self) -> &std::path::Path {
+        &self.data_dir
+    }
     fn events(&self) -> &tokio::sync::broadcast::Sender<Event> {
         &self.events
     }

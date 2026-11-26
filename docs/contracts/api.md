@@ -4167,6 +4167,27 @@ result goes and where agents run; which trigger may set them:
 | `result_channel`, `result_chat`, `result_thread`, `result_webhook`, `callback_url` | yes | yes (`result_*`) | yes | dropped |
 | `working_directory`, `repos`, `worktree`, `worktree_path`, `cwd` | `working_directory` | webhook spec: `working_directory`, `repos` | yes | dropped |
 | `repo_id`, `base`, `pr`, `pr_branch` | — | webhook spec | yes (`repo_id` must be in the workflow's workspace, else **400**) | dropped |
+| `chat_updates` (`live` \| `per_step`; also a Start node param) | chat binding spec | — | yes | dropped |
+| `attachments`, a non-boolean `research_dir` | engine only | dropped (Start node params too) | dropped | dropped |
+
+**Chat thread style (`chat_updates`).** `live` (the default) posts one status message
+and edits it in place, captions every step's file, and posts new messages only for
+needs-you, holds and the final result (+ `final-output.md`); `per_step` is the pre-0.7
+thread byte for byte (a line and a file per step). Resolved from the run input, else
+the Start node's param (`otto_workflows::chat_status::ChatUpdates::resolve`). In a run's
+thread, `status` replies with that status message's text; `skip` skips the running step,
+and while several run it asks for `skip <step name>` (a name prefix, then a substring,
+case-insensitive; the others keep running).
+
+**Files from the chat message.** The Slack listener passes the files it downloaded for
+a message as data (`Inbound.attachments`, never parsed back out of the text; `input.raw`
+keeps the `saved to:` note unchanged). When a chat message starts a run, each is copied —
+before the run can queue — to `<data>/workflow-context/<run>/attachments/<safe name>`
+(`[A-Za-z0-9._-]`, `-2`… on a clash, never through a symlink, only regular files the
+listener saved in the canonical temp dir, at most 10 files / 50 MiB per run) and listed
+in `<context>/attachments.json` as `AttachmentRef[]` `{name, mime, size_bytes?, path?
+("attachments/<safe name>"), error?, source: "start" | "steer"}`; a file that was not
+received or not copied has `error` and no `path`. Telegram receives no files.
 
 Results always post through the **workflow's own** workspace integration: an
 `origin_workspace_id` naming another workspace is ignored (chat triggers only
@@ -4195,7 +4216,8 @@ every inbound Slack/Telegram/webhook message *before* normal session routing. Re
    falls through (bare "run" reads too much like ordinary English to hijack the message).
 3. **Channel bindings** — enabled `chat`-kind `WorkflowTrigger`s pin a workflow to a
    channel/chat(/thread): spec shape `{"channel": "slack"|"telegram", "chat": "<id>", "thread"?:
-   "<ts>", "mention_only"?: bool}`. `channel`+`chat` must match exactly; an absent `thread` in the
+   "<ts>", "mention_only"?: bool, "chat_updates"?: "live" | "per_step"}` (`chat_updates` is
+   copied into the run input). `channel`+`chat` must match exactly; an absent `thread` in the
    spec matches any thread (a present one requires an exact match — a thread-pinned binding is
    preferred over an unpinned one when both match); `mention_only` (default false) requires the
    inbound text to @-mention someone (an `@word`; Slack mentions arrive decoded as `@name`, the
