@@ -13,6 +13,10 @@ test('each kind of step opens on its own first tab', () => {
   assert.deepEqual(paneTabs({ kind: 'script' }), ['log', 'output']);
   assert.deepEqual(paneTabs({ kind: 'human_approval' }), ['preview', 'log']);
   assert.deepEqual(paneTabs({ kind: 'post_review_comments', node: node('a', 'running', 0, null, { attention: { kind: 'approval', text: 'x', since: at(1) } }) }), ['preview', 'log']);
+  // An agent step paused on a provider or MCP approval keeps its conversation:
+  // the tool call and its context are what a person reads before approving (CR1-040).
+  const asks = node('a', 'running', 0, null, { attention: { kind: 'approval', via: 'mcp', text: 'post', since: at(1) }, thread: { thread_id: 't', runner: 'threads', provider: 'claude', turns: 1, usage: {} as never } });
+  assert.deepEqual(paneTabs({ kind: 'agent_prompt', node: asks }), ['conversation', 'output', 'files']);
   assert.deepEqual(paneTabs({ kind: 'manual_trigger' }), ['input']);
   assert.deepEqual(paneTabs({ result: true }), ['result', 'files', 'input']);
   assert.deepEqual(paneTabs({ result: true, goal: true }), ['result', 'criteria', 'files', 'input']);
