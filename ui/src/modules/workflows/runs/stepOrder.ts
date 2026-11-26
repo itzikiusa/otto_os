@@ -8,6 +8,15 @@
 // ui/unit/workflowStepOrder.test.ts.
 import type { ChildThread, ChildThreadStatus, NodeRunState, RunState, WorkflowCheckpoint, WorkflowGraph } from '../../../lib/api/types';
 
+/** A step's time bar inside the run's clock, in percent; clamped so a retry
+ *  that ran past the clock or a skewed start never leaves the track. */
+export function timeBar(s: StepItem, clock: { start: number; end: number }): { at: number; w: number } | null {
+  if (s.start === null || s.end === null) return null;
+  const span = Math.max(1, clock.end - clock.start);
+  const at = Math.min(99.4, Math.max(0, ((s.start - clock.start) / span) * 100));
+  return { at, w: Math.min(100 - at, Math.max(0.6, ((s.end - s.start) / span) * 100)) };
+}
+
 /** The pseudo-rows the pane can open besides a step. */
 export const RESULT = '_result';
 

@@ -10,7 +10,7 @@
   import { plural } from '../../../lib/plural';
   import type { RunState } from '../../../lib/api/types';
   import { childWord, stepDuration, stepLine2, stepWord, type StepGlyph } from './runWords';
-  import { doneFold, orderChildren, RESULT, type StepEntry, type StepItem } from './stepOrder';
+  import { doneFold, orderChildren, RESULT, timeBar, type StepEntry, type StepItem } from './stepOrder';
 
   interface Props {
     entries: readonly StepEntry[];
@@ -32,12 +32,7 @@
   let openQueued = $state<Record<string, boolean>>({});
   const fold = $derived(compact && !foldOpen ? doneFold(entries) : null);
   const shown = $derived(fold ? entries.slice(fold.entries) : entries);
-  const span = $derived(Math.max(1, clock.end - clock.start));
-
-  function bar(s: StepItem): { at: number; w: number } | null {
-    if (s.start === null || s.end === null) return null;
-    return { at: ((s.start - clock.start) / span) * 100, w: Math.max(0.6, ((s.end - s.start) / span) * 100) };
-  }
+  const bar = (s: StepItem) => timeBar(s, clock);
 
   function onkeydown(e: KeyboardEvent): void {
     if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
@@ -251,6 +246,7 @@
   .bar {
     position: relative;
     display: block;
+    overflow: hidden;
     block-size: 3px;
     margin-block-start: var(--sp-1);
     border-radius: var(--radius-s);
