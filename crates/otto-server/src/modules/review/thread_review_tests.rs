@@ -485,3 +485,54 @@ async fn a_held_review_back_on_the_terminal_runner_stops_its_threads_and_checkou
     let done = ctx.reviews_store.get_review(&review.id).await.unwrap();
     assert_eq!(done.status, ReviewStatus::Error);
 }
+
+/// CR1-028: a held review whose repo is gone when the daemon comes back
+/// stops its held agents' threads and ends as an error — it used to stay
+/// "running" with its threads open, and a workflow step waited on it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_held_review_whose_repo_is_gone_stops_its_threads_and_ends() {
+    let (_tmp, ctx, ws, repo) = rig().await;
+    let review = ctx
+        .reviews_store
+        .create_review(&repo.id, LOCAL_REVIEW_PR_NUMBER)
+        .await
+        .unwrap();
+    let owner: String = sqlx::query_scalar("SELECT id FROM users LIMIT 1")
+        .fetch_one(&ctx.pool)
+        .await
+        .unwrap();
+    let req = otto_core::agent_runtime::CreateRuntimeSessionReq {
+        provider: Some(otto_core::agent_runtime::RuntimeProvider::Claude),
+        cwd: Some(repo.path.clone()),
+        ..Default::default()
+    };
+    let thread = ctx.agent_runtime.create(&owner, &ws.id, req).await.unwrap();
+    let row = otto_core::domain::ReviewAgentState {
+        name: "Lens 1".into(),
+        provider: "claude".into(),
+        status: "running".into(),
+        thread: true,
+        session_id: Some(thread.id.to_string()),
+        ..Default::default()
+    };
+    ctx.reviews_store
+        .set_agents(&review.id, &[row])
+        .await
+        .unwrap();
+    // Removing a repo in the app removes its reviews with it: this is the
+    // row gone (or unreadable) underneath a review that is still stored.
+    sqlx::query("DELETE FROM repos WHERE id = ?")
+        .bind(&repo.id)
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+    let live = ctx.review_cancels.register(&review.id);
+    resume_held_review(ctx.clone(), review.id.clone(), live).await;
+    let after = ctx.agent_runtime.get(&thread.id).await.unwrap();
+    assert_eq!(
+        after.status,
+        otto_core::agent_runtime::RuntimeSessionStatus::Closed
+    );
+    let done = ctx.reviews_store.get_review(&review.id).await.unwrap();
+    assert_eq!(done.status, ReviewStatus::Error);
+}
