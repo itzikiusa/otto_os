@@ -341,57 +341,12 @@ pub(super) fn on_turn_end(inner: &Inner, st: &State, turn_id: &Id, status: TurnT
     // the child idle before its answer is queued.
     unattended::wake_announced(inner, &of.id, &child.id);
     let rt = AgentRuntime { inner: me };
-    let reporting = Reporting::start(&child.id);
     tokio::spawn(async move {
         let (parent, key) = (of.id.clone(), child.id.clone());
         rt.child_turn_ended(child, of, turn, status, answer, asked, false)
             .await;
         unattended::wake_done(&rt.inner, &parent, &key);
-        drop(reporting);
     });
-}
-
-/// Children whose ended turn is still being reported to their parent (the
-/// notice and the queued reply): set under the child's lock as the turn
-/// ends, so removing it (`close_peer` with `remove`) waits for its answer
-/// to reach the parent first.
-fn reporting() -> &'static Mutex<HashMap<Id, usize>> {
-    static S: std::sync::OnceLock<Mutex<HashMap<Id, usize>>> = std::sync::OnceLock::new();
-    S.get_or_init(Default::default)
-}
-
-/// One in-flight report of [`reporting`]; ends when dropped.
-struct Reporting(Id);
-
-impl Reporting {
-    fn start(child: &Id) -> Self {
-        *reporting()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .entry(child.clone())
-            .or_default() += 1;
-        Self(child.clone())
-    }
-}
-
-impl Drop for Reporting {
-    fn drop(&mut self) {
-        let mut m = reporting().lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(n) = m.get_mut(&self.0) {
-            *n -= 1;
-            if *n == 0 {
-                m.remove(&self.0);
-            }
-        }
-    }
-}
-
-/// `true` while child `id`'s ended turn is still on its way to its parent.
-pub(super) fn reporting_end(id: &Id) -> bool {
-    reporting()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .contains_key(id)
 }
 
 /// Turn `turn_id`'s answer (its top-level assistant messages, in order) and

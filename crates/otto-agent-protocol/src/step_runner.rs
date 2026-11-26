@@ -15,8 +15,8 @@ use otto_agent_run::step::{
 };
 use otto_core::agent_runtime::{
     error_class, limit_kind, Attention, AttentionKind, CreateRuntimeSessionReq, LimitKind,
-    ProviderTurnStatus, RuntimePromptReq, RuntimeSessionStatus, TurnTokenUsage, WaitReason,
-    ERROR_CLASS_AUTH, PROVIDER_SLUG_META_KEY,
+    ProviderTurnStatus, RuntimePromptReq, RuntimeSessionStatus, TurnTokenUsage, WaitDetail,
+    WaitReason, ERROR_CLASS_AUTH, PROVIDER_SLUG_META_KEY,
 };
 use otto_core::cancel_signal::CancelSignal;
 use otto_core::{Error, Id, Result};
@@ -31,13 +31,14 @@ use crate::{AgentRuntime, Ended, SettledTurn, TurnOpts};
 pub trait StepHost: Send + Sync {
     /// Wait for a machine place for a background agent of `source`
     /// (dropping the future leaves the queue), reporting each wait. The
-    /// returned guard holds the place until the step settles.
+    /// spawn claims the place by its key; the guard gives it back if no
+    /// spawn did.
     async fn admit(
         &self,
         source: &str,
         label: &str,
         on_wait: &(dyn Fn(WaitReason) + Send + Sync),
-    ) -> Box<dyn Send>;
+    ) -> Place;
     /// Why the step's provider / model / effort cannot run now (a model
     /// dropped from the catalog since the workflow was saved), checked
     /// before anything starts — `otto_sessions::provider_models::check_pick`.
@@ -62,18 +63,23 @@ pub trait StepHost: Send + Sync {
     }
 }
 
+/// A machine place: `key` goes with the spawn that takes it over (the
+/// create's `meta.admission_permit`, or `TurnOpts::permit`).
+pub struct Place {
+    pub key: Option<String>,
+    pub guard: Box<dyn Send>,
+}
+
 /// No machine gate, no usage lookup (tests, and engines without a daemon).
 pub struct NoStepHost;
 
 #[async_trait]
 impl StepHost for NoStepHost {
-    async fn admit(
-        &self,
-        _: &str,
-        _: &str,
-        _: &(dyn Fn(WaitReason) + Send + Sync),
-    ) -> Box<dyn Send> {
-        Box::new(())
+    async fn admit(&self, _: &str, _: &str, _: &(dyn Fn(WaitReason) + Send + Sync)) -> Place {
+        Place {
+            key: None,
+            guard: Box::new(()),
+        }
     }
 }
 
@@ -102,10 +108,23 @@ impl StepHost for DaemonStepHost {
     async fn admit(
         &self,
         source: &str,
-        _label: &str,
-        _on_wait: &(dyn Fn(WaitReason) + Send + Sync),
-    ) -> Box<dyn Send> {
-        Box::new(self.manager.admit_background(source).await)
+        label: &str,
+        on_wait: &(dyn Fn(WaitReason) + Send + Sync),
+    ) -> Place {
+        let permit = self
+            .manager
+            .admit_background_with(source, label, |w| {
+                if let Some(r) = wait_reason(w) {
+                    on_wait(r);
+                }
+            })
+            .await;
+        let mut meta = serde_json::json!({});
+        permit.stamp(&mut meta);
+        Place {
+            key: otto_sessions::admission::take_permit_key(&mut meta),
+            guard: Box::new(permit),
+        }
     }
     async fn refuse_pick(
         &self,
@@ -168,6 +187,37 @@ impl StepHost for DaemonStepHost {
     }
 }
 
+/// The gate's wait in the run's words (`None` for the brief spacing).
+fn wait_reason(w: &otto_sessions::admission::AdmissionWait) -> Option<WaitReason> {
+    use otto_sessions::admission::AdmissionWait as A;
+    let code = w.code()?;
+    let n = |x: usize| u32::try_from(x).unwrap_or(u32::MAX);
+    let detail = match w {
+        A::Queue { ahead } => WaitDetail {
+            ahead: Some(n(*ahead)),
+            ..WaitDetail::default()
+        },
+        A::LiveCeiling { live, max, holders } => WaitDetail {
+            live: n(*live),
+            max: Some(n(*max)),
+            holders: holders.iter().map(|h| h.label.clone()).collect(),
+            ..WaitDetail::default()
+        },
+        A::Load { live, floor, .. } | A::MemoryPressure { live, floor, .. } => WaitDetail {
+            live: n(*live),
+            floor: Some(n(*floor)),
+            ..WaitDetail::default()
+        },
+        A::Spacing => return None,
+    };
+    Some(WaitReason {
+        code: code.to_string(),
+        text: w.describe(),
+        since: Utc::now(),
+        detail: Some(detail),
+    })
+}
+
 pub const NUDGE: &str = "You did not write {path}. Write it now; nothing else.";
 pub const CONTINUE_AFTER_LIMIT: &str = "Continue the step where you stopped.";
 pub const AFTER_RESTART: &str = "Otto restarted while you were working on this step. \
@@ -203,7 +253,7 @@ impl ThreadStepRunner {
         t: &StepTurn,
         ev: &UnboundedSender<StepEvent>,
         cancel: &CancelSignal,
-    ) -> Option<Box<dyn Send>> {
+    ) -> Option<Place> {
         let ev = ev.clone();
         let on_wait = move |w: WaitReason| {
             let _ = ev.send(StepEvent::Waiting(w));
@@ -216,7 +266,11 @@ impl ThreadStepRunner {
     }
 
     /// A fresh thread for `t`, or the earlier step's it continues.
-    async fn thread(&self, t: &StepTurn) -> std::result::Result<Id, StepError> {
+    async fn thread(
+        &self,
+        t: &StepTurn,
+        key: Option<String>,
+    ) -> std::result::Result<Id, StepError> {
         let spawn = |m: String| StepError::new(StepErrorClass::Spawn, m);
         if let Some(id) = &t.continue_thread {
             let s = match self.rt.get(id).await {
@@ -236,7 +290,12 @@ impl ThreadStepRunner {
                 )));
             }
             if s.status == RuntimeSessionStatus::Closed {
-                self.rt.reopen(id).await.map_err(|e| spawn(e.to_string()))?;
+                // No spawn here: the turn's own spawn takes the place and
+                // resumes strictly.
+                self.rt
+                    .reopen_dormant(id)
+                    .await
+                    .map_err(|e| spawn(e.to_string()))?;
             }
             return Ok(id.clone());
         }
@@ -248,6 +307,12 @@ impl ThreadStepRunner {
         if let Some(m) = meta.as_object_mut() {
             if t.read_only {
                 m.insert("read_only".into(), Value::Bool(true));
+            }
+            if let Some(key) = key {
+                m.insert(
+                    otto_sessions::admission::PERMIT_META_KEY.into(),
+                    Value::String(key),
+                );
             }
             if provider.as_str() != t.provider {
                 m.insert(
@@ -297,6 +362,16 @@ impl ThreadStepRunner {
         let mut opts = TurnOpts::new(cancel.clone());
         opts.no_progress = t.no_progress;
         opts.deadline = t.timeout.map(|d| d.saturating_sub(tally.started.elapsed()));
+        // A thread with no process respawns for this turn: wait for its
+        // machine place first, outside every runtime lock.
+        let mut _place = None;
+        if !self.rt.has_process(id).await.unwrap_or(true) {
+            let Some(p) = self.admit(t, ev, cancel).await else {
+                return Err(StepError::new(StepErrorClass::Canceled, "canceled"));
+            };
+            opts.permit = p.key.clone();
+            _place = Some(p);
+        }
         let ev2 = ev.clone();
         let run = self.rt.run_turn(id, &req, opts, move |e| {
             let _ = ev2.send(e);
@@ -457,6 +532,9 @@ impl ThreadStepRunner {
                             "the step's time ran out while it waited for the usage limit to reset",
                         ));
                     }
+                    // Parked: no process, no machine place until the reset;
+                    // the next turn re-admits and resumes strictly.
+                    self.rt.release_process(id).await.ok();
                     if cancel.sleep(wait).await {
                         break Some(StepError::new(StepErrorClass::Canceled, "canceled"));
                     }
@@ -556,13 +634,25 @@ impl StepRunner for ThreadStepRunner {
             let id = t.continue_thread.clone().unwrap_or_default();
             return Ok(Self::failed(id, StepError::new(StepErrorClass::Spawn, m)));
         }
-        let Some(_place) = self.admit(&t, &ev, &cancel).await else {
-            return Ok(Self::failed(
-                String::new(),
-                StepError::new(StepErrorClass::Canceled, "canceled"),
-            ));
+        // A fresh thread's place rides its create (a continued thread's, its
+        // first turn: `turn` admits when it has no process).
+        let place = match t.continue_thread {
+            Some(_) => None,
+            None => match self.admit(&t, &ev, &cancel).await {
+                Some(p) => Some(p),
+                None => {
+                    return Ok(Self::failed(
+                        String::new(),
+                        StepError::new(StepErrorClass::Canceled, "canceled"),
+                    ))
+                }
+            },
         };
-        let id = match self.thread(&t).await {
+        let thread = self
+            .thread(&t, place.as_ref().and_then(|p| p.key.clone()))
+            .await;
+        drop(place);
+        let id = match thread {
             Ok(id) => id,
             Err(e) => {
                 return Ok(Self::failed(
@@ -620,12 +710,6 @@ impl StepRunner for ThreadStepRunner {
         match settled.ended {
             // An unheld thread: tell the agent and finish on the same conversation.
             Ended::ServerRestart => {
-                let Some(_place) = self.admit(t, &ev, &cancel).await else {
-                    return Ok(Self::failed(
-                        thread_id.clone(),
-                        StepError::new(StepErrorClass::Canceled, "canceled"),
-                    ));
-                };
                 let prompt = AFTER_RESTART.to_string();
                 let mut t = t.clone();
                 t.continue_thread = None;
@@ -640,12 +724,6 @@ impl StepRunner for ThreadStepRunner {
                 let error = Self::fold(&settled);
                 let needs_more = error.is_none() && t.handoff.as_ref().is_some_and(|h| !h.exists());
                 if needs_more {
-                    let Some(_place) = self.admit(&t, &ev, &cancel).await else {
-                        return Ok(Self::failed(
-                            thread_id.clone(),
-                            StepError::new(StepErrorClass::Canceled, "canceled"),
-                        ));
-                    };
                     let h = t
                         .handoff
                         .as_ref()

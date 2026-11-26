@@ -40,6 +40,9 @@ pub struct TurnOpts {
     /// background work runs) ends it.
     pub no_progress: Option<Duration>,
     pub background_limit: Duration,
+    /// A pre-admitted machine place for the spawn this turn may need (a
+    /// dormant or closed thread respawning); claimed by the spawn.
+    pub permit: Option<String>,
 }
 
 impl TurnOpts {
@@ -49,6 +52,7 @@ impl TurnOpts {
             deadline: None,
             no_progress: None,
             background_limit: BACKGROUND_LIMIT,
+            permit: None,
         }
     }
 }
@@ -85,6 +89,31 @@ pub struct SettledTurn {
     pub context_usage: Option<ThreadTokenUsage>,
     /// What waited on a person when the wait ended (a deadline's message).
     pub waited_on: Option<String>,
+}
+
+/// `meta` key: the turn a daemon restart cut off on an engine thread that
+/// was not held (`recover_excluding`). Persisted, so a second restart before
+/// the step resumes still reads it.
+pub const RESTART_CUT_KEY: &str = "restart_cut_turn";
+
+/// The latest turn above `since` is the one a restart cut off.
+fn restart_cut(st: &State, since: u32) -> bool {
+    let Some(cut) = st
+        .session
+        .meta
+        .as_ref()
+        .and_then(|m| m.get(RESTART_CUT_KEY))
+        .and_then(|v| v.as_str())
+    else {
+        return false;
+    };
+    st.proj
+        .turns
+        .values()
+        .max_by_key(|t| t.ordinal)
+        .is_some_and(|t| {
+            t.ordinal > since && t.id == cut && t.status == ProviderTurnStatus::Interrupted
+        })
 }
 
 /// One request waiting on a person: `(thread, request)` and what to show.
@@ -229,6 +258,9 @@ impl AgentRuntime {
             if st.turn.is_some() {
                 return Err(Error::Conflict(TURN_RUNNING.into()));
             }
+            if let Some(key) = &opts.permit {
+                *live.permit.lock().unwrap_or_else(|e| e.into_inner()) = Some(key.clone());
+            }
             st.proj.next_turn_ordinal
         };
         self.prompt_with(id, req).await?;
@@ -266,13 +298,7 @@ impl AgentRuntime {
         let mut sideband_after: Option<u64> = None;
         let mut background_since: Option<Instant> = None;
         let ended = loop {
-            if self
-                .inner
-                .restart_cut
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(id)
-            {
+            if restart_cut(&root.lock(), since) {
                 break Ended::ServerRestart;
             }
             // Arm every wake BEFORE looking, so an event in between is not lost.
@@ -580,7 +606,19 @@ impl AgentRuntime {
         let Ok(rows) = self.linked(id).await else {
             return Vec::new();
         };
-        let mut out = Vec::new();
+        // Sub-threads an agent removed before the step settled: their record
+        // stays on the thread that opened them (`otto.thread_close remove`).
+        let mut out: Vec<SubThreadUse> = rows
+            .iter()
+            .filter_map(|s| {
+                s.meta
+                    .as_ref()?
+                    .get(peers::REMOVED_CHILDREN_META_KEY)?
+                    .as_array()
+            })
+            .flatten()
+            .filter_map(|v| serde_json::from_value(v.clone()).ok())
+            .collect();
         for s in rows.into_iter().filter(|s| &s.id != id) {
             if s.child_of().is_none_or(|o| o.by != ChildOpener::Agent) {
                 continue;
@@ -626,6 +664,11 @@ impl AgentRuntime {
         }
     }
 
+    /// Whether the thread's agent process runs (a turn needs no spawn).
+    pub async fn has_process(&self, id: &Id) -> Result<bool> {
+        Ok(self.live(id).await?.lock().proc.is_some())
+    }
+
     /// The thread's latest turn ordinal (a new turn gets the next one).
     pub async fn turn_ordinal(&self, id: &Id) -> Result<u32> {
         Ok(self.live(id).await?.lock().proj.next_turn_ordinal)
@@ -658,6 +701,25 @@ impl Live {
     pub(super) fn pending_wakes(&self) -> MutexGuard<'_, Vec<String>> {
         self.pending_wakes.lock().unwrap_or_else(|e| e.into_inner())
     }
+}
+
+/// Count a spawned (or adopted) agent process with the host for as long as
+/// its pump runs — the pump ends with the process — then run the pump.
+pub(super) async fn register_and_pump(
+    inner: &Inner,
+    session: &RuntimeSession,
+    pid: u32,
+    pump: impl std::future::Future<Output = ()> + Send + 'static,
+) {
+    let (exit_tx, exit_rx) = tokio::sync::watch::channel(None);
+    inner
+        .host
+        .register_runtime(session, Some(pid), exit_rx)
+        .await;
+    tokio::spawn(async move {
+        pump.await;
+        drop(exit_tx);
+    });
 }
 
 /// Who answered `request_id` ([`AgentRuntime::note_resolver`]), once.

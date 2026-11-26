@@ -45,6 +45,25 @@ impl AgentRuntime {
         Ok(s)
     }
 
+    /// A closed thread takes turns again — it becomes `dormant` — but no
+    /// agent is spawned here: the next turn's spawn does that, with its
+    /// pre-admitted place and (an engine thread) a strict resume.
+    pub async fn reopen_dormant(&self, id: &Id) -> Result<RuntimeSession> {
+        let live = self.live(id).await?;
+        let _prompt = live.prompt_lock.lock().await;
+        let s = {
+            let mut st = live.lock();
+            if st.session.status == RuntimeSessionStatus::Closed {
+                st.session.status = RuntimeSessionStatus::Dormant;
+                let _ = live.persist.send(PersistOp::Opened);
+            }
+            st.session.last_active_at = Utc::now();
+            st.session.clone()
+        };
+        self.flush(id).await;
+        Ok(s)
+    }
+
     /// Low-latency HTTP reopen: validates & spawns the CLI process immediately
     /// (`< 30 ms`), returning the revived [`RuntimeSession`] without blocking
     /// the HTTP caller for up to `start_wait` (20 s) on MCP/CLI boot. A

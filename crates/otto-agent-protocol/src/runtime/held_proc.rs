@@ -274,14 +274,15 @@ pub(super) async fn spawn_via_holder(
             cli_pid,
         );
     }
-    tokio::spawn(pump_held(
+    let pumped = pump_held(
         Arc::clone(inner),
         Arc::clone(live),
         sid,
         epoch,
         held.events,
         claude_login,
-    ));
+    );
+    super::unattended::register_and_pump(inner, session, cli_pid, pumped).await;
     let _ = flushed.await;
     Ok(())
 }
