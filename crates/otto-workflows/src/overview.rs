@@ -32,7 +32,8 @@ pub fn effective_hold(status: RunStatus, hold: Option<&RunHold>) -> Option<&RunH
 /// the clock (the end of a run that has not finished). `origin` and
 /// `subject` are computed once at admission (names from the directory
 /// cache, PR URLs) and carried over from `run.overview`; without one, the
-/// origin falls back to the trigger in the run input. `rev` is the row's.
+/// origin falls back to the trigger in the run input and the subject to
+/// what the input names (its PR, ticket, branch, repo). `rev` is the row's.
 pub fn run_overview(
     run: &WorkflowRun,
     graph: &WorkflowGraph,
@@ -42,10 +43,13 @@ pub fn run_overview(
 ) -> RunOverview {
     let name = |id: &str| step_name(graph, id);
     let hold = effective_hold(run.status, run.hold.as_ref()).cloned();
+    // A settled run has nothing running: a step an older engine left
+    // `running` (a run a daemon restart interrupted) is not what happens now.
+    let live = matches!(run.status, RunStatus::Pending | RunStatus::Running);
     let running: Vec<&NodeRunState> = run
         .nodes
         .iter()
-        .filter(|n| n.status == NodeStatus::Running)
+        .filter(|n| live && n.status == NodeStatus::Running)
         .collect();
 
     let mut attention: Vec<AttentionRef> = running
@@ -176,7 +180,9 @@ pub fn run_overview(
         origin: prev
             .and_then(|o| o.origin.clone())
             .or_else(|| origin_from_input(&run.input)),
-        subject: prev.and_then(|o| o.subject.clone()),
+        subject: prev
+            .and_then(|o| o.subject.clone())
+            .or_else(|| otto_state::workflow_run_search::subject_from_input(&run.input)),
         elapsed_ms: millis(run.started_at, end),
         typical_ms,
         goal: goal_progress(run, graph, prev.and_then(|o| o.goal.as_ref())),

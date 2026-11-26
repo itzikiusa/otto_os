@@ -40,6 +40,8 @@
     /** The open step; null = the run's Result. */
     step: StepItem | null;
     childId: string | null;
+    /** The open step's number (its place in the run's order on an older run). */
+    stepNo?: number | null;
     stepCount: number;
     now: number;
     /** A tab a card asked for ("conversation", "preview"). */
@@ -51,7 +53,7 @@
     maximized?: boolean;
     onmaximize?: () => void;
   }
-  let { run, sync, workspaceId, runState, step, childId, stepCount, now, tab: asked = null, criteria = [], cardNode = null, maximized = false, onmaximize }: Props = $props();
+  let { run, sync, workspaceId, runState, step, childId, stepNo = null, stepCount, now, tab: asked = null, criteria = [], cardNode = null, maximized = false, onmaximize }: Props = $props();
 
   const node = $derived(step?.node ?? null);
   const child = $derived<ChildThread | null>(node?.children?.find((c) => c.id === childId) ?? null);
@@ -171,7 +173,7 @@
 <section class="pane" data-testid="wf-step-pane" data-node-id={step?.id ?? '_result'} aria-label={child?.label ?? step?.name ?? 'Run result'}>
   <header class="ph">
     <div class="crumb">
-      {#if child}{step?.name}{#if childKind}<Icon name="chevronRight" size={12} />{childKind}{/if}{:else if step}Step {node?.step_no ?? '–'} of {stepCount}{:else}Run result{/if}
+      {#if child}{step?.name}{#if childKind}<Icon name="chevronRight" size={12} />{childKind}{/if}{:else if step}Step {stepNo ?? node?.step_no ?? '–'} of {stepCount}{:else}Run result{/if}
     </div>
     <div class="prow">
       <h3 class="name ellipsis" dir="auto">{child?.label ?? step?.name ?? 'final-output.md'}</h3>

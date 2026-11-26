@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  ago, attentionWord, childWord, deliverableWord, deliverablesInOrder, errorParts, inboxFolds, ordinal, retentionNote, runLine3, runTitle, runWord,
+  ago, attentionWord, childWord, deliverableWord, deliverablesInOrder, errorParts, fromHistory, inboxFolds, ordinal, retentionNote, runContext, runLine3, runTitle, runWord,
   stepDuration, stepWord, subLine, type InboxRun,
 } from '../src/modules/workflows/runs/runWords.ts';
 import type { RunOverview, RunState } from '../src/lib/api/types';
@@ -116,6 +116,19 @@ test('inbox: needs you oldest first, queued last by position, unread failures fi
   assert.deepEqual(f.needs.map((r) => r.id), ['n1', 'n2']);
   assert.deepEqual(f.running.map((r) => r.id), ['r1', 'p1', 'q1', 'q2']);
   assert.deepEqual(f.recent.map((r) => r.id), ['f1', 'd1', 'f2']);
+});
+
+// Seen on a real history: every old row's second line was its base branch.
+test('a history row without an overview is titled from its own subject, never its base branch', () => {
+  const item = { id: 'r1', workflow_id: 'wf', workflow_name: 'PR Reviewer', status: 'success' as const, started_at: at(0), finished_at: at(9), trigger: 'chat', repo: 'wallet-go', branch: 'develop' };
+  const ticket = fromHistory({ ...item, subject: { ticket: { key: 'GS-16578', url: '' }, repo: 'wallet-go' } });
+  assert.equal(runTitle(ticket), 'GS-16578');
+  assert.equal(runContext(ticket), 'PR Reviewer · wallet-go');
+  assert.equal(runTitle(fromHistory({ ...item, subject: { pr: { repo: '', number: 15, url: '' }, ticket: { key: 'GS-1', url: '' } } })), 'PR #15', 'the pull request leads; one without a repo says PR');
+  assert.equal(runTitle(fromHistory({ ...item, subject: { repo: 'wallet-go', branch: 'feature/GS-1' } })), 'feature/GS-1');
+  assert.equal(runTitle(fromHistory({ ...item, subject: { repo: 'wallet-go' } })), 'wallet-go');
+  // The overview's own subject wins over the row's.
+  assert.equal(runTitle(fromHistory({ ...item, subject: { repo: 'x' }, overview: ov('succeeded', { subject: { ticket: { key: 'WEB-1', url: 'u' } } }) })), 'WEB-1');
 });
 
 test('row titles and line 3 say what the run is about, in names', () => {

@@ -67,7 +67,7 @@
     <span class="fact"><Icon name="comment" size={13} />Started from {chat.source}</span>
   {/if}
   {#if subject?.pr}
-    <span class="fact"><Icon name="pr" size={13} />{#if web(subject.pr.url)}<a href={subject.pr.url} target="_blank" rel="noreferrer noopener">{subject.pr.repo} #{subject.pr.number}</a>{:else}{subject.pr.repo} #{subject.pr.number}{/if}</span>
+    <span class="fact"><Icon name="pr" size={13} />{#if web(subject.pr.url)}<a href={subject.pr.url} target="_blank" rel="noreferrer noopener">{subject.pr.repo || 'PR'} #{subject.pr.number}</a>{:else}{subject.pr.repo || 'PR'} #{subject.pr.number}{/if}</span>
   {:else if subject?.repo || subject?.branch}
     <span class="fact"><Icon name="branch" size={13} />{[subject.repo, subject.branch].filter(Boolean).join(' · ')}</span>
   {/if}

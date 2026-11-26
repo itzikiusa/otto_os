@@ -28,7 +28,7 @@
   import StepPane from './StepPane.svelte';
   import { cancelQueued, pauseRun, rereview, resumeRun, retryStep, steerRun, stopRun } from './runActions';
   import { fallbackState, runTitle, runWord } from './runWords';
-  import { defaultSelection, entrySteps, loopChildren, orderSteps, RESULT } from './stepOrder';
+  import { defaultSelection, entrySteps, loopChildren, orderSteps, RESULT, settledNodes, stepNumber } from './stepOrder';
   import { markRunOpened } from './seenRuns';
   import { registry } from '../../../lib/commands.svelte';
   import { workflowsUi } from '../workflowsUiState.svelte';
@@ -112,7 +112,7 @@
   });
   $effect(() => () => (workflowsUi.shownRun = null));
   // A loop step's iterations are its child rows (from the run's checkpoints).
-  const nodes = $derived(run ? run.nodes.map((n) => (!n.children?.length && run.checkpoints?.some((c) => c.loop_id === n.node_id) ? { ...n, children: loopChildren(run.checkpoints, n.node_id) } : n)) : []);
+  const nodes = $derived(run ? settledNodes(run.nodes, live).map((n) => (!n.children?.length && run.checkpoints?.some((c) => c.loop_id === n.node_id) ? { ...n, children: loopChildren(run.checkpoints, n.node_id) } : n)) : []);
   const entries = $derived(run ? orderSteps(nodes, graph, now) : []);
   const steps = $derived(entries.flatMap(entrySteps));
   const selected = $derived(nodeId ? { node: nodeId, child: childId } : defaultSelection(runState, entries, run?.overview?.failed_step?.node_id));
@@ -230,7 +230,7 @@
           {#if wide && maximized}
             <button type="button" class="btn small runback" onclick={() => (maximized = false)}><Icon name="chevronLeft" size={12} />Run</button>
           {/if}
-          <StepPane {run} {sync} {workspaceId} {runState} cardNode={pushed || (wide && maximized) || runState !== 'failed' ? null : failedNode} step={openStep} childId={selected.child} stepCount={steps.length} {now} tab={askedTab} {criteria} {maximized} onmaximize={wide ? () => (maximized = !maximized) : undefined} />
+          <StepPane {run} {sync} {workspaceId} {runState} cardNode={pushed || (wide && maximized) || runState !== 'failed' ? null : failedNode} step={openStep} childId={selected.child} stepNo={openStep ? stepNumber(steps, openStep) : null} stepCount={steps.length} {now} tab={askedTab} {criteria} {maximized} onmaximize={wide ? () => (maximized = !maximized) : undefined} />
         </div>
       {/if}
     {/if}

@@ -28,6 +28,7 @@
   import { ws } from '../../../lib/stores/workspace.svelte';
   import type { DigestItem, StepThread, TranscriptDigest } from '../../../lib/api/types';
   import { retentionNote } from './runWords';
+  import { keptSessions } from './stepTabs';
 
   /** The embed's read-only props (agreed-names.md §9b; added to
    *  RuntimeThreadViewProps by the editor package — typed here until then). */
@@ -58,6 +59,14 @@
   let note = $state(retentionNote(24, 168));
   $effect(() => void retentionHours().then((h) => (note = retentionNote(h.success, h.failed))));
   const live = $derived(thread?.runner === 'threads' && thread.available !== false && !gone);
+
+  // An older step's terminal sessions: only the ones that still exist open.
+  const ptyIds = $derived(sessions.length ? [...sessions] : thread?.runner === 'pty' ? [thread.thread_id] : []);
+  let kept = $state<Record<string, boolean>>({});
+  $effect(() => {
+    for (const id of ptyIds) void ws.ensureSession(id).then((s) => (kept[id] = !!s));
+  });
+  const pty = $derived(keptSessions(ptyIds, kept));
 
   let View = $state<Component<ReadOnlyEmbedProps> | null>(null);
   let viewError = $state<string | null>(null);
@@ -120,15 +129,19 @@
       <p class="note">{digest.turns} turns · {digest.tool_calls} tool calls</p>
     {/if}
   </div>
-{:else if sessions.length || thread?.runner === 'pty'}
-  <ul class="sessions">
-    {#each sessions.length ? sessions : [thread!.thread_id] as id (id)}
-      <li>
-        <span>Session · {thread?.provider ?? 'agent'} · {id.slice(-6)}</span>
-        <button type="button" class="btn small" onclick={() => ws.navigateToSession(id)}>Open in Agents</button>
-      </li>
-    {/each}
-  </ul>
+{:else if ptyIds.length}
+  {#if pty.gone}
+    <p class="note" data-testid="wf-step-session-gone"><Icon name="info" size={12} />This step ran in a terminal session that is no longer kept.</p>
+  {:else}
+    <ul class="sessions">
+      {#each pty.open as id (id)}
+        <li>
+          <span>Session · {thread?.provider ?? 'agent'} · {id.slice(-6)}</span>
+          <button type="button" class="btn small" onclick={() => ws.navigateToSession(id)}>Open in Agents</button>
+        </li>
+      {/each}
+    </ul>
+  {/if}
 {:else}
   <p class="note">This step has no conversation.</p>
 {/if}
