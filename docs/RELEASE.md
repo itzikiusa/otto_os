@@ -160,8 +160,9 @@ in his password manager. They never go into the repository.
    git fetch origin && git tag v0.6.1 origin/main && git push origin v0.6.1
    ```
 
-3. In **Actions ▸ Release**, approve the `release` deployment. About 40
-   minutes later the draft is ready.
+3. In **Actions ▸ Release**, approve the `release` deployment. The run waits
+   for it after the build, about an hour after the tag; signing and Apple's
+   two notarizations then take from ten minutes to an hour.
 4. Open the draft.
    - Check the notes and attach the tour film by hand.
    - Optionally check an asset: `spctl -a -vv Otto.app` should say
