@@ -31,3 +31,12 @@ test('a chat-started run says where it came from', () => {
   assert.equal(runOrigin(null), null);
   assert.equal(runOrigin('text'), null);
 });
+
+test('a run link can name the open step and one of its reviewers', () => {
+  assert.deepEqual(parseRunRoute(['workflows', 'wf1', 'runs', 'r9', 'n7']), { workflowId: 'wf1', runId: 'r9', nodeId: 'n7' });
+  assert.deepEqual(parseRunRoute(['workflows', 'wf1', 'runs', 'r9', 'n7', 'correctness']), { workflowId: 'wf1', runId: 'r9', nodeId: 'n7', childId: 'correctness' });
+  assert.equal(runRoutePath('wf1', 'r9', 'n7', 'a b'), 'workflows/wf1/runs/r9/n7/a%20b');
+  assert.equal(runRoutePath('wf1', 'r9', null, 'x'), 'workflows/wf1/runs/r9');
+  const parts = runRoutePath('wf1', 'r9', 'n7', 'c').split('/').map(decodeURIComponent);
+  assert.deepEqual(parseRunRoute(parts), { workflowId: 'wf1', runId: 'r9', nodeId: 'n7', childId: 'c' });
+});
