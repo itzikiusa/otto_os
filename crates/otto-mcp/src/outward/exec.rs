@@ -2194,15 +2194,6 @@ pub fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             )
         }
         // ---- Goal loop / swarm task / scheduled tasks ----
-        "run_goal_loop" => {
-            let ws = arg_str(args, "workspace_id")?;
-            let mut body = args.clone();
-            if let Some(obj) = body.as_object_mut() {
-                obj.remove("workspace_id");
-                obj.insert("autostart".into(), json!(true));
-            }
-            SelfCall::post(format!("/api/v1/workspaces/{}/goal-loops", seg(&ws)), body)
-        }
         "room_post" => {
             let room = arg_str(args, "room_id")?;
             let text = arg_str(args, "text")?;
@@ -2618,7 +2609,7 @@ pub fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
                 body,
             )
         }
-        other => return super::simulators::route_for(other, args),
+        other => return super::goals::route_for(other, args),
     })
 }
 

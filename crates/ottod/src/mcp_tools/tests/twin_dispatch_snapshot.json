@@ -125,7 +125,7 @@
     "requests": [
       [
         "GET",
-        "/refs/directory?kind=goal_loop&prefer_workspace_id=ws-test",
+        "/refs/directory?kind=goal&prefer_workspace_id=ws-test",
         null
       ]
     ],

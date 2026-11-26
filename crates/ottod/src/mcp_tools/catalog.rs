@@ -610,6 +610,9 @@ pub(super) const NARROW_HIDDEN_PREFIXES: &[&str] = &[
     "otto_get_audio_",
     "otto_list_audio_",
     "otto_cancel_audio_",
+    // Starting goals and pausing / resuming workflow runs: a review does not drive runs.
+    "otto_run_goal_loop",
+    "otto_control_workflow_run",
     // Design Hall review comments: a code or skill review does not comment on a design.
     "otto_design_comment",
     "otto_design_resolve_comment",

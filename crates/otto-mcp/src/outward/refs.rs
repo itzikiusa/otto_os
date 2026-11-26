@@ -133,7 +133,7 @@ pub const DIRECTORY_TOOLS: &[(&str, &str)] = &[
     ("list_connections", "connection"),
     ("list_broker_clusters", "broker_cluster"),
     ("list_scheduled_tasks", "scheduled_task"),
-    ("list_goal_loops", "goal_loop"),
+    ("list_goal_loops", "goal"),
     ("list_agent_rooms", "agent_room"),
     ("list_personal_agents", "personal_agent"),
     ("list_issue_accounts", "issue_account"),
@@ -167,6 +167,12 @@ pub const PIN_PROBES: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "cancel_workflow_run",
+        "run_id",
+        "/api/v1/workflow-runs/",
+        "/workspace_id",
+    ),
+    (
+        "control_workflow_run",
         "run_id",
         "/api/v1/workflow-runs/",
         "/workspace_id",

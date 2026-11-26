@@ -178,6 +178,7 @@ pub const DEFAULT_ENABLED: &[&str] = &[
 ];
 pub const DANGEROUS: &[&str] = &[
     "run_goal_loop",
+    "control_workflow_run",
     // Creating/altering/running a recurring autonomous job that triggers agents and
     // posts to an external destination is approval-gated (off by default).
     "create_scheduled_task",
@@ -684,11 +685,6 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "description":"Assemble a code-grounded context packet for a workspace: metadata + the most relevant code excerpts for a query.",
             "inputSchema":{"type":"object","required":["workspace_id"],"properties":{
                 "workspace_id":{"type":"string"},"query":{"type":"string"},"story_id":{"type":"string"}}}}),
-        json!({"name":"otto.run_goal_loop","mutating":true,"category":"Agents",
-            "description":"Create/start a bounded goal loop. definition={title,acceptance_criteria:[{id,text,verify,verify_kind:command|agent|human,verify_cmd?}]}; limits={max_iterations,max_runtime_secs,per_phase_timeout_secs}; config={executors:[{name,provider,model?,prompt_extra?}],planner,evaluator,digester,definer:{provider,prompt,model?},graph?:{nodes:[{id,title,instructions,depends_on:[],criterion_ids:[]}]}}. Graph: 1–16 acyclic tasks, all criteria assigned, one task/iteration; human acceptance final. DANGEROUS: spawns agents; approval-gated.",
-            "inputSchema":{"type":"object","required":["workspace_id","name","repo_path","definition","limits","config"],"properties":{
-                "workspace_id":{"type":"string"},"name":{"type":"string"},"repo_path":{"type":"string"},
-                "definition":{"type":"object"},"limits":{"type":"object"},"config":{"type":"object"}}}}),
         json!({"name":"otto.open_pr_draft","mutating":false,"category":"Git",
             "description":"Draft a PR title + description from a repo's diff vs a base branch. Drafts text only — does NOT open/publish a PR.",
             "inputSchema":{"type":"object","required":["base"],"properties":{
@@ -1237,6 +1233,7 @@ pub fn otto_tool_specs() -> Vec<Value> {
 fn extra_tool_specs() -> impl Iterator<Item = Value> {
     agent_admin_specs()
         .into_iter()
+        .chain(super::goals::specs())
         .chain(super::simulators::specs())
         .chain(ui_commands::specs())
 }
@@ -1778,7 +1775,7 @@ fn approval_specs() -> [Value; 4] {
             "description":"List the Otto workspaces you can read — `{items}` with id, name, root_path, my_role. Every `workspace_id` argument accepts one of these ids OR the workspace's name. Read-only.",
             "inputSchema":{"type":"object","properties":{}}}),
         json!({"name":"otto.list_goal_loops","mutating":false,"category":"Agents",
-            "description":"List goal loops across EVERY workspace you can read — `{items, …}` with id, name, repo_path, status, workspace_id + workspace_name. Read-only.",
+            "description":"List goals and older goal loops in every workspace you can read — `{items}`; goals carry run_id, older loops legacy: true. Read-only.",
             "inputSchema":{"type":"object","properties":{"workspace_id":{"type":"string","description":WS_DIR_DESC}}}}),
         json!({"name":"otto.ask_human_approval","mutating":false,"category":"Approvals",
             "description":"Request a human's approval for an action and (optionally) wait for the decision. Creates a pending item in the MCP approval queue.",
@@ -2121,6 +2118,7 @@ pub fn dangerous_detail(tool: &str, args: &Value) -> String {
     let short = tool.strip_prefix("otto.").unwrap_or(tool);
     if let Some(d) = slack_detail(short, args)
         .or_else(|| media_detail(short, args))
+        .or_else(|| super::goals::dangerous_detail(short, args))
         .or_else(|| super::simulators::dangerous_detail(short, args))
     {
         return d;

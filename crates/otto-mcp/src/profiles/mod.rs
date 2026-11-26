@@ -204,7 +204,7 @@ pub const GROUPS: &[ToolGroup] = &[
     ToolGroup {
         id: "automation",
         label: "Workflows & automation",
-        description: "Workflows, scheduled tasks, goal loops and self-improvement runs.",
+        description: "Workflows, goals, scheduled tasks and self-improvement runs.",
         prefixes: &[],
         exact: &[
             "list_workflows",
@@ -213,6 +213,7 @@ pub const GROUPS: &[ToolGroup] = &[
             "list_workflow_runs",
             "get_workflow_run",
             "cancel_workflow_run",
+            "control_workflow_run",
             "list_scheduled_tasks",
             "get_scheduled_task",
             "create_scheduled_task",
