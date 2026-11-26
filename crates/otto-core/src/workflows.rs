@@ -764,22 +764,6 @@ pub struct CheckOutput {
     pub review: Option<CompletionReview>,
 }
 
-/// A file sent with the chat message that started or steered a run.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct AttachmentRef {
-    pub name: String,
-    pub mime: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub size_bytes: Option<u64>,
-    /// Context-relative (`attachments/<name>`); absent when the copy failed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    /// `start` | `steer`.
-    pub source: String,
-}
-
 /// Per-node execution state, captured during a run.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NodeRunState {
