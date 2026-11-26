@@ -1763,3 +1763,132 @@ async fn a_held_run_reports_to_the_start_steps_destination() {
     });
     assert!(told, "{:?}", rec.recorded());
 }
+
+fn gate_graph(sibling_ms: Option<u64>) -> WorkflowGraph {
+    let mut graph = WorkflowGraph {
+        nodes: vec![
+            node("start", "log", json!({})),
+            node("gate", "human_approval", json!({})),
+        ],
+        edges: vec![edge("start", "gate")],
+    };
+    if let Some(ms) = sibling_ms {
+        graph.nodes.push(node("d", "delay", json!({"ms": ms})));
+        graph.edges.push(edge("start", "d"));
+    }
+    graph
+}
+
+/// CR2-007: the run's board knows the gate before the row says "waiting", so
+/// a sibling's publish in between cannot store the run as working again. A
+/// trigger holds the marking UPDATE open: the gate is there while a reader
+/// still sees the row as not waiting.
+#[tokio::test]
+async fn an_approval_gate_is_known_before_the_row_says_waiting() {
+    use super::super::super::nodes::human_approval::waiting_gate;
+    let fx = fixture("approval-order", gate_graph(None), true).await;
+    for sql in [
+        "CREATE TABLE slow(x INTEGER)",
+        "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 3000) \
+         INSERT INTO slow SELECT x FROM c",
+        "CREATE TRIGGER slow_gate AFTER UPDATE OF waiting_approval ON workflow_runs \
+         WHEN NEW.waiting_approval = 1 AND OLD.waiting_approval = 0 \
+         BEGIN SELECT count(*) FROM slow a, slow b WHERE a.x + b.x < 0; END",
+    ] {
+        sqlx::query(sql).execute(&fx.ctx.pool).await.unwrap();
+    }
+    let driver = fx.drive();
+    let t0 = Instant::now();
+    while waiting_gate(&fx.run_id).is_none() {
+        assert!(t0.elapsed() < Duration::from_secs(10), "the gate opens");
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    let waiting: i64 =
+        sqlx::query_scalar("SELECT waiting_approval FROM workflow_runs WHERE id = ?")
+            .bind(&fx.run_id)
+            .fetch_one(fx.ctx.pool.reader())
+            .await
+            .unwrap();
+    assert_eq!(
+        waiting, 0,
+        "the gate is registered before the row is marked"
+    );
+    fx.repo.request_cancel(&fx.run_id).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), driver)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+/// CR2-007: a decided gate stops saying "waiting" at once — also while its
+/// step waits for a run slot (every slot taken meanwhile), when a sibling's
+/// publish would otherwise show the run as waiting for approval again.
+#[tokio::test]
+async fn a_decided_gate_is_gone_while_its_step_retakes_its_slot() {
+    use super::super::super::nodes::human_approval::waiting_gate;
+    let fx = setup("approval-retake", gate_graph(None)).await;
+    spawn_run(
+        fx.ctx.clone(),
+        fx.ws.clone(),
+        fx.wf.clone(),
+        fx.run_id.clone(),
+        json!({}),
+        RunScope::default(),
+        None,
+    );
+    let t0 = Instant::now();
+    while !fx.repo.get_run(&fx.run_id).await.unwrap().waiting_approval {
+        assert!(t0.elapsed() < Duration::from_secs(5), "the gate parks");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let gate =
+        otto_workflows::run_queue::gate_for(otto_workflows::run_queue::lane_of(&fx.wf.graph));
+    let mut held = vec![];
+    while held.len() < otto_workflows::run_queue::max_parallel_runs() {
+        held.extend(gate.try_acquire().ok());
+        assert!(
+            t0.elapsed() < Duration::from_secs(5),
+            "the parked run gives its slot back"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let rev = fx
+        .repo
+        .record_approval(&fx.run_id, "gate", Some(&fx.user.id), "", None)
+        .await
+        .unwrap();
+    let at = (&fx.ws.id, &fx.run_id, "running", rev);
+    emit_run_updated_with(&fx.ctx, at, Some("gate"), None, &[], false, None);
+    let t0 = Instant::now();
+    while waiting_gate(&fx.run_id).is_some() {
+        assert!(
+            t0.elapsed() < Duration::from_secs(5),
+            "the decided gate is gone before its step has a slot"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(running(&fx.repo.get_run(&fx.run_id).await.unwrap(), "gate"));
+    drop(held);
+    let run = fx.settled().await;
+    assert_eq!(run.status, RunStatus::Success, "{:?}", run.error);
+}
+
+/// CR2-007: one approval notice per gate. A sibling's publish while the gate
+/// waits names the sibling; it is not a second gate to tell the owner about.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn a_siblings_publish_does_not_notify_the_approval_again() {
+    let fx = setup("approval-notice", gate_graph(Some(300))).await;
+    crate::run_notices::spawn_listener(fx.ctx.clone());
+    let _driver = fx.drive();
+    let run = until(&fx, "d", |n| n.status == NodeStatus::Success).await;
+    assert!(run.waiting_approval, "d settled while the gate waits");
+    // The listener is a task of its own: give it d's last event.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let notices: Vec<String> =
+        sqlx::query_scalar("SELECT source_key FROM notifications WHERE title LIKE '%approval%'")
+            .fetch_all(&fx.ctx.pool)
+            .await
+            .unwrap();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert!(notices[0].ends_with(":gate"), "{notices:?}");
+}

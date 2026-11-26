@@ -193,11 +193,15 @@ async fn on_workflow_run(
     if verdict == RunVerdict::Nothing {
         return;
     }
-    // Once per approval gate, not per event the parked run emits — and
-    // decided BEFORE any DB read (perf W11: every event a parked run emitted
-    // used to pay a full run-row read first).
-    let gate = (verdict == RunVerdict::NeedsApproval)
-        .then(|| format!("{}{}", approval_gate_prefix(run_id), node_id.unwrap_or("")));
+    // Once per approval gate, not per event the parked run emits (a sibling's
+    // publish names the sibling, not the gate) — and decided BEFORE any DB
+    // read (perf W11: every event a parked run emitted used to pay a full
+    // run-row read first).
+    let gate = (verdict == RunVerdict::NeedsApproval).then(|| {
+        let gate = crate::workflow_engine::approval_gate(run_id);
+        let node = gate.as_deref().or(node_id).unwrap_or("");
+        format!("{}{node}", approval_gate_prefix(run_id))
+    });
     if let Some(g) = &gate {
         if !begin_streak(g) {
             return;
