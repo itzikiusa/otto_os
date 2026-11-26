@@ -68,6 +68,7 @@ pub(crate) async fn resume_held_review(
             grace: review_agent_timeout(diff_len, cfg.timeout_secs),
             skills_dir: stage_all_review_skills(&ctx.context_library).await,
             cancel: Some(Arc::clone(&cancel)),
+            agent_cancels: ctx.review_agent_cancels.clone(),
         };
         let keep = resume.threads.clone();
         let findings = otto_review::thread_resume::resume_reviewers(resume).await?;
