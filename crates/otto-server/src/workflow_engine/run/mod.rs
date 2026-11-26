@@ -12,6 +12,7 @@ pub(super) mod admission;
 pub(super) mod board;
 pub(super) mod chat;
 pub(super) mod finalize;
+pub(crate) mod hold;
 pub(super) mod identity;
 pub(super) mod refs;
 pub(super) mod schedule;

@@ -5,7 +5,7 @@
 use super::super::*;
 use super::NodeCall;
 
-struct Host<'a>(&'a ServerCtx);
+pub(super) struct Host<'a>(pub(super) &'a ServerCtx);
 
 #[async_trait::async_trait]
 impl otto_workflows::script_run::ScriptHost for Host<'_> {

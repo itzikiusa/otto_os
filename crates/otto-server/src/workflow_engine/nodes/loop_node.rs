@@ -1,8 +1,14 @@
-//! The `loop` workflow node, moved verbatim out of
-//! `execute_node`'s match (see `nodes/mod.rs`).
+//! The `loop` workflow node. Goal pieces (goal.md §2.2): the iteration and
+//! active-time budget with the run's raised limits, the repeated-failure
+//! stop, a passing `check` ending the loop at once, `hold_when_unmet`
+//! (`output._workflow_hold`, settled by `run::hold`), `steps[].same_thread`
+//! and inner attempts banking their time and thread (DR-111). Every stop
+//! decision is `otto_workflows::criteria::loop_stop`.
 
 use super::super::*;
 use super::NodeCall;
+use otto_workflows::checkpoint::{caught_thread, continue_previous, observed, AttemptClock};
+use otto_workflows::criteria::{loop_stop, CheckOutput, LoopBudget, Stop, StopPoint};
 
 pub(in crate::workflow_engine) async fn execute(
     call: NodeCall<'_>,
@@ -23,11 +29,17 @@ pub(in crate::workflow_engine) async fn execute(
     } = call;
     let run_id: &Id = &env.run_id;
     let p = &node.params;
-    let max_iter = p
-        .get("max_iterations")
-        .and_then(Value::as_u64)
-        .unwrap_or(3)
-        .clamp(1, 10);
+    let repo = WorkflowsRepo::new(ctx.pool.clone());
+    // Only Resume raises a loop's limits, and only a goal-style loop is held.
+    let limits = if p.get("hold_when_unmet").is_some() || p.get("max_active_s").is_some() {
+        let run = repo.get_run(run_id).await.ok();
+        run.and_then(|r| r.limits)
+            .and_then(|l| l.loops.get(&node.id).cloned())
+    } else {
+        None
+    };
+    let budget = LoopBudget::new(p, limits.as_ref());
+    let max_iter = u64::from(budget.max_iterations);
     let until = p
         .get("until")
         .and_then(Value::as_str)
@@ -75,6 +87,8 @@ pub(in crate::workflow_engine) async fn execute(
     // git_pr after the loop knows the exact repo(s)/branch(es) to open,
     // deduped by repo_id (latest wins). Carries multi-repo loops too.
     let mut refs_by_repo: serde_json::Map<String, Value> = serde_json::Map::new();
+    let mut stop: Option<Stop> = None;
+    let mut failed: Option<(String, String)> = None;
     for i in 1..=max_iter {
         iterations = i;
         if WorkflowsRepo::new(ctx.pool.clone())
@@ -110,6 +124,10 @@ pub(in crate::workflow_engine) async fn execute(
                 .and_then(Value::as_str)
                 .map(str::to_string)
                 .unwrap_or_else(|| format!("step{k}"));
+            stop = before_step(&repo, run_id, &node.id, &budget).await;
+            if stop.is_some() {
+                break;
+            }
             let mut merged = loop_base.clone();
             if let Value::Object(m) = &thread {
                 for (mk, mv) in m {
@@ -117,12 +135,15 @@ pub(in crate::workflow_engine) async fn execute(
                 }
             }
             merged.insert("_iteration".into(), json!(i));
+            if skind == "check" {
+                merged.insert("_steps".into(), Value::Object(step_outputs.clone()));
+            }
             let step_input = Value::Object(merged);
             if progress.enabled() && is_reportable(&skind) {
                 progress.post(format!("› ▶ {sname} started"));
             }
             let _ = log_tx.send(format!("▶ {sname} — iteration {i}…"));
-            let sub = WorkflowNode {
+            let mut sub = WorkflowNode {
                 id: format!("{}#{i}.{k}", node.id),
                 kind: skind.clone(),
                 name: sname.clone(),
@@ -133,6 +154,8 @@ pub(in crate::workflow_engine) async fn execute(
                     .get("retry")
                     .and_then(|r| serde_json::from_value(r.clone()).ok()),
             };
+            let same_thread = step.get("same_thread").and_then(Value::as_bool) == Some(true);
+            inner_thread(&repo, run_id, &node.id, &mut sub, (i, k), same_thread).await;
             // Inner steps share the loop's step number and add
             // `-iter{X}` (the user's convention): step3-review-iter2.md.
             let sub_scope = StepScope {
@@ -149,30 +172,41 @@ pub(in crate::workflow_engine) async fn execute(
             let sub_attempt_started = std::time::SystemTime::now();
             let checkpoint = loop_checkpoint(&sub, &node.id, i, k, step_input.clone());
             let checkpoint_repo = WorkflowsRepo::new(ctx.pool.clone());
-            match crate::workflow_checkpoint::execute_observed(
+            let clock = AttemptClock::default();
+            match crate::workflow_checkpoint::execute_timed(
                 &checkpoint_repo,
                 run_id,
                 checkpoint,
                 &resolve_retry(&sub),
                 sub.kind == "loop" || otto_workflows::resume::is_restart_resumable(&sub),
                 || {
-                    Box::pin(execute_inner_attempt(
-                        ctx,
-                        ws,
-                        user,
-                        &sub,
-                        step_input.clone(),
-                        env,
-                        &sub_scope,
+                    let (sub, step_input, sub_scope) = (&sub, step_input.clone(), &sub_scope);
+                    Box::pin(observed(
+                        &clock,
                         session_tx,
-                        log_tx,
-                        activity_tx,
-                        progress,
+                        step_note,
+                        move |tx| async move {
+                            execute_inner_attempt(
+                                ctx,
+                                ws,
+                                user,
+                                sub,
+                                step_input,
+                                env,
+                                sub_scope,
+                                &tx,
+                                log_tx,
+                                activity_tx,
+                                progress,
+                            )
+                            .await
+                        },
                     ))
                 },
                 |line| {
                     let _ = log_tx.send(line);
                 },
+                &clock,
             )
             .await
             {
@@ -220,11 +254,21 @@ pub(in crate::workflow_engine) async fn execute(
                         }
                     }
                     if let Some(error) = outcome_error(&out) {
+                        failed = Some((sname.clone(), error.to_string()));
                         last_iteration_error = Some(format!(
                             "loop step '{sname}' failed at iteration {i}: {error}"
                         ));
                         last = out;
                         break;
+                    }
+                    if skind == "check" {
+                        if let Ok(check) = serde_json::from_value::<CheckOutput>(out.clone()) {
+                            let at = StopPoint::AfterCheck {
+                                iteration: i as u32,
+                                check: &check,
+                            };
+                            stop = loop_stop(&budget, at);
+                        }
                     }
                     last = out.clone();
                     thread = out;
@@ -242,6 +286,9 @@ pub(in crate::workflow_engine) async fn execute(
                     // Attach the iteration's handoff file too.
                     if progress.enabled() && (is_reportable(&skind) || skind == "review_run") {
                         progress.post_step_file(&env.files, &sub_file_base);
+                    }
+                    if stop.is_some() {
+                        break;
                     }
                 }
                 Err(e) => {
@@ -273,6 +320,7 @@ pub(in crate::workflow_engine) async fn execute(
                     if progress.enabled() && (is_reportable(&skind) || skind == "review_run") {
                         progress.post_step_file(&env.files, &sub_file_base);
                     }
+                    failed = Some((sname.clone(), e.to_string()));
                     last_iteration_error =
                         Some(format!("loop step '{sname}' failed at iteration {i}: {e}"));
                     break;
@@ -281,6 +329,17 @@ pub(in crate::workflow_engine) async fn execute(
         }
         let ictx = json!({ "iteration": i, "last": last, "steps": Value::Object(step_outputs), "input": input, "error": last_iteration_error });
         history.push(ictx.clone());
+        if let (Some((step, error)), false) = (&failed, continue_on_error) {
+            let at = StopPoint::StepFailed {
+                iteration: i as u32,
+                step,
+                error,
+            };
+            stop = stop.or_else(|| loop_stop(&budget, at));
+        }
+        if stop.is_some() {
+            break;
+        }
         if last_iteration_error.is_some() {
             if continue_on_error {
                 continue;
@@ -295,7 +354,19 @@ pub(in crate::workflow_engine) async fn execute(
             break;
         }
     }
-    if !until.is_empty() && !satisfied {
+    if stop.is_none() && !satisfied && last_iteration_error.is_none() && iterations == max_iter {
+        stop = loop_stop(
+            &budget,
+            StopPoint::BeforeIteration {
+                used: max_iter as u32,
+            },
+        )
+        .filter(|s| matches!(s, Stop::Hold { .. }));
+    }
+    let (met, line, hold) = otto_workflows::criteria::stop_outcome(stop, iterations);
+    satisfied |= met;
+    logs.extend(line);
+    if !until.is_empty() && !satisfied && hold.is_none() {
         logs.push(format!(
             "loop: reached max_iterations ({max_iter}) without satisfying `{until}`"
         ));
@@ -307,11 +378,22 @@ pub(in crate::workflow_engine) async fn execute(
     let repos: Vec<Value> = refs_by_repo.values().cloned().collect();
     let mut out = serde_json::Map::new();
     out.insert("iterations".into(), json!(iterations));
+    if budget.hold_when_unmet || budget.max_active_s.is_some() {
+        let active_ms = otto_workflows::hold::loop_active_ms(&repo, run_id, &node.id).await;
+        out.insert("active_ms".into(), json!(active_ms));
+        out.insert("max_iterations".into(), json!(max_iter));
+        out.insert("max_active_s".into(), json!(budget.max_active_s));
+    }
     out.insert("satisfied".into(), json!(satisfied));
     out.insert("last".into(), last);
     out.insert("history".into(), json!(history));
     if let Some(error) = last_iteration_error {
         out.insert("_workflow_error".into(), json!(error));
+    }
+    // A hold also reads as an error, so the scheduler runs nothing after it.
+    if let Some(h) = hold {
+        out.insert("_workflow_error".into(), h["reason"].clone());
+        out.insert("_workflow_hold".into(), h);
     }
     if let Some((_, Value::Object(m))) = refs_by_repo.iter().next() {
         for k in ["repo_id", "base", "worktree"] {
@@ -324,4 +406,45 @@ pub(in crate::workflow_engine) async fn execute(
         out.insert("repos".into(), Value::Array(repos));
     }
     Ok((Value::Object(out), logs))
+}
+
+/// The time budget before an inner step starts (only for a budgeted loop).
+async fn before_step(
+    repo: &WorkflowsRepo,
+    run_id: &Id,
+    loop_id: &str,
+    b: &LoopBudget,
+) -> Option<Stop> {
+    b.max_active_s?;
+    let active_ms = otto_workflows::hold::loop_active_ms(repo, run_id, loop_id).await;
+    loop_stop(b, StopPoint::BeforeStep { active_ms })
+}
+
+/// A restart caught this attempt on a thread → resume it (DR-111);
+/// `same_thread` → continue the previous iteration's thread of the step.
+async fn inner_thread(
+    repo: &WorkflowsRepo,
+    run_id: &Id,
+    loop_id: &str,
+    sub: &mut WorkflowNode,
+    (i, k): (u64, usize),
+    same_thread: bool,
+) {
+    let cp = repo.checkpoint(run_id, &sub.id).await.ok().flatten();
+    if let Some(t) = cp.as_ref().and_then(caught_thread) {
+        super::super::step_thread::mark_resume(run_id, &sub.id, &t);
+    }
+    if same_thread && i > 1 {
+        let prev = repo
+            .checkpoint(run_id, &format!("{loop_id}#{}.{k}", i - 1))
+            .await;
+        continue_previous(&mut sub.params, prev.ok().flatten().as_ref());
+    }
+}
+
+fn step_note(a: &AgentAssociation) -> Option<&otto_workflows::step_util::StepNote> {
+    match a {
+        AgentAssociation::Step(n) => Some(n),
+        _ => None,
+    }
 }

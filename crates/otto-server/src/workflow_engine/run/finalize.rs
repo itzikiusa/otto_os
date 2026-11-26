@@ -37,6 +37,9 @@ pub(in crate::workflow_engine) async fn finish(
     if let Some(h) = progress_pump {
         let _ = h.await;
     }
+    if super::hold::settle_held(&ctx, &repo, &workflow, &run_id, &mut states).await {
+        return;
+    }
 
     if canceled {
         finalize_canceled_run(&ctx, &repo, &workflow, &run_id, &mut states, &input).await;
@@ -193,7 +196,12 @@ pub(in crate::workflow_engine) async fn finish(
 
 /// A terminal write cleared the overview: store the settled run's (CAS on
 /// `rev`, engine.md §2.3).
-async fn store_overview(repo: &WorkflowsRepo, workflow: &Workflow, run_id: &Id, rev: i64) {
+pub(super) async fn store_overview(
+    repo: &WorkflowsRepo,
+    workflow: &Workflow,
+    run_id: &Id,
+    rev: i64,
+) {
     let Ok(run) = repo.get_run(run_id).await else {
         return;
     };

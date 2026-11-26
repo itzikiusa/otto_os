@@ -85,6 +85,10 @@ pub(in crate::workflow_engine) async fn execute(
             truncate(&input.to_string(), 4000)
         ),
     );
+    let full = format!(
+        "{full}{}",
+        super::super::run::hold::take_steering(env, session_tx)
+    );
     let acwd = node_cwd(node, &input, run_cwd);
     let done = env
         .files

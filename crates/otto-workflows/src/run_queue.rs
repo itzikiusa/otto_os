@@ -54,6 +54,52 @@ pub fn run_gate() -> &'static tokio::sync::Semaphore {
     GATE.get_or_init(|| tokio::sync::Semaphore::new(max_parallel_runs()))
 }
 
+/// The long-run lane's cap (goal.md §2.6, G12): `OTTO_WF_MAX_LONG_RUNS`,
+/// default 2, 1..=4, read once like [`max_parallel_runs`].
+pub fn max_long_runs() -> usize {
+    static N: OnceLock<usize> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("OTTO_WF_MAX_LONG_RUNS")
+            .ok()
+            .and_then(|s| s.trim().parse::<usize>().ok())
+            .map_or(2, |n| n.clamp(1, 4))
+    })
+}
+
+/// A run's lane: `Some("long")` when its Start node says `lane: "long"`
+/// (goals), else the normal lane (`None`, stored as NULL).
+pub fn lane_of(graph: &otto_core::workflows::WorkflowGraph) -> Option<&'static str> {
+    graph
+        .nodes
+        .iter()
+        .any(|n| {
+            n.kind == "manual_trigger"
+                && n.params.get("lane").and_then(Value::as_str) == Some("long")
+        })
+        .then_some("long")
+}
+
+/// The gate a run of `lane` waits on: two goals never hold the ordinary
+/// slots every chat-triggered review needs.
+pub fn gate_for(lane: Option<&str>) -> &'static tokio::sync::Semaphore {
+    static LONG: OnceLock<tokio::sync::Semaphore> = OnceLock::new();
+    match lane {
+        Some("long") => LONG.get_or_init(|| tokio::sync::Semaphore::new(max_long_runs())),
+        _ => run_gate(),
+    }
+}
+
+/// `ids` minus the long lane's runs (a read error counts as normal).
+async fn normal_lane(repo: &WorkflowsRepo, ids: Vec<String>) -> Vec<String> {
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        if repo.run_lane(&id).await.ok().flatten().as_deref() != Some("long") {
+            out.push(id);
+        }
+    }
+    out
+}
+
 /// Whether a run admitted now starts or queues, from the persisted run states:
 /// queued = fresh `pending` rows with no step progress; executing = the other
 /// live runs, minus those parked on an approval (which hand their slot back).
@@ -65,15 +111,14 @@ pub async fn slot_outlook_now(
     cap: usize,
     exclude: Option<&str>,
 ) -> Option<SlotOutlook> {
-    let queued: std::collections::HashSet<String> = repo
-        .queued_run_ids()
-        .await
-        .ok()?
-        .into_iter()
-        .filter(|id| Some(id.as_str()) != exclude)
-        .collect();
+    let queued: std::collections::HashSet<String> =
+        normal_lane(repo, repo.queued_run_ids().await.ok()?)
+            .await
+            .into_iter()
+            .filter(|id| Some(id.as_str()) != exclude)
+            .collect();
     let mut executing = 0;
-    for id in repo.list_active_run_ids_global().await.ok()? {
+    for id in normal_lane(repo, repo.list_active_run_ids_global().await.ok()?).await {
         if queued.contains(&id) || Some(id.as_str()) == exclude {
             continue;
         }
@@ -119,16 +164,21 @@ pub async fn queue_view(
     repo: &WorkflowsRepo,
     workspace_id: &otto_core::Id,
 ) -> otto_core::Result<QueueView> {
-    let line = repo.queued_run_ids().await?;
+    let all = repo.queued_run_ids().await?;
     let mine = repo
         .list_active_runs(workspace_id)
         .await?
         .into_iter()
         .map(|r| r.run_id)
         .collect();
+    // A place is counted within the run's own lane (DR-111).
+    let normal = normal_lane(repo, all.clone()).await;
+    let long: Vec<String> = all.into_iter().filter(|id| !normal.contains(id)).collect();
+    let mut queued = places(&normal, &mine);
+    queued.extend(places(&long, &mine));
     Ok(QueueView {
         max_parallel_runs: max_parallel_runs(),
-        queued: places(&line, &mine),
+        queued,
     })
 }
 
@@ -300,6 +350,28 @@ mod tests {
         assert_eq!(parse_cap(Some("0")), 2);
         assert_eq!(parse_cap(Some("lots")), 2);
         assert_eq!(parse_cap(Some("")), 2);
+    }
+
+    /// Goals (Start node `lane: "long"`) wait on their own gate, never on the
+    /// ordinary slots (G12).
+    #[test]
+    fn a_long_lane_run_waits_on_its_own_gate() {
+        let mut g = WorkflowGraph::default();
+        assert_eq!(lane_of(&g), None);
+        g.nodes.push(otto_core::workflows::WorkflowNode {
+            id: "start".into(),
+            kind: "manual_trigger".into(),
+            name: String::new(),
+            x: 0.0,
+            y: 0.0,
+            params: json!({"lane": "long"}),
+            retry: None,
+        });
+        assert_eq!(lane_of(&g), Some("long"));
+        assert!(!std::ptr::eq(gate_for(Some("long")), run_gate()));
+        assert!(std::ptr::eq(gate_for(None), run_gate()));
+        assert_eq!(gate_for(Some("long")).available_permits(), max_long_runs());
+        assert_eq!(max_long_runs(), 2);
     }
 
     /// The gate is sized from the same cap the chat acknowledgement and the

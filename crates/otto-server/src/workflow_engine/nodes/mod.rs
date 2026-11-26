@@ -19,6 +19,7 @@ pub(super) mod broker_peek;
 pub(super) mod budget_gate;
 pub(super) mod canvas;
 pub(super) mod channel_notify;
+pub(super) mod check;
 pub(super) mod db_query;
 pub(super) mod game_engine;
 pub(super) mod git_checkout;
@@ -106,6 +107,8 @@ pub(in crate::workflow_engine) async fn dispatch(
         "game_engine" => game_engine::execute(call).await,
 
         "verifier" => verifier::execute(call).await,
+
+        "check" => check::execute(call).await,
 
         // --- DB Query -------------------------------------------------------
         // Runs a read-only SQL/NoSQL statement against a saved DB-Explorer
