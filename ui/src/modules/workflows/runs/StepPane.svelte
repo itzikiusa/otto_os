@@ -57,10 +57,15 @@
   const child = $derived<ChildThread | null>(node?.children?.find((c) => c.id === childId) ?? null);
   const tabs = $derived(paneTabs({ result: !step, goal: !!run.overview?.goal, child: !!child, kind: step?.kind, node: node ?? undefined }));
   let picked = $state<PaneTab | null>(null);
+  // Another step, child or asked-for tab starts over; a live update of the
+  // same step (a new `step` object, a new `tabs` array) keeps the tab the
+  // person picked. An asked tab the step does not offer yet falls back to the
+  // first (`tab` below).
+  const stepId = $derived(step?.id);
   $effect(() => {
-    void step?.id;
+    void stepId;
     void childId;
-    picked = (asked && tabs.includes(asked as PaneTab) ? asked : null) as PaneTab | null;
+    picked = (asked ?? null) as PaneTab | null;
   });
   const tab = $derived(picked && tabs.includes(picked) ? picked : tabs[0]);
 
