@@ -586,12 +586,14 @@ fn gates_command(n: &WorkflowNode) -> Result<Value, String> {
     let script = tokens
         .iter()
         .map(|t| {
-            t.trim_matches(|c| "`\"'(),;".contains(c))
+            t.trim_end_matches(['.', ':', '!', '?'])
+                .trim_matches(|c| "`\"'(),;".contains(c))
                 .trim_end_matches(['.', ':'])
         })
         .find(|t| t.ends_with("pr_gates.sh"))
         .unwrap_or_default();
-    let script_ok = !script.contains("..")
+    let script_ok = !script.is_empty()
+        && !script.contains("..")
         && script
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || "._/~-".contains(c));

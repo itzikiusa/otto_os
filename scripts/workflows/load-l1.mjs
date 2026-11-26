@@ -37,8 +37,10 @@ const cleanup = () => { try { process.kill(-daemon.pid, 'SIGKILL'); } catch {} r
 process.on('SIGINT', () => { cleanup(); process.exit(130); });
 
 function sample(t0, runIds) {
-  const rows = sh('ps', ['-axo', 'pid=,ppid=,rss=,pcpu=,comm=']).trim().split('\n').map((l) => l.trim().split(/\s+/)).map(([pid, ppid, rss, cpu, ...c]) => ({ pid: +pid, ppid: +ppid, rss: +rss, cpu: +cpu, comm: path.basename(c.join(' ')) }));
-  const mine = new Set([daemon.pid]);
+  // -E appends each process's environment: everything the daemon started carries
+  // the isolated root (HOME, OTTO_DATA_DIR), so a holder reparented to launchd counts too.
+  const rows = sh('ps', ['-axEo', 'pid=,ppid=,rss=,pcpu=,command='], { maxBuffer: 64 << 20 }).trim().split('\n').map((l) => l.trim().split(/\s+/)).map(([pid, ppid, rss, cpu, ...c]) => ({ pid: +pid, ppid: +ppid, rss: +rss, cpu: +cpu, comm: path.basename(c[0] ?? ''), under: c.join(' ').includes(iso.root) }));
+  const mine = new Set([daemon.pid, ...rows.filter((r) => r.under).map((r) => r.pid)]);
   for (let grew = true; grew; ) { grew = false; for (const r of rows) if (!mine.has(r.pid) && mine.has(r.ppid)) { mine.add(r.pid); grew = true; } }
   const by = {};
   for (const r of rows.filter((r) => mine.has(r.pid))) {
@@ -72,7 +74,7 @@ async function main() {
   const graph = { nodes: [
     { id: 'n1', kind: 'manual_trigger', name: 'Start', x: 0, y: 0, params: {} },
     { id: 'nc', kind: 'git_checkout', name: 'Checkout', x: 0, y: 0, params: { mode: 'branch' } },
-    { id: 'n2', kind: 'review_run', name: 'Review', x: 0, y: 0, params: { reviewers, threshold: 80, scope_assessment: 'configured', summarizer: { provider: 'claude' }, timeout_s: 7200 } },
+    { id: 'n2', kind: 'review_run', name: 'Review', x: 0, y: 0, params: { reviewers, cross_provider_check: true, threshold: 80, scope_assessment: 'configured', summarizer: { provider: 'claude' }, timeout_s: 7200 } },
     { id: 'n3', kind: 'log', name: 'Done', x: 0, y: 0, params: {} },
   ], edges: [edge('e1', 'n1', 'nc'), edge('e0', 'nc', 'n2'), edge('e2', 'n2', 'n3')] };
   const wf = await api('POST', '/workspaces/' + ws.id + '/workflows', { name: 'L1 review', graph });
@@ -112,14 +114,15 @@ function summarize({ samples, done, waits, ended, reviewRows }) {
   const last60 = rec.filter((s) => s.t >= ended + 60);
   const revRate = load.length > 1 ? (load.at(-1).revs - load[0].revs) / (load.at(-1).t - load[0].t) : 0;
   const lines = [
-    ['live fake agents never above the ceiling (' + CEILING + ')', liveMax <= CEILING, 'max ' + liveMax],
+    ['twelve reviewers per run (≥ ' + 4 * LENSES + ' agent threads over both runs)', Number(reviewRows) >= 2 * LENSES * 2, reviewRows + ' thread rows'],
+    ['live fake agents reach but never pass the ceiling (' + CEILING + ')', liveMax > 0 && liveMax <= CEILING && busy.length > 0, 'max ' + liveMax + ', ' + busy.length + ' samples at the ceiling'],
     ['both runs succeed', done.every((v) => v.status === 'success'), done.map((v) => v.status + (v.error ? ' (' + v.error.slice(0, 120) + ')' : '')).join(' / ')],
-    ['ottod CPU mean ≤ 30 % with the ceiling live', mean(busy.map((s) => g(s, 'ottod', 'cpu'))) <= 30, mean(busy.map((s) => g(s, 'ottod', 'cpu'))).toFixed(1) + ' % over ' + busy.length + ' samples'],
+    ['ottod CPU mean ≤ 30 % with the ceiling live', busy.length > 0 && mean(busy.map((s) => g(s, 'ottod', 'cpu'))) <= 30, mean(busy.map((s) => g(s, 'ottod', 'cpu'))).toFixed(1) + ' % over ' + busy.length + ' samples'],
     ['ottod RSS peak ≤ baseline + 250 MB', Math.max(...load.map((s) => g(s, 'ottod', 'rss_mb'))) <= baseRss + 250, 'baseline ' + baseRss.toFixed(0) + ' MB, peak ' + Math.max(...load.map((s) => g(s, 'ottod', 'rss_mb'))).toFixed(0)],
     ['ottod RSS ≤ baseline + 50 MB at the end of recovery', g(rec.at(-1), 'ottod', 'rss_mb') <= baseRss + 50, g(rec.at(-1), 'ottod', 'rss_mb').toFixed(0) + ' MB'],
     ['ottod fds back to baseline ± 10', Math.abs(rec.at(-1).fds - baseFds) <= 10, 'baseline ' + baseFds.toFixed(0) + ', end ' + rec.at(-1).fds + ', peak ' + Math.max(...load.map((s) => s.fds))],
     ['fd peak ≤ baseline + 40 per live agent', Math.max(...load.map((s) => s.fds)) <= baseFds + 40 * Math.max(1, liveMax), ''],
-    ['0 fake or holder processes 60 s after the runs', last60.every((s) => !g(s, 'fake', 'n') && !g(s, 'holder', 'n')), last60.length + ' samples'],
+    ['0 fake or holder processes 60 s after the runs', last60.length > 0 && last60.every((s) => !g(s, 'fake', 'n') && !g(s, 'holder', 'n')), last60.length + ' samples'],
     ['swap growth ≤ 100 MB', Math.max(...samples.map((s) => s.swap_mb)) - samples[0].swap_mb <= 100, (Math.max(...samples.map((s) => s.swap_mb)) - samples[0].swap_mb).toFixed(0) + ' MB'],
   ];
   const md = ['| pass line | result | measured |', '|---|---|---|', ...lines.map(([l, ok, m]) => '| ' + l + ' | ' + (ok ? 'pass' : '**FAIL**') + ' | ' + m + ' |')].join('\n');

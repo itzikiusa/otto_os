@@ -543,6 +543,46 @@ fn the_gates_out_name_must_be_plain_and_never_reaches_the_shell_text() {
     );
 }
 
+/// The script path is read through trailing punctuation around quotes, and a
+/// prompt that names no path ending in `pr_gates.sh` is not offered (CR1-013).
+#[test]
+fn the_gates_script_path_survives_punctuation_and_is_never_empty() {
+    let gates = |prompt: &str| {
+        let g = wf(
+            &[
+                ("n1", "manual_trigger", "Start", json!({})),
+                (
+                    "n2",
+                    "agent_prompt",
+                    "Gates",
+                    json!({"skills": ["otto-go-gates"], "prompt": prompt}),
+                ),
+            ],
+            &[("n1", "n2", None)],
+        );
+        plan(&g, &[], &opts())
+    };
+    let d = gates("Run `~/bin/pr_gates.sh`. With --out gates.md reply with the table.");
+    let cmd = node(&d.draft_graph, "n2").unwrap().params["command"]
+        .as_str()
+        .unwrap_or_else(|| panic!("not offered: {:?}", d.not_offered))
+        .to_string();
+    assert!(
+        cmd.contains("\n\"$HOME/bin/pr_gates.sh\" \"$OTTO_WORKTREE\""),
+        "{cmd}"
+    );
+    let d = gates("Run pr_gates.sh.bak --out gates.md and reply with the table.");
+    assert!(
+        d.changes.iter().all(|c| c.rule != Rule::GoGatesScript),
+        "{:?}",
+        d.changes
+    );
+    assert_eq!(
+        d.not_offered[0].reason,
+        "the gates script path in the prompt is not a plain path"
+    );
+}
+
 /// A graph where moving C earlier would give C the step number a prompt refers to.
 #[test]
 fn parallel_breaking_referenced_number_not_offered() {
