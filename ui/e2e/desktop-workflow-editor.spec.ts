@@ -75,8 +75,13 @@ test('continue from lists only same-provider ancestors', async ({ page }) => {
   await page.goto(`/#/workflows/${wf}`);
   await selectStep(page, 'c');
   const pick = page.getByTestId('wf-continue-from');
-  await expect(pick).toContainText('Claude one');
-  await expect(pick.getByRole('radio', { name: /Codex one/ })).toBeDisabled();
+  await pick.getByRole('radio', { name: /Continue the thread of an earlier step/ }).check();
+  // ux.md §9.6: the select lists the same-provider ancestors; others disabled with the reason.
+  const from = pick.getByRole('combobox', { name: 'The step whose thread this step continues' });
+  await expect(from).toHaveValue('a');
+  await expect(from.locator('option[value="a"]')).toBeEnabled();
+  await expect(from.locator('option[value="b"]')).toBeDisabled();
+  await expect(pick).toContainText('Codex one is a Codex step');
 });
 
 test('a skill that is not installed shows the problem and Save sends nothing', async ({ page }) => {

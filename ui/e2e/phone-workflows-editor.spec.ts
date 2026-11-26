@@ -39,7 +39,8 @@ test('outline, a step sheet that saves on Done, nothing that edits the graph', a
   await outline.getByRole('button', { name: /Write/ }).tap();
   const sheet = page.getByTestId('wf-step-sheet');
   await expect(sheet).toBeVisible();
-  await expectFullyInViewport(page, sheet);
+  // The sheet is the dialog; its long body scrolls inside it.
+  await expectFullyInViewport(page, page.getByRole('dialog', { name: 'Write' }));
   await sheet.getByRole('textbox', { name: 'Name' }).fill('Write the summary');
   const saved = page.waitForRequest((r) => r.method() === 'PATCH' && r.url().endsWith(`/workflows/${wf}`));
   await page.getByRole('button', { name: 'Done' }).tap();

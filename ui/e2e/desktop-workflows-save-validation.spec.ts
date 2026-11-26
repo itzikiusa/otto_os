@@ -117,7 +117,7 @@ test('"+ Step" filters the steps and names each one\'s category', async ({ page 
   await filter.fill('delay');
   const only = menu.getByRole('menuitem');
   await expect(only).toHaveCount(1);
-  await expect(only).toHaveText(/^Delay/);
+  await expect(only.locator('.ctx-label')).toHaveText('Delay');
   // Each step names its category beside the label.
   await expect(only.locator('.ctx-hint')).toHaveText(/\S/);
 

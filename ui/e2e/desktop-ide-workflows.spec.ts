@@ -483,7 +483,7 @@ test.describe('Desktop IDE Workflows — Polyglot Debug, Settings, Git, History 
     const toggleBuildTool = async (): Promise<void> => {
       await page.getByTestId('ide-more-btn').click();
       await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Tool windows' }).first().click();
-      await page.locator('.ctx-submenu').getByRole('menuitem', { name: /^(Show|Hide) (Maven|Gradle) tool window/ }).first().click();
+      await page.locator('.ctx-submenu').getByRole('menuitem', { name: /^(Show|Hide) (Build|Gradle) tool window/ }).first().click();
     };
     await toggleBuildTool();
     await expect(page.locator('body')).toContainText('otto-bonus-service');

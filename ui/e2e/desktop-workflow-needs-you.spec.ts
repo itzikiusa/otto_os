@@ -67,5 +67,6 @@ test('the sidebar badge counts runs that wait on a person', async ({ page }) => 
   await waitRun(api, run, needsYou);
   await runsTab(page);
   await expect(page.getByTestId('wf-tab-runs')).toContainText(/\d/);
-  await expect(page.getByTestId('sidebar-modules').getByRole('button', { name: /Workflows.*waiting on you/ })).toBeVisible();
+  // The rail is collapsed here (beforeEach): its entry speaks the badge.
+  await expect(page.getByTestId('rail-workflows')).toHaveAccessibleName(/^Workflows.*, 1 waiting on you$/);
 });
