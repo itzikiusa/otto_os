@@ -34,6 +34,7 @@ import type {
 } from './transcript';
 import type {
   NodeRunState,
+  RunOverview,
 } from './workflows';
 
 /** Per-connection `/ws/events` frame (ws.md "Lag resync frame"): the daemon
@@ -203,6 +204,8 @@ export type OttoEvent =
       nodes_done?: number;
       nodes_total?: number;
       waiting_approval?: boolean;
+      /** The run's computed overview (≤ 4 KiB); absent from emitters that do not compute it. */
+      overview?: RunOverview | null;
     }
   /** A skill-evaluation run reached a terminal state (done/error/cancelled).
    *  Lets the Skill-Eval UI replace its 2s×600 fixed poll with event-driven

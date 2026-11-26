@@ -1022,7 +1022,8 @@ non-terminal so the view converges even with no WS connection.
   "node": { "node_id": "…", "status": "…", "logs": [], "log_count": 12, "has_output": false, "detail_version": "<sha256>", "…": "…" },
   "nodes_done": 2,
   "nodes_total": 5,
-  "waiting_approval": false
+  "waiting_approval": false,
+  "overview": { "rev": 7, "state": "needs_you", "headline": "Approve posting 6 comments on PR #412", "…": "…" }
 }
 ```
 
@@ -1046,13 +1047,20 @@ non-terminal so the view converges even with no WS connection.
   in place without a second GET (`nodes_total` 0 = unknown, keep last counts).
 - `waiting_approval` — true on the pause event; the approve/reject decision
   re-emits with false.
+- `overview` — the run's computed `RunOverview` (api.md "Run view"; ≤ 4 KiB:
+  `now.node_ids` ≤ 8, `attention` ≤ 8, `deliverables` ≤ 12, `goal.awaiting` ≤ 8,
+  strings clipped), so attention, queue, phase and wait show without a GET.
+  Omitted by emitters that do not compute it; clients keep the last one then.
+  The `node` summary carries the run-view node fields `/progress` serves
+  (`phase`, `wait`, `attention`, `thread` without digest, …).
 - UI routing: `events.svelte.ts` dispatches to `workflowRunBus.apply(event)`
   (run view) **and** `ws.applyWorkflowRunEvent(event)` (in-place "Running"
   sidebar update; a full active-list refetch only for unknown run ids).
 - TypeScript type: the `OttoEvent` union in `ui/src/lib/api/types.ts` —
   `{ type: 'workflow_run_updated'; workspace_id: Id; run_id: Id; status:
   string; node_id?: Id | null; rev?: number; node?: NodeRunState | null;
-  nodes_done?: number; nodes_total?: number; waiting_approval?: boolean }` —
+  nodes_done?: number; nodes_total?: number; waiting_approval?: boolean;
+  overview?: RunOverview | null }` —
   `NodeRunState.activity?: NodeActivity` rides along inside `node`.
 
 ## Skill-eval completion (A11)
