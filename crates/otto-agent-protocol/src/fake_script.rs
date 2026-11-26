@@ -39,7 +39,8 @@
 //! workflow step prompt without a sentinel `expect`s every context file it
 //! names and writes `$HANDOFF`; `OTTO_FAKE_REVIEW_DIR` — a scope, reviewer or
 //! summarizer prompt writes its result file from
-//! `<dir>/<role>[-<lens>-<provider>].json` (or an empty valid one).
+//! `<dir>/<role>[-<lens>-<provider>].json` (or an empty valid one), after
+//! acting out the verbs of `<dir>/<role>.pre` when it exists (its work time).
 //!
 //! Environment: `OTTO_FAKE_TIME_SCALE` multiplies every `sleep`, `stream` and
 //! `background`; `OTTO_FAKE_LOG` appends a JSON line per turn
@@ -818,10 +819,14 @@ fn review_acts(prompt: &str, cfg: &Config) -> Option<Vec<Act>> {
         .to_string(),
         _ => "[]".to_string(),
     });
-    Some(vec![
+    let mut acts = std::fs::read_to_string(dir.join(format!("{role}.pre")))
+        .map(|t| parse_script(&t))
+        .unwrap_or_default();
+    acts.extend([
         Act::Write { path, text },
         Act::Reply(format!("{role} done")),
-    ])
+    ]);
+    Some(acts)
 }
 
 /// The blocking side of a binary fake: how it acts each [`Step`] out on its

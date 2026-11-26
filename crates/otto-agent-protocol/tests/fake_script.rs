@@ -998,6 +998,18 @@ fn the_finders_read_the_engines_real_preamble_and_review_prompts() {
     let mut t = fake_script::Turn::start(&plain, dir.path(), "s", 1, &cfg).unwrap();
     t.next_step();
     assert_eq!(std::fs::read_to_string(&out).unwrap(), "[]");
+    // `<role>.pre`: its verbs run first (the reviewer's work time), then the result.
+    std::fs::write(review.join("reviewer.pre"), "sleep 1500\n").unwrap();
+    let mut t = fake_script::Turn::start(&plain, dir.path(), "s", 1, &cfg).unwrap();
+    assert_eq!(
+        t.next_step(),
+        fake_script::Step::Wait(Duration::from_millis(1500))
+    );
+    assert_eq!(
+        t.next_step(),
+        fake_script::Step::Say("reviewer done".into())
+    );
+    std::fs::remove_file(review.join("reviewer.pre")).unwrap();
     // Without the persona the same prompt is not scripted.
     let off = Config {
         review_dir: None,

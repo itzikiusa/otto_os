@@ -110,6 +110,10 @@ mod wf_compat;
 mod wf_goal;
 #[path = "wf_lifecycle.rs"]
 mod wf_lifecycle;
+#[path = "wf_restart.rs"]
+mod wf_restart;
+#[path = "wf_timing.rs"]
+mod wf_timing;
 #[path = "workflow_run_files.rs"]
 mod workflow_run_files;
 

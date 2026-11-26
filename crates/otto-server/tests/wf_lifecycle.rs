@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 
 /// What a restart does with a run whose node of this kind was mid-flight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Restart {
+pub(crate) enum Restart {
     /// Re-entered at the node (pure, read-only, or a fresh agent session in
     /// the run's worktree).
     Resume,
@@ -28,7 +28,7 @@ enum Restart {
 }
 
 /// Today's restart classification for every catalog kind (test-plan §5.1).
-const RESTART: &[(&str, Restart)] = &[
+pub(crate) const RESTART: &[(&str, Restart)] = &[
     ("manual_trigger", Restart::Resume),
     ("agent_prompt", Restart::Resume),
     ("prepare_context", Restart::Resume),
