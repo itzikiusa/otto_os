@@ -665,3 +665,37 @@ async fn a_same_thread_step_continues_its_previous_iterations_thread() {
         "iteration 2 continues iteration 1"
     );
 }
+
+/// GL9.1: a research goal's agent works in `<context>/research`, never the
+/// workspace root.
+#[tokio::test]
+async fn a_research_goal_works_in_its_own_folder() {
+    let f = fake();
+    let steps = json!([{"kind": "agent_prompt", "name": "Work", "params": {"prompt": "find out", "provider": "claude"}}]);
+    let fx = setup(
+        "goal-research",
+        goal_graph(steps, json!({"max_iterations": 1})),
+    )
+    .await;
+    let input = json!({"research_dir": true});
+    let drive = run_workflow(
+        fx.ctx.clone(),
+        fx.ws.clone(),
+        fx.wf.clone(),
+        fx.run_id.clone(),
+        input,
+        RunScope::default(),
+        None,
+    );
+    tokio::time::timeout(Duration::from_secs(15), tokio::spawn(drive))
+        .await
+        .unwrap()
+        .unwrap();
+    let turns = f.turns.lock().unwrap().clone();
+    let want = format!("workflow-context/{}/research", fx.run_id);
+    assert!(
+        turns[0].cwd.ends_with(&want),
+        "{} does not end with {want}",
+        turns[0].cwd.display()
+    );
+}
