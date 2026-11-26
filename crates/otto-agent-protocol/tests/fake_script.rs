@@ -969,6 +969,56 @@ fn the_finders_read_the_engines_real_preamble_and_review_prompts() {
         ..cfg
     };
     assert!(fake_script::Turn::start(&plain, dir.path(), "s", 1, &off).is_none());
+
+    // OTTO_FAKE_DEFAULT=step: a step prompt with no sentinel expects the
+    // context files it names (not its own handoff), then writes the handoff.
+    let step_on = Config {
+        step_persona: true,
+        ..off
+    };
+    let mut t =
+        fake_script::Turn::start(&prompt, dir.path(), "s", 1, &step_on).expect("the step persona");
+    assert_eq!(
+        t.next_step(),
+        fake_script::Step::Fail(FailClass::Provider, "missing $CTX/instructions.md".into()),
+        "the real preamble's run dir does not exist here"
+    );
+    let ctx_dir = dir.path().join("ctx");
+    std::fs::create_dir_all(&ctx_dir).unwrap();
+    for f in [
+        "instructions.md",
+        "run-brief.md",
+        "repos.json",
+        "prs.json",
+        "step1-gather-info.md",
+    ] {
+        std::fs::write(ctx_dir.join(f), "x").unwrap();
+    }
+    let preamble = otto_workflows::context::agent_preamble(
+        &ctx_dir.display().to_string(),
+        true,
+        false,
+        true,
+        &["step1-gather-info.md".into()],
+        "step2-review-gate.md",
+    );
+    let real = format!("{preamble}Use prs.json.");
+    let mut t = fake_script::Turn::start(&real, dir.path(), "s", 1, &step_on).unwrap();
+    assert_eq!(t.next_step(), fake_script::Step::Say("step done".into()));
+    assert_eq!(
+        std::fs::read_to_string(ctx_dir.join("step2-review-gate.md"))
+            .unwrap()
+            .len(),
+        400
+    );
+    let off = Config {
+        step_persona: false,
+        ..step_on
+    };
+    assert!(
+        fake_script::Turn::start(&real, dir.path(), "s", 1, &off).is_none(),
+        "off by default"
+    );
 }
 
 #[test]
