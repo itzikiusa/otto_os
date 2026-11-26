@@ -39,8 +39,8 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
   "Restart to finish" with a list of what keeps running and what ends. The
   new version is verified before it replaces the app, and a version that
   fails to start is undone. Builds from source show that they update from
-  git. Published releases start with the first signed release (see
-  `docs/RELEASE.md`).
+  git. The 0.6.0 DMG does not update itself yet; self-updating releases
+  start with the first signed release (see `docs/RELEASE.md`).
 
 ### What's new in 0.5.3
 
@@ -707,7 +707,9 @@ notarized by Apple, so macOS blocks the first open.
 - **macOS 12–14:** Control-click ▸ **Open**.
 - **Either:** run `xattr -dr com.apple.quarantine /Applications/Otto.app` once.
 
-**Updates.** From 0.5.4 on, a release build finds new releases by itself
+**Updates.** The DMGs published so far, 0.6.0 included, do not update
+themselves: download the next one from the releases page. From the first
+Apple-signed release on, a release build finds new releases by itself
 (**Otto ▸ Check for Updates…** and the sidebar) and installs them when you
 restart it.
 - A build from source never updates itself: pull and run
