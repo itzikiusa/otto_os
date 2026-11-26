@@ -52,6 +52,9 @@ impl<'a> Spec<'a> {
     }
 }
 
+/// How long output is still read after the shell exited.
+const PIPE_GRACE: Duration = Duration::from_millis(300);
+
 /// How the command ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum End {
@@ -190,19 +193,30 @@ pub async fn execute(spec: &Spec<'_>, cancel: impl Future<Output = ()>) -> Finis
     // (the 15-minute linger of runs.md §6.3).
     #[cfg(unix)]
     let pgid = _group.as_ref().map(|g| g.0);
+    let (exited, _) = tokio::sync::watch::channel(false);
     let status = async {
         let status = child.wait().await;
         #[cfg(unix)]
         if let Some(pgid) = pgid {
             let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::KILL);
         }
+        exited.send_replace(true);
         status
+    };
+    // A child that left the group (its own session, or forked as the kill
+    // landed) still holds the pipes: stop reading soon after the shell exits.
+    let orphaned = || {
+        let mut exited = exited.subscribe();
+        async move {
+            let _ = exited.wait_for(|done| *done).await;
+            tokio::time::sleep(PIPE_GRACE).await;
+        }
     };
     let capture = async {
         tokio::try_join!(
             status,
-            crate::command_output::drain_tail(stdout, cap, log.as_ref()),
-            crate::command_output::drain_tail(stderr, cap, log.as_ref())
+            crate::command_output::drain_tail(stdout, cap, log.as_ref(), orphaned()),
+            crate::command_output::drain_tail(stderr, cap, log.as_ref(), orphaned())
         )
     };
     let output = tokio::select! {
@@ -312,6 +326,29 @@ mod tests {
             text.starts_with("earlier\n") && text.contains("started"),
             "{text}"
         );
+    }
+
+    /// A child that left the command's process group (its own session, or
+    /// forked as the group was killed) still holds the pipes: the command
+    /// ends when its shell does, with what was written.
+    #[tokio::test]
+    async fn a_child_outside_the_group_cannot_hold_the_command_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = Spec::new(
+            dir.path().to_str().unwrap(),
+            // The shell outlives the child's setsid, so the group kill misses it.
+            "/usr/bin/perl -e 'use POSIX; setsid(); sleep 4' & sleep 0.5; echo started",
+            Duration::from_secs(30),
+        );
+        let t0 = Instant::now();
+        let done = execute(&spec, std::future::pending()).await;
+        assert!(
+            t0.elapsed() < Duration::from_secs(2),
+            "lingered {:?}",
+            t0.elapsed()
+        );
+        assert_eq!(done.end, End::Exited(0));
+        assert!(done.output.contains("started"), "{}", done.output);
     }
 
     #[tokio::test]
