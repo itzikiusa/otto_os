@@ -18,6 +18,7 @@
   import CriteriaTable from '../goal/CriteriaTable.svelte';
   import { criterionRows, latestCheck } from '../goal/goalCheck';
   import GoalCard from './GoalCard.svelte';
+  import { cardKind } from './StateCards.svelte';
   import StepConversation from './StepConversation.svelte';
   import StepFiles from './StepFiles.svelte';
   import { retryStep, skipStep } from './runActions';
@@ -155,6 +156,8 @@
     {:else if tab === 'files'}
       <StepFiles runId={run.id} contextDir={run.context_dir} stepFile={step ? (node?.step_file ?? null) : null} />
     {:else if tab === 'result'}
+      <!-- A goal run whose card is taken by a hold, a person or an error: its criteria head the Result. -->
+      {#if run.overview?.goal && cardKind(run, runState) !== 'goal'}<GoalCard goal={run.overview.goal} {run} {criteria} />{/if}
       {#if run.status === 'success'}
         <RunFinalOutput mon={sync} {run} />
         {#if !sync.hasFinalOutput(run) && !sync.finalOutputError}<p class="none">This run wrote no final output.</p>{/if}

@@ -90,4 +90,4 @@ export function criterionRows(criteria: readonly Criterion[], check: CheckOutput
   });
 }
 
-export const STATE_WORD: Record<CriterionState, string> = { met: 'Met', not_met: 'Not met', verify: 'Verify', pending: 'Not checked yet' };
+export const STATE_WORD: Record<CriterionState, string> = { met: 'Met', not_met: 'Not met', verify: 'Verify', pending: 'Not checked' };

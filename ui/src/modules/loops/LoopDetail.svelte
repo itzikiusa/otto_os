@@ -127,12 +127,12 @@
     </button>
   {/snippet}
   {#snippet badge()}
-    {#if loop}<StatusBadge status={loopStatusOf(loop)} />{/if}
+    {#if loop && !viewport.isPhone}<StatusBadge status={loopStatusOf(loop)} />{/if}
   {/snippet}
   {#snippet actions()}
     {#if continuable}
       <button class="btn small primary" data-testid="loop-continue" title="Go on in this loop’s kept work, as a goal in Workflows" onclick={continueAsGoal}>
-        <Icon name="play" size={12} /> Continue as a goal
+        <Icon name="play" size={12} /> {viewport.isPhone ? 'Continue' : 'Continue as a goal'}
       </button>
     {/if}
   {/snippet}
