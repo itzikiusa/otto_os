@@ -17,6 +17,11 @@
 //! * anything else — `echo: <text>` as `item/agentMessage/delta`s, plus
 //!   ` [<model> <effort> <image count>]` when the turn sets any of them.
 //!
+//! A prompt with `OTTO_FAKE:` lines acts out that script instead
+//! (src/fake_script.rs; no `child`: this fake has no MCP client). Its
+//! `background <ms>` is a background subagent (`collabAgentToolCall`
+//! spawnAgent) whose thread finishes `<ms>` later, then Codex's own turn.
+//!
 //! `thread/resume` succeeds for ids this binary minted (`fake-th-*`) and
 //! fails otherwise. stdin EOF ends the process.
 
@@ -25,6 +30,11 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
+
+#[path = "../fake_script.rs"]
+mod fake_script;
+
+use fake_script::{FailClass, Turn, Wire};
 
 fn out(v: Value) {
     let mut o = std::io::stdout().lock();
@@ -94,6 +104,193 @@ enum In {
     Eof,
 }
 
+/// A script's follow-up turn, owed when its background subagent finishes.
+struct Owed {
+    at: Instant,
+    child: String,
+    rest: Turn,
+}
+
+/// The first string anywhere in `v` (an answer's text, whatever its nesting).
+fn first_string(v: &Value) -> Option<String> {
+    match v {
+        Value::String(s) => Some(s.clone()),
+        Value::Array(a) => a.iter().find_map(first_string),
+        Value::Object(o) => o.values().find_map(first_string),
+        _ => None,
+    }
+}
+
+struct CodexWire<'a> {
+    rx: &'a mpsc::Receiver<In>,
+    thread: &'a str,
+    tid: String,
+    next_server_id: &'a mut u64,
+    owed: &'a mut Vec<Owed>,
+    items: u32,
+}
+
+impl CodexWire<'_> {
+    fn complete(&self, status: &str) {
+        notify(
+            "turn/completed",
+            json!({"threadId": self.thread, "turn": turn(&self.tid, status)}),
+        );
+    }
+
+    /// The next message for this turn: a response to `rid` (`Ok`), or
+    /// `Err(true)` when the turn was interrupted, `Err(false)` on timeout.
+    fn wait_for(&mut self, rid: Option<u64>, until: Option<Instant>) -> Result<Value, bool> {
+        loop {
+            let msg = match until {
+                Some(at) => match self
+                    .rx
+                    .recv_timeout(at.saturating_duration_since(Instant::now()))
+                {
+                    Ok(m) => m,
+                    Err(mpsc::RecvTimeoutError::Timeout) => return Err(false),
+                    Err(mpsc::RecvTimeoutError::Disconnected) => std::process::exit(0),
+                },
+                None => self.rx.recv().unwrap_or(In::Eof),
+            };
+            let In::Line(msg) = msg else {
+                std::process::exit(0)
+            };
+            let id = msg.get("id").cloned().unwrap_or(Value::Null);
+            match msg.get("method").and_then(Value::as_str) {
+                Some("turn/interrupt") => {
+                    out(json!({"id": id, "result": {}}));
+                    if let Some(rid) = rid {
+                        notify(
+                            "serverRequest/resolved",
+                            json!({"threadId": self.thread, "requestId": rid}),
+                        );
+                    }
+                    self.complete("interrupted");
+                    return Err(true);
+                }
+                Some(_) if !id.is_null() => out(
+                    json!({"id": id, "error": {"code": -32600, "message": "busy with a scripted turn"}}),
+                ),
+                None if rid.is_some() && id.as_u64() == rid => return Ok(msg),
+                _ => {}
+            }
+        }
+    }
+
+    fn request(&mut self, method: &str, params: Value) -> u64 {
+        *self.next_server_id += 1;
+        let rid = *self.next_server_id;
+        out(json!({"id": rid, "method": method, "params": params}));
+        rid
+    }
+}
+
+impl Wire for CodexWire<'_> {
+    fn say(&mut self, text: &str) {
+        self.items += 1;
+        agent_message(
+            self.thread,
+            &self.tid,
+            &format!("msg-f{}", self.items),
+            &[text],
+        );
+    }
+
+    fn wait(&mut self, d: Duration) -> bool {
+        self.wait_for(None, Some(Instant::now() + d)) == Err(false)
+    }
+
+    fn ask(&mut self, question: &str) -> Option<String> {
+        let rid = self.request(
+            "item/tool/requestUserInput",
+            json!({"threadId": self.thread, "turnId": self.tid, "itemId": "question-f",
+                "questions": [{"id": "q1", "header": "Question", "question": question,
+                    "isOther": true, "options": null}]}),
+        );
+        let m = self.wait_for(Some(rid), None).ok()?;
+        Some(first_string(&m["result"]["answers"]).unwrap_or_default())
+    }
+
+    fn approve(&mut self, tool: &str) -> Option<bool> {
+        let rid = self.request(
+            "item/commandExecution/requestApproval",
+            json!({"threadId": self.thread, "turnId": self.tid, "itemId": "cmd-f",
+                "startedAtMs": 0, "command": tool, "reason": "the script asks"}),
+        );
+        let m = self.wait_for(Some(rid), None).ok()?;
+        match m.pointer("/result/decision").and_then(Value::as_str) {
+            Some("accept" | "acceptForSession") => Some(true),
+            Some("decline") => Some(false),
+            _ => {
+                self.complete("interrupted");
+                None
+            }
+        }
+    }
+
+    fn usage(&mut self, input: u64, output: u64) {
+        let u = json!({"inputTokens": input, "outputTokens": output, "cachedInputTokens": 0,
+            "reasoningOutputTokens": 0, "totalTokens": input + output});
+        notify(
+            "thread/tokenUsage/updated",
+            json!({"threadId": self.thread, "turnId": self.tid,
+                "tokenUsage": {"last": u, "total": u, "modelContextWindow": 1000000}}),
+        );
+    }
+
+    fn fail(&mut self, class: FailClass, message: &str) {
+        let info = match class {
+            FailClass::UsageLimit => "usageLimitExceeded",
+            FailClass::Auth => "unauthorized",
+            _ => "internalServerError",
+        };
+        let mut t = turn(&self.tid, "failed");
+        t["error"] = json!({"message": message, "codexErrorInfo": info});
+        notify(
+            "turn/completed",
+            json!({"threadId": self.thread, "turn": t}),
+        );
+    }
+
+    fn background(&mut self, after: Duration, rest: Turn) {
+        self.items += 1;
+        let child = format!(
+            "fake-bg-th-{}-{}",
+            std::process::id(),
+            self.owed.len() + self.items as usize
+        );
+        for status in ["inProgress", "completed"] {
+            notify(
+                if status == "completed" {
+                    "item/completed"
+                } else {
+                    "item/started"
+                },
+                json!({"threadId": self.thread, "turnId": self.tid, "item": {
+                    "type": "collabAgentToolCall", "id": format!("col-f{}", self.items),
+                    "tool": "spawnAgent", "role": "background", "prompt": "background work",
+                    "receiverThreadIds": [child], "status": status}}),
+            );
+        }
+        self.say("Working in the background.");
+        self.complete("completed");
+        self.owed.push(Owed {
+            at: Instant::now() + after,
+            child,
+            rest,
+        });
+    }
+
+    fn mcp(&mut self, _tool: &str, _args: Value) -> Result<Value, String> {
+        Err("no MCP client".into())
+    }
+
+    fn done(&mut self) {
+        self.complete("completed");
+    }
+}
+
 /// The turn's text as the fake acts on it: without Otto's delegation rules
 /// (runtime::delegation; `rules?` answers whether they came, after a handoff
 /// too) and without a subagent's task header.
@@ -118,7 +315,92 @@ fn prompt_text(input: &[Value]) -> String {
     }
 }
 
+/// `stream:<n>:<ms>[:<tools>]`: `c0 `…`c<n-1> `, one delta per <ms>, with
+/// <tools> completed commands spread through it (perf specs).
+fn stream_turn(thread: &str, tid: &str, t: &str) {
+    let mut f = t[7..].split(':');
+    let n: usize = f.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let ms: u64 = f.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let tools: usize = f.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+    for k in 0..tools {
+        let mut c = command(thread, tid, "completed", Some("ok\n"));
+        c["item"]["id"] = json!(format!("cmd-s{k}"));
+        c["item"]["command"] = json!(format!("rg step_{k} src"));
+        notify("item/started", c.clone());
+        notify("item/completed", c);
+    }
+    notify(
+        "item/started",
+        json!({"threadId": thread, "turnId": tid, "startedAtMs": 0,
+                   "item": {"type": "agentMessage", "id": "msg-s", "text": ""}}),
+    );
+    let mut all = String::new();
+    for i in 0..n {
+        let d = format!("c{i} ");
+        all.push_str(&d);
+        notify(
+            "item/agentMessage/delta",
+            json!({"threadId": thread, "turnId": tid, "itemId": "msg-s", "delta": d}),
+        );
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+    notify(
+        "item/completed",
+        json!({"threadId": thread, "turnId": tid, "completedAtMs": 0,
+                   "item": {"type": "agentMessage", "id": "msg-s", "text": all}}),
+    );
+    notify(
+        "turn/completed",
+        json!({"threadId": thread, "turn": turn(tid, "completed")}),
+    );
+}
+
+/// `tool image`: a completed MCP result with text, metadata and two PNGs.
+fn tool_image_turn(thread: &str, tid: &str) {
+    let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5V8AAAAASUVORK5CYII=";
+    notify(
+        "item/completed",
+        json!({"threadId":thread,"turnId":tid,"item":{
+        "type":"mcpToolCall","id":"tool-images","server":"preview","tool":"screenshot",
+        "arguments":{"page":"example"},"status":"completed","result":{
+            "content":[{"type":"text","text":"Screenshot captured"},
+                {"type":"image","mimeType":"image/png","data":png},
+                {"type":"image","mimeType":"image/png","data":png}],
+            "structuredContent":{"width":1,"height":1}
+        }}}),
+    );
+    notify(
+        "turn/completed",
+        json!({"threadId":thread,"turn":turn(tid,"completed")}),
+    );
+}
+
+/// `make image`: an image it generated, as a file on disk.
+fn make_image_turn(thread: &str, tid: &str) {
+    use base64::Engine;
+    let png = base64::engine::general_purpose::STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5V8AAAAASUVORK5CYII=")
+            .unwrap_or_default();
+    let path = std::env::temp_dir().join(format!("fake-codex-{}-{tid}.png", std::process::id()));
+    let _ = std::fs::write(&path, png);
+    notify(
+        "item/completed",
+        json!({"threadId": thread, "turnId": tid, "item": {"type": "imageGeneration",
+                "id": "ig-1", "status": "completed", "revisedPrompt": "a red dot",
+                "savedPath": path, "inputImages": []}}),
+    );
+    agent_message(thread, tid, "msg-i", &["made it"]);
+    notify(
+        "turn/completed",
+        json!({"threadId": thread, "turn": turn(tid, "completed")}),
+    );
+}
+
 fn main() {
+    fake_script::log_start();
+    let cfg = fake_script::Config::from_env("codex", &["child", "finish-child"]);
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let mut owed: Vec<Owed> = Vec::new();
     let (tx, rx) = mpsc::channel::<In>();
     std::thread::spawn(move || {
         for line in std::io::stdin().lock().lines() {
@@ -139,7 +421,11 @@ fn main() {
     let mut question: Option<(u64, String)> = None;
     let mut next_server_id = 100u64;
     loop {
-        let msg = match waiting_until {
+        let wake = [waiting_until, owed.iter().map(|o| o.at).min()]
+            .into_iter()
+            .flatten()
+            .min();
+        let msg = match wake {
             Some(at) => match rx.recv_timeout(at.saturating_duration_since(Instant::now())) {
                 Ok(m) => Some(m),
                 Err(mpsc::RecvTimeoutError::Timeout) => None,
@@ -151,6 +437,40 @@ fn main() {
             },
         };
         let Some(msg) = msg else {
+            // A script's background subagent finished: Codex's own turn goes on.
+            if let Some(i) = owed.iter().position(|o| o.at <= Instant::now()) {
+                if current.is_none() {
+                    let o = owed.remove(i);
+                    let ct = format!("{}-turn", o.child);
+                    notify(
+                        "turn/started",
+                        json!({"threadId": o.child, "turn": turn(&ct, "inProgress")}),
+                    );
+                    notify(
+                        "turn/completed",
+                        json!({"threadId": o.child, "turn": turn(&ct, "completed")}),
+                    );
+                    turns += 1;
+                    let tid = format!("turn-{turns}");
+                    notify(
+                        "turn/started",
+                        json!({"threadId": thread, "turn": turn(&tid, "inProgress")}),
+                    );
+                    let mut rest = o.rest;
+                    rest.resumed(turns);
+                    let mut wire = CodexWire {
+                        rx: &rx,
+                        thread: &thread,
+                        tid,
+                        next_server_id: &mut next_server_id,
+                        owed: &mut owed,
+                        items: turns * 100,
+                    };
+                    wire.say("Background agent reported.");
+                    fake_script::drive(rest, &mut wire);
+                }
+                continue;
+            }
             if let Some(until) = waiting_until {
                 if until <= Instant::now() {
                     waiting_until = None;
@@ -212,64 +532,33 @@ fn main() {
                 let input = params["input"].as_array().cloned().unwrap_or_default();
                 let text = prompt_text(&input);
                 let extras = echo_extras(&params, &input);
+                if params["model"].is_string() || params["effort"].is_string() {
+                    fake_script::argv_log(
+                        json!({"model": params["model"], "effort": params["effort"]}),
+                    );
+                }
+                if let Some(script) = Turn::start(&text, &cwd, &thread, turns, &cfg) {
+                    let mut wire = CodexWire {
+                        rx: &rx,
+                        thread: &thread,
+                        tid,
+                        next_server_id: &mut next_server_id,
+                        owed: &mut owed,
+                        items: turns * 100,
+                    };
+                    fake_script::drive(script, &mut wire);
+                    current = None;
+                    continue;
+                }
                 match text.as_str() {
                     // `stream:<n>:<ms>[:<tools>]`: `c0 `…`c<n-1> `, one delta per <ms>,
                     // with <tools> completed commands spread through it (perf specs).
                     t if t.starts_with("stream:") => {
-                        let mut f = t[7..].split(':');
-                        let n: usize = f.next().and_then(|v| v.parse().ok()).unwrap_or(0);
-                        let ms: u64 = f.next().and_then(|v| v.parse().ok()).unwrap_or(0);
-                        let tools: usize = f.next().and_then(|v| v.parse().ok()).unwrap_or(0);
-                        for k in 0..tools {
-                            let mut c = command(&thread, &tid, "completed", Some("ok\n"));
-                            c["item"]["id"] = json!(format!("cmd-s{k}"));
-                            c["item"]["command"] = json!(format!("rg step_{k} src"));
-                            notify("item/started", c.clone());
-                            notify("item/completed", c);
-                        }
-                        notify(
-                            "item/started",
-                            json!({"threadId": thread, "turnId": tid, "startedAtMs": 0,
-                                   "item": {"type": "agentMessage", "id": "msg-s", "text": ""}}),
-                        );
-                        let mut all = String::new();
-                        for i in 0..n {
-                            let d = format!("c{i} ");
-                            all.push_str(&d);
-                            notify(
-                                "item/agentMessage/delta",
-                                json!({"threadId": thread, "turnId": tid, "itemId": "msg-s", "delta": d}),
-                            );
-                            std::thread::sleep(std::time::Duration::from_millis(ms));
-                        }
-                        notify(
-                            "item/completed",
-                            json!({"threadId": thread, "turnId": tid, "completedAtMs": 0,
-                                   "item": {"type": "agentMessage", "id": "msg-s", "text": all}}),
-                        );
-                        notify(
-                            "turn/completed",
-                            json!({"threadId": thread, "turn": turn(&tid, "completed")}),
-                        );
+                        stream_turn(&thread, &tid, t);
                         current = None;
                     }
                     "tool image" => {
-                        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5V8AAAAASUVORK5CYII=";
-                        notify(
-                            "item/completed",
-                            json!({"threadId":thread,"turnId":tid,"item":{
-                            "type":"mcpToolCall","id":"tool-images","server":"preview","tool":"screenshot",
-                            "arguments":{"page":"example"},"status":"completed","result":{
-                                "content":[{"type":"text","text":"Screenshot captured"},
-                                    {"type":"image","mimeType":"image/png","data":png},
-                                    {"type":"image","mimeType":"image/png","data":png}],
-                                "structuredContent":{"width":1,"height":1}
-                            }}}),
-                        );
-                        notify(
-                            "turn/completed",
-                            json!({"threadId":thread,"turn":turn(&tid,"completed")}),
-                        );
+                        tool_image_turn(&thread, &tid);
                         current = None;
                     }
                     // `name me`: Codex names the thread.
@@ -287,24 +576,7 @@ fn main() {
                     }
                     // `make image`: an image it generated, as a file on disk.
                     "make image" => {
-                        use base64::Engine;
-                        let png = base64::engine::general_purpose::STANDARD
-                            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5V8AAAAASUVORK5CYII=")
-                            .unwrap_or_default();
-                        let path = std::env::temp_dir()
-                            .join(format!("fake-codex-{}-{tid}.png", std::process::id()));
-                        let _ = std::fs::write(&path, png);
-                        notify(
-                            "item/completed",
-                            json!({"threadId": thread, "turnId": tid, "item": {"type": "imageGeneration",
-                                "id": "ig-1", "status": "completed", "revisedPrompt": "a red dot",
-                                "savedPath": path, "inputImages": []}}),
-                        );
-                        agent_message(&thread, &tid, "msg-i", &["made it"]);
-                        notify(
-                            "turn/completed",
-                            json!({"threadId": thread, "turn": turn(&tid, "completed")}),
-                        );
+                        make_image_turn(&thread, &tid);
                         current = None;
                     }
                     "crash" => {

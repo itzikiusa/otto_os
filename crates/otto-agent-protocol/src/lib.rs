@@ -24,6 +24,8 @@ pub mod claude;
 pub mod codex;
 pub(crate) mod diff_compact;
 pub mod driver;
+#[cfg(any(test, feature = "test-util"))]
+pub mod fake_script;
 pub mod holder;
 pub mod host;
 mod http;
@@ -33,6 +35,8 @@ pub mod process;
 mod questions;
 pub mod ring;
 pub mod runtime;
+#[cfg(any(test, feature = "test-util"))]
+pub mod scripted;
 mod tool_images;
 #[cfg(test)]
 mod tool_images_tests;

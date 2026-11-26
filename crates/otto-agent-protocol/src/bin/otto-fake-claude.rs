@@ -34,6 +34,12 @@
 //!   diff; `fake-draft: fail` answers a "Not logged in" error result).
 //! * anything else — `echo: <text>` as stream events + `assistant`.
 //!
+//! A prompt with `OTTO_FAKE:` lines acts out that script instead
+//! (src/fake_script.rs): `ask` is an `AskUserQuestion`, `approve` a
+//! `can_use_tool`, `background` a background Bash and its own follow-up
+//! turn, `child` / `finish-child` Otto's `otto_thread_*` tools through the
+//! `otto` server of `--mcp-config`.
+//!
 //! An `interrupt` control request ends the running turn as interrupted; a
 //! `stop_task` one kills that background task (`task_notification` killed).
 //! `--resume <id>` works only for a session this binary started in the same
@@ -47,6 +53,11 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
+
+#[path = "../fake_script.rs"]
+mod fake_script;
+
+use fake_script::{FailClass, Turn, Wire};
 
 /// `<tmp>/claude-<uid>/otto-fake/<session>/tasks/<task>.output` with two
 /// lines of output, as Claude Code lays out a background command's output.
@@ -215,58 +226,30 @@ fn init_mcp_servers(config: &str) -> Value {
 
 /// One stdio MCP call against `server` from the `--mcp-config` document.
 fn mcp_call(config: &str, server: &str, tool: &str, args: Value) -> Result<Value, String> {
-    use std::io::BufReader;
-    use std::process::{Command, Stdio};
     let raw = std::fs::read_to_string(config).unwrap_or_else(|_| config.to_string());
     let doc: Value = serde_json::from_str(&raw).map_err(|e| format!("mcp config: {e}"))?;
     let spec = doc
         .pointer(&format!("/mcpServers/{server}"))
         .ok_or_else(|| format!("no MCP server {server}"))?;
-    let mut cmd = Command::new(spec["command"].as_str().unwrap_or_default());
-    for a in spec["args"].as_array().into_iter().flatten() {
-        cmd.arg(a.as_str().unwrap_or_default());
-    }
-    for (k, v) in spec["env"].as_object().into_iter().flatten() {
-        cmd.env(k, expand_env(v.as_str().unwrap_or_default()));
-    }
-    let mut child = cmd
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("spawn {server}: {e}"))?;
-    let mut stdin = child.stdin.take().ok_or("no stdin")?;
-    let mut lines = BufReader::new(child.stdout.take().ok_or("no stdout")?).lines();
-    let mut ask = |id: u64, method: &str, params: Value| -> Result<Value, String> {
-        if method.starts_with("notifications/") {
-            let note = json!({"jsonrpc":"2.0","method":method});
-            return writeln!(stdin, "{note}")
-                .map(|_| Value::Null)
-                .map_err(|e| e.to_string());
-        }
-        let req = json!({"jsonrpc":"2.0","id":id,"method":method,"params":params});
-        writeln!(stdin, "{req}").map_err(|e| e.to_string())?;
-        loop {
-            let line = lines
-                .next()
-                .ok_or("server closed")?
-                .map_err(|e| e.to_string())?;
-            let v: Value = serde_json::from_str(&line).unwrap_or(Value::Null);
-            if v["id"] == json!(id) {
-                return match v.get("error") {
-                    Some(e) => Err(e.to_string()),
-                    None => Ok(v["result"].clone()),
-                };
-            }
-        }
-    };
-    let hello = json!({"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"fake-claude","version":"0"}});
-    ask(1, "initialize", hello)?;
-    ask(0, "notifications/initialized", Value::Null)?;
-    let res = ask(2, "tools/call", json!({"name": tool, "arguments": args}));
-    let _ = child.kill();
-    let _ = child.wait();
-    res
+    let argv: Vec<String> = spec["args"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|a| a.as_str().unwrap_or_default().to_string())
+        .collect();
+    let env: Vec<(String, String)> = spec["env"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(k, v)| (k.clone(), expand_env(v.as_str().unwrap_or_default())))
+        .collect();
+    fake_script::mcp_call(
+        spec["command"].as_str().unwrap_or_default(),
+        &argv,
+        &env,
+        tool,
+        args,
+    )
 }
 
 /// What the fake owes later: a background task's completion.
@@ -275,6 +258,168 @@ struct Due {
     task_id: String,
     tool_use_id: String,
     agent: bool,
+    /// A script's verbs after its `background`: the follow-up turn runs them.
+    rest: Option<Turn>,
+}
+
+struct ClaudeWire<'a> {
+    rx: &'a mpsc::Receiver<In>,
+    n: &'a mut u32,
+    dues: &'a mut Vec<Due>,
+    mcp_config: &'a str,
+    session: &'a str,
+    usage: (u64, u64),
+}
+
+impl ClaudeWire<'_> {
+    fn id(&mut self) -> String {
+        *self.n += 1;
+        format!("m{}", self.n)
+    }
+
+    /// The answer to control request `rid` (`Ok`), `Err(true)` when the turn
+    /// was interrupted, `Err(false)` when `until` came first.
+    fn wait_for(&mut self, rid: Option<&str>, until: Option<Instant>) -> Result<Value, bool> {
+        loop {
+            let msg = match until {
+                Some(at) => match self
+                    .rx
+                    .recv_timeout(at.saturating_duration_since(Instant::now()))
+                {
+                    Ok(m) => m,
+                    Err(mpsc::RecvTimeoutError::Timeout) => return Err(false),
+                    Err(mpsc::RecvTimeoutError::Disconnected) => std::process::exit(0),
+                },
+                None => self.rx.recv().unwrap_or(In::Eof),
+            };
+            let msg = match msg {
+                In::Line(v) => v,
+                In::Eof => std::process::exit(0),
+                In::McpDone(..) => continue,
+            };
+            match msg.get("type").and_then(Value::as_str) {
+                Some("control_request") => {
+                    let id = msg.get("request_id").cloned().unwrap_or(Value::Null);
+                    out(
+                        json!({"type":"control_response","response":{"subtype":"success","request_id":id,"response":{}}}),
+                    );
+                    if msg.pointer("/request/subtype").and_then(Value::as_str) == Some("interrupt")
+                    {
+                        result_interrupted();
+                        return Err(true);
+                    }
+                }
+                Some("control_response")
+                    if rid.is_some()
+                        && msg.pointer("/response/request_id").and_then(Value::as_str) == rid =>
+                {
+                    return Ok(msg)
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn can_use_tool(&mut self, tool: &str, input: Value) -> Option<Value> {
+        let rid = format!("perm-f{}", self.n);
+        out(
+            json!({"type":"control_request","request_id":rid,"request":{"subtype":"can_use_tool","tool_name":tool,"input":input,"tool_use_id":format!("tu-f{}", self.n)}}),
+        );
+        self.wait_for(Some(&rid), None).ok()
+    }
+}
+
+impl Wire for ClaudeWire<'_> {
+    fn say(&mut self, text: &str) {
+        let id = self.id();
+        text_message(&id, text);
+    }
+
+    fn wait(&mut self, d: Duration) -> bool {
+        self.wait_for(None, Some(Instant::now() + d)) == Err(false)
+    }
+
+    fn ask(&mut self, question: &str) -> Option<String> {
+        let input = json!({"questions": [{"question": question, "header": "Question", "multiSelect": false}]});
+        let m = self.can_use_tool("AskUserQuestion", input)?;
+        let answers = m.pointer("/response/response/updatedInput/answers");
+        Some(
+            answers
+                .and_then(|a| a.get(question).or_else(|| a.as_object()?.values().next()))
+                .and_then(Value::as_str)
+                .unwrap_or("declined")
+                .to_string(),
+        )
+    }
+
+    fn approve(&mut self, tool: &str) -> Option<bool> {
+        let m = self.can_use_tool(tool, json!({"command": "ls"}))?;
+        Some(
+            m.pointer("/response/response/behavior")
+                .and_then(Value::as_str)
+                == Some("allow"),
+        )
+    }
+
+    fn usage(&mut self, input: u64, output: u64) {
+        self.usage = (self.usage.0 + input, self.usage.1 + output);
+    }
+
+    fn fail(&mut self, class: FailClass, message: &str) {
+        let _ = class;
+        out(json!({"type":"result","subtype":"success","is_error":true,"result":message}));
+    }
+
+    fn background(&mut self, after: Duration, rest: Turn) {
+        let mid = self.id();
+        let (tu, task) = (format!("tu{}", self.n), format!("b{}", self.n));
+        out(
+            json!({"type":"assistant","message":{"id":mid,"content":[{"type":"tool_use","id":tu,"name":"Bash","input":{"command":"sleep 300","run_in_background":true}}]},"parent_tool_use_id":null}),
+        );
+        out(
+            json!({"type":"system","subtype":"task_started","task_id":task,"tool_use_id":tu,"description":"sleep 300","task_type":"local_bash"}),
+        );
+        let file = task_output_file(self.session, &task);
+        out(
+            json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":tu,"content":format!("Command running in background with ID: {task}. Output is being written to: {}", file.display())}]},"parent_tool_use_id":null}),
+        );
+        self.say("Working in the background.");
+        self.done();
+        self.dues.push(Due {
+            at: Instant::now() + after,
+            task_id: task,
+            tool_use_id: tu,
+            agent: false,
+            rest: Some(rest),
+        });
+    }
+
+    fn mcp(&mut self, tool: &str, args: Value) -> Result<Value, String> {
+        let mid = self.id();
+        let tu = format!("tu{}", self.n);
+        out(
+            json!({"type":"assistant","message":{"id":mid,"content":[{"type":"tool_use","id":tu,"name":format!("mcp__otto__{tool}"),"input":args}]},"parent_tool_use_id":null}),
+        );
+        let res = mcp_call(self.mcp_config, "otto", tool, args);
+        let (content, is_error) = match &res {
+            Ok(r) => (
+                r["content"].clone(),
+                r["isError"].as_bool().unwrap_or(false),
+            ),
+            Err(e) => (json!([{"type":"text","text":e}]), true),
+        };
+        out(
+            json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":tu,"content":content,"is_error":is_error}]},"parent_tool_use_id":null}),
+        );
+        res
+    }
+
+    fn done(&mut self) {
+        out(
+            json!({"type":"result","subtype":"success","is_error":false,"stop_reason":"end_turn","usage":{"input_tokens":self.usage.0,"output_tokens":self.usage.1}}),
+        );
+        self.usage = (0, 0);
+    }
 }
 
 fn arg_after(args: &[String], flag: &str) -> Option<String> {
@@ -284,7 +429,66 @@ fn arg_after(args: &[String], flag: &str) -> Option<String> {
         .cloned()
 }
 
+/// `stream <n> <ms>`: `c0 `…`c<n-1> ` as text deltas, one per `<ms>`.
+fn stream_turn(mid: &str, count: usize, ms: u64) {
+    out(
+        json!({"type":"stream_event","event":{"type":"message_start","message":{"id":mid}},"parent_tool_use_id":null}),
+    );
+    out(
+        json!({"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}},"parent_tool_use_id":null}),
+    );
+    let mut all = String::new();
+    for i in 0..count {
+        let d = format!("c{i} ");
+        all.push_str(&d);
+        out(
+            json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":d}},"parent_tool_use_id":null}),
+        );
+        std::thread::sleep(Duration::from_millis(ms));
+    }
+    out(
+        json!({"type":"stream_event","event":{"type":"content_block_stop","index":0},"parent_tool_use_id":null}),
+    );
+    out(
+        json!({"type":"assistant","message":{"id":mid,"content":[{"type":"text","text":all}]},"parent_tool_use_id":null}),
+    );
+    result_ok();
+}
+
+/// `gated <dir>`: a turn that streams in steps the test releases by files in `<dir>`.
+fn gated_turn(gate_dir: &str, mid: &str) {
+    let gate = std::path::Path::new(gate_dir);
+    let _ = std::fs::write(gate.join("pid_turn1"), std::process::id().to_string());
+    out(
+        json!({"type":"stream_event","event":{"type":"message_start","message":{"id":mid}},"parent_tool_use_id":null}),
+    );
+    out(
+        json!({"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}},"parent_tool_use_id":null}),
+    );
+    stream_delta(0, "alpha beta ");
+    let _ = std::fs::write(gate.join("phase1_ready"), b"1");
+    if !wait_for_file(&gate.join("emit_gap")) {
+        std::process::exit(2);
+    }
+    stream_delta(0, "gamma ");
+    let _ = std::fs::write(gate.join("gap_emitted"), b"1");
+    if !wait_for_file(&gate.join("finish_turn")) {
+        std::process::exit(2);
+    }
+    stream_delta(0, "delta");
+    out(
+        json!({"type":"stream_event","event":{"type":"content_block_stop","index":0},"parent_tool_use_id":null}),
+    );
+    out(
+        json!({"type":"assistant","message":{"id":mid,"content":[{"type":"text","text":"alpha beta gamma delta"}]},"parent_tool_use_id":null}),
+    );
+    result_ok();
+}
+
 fn main() {
+    fake_script::log_start();
+    let cfg = fake_script::Config::from_env("claude", &[]);
+    let cwd = std::env::current_dir().unwrap_or_default();
     let args: Vec<String> = std::env::args().collect();
     let mut mode = arg_after(&args, "--permission-mode").unwrap_or_default();
     let mut cost = 0.0f64;
@@ -362,6 +566,21 @@ fn main() {
                     "tool_use_id":d.tool_use_id,"status":"completed","output_file":"",
                     "summary": if d.agent { "Found 2 open PRs" } else { "exit 0" }}),
                 );
+                if let Some(mut rest) = d.rest {
+                    // The script's follow-up turn: the verbs after `background`.
+                    let mut wire = ClaudeWire {
+                        rx: &rx,
+                        n: &mut n,
+                        dues: &mut dues,
+                        mcp_config: &mcp_config,
+                        session: &session,
+                        usage: (0, 0),
+                    };
+                    wire.say("Background done: ok");
+                    rest.resumed(*wire.n);
+                    fake_script::drive(rest, &mut wire);
+                    continue;
+                }
                 // The notification reaches the model: a turn of its own.
                 n += 1;
                 let reply = if d.agent {
@@ -476,33 +695,20 @@ fn main() {
                 if fake_draft(&mid, &text) {
                     continue;
                 }
+                if let Some(script) = Turn::start(&text, &cwd, &session, n, &cfg) {
+                    let mut wire = ClaudeWire {
+                        rx: &rx,
+                        n: &mut n,
+                        dues: &mut dues,
+                        mcp_config: &mcp_config,
+                        session: &session,
+                        usage: (0, 0),
+                    };
+                    fake_script::drive(script, &mut wire);
+                    continue;
+                }
                 if let Some(gate_dir) = text.strip_prefix("gated ").map(str::trim) {
-                    let gate = std::path::Path::new(gate_dir);
-                    let _ = std::fs::write(gate.join("pid_turn1"), std::process::id().to_string());
-                    out(
-                        json!({"type":"stream_event","event":{"type":"message_start","message":{"id":mid}},"parent_tool_use_id":null}),
-                    );
-                    out(
-                        json!({"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}},"parent_tool_use_id":null}),
-                    );
-                    stream_delta(0, "alpha beta ");
-                    let _ = std::fs::write(gate.join("phase1_ready"), b"1");
-                    if !wait_for_file(&gate.join("emit_gap")) {
-                        std::process::exit(2);
-                    }
-                    stream_delta(0, "gamma ");
-                    let _ = std::fs::write(gate.join("gap_emitted"), b"1");
-                    if !wait_for_file(&gate.join("finish_turn")) {
-                        std::process::exit(2);
-                    }
-                    stream_delta(0, "delta");
-                    out(
-                        json!({"type":"stream_event","event":{"type":"content_block_stop","index":0},"parent_tool_use_id":null}),
-                    );
-                    out(
-                        json!({"type":"assistant","message":{"id":mid,"content":[{"type":"text","text":"alpha beta gamma delta"}]},"parent_tool_use_id":null}),
-                    );
-                    result_ok();
+                    gated_turn(gate_dir, &mid);
                     continue;
                 }
                 if let Some(pid_path) = text.strip_prefix("pid ").map(str::trim) {
@@ -536,6 +742,7 @@ fn main() {
                             task_id: task,
                             tool_use_id: tu,
                             agent: false,
+                            rest: None,
                         });
                     }
                     "agent" => {
@@ -565,33 +772,13 @@ fn main() {
                             task_id: task,
                             tool_use_id: tu,
                             agent: true,
+                            rest: None,
                         });
                     }
                     "stream" => {
                         let count: usize = secs as usize;
                         let ms: u64 = words.next().and_then(|w| w.parse().ok()).unwrap_or(0);
-                        out(
-                            json!({"type":"stream_event","event":{"type":"message_start","message":{"id":mid}},"parent_tool_use_id":null}),
-                        );
-                        out(
-                            json!({"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}},"parent_tool_use_id":null}),
-                        );
-                        let mut all = String::new();
-                        for i in 0..count {
-                            let d = format!("c{i} ");
-                            all.push_str(&d);
-                            out(
-                                json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":d}},"parent_tool_use_id":null}),
-                            );
-                            std::thread::sleep(Duration::from_millis(ms));
-                        }
-                        out(
-                            json!({"type":"stream_event","event":{"type":"content_block_stop","index":0},"parent_tool_use_id":null}),
-                        );
-                        out(
-                            json!({"type":"assistant","message":{"id":mid,"content":[{"type":"text","text":all}]},"parent_tool_use_id":null}),
-                        );
-                        result_ok();
+                        stream_turn(&mid, count, ms);
                     }
                     "ask" => {
                         let rid = format!("perm-{n}");

@@ -51,12 +51,242 @@
 //! slash commands (`available_commands_update`).
 //! `initialize` advertises `promptCapabilities.embeddedContext` (no images).
 //!
+//! A prompt with `OTTO_FAKE:` lines acts out that script instead
+//! (src/fake_script.rs): `ask` is a form `elicitation/create`, `approve` a
+//! `session/request_permission`, `child` / `finish-child` Otto's
+//! `otto_thread_*` tools through the `otto` server of `session/new`'s
+//! `mcpServers` (no `background`: ACP has no turn of the agent's own).
+//!
 //! `session/load` replays one history chunk before answering (clients must
 //! not show it). stdin EOF ends the process (exit 0), like the real CLIs.
 
 use std::io::{BufRead, Write};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
+
+#[path = "../fake_script.rs"]
+mod fake_script;
+
+use fake_script::{FailClass, Turn, Wire};
+
+/// stdin's lines off a reader thread, so a script's `sleep` can still see a
+/// `session/cancel`.
+struct Input(mpsc::Receiver<String>);
+
+impl Input {
+    fn spawn() -> Self {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            for line in std::io::stdin().lock().lines() {
+                let Ok(line) = line else { break };
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        Self(rx)
+    }
+}
+
+impl Iterator for Input {
+    type Item = std::io::Result<String>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.recv().ok().map(Ok)
+    }
+}
+
+/// One stdio MCP server from `session/new` (`mcpServers`).
+struct McpServer {
+    name: String,
+    command: String,
+    args: Vec<String>,
+    env: Vec<(String, String)>,
+}
+
+fn mcp_servers(params: &Value) -> Vec<McpServer> {
+    params["mcpServers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|s| McpServer {
+            name: s["name"].as_str().unwrap_or_default().into(),
+            command: s["command"].as_str().unwrap_or_default().into(),
+            args: s["args"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|a| a.as_str().map(str::to_string))
+                .collect(),
+            env: s["env"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|e| {
+                    let s = |k: &str| e[k].as_str().unwrap_or_default().to_string();
+                    (s("name"), s("value"))
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+struct AcpWire<'a> {
+    lines: &'a mut Input,
+    id: &'a Value,
+    sid: &'a str,
+    servers: &'a [McpServer],
+    usage: Option<(u64, u64)>,
+    asks: u32,
+}
+
+impl AcpWire<'_> {
+    fn finish(&self, stop: &str) {
+        let mut result = json!({"stopReason": stop});
+        if let Some((i, o)) = self.usage {
+            result["usage"] = json!({"inputTokens": i, "outputTokens": o});
+        }
+        reply(self.id, result);
+    }
+
+    /// The answer to our request `rid` (`Ok`), `Err(true)` on `session/cancel`,
+    /// `Err(false)` when `until` came first.
+    fn wait_for(&mut self, rid: Option<&str>, until: Option<Instant>) -> Result<Value, bool> {
+        loop {
+            let line = match until {
+                Some(at) => match self
+                    .lines
+                    .0
+                    .recv_timeout(at.saturating_duration_since(Instant::now()))
+                {
+                    Ok(l) => l,
+                    Err(mpsc::RecvTimeoutError::Timeout) => return Err(false),
+                    Err(mpsc::RecvTimeoutError::Disconnected) => std::process::exit(0),
+                },
+                None => self
+                    .lines
+                    .0
+                    .recv()
+                    .unwrap_or_else(|_| std::process::exit(0)),
+            };
+            let Ok(m) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if method(&m) == "session/cancel" {
+                self.finish("cancelled");
+                return Err(true);
+            }
+            if rid.is_some() && m.get("method").is_none() && m["id"].as_str() == rid {
+                return Ok(m);
+            }
+        }
+    }
+}
+
+impl Wire for AcpWire<'_> {
+    fn say(&mut self, text: &str) {
+        chunk(self.sid, "agent_message_chunk", text);
+    }
+
+    fn wait(&mut self, d: Duration) -> bool {
+        self.wait_for(None, Some(Instant::now() + d)) == Err(false)
+    }
+
+    fn ask(&mut self, question: &str) -> Option<String> {
+        self.asks += 1;
+        let rid = format!("elicit-f{}", self.asks);
+        out(
+            json!({"jsonrpc":"2.0","id":rid,"method":"elicitation/create","params":{"sessionId":self.sid,
+            "mode":"form","message":question,"requestedSchema":{"type":"object",
+            "properties":{"answer":{"type":"string","title":question}},"required":["answer"]}}}),
+        );
+        let m = self.wait_for(Some(&rid), None).ok()?;
+        Some(match m["result"]["action"].as_str() {
+            Some("accept") => m["result"]["content"]["answer"]
+                .as_str()
+                .unwrap_or_default()
+                .into(),
+            other => other.unwrap_or("declined").into(),
+        })
+    }
+
+    fn approve(&mut self, tool: &str) -> Option<bool> {
+        self.asks += 1;
+        let rid = format!("perm-f{}", self.asks);
+        update(
+            self.sid,
+            json!({"sessionUpdate":"tool_call","toolCallId":rid,"title":tool,"kind":"execute","status":"pending"}),
+        );
+        out(
+            json!({"jsonrpc":"2.0","id":rid,"method":"session/request_permission","params":{
+            "sessionId":self.sid,"toolCall":{"toolCallId":rid,"kind":"execute","title":tool},
+            "options":[{"optionId":"a1","name":"Allow","kind":"allow_once"},
+                {"optionId":"r1","name":"Deny","kind":"reject_once"}]}}),
+        );
+        let m = self.wait_for(Some(&rid), None).ok()?;
+        let outcome = &m["result"]["outcome"];
+        let allowed = match (outcome["outcome"].as_str(), outcome["optionId"].as_str()) {
+            (Some("selected"), Some("a1")) => true,
+            (Some("selected"), _) => false,
+            _ => {
+                self.finish("cancelled");
+                return None;
+            }
+        };
+        let status = if allowed { "completed" } else { "failed" };
+        update(
+            self.sid,
+            json!({"sessionUpdate":"tool_call_update","toolCallId":rid,"status":status}),
+        );
+        Some(allowed)
+    }
+
+    fn usage(&mut self, input: u64, output: u64) {
+        let (i, o) = self.usage.unwrap_or_default();
+        self.usage = Some((i + input, o + output));
+    }
+
+    fn fail(&mut self, class: FailClass, message: &str) {
+        // `-32000` is ACP's auth_required; the rest read by their text.
+        let code = if class == FailClass::Auth {
+            -32000
+        } else {
+            -32603
+        };
+        out(json!({"jsonrpc":"2.0","id":self.id,"error":{"code":code,"message":message}}));
+    }
+
+    fn background(&mut self, _after: Duration, _rest: Turn) {
+        unreachable!("ACP has no background turn")
+    }
+
+    fn mcp(&mut self, tool: &str, args: Value) -> Result<Value, String> {
+        let s = self
+            .servers
+            .iter()
+            .find(|s| s.name == "otto")
+            .ok_or("no otto MCP server")?;
+        self.asks += 1;
+        let call = format!("mcp-f{}", self.asks);
+        update(
+            self.sid,
+            json!({"sessionUpdate":"tool_call","toolCallId":call,"title":format!("otto: {tool}"),"kind":"other","status":"in_progress","rawInput":args}),
+        );
+        let res = fake_script::mcp_call(&s.command, &s.args, &s.env, tool, args);
+        let status = if res.is_ok() { "completed" } else { "failed" };
+        update(
+            self.sid,
+            json!({"sessionUpdate":"tool_call_update","toolCallId":call,"status":status}),
+        );
+        res
+    }
+
+    fn done(&mut self) {
+        self.finish("end_turn");
+    }
+}
 
 fn out(v: Value) {
     let mut o = std::io::stdout().lock();
@@ -121,8 +351,12 @@ fn reply(id: &Value, result: Value) {
 }
 
 fn main() {
-    let stdin = std::io::stdin();
-    let mut lines = stdin.lock().lines();
+    fake_script::log_start();
+    let cfg = fake_script::Config::from_env("acp", &["background"]);
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let mut lines = Input::spawn();
+    let mut servers: Vec<McpServer> = Vec::new();
+    let mut turns = 0u32;
     let mut asks = 0u32;
     let args: Vec<String> = std::env::args().collect();
     let refuse = args.iter().any(|a| a == "--refuse-session");
@@ -162,6 +396,7 @@ fn main() {
             ),
             "session/new" => {
                 system = system_of(&params);
+                servers = mcp_servers(&params);
                 let sid = format!("fake-{}", std::process::id());
                 reply(
                     &id,
@@ -171,6 +406,7 @@ fn main() {
             }
             "session/set_model" => {
                 model = params["modelId"].as_str().unwrap_or_default().to_string();
+                fake_script::argv_log(json!({"model": model}));
                 reply(&id, json!({}));
             }
             "session/set_config_option" => {
@@ -180,6 +416,9 @@ fn main() {
                     Some("thought_level") => effort = value,
                     _ => {}
                 }
+                fake_script::argv_log(
+                    json!({"config": params["configId"], "value": params["value"]}),
+                );
                 reply(&id, json!({}));
             }
             "session/set_mode" => {
@@ -188,6 +427,7 @@ fn main() {
             }
             "session/load" => {
                 system = system_of(&params);
+                servers = mcp_servers(&params);
                 let sid = params["sessionId"].as_str().unwrap_or_default().to_string();
                 chunk(&sid, "agent_message_chunk", "(history)");
                 reply(&id, json!({"modes": modes}));
@@ -210,6 +450,19 @@ fn main() {
                     Some((h, t)) if h.starts_with("[Subagent task from thread ") => t.to_string(),
                     _ => text,
                 };
+                turns += 1;
+                if let Some(script) = Turn::start(&text, &cwd, &sid, turns, &cfg) {
+                    let mut wire = AcpWire {
+                        lines: &mut lines,
+                        id: &id,
+                        sid: &sid,
+                        servers: &servers,
+                        usage: None,
+                        asks: 0,
+                    };
+                    fake_script::drive(script, &mut wire);
+                    continue;
+                }
                 let done = |stop: &str| reply(&id, json!({"stopReason":stop}));
                 match text.as_str() {
                     "crash" => {
