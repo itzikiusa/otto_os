@@ -1119,40 +1119,30 @@ fn flow_templates() -> Vec<WorkflowTemplate> {
             ) }),
         )
     };
-    // Loop body — REVIEW first, then FIX (design §E): the work already exists
-    // from the upstream implement step, so each iteration reviews it, then fixes
-    // the findings, repeating until the review passes. The reviewers mirror PR
-    // review (design §F): per-lens provider sets + a summarizer. Scoring is a
-    // generic, configurable severity→deduction guideline (design §G). `reviewers`
-    // is a JSON array of { lens, providers[] (, instructions?) }.
-    let fix_review_loop = |max: u64, threshold: u64, reviewers: serde_json::Value, x: f64| {
-        node(
-            "iterate",
-            "loop",
-            "Review → fix until passing",
+    // Loop body — REVIEW first, then FIX (design §E), as the one review→fix
+    // rule (goal.md §4.1): review → check "the review passes" → fix, ending at
+    // once when the review passes. The reviewers mirror PR review (per-lens
+    // provider sets + a summarizer); scoring deducts per OPEN finding by
+    // severity (bug=critical, warn=high, info=low).
+    let fix_review_loop = |max: u32, threshold: u64, reviewers: serde_json::Value, x: f64| {
+        use otto_workflows::goal::{review_fix_loop, ReviewFixOpts, ReviewFixStart};
+        review_fix_loop(ReviewFixOpts {
+            max_iterations: max,
+            max_active_s: None,
+            start_with: ReviewFixStart::Review,
+            review_params: json!({"threshold": threshold, "reviewers": reviewers,
+                "summarizer": {"provider": "claude"}, "scoring": {"bug": 10, "warn": 5, "info": 1}}),
+            fix_prompt: "You are given the latest code review in the input (its findings and score). \
+                         Address EVERY finding and make all tests pass while satisfying the goals."
+                .into(),
+            extra_criteria: vec![],
+            hold_when_unmet: false,
+            stop_on_repeat_failure: false,
+            fix_agent: Default::default(),
+            checker: Default::default(),
             x,
-            json!({
-                "max_iterations": max,
-                // Pass iff the review step (by name) cleared the threshold.
-                "until": "steps.review.passed == true",
-                "steps": [
-                    { "kind": "review_run", "name": "review", "params": {
-                        "threshold": threshold,
-                        "reviewers": reviewers,
-                        "summarizer": { "provider": "claude" },
-                        // Generic scoring guideline — percent deducted per OPEN
-                        // finding by severity (bug=critical, warn=high, info=low).
-                        "scoring": { "bug": 10, "warn": 5, "info": 1 }
-                    }},
-                    { "kind": "agent_prompt", "name": "fix", "params": {
-                        "prompt": "You are given the latest code review in the input (its findings, \
-                                   score, and `passed`). If `passed` is true or there are no \
-                                   findings, make NO changes. Otherwise address EVERY finding and \
-                                   make all tests pass while satisfying the goals."
-                    }}
-                ]
-            }),
-        )
+        })
+        .expect("the templates' review step has no require_pass")
     };
     // A separate, terminal "offer improvements" block (design §I): after the
     // work + review loop, reflect on the session and OFFER skill/memory
@@ -2478,6 +2468,29 @@ mod tests {
                 .edges
                 .iter()
                 .any(|e| e.source == "iterate" && e.target == "report"));
+        }
+    }
+
+    /// GL12.2: the four review→fix templates share the one review→fix loop —
+    /// review, check "the review passes", fix — and no `until` / `require_pass`.
+    #[test]
+    fn templates_use_the_one_review_fix_loop() {
+        let loops: Vec<_> = flow_templates()
+            .into_iter()
+            .filter_map(|t| t.graph.nodes.into_iter().find(|n| n.id == "iterate"))
+            .collect();
+        assert_eq!(loops.len(), 4);
+        for n in loops {
+            let steps = n.params["steps"].as_array().unwrap();
+            let kinds: Vec<_> = steps.iter().map(|s| s["kind"].as_str().unwrap()).collect();
+            assert_eq!(kinds, ["review_run", "check", "agent_prompt"]);
+            assert!(
+                n.params.get("until").is_none() && steps[0]["params"].get("require_pass").is_none()
+            );
+            assert_eq!(
+                steps[1]["params"]["criteria"][0]["expr"],
+                "steps.review.passed == true"
+            );
         }
     }
 
