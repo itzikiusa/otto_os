@@ -105,6 +105,41 @@ test('a second failed step says its own failure in the pane; the card keeps the 
   await expect(stepPane(page).getByTestId('wf-step-error')).toContainText(other!.node_id === 'a' ? 'Not logged in' : 'API Error: 500');
 });
 
+test('a failed step under another card says its failure in the pane (CR1-047)', async ({ page }) => {
+  const wf = await createWorkflow(api, 'E2E Held failure', chain(agentStep('p', 'Provider down', ['fail provider'], { retry: { max_attempts: 0 } })));
+  const run = await startRun(api, wf);
+  await waitRun(api, run, settled);
+  // A held run (a goal out of checks, DR-101): its card is the hold, so the error card is not shown.
+  await page.route(`**/api/v1/workflow-runs/${run}`, async (route) => {
+    const res = await route.fetch();
+    const real = await res.json();
+    const hold = { kind: 'blocked', reason: 'Check failed twice', since: real.finished_at, node_ids: [] };
+    await route.fulfill({ response: res, json: { ...real, overview: { ...real.overview, state: 'blocked', hold } } });
+  });
+  await openRun(page, wf, run, 'p');
+  await expect(page.getByTestId('wf-run-card')).toHaveAttribute('data-kind', 'hold');
+  await expect(stepPane(page).getByTestId('wf-step-error')).toContainText('API Error: 500');
+});
+
+test('a step thread offers neither an agent restart nor Open in Threads (CR2-009)', async ({ page }) => {
+  const wf = await createWorkflow(api, 'E2E Live step thread', chain(agentStep('slow', 'Slow step', ['sleep 60000'])));
+  const run = await startRun(api, wf);
+  const live = await waitRun(api, run, (r) => !!r.nodes.find((n) => n.node_id === 'slow')?.thread?.thread_id);
+  const thread = live.nodes.find((n) => n.node_id === 'slow')!.thread!.thread_id;
+  // The workspace's servers now differ from the ones the step's agent started with…
+  await page.route(`**/api/v1/workspaces/${api.ws}/mcp-servers`, (route) => route.fulfill({ json: [{ name: 'late-probe', enabled: true }] }));
+  // …and the step's agent opened a thread of its own.
+  await api.post(`/runtime-sessions/${thread}/children`, { prompt: 'hi', targets: [{ provider: 'claude' }], title: 'Step subagent' });
+  await openRun(page, wf, run, 'slow');
+  const conv = page.getByTestId('wf-step-conversation');
+  await conv.getByTestId('runtime-linked').click({ timeout: 20_000 });
+  const list = page.getByRole('list', { name: 'Subagents' });
+  await expect(list).toContainText('Step subagent');
+  await expect(list.getByRole('button', { name: /in Threads$/ })).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  await expect(conv.getByTestId('runtime-mcp-changed')).toHaveCount(0);
+});
+
 test('Stop run… asks first; Stop is never beside a primary', async ({ page }) => {
   const wf = await createWorkflow(api, 'E2E Long step', chain(agentStep('slow', 'Slow step', ['sleep 60000'])));
   const run = await startRun(api, wf);
@@ -168,6 +203,9 @@ test('files sent with the message show under Result → Input: a text one previe
     const body = { ...real, overview, attachments: [
       { name: 'trace.log', mime: 'text/plain', size_bytes: 2048, path: 'attachments/trace.log', source: 'start' },
       { name: 'screen.png', mime: 'image/png', source: 'steer', error: 'too large' },
+      // Two files of one name: the daemon keeps the name and gives each its own path (CR2-012).
+      { name: 'shot.png', mime: 'image/png', size_bytes: 1024, path: 'attachments/shot.png', source: 'start' },
+      { name: 'shot.png', mime: 'image/png', size_bytes: 1024, path: 'attachments/shot-2.png', source: 'steer' },
     ] };
     await route.fulfill({ response: res, json: body });
   });
@@ -184,7 +222,7 @@ test('files sent with the message show under Result → Input: a text one previe
   await expect(card.locator('a')).toHaveCount(1);
   await expect(card.locator('a')).toHaveAttribute('href', 'https://example.invalid/pr/1');
   await page.getByTestId('wf-step-tab-input').click();
-  await expect(page.getByTestId('wf-run-attachment')).toHaveCount(2);
+  await expect(page.getByTestId('wf-run-attachment')).toHaveCount(4);
   const failed = page.locator('[data-testid="wf-run-attachment"][data-error="true"]');
   await expect(failed).toContainText('not downloaded');
   await expect(failed.getByRole('button')).toHaveCount(0);
