@@ -28,7 +28,7 @@
   import StepPane from './StepPane.svelte';
   import { cancelQueued, pauseRun, rereview, resumeRun, retryStep, steerRun, stopRun } from './runActions';
   import { fallbackState, runTitle, runWord } from './runWords';
-  import { defaultSelection, entrySteps, loopChildren, orderSteps, RESULT, settledNodes } from './stepOrder';
+  import { defaultSelection, entrySteps, loopChildren, orderSteps, RESULT, settledNodes, stepNumber } from './stepOrder';
   import { markRunOpened } from './seenRuns';
   import { registry } from '../../../lib/commands.svelte';
   import { workflowsUi } from '../workflowsUiState.svelte';
@@ -230,7 +230,7 @@
           {#if wide && maximized}
             <button type="button" class="btn small runback" onclick={() => (maximized = false)}><Icon name="chevronLeft" size={12} />Run</button>
           {/if}
-          <StepPane {run} {sync} {workspaceId} {runState} cardNode={pushed || (wide && maximized) || runState !== 'failed' ? null : failedNode} step={openStep} childId={selected.child} stepCount={steps.length} {now} tab={askedTab} {criteria} {maximized} onmaximize={wide ? () => (maximized = !maximized) : undefined} />
+          <StepPane {run} {sync} {workspaceId} {runState} cardNode={pushed || (wide && maximized) || runState !== 'failed' ? null : failedNode} step={openStep} childId={selected.child} stepNo={openStep ? stepNumber(steps, openStep) : null} stepCount={steps.length} {now} tab={askedTab} {criteria} {maximized} onmaximize={wide ? () => (maximized = !maximized) : undefined} />
         </div>
       {/if}
     {/if}

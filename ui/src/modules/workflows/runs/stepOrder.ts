@@ -81,6 +81,12 @@ function ancestorsOf(graph: WorkflowGraph): (id: string) => Set<string> {
   return (id) => visit(id, new Set());
 }
 
+/** A step's number for "Step 3 of 6": the engine's own, else (a run from
+ *  before steps were numbered) its place in the run's order. */
+export function stepNumber(steps: readonly StepItem[], step: StepItem): number {
+  return step.node.step_no ?? steps.indexOf(step) + 1;
+}
+
 /** A settled run has nothing running: a step an older engine left `running`
  *  (a run a daemon restart interrupted) reads as stopped — no spinner, no
  *  live timer — everywhere the page shows it. */

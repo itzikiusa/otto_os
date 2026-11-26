@@ -3,7 +3,7 @@
 // selection — runs/stepOrder.ts.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { childCrumb, childNoun, defaultSelection, doneFold, entrySteps, loopChildren, orderChildren, orderSteps, RESULT, settledNodes, timeBar, topoOrder } from '../src/modules/workflows/runs/stepOrder.ts';
+import { childCrumb, childNoun, defaultSelection, doneFold, entrySteps, loopChildren, orderChildren, orderSteps, RESULT, settledNodes, stepNumber, timeBar, topoOrder } from '../src/modules/workflows/runs/stepOrder.ts';
 import { at, fanoutNodes, node, PR_GRAPH, reviewers, T0 } from './workflowRunFixtures.ts';
 import { stepWord } from '../src/modules/workflows/runs/runWords.ts';
 import type { WorkflowGraph } from '../src/lib/api/types';
@@ -85,6 +85,15 @@ test('a settled run shows a step left running as stopped, with no live timer', (
   assert.match(stepWord(left, { now: NOW + 3463 * 3_600_000, run: 'failed' }).word, /^Working 3463h/);
   // A live run's steps are untouched.
   assert.equal(settledNodes(nodes, true), nodes);
+});
+
+// Seen on a real history: every pre-upgrade step's pane was headed "Step – of 6".
+test('a step without a stored number takes its place in the run\'s order', () => {
+  const steps = orderSteps([node('n1', 'success', 0, 1000), node('n3', 'success', 2, 1000), node('n2', 'success', 1, 1000)], PR_GRAPH, NOW).flatMap(entrySteps);
+  assert.deepEqual(steps.map((s) => [s.id, stepNumber(steps, s)]), [['n1', 1], ['n2', 2], ['n3', 3]]);
+  // The engine's own number wins.
+  const numbered = orderSteps([node('n1', 'success', 0, 1000, { step_no: 4 })], PR_GRAPH, NOW).flatMap(entrySteps);
+  assert.equal(stepNumber(numbered, numbered[0]), 4);
 });
 
 test('the phone folds the done steps before the current one', () => {

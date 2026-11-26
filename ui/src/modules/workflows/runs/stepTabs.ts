@@ -28,6 +28,13 @@ export function paneTabs(what: { result?: boolean; goal?: boolean; child?: boole
   return ['log', 'output'];
 }
 
+/** An older (terminal-session) step's sessions: the ones still kept open in
+ *  Agents; `gone` when every one was checked and none is kept — the pane then
+ *  says so instead of offering an action that leads nowhere. */
+export function keptSessions(ids: readonly string[], kept: Readonly<Record<string, boolean>>): { open: string[]; gone: boolean } {
+  return { open: ids.filter((id) => kept[id]), gone: ids.length > 0 && ids.every((id) => kept[id] === false) };
+}
+
 export interface PhaseSegment {
   phase: string;
   label: string;
