@@ -55,8 +55,17 @@ struct Fx {
 }
 
 async fn setup(ws_id: &str, graph: WorkflowGraph) -> Fx {
+    fixture(ws_id, graph, false).await
+}
+
+/// `on_disk`: a database file, which a query dropped mid-flight (a Pause
+/// cutting a step) cannot reset as it resets the in-memory one.
+async fn fixture(ws_id: &str, graph: WorkflowGraph, on_disk: bool) -> Fx {
     let tmp = tempfile::TempDir::new().unwrap();
-    let pool = mem_pool().await;
+    let pool = match on_disk {
+        true => otto_state::open(&tmp.path().join("goal.db")).await.unwrap(),
+        false => mem_pool().await,
+    };
     seed_workspace(&pool, ws_id).await;
     sqlx::query("INSERT INTO users(id,username,password_hash,display_name,is_root,created_at) VALUES('root','root','x','Root',1,?)")
         .bind(chrono::Utc::now().to_rfc3339())
@@ -1535,4 +1544,49 @@ async fn a_siblings_publish_keeps_the_gates_preview() {
         out.and_then(|o| o.get("publication_preview").cloned()),
         Some(preview)
     );
+}
+
+/// GL11.2: a Pause racing an inner step's completion never loses the step
+/// or fails the run — after Resume the run succeeds and every iteration's
+/// step has a successful checkpoint (a step the pause cut runs again).
+/// 50 runs, the pause landing at a different point each time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "GL11.2 finding: some pause/resume races end the run as 'one or more nodes failed' — engine fix pending"]
+async fn pause_racing_completion_never_runs_a_step_twice() {
+    for rep in 0..50u64 {
+        let steps = json!([
+            {"kind": "delay", "name": "work", "params": {"ms": 20}},
+            check(json!([{"id": "two", "text": "second try", "verify": "expr", "expr": "iteration >= 2"}])),
+        ]);
+        let graph = goal_graph(steps, json!({"max_iterations": 3}));
+        let fx = fixture(&format!("goal-race-{rep}"), graph, true).await;
+        let driver = fx.drive();
+        until(&fx, "goal", |n| n.status == NodeStatus::Running).await;
+        tokio::time::sleep(Duration::from_millis(rep % 45)).await;
+        let paused = hold::pause(&fx.ctx, &fx.run_id, &fx.user).await.is_ok();
+        let _ = driver.await;
+        if paused && fx.repo.get_run(&fx.run_id).await.unwrap().hold.is_some() {
+            hold::resume(&fx.ctx, &fx.run_id, None).await.unwrap();
+        }
+        let run = fx.settled().await;
+        let errs: Vec<_> = run
+            .nodes
+            .iter()
+            .map(|n| (&n.node_id, n.status, &n.error, n.logs.last()))
+            .collect();
+        assert_eq!(
+            run.status,
+            RunStatus::Success,
+            "rep {rep}: {:?} paused {paused} {errs:?}",
+            run.error
+        );
+        for id in ["goal#1.0", "goal#2.0"] {
+            let cp = fx.checkpoint(id).await;
+            assert_eq!(
+                cp.map(|c| c.status),
+                Some(NodeStatus::Success),
+                "rep {rep}: {id}"
+            );
+        }
+    }
 }
