@@ -538,6 +538,53 @@ async fn thread_survived() {
     ctx.agent_runtime.shutdown().await;
 }
 
+/// CR1-005 for a loop's inner step: a held thread that finished its turn
+/// while the daemon was down keeps the handoff its agent wrote — the resumed
+/// attempt is not dated from the boot, so the engine's rendering never
+/// overwrites the agent's file.
+#[test]
+fn a_loop_step_whose_thread_survived_keeps_the_handoff_it_wrote() {
+    on_workers(DEFAULT_STACK, inner_thread_survived());
+}
+
+async fn inner_thread_survived() {
+    let rig = Rig::new().await;
+    std::fs::write(
+        rig.root.join("scripts/work.txt"),
+        "sleep 1500\nwrite $HANDOFF the agent's own handoff\nreply done\n",
+    )
+    .unwrap();
+    let work = json!({"kind": "agent_prompt", "name": "Work",
+        "params": {"provider": "claude", "prompt": "Do it.\nOTTO_FAKE: @script"}});
+    let ctx = rig.life(None).await;
+    let loop_params = json!({"max_iterations": 1, "steps": [work]});
+    let (run_id, _) = start_and_cut(&rig, &ctx, graph("loop", loop_params)).await;
+    let kept = ctx.agent_runtime.clone();
+    drop(ctx);
+    // The held turn ends and writes its handoff while no daemon runs.
+    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+    let ctx = rig.life(Some(kept)).await;
+    boot(&ctx).await;
+    let run = settled(&ctx, &run_id, false).await;
+    assert_eq!(
+        run.status,
+        RunStatus::Success,
+        "{:?} {:?}",
+        run.error,
+        run.nodes
+    );
+    let dir = ctx.data_dir.join("workflow-context").join(run_id.as_str());
+    let handoff = std::fs::read_to_string(dir.join("step2-work-iter1.md")).unwrap_or_default();
+    assert!(handoff.contains("the agent's own handoff"), "{handoff}");
+    assert_eq!(
+        turns(&rig).len(),
+        1,
+        "never prompted again: {:?}",
+        turns(&rig)
+    );
+    ctx.agent_runtime.shutdown().await;
+}
+
 /// A delay cut mid-wait re-runs after the boot and the run finishes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_delay_cut_mid_wait_runs_again_and_the_run_finishes() {

@@ -154,7 +154,9 @@ pub(in crate::workflow_engine) async fn execute(
                     .and_then(|r| serde_json::from_value(r.clone()).ok()),
             };
             let same_thread = step.get("same_thread").and_then(Value::as_bool) == Some(true);
-            inner_thread(&repo, run_id, &node.id, &mut sub, (i, k), same_thread).await;
+            // A resumed attempt began before the restart (CR1-005).
+            let sub_attempt_started =
+                inner_thread(&repo, run_id, &node.id, &mut sub, (i, k), same_thread).await;
             // Inner steps share the loop's step number and add
             // `-iter{X}` (the user's convention): step3-review-iter2.md.
             let sub_scope = StepScope {
@@ -168,7 +170,6 @@ pub(in crate::workflow_engine) async fn execute(
                 sub_scope.iter,
                 sub_scope.inner_idx,
             );
-            let sub_attempt_started = std::time::SystemTime::now();
             let checkpoint = loop_checkpoint(&sub, &node.id, i, k, step_input.clone());
             let checkpoint_repo = WorkflowsRepo::new(ctx.pool.clone());
             let clock = AttemptClock::default();
@@ -423,7 +424,8 @@ async fn before_step(
     loop_stop(b, StopPoint::BeforeStep { active_ms })
 }
 
-/// A restart caught this attempt on a thread → resume it (DR-111);
+/// The attempt's start: now, or — a restart caught it on a thread, which it
+/// resumes (DR-111) — when its checkpoint last moved, at the latest.
 /// `same_thread` → continue the previous iteration's thread of the step.
 async fn inner_thread(
     repo: &WorkflowsRepo,
@@ -432,10 +434,12 @@ async fn inner_thread(
     sub: &mut WorkflowNode,
     (i, k): (u64, usize),
     same_thread: bool,
-) {
+) -> std::time::SystemTime {
     let cp = repo.checkpoint(run_id, &sub.id).await.ok().flatten();
-    if let Some(t) = cp.as_ref().and_then(caught_thread) {
+    let mut started = std::time::SystemTime::now();
+    if let Some((t, cp)) = cp.as_ref().and_then(|cp| Some((caught_thread(cp)?, cp))) {
         super::super::step_thread::mark_resume(run_id, &sub.id, &t);
+        started = cp.updated_at.into();
     }
     if same_thread && i > 1 {
         let prev = repo
@@ -443,6 +447,7 @@ async fn inner_thread(
             .await;
         continue_previous(&mut sub.params, prev.ok().flatten().as_ref());
     }
+    started
 }
 
 fn step_note(a: &AgentAssociation) -> Option<&otto_workflows::step_util::StepNote> {
