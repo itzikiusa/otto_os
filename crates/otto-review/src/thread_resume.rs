@@ -40,7 +40,7 @@ pub struct ResumeCtx {
 /// closed (the caller summarizes afresh). Returns each reviewer row's
 /// findings for the summarizer (empty for a row that did not finish).
 pub async fn resume_reviewers(c: ResumeCtx) -> otto_core::Result<Vec<Vec<ReviewFinding>>> {
-    let id: otto_core::Id = c.review_id.clone().into();
+    let id: otto_core::Id = c.review_id.clone();
     let rows = c.reviews.get_review(&id).await?.agents;
     let n = rows.len().saturating_sub(1);
     if let Some(sid) = rows
@@ -48,7 +48,7 @@ pub async fn resume_reviewers(c: ResumeCtx) -> otto_core::Result<Vec<Vec<ReviewF
         .filter(|s| n > 0 && s.thread)
         .and_then(|s| s.session_id.clone())
     {
-        c.threads.close(&sid.into()).await;
+        c.threads.close(&sid).await;
     }
     let states: SharedStates = Arc::new(tokio::sync::Mutex::new(rows.clone()));
     let mut set = tokio::task::JoinSet::new();
@@ -114,7 +114,7 @@ async fn resume_row(c: &ResumeCtx, states: &SharedStates, i: usize, row: &Review
             &c.review_id,
             i,
             c.cancel.as_ref(),
-            Some(thread.into()),
+            Some(thread),
         )
         .await;
         if let Some(o) = resumed {
@@ -129,10 +129,7 @@ async fn resume_row(c: &ResumeCtx, states: &SharedStates, i: usize, row: &Review
         }
     }
     // The thread is gone (or never was one): re-run the row.
-    let prompt = c
-        .reviews
-        .get_agent_prompt(&c.review_id.clone().into(), i)
-        .await;
+    let prompt = c.reviews.get_agent_prompt(&c.review_id, i).await;
     let Ok(Some(prompt)) = prompt else {
         settle(RunOutcome::failed(None, FailReason::CreateFailed)).await;
         return;

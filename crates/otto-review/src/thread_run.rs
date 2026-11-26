@@ -130,7 +130,7 @@ impl Threads {
         let ids: Vec<otto_core::Id> = rows
             .iter()
             .filter(|r| r.thread)
-            .filter_map(|r| r.session_id.clone().map(Into::into))
+            .filter_map(|r| r.session_id.clone())
             .collect();
         if !ids.is_empty() {
             self.runner
@@ -282,7 +282,7 @@ pub fn child_rows(
         .enumerate()
         .map(|(i, r)| otto_core::workflows::ChildThread {
             id: format!("{review_id}.{i}"),
-            thread_id: r.session_id.clone().filter(|_| r.thread).map(Into::into),
+            thread_id: r.session_id.clone().filter(|_| r.thread),
             label: r.name.clone(),
             provider: r.provider.clone(),
             model: some(&r.model),

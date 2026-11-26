@@ -47,7 +47,7 @@ impl Fake {
             let acts = self.acts.lock().unwrap();
             acts.get(n - 1).or(acts.last()).cloned().unwrap_or_default()
         };
-        let thread_id: Id = resume.unwrap_or_else(|| format!("thread-{n}").into());
+        let thread_id: Id = resume.unwrap_or_else(|| format!("thread-{n}"));
         let _ = ev.send(StepEvent::Started {
             thread_id: thread_id.clone(),
             start_ordinal: 0,
@@ -220,7 +220,7 @@ impl Rig {
     }
     async fn row(&self) -> ReviewAgentState {
         self.reviews
-            .get_review(&self.review_id.clone().into())
+            .get_review(&self.review_id)
             .await
             .unwrap()
             .agents[0]
@@ -553,7 +553,7 @@ async fn after_a_restart_a_held_reviewer_is_awaited_and_only_the_lost_one_re_run
         ..Default::default()
     }])
     .await;
-    let id: Id = r.review_id.clone().into();
+    let id: Id = r.review_id.clone();
     let row = |name: &str, status: &str, thread: Option<&str>| ReviewAgentState {
         name: name.into(),
         provider: "claude".into(),

@@ -1,5 +1,6 @@
 //! `post_one` with a workflow review (stored as PR 0) and the run's real PR
 //! number: the forge is a wiremock GitLab, the review of MR `!7`.
+#![allow(clippy::disallowed_methods)] // test fixtures: a git checkout and an in-memory secret
 use super::*;
 use otto_core::domain::{CommentSeverity, GitProviderKind};
 use otto_state::{NewGitAccount, NewRepo};

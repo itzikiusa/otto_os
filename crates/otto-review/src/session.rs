@@ -987,6 +987,7 @@ pub async fn run_agent_session_with_recovery(
 /// Persist an agent row's terminal state ONCE from its final attempt
 /// (findings, note, score; `skipped` for a covered lens; `error` with the
 /// reason). `refused`: the last attempt's prompt never reached the agent.
+#[allow(clippy::too_many_arguments)]
 pub async fn settle_run(
     states: &SharedStates,
     reviews: &ReviewsRepo,

@@ -391,7 +391,7 @@ impl SummarizerTurn<'_> {
                 repo_path,
             );
             let turn = threads.summarizer_turn(&attempt, brief, ready_tx, self.cancel_flag);
-            let stop = |sid: String| async move { threads.close(&sid.into()).await };
+            let stop = |sid: String| async move { threads.close(&sid).await };
             return crate::review_summarizer::drive(
                 turn,
                 ready_rx,

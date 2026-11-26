@@ -2,6 +2,7 @@
 //! (otto_agent_protocol::scripted, the review persona): scope assessment →
 //! twelve reviewers → summarizer, through `run_review_core` as the Git page
 //! and the workflow node start it.
+#![allow(clippy::disallowed_methods)] // test fixtures: a git checkout and an in-memory secret
 use super::*;
 use otto_agent_protocol::{scripted, AgentRuntime, RuntimeConfig, SessionManagerHost};
 use serde_json::json;
