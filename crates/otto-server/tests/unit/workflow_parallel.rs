@@ -676,6 +676,104 @@ async fn a_usage_limit_parks_the_step_until_its_reset_and_notifies_once() {
     assert_eq!(d.state, otto_core::workflows::DeliverableState::Partial);
 }
 
+/// A thread runner whose every turn ends on a plan usage limit with no
+/// known reset; counts its runs.
+#[derive(Default)]
+struct NoResetRunner(std::sync::atomic::AtomicUsize);
+
+#[async_trait::async_trait]
+impl otto_agent_run::step::StepRunner for NoResetRunner {
+    async fn run(
+        &self,
+        _: otto_agent_run::step::StepTurn,
+        ev: tokio::sync::mpsc::UnboundedSender<otto_agent_run::step::StepEvent>,
+        _: otto_core::cancel_signal::CancelSignal,
+    ) -> Result<otto_agent_run::step::StepOutcome> {
+        use otto_agent_run::step::{StepError, StepErrorClass, StepOutcome};
+        let n = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let thread_id: Id = format!("th-{n}");
+        let _ = ev.send(otto_agent_run::step::StepEvent::Started {
+            thread_id: thread_id.clone(),
+            start_ordinal: 0,
+        });
+        Ok(StepOutcome {
+            thread_id,
+            reply: String::new(),
+            handoff_written: false,
+            turn_status: "failed".into(),
+            error: Some(StepError::new(
+                StepErrorClass::UsageLimit,
+                "You've hit your usage limit",
+            )),
+            context_usage: None,
+            turns: 1,
+            usage: Default::default(),
+            model: None,
+            effort: None,
+            sub_threads: vec![],
+            digest: None,
+        })
+    }
+    async fn resume(
+        &self,
+        _: &Id,
+        _: u32,
+        t: &otto_agent_run::step::StepTurn,
+        ev: tokio::sync::mpsc::UnboundedSender<otto_agent_run::step::StepEvent>,
+        cancel: otto_core::cancel_signal::CancelSignal,
+    ) -> Result<otto_agent_run::step::StepOutcome> {
+        self.run(t.clone(), ev, cancel).await
+    }
+    async fn close(&self, _: &Id, _: chrono::DateTime<chrono::Utc>) {}
+    async fn set_retain_until(&self, _: &[Id], _: chrono::DateTime<chrono::Utc>) {}
+    async fn release_process(&self, _: &Id) {}
+    async fn delete(&self, _: &Id) {}
+}
+
+/// runtime.md §1.7: a plan usage limit is never retried by backoff — with
+/// no known reset the step fails at its first attempt (Retry step), although
+/// an agent step's default policy retries twice.
+#[tokio::test]
+async fn a_usage_limit_with_no_known_reset_fails_at_once_without_backoff() {
+    let fake = std::sync::Arc::new(NoResetRunner::default());
+    super::super::super::step_thread::FAKE_RUNNER.with(|f| *f.borrow_mut() = Some(fake.clone()));
+    let graph = WorkflowGraph {
+        nodes: vec![
+            node("start", "log", json!({})),
+            node(
+                "agent",
+                "agent_prompt",
+                json!({"prompt": "post it", "provider": "claude"}),
+            ),
+        ],
+        edges: vec![edge("start", "agent")],
+    };
+    let (ctx, ws, wf, run_id, repo, _tmp) = setup("no-reset-ws", graph).await;
+    let driver = run_workflow(
+        ctx,
+        ws,
+        wf,
+        run_id.clone(),
+        json!({}),
+        RunScope::default(),
+        None,
+    );
+    tokio::time::timeout(Duration::from_secs(20), driver)
+        .await
+        .expect("the run settles");
+    let run = repo.get_run(&run_id).await.unwrap();
+    assert_eq!(run.status, RunStatus::Error);
+    let st = state(&run, "agent");
+    assert_eq!(st.error_class.as_deref(), Some("usage_limit"));
+    assert_eq!(
+        fake.0.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "{:?}",
+        st.logs
+    );
+    assert_eq!(st.attempts, Some(1));
+}
+
 /// Test plan §2.6 skip with siblings (engine.md §3.6): `skip <name>` with
 /// several steps running skips only that one; its sibling runs to its end
 /// and the run goes on.

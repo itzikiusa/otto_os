@@ -14,6 +14,7 @@ use super::board::RunBoard;
 use super::state::RunState;
 use futures_util::future::BoxFuture;
 use futures_util::stream::{FuturesUnordered, StreamExt};
+use otto_core::agent_runtime::ERROR_CLASS_USAGE_LIMIT;
 use otto_workflows::schedule::{
     Init, Outcome, Scheduler, SkipWhy, Start, DEFAULT_MAX_PARALLEL_STEPS,
 };
@@ -618,7 +619,10 @@ async fn run_attempts(
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.subsec_nanos() as u64 % 5_000)
                     .unwrap_or(0);
-                let plan = if is_retryable(&node.kind) {
+                // A plan usage limit is never backed off: its runner parked
+                // the step until a known reset; without one it fails now.
+                let limit = st.error_class.as_deref() == Some(ERROR_CLASS_USAGE_LIMIT);
+                let plan = if is_retryable(&node.kind) && !limit {
                     retry_backoff(&e.to_string(), &policy, attempt, backoff, jitter)
                 } else {
                     None

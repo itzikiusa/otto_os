@@ -112,6 +112,8 @@ mod wf_goal;
 mod wf_lifecycle;
 #[path = "wf_restart.rs"]
 mod wf_restart;
+#[path = "wf_retry.rs"]
+mod wf_retry;
 #[path = "wf_threads.rs"]
 mod wf_threads;
 #[path = "wf_timing.rs"]

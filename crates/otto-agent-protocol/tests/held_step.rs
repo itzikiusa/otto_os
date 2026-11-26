@@ -325,7 +325,7 @@ async fn a_held_step_reports_its_mcp_approval_card_after_a_restart() {
 async fn a_held_step_waits_out_a_usage_limit_after_a_restart() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().canonicalize().unwrap();
-    let prompt = "OTTO_FAKE: sleep 1500\nOTTO_FAKE: fail usage_limit";
+    let prompt = "OTTO_FAKE: sleep 1500\nOTTO_FAKE: fail usage_limit_no_reset";
     let (rt, id, start) = start_then_restart(&root, prompt, |e| *e == StepEvent::Working).await;
     let at = Utc::now() + chrono::TimeDelta::seconds(3);
     let runner = ThreadStepRunner::new(rt.clone(), Arc::new(AfterRestart(at)));
