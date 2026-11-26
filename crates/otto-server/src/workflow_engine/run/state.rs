@@ -71,8 +71,12 @@ impl RunState {
                 continue;
             }
             if let Some(idx) = self.states.iter().position(|s| s.node_id == ps.node_id) {
-                if let Some(o) = &ps.output {
-                    self.outputs.insert(ps.node_id.clone(), o.clone());
+                // A step that succeeded with a JSON null output (a Start of a
+                // run with no input) is stored without one; it still produced
+                // it — without it the next step is "skipped (branch not taken)".
+                if ps.output.is_some() || ps.status == NodeStatus::Success {
+                    let output = ps.output.clone().unwrap_or(Value::Null);
+                    self.outputs.insert(ps.node_id.clone(), output);
                 }
                 if ps.status == NodeStatus::Error {
                     self.errored.insert(ps.node_id.clone());
