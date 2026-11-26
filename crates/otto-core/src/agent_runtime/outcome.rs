@@ -121,6 +121,50 @@ pub fn error_class(f: &ProviderFailure) -> &'static str {
     }
 }
 
+/// Which kind of limit a `usage_limit` failure is ([`limit_kind`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LimitKind {
+    /// A per-minute 429: retry with backoff.
+    Rate,
+    /// The plan's usage limit; `resets_at` when the failure itself says.
+    Plan {
+        resets_at: Option<chrono::DateTime<chrono::Utc>>,
+    },
+    /// No credit left: nothing resets it.
+    Billing,
+}
+
+const RATE_CODES: &[&str] = &["rate_limit", "rate_limit_error"];
+const RATE_TEXT: &[&str] = &["rate limit", "rate_limit", "too many requests", "429"];
+
+/// Tell a per-minute rate limit, a plan limit and a billing failure apart;
+/// `None` when [`error_class`] is not `usage_limit`. The row's
+/// `last_error_class` keeps the one coarse class.
+pub fn limit_kind(f: &ProviderFailure) -> Option<LimitKind> {
+    if error_class(f) != ERROR_CLASS_USAGE_LIMIT {
+        return None;
+    }
+    let code = f.code.as_deref().map(|c| c.trim().trim_matches('"'));
+    let text = f.message.to_lowercase();
+    if code == Some("billing_error") || text.contains("credit balance") {
+        return Some(LimitKind::Billing);
+    }
+    let planned = code.is_some_and(|c| !RATE_CODES.contains(&c) && USAGE_CODES.contains(&c));
+    if !planned
+        && (code.is_some_and(|c| RATE_CODES.contains(&c))
+            || RATE_TEXT.iter().any(|n| text.contains(n)))
+    {
+        return Some(LimitKind::Rate);
+    }
+    // Claude's own shape: "Claude AI usage limit reached|<unix seconds>".
+    let resets_at = f
+        .message
+        .rsplit_once('|')
+        .and_then(|(_, t)| t.trim().parse::<i64>().ok())
+        .and_then(|t| chrono::DateTime::from_timestamp(t, 0));
+    Some(LimitKind::Plan { resets_at })
+}
+
 impl RuntimeSession {
     /// Set [`Self::last_turn_status`] / [`Self::last_error_class`] from the
     /// thread's latest turn (by ordinal) and that turn's failure, if any. A
@@ -235,6 +279,45 @@ mod tests {
             error_class(&failure(Some("contextWindowExceeded"), "rate limit")),
             "provider"
         );
+    }
+
+    #[test]
+    fn limits_are_told_apart() {
+        use chrono::TimeZone;
+        let kind = |code: Option<&str>, text: &str| limit_kind(&failure(code, text));
+        assert_eq!(kind(Some("rate_limit_error"), "x"), Some(LimitKind::Rate));
+        assert_eq!(
+            kind(None, "API Error: 429 Too Many Requests"),
+            Some(LimitKind::Rate)
+        );
+        assert_eq!(
+            kind(None, "Rate limit exceeded, retry in 20s"),
+            Some(LimitKind::Rate)
+        );
+        assert_eq!(
+            kind(Some("success"), "Claude AI usage limit reached|1700000000"),
+            Some(LimitKind::Plan {
+                resets_at: Some(chrono::Utc.timestamp_opt(1_700_000_000, 0).unwrap())
+            })
+        );
+        assert_eq!(
+            kind(
+                Some("usageLimitExceeded"),
+                "You've hit your usage limit · resets 3pm"
+            ),
+            Some(LimitKind::Plan { resets_at: None })
+        );
+        assert_eq!(
+            kind(Some("insufficient_quota"), "rate limit"),
+            Some(LimitKind::Plan { resets_at: None }),
+            "a plan code decides over words"
+        );
+        assert_eq!(
+            kind(None, "Credit balance is too low"),
+            Some(LimitKind::Billing)
+        );
+        assert_eq!(kind(Some("billing_error"), "x"), Some(LimitKind::Billing));
+        assert_eq!(kind(None, "API Error: 500 Internal server error"), None);
     }
 
     #[test]

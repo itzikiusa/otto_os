@@ -800,7 +800,8 @@ pub use step::{
 
 mod outcome;
 pub use outcome::{
-    error_class, TurnOutcome, ERROR_CLASS_AUTH, ERROR_CLASS_PROVIDER, ERROR_CLASS_USAGE_LIMIT,
+    error_class, limit_kind, LimitKind, TurnOutcome, ERROR_CLASS_AUTH, ERROR_CLASS_PROVIDER,
+    ERROR_CLASS_USAGE_LIMIT,
 };
 
 /// An approval or structured question the agent is blocked on (`OrchestrationV2RuntimeRequest`).
