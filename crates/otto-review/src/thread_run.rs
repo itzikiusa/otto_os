@@ -81,6 +81,16 @@ pub async fn threads(
     })
 }
 
+/// What the summarizer's thread turn needs beside its attempt: the brief,
+/// its config, workspace, user and checkout.
+pub type SummarizerBrief<'a> = (
+    &'a str,
+    &'a otto_core::domain::ReviewAgentCfg,
+    &'a Workspace,
+    &'a User,
+    &'a str,
+);
+
 /// The thread runner a review's agents use, and what every thread carries.
 #[derive(Clone)]
 pub struct Threads {
@@ -104,6 +114,74 @@ impl Threads {
     pub fn retain_success(&self) -> chrono::DateTime<Utc> {
         Utc::now() + self.keep_success
     }
+    /// Close a thread now, kept for the failed period.
+    pub async fn close(&self, id: &otto_core::Id) {
+        self.runner.close(id, self.retain_failed()).await;
+    }
+
+    /// The summarizer's (and verifier's) turn on a thread: `attempt`'s brief
+    /// and result file as the handoff — the same files as the terminal turn.
+    /// `ready` hears the thread id first; the text is the result file once
+    /// it validates ([`crate::summarizer::valid_result`]).
+    pub async fn summarizer_turn(
+        &self,
+        attempt: &crate::summarizer::Attempt,
+        (brief, cfg, ws, user, cwd): SummarizerBrief<'_>,
+        ready: tokio::sync::oneshot::Sender<String>,
+        cancel: Option<&Arc<AtomicBool>>,
+    ) -> Result<String, String> {
+        let mut meta = attempt.meta.clone();
+        self.meta_into(&mut meta);
+        let turn = StepTurn {
+            user_id: user.id.clone(),
+            workspace_id: ws.id.clone(),
+            provider: attempt.provider.clone(),
+            model: Some(cfg.model.trim().to_string()).filter(|m| !m.is_empty()),
+            effort: Some(cfg.effort.trim().to_string()).filter(|e| !e.is_empty()),
+            cwd: PathBuf::from(cwd),
+            title: "Review summarizer".into(),
+            meta,
+            prompt: attempt.prompt(brief),
+            continue_thread: None,
+            handoff: Some(attempt.result_path()),
+            read_only: true,
+            timeout: None,
+            no_progress: None,
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let runner = Arc::clone(&self.runner);
+        let run = with_cancel(cancel, |signal| async move {
+            runner.run(turn, tx, signal).await
+        });
+        tokio::pin!(run);
+        let mut ready = Some(ready);
+        let result = loop {
+            tokio::select! {
+                r = &mut run => break r,
+                Some(ev) = rx.recv() => {
+                    if let (StepEvent::Started { thread_id, .. }, true) = (ev, ready.is_some()) {
+                        let _ = ready.take().expect("checked").send(thread_id.to_string());
+                    }
+                }
+            }
+        };
+        // A turn that settles in the same poll as its start still publishes.
+        while let (Ok(ev), true) = (rx.try_recv(), ready.is_some()) {
+            if let StepEvent::Started { thread_id, .. } = ev {
+                let _ = ready.take().expect("checked").send(thread_id.to_string());
+            }
+        }
+        let o = result.map_err(|e| e.to_string())?;
+        let text = std::fs::read_to_string(attempt.result_path()).ok();
+        match text.filter(|t| crate::summarizer::valid_result(t)) {
+            Some(text) => Ok(text),
+            None => Err(o
+                .error
+                .map(|e| e.message)
+                .unwrap_or_else(|| "the summarizer wrote no valid result file".into())),
+        }
+    }
+
     fn meta_into(&self, meta: &mut Value) {
         if let (Some(m), Some(extra)) = (meta.as_object_mut(), self.meta.as_object()) {
             for (k, v) in extra {

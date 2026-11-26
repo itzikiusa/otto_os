@@ -386,3 +386,59 @@ fn runner_events_drive_the_row_in_todays_words() {
     assert_eq!(row.status, "running");
     assert!(!apply_event(&mut row, &StepEvent::Working));
 }
+
+#[tokio::test]
+async fn the_summarizer_turn_on_a_thread_returns_its_validated_result_file() {
+    let draft = r#"[{"path":"src/a.rs","line":3,"severity":"bug","body":"off by one"}]"#;
+    let r = rig(vec![
+        Act {
+            write: Some(draft.into()),
+            events: vec![StepEvent::Working],
+            ..Default::default()
+        },
+        Act {
+            write: Some("{ not an array".into()),
+            fail: Some(StepErrorClass::Provider),
+            ..Default::default()
+        },
+    ])
+    .await;
+    let mut cfg = crate::engine::default_review_config("claude").summarizer;
+    (cfg.model, cfg.effort) = ("sonnet".into(), "low".into());
+    let attempt = crate::summarizer::Attempt::new("claude", "sonnet").unwrap();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let cwd = r._dir.path().to_str().unwrap();
+    let text = r
+        .threads
+        .summarizer_turn(&attempt, ("brief", &cfg, &r.ws, &r.user, cwd), tx, None)
+        .await
+        .unwrap();
+    assert_eq!(text, draft);
+    assert_eq!(
+        rx.await.unwrap(),
+        "thread-1",
+        "ready hears the thread once it exists"
+    );
+    let t = r.fake.turns.lock().unwrap()[0].clone();
+    assert_eq!(
+        t.prompt,
+        attempt.prompt("brief"),
+        "the terminal turn's brief and hand-off"
+    );
+    assert_eq!(t.handoff, Some(attempt.result_path()));
+    assert_eq!(
+        (t.model.as_deref(), t.effort.as_deref()),
+        (Some("sonnet"), Some("low"))
+    );
+    assert_eq!(t.meta["source"], "review_summarizer");
+    assert_eq!(t.meta["run_id"], "run-1");
+    // An unusable result is an error the caller retries or falls back on.
+    let second = crate::summarizer::Attempt::new("claude", "").unwrap();
+    let (tx, _rx) = tokio::sync::oneshot::channel();
+    let err = r
+        .threads
+        .summarizer_turn(&second, ("brief", &cfg, &r.ws, &r.user, cwd), tx, None)
+        .await
+        .unwrap_err();
+    assert_eq!(err, "provider");
+}

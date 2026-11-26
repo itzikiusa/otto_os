@@ -536,7 +536,7 @@ pub(crate) async fn rerun_summarizer(ctx: &ServerCtx, review_id: &Id, user: User
             &user,
             &repo_id,
             pr_number,
-            &cfg.summarizer,
+            &cfg,
             &agent_findings,
             // A retry re-runs ONLY this stage, from findings stored earlier; the
             // run that produced them is long gone, so there is no context to

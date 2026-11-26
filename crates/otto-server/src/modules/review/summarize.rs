@@ -11,7 +11,6 @@ use otto_review::prompts::*;
 /// How often a running summarizer re-reads the durable review status when no
 /// `ReviewChanged` arrives (the flagless cancel paths: restart, a cancel that
 /// landed before this attempt registered).
-const SUMMARIZER_CANCEL_RECHECK: Duration = Duration::from_secs(5);
 
 /// The draft loop reads the durable review status once per this many parsed
 /// comments; the in-memory cancel flag is checked for every one.
@@ -28,7 +27,7 @@ pub(crate) async fn summarize_and_persist(
     user: &otto_core::domain::User,
     repo_id: &Id,
     pr_number: u64,
-    summarizer_cfg: &ReviewAgentCfg,
+    cfg: &ReviewConfig,
     agent_findings: &[Vec<otto_core::domain::ReviewFinding>],
     // What the caller already knew about the change (ticket + prior-step
     // briefs), pre-rendered. The summarizer is the step that applies the scope
@@ -54,6 +53,7 @@ pub(crate) async fn summarize_and_persist(
             .is_some_and(|f| f.load(std::sync::atomic::Ordering::SeqCst))
     };
     let is_cancelled = || async { flag_tripped() || review_is_cancelled(ctx, review_id).await };
+    let (summarizer_cfg, threads) = (&cfg.summarizer, review_threads(ctx, Some(cfg)).await);
     let mut agent_states = ctx.reviews_store.get_review(review_id).await?.agents;
     let summarizer_idx = agent_states
         .len()
@@ -118,6 +118,7 @@ pub(crate) async fn summarize_and_persist(
         total_findings,
         cancel_flag: cancel_flag.as_ref(),
         row: summarizer_idx,
+        threads: threads.as_ref(),
     };
     // A start/delivery failure gets a fresh attempt (fresh handoff dir) within
     // the same overall budget; the verifier used to get exactly one.
@@ -432,6 +433,7 @@ struct SummarizerTurn<'a> {
     cancel_flag: Option<&'a Arc<std::sync::atomic::AtomicBool>>,
     /// The summarizer's agent row (always the last).
     row: usize,
+    threads: Option<&'a otto_review::thread_run::Threads>,
 }
 
 impl SummarizerTurn<'_> {
@@ -478,6 +480,50 @@ impl SummarizerTurn<'_> {
             &summarizer_cfg.model,
         )?;
         attempt.meta["review_id"] = serde_json::json!(review_id);
+        // Event- and flag-driven (no 100 ms DB poll of the whole review).
+        let cancelled = otto_review::summarizer::until_cancelled(
+            ctx.events.subscribe(),
+            review_id,
+            flag_tripped,
+            || review_is_cancelled(ctx, review_id),
+        );
+        let publish = move |sid: String| async move {
+            let row = &mut agent_states[summarizer_idx];
+            (row.session_id, row.thread) = (Some(sid.clone()), self.threads.is_some());
+            ctx.reviews_store
+                .set_agent_at(review_id, summarizer_idx, &agent_states[summarizer_idx])
+                .await
+                .map_err(|e| e.to_string())?;
+            let _ = ctx.events.send(Event::ReviewChanged {
+                workspace_id: workspace.id.clone(),
+                session_id: Some(sid),
+                review_id: review_id.clone(),
+                status: "running".into(),
+            });
+            Ok(())
+        };
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        if let Some(threads) = self.threads {
+            // The runner takes the machine place itself.
+            let brief = (
+                summarizer_prompt,
+                summarizer_cfg,
+                workspace,
+                user,
+                repo_path,
+            );
+            let turn = threads.summarizer_turn(&attempt, brief, ready_tx, self.cancel_flag);
+            let stop = |sid: String| async move { threads.close(&sid.into()).await };
+            return crate::review_summarizer::drive(
+                turn,
+                ready_rx,
+                summarizer_timeout,
+                cancelled,
+                publish,
+                stop,
+            )
+            .await;
+        }
         // Queue for a machine slot BEFORE the summarizer's hard budget starts,
         // racing against cancellation so a cancelled review never hangs queued.
         let admission = tokio::select! {
@@ -491,7 +537,6 @@ impl SummarizerTurn<'_> {
         };
         admission.stamp(&mut attempt.meta);
         let prompt = attempt.prompt(summarizer_prompt);
-        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let turn = crate::agent_session::run_session_turn_with(
             ctx,
             workspace,
@@ -513,34 +558,6 @@ impl SummarizerTurn<'_> {
                 let _ = ready_tx.send(id.clone());
             },
         );
-        // Event- and flag-driven: the cheap in-memory flag every 100 ms, the
-        // one-column status on this review's `ReviewChanged`, and a slow safety
-        // recheck. A 100 ms DB poll used to load the whole review (agents JSON
-        // plus every comment) 3,000–18,000 times per summarizer turn.
-        let cancelled = async {
-            let mut events = ctx.events.subscribe();
-            let mut events_open = true;
-            let mut flag_tick = tokio::time::interval(Duration::from_millis(100));
-            let mut recheck = tokio::time::interval(SUMMARIZER_CANCEL_RECHECK);
-            loop {
-                let check_db = tokio::select! {
-                    _ = flag_tick.tick() => false,
-                    _ = recheck.tick() => true,
-                    ev = events.recv(), if events_open => match ev {
-                        Ok(Event::ReviewChanged { review_id: rid, .. }) => rid == *review_id,
-                        Ok(_) => false,
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => true,
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                            events_open = false;
-                            false
-                        }
-                    },
-                };
-                if flag_tripped() || (check_db && review_is_cancelled(ctx, review_id).await) {
-                    break;
-                }
-            }
-        };
         crate::review_summarizer::drive(
             async {
                 turn.await
@@ -550,20 +567,7 @@ impl SummarizerTurn<'_> {
             ready_rx,
             summarizer_timeout,
             cancelled,
-            |sid| async {
-                agent_states[summarizer_idx].session_id = Some(sid.clone());
-                ctx.reviews_store
-                    .set_agent_at(review_id, summarizer_idx, &agent_states[summarizer_idx])
-                    .await
-                    .map_err(|e| e.to_string())?;
-                let _ = ctx.events.send(Event::ReviewChanged {
-                    workspace_id: workspace.id.clone(),
-                    session_id: Some(sid),
-                    review_id: review_id.clone(),
-                    status: "running".into(),
-                });
-                Ok(())
-            },
+            publish,
             |sid| async move {
                 otto_review::session::stop_review_sessions(&ctx.manager, &[sid]).await;
             },

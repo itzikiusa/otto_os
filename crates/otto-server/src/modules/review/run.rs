@@ -593,7 +593,7 @@ pub(crate) async fn run_review_core(
         &review_user,
         repo_id,
         pr_number,
-        &cfg.summarizer,
+        &cfg,
         &agent_findings,
         &format!("{user_ctx}{jira_ctx}"),
         resolve_blocker(pr_number, branches, &diff_text),
