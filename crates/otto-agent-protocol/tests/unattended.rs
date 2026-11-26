@@ -1326,6 +1326,50 @@ async fn resume_after_a_restart_killed_background_work_tells_the_agent() {
     rt.shutdown().await;
 }
 
+/// CR1-032: an agent removes two answered sub-threads in parallel tool
+/// calls: both records stay on the step (their usage is not lost).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_removals_at_once_keep_both_records() {
+    let rig = Rig::new(false).await;
+    let step = rig.thread(RuntimeProvider::Claude).await;
+    let open = |text: &str| OpenPeerReq {
+        provider: RuntimeProvider::Claude,
+        prompt: Some(format!("OTTO_FAKE: usage 5 1\nOTTO_FAKE: reply {text}")),
+        title: None,
+        model: None,
+        effort: None,
+        cwd: None,
+        meta: None,
+    };
+    let c1 = rig.rt.open_peer(&step, open("one")).await.unwrap();
+    let c2 = rig.rt.open_peer(&step, open("two")).await.unwrap();
+    let out = rig
+        .rt
+        .await_settled(&step, 0, opts(), |_| {})
+        .await
+        .unwrap();
+    assert_eq!(out.ended, Ended::Settled);
+    let (a, b) = tokio::join!(
+        rig.rt.close_peer(&step, &c1.id, true),
+        rig.rt.close_peer(&step, &c2.id, true),
+    );
+    a.unwrap();
+    b.unwrap();
+    let kept = |meta: Option<serde_json::Value>| {
+        meta.and_then(|m| m.get("removed_children").cloned())
+            .and_then(|v| v.as_array().map(Vec::len))
+    };
+    assert_eq!(kept(rig.rt.get(&step).await.unwrap().meta), Some(2));
+    rig.rt.shutdown().await;
+    let rt = rig.again();
+    assert_eq!(
+        kept(rt.get(&step).await.unwrap().meta),
+        Some(2),
+        "as stored"
+    );
+    rt.shutdown().await;
+}
+
 /// CR1-053: a usage limit that resets after the step's time runs out ends
 /// the step as `timeout` at once, with no "Needs you" for a wait it will
 /// never do.

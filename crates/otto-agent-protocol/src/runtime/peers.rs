@@ -429,7 +429,12 @@ impl AgentRuntime {
             let st = live.lock();
             removed_record(&st.session, &st.proj.snapshot().turns)
         };
-        let mut kept: Vec<serde_json::Value> = c
+        // Two removals at once (parallel tool calls) each append to what the
+        // other wrote: read and write the list under the parent's prompt lock.
+        let meta_lock = parent.prompt_lock.lock().await;
+        let mut kept: Vec<serde_json::Value> = parent
+            .lock()
+            .session
             .meta
             .as_ref()
             .and_then(|m| m.get(REMOVED_CHILDREN_META_KEY))
@@ -441,6 +446,7 @@ impl AgentRuntime {
         let mut patch = serde_json::Map::new();
         patch.insert(REMOVED_CHILDREN_META_KEY.into(), kept.into());
         self.update_thread_meta(&c.id, patch).await?;
+        drop(meta_lock);
         let closed = self.close(&p.id).await?;
         self.delete(&p.id).await?;
         if let Err(e) = self.notice(&c.id, &children::removed_notice(c, &p)).await {
