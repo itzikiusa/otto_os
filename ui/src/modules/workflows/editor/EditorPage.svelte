@@ -35,6 +35,7 @@
   import EditorCanvas from './EditorCanvas.svelte';
   import PhoneOutline from './PhoneOutline.svelte';
   import { continueClashes, issueBlocks, missingSkills, stepProvider, wireAfter } from './stepRules';
+  import { plural } from '../../../lib/plural';
 
   interface Props {
     workflowId: string;
@@ -240,15 +241,19 @@
     const copy = wf && (await duplicateWorkflow(wf.workspace_id, wf));
     if (copy) router.go(`workflows/${copy.id}`);
   }
+  // The side panels and the problems bar are the desktop layout's; the phone
+  // outline has neither, so its menu leaves them out.
   const more = (): MenuItem[] => [
     { label: 'Runs of this workflow', icon: 'clock', action: () => onrunsof?.(workflowId) },
     { label: 'Optimize…', icon: 'zap', action: () => router.go(`workflows/${workflowId}/optimize`) },
-    { separator: true },
-    { label: 'Triggers', checked: panel === 'triggers', action: () => (panel = panel === 'triggers' ? null : 'triggers') },
-    { label: 'Instructions', checked: panel === 'instructions', action: () => (panel = panel === 'instructions' ? null : 'instructions') },
-    { label: 'Versions', checked: panel === 'versions', action: () => (panel === 'versions' ? (panel = null) : void openVersions()) },
-    { separator: true },
-    { label: 'Validate', action: () => void validate() },
+    ...(phone ? [] : [
+      { separator: true },
+      { label: 'Triggers', checked: panel === 'triggers', action: () => (panel = panel === 'triggers' ? null : 'triggers') },
+      { label: 'Instructions', checked: panel === 'instructions', action: () => (panel = panel === 'instructions' ? null : 'instructions') },
+      { label: 'Versions', checked: panel === 'versions', action: () => (panel === 'versions' ? (panel = null) : void openVersions()) },
+      { separator: true },
+      { label: 'Validate', action: () => void validate() },
+    ] satisfies MenuItem[]),
     { label: 'Rename…', action: () => void rename() },
     { label: 'Duplicate', icon: 'copy', action: () => void duplicate() },
     { separator: true },
@@ -317,7 +322,7 @@
       <div class="ed-main">
         {#if problems.length}
           <div class="ed-problems" class:warn={onlyWarnings} data-testid="wf-editor-problems">
-            <Icon name="warning" size={12} />{problems.length} {onlyWarnings ? 'warning' : 'problem'}{problems.length === 1 ? '' : 's'} ·
+            <Icon name="warning" size={12} />{plural(problems.length, onlyWarnings ? 'warning' : 'problem')} ·
             <button type="button" class="ed-link" aria-expanded={showProblems} onclick={() => (showProblems = !showProblems)}>{showProblems ? 'Hide' : 'Show'}</button>
             {#if showProblems}<ul>{#each problems as p, i (i)}<li class:warn={p.warning}>{p.warning ? 'Warning: ' : ''}{p.text}</li>{/each}</ul>{/if}
           </div>
