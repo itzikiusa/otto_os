@@ -39,7 +39,7 @@ process.on('SIGINT', () => { cleanup(); process.exit(130); });
 function sample(t0, runIds) {
   // -E appends each process's environment: everything the daemon started carries
   // the isolated root (HOME, OTTO_DATA_DIR), so a holder reparented to launchd counts too.
-  const rows = sh('ps', ['-axEo', 'pid=,ppid=,rss=,pcpu=,command=']).trim().split('\n').map((l) => l.trim().split(/\s+/)).map(([pid, ppid, rss, cpu, ...c]) => ({ pid: +pid, ppid: +ppid, rss: +rss, cpu: +cpu, comm: path.basename(c[0] ?? ''), under: c.join(' ').includes(iso.root) }));
+  const rows = sh('ps', ['-axEo', 'pid=,ppid=,rss=,pcpu=,command='], { maxBuffer: 64 << 20 }).trim().split('\n').map((l) => l.trim().split(/\s+/)).map(([pid, ppid, rss, cpu, ...c]) => ({ pid: +pid, ppid: +ppid, rss: +rss, cpu: +cpu, comm: path.basename(c[0] ?? ''), under: c.join(' ').includes(iso.root) }));
   const mine = new Set([daemon.pid, ...rows.filter((r) => r.under).map((r) => r.pid)]);
   for (let grew = true; grew; ) { grew = false; for (const r of rows) if (!mine.has(r.pid) && mine.has(r.ppid)) { mine.add(r.pid); grew = true; } }
   const by = {};
