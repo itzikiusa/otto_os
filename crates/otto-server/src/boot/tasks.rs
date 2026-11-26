@@ -559,7 +559,7 @@ fn spawn_workflow_run_retention(ctx: &ServerCtx) -> tokio::task::JoinHandle<()> 
                 )
                 .await
             {
-                Ok(ids) if !ids.is_empty() => {
+                Ok(otto_state::workflows::PrunedRuns { run_ids: ids, .. }) if !ids.is_empty() => {
                     let root = ctx_root.clone();
                     let n = ids.len();
                     // Runs inside spawn_blocking (std fs is fine there).

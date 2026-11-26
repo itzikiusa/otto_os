@@ -33,6 +33,9 @@ pub struct RunSearch {
     pub q: Option<String>,
     /// Status filter (`running`, `success`, …); empty = any.
     pub statuses: Vec<String>,
+    /// Only runs waiting on a person: running with a step on a person or an
+    /// approval pause, or held blocked / exhausted (the Runs inbox "Needs you").
+    pub attention: bool,
     pub limit: Option<u32>,
     pub cursor: Option<String>,
 }
@@ -88,10 +91,21 @@ pub async fn search_runs(pool: &DbPool, s: &RunSearch) -> Result<RunListPage> {
     let cursor = s.cursor.as_deref().map(parse_cursor).transpose()?;
     let mut sql = String::from(
         "SELECT r.id, r.workflow_id, w.name AS workflow_name, r.status, r.started_at,
-                r.finished_at, r.error, r.input_json,
+                r.finished_at, r.error, r.input_json, r.overview_json, r.rev,
                 COALESCE(r.progress_json, r.nodes_json) AS nodes_json, w.graph_json
-         FROM (SELECT * FROM workflow_runs WHERE workspace_id = ?
-               ORDER BY started_at DESC, id DESC LIMIT ?) r
+         FROM (SELECT * FROM workflow_runs WHERE workspace_id = ?",
+    );
+    if s.attention {
+        // Repeats the partial index's predicate, so the scan uses
+        // `idx_workflow_runs_ws_attention` (running or held rows only).
+        sql.push_str(
+            " AND (status = 'running' OR hold_json IS NOT NULL)
+              AND ((status = 'running' AND (attention > 0 OR waiting_approval = 1))
+                   OR json_extract(hold_json, '$.kind') IN ('blocked', 'exhausted'))",
+        );
+    }
+    sql.push_str(
+        " ORDER BY started_at DESC, id DESC LIMIT ?) r
          JOIN workflows w ON w.id = r.workflow_id
          WHERE 1 = 1",
     );
@@ -235,6 +249,10 @@ fn row_to_item(r: &sqlx::sqlite::SqliteRow) -> Result<RunListItem> {
             .get::<Option<String>, _>("error")
             .filter(|e| !e.trim().is_empty())
             .map(|e| clip(&e, 240)),
+        overview: crate::workflows::fresh_overview(
+            r.get::<Option<String>, _>("overview_json").as_deref(),
+            r.get("rev"),
+        ),
     })
 }
 

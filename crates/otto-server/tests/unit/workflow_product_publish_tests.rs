@@ -263,6 +263,7 @@ impl Fixture {
                 nodes_done: 0,
                 nodes_total: 0,
                 waiting_approval: false,
+                overview: None,
             });
         };
         let (out, ()) = tokio::join!(pending, decision);

@@ -2788,7 +2788,7 @@ workspace from the workflow/run row.
 | POST /workflows/{id}/validate | ws viewer | `{graph?: WorkflowGraph}` (omitted uses saved graph) | `{valid: boolean, issues: WorkflowValidationIssue[]}`; each issue has `field`, `message`, optional `node_id`/`edge_id`; no execution |
 | POST /workflows/{id}/triggers/preview | ws viewer | `{kind, spec}` | `{kind, next_fire_times: string[]}`; validates trigger and returns next five schedule times (UTC timestamps), empty list for other kinds; does not save or advance cursor |
 | GET /workflows/{id}/runs | ws viewer | `?summary=true` (rows without node/input bodies); `?q=&status=&limit=&cursor=` | `WorkflowRun[]` (newest 50). With any of `q` / `status` / `cursor` it answers the workspace history search below, scoped to this workflow: a `RunListPage` |
-| GET /workspaces/{wid}/workflow-runs | ws viewer | `?q=` open text (≤ 200 chars, ≤ 8 whitespace-separated terms, every term must match), `status=` comma list of run statuses, `workflow_id=`, `limit=` (1–100, default 30; larger values clamp), `cursor=` (opaque, from the previous page) | `RunListPage {items: RunListItem[], next_cursor?}` — the workspace's run history, newest first. Each term matches (ASCII case-insensitive substring) the workflow name, the run input (trigger message / prompt / goals / repo / branch / PR…), the run error, the workflow's step names and the run's step summaries (phases, step errors). Scans the newest 5000 runs of the workspace. `400` for a too-long `q`, too many terms, an unknown status or a bad cursor |
+| GET /workspaces/{wid}/workflow-runs | ws viewer | `?q=` open text (≤ 200 chars, ≤ 8 whitespace-separated terms, every term must match), `status=` comma list of run statuses, `workflow_id=`, `limit=` (1–100, default 30; larger values clamp), `cursor=` (opaque, from the previous page), `attention=1` (only runs waiting on a person: `running` with a step on a person or an approval pause, or held `blocked` / `exhausted` — the Runs inbox "Needs you") | `RunListPage {items: RunListItem[], next_cursor?}` — the workspace's run history, newest first; each row carries `overview?` (see Run view). Each term matches (ASCII case-insensitive substring) the workflow name, the run input (trigger message / prompt / goals / repo / branch / PR…), the run error, the workflow's step names and the run's step summaries (phases, step errors). Scans the newest 5000 runs of the workspace. `400` for a too-long `q`, too many terms, an unknown status or a bad cursor |
 | GET /workspaces/{wid}/workflow-runs/active | ws viewer | — | `ActiveWorkflowRun[]` — in-flight runs (pending\|running) across the workspace, newest first; backs the "Running" sidebar list |
 | GET /workspaces/{wid}/workflow-runs/queue | ws viewer | — | `WorkflowRunQueue {max_parallel_runs, queued: [{run_id, position}]}` — the daemon-wide parallel-run cap (`OTTO_WF_MAX_PARALLEL_RUNS`, default 2) and THIS workspace's queued runs (fresh `pending`, no step progress) with their 1-based place in the global FIFO line; runs of other workspaces are never listed, only counted in the positions. Backs the Running list's "2nd in line, behind …" |
 | GET /workflow-runs/{id} | ws viewer | — | WorkflowRun |
@@ -2962,6 +2962,66 @@ count refresh on each `workflow_run_updated` WS event without per-run fetches.
 node's display name (its `name`, else its `kind`); both are omitted before the
 first step starts. Clients refetch the list when an event's `node` starts a
 different step or settles the current one.
+
+**Run view (0233, 0234 — workflows on threads).** Additive and optional throughout:
+`RunStatus` / `NodeStatus` and the `workflow_runs.status` CHECK are unchanged, every
+new field is omitted when empty, and a node that uses none of them serializes exactly
+as before, so the previous build reads every row. New enums end in a catch-all
+(`unknown`, `other` for attention kinds) so a later value decodes.
+
+- `NodeRunState` gains `step_no?` (the stable N of `stepN-…`), `step_file?`
+  (`step3-checkout-pr-branch`, no extension), `phase?: StepPhase` (`queued | waiting |
+  starting | working | needs_you | finishing`; only while running), `phases?: PhaseMark[]`
+  (`{phase, at, note?}`, ≤ 40), `wait?: WaitReason` (`{code: slots|memory|load|run_slots|run_order,
+  text, since, detail?: {live, max?, floor?, ahead?, holders?: string[]}}`), `attention?:
+  Attention` (`{kind: approval|question|usage_limit|verify, via?: provider|mcp, text ≤ 300,
+  since, thread_id?, request_id?, resets_at?}`; answered through `POST
+  /runtime-sessions/{id}/requests/{request_id}`), `error_class?` (runner: `usage_limit ·
+  rate_limit · auth · provider · stalled · timeout · spawn · server_restart · canceled`;
+  engine: `script · outcome_unknown`; `error` stays the step's own words), `thread?:
+  StepThread` (`{thread_id, runner: threads|pty, provider, model?, effort?, continued_from?,
+  start_ordinal?, turns, usage: TurnTokenUsage, digest?: TranscriptDigest, closed_at?,
+  available?}` — `available` is computed on read, never stored), `children?: ChildThread[]`
+  (`{id, thread_id?, label, provider, model?, effort?, status: queued|pending|running|success|error|skipped|needs_you,
+  started_at?, ended_at?, note?, usage}`), `deliverables?: Deliverable[]` (`{label, state:
+  done|partial|failed|pending_approval, detail?, url?}`), `human_log?: HumanEntry[]` (`{kind:
+  answer|verify|steer, ask?, text ≤ 2 KiB, met?, revision?, iteration?, by, at}`, ≤ 20) and
+  `brief?` (≤ 200 chars). Thread ids never go in `sessions`, which stays PTY-only.
+  `TranscriptDigest = {turns, tool_calls, files_changed, last_answer_excerpt, errors, actions:
+  [{tool, target?, outcome: ok|failed|pending_approval, message?}], started_at?, ended_at?}`.
+- `WorkflowRun`, `RunListItem` and `ActiveWorkflowRun` gain `overview?: RunOverview` =
+  `{rev, state, headline, steps_done, steps_total, now?, attention: AttentionRef[], queue?,
+  failed_step?, deliverables, usage, time, origin?, subject?, elapsed_ms, typical_ms?, goal?,
+  hold?}` — `state`: `queued · running · waiting · needs_you · succeeded · failed · canceled ·
+  paused · blocked · exhausted` (+ `unknown`); `now = {node_ids, node_names, phase, wait_text?,
+  fan?: {done, total, running}}`; `AttentionRef` = `Attention` + `{node_id, name}` (flat);
+  `queue = {position, ahead, cap, lane?}`; `failed_step = {node_id, name, error, error_class?}`;
+  `time = {queued_ms, waiting_ms, with_you_ms, working_ms}`; `origin = {kind:
+  chat|manual|schedule|webhook|event|task|mcp|goal, channel_name?, user_name?, thread_url?}`;
+  `subject = {pr?: {repo, number, url, title?}, ticket?: {key, url, title?}, repo?, branch?}`;
+  `goal = GoalProgress {iteration, max_iterations, criteria_met, criteria_total, active_ms,
+  max_active_ms?, awaiting?}`; `hold = RunHold`. The field is `overview`, never
+  `summary` (`/progress` keeps its boolean `summary: true` marker). Stored in
+  `workflow_runs.overview_json` stamped with the row's `rev` by the same progress write;
+  it is absent from a response when the stored one is stale (its `rev` is not the row's —
+  a status write, the previous build, a raw write or an archive restore) or missing, and the
+  server recomputes it. Every status writer clears it and `workflow_runs.attention` (the
+  number of running steps on a person).
+- `WorkflowRun` also gains `hold?: RunHold` (`{kind: paused|blocked|exhausted, reason ≤ 300,
+  since, by?, node_ids, iteration?}`; a held run is settled — paused = `canceled`,
+  blocked/exhausted = `error` — and is never pruned by run retention), `limits?: RunLimits`
+  (`{loops: {<node id>: {max_iterations?, max_active_s?, unblocked_at?}}}`, written only by
+  Resume) and `steering_queued?: string[]` (notes queued for the next agent step; filled
+  from the run's context dir, not stored). `Workflow` gains `origin?` (`goal` or absent) and
+  `origin_ref?` (`review:<id>` · `insights` · `goal_loop:<id>` · `mcp`), both server-set.
+  `WorkflowCheckpoint` gains `active_ms?` (the attempt's time minus its time on a person;
+  omitted at 0).
+- Run retention: goal workflows keep no run by count (the 30-day age rule still keeps recent
+  ones) and a goal workflow left with no run is deleted in the same pass.
+- Backed by migrations **0233** (`workflow_runs.overview_json`, `attention INTEGER NOT NULL
+  DEFAULT 0`, `hold_json`, `chat_status_json`, partial index
+  `idx_workflow_runs_ws_attention`) and **0234** (`workflows.origin`, `origin_ref`,
+  `workflow_runs.limits_json`).
 
 **Node kinds (catalog).** `GET /workflows/node-types` returns each kind's
 `NodeTypeSpec`, now including `output_schema` (declared output shape; drives UI
@@ -6597,7 +6657,7 @@ Transcript session GETs reuse bounded immutable folds (32 retained entries / 128
 
 ### Lightweight workflow progress and lazy details
 
-`GET /api/v1/workflow-runs/{id}/progress?after_rev=N` requires workspace Viewer before reading/returning either branch. It returns 200 `{"changed":false,"rev":N}` if current, or `{"changed":true,"rev":N,"run":WorkflowRun}` with `run.summary=true`, lightweight nodes and `checkpoint_rev`, `checkpoint_generation`, `checkpoint_count`, `checkpoint_done`. Input/output/log bodies are omitted (`input`/`output` null, `logs` empty); node summaries add `detail_version`, `log_count`, `has_output`, bounded error/phase previews and session references. Context directory/approval/proof/version metadata remain available. Missing imported projections repair from authoritative JSON before the conditional comparison; busy admission returns 409, never a fabricated empty run.
+`GET /api/v1/workflow-runs/{id}/progress?after_rev=N` requires workspace Viewer before reading/returning either branch. It returns 200 `{"changed":false,"rev":N}` if current, or `{"changed":true,"rev":N,"run":WorkflowRun}` with `run.summary=true`, lightweight nodes and `checkpoint_rev`, `checkpoint_generation`, `checkpoint_count`, `checkpoint_done`. Input/output/log bodies are omitted (`input`/`output` null, `logs` empty); node summaries add `detail_version`, `log_count`, `has_output`, bounded error/phase previews and session references, and copy the run-view fields `step_no`, `step_file`, `phase`, `wait`, `attention`, `error_class`, `deliverables`, `brief`, the newest 12 `phases` and 5 `human_log` entries, `thread` without `digest` and `children` without `usage` (the full node from `…/nodes/{node_id}` has both). The run adds `overview` (null when stale) and `hold` beside the unchanged `summary: true`. Context directory/approval/proof/version metadata remain available. Missing imported projections repair from authoritative JSON before the conditional comparison; busy admission returns 409, never a fabricated empty run.
 
 `GET /api/v1/workflow-runs/{id}/checkpoints?cursor=&limit=100` returns `{checkpoint_rev,generation,items:[WorkflowCheckpoint],next_cursor}`. Items are summaries with the same body descriptors; no input/output/log bodies. Limit 1–200. Opaque ≤4 KiB cursor binds run, reset generation and insertion order. Ordinary node/log/checkpoint updates do not invalidate pagination; append remains discoverable. Retry/deletion/reset returns 409 for an old generation and requires reloading checkpoints. Native SQLite insertion identity is not imported/exported as authoritative data.
 

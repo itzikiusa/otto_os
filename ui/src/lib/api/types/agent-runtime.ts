@@ -11,7 +11,9 @@
 // names are snake_case where T3 Code uses camelCase.
 
 // The types live in ./agent-runtime/ (events.ts: entities, events and replay;
-// sessions.ts: sessions, councils, peers and request bodies).
+// sessions.ts: sessions, councils, peers and request bodies; step.ts: what an
+// unattended agent step reports and leaves behind).
 
 export * from './agent-runtime/events';
 export * from './agent-runtime/sessions';
+export * from './agent-runtime/step';

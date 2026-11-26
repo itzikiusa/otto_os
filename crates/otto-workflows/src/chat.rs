@@ -1336,6 +1336,7 @@ impl<C: WorkflowCtx> WorkflowChatTrigger for WorkflowChatTriggerImpl<C> {
                             nodes_done: 0,
                             nodes_total: 0,
                             waiting_approval: false,
+                            overview: None,
                         });
                     }
                     Err(e) => tracing::warn!("workflow chat abort: cancel failed: {e}"),

@@ -296,6 +296,7 @@ fn nstate(id: &str, status: NodeStatus) -> NodeRunState {
         sessions: vec![],
         review_ids: Vec::new(),
         activity: None,
+        ..Default::default()
     }
 }
 
@@ -321,6 +322,10 @@ fn mk_run(status: RunStatus, nodes: Vec<NodeRunState>) -> WorkflowRun {
         workflow_version: None,
         resume_attempts: 0,
         context_dir: None,
+        overview: None,
+        hold: None,
+        limits: None,
+        steering_queued: vec![],
     }
 }
 
@@ -967,6 +972,8 @@ fn run_summary_has_status_steps_and_score() {
         updated_at: chrono::Utc::now(),
         version: 1,
         on_restart: "resume".into(),
+        origin: None,
+        origin_ref: None,
     };
     let mk = |id: &str, status: NodeStatus, out: Value| NodeRunState {
         node_id: id.into(),
@@ -980,6 +987,7 @@ fn run_summary_has_status_steps_and_score() {
         sessions: vec![],
         review_ids: Vec::new(),
         activity: None,
+        ..Default::default()
     };
     let states = vec![
         mk(
@@ -1079,6 +1087,8 @@ fn chat_target_resolves_origin_and_override() {
         updated_at: chrono::Utc::now(),
         version: 1,
         on_restart: "resume".into(),
+        origin: None,
+        origin_ref: None,
     };
     // Slack origin from a chat trigger.
     let t = resolve_chat_target(
@@ -1714,6 +1724,7 @@ fn activity_snapshots_are_rate_limited_and_bounded() {
         sessions: vec!["01ABCDEF".into()],
         review_ids: Vec::new(),
         activity: Some(a),
+        ..Default::default()
     };
     let n = serde_json::to_string(&state).unwrap().len();
     assert!(n < NODE_EVENT_MAX_BYTES, "node row was {n} bytes");
