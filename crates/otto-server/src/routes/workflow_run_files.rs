@@ -41,7 +41,13 @@ pub struct RelPathParams {
     /// Relative to the run's context dir; empty or absent = its root.
     #[serde(default)]
     path: Option<String>,
+    /// `1`: the raw bytes as an attachment (DR-114), at most [`MAX_DOWNLOAD_BYTES`].
+    #[serde(default)]
+    download: Option<u8>,
 }
+
+/// Cap of `…/context/read?download=1`.
+const MAX_DOWNLOAD_BYTES: usize = 50 * 1024 * 1024;
 
 /// Gate on the run (404 unknown, ws Viewer on its workspace) and return the
 /// run's context dir — not yet canonicalized, it may not exist.
@@ -181,16 +187,56 @@ pub async fn read(
     Query(params): Query<RelPathParams>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
-) -> ApiResult<Json<FsRead>> {
+) -> ApiResult<axum::response::Response> {
+    use axum::response::IntoResponse;
     let root = run_context_root(&ctx, &user, &id).await?;
     let rel = params.path.unwrap_or_default();
     if rel.trim().is_empty() {
         return Err(ApiError(Error::Invalid("path is required".into())));
     }
     let restricted = !user.is_root;
-    blocking(move || read_sync(&root, &rel, restricted))
-        .await
-        .map(Json)
+    if params.download != Some(1) {
+        let read = blocking(move || read_sync(&root, &rel, restricted)).await?;
+        return Ok(Json(read).into_response());
+    }
+    let (name, bytes) = blocking(move || download_sync(&root, &rel, restricted)).await?;
+    let disposition = format!(
+        "attachment; filename=\"{}\"",
+        name.replace(['"', '\\'], "_")
+    );
+    let headers = [
+        (
+            axum::http::header::CONTENT_TYPE,
+            "application/octet-stream".to_string(),
+        ),
+        (axum::http::header::CONTENT_DISPOSITION, disposition),
+        (
+            axum::http::header::X_CONTENT_TYPE_OPTIONS,
+            "nosniff".to_string(),
+        ),
+    ];
+    Ok((headers, bytes).into_response())
+}
+
+/// The whole file for a download, under the same confinement and credential
+/// deny as [`read_sync`].
+#[allow(clippy::disallowed_methods)] // sync helper: runs on the blocking pool
+fn download_sync(root: &FsPath, rel: &str, restricted: bool) -> ApiResult<(String, Vec<u8>)> {
+    let (_, file) = resolve(root, rel)?;
+    if restricted && otto_core::secret_paths::is_denied_file(&file) {
+        return Err(ApiError(Error::Forbidden(format!(
+            "{rel} looks like a credential file; only the root user can open it"
+        ))));
+    }
+    let bytes = read_at_most(&file, MAX_DOWNLOAD_BYTES + 1)
+        .map_err(|e| ApiError(Error::Invalid(format!("cannot read {rel}: {e}"))))?;
+    if bytes.len() > MAX_DOWNLOAD_BYTES {
+        return Err(ApiError(Error::Invalid(format!(
+            "{rel} is larger than 50 MiB"
+        ))));
+    }
+    let name = file.file_name().map(|n| n.to_string_lossy().into_owned());
+    Ok((name.unwrap_or_default(), bytes))
 }
 
 #[allow(clippy::disallowed_methods)] // sync helper: runs on the blocking pool

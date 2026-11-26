@@ -59,6 +59,7 @@ pub mod users;
 pub mod workflow_progress;
 pub mod workflow_run_files;
 pub mod workflows;
+pub mod workflows_ext;
 pub mod workspaces;
 
 use axum::extract::Request;
@@ -665,6 +666,7 @@ pub fn protected_routes() -> Router<ServerCtx> {
         .route("/workflows/{id}/runs", get(workflows::list_runs))
         // In-flight runs + the searchable run history across a workspace.
         .merge(workflows::workspace_run_routes())
+        .merge(workflows_ext::routes())
         // Workflow versioning (history + restore).
         .route("/workflows/{id}/versions", get(workflows::list_versions))
         .route("/workflows/{id}/versions/{v}", get(workflows::get_version))

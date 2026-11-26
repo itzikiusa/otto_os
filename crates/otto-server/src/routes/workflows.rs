@@ -36,9 +36,21 @@ pub async fn list_workflows(
     Path(wid): Path<Id>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
-) -> ApiResult<Json<Vec<Workflow>>> {
+) -> ApiResult<Json<Vec<Value>>> {
     crate::auth::require_ws_role(&ctx, &user, &wid, WorkspaceRole::Viewer).await?;
-    Ok(Json(repo(&ctx).list(&wid).await.map_err(ApiError)?))
+    let wfs = repo(&ctx).list(&wid).await.map_err(ApiError)?;
+    // Each row's status column: its latest run and its runs in flight.
+    let runs = otto_state::workflow_last_runs::last_runs(&ctx.pool, &wid)
+        .await
+        .map_err(ApiError)?;
+    let row = |wf: Workflow| {
+        let last = runs.iter().find(|r| r.0 == wf.id);
+        let mut v = serde_json::to_value(wf).unwrap_or_default();
+        v["last_run"] = json!(last.map(|r| &r.1));
+        v["running_count"] = json!(last.map_or(0, |r| r.2));
+        v
+    };
+    Ok(Json(wfs.into_iter().map(row).collect()))
 }
 
 /// `POST /workspaces/{wid}/workflows`
@@ -54,6 +66,7 @@ pub async fn create_workflow(
         return Err(ApiError(Error::Invalid("name must not be empty".into())));
     }
     let graph = req.graph.unwrap_or_default();
+    crate::workflow_validation::ensure_savable(&graph).map_err(ApiError)?;
     let wf = repo(&ctx)
         .create(
             &wid,
@@ -95,6 +108,9 @@ pub async fn update_workflow(
     let wf = repo(&ctx).get(&id).await.map_err(ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &wf.workspace_id, WorkspaceRole::Editor).await?;
     req.check(wf.version).map_err(ApiError)?;
+    if let Some(g) = &req.graph {
+        crate::workflow_validation::ensure_savable(g).map_err(ApiError)?;
+    }
     Ok(Json(
         repo(&ctx)
             .publish(
@@ -494,14 +510,14 @@ pub(crate) fn seed_review_mode(
     }
 }
 
-const GRAPH_WRITE_REFUSED: &str =
+pub(crate) const GRAPH_WRITE_REFUSED: &str =
     "an agent session's credential cannot change a workflow's graph — \
      a person signed in to Otto must edit it";
 const APPROVAL_SKIP_REFUSED: &str = "this would skip a human approval step — an agent session's \
      credential cannot start or retry a run below an approval gate; a person must do it";
 
 /// `require_human` with a message that says what was refused.
-fn require_human_for(
+pub(crate) fn require_human_for(
     auth: &crate::auth::CurrentAuthContext,
     msg: &'static str,
 ) -> Result<(), ApiError> {
@@ -1462,7 +1478,11 @@ pub async fn validate_graph(
     let wf = repo(&ctx).get(&id).await.map_err(ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &wf.workspace_id, WorkspaceRole::Viewer).await?;
     let issues = crate::workflow_validation::validate(req.graph.as_ref().unwrap_or(&wf.graph));
-    Ok(Json(json!({"valid": issues.is_empty(), "issues": issues})))
+    // Warnings never block (DR-028); save and run problems do.
+    let valid = issues
+        .iter()
+        .all(|i| i.class == crate::workflow_validation::IssueClass::Warning);
+    Ok(Json(json!({"valid": valid, "issues": issues})))
 }
 
 /// Preview uses the scheduler's cadence/timezone evaluator; never advances the

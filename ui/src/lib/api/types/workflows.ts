@@ -70,6 +70,78 @@ export interface Workflow {
   origin?: string;
   /** `review:<id>` · `insights` · `goal_loop:<id>` · `mcp` (server-set). */
   origin_ref?: string;
+  /** `GET /workspaces/{wid}/workflows` only: the newest run (null: never ran). */
+  last_run?: WorkflowLastRun | null;
+  /** `GET /workspaces/{wid}/workflows` only: its pending/running runs. */
+  running_count?: number;
+}
+
+export interface WorkflowLastRun {
+  id: Id;
+  status: string;
+  /** The stored `overview.state` (absent on rows of older builds). */
+  overview_state: string | null;
+  attention: boolean;
+  ended_at: string | null;
+  duration_ms: number | null;
+}
+
+export type OptimizeRule =
+  | 'parallel'
+  | 'git_checkout'
+  | 'go_gates_script'
+  | 'step_timeout'
+  | 'single_repo_skip'
+  | 'post_review_comments'
+  | 'review_declared_lenses'
+  | 'agent';
+
+/** One change `POST /workflows/{id}/optimize` offers (addendum §2.6). */
+export interface OptimizeChange {
+  /** `<rule>:<node id>`. */
+  id: string;
+  rule: OptimizeRule;
+  nodes: string[];
+  title: string;
+  why: string;
+  effect: 'same_contract' | 'may_change_output' | 'changes_findings';
+  preselected: boolean;
+  saving_ms?: number;
+}
+
+export interface OptimizeDraft {
+  base_version: number;
+  changes: OptimizeChange[];
+  not_offered: { rule: OptimizeRule; nodes: string[]; reason: string }[];
+  draft_graph: WorkflowGraph;
+  estimate: {
+    runs: number;
+    since?: string;
+    typical_before_ms?: number;
+    typical_after_ms?: number;
+    slow_before_ms?: number;
+    slow_after_ms?: number;
+    note?: string;
+  };
+  checks: {
+    numbering: { step_no: number; node_id: string; ok: boolean }[];
+    renumbered: { node_id: string; from: string; to: string }[];
+    files: {
+      node_id: string;
+      reads: string[];
+      writes: string[];
+      reads_added: string[];
+      reads_lost: string[];
+      listing_removed: string[];
+    }[];
+    warnings: string[];
+  };
+}
+
+/** `POST /workflows/{id}/optimize/apply` body. */
+export interface OptimizeApplyReq {
+  base_version: number;
+  change_ids: string[];
 }
 
 // NOTE: named `WorkflowRunStatus` (not `RunStatus`) to avoid colliding with the
