@@ -13,6 +13,7 @@
 //! listed under "Not offered" with the reason.
 
 use crate::context::slug;
+use crate::graph::{ancestors, topo_order};
 use otto_core::workflows::{
     NodeStatus, RunStatus, StepPhase, Workflow, WorkflowEdge, WorkflowGraph, WorkflowNode,
     WorkflowRun,
@@ -155,14 +156,15 @@ pub fn plan(wf: &Workflow, history: &[WorkflowRun], opts: &Options<'_>) -> Optim
     }
 }
 
-/// The graph to save for exactly `change_ids`, re-derived and re-checked;
-/// `Err` (a 422) when an id is unknown or no longer passes its checks.
+/// The graph to save for exactly `change_ids`, re-derived and re-checked,
+/// with the offered changes (for [`version_note`]); `Err` (a 422) when an
+/// id is unknown or no longer passes its checks.
 pub fn apply(
     wf: &Workflow,
     history: &[WorkflowRun],
     change_ids: &[String],
     opts: &Options<'_>,
-) -> Result<WorkflowGraph, String> {
+) -> Result<(WorkflowGraph, Vec<OptimizeChange>), String> {
     let opts = Options {
         selection: Some(change_ids),
         ..*opts
@@ -181,13 +183,12 @@ pub fn apply(
             });
         return Err(format!("{id}: {why}"));
     }
-    Ok(built.graph)
+    Ok((built.graph, built.offered))
 }
 
 /// The version note: "Optimized by <user>: <change titles>".
-pub fn version_note(user: &str, draft: &OptimizeDraft, change_ids: &[String]) -> String {
-    let titles: Vec<&str> = draft
-        .changes
+pub fn version_note(user: &str, changes: &[OptimizeChange], change_ids: &[String]) -> String {
+    let titles: Vec<&str> = changes
         .iter()
         .filter(|c| change_ids.contains(&c.id))
         .map(|c| c.title.as_str())
@@ -584,7 +585,10 @@ fn gates_command(n: &WorkflowNode) -> Result<Value, String> {
     let tokens: Vec<&str> = raw.split_whitespace().collect();
     let script = tokens
         .iter()
-        .map(|t| t.trim_matches(|c| "`\"'(),;".contains(c)))
+        .map(|t| {
+            t.trim_matches(|c| "`\"'(),;".contains(c))
+                .trim_end_matches(['.', ':'])
+        })
         .find(|t| t.ends_with("pr_gates.sh"))
         .unwrap_or_default();
     let script_ok = !script.contains("..")
@@ -612,10 +616,15 @@ fn gates_command(n: &WorkflowNode) -> Result<Value, String> {
     if !plain {
         return Err("output file name in the prompt is not a plain file name".into());
     }
+    // A gate that fails is a row of the table (the prompt's contract: keep
+    // every row), so the script's exit code alone does not fail the step;
+    // no fresh report does (a crash, or a retry that would cat the last one).
     let command = format!(
         "if [ -z \"$(git -C \"$OTTO_WORKTREE\" diff --name-only \"$OTTO_BASE\" HEAD -- '*.go')\" ]; then echo \"$OTTO_REPO_NAME: no Go changes — gates NOT RUN\" >> \"$OTTO_CONTEXT_DIR/$OTTO_OUT\"; exit 0; fi\n\
-         {script} \"$OTTO_WORKTREE\" \"$OTTO_BASE\" --main \"$OTTO_REPO\" --out \"$OTTO_CONTEXT_DIR/$OTTO_REPO_NAME-$OTTO_OUT\"\n\
-         cat \"$OTTO_CONTEXT_DIR/$OTTO_REPO_NAME-$OTTO_OUT\" >> \"$OTTO_CONTEXT_DIR/$OTTO_OUT\""
+         f=\"$OTTO_CONTEXT_DIR/$OTTO_REPO_NAME-$OTTO_OUT\"; rm -f \"$f\"\n\
+         {script} \"$OTTO_WORKTREE\" \"$OTTO_BASE\" --main \"$OTTO_REPO\" --out \"$f\"; rc=$?\n\
+         [ -f \"$f\" ] || {{ echo \"$OTTO_REPO_NAME: the gates script wrote no report (exit $rc)\" >&2; exit 1; }}\n\
+         cat \"$f\" >> \"$OTTO_CONTEXT_DIR/$OTTO_OUT\""
     );
     Ok(json!({
         "command": command,
@@ -1417,45 +1426,7 @@ fn writers_of(g: &WorkflowGraph, x: &WorkflowNode) -> BTreeSet<String> {
 }
 
 // ---------------------------------------------------------------- graph --
-// Same rules as the engine's run order (wf-pure's graph::topo_order /
-// ancestors replace these when that module lands).
-
-fn topo_order(g: &WorkflowGraph) -> Result<Vec<String>, String> {
-    let mut indeg: HashMap<&str, usize> = g.nodes.iter().map(|n| (n.id.as_str(), 0)).collect();
-    let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
-    for e in &g.edges {
-        if indeg.contains_key(e.source.as_str()) && indeg.contains_key(e.target.as_str()) {
-            *indeg.get_mut(e.target.as_str()).unwrap() += 1;
-            adj.entry(&e.source).or_default().push(&e.target);
-        }
-    }
-    let mut queue: Vec<&str> = g
-        .nodes
-        .iter()
-        .map(|n| n.id.as_str())
-        .filter(|id| indeg[id] == 0)
-        .collect();
-    let mut i = 0;
-    while i < queue.len() {
-        let id = queue[i];
-        i += 1;
-        for s in adj.get(id).cloned().unwrap_or_default() {
-            let d = indeg.get_mut(s).unwrap();
-            *d -= 1;
-            if *d == 0 {
-                queue.push(s);
-            }
-        }
-    }
-    if queue.len() != g.nodes.len() {
-        return Err("workflow graph has a cycle".into());
-    }
-    Ok(queue.into_iter().map(str::to_string).collect())
-}
-
-fn ancestors(g: &WorkflowGraph, id: &str) -> HashSet<String> {
-    walk_back(g, id, |_| true)
-}
+// The run order and ancestors are the engine's (`crate::graph`).
 
 fn unconditional_ancestors(g: &WorkflowGraph, id: &str) -> HashSet<String> {
     walk_back(g, id, |e| e.condition.is_none())
