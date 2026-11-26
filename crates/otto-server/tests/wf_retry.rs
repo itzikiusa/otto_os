@@ -4,7 +4,9 @@
 //! on one branch of a fork with a join after it — and a succeeded step's
 //! Retry from here re-runs it and what follows. Every run starts with no
 //! input, as the UI's Run does: the Start step's output is then JSON null,
-//! which the run row stores as no output at all.
+//! which the run row stores as no output at all. And a plan usage limit
+//! whose words name the reset parks its step until then (runtime.md §1.7)
+//! instead of being retried by backoff.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -53,6 +55,15 @@ async fn boot() -> Daemon {
     let base = format!("http://{}", listener.local_addr().unwrap());
     let mut ctx = otto_server::ServerCtx::for_tests(&pool, root.join("data")).await;
     ctx.base_url = base.clone();
+    // Agent steps run on the in-memory fakes.
+    for d in ["scripts", "fake-state"] {
+        std::fs::create_dir_all(root.join(d)).unwrap();
+    }
+    ctx.agent_runtime = crate::wf_restart::runtime(&pool, &ctx, &root);
+    otto_state::SettingsRepo::new(pool.clone())
+        .put("agent_admission_enabled", &json!(false))
+        .await
+        .unwrap();
     let (api, root_extras) = otto_server::modules::module_routers(&ctx);
     let app = otto_server::build_router(ctx.clone(), api, root_extras);
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -306,4 +317,52 @@ async fn a_run_cut_by_a_restart_continues_after_a_start_with_no_output() {
         let n = node(&after, id);
         assert_eq!(n.status, NodeStatus::Success, "{id}: {:?}", n.logs);
     }
+}
+
+/// The fake Claude's limit says "resets 3pm", as the CLI does: the step
+/// parks in needs you with the reset, never retried by backoff.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_usage_limit_that_names_its_reset_parks_the_step() {
+    let d = boot().await;
+    let agent = json!({"id": "a", "kind": "agent_prompt", "name": "Hit the limit",
+        "params": {"provider": "claude", "prompt": "Do it.\nOTTO_FAKE: fail usage_limit"}});
+    let wf = d.save(chain(vec![agent])).await;
+    let (st, run) = d.post(&format!("/workflows/{wf}/run"), json!({})).await;
+    assert_eq!(st, 200, "{run}");
+    let id: otto_core::Id = run["id"].as_str().unwrap().into();
+    let repo = WorkflowsRepo::new(d.pool.clone());
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let parked = loop {
+        let run = repo.get_run(&id).await.unwrap();
+        let waits = run.overview.as_ref().map(|o| o.state)
+            == Some(otto_core::workflows::RunState::NeedsYou);
+        if waits {
+            break run;
+        }
+        assert!(
+            Instant::now() < deadline
+                && matches!(run.status, RunStatus::Pending | RunStatus::Running),
+            "the step did not park: {:?} {:?}",
+            run.status,
+            run.nodes
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    let attention = &parked.overview.as_ref().unwrap().attention[0].attention;
+    assert_eq!(
+        attention.kind,
+        otto_core::agent_runtime::AttentionKind::UsageLimit
+    );
+    assert!(
+        attention.resets_at.is_some_and(|t| t > Utc::now()),
+        "{attention:?}"
+    );
+    let a = node(&parked, "a");
+    assert_eq!(a.attempts, Some(1), "{:?}", a.logs);
+    assert!(!a.logs.iter().any(|l| l.contains("retry")), "{:?}", a.logs);
+    let (st, _) = d
+        .post(&format!("/workflow-runs/{id}/cancel"), json!({}))
+        .await;
+    assert_eq!(st, 200);
+    assert_eq!(d.settled(&id).await.status, RunStatus::Canceled);
 }

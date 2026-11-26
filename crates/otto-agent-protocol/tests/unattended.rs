@@ -763,7 +763,7 @@ impl StepHost for ResetsSoon {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_usage_limit_with_a_known_reset_waits_and_continues_the_same_thread() {
     let rig = Rig::new(false).await;
-    let t = rig.turn("claude", &fake(&["fail usage_limit"]));
+    let t = rig.turn("claude", &fake(&["fail usage_limit_no_reset"]));
     let (out, _) = run(&rig.runner(), t.clone()).await;
     assert_eq!(out.error.unwrap().class, StepErrorClass::UsageLimit);
     let at = Utc::now() + chrono::TimeDelta::seconds(2);
@@ -1379,7 +1379,7 @@ async fn a_usage_limit_past_the_steps_time_fails_it_without_needs_you() {
     let at = Utc::now() + chrono::TimeDelta::hours(3);
     let host = Arc::new(ResetsSoon(at, Default::default()));
     let runner = ThreadStepRunner::new(rig.rt.clone(), host as Arc<dyn StepHost>);
-    let mut t = rig.turn("claude", &fake(&["fail usage_limit"]));
+    let mut t = rig.turn("claude", &fake(&["fail usage_limit_no_reset"]));
     t.timeout = Some(Duration::from_secs(20 * 60));
     let (out, evs) = run(&runner, t).await;
     assert_eq!(out.error.unwrap().class, StepErrorClass::Timeout);

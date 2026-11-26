@@ -101,7 +101,7 @@ impl Rig {
     }
 }
 
-fn runtime(pool: &DbPool, ctx: &ServerCtx, root: &Path) -> AgentRuntime {
+pub(crate) fn runtime(pool: &DbPool, ctx: &ServerCtx, root: &Path) -> AgentRuntime {
     let host = SessionManagerHost {
         manager: Arc::clone(&ctx.manager),
         workspaces: otto_state::WorkspacesRepo::new(pool.clone()),
