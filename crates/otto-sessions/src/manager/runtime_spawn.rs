@@ -247,9 +247,18 @@ impl SessionManager {
             )
             .await;
         }
-        // MCP before the context hook — the PTY spawn's order.
+        // MCP before the context hook — the PTY spawn's order. An untrusted
+        // read-only thread (a PR's reviewer) gets no servers at all, as its
+        // terminal would: no `otto`, none of the workspace's.
         let _mcp_activation = crate::mcp::activation_gate().read().await;
+        let untrusted = read_only
+            && session
+                .meta
+                .get("project_settings")
+                .and_then(|v| v.as_bool())
+                == Some(false);
         let protocol_mcp = match delivery {
+            _ if untrusted => Vec::new(),
             RuntimeMcpDelivery::Launcher => {
                 self.apply_launcher_mcp(session, spec).await;
                 Vec::new()
@@ -279,11 +288,17 @@ impl SessionManager {
             spec.args.extend(injection.args);
             spec.env.extend(injection.env);
         }
-        // A read-only session's tool list (claude: no shell, no subagents) —
-        // what its terminal spawn adds; `read_only_strip` has nothing to drop
-        // from a structured driver's argv.
+        // A read-only session's tool list (claude: no shell, no subagents) and
+        // the extra folders it may read — what its terminal spawn adds.
         spec.args
             .extend(cli_flags::read_only_args(&cli_family, &session.meta));
+        // Only Claude's stream-json mode takes `--add-dir` (an app-server or
+        // an ACP agent has no such flag).
+        if cli_family == "claude" {
+            spec.args
+                .extend(cli_flags::add_dir_args(&cli_family, &session.meta));
+        }
+        cli_flags::read_only_strip(&cli_family, &session.meta, &mut spec.args);
         // A subcommand that must follow the injected top-level flags (unless a
         // custom provider spec already carried it).
         if !tail_args.is_empty()
