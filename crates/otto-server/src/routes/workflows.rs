@@ -975,16 +975,17 @@ pub async fn list_runs(
 /// (`<data_dir>/workflow-context/<run_id>/`) when it exists on disk. Kept out
 /// of the DB — run_id derives it — and out of list endpoints (one stat per
 /// run there is wasted work; the run VIEW is where the file browser lives).
-fn with_context_dir(ctx: &ServerCtx, mut run: WorkflowRun) -> WorkflowRun {
+async fn with_context_dir(ctx: &ServerCtx, mut run: WorkflowRun) -> WorkflowRun {
     // Run ids are daemon-generated ULIDs, but confine the join anyway so a
     // hostile id can never stat outside the workflow-context tree.
     let Some(dir) = otto_core::paths::confine_join(&ctx.data_dir.join("workflow-context"), &run.id)
     else {
         return run;
     };
-    if dir.is_dir() {
-        run.attachments = otto_workflows::attachments::read(&dir);
+    if tokio::fs::metadata(&dir).await.is_ok_and(|m| m.is_dir()) {
         run.context_dir = Some(dir.to_string_lossy().into_owned());
+        let read = tokio::task::spawn_blocking(move || otto_workflows::attachments::read(&dir));
+        run.attachments = read.await.unwrap_or_default();
     }
     run
 }
@@ -1019,7 +1020,7 @@ pub async fn get_run(
     if run.overview.is_none() {
         run.overview = recompute_overview(&ctx, &run).await;
     }
-    Ok(Json(with_context_dir(&ctx, run)))
+    Ok(Json(with_context_dir(&ctx, run).await))
 }
 
 /// `GET /workspaces/{wid}/workflow-runs/active` — in-flight runs (pending|running)
