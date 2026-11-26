@@ -14,7 +14,7 @@ fn gates() -> &'static std::sync::Mutex<HashMap<Id, Gate>> {
     G.get_or_init(Default::default)
 }
 
-pub(in crate::workflow_engine) fn waiting_gate(run_id: &Id) -> Option<Gate> {
+pub(in crate::workflow_engine) fn waiting_gate(run_id: &str) -> Option<Gate> {
     gates().lock().ok()?.get(run_id).cloned()
 }
 
@@ -55,6 +55,12 @@ pub(in crate::workflow_engine) async fn execute(
     // it does is never missed.
     let mut decisions = ctx.events.subscribe();
     let pool = &ctx.pool;
+    // The board knows the gate before the row says "waiting": a sibling's
+    // publish in between would store the run as working again (CR2-007).
+    if let Ok(mut g) = gates().lock() {
+        g.insert(run_id.clone(), (node.id.clone(), exposed));
+    }
+    let waiting = Waiting(run_id);
     let rev: i64 = sqlx::query_scalar(
         "UPDATE workflow_runs
                  SET waiting_approval = 1, approval_node_id = ?,
@@ -69,10 +75,6 @@ pub(in crate::workflow_engine) async fn execute(
     .await
     .map_err(|e| otto_core::Error::Internal(format!("human_approval mark: {e}")))?
     .ok_or_else(|| otto_core::Error::Conflict("human_approval: run is no longer running".into()))?;
-    if let Ok(mut g) = gates().lock() {
-        g.insert(run_id.clone(), (node.id.clone(), exposed));
-    }
-    let _waiting = Waiting(run_id);
     // The stored overview and the event say "needs you" at once.
     let repo = WorkflowsRepo::new(pool.clone());
     let wf = repo
@@ -182,6 +184,9 @@ pub(in crate::workflow_engine) async fn execute(
             }
         }
     };
+    // Decided: no sibling's publish says "waiting" while this step waits
+    // for the run's slot.
+    drop(waiting);
     park.unpark().await;
     decision
 }

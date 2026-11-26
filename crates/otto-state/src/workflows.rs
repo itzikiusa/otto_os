@@ -254,6 +254,31 @@ impl WorkflowsRepo {
         run_id: &Id,
         checkpoint: &WorkflowCheckpoint,
     ) -> Result<()> {
+        self.save_checkpoint_at(run_id, checkpoint, None).await
+    }
+
+    /// The run's checkpoint generation: every retry re-entry bumps it
+    /// ([`Self::prepare_retry`], which resets the retried checkpoints).
+    pub async fn checkpoint_generation(&self, run_id: &Id) -> i64 {
+        sqlx::query_scalar("SELECT checkpoint_generation FROM workflow_runs WHERE id = ?")
+            .bind(run_id)
+            .fetch_optional(&self.pool)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(0)
+    }
+
+    /// [`Self::save_checkpoint`] for a write that can land late (the bank of
+    /// an attempt dropped mid-way): with `generation`, nothing is written
+    /// once a retry re-entered the run since it was read — that retry reset
+    /// this checkpoint, and the late write would undo it.
+    pub async fn save_checkpoint_at(
+        &self,
+        run_id: &Id,
+        checkpoint: &WorkflowCheckpoint,
+        generation: Option<i64>,
+    ) -> Result<()> {
         let json = serde_json::to_string(checkpoint).map_err(|e| Error::Internal(e.to_string()))?;
         let projection = crate::workflow_progress::checkpoint_projection(checkpoint)?;
         let mut tx = self
@@ -261,8 +286,11 @@ impl WorkflowsRepo {
             .begin()
             .await
             .map_err(dberr("begin checkpoint write"))?;
-        sqlx::query("INSERT INTO workflow_checkpoints (run_id, node_id, checkpoint_json) VALUES (?, ?, ?) ON CONFLICT(run_id, node_id) DO UPDATE SET checkpoint_json = excluded.checkpoint_json")
-            .bind(run_id).bind(&checkpoint.node_id).bind(json).execute(&mut *tx).await.map_err(dberr("save loop checkpoint"))?;
+        let written = sqlx::query("INSERT INTO workflow_checkpoints (run_id, node_id, checkpoint_json) SELECT ?1, ?2, ?3 WHERE ?4 IS NULL OR ?4 = (SELECT checkpoint_generation FROM workflow_runs WHERE id = ?1) ON CONFLICT(run_id, node_id) DO UPDATE SET checkpoint_json = excluded.checkpoint_json")
+            .bind(run_id).bind(&checkpoint.node_id).bind(json).bind(generation).execute(&mut *tx).await.map_err(dberr("save loop checkpoint"))?;
+        if written.rows_affected() == 0 {
+            return Ok(());
+        }
         crate::workflow_progress::publish_checkpoint(
             &mut tx,
             run_id,

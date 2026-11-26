@@ -493,11 +493,17 @@ struct Fake {
     closed: std::sync::Mutex<Vec<Id>>,
     /// The first turn hangs once its thread started (a step to pause or skip).
     hang_first: std::sync::atomic::AtomicBool,
+    /// This turn (1-based) hangs once, like `hang_first`.
+    hang_at: std::sync::atomic::AtomicUsize,
     /// A resumed turn finds its handoff already written (restart meanwhile).
     quiet_resume: std::sync::atomic::AtomicBool,
     /// The first turn asks a question, is answered once `answer` is set, then hangs.
     ask: std::sync::atomic::AtomicBool,
     answer: std::sync::atomic::AtomicBool,
+    /// With `ask`: once answered, the turn asks a second question.
+    ask_again: std::sync::atomic::AtomicBool,
+    /// With `ask`: the turn fails instead of taking its answer.
+    fail_asked: std::sync::atomic::AtomicBool,
 }
 
 #[async_trait::async_trait]
@@ -519,31 +525,50 @@ impl otto_agent_run::step::StepRunner for Fake {
             start_ordinal: 0,
         });
         if self.ask.swap(false, std::sync::atomic::Ordering::SeqCst) {
-            let _ = ev.send(otto_agent_run::step::StepEvent::NeedsYou(
-                otto_core::agent_runtime::Attention {
-                    kind: otto_core::agent_runtime::AttentionKind::Question,
-                    via: Some(otto_core::agent_runtime::AttentionVia::Provider),
-                    text: "Which one?".into(),
-                    since: chrono::Utc::now(),
-                    thread_id: Some(thread_id.clone()),
-                    request_id: None,
-                    resets_at: None,
-                    criterion_id: None,
-                },
-            ));
+            let ask = |text: &str| {
+                let _ = ev.send(otto_agent_run::step::StepEvent::NeedsYou(
+                    otto_core::agent_runtime::Attention {
+                        kind: otto_core::agent_runtime::AttentionKind::Question,
+                        via: Some(otto_core::agent_runtime::AttentionVia::Provider),
+                        text: text.into(),
+                        since: chrono::Utc::now(),
+                        thread_id: Some(thread_id.clone()),
+                        request_id: None,
+                        resets_at: None,
+                        criterion_id: None,
+                    },
+                ));
+            };
+            ask("Which one?");
             while !self.answer.load(std::sync::atomic::Ordering::SeqCst) {
                 tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            if self.fail_asked.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(otto_core::Error::Upstream("the provider dropped".into()));
             }
             let _ = ev.send(otto_agent_run::step::StepEvent::Resumed {
                 request_id: None,
                 answer: Some("this one".into()),
                 by: None,
             });
+            if self.ask_again.load(std::sync::atomic::Ordering::SeqCst) {
+                ask("And then?");
+            }
             std::future::pending::<()>().await;
         }
-        if self
-            .hang_first
-            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        let hang_now = self
+            .hang_at
+            .compare_exchange(
+                n,
+                0,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .is_ok();
+        if hang_now
+            || self
+                .hang_first
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
         {
             std::future::pending::<()>().await;
         }
@@ -745,6 +770,41 @@ async fn a_research_goal_works_in_its_own_folder() {
     )
     .await;
     let input = json!({"research_dir": true});
+    let drive = run_workflow(
+        fx.ctx.clone(),
+        fx.ws.clone(),
+        fx.wf.clone(),
+        fx.run_id.clone(),
+        input,
+        RunScope::default(),
+        None,
+    );
+    tokio::time::timeout(Duration::from_secs(15), tokio::spawn(drive))
+        .await
+        .unwrap()
+        .unwrap();
+    let turns = f.turns.lock().unwrap().clone();
+    let want = format!("workflow-context/{}/research", fx.run_id);
+    assert!(
+        turns[0].cwd.ends_with(&want),
+        "{} does not end with {want}",
+        turns[0].cwd.display()
+    );
+}
+
+/// CR2-006: a kept research folder that is gone gives a fresh research
+/// folder, never the workspace root.
+#[tokio::test]
+async fn a_research_goal_whose_kept_folder_is_gone_works_in_a_fresh_one() {
+    let (f, _fake) = fake();
+    let steps = json!([{"kind": "agent_prompt", "name": "Work", "params": {"prompt": "find out", "provider": "claude"}}]);
+    let fx = setup(
+        "goal-research-gone",
+        goal_graph(steps, json!({"max_iterations": 1})),
+    )
+    .await;
+    let gone = fx.ctx.data_dir.join("goal-loops/old/work");
+    let input = json!({"research_dir": gone.to_string_lossy()});
     let drive = run_workflow(
         fx.ctx.clone(),
         fx.ws.clone(),
@@ -1032,6 +1092,79 @@ async fn a_skipped_thread_step_closes_its_thread() {
         .await
         .unwrap()
         .unwrap();
+}
+
+/// CR2-004: a hold closes the threads of a loop's earlier steps too (the
+/// worker's stays open beside the next step until the loop ends, and a hold
+/// never reaches that end), and a `same_thread` step still continues its
+/// thread after Resume — the runner reopens a closed one.
+#[tokio::test]
+async fn a_paused_goal_closes_its_earlier_threads_and_same_thread_resumes() {
+    let (f, _fake) = fake();
+    f.hang_at.store(2, std::sync::atomic::Ordering::SeqCst);
+    let once =
+        "test -f \"$OTTO_CONTEXT_DIR/seen\" || { touch \"$OTTO_CONTEXT_DIR/seen\"; exit 1; }";
+    let steps = json!([
+        {"kind": "agent_prompt", "name": "Work", "same_thread": true, "params": {"prompt": "do it", "provider": "claude"}},
+        check(json!([{"id": "twice", "text": "second time lucky", "verify": "command", "command": once}])),
+    ]);
+    let fx = setup(
+        "goal-children",
+        goal_graph(steps, json!({"max_iterations": 2})),
+    )
+    .await;
+    let driver = fx.drive();
+    let on = |id: &'static str| {
+        move |n: &NodeRunState| n.thread.as_ref().is_some_and(|t| t.thread_id == id)
+    };
+    until(&fx, "goal", on("th-2")).await;
+    hold::pause(&fx.ctx, &fx.run_id, &fx.user).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(4), driver)
+        .await
+        .unwrap()
+        .unwrap();
+    let closed = f.closed.lock().unwrap().clone();
+    assert!(
+        closed.contains(&"th-1".to_string()) && closed.contains(&"th-2".to_string()),
+        "iteration 1's thread is closed with the paused one: {closed:?}"
+    );
+    hold::resume(&fx.ctx, &fx.run_id, None).await.unwrap();
+    let run = fx.settled().await;
+    assert_eq!(run.status, RunStatus::Success, "{:?}", run.error);
+    let turns = f.turns.lock().unwrap().clone();
+    assert_eq!(
+        turns.last().unwrap().continue_thread.as_deref(),
+        Some("th-1"),
+        "the resumed iteration continues the closed thread"
+    );
+}
+
+/// CR2-004: skipping a loop stops its earlier steps' threads with its current one.
+#[tokio::test]
+async fn a_skipped_loop_closes_its_earlier_threads() {
+    let (f, _fake) = fake();
+    f.hang_at.store(2, std::sync::atomic::Ordering::SeqCst);
+    let agent_step = |name: &str| json!({"kind": "agent_prompt", "name": name, "params": {"prompt": "do it", "provider": "claude"}});
+    let steps = json!([agent_step("Work"), agent_step("Polish")]);
+    let fx = setup("goal-skip", goal_graph(steps, json!({"max_iterations": 1}))).await;
+    let driver = fx.drive();
+    until(&fx, "goal", |n| {
+        n.thread.as_ref().is_some_and(|t| t.thread_id == "th-2")
+    })
+    .await;
+    fx.ctx
+        .wf_skip_current
+        .lock()
+        .unwrap()
+        .insert(skip_marker_key(&fx.run_id, "goal"));
+    tokio::time::timeout(Duration::from_secs(10), driver)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut closed = f.closed.lock().unwrap().clone();
+    closed.sort();
+    closed.dedup();
+    assert_eq!(closed, ["th-1".to_string(), "th-2".to_string()]);
 }
 
 /// CR1-055 / CR1-056: a resume the run never took dies with the run (the
@@ -1632,4 +1765,302 @@ async fn pause_racing_completion_never_runs_a_step_twice() {
             );
         }
     }
+}
+
+/// CR2-013: a held run reports where its Start step says — the seeded input
+/// carries `result_chat`, the stored row's does not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn a_held_run_reports_to_the_start_steps_destination() {
+    use otto_channels::test_util::{Recorded, RecordingAdapter};
+    let to = json!({"result_channel": "slack", "result_chat": "C-held"});
+    let graph = WorkflowGraph {
+        nodes: vec![
+            node("start", "manual_trigger", to),
+            node("d", "delay", json!({"ms": 4000})),
+        ],
+        edges: vec![edge("start", "d")],
+    };
+    let mut fx = setup("held-result", graph).await;
+    let rec = RecordingAdapter::new(Channel::Slack, &fx.ws.id, "C-held", None);
+    fx.ctx.outbound = rec.factory();
+    fx.ctx
+        .integrations_store
+        .upsert(
+            &fx.ws.id,
+            Channel::Slack,
+            true,
+            Some("held-bot".into()),
+            None,
+            "root",
+            false,
+            "",
+            "C-held",
+            "",
+        )
+        .await
+        .unwrap();
+    let driver = fx.drive();
+    until(&fx, "d", |n| n.status == NodeStatus::Running).await;
+    hold::pause(&fx.ctx, &fx.run_id, &fx.user).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(4), driver)
+        .await
+        .unwrap()
+        .unwrap();
+    let told = rec.recorded().into_iter().any(|r| {
+        matches!(r, Recorded::Upload { chat, name, .. } if chat == "C-held" && name == "summary.md")
+    });
+    assert!(told, "{:?}", rec.recorded());
+}
+
+fn gate_graph(sibling_ms: Option<u64>) -> WorkflowGraph {
+    let mut graph = WorkflowGraph {
+        nodes: vec![
+            node("start", "log", json!({})),
+            node("gate", "human_approval", json!({})),
+        ],
+        edges: vec![edge("start", "gate")],
+    };
+    if let Some(ms) = sibling_ms {
+        graph.nodes.push(node("d", "delay", json!({"ms": ms})));
+        graph.edges.push(edge("start", "d"));
+    }
+    graph
+}
+
+/// CR2-007: the run's board knows the gate before the row says "waiting", so
+/// a sibling's publish in between cannot store the run as working again. A
+/// trigger holds the marking UPDATE open: the gate is there while a reader
+/// still sees the row as not waiting.
+#[tokio::test]
+async fn an_approval_gate_is_known_before_the_row_says_waiting() {
+    use super::super::super::nodes::human_approval::waiting_gate;
+    let fx = fixture("approval-order", gate_graph(None), true).await;
+    for sql in [
+        "CREATE TABLE slow(x INTEGER)",
+        "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 3000) \
+         INSERT INTO slow SELECT x FROM c",
+        "CREATE TRIGGER slow_gate AFTER UPDATE OF waiting_approval ON workflow_runs \
+         WHEN NEW.waiting_approval = 1 AND OLD.waiting_approval = 0 \
+         BEGIN SELECT count(*) FROM slow a, slow b WHERE a.x + b.x < 0; END",
+    ] {
+        sqlx::query(sql).execute(&fx.ctx.pool).await.unwrap();
+    }
+    let driver = fx.drive();
+    let t0 = Instant::now();
+    while waiting_gate(&fx.run_id).is_none() {
+        assert!(t0.elapsed() < Duration::from_secs(10), "the gate opens");
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    let waiting: i64 =
+        sqlx::query_scalar("SELECT waiting_approval FROM workflow_runs WHERE id = ?")
+            .bind(&fx.run_id)
+            .fetch_one(fx.ctx.pool.reader())
+            .await
+            .unwrap();
+    assert_eq!(
+        waiting, 0,
+        "the gate is registered before the row is marked"
+    );
+    fx.repo.request_cancel(&fx.run_id).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), driver)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+/// CR2-007: a decided gate stops saying "waiting" at once — also while its
+/// step waits for a run slot (every slot taken meanwhile), when a sibling's
+/// publish would otherwise show the run as waiting for approval again.
+#[tokio::test]
+async fn a_decided_gate_is_gone_while_its_step_retakes_its_slot() {
+    use super::super::super::nodes::human_approval::waiting_gate;
+    let fx = setup("approval-retake", gate_graph(None)).await;
+    spawn_run(
+        fx.ctx.clone(),
+        fx.ws.clone(),
+        fx.wf.clone(),
+        fx.run_id.clone(),
+        json!({}),
+        RunScope::default(),
+        None,
+    );
+    let t0 = Instant::now();
+    while !fx.repo.get_run(&fx.run_id).await.unwrap().waiting_approval {
+        assert!(t0.elapsed() < Duration::from_secs(5), "the gate parks");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let gate =
+        otto_workflows::run_queue::gate_for(otto_workflows::run_queue::lane_of(&fx.wf.graph));
+    let mut held = vec![];
+    while held.len() < otto_workflows::run_queue::max_parallel_runs() {
+        held.extend(gate.try_acquire().ok());
+        assert!(
+            t0.elapsed() < Duration::from_secs(5),
+            "the parked run gives its slot back"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let rev = fx
+        .repo
+        .record_approval(&fx.run_id, "gate", Some(&fx.user.id), "", None)
+        .await
+        .unwrap();
+    let at = (&fx.ws.id, &fx.run_id, "running", rev);
+    emit_run_updated_with(&fx.ctx, at, Some("gate"), None, &[], false, None);
+    let t0 = Instant::now();
+    while waiting_gate(&fx.run_id).is_some() {
+        assert!(
+            t0.elapsed() < Duration::from_secs(5),
+            "the decided gate is gone before its step has a slot"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(running(&fx.repo.get_run(&fx.run_id).await.unwrap(), "gate"));
+    drop(held);
+    let run = fx.settled().await;
+    assert_eq!(run.status, RunStatus::Success, "{:?}", run.error);
+}
+
+/// CR2-007: one approval notice per gate. A sibling's publish while the gate
+/// waits names the sibling; it is not a second gate to tell the owner about.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn a_siblings_publish_does_not_notify_the_approval_again() {
+    let fx = setup("approval-notice", gate_graph(Some(300))).await;
+    crate::run_notices::spawn_listener(fx.ctx.clone());
+    let _driver = fx.drive();
+    let run = until(&fx, "d", |n| n.status == NodeStatus::Success).await;
+    assert!(run.waiting_approval, "d settled while the gate waits");
+    // The listener is a task of its own: give it d's last event.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let notices: Vec<String> =
+        sqlx::query_scalar("SELECT source_key FROM notifications WHERE title LIKE '%approval%'")
+            .fetch_all(&fx.ctx.pool)
+            .await
+            .unwrap();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert!(notices[0].ends_with(":gate"), "{notices:?}");
+}
+
+/// CR1-024: a step that starts again from its kept state (a restart caught
+/// it after an attempt that failed) drops the error class that attempt left:
+/// once it succeeded it must not still read as a provider failure.
+#[tokio::test]
+async fn a_step_that_starts_again_drops_its_old_error_class() {
+    let graph = WorkflowGraph {
+        nodes: vec![node("start", "log", json!({})), node("a", "log", json!({}))],
+        edges: vec![edge("start", "a")],
+    };
+    let fx = setup("class-again", graph).await;
+    let prior = vec![
+        NodeRunState {
+            node_id: "start".into(),
+            status: NodeStatus::Success,
+            step_no: Some(1),
+            output: Some(json!({})),
+            ..Default::default()
+        },
+        // A step caught mid-flight re-enters with its state kept (DR-006).
+        NodeRunState {
+            node_id: "a".into(),
+            status: NodeStatus::Pending,
+            step_no: Some(2),
+            started_at: Some(chrono::Utc::now() - chrono::Duration::seconds(60)),
+            error_class: Some("provider".into()),
+            ..Default::default()
+        },
+    ];
+    let scope = RunScope {
+        continue_unfinished: true,
+        ..Default::default()
+    };
+    let drive = run_workflow(
+        fx.ctx.clone(),
+        fx.ws.clone(),
+        fx.wf.clone(),
+        fx.run_id.clone(),
+        json!({}),
+        scope,
+        Some(prior),
+    );
+    tokio::time::timeout(Duration::from_secs(15), tokio::spawn(drive))
+        .await
+        .unwrap()
+        .unwrap();
+    let run = fx.repo.get_run(&fx.run_id).await.unwrap();
+    assert_eq!(run.status, RunStatus::Success, "{:?}", run.error);
+    assert_eq!(state(&run, "a").error_class, None);
+}
+
+/// A run on `spawn_run` whose agent step asked its question, with every run
+/// slot then taken by the test (the parked run gave its own back).
+async fn asked_with_the_run_gate_full(
+    ws: &str,
+    f: &Fake,
+) -> (Fx, Vec<tokio::sync::SemaphorePermit<'static>>) {
+    f.ask.store(true, std::sync::atomic::Ordering::SeqCst);
+    let graph = WorkflowGraph {
+        nodes: vec![node("start", "log", json!({})), agent("a")],
+        edges: vec![edge("start", "a")],
+    };
+    let fx = setup(ws, graph).await;
+    spawn_run(
+        fx.ctx.clone(),
+        fx.ws.clone(),
+        fx.wf.clone(),
+        fx.run_id.clone(),
+        json!({}),
+        RunScope::default(),
+        None,
+    );
+    until(&fx, "a", |n| n.attention.is_some()).await;
+    let gate =
+        otto_workflows::run_queue::gate_for(otto_workflows::run_queue::lane_of(&fx.wf.graph));
+    let t0 = Instant::now();
+    let mut held = vec![];
+    while held.len() < otto_workflows::run_queue::max_parallel_runs() {
+        held.extend(gate.try_acquire().ok());
+        assert!(
+            t0.elapsed() < Duration::from_secs(5),
+            "the parked run gives its slot back"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    (fx, held)
+}
+
+/// CR1-022: a step that asks again while its last answer still waits for a
+/// run slot is parked, not half back: a slot that frees then is not taken by
+/// a run that waits on a person (it held it, and burnt its time budget).
+#[tokio::test]
+async fn a_step_asking_again_before_it_retook_its_slot_stays_parked() {
+    let (f, _fake) = fake();
+    f.ask_again.store(true, std::sync::atomic::Ordering::SeqCst);
+    let (fx, mut held) = asked_with_the_run_gate_full("retake-again", &f).await;
+    f.answer.store(true, std::sync::atomic::Ordering::SeqCst);
+    let again = |n: &NodeRunState| n.attention.as_ref().is_some_and(|a| a.text == "And then?");
+    until(&fx, "a", again).await;
+    held.pop();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let gate =
+        otto_workflows::run_queue::gate_for(otto_workflows::run_queue::lane_of(&fx.wf.graph));
+    assert_eq!(gate.available_permits(), 1, "the parked run took no slot");
+    fx.repo.request_cancel(&fx.run_id).await.unwrap();
+    assert_eq!(fx.settled().await.status, RunStatus::Canceled);
+}
+
+/// CR1-022: an attempt that failed while it waited on a person is retried;
+/// with every run slot taken, the retry waits for its slot beside the cancel
+/// watch, so a Cancel still stops the run at once.
+#[tokio::test]
+async fn a_cancel_stops_a_retry_waiting_to_retake_its_slot() {
+    let (f, _fake) = fake();
+    f.fail_asked
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let (fx, _held) = asked_with_the_run_gate_full("retake-retry", &f).await;
+    f.answer.store(true, std::sync::atomic::Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    fx.repo.request_cancel(&fx.run_id).await.unwrap();
+    let t0 = Instant::now();
+    assert_eq!(fx.settled().await.status, RunStatus::Canceled);
+    assert!(t0.elapsed() < Duration::from_secs(10), "{:?}", t0.elapsed());
 }

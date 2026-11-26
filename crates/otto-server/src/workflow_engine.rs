@@ -235,6 +235,11 @@ pub(crate) async fn wake_on_event(
 /// that does not announce.
 const APPROVAL_SAFETY_RECHECK: Duration = Duration::from_secs(30);
 
+/// The approval gate `run_id` waits at (its notice is keyed on it).
+pub(crate) fn approval_gate(run_id: &str) -> Option<String> {
+    nodes::human_approval::waiting_gate(run_id).map(|(gate, _)| gate)
+}
+
 /// Whether `ev` announces a decision on `run_id`'s approval gate `node_id`:
 /// `approve_run` emits a NON-waiting update for the gate node (the engine's
 /// own pause announcement for it is a waiting one).
@@ -1684,7 +1689,7 @@ async fn finalize_canceled_run(
     input: &Value,
 ) {
     // A Pause that landed after the driver's own hold check holds the run.
-    if run::hold::settle_held(ctx, repo, workflow, run_id, states).await {
+    if run::hold::settle_held(ctx, repo, workflow, run_id, states, input).await {
         return;
     }
     stop_run_reviews(ctx, repo, &workflow.workspace_id, run_id, states).await;

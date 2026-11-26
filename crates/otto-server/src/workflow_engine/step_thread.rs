@@ -392,6 +392,17 @@ async fn retention_hours(ctx: &ServerCtx) -> (i64, i64) {
     )
 }
 
+/// The threads a node worked on before its current one — a retry's earlier
+/// turns, a loop's earlier iterations and inner steps. They stay open while
+/// the node runs; a review's rows and an agent's sub-threads are not these.
+fn earlier_threads(st: &NodeRunState) -> impl Iterator<Item = &Id> {
+    st.children
+        .iter()
+        .filter(|c| c.status == "success")
+        .filter(|c| c.label.ends_with("earlier turn") || c.label.contains(" · iteration "))
+        .filter_map(|c| c.thread_id.as_ref())
+}
+
 /// A settled step closes its thread, unless a step that has not settled yet
 /// continues it (`continue_from`, §4.5): the last continuer closes it.
 pub(super) async fn close_settled(
@@ -402,15 +413,8 @@ pub(super) async fn close_settled(
 ) {
     let until = retain_until(ctx, st.status == NodeStatus::Success).await;
     let r = runner(ctx, None);
-    for c in st
-        .children
-        .iter()
-        .filter(|c| c.status == "success")
-        .filter(|c| c.label.ends_with("earlier turn") || c.label.contains(" · iteration "))
-    {
-        if let Some(id) = &c.thread_id {
-            r.close(id, until).await;
-        }
+    for id in earlier_threads(st) {
+        r.close(id, until).await;
     }
     let Some(t) = st
         .thread
@@ -453,8 +457,9 @@ pub(super) async fn close_settled(
 
 /// The run ended (or is held): a stopped run's open threads are closed —
 /// and marked so, so a Resume starts the step afresh instead of awaiting a
-/// stopped turn — and every thread of the run is kept for the success or
-/// the failed period from now (§6.5).
+/// stopped turn — a loop's earlier ones too (no CLI idles through a hold; a
+/// `same_thread` step reopens its own), and every thread of the run is kept
+/// for the success or the failed period from now (§6.5).
 pub(super) async fn retain_run(ctx: &ServerCtx, states: &mut [NodeRunState], success: bool) {
     let r = runner(ctx, None);
     let (ok_h, failed_h) = retention_hours(ctx).await;
@@ -469,6 +474,9 @@ pub(super) async fn retain_run(ctx: &ServerCtx, states: &mut [NodeRunState], suc
             }
             ids.push(t.thread_id.clone());
         }
+        for id in earlier_threads(s) {
+            r.close(id, until).await;
+        }
         ids.extend(s.children.iter().filter_map(|c| c.thread_id.clone()));
     }
     if !ids.is_empty() {
@@ -476,8 +484,12 @@ pub(super) async fn retain_run(ctx: &ServerCtx, states: &mut [NodeRunState], suc
     }
 }
 
-/// A skipped step's thread stops with it (the run goes on without it).
+/// A skipped step's threads stop with it (the run goes on without it).
 pub(super) async fn close_open(ctx: &ServerCtx, st: &mut NodeRunState) {
+    let (r, until) = (runner(ctx, None), retain_until(ctx, false).await);
+    for id in earlier_threads(st) {
+        r.close(id, until).await;
+    }
     let Some(t) = st
         .thread
         .as_mut()
@@ -485,8 +497,6 @@ pub(super) async fn close_open(ctx: &ServerCtx, st: &mut NodeRunState) {
     else {
         return;
     };
-    runner(ctx, None)
-        .close(&t.thread_id, retain_until(ctx, false).await)
-        .await;
+    r.close(&t.thread_id, until).await;
     t.closed_at = Some(chrono::Utc::now());
 }

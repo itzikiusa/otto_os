@@ -17,8 +17,22 @@ pub(crate) async fn resume_held_review(
         Ok(r) => r,
         Err(e) => return tracing::warn!(review = %review_id, "held review resume: {e}"),
     };
-    let Ok(repo) = ctx.git_store.get_repo(&review.repo_id).await else {
-        return;
+    let repo = match ctx.git_store.get_repo(&review.repo_id).await {
+        Ok(repo) => repo,
+        // The repo is gone: the held agents stop and the review ends, so a
+        // workflow step waiting for it fails now, not after its 5 hours.
+        Err(e) => {
+            for agent in &review.agents {
+                end_review_agent(&ctx, agent).await;
+            }
+            remove_review_temp_files(&review_id).await;
+            let error = Some(e.to_string());
+            let _ = ctx
+                .reviews_store
+                .set_status(&review_id, ReviewStatus::Error, error.as_deref())
+                .await;
+            return;
+        }
     };
     let run = ctx
         .reviews_store

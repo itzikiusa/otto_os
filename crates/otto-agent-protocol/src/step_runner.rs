@@ -672,12 +672,37 @@ impl StepRunner for ThreadStepRunner {
                 }
             },
         };
-        let thread = self
-            .thread(&t, place.as_ref().and_then(|p| p.key.clone()))
-            .await;
-        drop(place);
-        let id = match thread {
-            Ok(id) => id,
+        // The thread is made on a task of its own, to its end: a step cut
+        // while its CLI spawns (a skip, a cancel) drops this future, and a
+        // thread nobody was told of would idle with its process for good. A
+        // fresh one whose `Started` no one hears any more is deleted.
+        let me = Self::new(self.rt.clone(), self.host.clone());
+        let (t2, ev2) = (t.clone(), ev.clone());
+        let made = tokio::spawn(async move {
+            let key = place.as_ref().and_then(|p| p.key.clone());
+            let id = match me.thread(&t2, key).await {
+                Ok(id) => id,
+                Err(e) => return Ok(Err(e)),
+            };
+            drop(place);
+            let start_ordinal = me.rt.turn_ordinal(&id).await?;
+            let started = StepEvent::Started {
+                thread_id: id.clone(),
+                start_ordinal,
+            };
+            if ev2.send(started).is_err() {
+                if t2.continue_thread.is_none() {
+                    me.rt.delete(&id).await?;
+                }
+                return Ok(Err(StepError::new(StepErrorClass::Canceled, "canceled")));
+            }
+            Ok::<_, Error>(Ok((id, start_ordinal)))
+        });
+        let made: Result<_> = made
+            .await
+            .map_err(|e| Error::Internal(format!("step thread: {e}")))?;
+        let (id, start_ordinal) = match made? {
+            Ok(made) => made,
             Err(e) => {
                 return Ok(Self::failed(
                     t.continue_thread.clone().unwrap_or_default(),
@@ -685,11 +710,6 @@ impl StepRunner for ThreadStepRunner {
                 ))
             }
         };
-        let start_ordinal = self.rt.turn_ordinal(&id).await?;
-        let _ = ev.send(StepEvent::Started {
-            thread_id: id.clone(),
-            start_ordinal,
-        });
         let tally = Tally {
             start_ordinal,
             started,

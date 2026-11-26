@@ -324,6 +324,8 @@ struct BankOnDrop<'a> {
     bank: Bank<'a>,
     repo: WorkflowsRepo,
     run_id: Id,
+    /// The run's checkpoint generation as the attempt began.
+    generation: i64,
     cp: Option<WorkflowCheckpoint>,
 }
 
@@ -333,9 +335,13 @@ impl Drop for BankOnDrop<'_> {
             return;
         };
         self.bank.apply(&mut cp);
-        let (repo, run_id) = (self.repo.clone(), self.run_id.clone());
+        let (repo, run_id, generation) = (self.repo.clone(), self.run_id.clone(), self.generation);
+        // Detached, so it can land after a Resume or Retry reset this
+        // checkpoint: the write is refused then (the generation moved on).
         rt.spawn(async move {
-            let _ = repo.save_checkpoint(&run_id, &cp).await;
+            let _ = repo
+                .save_checkpoint_at(&run_id, &cp, Some(generation))
+                .await;
         });
     }
 }
@@ -394,6 +400,7 @@ where
         bank,
         repo: repo.clone(),
         run_id: run_id.clone(),
+        generation: repo.checkpoint_generation(run_id).await,
         cp: Some(cp.clone()),
     };
     tokio::pin!(fut);
@@ -748,6 +755,65 @@ mod tests {
             "{} after {first}",
             saved.active_ms
         );
+    }
+
+    /// CR1-026: the bank of a dropped attempt is a detached write. Landing
+    /// after a Resume or a Retry re-entered the run, it must not put the
+    /// reset checkpoint back to running on its closed thread. The retry
+    /// commits on another thread while this one never yields, so the bank
+    /// (spawned at the drop) can only run after it.
+    #[tokio::test]
+    async fn a_late_bank_does_not_undo_a_retrys_reset() {
+        let (_dir, repo, run_id, cp) = fixture().await;
+        let clock = AttemptClock::default();
+        let policy = RetryPolicy::default();
+        {
+            let attempt = execute_timed(
+                &repo,
+                &run_id,
+                cp.clone(),
+                &policy,
+                true,
+                || async {
+                    clock.thread_started("th-1".into(), 0);
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    Ok((json!({}), vec![]))
+                },
+                |_| {},
+                &clock,
+            );
+            tokio::pin!(attempt);
+            let on_thread = |c: Option<WorkflowCheckpoint>| c.and_then(|c| c.thread_id).is_some();
+            while !on_thread(repo.checkpoint(&run_id, &cp.node_id).await.unwrap()) {
+                let tick = tokio::time::sleep(Duration::from_millis(10));
+                tokio::select! {
+                    _ = &mut attempt => unreachable!("the attempt hangs"),
+                    () = tick => {}
+                }
+            }
+        }
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                rt.block_on(repo.prepare_retry(
+                    &run_id,
+                    &["loop".into()],
+                    false,
+                    &Default::default(),
+                ))
+                .unwrap();
+            });
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let saved = repo
+            .checkpoint(&run_id, &cp.node_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.status, NodeStatus::Pending, "the reset stands");
     }
 
     #[tokio::test]

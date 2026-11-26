@@ -438,7 +438,13 @@ async fn prepare_input(
         .unwrap_or_else(|| ws.root_path.clone());
     // A research goal works in its own folder (goal.md §2.5).
     let dir = files.dir_str();
-    let research = otto_workflows::goal::research_cwd(&input, dir.as_deref(), &ctx.data_dir).await;
+    let mut research =
+        otto_workflows::goal::research_cwd(&input, dir.as_deref(), &ctx.data_dir).await;
+    // A kept folder that is gone or refused: a fresh one, never the workspace root.
+    if research.is_none() && input.get("research_dir").is_some() {
+        let fresh = json!({"research_dir": true});
+        research = otto_workflows::goal::research_cwd(&fresh, dir.as_deref(), &ctx.data_dir).await;
+    }
     let run_cwd = research.unwrap_or(run_cwd);
     // Run-level base branch: the ambient PR/review base for the whole run, so a
     // `review_run`/`git_pr` is aware of the run's base even after intervening
