@@ -1451,3 +1451,52 @@ async fn approval_agent_step_goal_and_resume() {
     assert_eq!(run.status, RunStatus::Success, "{:?}", run.error);
     fx.ctx.agent_runtime.shutdown().await;
 }
+
+/// A re-entered run whose graph no longer validates fails with its node
+/// states kept: the steps that already ran stay on the run's page.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn a_reentered_run_that_no_longer_validates_keeps_its_steps() {
+    let graph = WorkflowGraph {
+        nodes: vec![
+            node("start", "log", json!({})),
+            node("q", "db_query", json!({})),
+        ],
+        edges: vec![edge("start", "q")],
+    };
+    let fx = setup("invalid-reentry", graph).await;
+    let prior = vec![
+        NodeRunState {
+            node_id: "start".into(),
+            status: NodeStatus::Success,
+            output: Some(json!({"ok": true})),
+            ..Default::default()
+        },
+        NodeRunState {
+            node_id: "q".into(),
+            ..Default::default()
+        },
+    ];
+    run_workflow(
+        fx.ctx.clone(),
+        fx.ws.clone(),
+        fx.wf.clone(),
+        fx.run_id.clone(),
+        json!({}),
+        RunScope::default(),
+        Some(prior),
+    )
+    .await;
+    let run = fx.repo.get_run(&fx.run_id).await.unwrap();
+    assert_eq!(run.status, RunStatus::Error);
+    assert!(
+        run.error.as_deref().is_some_and(|e| e.contains("q")),
+        "{:?}",
+        run.error
+    );
+    assert_eq!(
+        state(&run, "start").status,
+        NodeStatus::Success,
+        "{:?}",
+        run.nodes
+    );
+}

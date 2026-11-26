@@ -36,7 +36,7 @@ pub(in crate::workflow_engine) async fn admit(
     repo: &WorkflowsRepo,
     active_budget: Duration,
 ) -> Option<Admitted> {
-    let order = valid_order(ctx, repo, workflow, run_id).await?;
+    let order = valid_order(ctx, repo, workflow, run_id, prior_nodes.unwrap_or(&[])).await?;
     let RunScope {
         start_node,
         only_node,
@@ -143,12 +143,13 @@ pub(in crate::workflow_engine) async fn admit(
 }
 
 /// The graph's topological order, or — for an invalid graph — the run
-/// settled as Error and `None`.
+/// settled as Error and `None`. A re-entered run keeps its node states.
 async fn valid_order(
     ctx: &ServerCtx,
     repo: &WorkflowsRepo,
     workflow: &Workflow,
     run_id: &Id,
+    nodes: &[NodeRunState],
 ) -> Option<Vec<String>> {
     match crate::workflow_validation::ensure_valid(&workflow.graph)
         .map_err(|e| e.to_string())
@@ -163,7 +164,7 @@ async fn valid_order(
                     run_id,
                     &[RunStatus::Pending, RunStatus::Running],
                     RunStatus::Error,
-                    &[],
+                    nodes,
                     Some(&e),
                     true,
                 )
@@ -179,7 +180,7 @@ async fn valid_order(
                 None,
                 rev,
                 None,
-                &[],
+                nodes,
                 false,
             );
             None
