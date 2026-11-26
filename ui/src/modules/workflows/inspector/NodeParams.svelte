@@ -4,19 +4,15 @@
   // through to a raw JSON editor. Every edit goes through the page's `set`
   // (the selected node's `onParam`), which marks the canvas dirty.
   import type { WorkflowNode } from '../../../lib/api/types';
-  import AgentPrompt from './AgentPrompt.svelte';
   import BrokerPeek from './BrokerPeek.svelte';
   import Canvas from './Canvas.svelte';
   import DbQuery from './DbQuery.svelte';
-  import GitPr from './GitPr.svelte';
   import HttpRequest from './HttpRequest.svelte';
   import Loop from './Loop.svelte';
   import ManualTrigger from './ManualTrigger.svelte';
   import PrepareContext from './PrepareContext.svelte';
   import ProductStep from './ProductStep.svelte';
-  import ProviderModel from './ProviderModel.svelte';
   import RawParams from './RawParams.svelte';
-  import ReviewRun from './ReviewRun.svelte';
   import SelfImprove from './SelfImprove.svelte';
   import Utility from './Utility.svelte';
   import type { InspectorOptions } from './options.svelte';
@@ -25,7 +21,9 @@
   // Only a product_publish node needs the Confluence space/page pickers: keep
   // them (and their issues API) off the Workflows page's first load.
   const ProductPublish = lazyComponent(() => import('./ProductPublish.svelte'));
-  import { KINDS_WITH_OWN_PROVIDER, type SetParam } from './util';
+  import StepModel from './StepModel.svelte';
+  import { paramStr, type SetParam } from './util';
+  import { defaultAgentProvider } from '../../../lib/providers';
   import type { Snippet } from 'svelte';
 
   interface Props {
@@ -39,12 +37,13 @@
     workflowName: string | undefined;
     /** Open the page's big JSON editor for `field`. */
     onzoom: (field: string, label: string) => void;
-    /** The editor's own form for this kind (in place of the one below). */
+    /** The editor's own form for this kind (agent, review, git and the new
+     *  deterministic steps — StepInspector.svelte), in place of the one below. */
     body?: Snippet;
-    /** false: no Provider + Model on kinds that run no agent (the editor). */
-    universalModel?: boolean;
   }
-  let { node, set, setParams, wsId, pickers, workflowName, onzoom, body, universalModel = true }: Props = $props();
+  let { node, set, setParams, wsId, pickers, workflowName, onzoom, body }: Props = $props();
+  /** The other kinds that run an agent: provider · model · effort under their form. */
+  const MODEL_KINDS = ['prepare_context', 'product_analyze', 'product_rewrite', 'product_plan', 'canvas'];
   const UTILITY_KINDS = ['delay', 'transform', 'game_engine', 'channel_notify', 'budget_gate', 'human_approval', 'condition'];
   const PRODUCT_STEP_KINDS = ['product_analyze', 'product_rewrite', 'product_plan'];
 </script>
@@ -55,8 +54,6 @@
     {@render body()}
   {:else if node.kind === 'manual_trigger'}
     <ManualTrigger {node} {set} {wsId} {pickers} {workflowName} />
-  {:else if node.kind === 'agent_prompt'}
-    <AgentPrompt {node} {set} />
   {:else if node.kind === 'prepare_context'}
     <PrepareContext {node} {set} {pickers} />
   {:else if node.kind === 'http_request' || node.kind === 'api_run'}
@@ -69,29 +66,22 @@
     <BrokerPeek {node} {set} {wsId} {pickers} />
   {:else if node.kind === 'loop'}
     <Loop {node} {set} {onzoom} />
-  {:else if node.kind === 'review_run'}
-    <ReviewRun {node} {set} {wsId} {pickers} />
   {:else if PRODUCT_STEP_KINDS.includes(node.kind)}
     <ProductStep {node} {set} {wsId} {pickers} />
   {:else if node.kind === 'product_publish'}
     <LazyMount lazy={ProductPublish} what="the publish settings" variant="compact" props={{ node, set, wsId, pickers }} />
   {:else if node.kind === 'canvas'}
     <Canvas {node} {set} />
-  {:else if node.kind === 'git_pr'}
-    <GitPr {node} {set} {wsId} {pickers} />
   {:else if node.kind === 'self_improve'}
     <SelfImprove {node} {set} />
   {:else if node.kind !== 'log' && node.kind !== 'verifier'}
     <RawParams {node} {setParams} />
   {/if}
 
-  <!-- Universal Provider + Model: EVERY node that doesn't render its own
-       provider control gets one here, so no node is ever missing it. For
-       agent-running kinds (git_pr drafts the PR message, …) it
-       drives the agent; for pure utility nodes it's simply present and unused.
-       Kinds with their own control are excluded to avoid a duplicate. -->
-  {#if universalModel && !KINDS_WITH_OWN_PROVIDER.includes(node.kind) && node.kind !== 'manual_trigger'}
-    <ProviderModel {node} {set} />
+  {#if MODEL_KINDS.includes(node.kind)}
+    <span class="np-label np-sec">Agent</span>
+    <StepModel value={{ provider: paramStr(node, 'provider'), model: paramStr(node, 'model'), effort: paramStr(node, 'effort') }} defaultProvider={defaultAgentProvider()}
+      onchange={(v) => { set('provider', v.provider || undefined); set('model', v.model || undefined); set('effort', v.effort || undefined); }} />
   {/if}
 </div>
 

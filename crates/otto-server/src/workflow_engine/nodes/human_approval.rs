@@ -67,10 +67,10 @@ pub(in crate::workflow_engine) async fn execute(
         .unwrap_or(86_400)
         .max(60);
     let deadline = Instant::now() + Duration::from_secs(timeout_s);
-    // A parked run hands its run-gate slot back while a human decides
-    // (up to 24h) and re-takes it — FIFO — once decided.
-    let released = release_run_permit();
-    let approval_pause = env.budget.pause();
+    // Parked while a human decides (up to 24h): when nothing else of the run
+    // works, the run hands its run-gate slot back and re-takes it — FIFO —
+    // once decided (`ActiveBudget::park`).
+    let park = env.budget.park();
     let tokio_deadline = tokio::time::Instant::from_std(deadline);
     let decision = loop {
         // Wake on THIS gate's decision (`approve_run` emits a
@@ -157,7 +157,6 @@ pub(in crate::workflow_engine) async fn execute(
             }
         }
     };
-    reacquire_run_permit(released).await;
-    drop(approval_pause);
+    park.unpark().await;
     decision
 }

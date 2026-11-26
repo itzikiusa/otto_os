@@ -864,9 +864,11 @@ pub async fn cancel_run(
                 overview: None,
             });
         }
-    } else if run.hold.is_some() {
-        // A held run is settled: Cancel only drops its hold (goal.md §2.3).
-        repo(&ctx).clear_hold(&id).await.map_err(ApiError)?;
+    } else {
+        // A held run is settled: Cancel drops its hold and reaps (goal.md §2.3).
+        workflow_engine::hold::cancel_held(&ctx, &id)
+            .await
+            .map_err(ApiError)?;
     }
     repo(&ctx).get_run(&id).await.map(Json).map_err(ApiError)
 }
@@ -995,6 +997,7 @@ pub async fn get_run(
     let mut run = repo(&ctx).get_run(&id).await.map_err(ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &run.workspace_id, WorkspaceRole::Viewer).await?;
     run.checkpoints = repo(&ctx).checkpoints(&id).await.map_err(ApiError)?;
+    crate::workflow_engine::fill_thread_available(&ctx, &mut run.nodes).await;
     Ok(Json(with_context_dir(&ctx, run)))
 }
 

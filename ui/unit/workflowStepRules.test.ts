@@ -50,7 +50,10 @@ test('reviewer picks: a row writes picks[provider]; resolution falls back to the
   assert.deepEqual(set, { lens: 'correctness', providers: ['claude', 'codex'], picks: { codex: { model: 'gpt-5.1-codex', effort: 'high' } } });
   assert.deepEqual(withReviewerPick(set, 'codex', {}), row, 'clearing removes the key (and an empty picks)');
   assert.deepEqual(reviewerPick({ lens: 'x', providers: ['claude'], model: 'opus', effort: 'low' }, 'claude'), { model: 'opus', effort: 'low' });
-  assert.deepEqual(reviewerPick({ lens: 'x', providers: ['claude', 'codex'], model: 'opus' }, 'claude'), {}, 'row model/effort only bind a one-provider lens');
+  assert.deepEqual(reviewerPick({ lens: 'x', providers: ['claude', 'codex'], model: 'opus' }, 'claude'), { model: 'opus', effort: undefined }, 'row model/effort bind the primary provider');
+  assert.deepEqual(reviewerPick({ lens: 'x', providers: ['claude', 'codex'], model: 'opus' }, 'codex'), {}, 'a secondary provider uses picks, else the review-wide default');
+  assert.deepEqual(reviewerPick({ lens: 'x', providers: ['claude', 'codex'], model: 'opus', picks: { claude: { effort: 'low' } } }, 'claude'), { effort: 'low' }, 'picks[provider] first');
+  assert.deepEqual(resolvedReviewerPick({ lens: 'x', providers: ['claude'] }, 'claude', { claude: { effort: 'max' } }), { effort: 'max' }, 'an empty own pick falls to the node default');
   assert.deepEqual(resolvedReviewerPick(row, 'claude', { claude: { effort: 'max' } }), { effort: 'max' });
   assert.deepEqual(resolvedReviewerPick(set, 'codex', { codex: { effort: 'max' } }), { model: 'gpt-5.1-codex', effort: 'high' });
   assert.deepEqual(withNodePick(undefined, 'codex', { effort: 'low' }), { codex: { effort: 'low' } });

@@ -628,3 +628,59 @@ fn command_timeouts_default_and_clamp() {
     c.timeout_s = Some(99_999);
     assert_eq!(command_timeout_s(&c), 3_600);
 }
+
+fn hold(kind: HoldKind, iteration: u32) -> otto_core::workflows::RunHold {
+    otto_core::workflows::RunHold {
+        kind,
+        reason: String::new(),
+        since: Utc::now(),
+        by: None,
+        node_ids: vec!["goal".into()],
+        iteration: Some(iteration),
+    }
+}
+
+/// GL7.1: Resume after Exhausted needs a raised limit and names it; Extend
+/// writes the new totals; a Blocked hold records where it resumed.
+#[test]
+fn resume_needs_room_above_what_is_used() {
+    let params = json!({"max_iterations": 3, "hold_when_unmet": true});
+    let out_of_iters = hold(HoldKind::Exhausted, 3);
+    assert_eq!(
+        resume_limits(&params, None, &out_of_iters, (3, 0), (None, None)).unwrap_err(),
+        "Raise the iteration limit to resume: 3 of 3 iterations are used."
+    );
+    let l = resume_limits(&params, None, &out_of_iters, (3, 0), (Some(5), None)).unwrap();
+    assert_eq!(l.max_iterations, Some(5));
+    let timed = json!({"max_iterations": 9, "max_active_s": 3600});
+    let out_of_time = hold(HoldKind::Exhausted, 4);
+    let err =
+        resume_limits(&timed, None, &out_of_time, (4, 3_600_000), (Some(12), None)).unwrap_err();
+    assert_eq!(
+        err,
+        "Raise the time limit to resume: 1h of 1h active time is used."
+    );
+    let l = resume_limits(
+        &timed,
+        None,
+        &out_of_time,
+        (4, 3_600_000),
+        (None, Some(5400)),
+    )
+    .unwrap();
+    assert_eq!((l.max_iterations, l.max_active_s), (None, Some(5400)));
+    let blocked = resume_limits(
+        &params,
+        Some(&l),
+        &hold(HoldKind::Blocked, 2),
+        (2, 0),
+        (None, None),
+    )
+    .unwrap();
+    assert_eq!(blocked.unblocked_at, Some(2));
+    assert_eq!(
+        blocked.max_active_s,
+        Some(5400),
+        "earlier extensions are kept"
+    );
+}

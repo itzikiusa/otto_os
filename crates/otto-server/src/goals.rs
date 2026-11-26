@@ -62,20 +62,6 @@ pub async fn start_built(
     Ok((wf, run))
 }
 
-/// Hand a person's criterion record to the check parked on it. The engine
-/// join (its ´run/hold.rs´, not built yet): nothing parks on a criterion
-/// before the check node lands, so the verify route answers 409 first.
-pub async fn deliver_verify(
-    _ctx: &ServerCtx,
-    _run_id: &Id,
-    node_id: &str,
-    _entry: otto_core::workflows::HumanEntry,
-) -> Result<()> {
-    Err(Error::Conflict(format!(
-        "{node_id} is not waiting for a person"
-    )))
-}
-
 /// A workspace repository and the commit (`base`, default HEAD) a run worktree is cut from.
 async fn repo_at(
     ctx: &ServerCtx,

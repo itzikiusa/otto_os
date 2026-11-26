@@ -1,11 +1,12 @@
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
+import { openEditor, openStartForm, saveEditor, selectStep } from './workflowsUi';
 
 // review_run EXECUTION MODE E2E (workflows batch, R2).
 //   - The node inspector's "Execution mode" select defaults to *Default* (the
 //     `mode` key is absent from params), persists `fan_out`/`orchestrator` through
 //     a save + reload, and removes the key again when set back to Default.
-//   - A run-level `review_mode` (the Run dialog's row / the `/run` body) OVERRIDES
+//   - A run-level `review_mode` (the start form's Review row / the `/run` body) OVERRIDES
 //     every review_run node in that run: the step's first log line names the
 //     resolved mode AND its source, and the run input carries the override.
 //   - The two 400s of the wire contract.
@@ -32,9 +33,6 @@ interface Edge {
   source: string;
   target: string;
 }
-// `name: id` matters: the canvas card renders `n.name || <catalog label>` as its
-// title, so the node id is the text a `.node` locator can match on (the raw kind
-// string `review_run` is never rendered — the label "Review Run" is).
 function node(id: string, kind: string, params?: unknown, x = 0, y = 0): Node {
   return { id, kind, name: id, x, y, params: params ?? null };
 }
@@ -93,17 +91,11 @@ function nodeLogs(run: any, nodeId: string): string[] {
   return (n.logs ?? []) as string[];
 }
 
-/** Open the workflow's editor (canvas + inspector) from the list. */
-async function openWorkflow(page: Page, wfId: string): Promise<void> {
-  await page.goto('/#/workflows');
-  await page.getByTestId(`wf-row-${wfId}`).locator('.row-main').click();
-  await expect(page.locator('.node').first()).toBeVisible({ timeout: 15_000 });
-}
+/** Open the workflow's editor (canvas + inspector). */
+const openWorkflow = openEditor;
 
-/** Select a canvas node by its rendered title (= the node id, see `node()`). */
-async function selectNode(page: Page, id: string): Promise<void> {
-  await page.locator('.node', { hasText: id }).click();
-}
+/** Select a canvas step; its inspector opens. */
+const selectNode = selectStep;
 
 test.beforeEach(async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== 'desktop-browser', 'desktop-browser only');
@@ -151,7 +143,7 @@ test('inspector defaults to Default and persists mode', async ({ page }) => {
 
   // Orchestrator → saved onto the node's params.
   await sel.selectOption('orchestrator');
-  await page.getByRole('button', { name: 'Save' }).click();
+  await saveEditor(page);
   await expect
     .poll(async () => (await nodeParams(wfId, 'review')).mode, { timeout: 10_000 })
     .toBe('orchestrator');
@@ -164,7 +156,7 @@ test('inspector defaults to Default and persists mode', async ({ page }) => {
 
   // Back to Default REMOVES the key (it must not persist as `""`).
   await page.getByTestId('review-mode-select').selectOption('');
-  await page.getByRole('button', { name: 'Save' }).click();
+  await saveEditor(page);
   await expect
     .poll(async () => 'mode' in (await nodeParams(wfId, 'review')), { timeout: 10_000 })
     .toBe(false);
@@ -193,15 +185,15 @@ test('run dialog override wins over the node', async ({ page }) => {
   const plainRun = await waitRun(await startRun(wfId));
   expect(nodeLogs(plainRun, 'review')).toContain('review_run: mode orchestrator (node)');
 
-  // 3. The Run dialog's "Review mode" row posts the same override.
+  // 3. The start form's "Review" row posts the same override.
   const known = new Set([overrideRunId, plainRun.id as string]);
   await openWorkflow(page, wfId);
-  await page.getByRole('button', { name: 'Run…' }).click();
-  const dialogSel = page.getByTestId('run-review-mode');
+  const form = await openStartForm(page);
+  const dialogSel = form.getByTestId('wf-start-review-mode');
   await expect(dialogSel).toBeVisible({ timeout: 10_000 });
   await expect(dialogSel).toHaveValue('');
   await dialogSel.selectOption('fan_out');
-  await page.locator('.run-input').getByRole('button', { name: 'Run' }).click();
+  await page.getByTestId('wf-start-run').click();
 
   let dialogRunId = '';
   await expect

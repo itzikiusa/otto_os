@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  ago, attentionWord, childWord, deliverableWord, deliverablesInOrder, errorParts, inboxFolds, ordinal, runLine3, runTitle, runWord,
+  ago, attentionWord, childWord, deliverableWord, deliverablesInOrder, errorParts, inboxFolds, ordinal, retentionNote, runLine3, runTitle, runWord,
   stepDuration, stepWord, subLine, type InboxRun,
 } from '../src/modules/workflows/runs/runWords.ts';
 import type { RunOverview, RunState } from '../src/lib/api/types';
@@ -140,4 +140,10 @@ test('the error card leads with the step’s own first sentence', () => {
     title: 'The summarizer passed its 20-minute deadline.', body: '65 findings are saved but not verified.',
   });
   assert.deepEqual(errorParts('exit code 2'), { title: 'exit code 2', body: '' });
+});
+
+test('the conversation note reads the two retention settings', () => {
+  assert.equal(retentionNote(24, 168), 'Read-only: this conversation belongs to the run. It is kept for 24 hours after the run ends (7 days if the run fails).');
+  assert.equal(retentionNote(1, 36), 'Read-only: this conversation belongs to the run. It is kept for 1 hour after the run ends (36 hours if the run fails).');
+  assert.equal(retentionNote(0, 168), 'Read-only: this conversation belongs to the run. It is removed when the step succeeds; a summary stays (7 days if the run fails).');
 });

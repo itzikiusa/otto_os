@@ -1935,6 +1935,12 @@ must-fix); on the summarizer row they are the verifier's overall rating after
 verification. Agents emit it as one `{"lens_score": n, "score_reason": "…"}`
 element of their JSON array, which is never stored as a finding or comment.
 The workflow `review_run` node outputs them as `lens_scores: [{lens, score, reason}]`.
+`effort` (optional) is the effort the row runs with (empty = provider default).
+`thread` (optional, true) says `session_id` names a runtime thread (open it in
+the embedded thread view) rather than a terminal session; `started_at` /
+`finished_at` (optional) time the row's agent. On the thread runner an
+admission wait keeps the row `pending` with the wait's words in `note`, and a
+question or approval makes it `waiting` with "needs you: …".
 A scope assessment's `related_modules`/`risks` entries may arrive as strings or
 objects; objects are folded into one `"a — b"` string each.
 Recovery policy for a failed agent: up to `ReviewConfig.max_attempts`
@@ -3713,6 +3719,15 @@ Filesystem paths are on the **daemon host**, including when the caller uses a re
 - `large_pr_lines?: number | null` — changed lines (tests included) above which a PR is LARGE: no scope assessment, every configured lens on every configured provider. Default 5000.
 - `medium_pr_lines?: number | null` — changed lines above which a PR is MEDIUM (recorded on the plan; lenses stay agent-selected, as for SMALL). Default 1000.
 - `ReviewScopePlan` additionally carries `size` (`small|medium|large`), `changed_lines` and `all_providers` (true for LARGE PRs). A failed scope assessment never stops a review: it falls back to every configured lens (`source` says so).
+
+**Model and effort per reviewer and provider; drop-only scope (additive, optional, all `serde(default)`):**
+- `ModelPick { model, effort }` — empty = the provider's default (no flag sent).
+- `ReviewAgentCfg.effort?: string` (beside `model`, on `provider`) and `ReviewAgentCfg.picks?: { <provider>: ModelPick }`.
+- `ReviewConfig.picks?: { <provider>: ModelPick }` — the review-wide default per provider; also reaches lenses the scope assessment adds.
+- Resolution for a row "lens L on provider P": `L.picks[P]` → `(L.model, L.effort)` when `L.provider == P` → `picks[P]` → provider default (an empty pick falls through). An orchestrator row (one per provider) takes the first lens pick for P, else the first configured model that applies to P, else `picks[P]`. The summarizer and the scope assessment run on `summarizer.{provider, model, effort}`.
+- `ReviewConfig.scope_assessment?: "auto" | "configured"` (absent = `auto`, today's behaviour). `configured`: the scope assessment still runs, then the plan keeps only lenses a configured reviewer declares (name, case-insensitive), in plan order — it may drop a declared lens, never add one; a plan left empty runs every configured lens.
+- `ReviewConfig.reviewer_time_box_secs?: number` — reserved (accepted and stored; not enforced yet).
+- A `review_run` node takes the same keys: `reviewers[].effort`, `reviewers[].picks`, node-level `picks`, `summarizer.effort`, `scope_assessment`, `reviewer_time_box_secs`.
 
 **`Review` DTO additions (A2 — additive, optional):**
 - `verdict?: "approved" | "changes_requested" | "incomplete" | null` — computed at read time (every review read route) from the review's tracked findings: `incomplete` when `error` carries `Review incomplete — not a verdict:`, else for a `done` review `changes_requested` when `blocker_count > 0`, `approved` otherwise; `null` while running, cancelled or failed with nothing usable.
@@ -6661,6 +6676,109 @@ Transcript session GETs reuse bounded immutable folds (32 retained entries / 128
 ```
 
 `status`, `duration_ms`, `request_id`, `source.session_id` and `source.via` may be null. `source.kind` defaults to `human` when absent/null and retains explicit legacy kinds. Summaries omit request/response bodies, headers and authentication. Fetch `GET /workspaces/{wid}/api-client/history/{id}` for the original full `ApiHistoryEntry` before replay. The existing full `/history` route and MCP history behavior remain unchanged. Cross-workspace detail access is rejected; missing detail is 404 and insufficient workspace access is 403. Listing causes no remote request execution or credential lookup.
+
+### Steps side by side and the step runner
+
+- **Parallel steps:** a run starts every step whose inputs have settled, in
+  run order (a step starts only after every step before it in run order has
+  started or been skipped), so each step keeps the number the one-at-a-time
+  engine gave it (`NodeRunState.step_no` / `step_file`, stored once
+  numbered). Setting `wf_max_parallel_steps` (default 4, 1–8; 1 = one at a
+  time) caps the running steps that hold an agent or a process; a step over
+  the cap is `running` with `phase: "queued"` and the log line "waiting for a
+  step slot (N of M in use)".
+- A step's `[workflow context]` preamble lists the step files of its settled
+  ancestors (and its own earlier loop iterations), never a sibling's.
+- While every running step of a run waits on a person (approval, question),
+  the run gives its run-queue slot back and its active-time budget stops; the
+  first step to work again takes both back first.
+- **Step runner:** agent steps run on structured runtime threads (engine
+  threads, below) unless `OTTO_WF_STEP_RUNNER=pty` or the setting
+  `wf_step_runner: "pty"` (read once per run execution; a provider the
+  runtime has no driver for always runs on PTY). A thread step records
+  `NodeRunState.thread` (runner `threads`, usage, turns, model, effort) —
+  never `sessions` — and its `agent_prompt` output carries `thread_id`
+  instead of `session_id`. Agent step params `effort`, `timeout_s`
+  (60–36,000) and `continue_from` (a node id: continue that step's thread;
+  a removed thread starts a fresh one) reach the runner. The thread's phases
+  (`waiting` with `wait`, `starting`, `working`, `needs_you` with
+  `attention`, `finishing`) are appended to `phases`; an answered question
+  is kept in `human_log`. The thread is closed when the step settles (unless
+  a later step continues it) and kept until the run's end plus the retention
+  period below.
+- **Needs you, limits, deliverables.** A step entering `needs_you` (an
+  approval, a question, or a usage limit with a known reset — the step parks
+  until `attention.resets_at` and then continues on the same thread; with no
+  known reset it fails with class `usage_limit`) posts one notification
+  ("Workflow “…” needs you") per episode and, in the live chat style, one new
+  post in the run's thread. `deliverables` come from the thread digest's
+  outward actions (agent steps) or a built-in node's `output.deliverables`.
+  A retry appends a `queued` phase mark noted "attempt 2 of 3 — <reason>"; a
+  step that waits on an earlier one in run order logs "waiting for <step> to
+  start (run order)"; a step running when the run is canceled settles
+  `skipped` with `error_class: "canceled"` and a phase mark noted
+  `canceled`. The newest ≤ 50 timeline items of a step's thread are kept in
+  the run's context dir as `.threads/<node_id>-<attempt>.json`.
+  `GET /workflow-runs/{id}` fills `thread.available` (`false` once
+  retention deleted the thread). After a restart the done-file oracle checks
+  every interrupted PTY agent step, not only the first.
+- **Chat style.** A chat-started run reports in the `live` style unless its
+  input or Start node sets `chat_updates: "per_step"` (today's thread). Live:
+  one status message posted when the run starts — or while it is still queued
+  for a run slot — and edited in place (≤ 1 edit / 3 s), its id stored in
+  `chat_status_json` so a restart or retry edits the same message; a run
+  canceled while queued edits it to "canceled while queued"; per-step text
+  lines are dropped, step files are captioned; the final post is
+  `render_final` (what was delivered, in words) with the same attachment as
+  before. The offline e2e daemon (`OTTO_E2E`) keeps `per_step` unless the
+  run sets the key.
+
+### Goals inside the engine: check, loop budgets, holds
+
+- **`check` step:** command criteria run one after another in the run's
+  working directory through `verify_command` (env `OTTO_RUN_ID`,
+  `OTTO_CONTEXT_DIR`, `OTTO_WORKTREE`; exit 0 = met, the evaluator cannot
+  change it; evidence keeps the exit status and an 8 KiB output tail, every
+  byte in `<step base>.<criterion id>.log`); rule criteria (`verify: expr`)
+  read `{iteration, steps, last, input}`; agent criteria get one evaluator
+  turn on a fresh thread (`evaluator.{provider, model, effort}`) that writes
+  `<step base>.output.json` — a "met" without evidence counts as not met, no
+  valid answer leaves every agent criterion unmet. When every other criterion
+  is met and a human one has no record for this iteration, the step waits
+  (`phase: needs_you`, `attention {kind: verify, criterion_id}`) for
+  `POST /workflow-runs/{id}/nodes/{node_id}/criteria/{criterion_id}/verify`
+  (`node_id` = the check, or the loop around it); the record lands in that
+  node's `human_log`. `final_review: true` adds one review turn on a fresh
+  thread after an `achieved` verdict (passes only approved with no
+  findings). The output is `CheckOutput` (above) plus `summary`, and the
+  step file is its table.
+- **`loop`:** `max_iterations` 1..=10, or 1..=50 with `max_active_s`
+  (300..=28,800; banked as the sum of the inner checkpoints' `active_ms`,
+  never counting time on a person, a pause or downtime). An inner `check`
+  whose verdict is `achieved` ends the loop satisfied at once; `blocked`,
+  or two identical unmet signatures with `stop_on_repeat_failure`, stops
+  it. With `hold_when_unmet` a stop without the check passing (out of
+  iterations or time, blocked, a failed inner step) **holds the run**
+  (output `_workflow_hold = {kind, reason, iteration}`) instead of ending
+  `satisfied: false`. `steps[].same_thread` continues the step's thread
+  from the previous iteration; an inner agent step a restart caught resumes
+  its thread. The run's `limits.loops[<node id>]` (Resume) wins over the
+  params.
+- **Holds:** Pause writes the hold before anything unwinds; the driver then
+  stores the in-flight steps (and a held loop's skipped branch) as
+  `pending` with a `queued` phase mark noting the kind, no delivery and no
+  worktree reaping. Resume re-enters with every unsettled step (finished
+  steps and iterations are adopted); after Exhausted it needs new totals
+  above what is used ("Raise the iteration limit to resume: 6 of 6
+  iterations are used."), after Blocked it goes on with the next iteration.
+  Cancel of a held run drops the hold (the status stays) and reaps.
+- **Steering:** `POST /workflow-runs/{id}/steer` queues a note (≤ 4,000
+  chars, ≤ 20 waiting) in `<context>/steering.json`; the next agent step
+  that starts takes them all as a `[steering]` section and records each in
+  its node's `human_log`.
+- **Run lanes:** a run whose Start node has `lane: "long"` waits on its own
+  gate (env `OTTO_WF_MAX_LONG_RUNS`, default 2, 1..=4), not the ordinary
+  slots; queue places count within the lane.
 
 ### Lightweight workflow progress and lazy details
 

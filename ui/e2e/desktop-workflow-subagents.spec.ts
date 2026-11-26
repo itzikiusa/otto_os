@@ -1,5 +1,6 @@
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
+import { runPage, stepRow } from './workflowsUi';
 
 // Sub-agent visibility E2E (workflows batch, R1/R5.5). Under `OTTO_E2E` an
 // `agent_prompt` whose prompt carries the sentinel line
@@ -10,10 +11,11 @@ import { apiCtx, seedWorkspace } from './seed';
 // matching `NodeRunState.activity` snapshot, HOLDING the step for `hold_ms`
 // before the canned reply. No live CLI is involved.
 //
-// What this asserts: the live chip + phase line on the running step card, the
-// nested sub-agent rows in the run sidebar's Agents tab (the step has NO session
-// of its own yet — the group must still appear), the kept phase lines in the
-// finished step's logs IN ORDER, and that `activity` is cleared on finish.
+// What this asserts: the live phase line — with the sub-agent counts — on the
+// running step's row of the run page (the step has NO session of its own yet:
+// the line must still appear), the kept phase lines in the finished step's
+// logs IN ORDER, and that `activity` is cleared on finish (the row's live line
+// then gives way to the step's brief).
 //
 // The hold is 12 s so the WS event / 2.5 s fallback poll have room to land every
 // DOM state; the e2e daemon is one shared process, so its env cannot be tuned
@@ -81,12 +83,11 @@ function nodeState(run: any, nodeId: string): any {
   return n;
 }
 
-/** Open the workflows page with the seeded workspace, collapsed rail, ctx sidebar on. */
+/** Open Workflows (the Runs inbox) with the seeded workspace and collapsed rail. */
 async function gotoWorkflows(page: Page): Promise<void> {
   await page.addInitScript((wsId) => {
     localStorage.setItem('otto_workspace', wsId as string);
     localStorage.setItem('otto_rail_expanded', '0');
-    localStorage.setItem('otto_wf_ctx_open', '1');
   }, ws);
   await page.goto('/#/workflows');
 }
@@ -129,9 +130,10 @@ test('a running step shows its sub-agents; a finished one keeps the phase lines'
   await gotoWorkflows(page);
   const runId = await startRun(wfId);
 
-  const running = page.getByTestId('running-workflows');
-  await expect(running).toBeVisible({ timeout: 15_000 });
-  await running.getByText('E2E Subagents').click();
+  const row = page.getByTestId('wf-runs-running').locator(`[data-testid="wf-run-row"][data-run-id="${runId}"]`);
+  await expect(row).toBeVisible({ timeout: 15_000 });
+  await row.click();
+  await expect(runPage(page, runId)).toBeVisible({ timeout: 10_000 });
 
   // Wait on the API — not the DOM — for the synthetic sub-agents to exist, so the
   // DOM assertions below can never race the first WS event / fallback poll.
@@ -141,19 +143,10 @@ test('a running step shows its sub-agents; a finished one keeps the phase lines'
     })
     .toBe(2);
 
-  // The running step card carries the sub-agent chip + the live phase line.
-  const chip = page.getByTestId('subagent-chip');
-  await expect(chip).toBeVisible({ timeout: 10_000 });
-  await expect(chip).toHaveText(/2 sub-agents · (2 running|2 done)/);
-  await expect(page.getByTestId('step-phase')).toBeVisible();
-
-  // The run sidebar's Agents tab nests one row per sub-agent under the step —
-  // even though the step has no openable session of its own yet (the stub's
-  // `on_ready` only fires once the hold has elapsed).
-  await page.getByRole('tab', { name: 'Agents' }).click();
-  const rows = page.getByTestId('subagent-rows');
-  await expect(rows).toBeVisible({ timeout: 10_000 });
-  await expect(rows.locator('.sub')).toHaveCount(2);
+  // The running step's row carries the live phase line with its sub-agents.
+  const impl = stepRow(page, 'impl');
+  await expect(impl).toHaveAttribute('data-status', 'running');
+  await expect(impl).toContainText(/sub-agents: (2 running · 0 done|0 running · 2 done)/, { timeout: 10_000 });
 
   // …and once the step settles, the phase lines are KEPT, in order.
   const run = await waitRun(runId);
@@ -172,6 +165,9 @@ test('a running step shows its sub-agents; a finished one keeps the phase lines'
   expect(logs).toContain('agent turn complete');
   expect(logs.indexOf('agent turn complete')).toBeGreaterThan(complete);
 
-  // A settled step carries no activity at all (serde skips `None`).
+  // A settled step carries no activity at all (serde skips `None`), so its
+  // row drops the live line.
   expect(step.activity ?? null).toBeNull();
+  await expect(impl).toHaveAttribute('data-status', 'success', { timeout: 10_000 });
+  await expect(impl).not.toContainText('sub-agents:');
 });

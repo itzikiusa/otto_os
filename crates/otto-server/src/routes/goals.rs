@@ -9,20 +9,19 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use chrono::Utc;
 use otto_core::api::{
     CreateGoalLoopReq, GoalSpec, GoalStartResp, ResumeReq, SteerReq, VerifyCriterionReq,
 };
 use otto_core::domain::{GoalLoop, GoalLoopDetail, GoalLoopIteration, WorkspaceRole};
-use otto_core::workflows::{HoldKind, RunHold, RunScope, RunStatus, WorkflowRun};
-use otto_core::{Error, Id};
+use otto_core::workflows::WorkflowRun;
+use otto_core::Id;
 use otto_state::WorkflowsRepo;
 use serde_json::{json, Value};
 
 use crate::auth::{require_human, require_ws_role, CurrentAuthContext, CurrentUser};
 use crate::error::{ApiError, ApiResult};
 use crate::state::ServerCtx;
-use crate::workflow_engine;
+use crate::workflow_engine::hold;
 
 pub fn routes() -> Router<ServerCtx> {
     Router::new()
@@ -137,85 +136,29 @@ async fn run_for(
     Ok(run)
 }
 
-/// Pause (DR-106): the hold is written before the run's steps unwind.
+/// Pause (DR-106): the engine writes the hold before anything unwinds.
 async fn pause(
     Path(id): Path<Id>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<WorkflowRun>> {
-    let run = run_for(&ctx, &user, &id).await?;
-    let hold = RunHold {
-        kind: HoldKind::Paused,
-        reason: format!("Paused by {}", user.display_name),
-        since: Utc::now(),
-        by: Some(user.id.clone()),
-        node_ids: vec![],
-        iteration: None,
-    };
-    // The driver unwinds on the announced cancel and publishes the hold.
-    if repo(&ctx)
-        .request_pause(&run.id, &hold)
+    run_for(&ctx, &user, &id).await?;
+    hold::pause(&ctx, &id, &user)
         .await
-        .map_err(ApiError)?
-        .is_none()
-    {
-        return Err(ApiError(Error::Conflict(
-            "Only a queued or running run can be paused".into(),
-        )));
-    }
-    repo(&ctx).get_run(&id).await.map(Json).map_err(ApiError)
+        .map(Json)
+        .map_err(ApiError)
 }
 
-/// Resume a held run (goal.md §2.3): Extend writes the loop's new limits,
-/// then the run re-enters with every unsettled step, adopting the rest.
+/// Resume a held run, Extend first (goal.md §2.3).
 async fn resume(
     Path(id): Path<Id>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
     Json(req): Json<ResumeReq>,
 ) -> ApiResult<Json<WorkflowRun>> {
-    let run = run_for(&ctx, &user, &id).await?;
-    let wf = repo(&ctx)
-        .definition_for_run(&run)
-        .await
-        .map_err(ApiError)?;
-    let extend = req.extend.unwrap_or_default();
-    let conflict = |m: String| ApiError(Error::Conflict(m));
-    let plan = otto_workflows::goal::resume_plan(&run, &wf.graph, &extend).map_err(conflict)?;
-    if workflow_engine::driver_alive(&id) {
-        return Err(conflict(
-            "the run is still stopping — try again in a few seconds".into(),
-        ));
-    }
-    if let Some(limits) = &plan.limits {
-        repo(&ctx)
-            .set_run_limits(&id, limits)
-            .await
-            .map_err(ApiError)?;
-    }
-    let scope = RunScope {
-        continue_unfinished: true,
-        ..Default::default()
-    };
-    repo(&ctx)
-        .prepare_retry(&id, &plan.unsettled, false, &scope)
-        .await
-        .map_err(ApiError)?;
-    let ws = ctx
-        .workspaces
-        .get(&run.workspace_id)
-        .await
-        .map_err(ApiError)?;
-    workflow_engine::spawn_run(
-        ctx.clone(),
-        ws,
-        wf,
-        id.clone(),
-        run.input.clone(),
-        scope,
-        Some(plan.nodes),
-    );
-    repo(&ctx).get_run(&id).await.map(Json).map_err(ApiError)
+    run_for(&ctx, &user, &id).await?;
+    let out = hold::resume(&ctx, &id, req.extend.as_ref()).await;
+    out.map(Json).map_err(ApiError)
 }
 
 /// A note for the next agent step (goal.md §2.4); a person's credential only.
@@ -227,14 +170,8 @@ async fn steer(
     Json(req): Json<SteerReq>,
 ) -> ApiResult<Json<Value>> {
     require_human(&auth.0)?;
-    let run = run_for(&ctx, &user, &id).await?;
-    if !matches!(run.status, RunStatus::Pending | RunStatus::Running) && run.hold.is_none() {
-        return Err(ApiError(Error::Conflict(
-            "This run has finished: a note would reach no step".into(),
-        )));
-    }
-    let dir = otto_workflows::attachments::context_dir(&ctx.data_dir, &id);
-    let queued = otto_workflows::steering::queue(&dir, &req.note)
+    run_for(&ctx, &user, &id).await?;
+    let queued = hold::steer(&ctx, &id, &user, &req.note)
         .await
         .map_err(ApiError)?;
     Ok(Json(json!({"queued": queued})))
@@ -250,24 +187,9 @@ async fn verify(
     Json(req): Json<VerifyCriterionReq>,
 ) -> ApiResult<Json<Value>> {
     require_human(&auth.0)?;
-    let run = run_for(&ctx, &user, &id).await?;
-    let wf = repo(&ctx)
-        .definition_for_run(&run)
-        .await
-        .map_err(ApiError)?;
-    let at = (node_id.as_str(), criterion_id.as_str());
-    let entry = otto_workflows::goal::verify_entry(
-        &run,
-        &wf.graph,
-        at,
-        req.met,
-        &req.evidence,
-        &user.display_name,
-    )
-    .map_err(ApiError)?;
-    crate::goals::deliver_verify(&ctx, &id, &node_id, entry)
-        .await
-        .map_err(ApiError)?;
+    run_for(&ctx, &user, &id).await?;
+    let out = hold::verify(&ctx, &id, &node_id, &criterion_id, &user, &req).await;
+    out.map_err(ApiError)?;
     Ok(Json(json!({"ok": true})))
 }
 

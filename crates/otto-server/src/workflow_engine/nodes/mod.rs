@@ -19,6 +19,7 @@ pub(super) mod broker_peek;
 pub(super) mod budget_gate;
 pub(super) mod canvas;
 pub(super) mod channel_notify;
+pub(super) mod check;
 pub(super) mod db_query;
 pub(super) mod game_engine;
 pub(super) mod git_checkout;
@@ -107,6 +108,8 @@ pub(in crate::workflow_engine) async fn dispatch(
 
         "verifier" => verifier::execute(call).await,
 
+        "check" => check::execute(call).await,
+
         // --- DB Query -------------------------------------------------------
         // Runs a read-only SQL/NoSQL statement against a saved DB-Explorer
         // connection. `params.connection_id` is the otto-dbviewer Connection id;
@@ -166,7 +169,9 @@ pub(in crate::workflow_engine) async fn dispatch(
         "condition" => {
             let expr = p.get("expr").and_then(Value::as_str).unwrap_or("true");
             let input = call.input;
-            let value = otto_core::expr::eval(expr, &input)
+            let run = super::run::state::run_data(&call.env.files, &call.env.run_input);
+            let root = otto_workflows::graph::condition_root(&input, &run);
+            let value = otto_core::expr::eval(expr, &root)
                 .map_err(|e| otto_core::Error::Invalid(format!("condition: {e}")))?;
             let result = otto_core::expr::truthy(&value);
             let mut out = match &input {

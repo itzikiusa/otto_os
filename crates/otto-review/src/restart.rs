@@ -143,14 +143,32 @@ fn summarizer_failed(review: &Review) -> bool {
         || error.contains(INTERRUPTED_SUMMARIZING)
 }
 
-/// Settle what a dead daemon left `running`: each review either gets its
-/// summarizer resumed (returned, already settled as `error` with
-/// [`INTERRUPTED_SUMMARIZING`] so the caller's rerun claim can take it) or
-/// fails with the reason. Live agent rows of settled reviews are failed too.
-/// One review's failed write is logged and skipped; the closing sweep still
-/// fails it, so nothing is left `running`.
-pub async fn settle_after_restart(reviews: &otto_state::ReviewsRepo) -> Result<Vec<Id>> {
+/// What [`settle_after_restart`] left for the daemon to drive.
+#[derive(Debug, Default, PartialEq)]
+pub struct Settled {
+    /// Settled as `error` with [`INTERRUPTED_SUMMARIZING`]: re-run only the
+    /// summarizer (the caller's rerun claim takes it).
+    pub summarizer_resume: Vec<Id>,
+    /// Still `running`: some reviewers survived in their holders. A driver
+    /// awaits them, re-runs the ones that did not, then summarizes; their
+    /// worktrees are not swept.
+    pub resume_held: Vec<Id>,
+}
+
+/// Settle what a dead daemon left `running`: a review with an agent in
+/// `held` (its holder survived the restart) whose reviewers had not all
+/// finished stays running for a driver ([`Settled::resume_held`], DR-006);
+/// any other either gets its summarizer resumed or fails with the reason.
+/// Both resumes count against [`MAX_RESTART_RESUMES`]. Live agent rows of
+/// settled reviews are failed too. One review's failed write is logged and
+/// skipped; the closing sweep still fails it, so nothing else is left
+/// `running`.
+pub async fn settle_after_restart(
+    reviews: &otto_state::ReviewsRepo,
+    held: &std::collections::HashSet<Id>,
+) -> Result<Settled> {
     let mut resume = Vec::new();
+    let mut resume_held = Vec::new();
     let mut repo_paths = Vec::new();
     for review in reviews.list_running().await? {
         let id = review.id.clone();
@@ -162,6 +180,24 @@ pub async fn settle_after_restart(reviews: &otto_state::ReviewsRepo) -> Result<V
                 } else if tokio::fs::metadata(&p).await.is_ok_and(|m| m.is_dir()) {
                     repo_paths.push(p);
                 }
+            }
+        }
+        let awaitable = held.contains(&id) && !summarizer_only_left(&review);
+        if let Some(mut plan) = review
+            .scope_plan
+            .clone()
+            .filter(|p| awaitable && restart_resumes(p) < MAX_RESTART_RESUMES)
+        {
+            let n = restart_resumes(&plan) + 1;
+            plan.verification_notes.push(format!(
+                "{RESUME_NOTE} ({n} of {MAX_RESTART_RESUMES}); its reviewers were awaited in their holders."
+            ));
+            match reviews.set_scope_plan(&id, &plan).await {
+                Ok(()) => {
+                    resume_held.push(id);
+                    continue;
+                }
+                Err(e) => tracing::warn!(review = %id, "restart resume note: {e}"),
             }
         }
         let settled = match (on_restart(&review), review.scope_plan) {
@@ -191,7 +227,13 @@ pub async fn settle_after_restart(reviews: &otto_state::ReviewsRepo) -> Result<V
     }
     // Anything left (a failed write above, a row that turned `running`
     // meanwhile), then the live agent rows of every settled review.
-    reviews.fail_running(INTERRUPTED).await?;
+    for r in reviews.list_running().await? {
+        if !resume_held.contains(&r.id) {
+            reviews
+                .set_status(&r.id, ReviewStatus::Error, Some(INTERRUPTED))
+                .await?;
+        }
+    }
     reviews
         .fail_orphaned_agents("Interrupted by a daemon restart")
         .await?;
@@ -215,7 +257,10 @@ pub async fn settle_after_restart(reviews: &otto_state::ReviewsRepo) -> Result<V
             "review recovery: swept orphaned PR worktrees and refs"
         );
     }
-    Ok(resume)
+    Ok(Settled {
+        summarizer_resume: resume,
+        resume_held,
+    })
 }
 
 /// The user review sessions run as when no person started them (a restart

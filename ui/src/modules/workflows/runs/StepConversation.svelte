@@ -1,3 +1,17 @@
+<script module lang="ts">
+  import { api } from '../../../lib/api/client';
+  // The two retention settings, read once (root only; anyone else sees the defaults).
+  let retention: Promise<{ success: number; failed: number }> | null = null;
+  const hours = (v: unknown, d: number): number => (Number.isFinite(Number(v)) && v !== null && v !== '' ? Number(v) : d);
+  function retentionHours(): Promise<{ success: number; failed: number }> {
+    retention ??= api.bg.get<Record<string, unknown>>('/settings').then(
+      (s) => ({ success: hours(s.workflow_thread_retention_success_hours, 24), failed: hours(s.workflow_thread_retention_failed_hours, 168) }),
+      () => ({ success: 24, failed: 168 }),
+    );
+    return retention;
+  }
+</script>
+
 <script lang="ts">
   // A step's (or reviewer's) conversation (ux.md §4.4): the step's runtime
   // thread embedded READ-ONLY (no composer, no "Open in Threads"; its approval
@@ -13,6 +27,7 @@
   import { loadRuntimeThreadView, type RuntimeThreadViewProps } from '../../../lib/runtimeThreadPort';
   import { ws } from '../../../lib/stores/workspace.svelte';
   import type { DigestItem, StepThread, TranscriptDigest } from '../../../lib/api/types';
+  import { retentionNote } from './runWords';
 
   /** The embed's read-only props (agreed-names.md §9b; added to
    *  RuntimeThreadViewProps by the editor package — typed here until then). */
@@ -32,6 +47,8 @@
   let { thread = null, sessions = [], digest = null, workspaceId, runId, nodeId, attempt }: Props = $props();
 
   let gone = $state<'deleted' | 'forbidden' | null>(null);
+  let note = $state(retentionNote(24, 168));
+  $effect(() => void retentionHours().then((h) => (note = retentionNote(h.success, h.failed))));
   const live = $derived(thread?.runner === 'threads' && thread.available !== false && !gone);
 
   let View = $state<Component<ReadOnlyEmbedProps> | null>(null);
@@ -61,7 +78,7 @@
   <div class="embed" data-testid="wf-step-conversation">
     <View sessionId={thread!.thread_id} {workspaceId} readOnly hideEmbedBarWhenUnlinked onunavailable={(reason) => (gone = reason)} />
   </div>
-  <p class="note"><Icon name="lock" size={12} />Read-only: this conversation belongs to the run. It is kept for 24 hours after the run ends (7 days if the run fails).</p>
+  <p class="note"><Icon name="lock" size={12} />{note}</p>
 {:else if live}
   <LoadState what="the conversation" loading={!viewError} error={viewError} empty />
 {:else if thread?.runner === 'threads'}

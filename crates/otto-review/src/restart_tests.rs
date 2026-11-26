@@ -167,8 +167,11 @@ async fn boot_settles_running_reviews_and_returns_the_ones_to_resume() {
     let resumable = make(review("running", &["done"], true, Some(0))).await;
     let unfinished = make(review("running", &["running"], true, Some(0))).await;
     let looping = make(review("running", &["done"], true, Some(2))).await;
-    let resume = settle_after_restart(&reviews).await.unwrap();
-    assert_eq!(resume, vec![resumable.clone()]);
+    let resume = settle_after_restart(&reviews, &Default::default())
+        .await
+        .unwrap();
+    assert_eq!(resume.summarizer_resume, vec![resumable.clone()]);
+    assert!(resume.resume_held.is_empty());
     let after = |id: Id| {
         let reviews = reviews.clone();
         async move { reviews.get_review(&id).await.unwrap() }
@@ -189,5 +192,65 @@ async fn boot_settles_running_reviews_and_returns_the_ones_to_resume() {
         after(looping).await.error.as_deref(),
         Some(RESUMES_EXHAUSTED)
     );
-    assert!(settle_after_restart(&reviews).await.unwrap().is_empty());
+    assert_eq!(
+        settle_after_restart(&reviews, &Default::default())
+            .await
+            .unwrap(),
+        Settled::default()
+    );
+}
+
+#[tokio::test]
+async fn a_review_whose_agents_survived_in_their_holders_keeps_running() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = otto_state::db::open(&dir.path().join("state.sqlite"))
+        .await
+        .unwrap();
+    let reviews = otto_state::ReviewsRepo::new(pool);
+    let make = |template: Review| {
+        let reviews = reviews.clone();
+        async move {
+            let row = reviews.create_review(&"repo".into(), 0).await.unwrap();
+            reviews.set_agents(&row.id, &template.agents).await.unwrap();
+            if let Some(plan) = &template.scope_plan {
+                reviews.set_scope_plan(&row.id, plan).await.unwrap();
+            }
+            row.id
+        }
+    };
+    let held = make(review("running", &["done", "running"], true, Some(0))).await;
+    let exhausted = make(review("running", &["running"], true, Some(2))).await;
+    let held_summarizing = make(review("running", &["done"], true, Some(0))).await;
+    let unheld = make(review("running", &["running"], true, Some(0))).await;
+    let holders: std::collections::HashSet<Id> =
+        [held.clone(), exhausted.clone(), held_summarizing.clone()].into();
+    let s = settle_after_restart(&reviews, &holders).await.unwrap();
+    assert_eq!(s.resume_held, vec![held.clone()]);
+    assert_eq!(
+        s.summarizer_resume,
+        vec![held_summarizing.clone()],
+        "the summarizer alone is left: today's path"
+    );
+    let get = |id: Id| {
+        let reviews = reviews.clone();
+        async move { reviews.get_review(&id).await.unwrap() }
+    };
+    let h = get(held).await;
+    assert_eq!(
+        h.status,
+        ReviewStatus::Running,
+        "not failed: its driver awaits the holders"
+    );
+    assert_eq!(h.agents[1].status, "running", "its live row is not settled");
+    assert_eq!(
+        restart_resumes(h.scope_plan.as_ref().unwrap()),
+        1,
+        "counts against the resume cap"
+    );
+    assert_eq!(
+        get(exhausted).await.status,
+        ReviewStatus::Error,
+        "past the cap it fails as before"
+    );
+    assert_eq!(get(unheld).await.error.as_deref(), Some(INTERRUPTED));
 }

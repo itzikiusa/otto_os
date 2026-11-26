@@ -25,7 +25,7 @@ use otto_channels::admission::Admission;
 use otto_channels::test_util::{Recorded, RecordingAdapter};
 use otto_channels::Inbound;
 use otto_core::domain::Channel;
-use otto_core::workflows::{RunStatus, Workflow, WorkflowGraph};
+use otto_core::workflows::{NodeStatus, RunStatus, Workflow, WorkflowGraph};
 use otto_server::workflow_chat::WorkflowChatTriggerImpl;
 use otto_server::ServerCtx;
 use otto_state::{DbPool, WorkflowsRepo};
@@ -251,6 +251,7 @@ struct Outcome {
     chat: Vec<Recorded>,
     /// The wiremock Slack's base URL, when the message carried files.
     slack: Option<String>,
+    run: otto_core::workflows::WorkflowRun,
 }
 
 /// The person's message as the Slack listener hands it to the bridge: plain,
@@ -295,8 +296,20 @@ async fn inbound(h: &Harness, text: &str, files: bool) -> (Inbound, Option<wirem
     (msg, Some(slack))
 }
 
-async fn run_scenario(s: &Scenario) -> (Harness, Outcome) {
+/// Run one scenario; `slots` sets `wf_max_parallel_steps` (None: the
+/// default), `edit` changes the stubbed clone before it is created.
+async fn run_scenario(
+    s: &Scenario,
+    slots: Option<u64>,
+    edit: fn(&mut Value),
+) -> (Harness, Outcome) {
     let h = harness().await;
+    if let Some(n) = slots {
+        otto_state::SettingsRepo::new(h.pool.clone())
+            .put("wf_max_parallel_steps", &json!(n))
+            .await
+            .unwrap();
+    }
     let dir = compat_dir();
     let clone = read_json(&dir.join("clones").join(format!("{}.json", s.clone)));
     let review = s.review_from.map(|t| {
@@ -304,7 +317,8 @@ async fn run_scenario(s: &Scenario) -> (Harness, Outcome) {
         let nodes = trace["nodes"].as_array().unwrap();
         nodes.iter().find(|n| n["kind"] == "review_run").unwrap()["review"].clone()
     });
-    let wf = stubbed(&clone, review.as_ref());
+    let mut wf = stubbed(&clone, review.as_ref());
+    edit(&mut wf);
     let graph: WorkflowGraph = serde_json::from_value(wf["graph"].clone()).unwrap();
     let repo = WorkflowsRepo::new(h.pool.clone());
     let created = repo
@@ -388,6 +402,7 @@ async fn run_scenario(s: &Scenario) -> (Harness, Outcome) {
             golden,
             chat,
             slack,
+            run,
         },
     )
 }
@@ -715,7 +730,10 @@ fn goldens_of(clone: &str) {
         let log = log_dir.path().join(format!("{}.prompts", s.name));
         // The offline child is its own process running only this test.
         std::env::set_var("OTTO_E2E_PROMPT_LOG", &log);
-        let (h, out) = rt.block_on(run_scenario(s));
+        // Clone E's fork runs one sweep at a time here, so its per-step chat
+        // lines keep their recorded order; side by side is proven below.
+        let slots = (s.clone == "e").then_some(1);
+        let (h, out) = rt.block_on(run_scenario(s, slots, |_| {}));
         let mut norm = Normalizer::new(&h, out.slack.as_deref());
         let golden = norm.value(&out.golden);
         let chat = norm.chat(&out.chat);
@@ -769,4 +787,134 @@ fn golden_d() {
 #[test]
 fn golden_e() {
     goldens_of("e");
+}
+
+/// Engine parallelism (engine.md §3, §5.3): at the default step slots clone
+/// E's two sweeps (n10, n11) run at the same time, under the numbers the
+/// serial engine gave them (6:n5 7:n10 8:n11 9:n6). Each sweep holds for
+/// 1.5 s, so they overlap only when they really run side by side.
+#[test]
+fn fork_sweeps_run_side_by_side() {
+    if !in_offline_child("fork_sweeps_run_side_by_side") {
+        return;
+    }
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let s = SCENARIOS
+        .iter()
+        .find(|s| s.clone == "e" && s.name == "no-ticket")
+        .unwrap();
+    let (_h, out) = rt.block_on(run_scenario(s, None, |wf| {
+        for node in wf["graph"]["nodes"].as_array_mut().unwrap() {
+            if node["id"] == "n10" || node["id"] == "n11" {
+                let prompt = node["params"]["prompt"].as_str().unwrap_or("").to_string();
+                node["params"]["prompt"] =
+                    json!(format!("{prompt}\nOTTO_E2E_SUBAGENTS: 1 hold_ms=1500"));
+            }
+        }
+    }));
+    let state = |id: &str| out.run.nodes.iter().find(|n| n.node_id == id).unwrap();
+    let numbers: Vec<_> = ["n5", "n10", "n11", "n6"]
+        .iter()
+        .map(|id| state(id).step_no)
+        .collect();
+    assert_eq!(numbers, [Some(6), Some(7), Some(8), Some(9)]);
+    let span = |id: &str| {
+        let st = state(id);
+        assert_eq!(st.status, NodeStatus::Success, "{id}: {:?}", st.error);
+        let start = st.started_at.unwrap();
+        let ms = st.duration_ms.unwrap() as i64;
+        assert!(ms >= 1_400, "{id} held for its sweep: {ms} ms");
+        (start, start + chrono::Duration::milliseconds(ms))
+    };
+    let ((a0, a1), (b0, b1)) = (span("n10"), span("n11"));
+    assert!(
+        a0 < b1 && b0 < a1,
+        "the sweeps ran one after the other: n10 {a0}..{a1}, n11 {b0}..{b1}"
+    );
+}
+
+/// Chat live style (engine.md §9.2, DR-113) through the real bridge and
+/// engine: the run's thread gets the ack, ONE status message edited in place
+/// (formatted), every step file captioned, no per-step text lines, and a
+/// final post that says the run passed. The Phase-0 goldens above prove the
+/// per_step style is byte for byte today's.
+#[test]
+fn live_style_keeps_one_status_message_and_captions_every_file() {
+    if !in_offline_child("live_style_keeps_one_status_message_and_captions_every_file") {
+        return;
+    }
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let s = SCENARIOS
+        .iter()
+        .find(|s| s.clone == "c" && s.name == "passed")
+        .unwrap();
+    let (_h, out) = rt.block_on(run_scenario(s, None, |wf| {
+        for node in wf["graph"]["nodes"].as_array_mut().unwrap() {
+            if node["kind"] == "manual_trigger" {
+                node["params"]["chat_updates"] = json!("live");
+            }
+        }
+    }));
+    assert_eq!(out.run.status, RunStatus::Success, "{:?}", out.run.error);
+    let sends: Vec<&str> = out
+        .chat
+        .iter()
+        .filter_map(|r| match r {
+            Recorded::Send { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    let card = sends
+        .iter()
+        .position(|t| t.starts_with("*Compat C*"))
+        .unwrap_or_else(|| panic!("a status message: {sends:#?}"));
+    assert!(
+        !sends
+            .iter()
+            .any(|t| t.contains("▶ *") || t.contains(" done (")),
+        "no per-step lines in live: {sends:#?}"
+    );
+    assert!(
+        sends.last().unwrap().starts_with("✅ *Compat C*"),
+        "the final post: {sends:#?}"
+    );
+    let card_id = format!("m{}", card + 1);
+    let edits: Vec<_> = out
+        .chat
+        .iter()
+        .filter_map(|r| match r {
+            Recorded::Edit {
+                message_id,
+                formatted,
+                ..
+            } => Some((message_id.clone(), *formatted)),
+            _ => None,
+        })
+        .collect();
+    assert!(!edits.is_empty(), "the card is edited in place");
+    assert!(
+        edits.iter().all(|(id, f)| *id == card_id && *f),
+        "only the card, formatted: {edits:?} (card {card_id})"
+    );
+    let step_files: Vec<_> = out
+        .chat
+        .iter()
+        .filter_map(|r| match r {
+            Recorded::Upload { name, caption, .. } if name.starts_with("step") => Some(caption),
+            _ => None,
+        })
+        .collect();
+    assert!(!step_files.is_empty());
+    assert!(
+        step_files
+            .iter()
+            .all(|c| c.as_deref().is_some_and(|c| c.starts_with('✅'))),
+        "every step file captioned: {step_files:?}"
+    );
 }

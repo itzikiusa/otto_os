@@ -85,6 +85,10 @@ pub(in crate::workflow_engine) async fn execute(
             truncate(&input.to_string(), 4000)
         ),
     );
+    let full = format!(
+        "{full}{}",
+        super::super::run::hold::take_steering(env, session_tx)
+    );
     let acwd = node_cwd(node, &input, run_cwd);
     let done = env
         .files
@@ -122,8 +126,14 @@ pub(in crate::workflow_engine) async fn execute(
     // reference from the implementer to the reviewer and the PR.
     let mut out = serde_json::Map::new();
     out.insert("reply".into(), json!(reply));
+    // A thread is not a PTY session: the previous build would open every
+    // `session_id` as one (DR-014).
     if let Some(sid) = sid {
-        out.insert("session_id".into(), json!(sid));
+        let key = match super::super::step_thread::runner_for(ctx, &env.run_id, provider).await {
+            "pty" => "session_id",
+            _ => "thread_id",
+        };
+        out.insert(key.into(), json!(sid));
     }
     if reused {
         out.insert("context_reused".into(), json!(true));

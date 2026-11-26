@@ -105,24 +105,22 @@ test('skills lab: the editor loads on Files; copies compare by hash, not one req
   expect(perCopy, 'no per-copy body fetch to compare copies').toEqual([]);
 });
 
-// Workflows: the canvas is its own chunk; selecting a node (a click, no move)
-// must not mark the workflow Unsaved.
-test('workflows: the canvas loads behind a placeholder; a node click is not an edit', async ({ page }) => {
+// Workflows: the editor is its own chunk (the module paints the Runs inbox
+// first); selecting a step (a click, no move) must not mark it Unsaved.
+test('workflows: the editor loads behind a placeholder; a step click is not an edit', async ({ page }) => {
   await mockMode(page);
   let release!: () => void;
   const gate = new Promise<void>((r) => (release = r));
-  await page.route((u) => u.pathname.endsWith('/src/modules/workflows/WorkflowCanvas.svelte'), async (route) => {
+  await page.route((u) => u.pathname.endsWith('/src/modules/workflows/editor/EditorPage.svelte'), async (route) => {
     await gate;
     await route.continue();
   });
-  await page.goto('/#/workflows');
-  await expect(page.getByRole('status', { name: 'Loading the canvas' })).toBeVisible({ timeout: 20_000 });
-  const header = page.getByTestId('page-header').first();
-  const before = await header.boundingBox();
+  await page.goto('/#/workflows/all');
+  await page.getByTestId('wf-workflow-row').first().getByRole('button').first().click();
+  await expect(page.getByRole('status', { name: 'Loading the workflow' })).toBeVisible({ timeout: 20_000 });
   release();
-  const node = page.locator('.node').first();
+  const node = page.getByTestId('wf-node').first();
   await expect(node).toBeVisible({ timeout: 20_000 });
-  expect(await header.boundingBox()).toEqual(before);
   await node.click();
   await page.waitForTimeout(300); // ui-guards: allow (proving the badge does not appear)
   await expect(page.getByText('Unsaved', { exact: true })).toHaveCount(0);

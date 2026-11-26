@@ -3,17 +3,12 @@
 //! Start → loop { Work → Check criteria }, and the one review→fix loop the
 //! bundled templates and Git's "Fix review" share.
 
-use otto_core::agent_runtime::AttentionKind;
-use otto_core::api::{AgentChoice, ExtendReq, GoalBudget, GoalSpec, GoalWork, NamedAgentChoice};
+use otto_core::api::{AgentChoice, GoalBudget, GoalSpec, GoalWork, NamedAgentChoice};
 use otto_core::domain::{
     CommentState, GoalLoop, GoalLoopConfig, GoalLoopDefinition, GoalLoopLimits, Review,
     DEFAULT_EVALUATOR_PROMPT,
 };
-use otto_core::workflows::{
-    Criterion, HoldKind, HumanEntry, NodeRunState, NodeStatus, RunLimits, VerifyKind, WorkflowEdge,
-    WorkflowGraph, WorkflowNode, WorkflowRun,
-};
-use otto_core::Error;
+use otto_core::workflows::{Criterion, VerifyKind, WorkflowEdge, WorkflowGraph, WorkflowNode};
 use serde_json::{json, Value};
 
 /// A built goal: what the server stores as the workflow row and the run input.
@@ -563,158 +558,6 @@ pub fn carry_loop_context(spec: &mut GoalSpec, loop_: &GoalLoop) {
         spec.goal.push_str(&format!("\n\nNext action: {next}"));
     }
     spec.goal = spec.goal.chars().take(8_000).collect();
-}
-
-/// Resume of a held run (goal.md §2.3): the loop's limits after Extend and
-/// the step states to re-enter with.
-#[derive(Debug)]
-pub struct ResumePlan {
-    /// `None`: the graph has no loop, nothing to write.
-    pub limits: Option<RunLimits>,
-    /// The run's steps, a `running` one (left by a crash) back to `pending`.
-    pub nodes: Vec<NodeRunState>,
-    /// Every step not settled: what the retry re-enters.
-    pub unsettled: Vec<String>,
-}
-
-/// Err: why the run cannot resume (no hold, or an exhausted run without the
-/// room to go on — Goal Loops' wording).
-pub fn resume_plan(
-    run: &WorkflowRun,
-    graph: &WorkflowGraph,
-    extend: &ExtendReq,
-) -> Result<ResumePlan, String> {
-    let hold = run
-        .hold
-        .as_ref()
-        .ok_or("This run is not paused, blocked or out of budget")?;
-    if let (HoldKind::Exhausted, Some(g)) = (
-        hold.kind,
-        run.overview.as_ref().and_then(|o| o.goal.as_ref()),
-    ) {
-        let max = extend.iterations.unwrap_or(g.max_iterations);
-        if max <= g.iteration {
-            return Err(format!(
-                "Raise the iteration limit to resume: {} of {max} iterations are used.",
-                g.iteration
-            ));
-        }
-        let max_ms = extend.active_s.map(|s| s * 1_000).or(g.max_active_ms);
-        if let Some(max_ms) = max_ms.filter(|m| *m <= g.active_ms) {
-            let min = |ms: u64| ms / 60_000;
-            return Err(format!(
-                "Raise the active-time limit to resume: {} of {} minutes are used.",
-                min(g.active_ms),
-                min(max_ms)
-            ));
-        }
-    }
-    let loop_id = hold.node_ids.first().cloned().or_else(|| {
-        graph
-            .nodes
-            .iter()
-            .find(|n| n.kind == "loop")
-            .map(|n| n.id.clone())
-    });
-    let limits = loop_id.map(|id| {
-        let mut limits = run.limits.clone().unwrap_or_default();
-        let l = limits.loops.entry(id).or_default();
-        l.max_iterations = extend.iterations.or(l.max_iterations);
-        l.max_active_s = extend.active_s.or(l.max_active_s);
-        if hold.kind == HoldKind::Blocked {
-            l.unblocked_at = hold.iteration.or(l.unblocked_at);
-        }
-        limits
-    });
-    let mut nodes = run.nodes.clone();
-    for n in nodes.iter_mut().filter(|n| n.status == NodeStatus::Running) {
-        n.status = NodeStatus::Pending;
-    }
-    let unsettled = nodes
-        .iter()
-        .filter(|n| {
-            !matches!(
-                n.status,
-                NodeStatus::Success | NodeStatus::Error | NodeStatus::Skipped
-            )
-        })
-        .map(|n| n.node_id.clone())
-        .collect();
-    Ok(ResumePlan {
-        limits,
-        nodes,
-        unsettled,
-    })
-}
-
-/// The criteria of the check at `node_id`, or of the checks inside that loop.
-pub fn check_criteria(graph: &WorkflowGraph, node_id: &str) -> Vec<Criterion> {
-    let Some(node) = graph.nodes.iter().find(|n| n.id == node_id) else {
-        return vec![];
-    };
-    let inner = node
-        .params
-        .get("steps")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|s| s["kind"] == "check")
-        .map(|s| &s["params"]);
-    std::iter::once(&node.params)
-        .chain(inner)
-        .filter_map(|p| serde_json::from_value::<Vec<Criterion>>(p.get("criteria")?.clone()).ok())
-        .flatten()
-        .collect()
-}
-
-/// A person's record for criterion `criterion_id` that the check at the
-/// top-level `node_id` waits on (goal.md §2.4, DR-107), bound to the
-/// criterion's revision and the current iteration.
-pub fn verify_entry(
-    run: &WorkflowRun,
-    graph: &WorkflowGraph,
-    (node_id, criterion_id): (&str, &str),
-    met: bool,
-    evidence: &str,
-    by: &str,
-) -> otto_core::Result<HumanEntry> {
-    let evidence = evidence.trim();
-    if evidence.is_empty() || evidence.chars().count() > 2_000 {
-        return Err(Error::Invalid(
-            "evidence: say what you checked (at most 2,000 characters)".into(),
-        ));
-    }
-    let waiting = run
-        .nodes
-        .iter()
-        .find(|n| n.node_id == node_id)
-        .and_then(|n| n.attention.as_ref())
-        .is_some_and(|a| {
-            a.kind == AttentionKind::Verify && a.criterion_id.as_deref() == Some(criterion_id)
-        });
-    if !waiting {
-        return Err(Error::Conflict(format!(
-            "{node_id} is not waiting for a person on {criterion_id}"
-        )));
-    }
-    let criterion = check_criteria(graph, node_id)
-        .into_iter()
-        .find(|c| c.id == criterion_id)
-        .ok_or_else(|| Error::NotFound(format!("no criterion {criterion_id}")))?;
-    Ok(HumanEntry {
-        kind: "verify".into(),
-        ask: Some(criterion_id.into()),
-        text: evidence.into(),
-        met: Some(met),
-        revision: Some(crate::criteria::revision(&criterion)),
-        iteration: run
-            .overview
-            .as_ref()
-            .and_then(|o| o.goal.as_ref())
-            .map(|g| g.iteration),
-        by: by.into(),
-        at: chrono::Utc::now(),
-    })
 }
 
 #[cfg(test)]

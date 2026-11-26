@@ -70,10 +70,14 @@ async fn start_review_for_branch(
         use sha2::{Digest, Sha256};
         // Freeze the actual reviewed content and effective configuration. A node
         // id alone cannot distinguish a later loop iteration or changed target.
-        let config = match cfg_override.take() {
+        let mut config = match cfg_override.take() {
             Some(config) => config,
             None => load_review_config_for_repo(ctx, repo_id).await,
         };
+        let run = otto_state::WorkflowsRepo::new(ctx.pool.clone())
+            .get_run(run_id)
+            .await?;
+        config.thread_meta = otto_review::thread_run::run_meta(&run, &checkpoint.node_id);
         checkpoint.input = serde_json::json!({
             "request": checkpoint.input, "repo_id":repo_id, "worktree":worktree_path,
             "base":resolved.diff_ref, "head":git.rev_parse("HEAD").await?,

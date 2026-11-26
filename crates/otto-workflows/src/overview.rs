@@ -179,11 +179,48 @@ pub fn run_overview(
         subject: prev.and_then(|o| o.subject.clone()),
         elapsed_ms: millis(run.started_at, end),
         typical_ms,
-        goal: prev.and_then(|o| o.goal.clone()),
+        goal: goal_progress(run, graph).or_else(|| prev.and_then(|o| o.goal.clone())),
         hold,
     };
     overview.headline = clip(&headline(run, graph, &overview), MAX_HEADLINE);
     overview
+}
+
+/// A goal run's progress (goal.md §2.7): the graph's loop around a `check`,
+/// read from what the loop left on its node (its output once it stopped,
+/// the person it waits for while it runs).
+fn goal_progress(
+    run: &WorkflowRun,
+    graph: &WorkflowGraph,
+) -> Option<otto_core::workflows::GoalProgress> {
+    let lp = graph.nodes.iter().find(|n| {
+        n.kind == "loop"
+            && n.params["steps"]
+                .as_array()
+                .is_some_and(|s| s.iter().any(|s| s["kind"] == "check"))
+    })?;
+    let st = run.nodes.iter().find(|n| n.node_id == lp.id)?;
+    let out = st.output.as_ref()?;
+    let num = |k: &str| out.get(k).and_then(Value::as_u64);
+    let last_check = out["history"]
+        .as_array()
+        .and_then(|h| h.last())
+        .and_then(|i| i["steps"].as_object())
+        .and_then(|s| s.values().find(|v| v.get("all_met").is_some()));
+    let count = |k: &str| last_check.and_then(|c| c[k].as_u64()).unwrap_or(0) as u32;
+    Some(otto_core::workflows::GoalProgress {
+        iteration: num("iterations").unwrap_or(0) as u32,
+        max_iterations: num("max_iterations").unwrap_or(0) as u32,
+        criteria_met: count("met"),
+        criteria_total: count("total"),
+        active_ms: num("active_ms").unwrap_or(0),
+        max_active_ms: num("max_active_s").map(|s| s * 1000),
+        awaiting: st
+            .attention
+            .iter()
+            .filter_map(|a| a.criterion_id.clone())
+            .collect(),
+    })
 }
 
 /// The one sentence (engine.md §2.3, ux.md §2.3, goal.md §2.3 — first match).
@@ -290,6 +327,17 @@ fn headline(run: &WorkflowRun, graph: &WorkflowGraph, o: &RunOverview) -> String
 /// deliverable that did not land first ("Done, but the Jira comment was not
 /// posted: …").
 fn succeeded(run: &WorkflowRun, graph: &WorkflowGraph, o: &RunOverview) -> String {
+    if let Some(g) = o
+        .goal
+        .as_ref()
+        .filter(|g| g.criteria_total > 0 && g.criteria_met == g.criteria_total)
+    {
+        let s = if g.iteration == 1 { "" } else { "s" };
+        return format!(
+            "Goal reached — {} of {} criteria met in {} iteration{s}",
+            g.criteria_met, g.criteria_total, g.iteration
+        );
+    }
     if let Some(d) = o
         .deliverables
         .iter()

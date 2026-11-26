@@ -152,22 +152,6 @@ export const LOOP_AGENT_KINDS = [
 // non-agent utilities). Anything else stays editable via Advanced JSON.
 export const LOOP_STEP_KINDS = [...LOOP_AGENT_KINDS, 'review_run', 'http_request', 'db_query', 'delay', 'transform'];
 
-// Kinds that render their OWN Provider control (inline or a richer multi-agent
-// config). EVERY OTHER kind gets the shared universal Provider+Model block, so
-// NO node is ever missing a provider selector — including git_pr (drafts the PR
-// message with an agent) and the utility nodes.
-export const KINDS_WITH_OWN_PROVIDER = [
-  'agent_prompt',
-  'prepare_context',
-  'product_analyze',
-  'product_rewrite',
-  'product_plan',
-  'canvas',
-  'review_run',
-  'self_improve',
-  'loop',
-  'budget_gate',
-];
 
 export function loopSteps(node: WorkflowNode | null | undefined): LoopStep[] {
   const p = params(node);

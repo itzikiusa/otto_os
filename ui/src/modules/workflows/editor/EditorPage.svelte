@@ -30,12 +30,19 @@
   import Modal from '../../../lib/components/Modal.svelte';
   import StartRunModal from '../runs/StartRunModal.svelte';
   import { workflowsUi } from '../workflowsUiState.svelte';
+  import { deleteWorkflow, duplicateWorkflow, renameWorkflow } from '../list/workflowActions';
   import { autoLayout } from './autoLayout';
   import EditorCanvas from './EditorCanvas.svelte';
   import PhoneOutline from './PhoneOutline.svelte';
   import { continueClashes, missingSkills, stepProvider, wireAfter } from './stepRules';
 
-  let { workflowId }: { workflowId: string } = $props();
+  interface Props {
+    workflowId: string;
+    /** "Runs of this workflow": the Runs tab, filtered. */
+    onrunsof?: (workflowId: string) => void;
+    ondeleted?: () => void;
+  }
+  let { workflowId, onrunsof, ondeleted }: Props = $props();
 
   let wf = $state<Workflow | null>(null);
   let graph = $state<WorkflowGraph>({ nodes: [], edges: [] });
@@ -85,7 +92,7 @@
     void workflowId;
     untrack(() => void load());
   });
-  $effect(() => guardUnsaved(() => dirty, { what: wf ? `“${wf.name}”` : 'this workflow' }));
+  $effect(() => guardUnsaved(() => dirty || (!!wf && instructions !== (wf.instructions ?? '')), { what: wf ? `“${wf.name}”` : 'this workflow' }));
 
   const selected = $derived(selectedId ? graph.nodes.find((n) => n.id === selectedId) ?? null : null);
   const zoomText = $derived(zoom && selected ? String((selected.params as Record<string, unknown> | null)?.[zoom.field] ?? '') : '');
@@ -194,36 +201,45 @@
   }
   let versions = $state<WorkflowVersionSummary[] | null>(null);
   let versionsError = $state<string | null>(null);
-  async function openVersions(): Promise<void> {
+  let versionsMore = $state(false);
+  const VERSION_PAGE = 30;
+  /** Versions, newest first, a page at a time: `before` ("Show older")
+   *  appends the page below that version (an exclusive cursor, so a save
+   *  made meanwhile never shifts it). */
+  async function openVersions(before?: number): Promise<void> {
     panel = 'versions';
     versionsError = null;
     try {
-      versions = await listWorkflowVersions(workflowId, { limit: 30 });
+      const page = await listWorkflowVersions(workflowId, { limit: VERSION_PAGE, beforeVersion: before });
+      versions = before ? [...(versions ?? []), ...page] : page;
+      versionsMore = page.length === VERSION_PAGE;
     } catch (e) {
       versionsError = loadErrorText(e);
     }
   }
   async function restore(v: number): Promise<void> {
+    const id = workflowId; // the version the person confirms, whatever opens meanwhile
     if (!(await confirmer.ask(`The workflow goes back to version ${v}, saved as a new version. The current one stays in Versions.`, { title: `Restore version ${v}?`, confirmLabel: 'Restore' }))) return;
     try {
-      apply(await restoreWorkflowVersion(workflowId, v));
-      void openVersions();
+      const w = await restoreWorkflowVersion(id, v);
+      if (id === workflowId) {
+        apply(w);
+        void openVersions();
+      }
     } catch (e) {
       toastError('Couldn’t restore that version', e);
     }
   }
   async function rename(): Promise<void> {
-    if (!wf) return;
-    const name = await confirmer.promptText('Name', { title: 'Rename workflow', initial: wf.name, confirmLabel: 'Rename' });
-    if (!name?.trim() || name.trim() === wf.name) return;
-    try {
-      wf = await patchWorkflow(wf.id, { name: name.trim() });
-    } catch (e) {
-      toastError('Couldn’t rename the workflow', e);
-    }
+    const w = wf && (await renameWorkflow(wf));
+    if (w && wf) wf = { ...wf, name: w.name, version: w.version ?? wf.version };
+  }
+  async function duplicate(): Promise<void> {
+    const copy = wf && (await duplicateWorkflow(wf.workspace_id, wf));
+    if (copy) router.go(`workflows/${copy.id}`);
   }
   const more = (): MenuItem[] => [
-    { label: 'Runs of this workflow', icon: 'list', action: () => router.go('workflows') },
+    { label: 'Runs of this workflow', icon: 'clock', action: () => onrunsof?.(workflowId) },
     { label: 'Optimize…', icon: 'zap', action: () => router.go(`workflows/${workflowId}/optimize`) },
     { separator: true },
     { label: 'Triggers', checked: panel === 'triggers', action: () => (panel = panel === 'triggers' ? null : 'triggers') },
@@ -232,6 +248,9 @@
     { separator: true },
     { label: 'Validate', action: () => void validate() },
     { label: 'Rename…', action: () => void rename() },
+    { label: 'Duplicate', icon: 'copy', action: () => void duplicate() },
+    { separator: true },
+    { label: 'Delete workflow…', icon: 'trash', danger: true, action: async () => { if (wf && (await deleteWorkflow(wf))) { dirty = false; ondeleted?.(); } } },
   ];
   async function validate(): Promise<void> {
     blockers = localBlockers();
@@ -325,6 +344,9 @@
                   {#if v.version !== wf.version}<button type="button" class="btn small ghost" onclick={() => void restore(v.version)}>Restore</button>{/if}</li>
               {/each}
             </ol>
+            {#if versionsMore && versions?.length}
+              <button type="button" class="btn small ghost" onclick={() => void openVersions(versions!.at(-1)!.version)}>Show older</button>
+            {/if}
           </LoadState>
         {:else if selected}
           {#key selected.id}

@@ -26,8 +26,12 @@
     onconnect: (source: string, target: string) => void;
     ondeletenode: (id: string) => void;
     ondeleteedge: (id: string) => void;
+    /** Look only (Optimize's Before | After): no ports, no deleting. */
+    readOnly?: boolean;
+    /** A word on a card ("new", "changed"), which also outlines it. */
+    marks?: Record<string, string>;
   }
-  let { graph, selectedId, selectedEdgeId, invalid = {}, triggers = [], defaultProvider, onselect, onedgeselect, onconnect, ondeletenode, ondeleteedge }: Props = $props();
+  let { graph, selectedId, selectedEdgeId, invalid = {}, triggers = [], defaultProvider, onselect, onedgeselect, onconnect, ondeletenode, ondeleteedge, readOnly = false, marks = {} }: Props = $props();
 
   const PAD = 32;
   const layout = $derived(autoLayout(graph));
@@ -134,6 +138,7 @@
   }
 
   function onNodeKey(e: KeyboardEvent, id: string): void {
+    if (readOnly) return;
     if (e.key === 'Delete' || e.key === 'Backspace') {
       e.preventDefault();
       ondeletenode(id);
@@ -144,7 +149,7 @@
       e.preventDefault();
       onselect(null);
       onedgeselect(id);
-    } else if (e.key === 'Delete' || e.key === 'Backspace') {
+    } else if (!readOnly && (e.key === 'Delete' || e.key === 'Backspace')) {
       e.preventDefault();
       ondeleteedge(id);
     }
@@ -221,7 +226,7 @@
       {@const se = nodeSideEffect(n)}
       {@const bad = invalid[n.id]}
       {#if p}
-        <div class="ec-node" class:selected={selectedId === n.id} class:invalid={!!bad} class:outward={!!se}
+        <div class="ec-node" class:selected={selectedId === n.id} class:invalid={!!bad} class:outward={!!se} class:marked={!!marks[n.id]}
           style="inset-inline-start: {p.x}px; inset-block-start: {p.y}px;" data-testid="wf-node" data-node-id={n.id} data-kind={n.kind}>
           <button type="button" class="ec-main" aria-pressed={selectedId === n.id} aria-describedby="{hintId}-node"
             aria-label="{label(n)}: {nodeSummary(n, ctx)}{bad ? `. Problem: ${bad}` : ''}"
@@ -234,8 +239,11 @@
           </button>
           {#if bad}<span class="ec-bad" title={bad} aria-hidden="true">!</span>
           {:else if se}<span class="ec-out" title="Posts outside Otto: {se.summary}" aria-hidden="true"><Icon name="external" size={12} /></span>{/if}
-          <button type="button" class="ec-port" aria-label="Connect {label(n)} to…" title="Drag to a step, or click to pick one"
-            onpointerdown={(e) => startConnect(e, n.id)} onclick={(e) => connectMenu(e, n)}></button>
+          {#if marks[n.id]}<span class="ec-mark">{marks[n.id]}</span>{/if}
+          {#if !readOnly}
+            <button type="button" class="ec-port" aria-label="Connect {label(n)} to…" title="Drag to a step, or click to pick one"
+              onpointerdown={(e) => startConnect(e, n.id)} onclick={(e) => connectMenu(e, n)}></button>
+          {/if}
         </div>
       {/if}
     {/each}
@@ -350,6 +358,22 @@
   }
   .ec-node.invalid .ec-main {
     border-color: var(--danger);
+  }
+  .ec-node.marked .ec-main {
+    border-color: var(--warning);
+    background: var(--warning-soft);
+  }
+  .ec-mark {
+    position: absolute;
+    inset-block-start: -9px;
+    inset-inline-end: 8px;
+    padding-inline: 6px;
+    border-radius: 999px;
+    border: 1px solid var(--warning);
+    background: var(--surface);
+    color: var(--warning);
+    font-size: var(--fs-xs);
+    font-weight: 600;
   }
   .ec-main:focus-visible {
     outline: 2px solid var(--accent-text);

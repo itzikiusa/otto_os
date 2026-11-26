@@ -7,6 +7,8 @@ import { confirmer } from '../../../lib/confirm.svelte';
 import { loadIdeRuntimeSessionPort } from '../../../lib/runtimeThreadPort';
 import { toasts } from '../../../lib/toast.svelte';
 import { toastError } from '../../../lib/toastError';
+import { router } from '../../../lib/router.svelte';
+import type { Review } from '../../../lib/api/types';
 
 const run = (id: string) => `/workflow-runs/${encodeURIComponent(id)}`;
 
@@ -72,4 +74,12 @@ export function answerRequest(threadId: string, requestId: string, approve: bool
     const port = await loadIdeRuntimeSessionPort();
     await port.runtimeThreads.respond(threadId, requestId, approve ? 'accept' : 'decline');
   });
+}
+
+/** "Open review": the review's page in Git (its repository from the review
+ *  itself when the step output does not name one), else the Git overview. */
+export async function openReview(reviewId: string, repoId: string | null): Promise<void> {
+  let repo = repoId;
+  if (!repo) repo = await api.get<Review>(`/reviews/${encodeURIComponent(reviewId)}`).then((r) => r.repo_id || null, () => null);
+  router.go(repo ? `git/${encodeURIComponent(repo)}/review/${encodeURIComponent(reviewId)}` : 'git');
 }

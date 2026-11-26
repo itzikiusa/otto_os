@@ -3,7 +3,7 @@
 // selection — runs/stepOrder.ts.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { defaultSelection, doneFold, entrySteps, orderChildren, orderSteps, RESULT, topoOrder } from '../src/modules/workflows/runs/stepOrder.ts';
+import { defaultSelection, doneFold, entrySteps, loopChildren, orderChildren, orderSteps, RESULT, topoOrder } from '../src/modules/workflows/runs/stepOrder.ts';
 import { at, fanoutNodes, node, PR_GRAPH, reviewers, T0 } from './workflowRunFixtures.ts';
 import type { WorkflowGraph } from '../src/lib/api/types';
 
@@ -71,4 +71,22 @@ test('the pane opens on the step that matters for each run state', () => {
   const machine = orderSteps([node('n1', 'success', 0, 0), node('n3', 'running', 1, null, { phase: 'waiting' })], PR_GRAPH, NOW);
   assert.deepEqual(defaultSelection('waiting', machine), { node: 'n3', child: null });
   assert.equal(entrySteps(entries[3]).length, 3);
+});
+
+test('a loop step\'s iterations become child rows, newest first, worded from their steps', () => {
+  const cp = (iteration: number, step_index: number, name: string, status: string, extra: Record<string, unknown> = {}) =>
+    ({ node_id: `work-${iteration}-${step_index}`, loop_id: 'loop', iteration, step_index, kind: 'agent_prompt', name, status, attempts: 1, input: null, output: null, logs: [], updated_at: `2026-11-26T10:0${iteration}:0${step_index}Z`, ...extra }) as never;
+  const kids = loopChildren([
+    cp(1, 1, 'Check', 'success'), cp(1, 0, 'Work', 'success', { thread_id: 'th-1' }),
+    cp(2, 0, 'Work', 'error', { thread_id: 'th-2' }), cp(2, 1, 'Check', 'pending'),
+    cp(3, 0, 'Work', 'running', { thread_id: 'th-3' }),
+    cp(1, 0, 'Other loop', 'success', { loop_id: 'other' }),
+  ], 'loop');
+  assert.deepEqual(kids.map((k) => [k.id, k.label, k.status, k.thread_id]), [
+    ['iter-3', 'Iteration 3 · Work', 'running', 'th-3'],
+    ['iter-2', 'Iteration 2 · Work, Check', 'error', 'th-2'],
+    ['iter-1', 'Iteration 1 · Work, Check', 'success', 'th-1'],
+  ]);
+  assert.equal(kids[0].ended_at, undefined, 'a running iteration has no end');
+  assert.equal(kids[2].ended_at, '2026-11-26T10:01:01Z');
 });

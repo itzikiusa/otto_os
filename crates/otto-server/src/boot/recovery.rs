@@ -15,16 +15,16 @@ pub async fn recover_before_serve(ctx: &ServerCtx, boot: &mut BootPhases) -> Res
     // Adopt detached runtime-holder processes before `restore_sessions` sweeps
     // per-session `OTTO_MCP_TOKEN` credentials so live runtime sessions keep
     // working MCP tools across restart, while unadopted turns end `interrupted`.
-    let adopted_runtime = match ctx.agent_runtime.recover_and_adopt().await {
-        Ok(ids) => ids,
+    let adopted = match ctx.agent_runtime.recover_and_adopt().await {
+        Ok(adopted) => adopted,
         Err(e) => {
             tracing::warn!("agent-runtime recovery: {e}");
-            std::collections::HashSet::new()
+            Default::default()
         }
     };
-    restore_sessions(ctx, &adopted_runtime).await?;
+    restore_sessions(ctx, &adopted.live_ids).await?;
     boot.mark("restore");
-    fail_orphaned_reviews(ctx).await;
+    fail_orphaned_reviews(ctx, &ctx.agent_runtime.held_reviews(&adopted).await).await;
     fail_orphaned_skill_evals(ctx).await;
     warn_on_err(
         "3D job and production recovery",
@@ -123,17 +123,21 @@ async fn restore_sessions(
 
 /// Settle reviews orphaned by the previous process exit: a review's
 /// background task dies with the process, so a row left `running` would
-/// otherwise poll forever in the UI. One whose reviewers had all finished
-/// gets ONLY its summarizer re-run over their stored findings (at most twice
-/// per review — `otto_review::restart`); the rest fail as re-runnable, and
-/// every live agent row (a per-agent retry's) is settled too.
-async fn fail_orphaned_reviews(ctx: &ServerCtx) {
-    let resume = otto_review::restart::settle_after_restart(&ctx.reviews_store).await;
-    let users = otto_state::UsersRepo::new(ctx.pool.clone());
-    for id in resume
+/// otherwise poll forever in the UI. One whose agents survived in their
+/// holders (`held`) keeps running and gets a driver that awaits them; one
+/// whose reviewers had all finished gets ONLY its summarizer re-run over
+/// their stored findings (at most twice per review — `otto_review::restart`);
+/// the rest fail as re-runnable, and every live agent row is settled too.
+async fn fail_orphaned_reviews(ctx: &ServerCtx, held: &std::collections::HashSet<otto_core::Id>) {
+    let settled = otto_review::restart::settle_after_restart(&ctx.reviews_store, held).await;
+    let settled = settled
         .inspect_err(|e| tracing::warn!("review recovery: {e}"))
-        .unwrap_or_default()
-    {
+        .unwrap_or_default();
+    for id in settled.resume_held {
+        tokio::spawn(crate::modules::review::resume_held_review(ctx.clone(), id));
+    }
+    let users = otto_state::UsersRepo::new(ctx.pool.clone());
+    for id in settled.summarizer_resume {
         let user = otto_review::restart::review_user(&users).await;
         let resumed = async { crate::modules::review::rerun_summarizer(ctx, &id, user?).await };
         match resumed.await {

@@ -1,5 +1,5 @@
 // Workflow canvas geometry (pure): card sizes, loop-card height and the edge
-// paths between ports, in graph coordinates. Split out of WorkflowCanvas.svelte.
+// paths between ports, in graph coordinates. Used by the editor.
 import type { WorkflowNode } from '../../lib/api/types';
 
 export const NODE_W = 210;

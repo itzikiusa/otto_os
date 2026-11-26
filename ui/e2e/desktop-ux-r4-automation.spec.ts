@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
+import { canvasNode, openEditor } from './workflowsUi';
 
 test.use({ serviceWorkers: 'block', viewport: { width: 1440, height: 900 } });
 async function setup(page: Page) {
@@ -31,7 +32,7 @@ test('rooms: pending creation prevents duplicate Enter and preserves newer name'
   await expect(input).toHaveValue('Release team');
 });
 
-test('workflow canvas: keyboard selects a step and saved input survives reload', async ({ page }) => {
+test('workflow editor: keyboard selects a step and saved input survives reload', async ({ page }) => {
   const { ctx, base, ws } = await setup(page);
   const workflow = await (await ctx.post(`${base}/api/v1/workspaces/${ws}/workflows`, { data: {
     name: 'Keyboard release checklist', graph: {
@@ -41,9 +42,8 @@ test('workflow canvas: keyboard selects a step and saved input survives reload',
       edges: [{ id: 'e1', source: 'start', target: 'approval' }, { id: 'e2', source: 'approval', target: 'done' }],
     },
   } })).json();
-  await page.goto('/#/workflows');
-  await page.getByTestId(`wf-row-${workflow.id}`).locator('.row-main').click();
-  const node = page.locator('.node-main', { hasText: 'Release input' });
+  await openEditor(page, workflow.id);
+  const node = canvasNode(page, 'start').getByRole('button').first();
   await node.focus(); await page.keyboard.press('Enter');
   const input = page.getByLabel('Message / prompt', { exact: true });
   await expect(input).toBeVisible();
@@ -52,9 +52,9 @@ test('workflow canvas: keyboard selects a step and saved input survives reload',
   const saved = page.waitForResponse(r => r.url().endsWith(`/workflows/${workflow.id}`) && r.request().method() === 'PATCH' && r.ok());
   await page.getByRole('button', { name: 'Save', exact: true }).click();
   await saved;
-  await expect(page.getByRole('button', { name: 'Save', exact: true })).toBeDisabled();
+  await expect(page.getByText('Unsaved', { exact: true })).toHaveCount(0);
   await page.reload();
-  await page.locator('.node-main', { hasText: 'Release input' }).focus(); await page.keyboard.press('Space');
+  await canvasNode(page, 'start').getByRole('button').first().focus(); await page.keyboard.press('Space');
   await expect(input).toHaveValue('Review long acceptance checklist before release');
   await ctx.dispose();
 });

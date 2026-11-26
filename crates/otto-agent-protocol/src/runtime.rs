@@ -31,6 +31,7 @@ mod descendants;
 mod fresh;
 mod handoff;
 mod held_adopt;
+pub use held_adopt::Adopted;
 mod held_proc;
 mod keep_awake;
 mod loop_guard;

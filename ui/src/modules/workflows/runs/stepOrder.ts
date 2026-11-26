@@ -6,7 +6,7 @@
 // pane's default selection per run state (§4.4). The ring (runOrbit.ts) is
 // built from the same entries, so the two never disagree. Pure; unit-tested in
 // ui/unit/workflowStepOrder.test.ts.
-import type { ChildThread, NodeRunState, RunState, WorkflowGraph } from '../../../lib/api/types';
+import type { ChildThread, ChildThreadStatus, NodeRunState, RunState, WorkflowCheckpoint, WorkflowGraph } from '../../../lib/api/types';
 
 /** The pseudo-rows the pane can open besides a step. */
 export const RESULT = '_result';
@@ -186,4 +186,24 @@ export function defaultSelection(state: RunState, entries: readonly StepEntry[],
     default:
       return { node: RESULT, child: null };
   }
+}
+
+/** A loop step's iterations as child rows (goal.md §3.5), newest first —
+ *  "Iteration 3 · Work, Check" — so the list and the ring show one entry per
+ *  iteration like a fan-out. An iteration's state comes from its steps; it
+ *  opens the conversation of its last step that had a thread. */
+export function loopChildren(checkpoints: readonly WorkflowCheckpoint[], loopId: string): ChildThread[] {
+  const byIter = new Map<number, WorkflowCheckpoint[]>();
+  for (const c of checkpoints) if (c.loop_id === loopId) byIter.set(c.iteration, [...(byIter.get(c.iteration) ?? []), c]);
+  return [...byIter.entries()].sort((a, b) => b[0] - a[0]).map(([n, steps]) => {
+    steps.sort((a, b) => a.step_index - b.step_index);
+    const st = steps.map((s) => s.status);
+    const status: ChildThreadStatus = st.includes('error') ? 'error' : st.includes('running') ? 'running' : st.every((s) => s === 'success' || s === 'skipped') ? 'success' : 'pending';
+    const thread = [...steps].reverse().find((s) => s.thread_id)?.thread_id;
+    const ended = steps.map((s) => s.updated_at).sort().at(-1);
+    return {
+      id: `iter-${n}`, label: `Iteration ${n} · ${steps.map((s) => s.name).join(', ')}`, provider: '', status,
+      ...(thread ? { thread_id: thread } : {}), ...(status !== 'running' && ended ? { ended_at: ended } : {}),
+    };
+  });
 }

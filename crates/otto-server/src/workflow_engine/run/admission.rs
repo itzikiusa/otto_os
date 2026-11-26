@@ -408,7 +408,16 @@ async fn isolate_repos(
             .ok()
             .flatten();
         if let Some(rev) = rev {
-            deliver_run_result(ctx, workflow, &nodes, RunStatus::Error, &input, None).await;
+            deliver_run_result(
+                ctx,
+                workflow,
+                run_id,
+                &nodes,
+                RunStatus::Error,
+                &input,
+                None,
+            )
+            .await;
             emit_run_updated(
                 ctx,
                 &workflow.workspace_id,
@@ -662,6 +671,7 @@ pub(in crate::workflow_engine) async fn mark_running(
 /// UI / webhook-only runs get a disabled (no-op) sink.
 pub(in crate::workflow_engine) fn open_progress(
     ctx: &ServerCtx,
+    run_id: &Id,
     workflow: &Workflow,
     input: &Value,
     steps: usize,
@@ -669,7 +679,8 @@ pub(in crate::workflow_engine) fn open_progress(
 ) -> (ProgressSink, Option<tokio::task::JoinHandle<()>>) {
     let (progress, progress_pump) = match resolve_chat_target(workflow, input) {
         Some(target) => {
-            let (sink, handle) = spawn_progress_pump(ctx.clone(), target);
+            let style = super::chat::style(workflow, input);
+            let (sink, handle) = spawn_progress_pump(ctx.clone(), run_id.clone(), target, style);
             (sink, Some(handle))
         }
         None => (ProgressSink::disabled(), None),
