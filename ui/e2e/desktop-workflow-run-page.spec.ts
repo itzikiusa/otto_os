@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
-import { agentStep, cancelStarted, chain, createWorkflow, fork, reviewStep, settled, startRun, waitRun, wfApi, type WfApi } from './workflowsFixture';
+import { agentStep, cancelStarted, chain, createWorkflow, fork, reviewStep, reviewTarget, settled, startRun, waitRun, wfApi, type WfApi } from './workflowsFixture';
 import { openRun, runRow, runsTab, stepPane, stepRow } from './workflowsUi';
 
 // The run page (ux.md §4, §5, §16; test-plan.md §7, gate candidate) on the
@@ -35,17 +35,19 @@ test.beforeEach(async ({ page }, info) => {
   }, api.ws);
 });
 
-test('a 12-reviewer fan-out: named reviewer rows, one ring tick each, no "Open session" wall', async ({ page }) => {
-  const wf = await createWorkflow(api, 'E2E Fan-out 12', chain(agentStep('prep', 'Prepare'), reviewStep('review', 12)));
-  const run = await startRun(api, wf);
+test('a 12-child fan-out: named reviewer rows, one ring tick each, no "Open session" wall', async ({ page }) => {
+  // 11 reviewers and the summarizer: the ring counts every child the step
+  // list shows (ux.md §4.3 children), one tick each up to 12 (DR-020).
+  const wf = await createWorkflow(api, 'E2E Fan-out 12', chain(agentStep('prep', 'Prepare'), reviewStep('review', 11)));
+  const run = await startRun(api, wf, await reviewTarget(api));
   await waitRun(api, run, (r) => (r.nodes.find((n) => n.node_id === 'review')?.children?.length ?? 0) >= 12);
   await openRun(page, wf, run, 'review');
   await expect(page.getByTestId('wf-run-orbit')).toHaveAttribute('data-children', '12');
   await expect(page.getByTestId('wf-run-orbit')).toHaveAttribute('data-grouped', 'false');
-  // Reviewers are named rows (done ones may sit under their "N reviewers done" fold).
+  // Reviewers are named rows (done ones may sit under their "N reviewers done" fold); the summarizer trails.
   const kids = page.getByTestId('wf-step-child');
   expect(await kids.count()).toBeGreaterThan(0);
-  for (const k of await kids.all()) await expect(k).toContainText(/lens-\d+/);
+  for (const k of await kids.all()) await expect(k).toContainText(/lens-\d+|Summarizer/);
   await expect(page.getByRole('button', { name: 'Open session' })).toHaveCount(0);
 });
 
@@ -62,7 +64,9 @@ test('a parallel group renders as one block and the steps follow execution order
 });
 
 test('one primary per state: Retry step on a failure (and it retries), Run again… when done', async ({ page }) => {
-  const failing = await createWorkflow(api, 'E2E Fails once', chain(agentStep('flaky', 'Flaky step', ['fail-attempts 1 provider'])));
+  // No automatic retry (agent steps retry twice by default, engine.md E3.5):
+  // the first attempt's failure fails the run; Retry step's attempt succeeds.
+  const failing = await createWorkflow(api, 'E2E Fails once', chain(agentStep('flaky', 'Flaky step', ['fail-attempts 1 provider'], { retry: { max_attempts: 0 } })));
   const run = await startRun(api, failing);
   await waitRun(api, run, settled);
   await openRun(page, failing, run);
@@ -74,6 +78,9 @@ test('one primary per state: Retry step on a failure (and it retries), Run again
   expect(await stepMenu(page)).toContain('Retry only this step');
   await primary.click();
   await expect(page.getByTestId('wf-run-page')).toHaveAttribute('data-state', 'succeeded', { timeout: 30_000 });
+  // The step itself ran again (not skipped past): its own status is success.
+  const retried = (await waitRun(api, run, settled)).nodes.find((n) => n.node_id === 'flaky');
+  expect(retried?.status, JSON.stringify(retried?.logs)).toBe('success');
   await expect(page.getByTestId('wf-run-primary')).toHaveAttribute('data-action', 'run-again');
   await stepRow(page, 'flaky').click();
   await expect(stepPane(page).getByTestId('wf-step-error')).toHaveCount(0);
