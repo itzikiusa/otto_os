@@ -1,7 +1,6 @@
 //! Otto automation engines: **Scheduled Tasks** (cadence, the 60 s supervisor,
-//! the run engine + report delivery) and **Goal Loops** (the bounded
-//! Plan → Execute → Evaluate → Digest controller and its roles, verification
-//! commands, worktree provisioning and pure completion policy).
+//! the run engine + report delivery), the verification command runner, and
+//! what older **Goal Loops** still need (goals are workflows now, goal.md).
 //!
 //! Everything daemon-side comes in through [`AutomationCtx`], which otto-server
 //! implements for its `ServerCtx`; this crate never depends on otto-server.
@@ -13,16 +12,10 @@ pub mod cadence;
 pub mod cancel_signal;
 mod command_output;
 mod ctx;
-pub mod goal_loop;
-pub mod goal_loop_commands;
-pub mod goal_loop_graph;
-pub mod goal_loop_parse;
-pub mod goal_loop_policy;
-pub mod goal_loop_roles;
-pub mod goal_loop_steering;
-pub mod goal_loop_workspace;
+pub mod goal_loop_history;
 pub mod report_delivery;
 pub mod scheduled_tasks_engine;
 pub mod scheduled_tasks_scheduler;
+pub mod verify_command;
 
 pub use ctx::AutomationCtx;

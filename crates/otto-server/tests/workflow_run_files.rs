@@ -268,6 +268,101 @@ async fn escaping_paths_are_400() {
     }
 }
 
+/// DR-114: `?download=1` hands over the exact bytes as an attachment, under
+/// the same confinement and credential deny as a read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn download_returns_the_bytes_as_an_attachment() {
+    let d = boot().await;
+    let get = |token: &str, path: &str| {
+        d.http
+            .get(format!(
+                "{}/api/v1/workflow-runs/{}/context/read",
+                d.base, d.run
+            ))
+            .query(&[("path", path), ("download", "1")])
+            .bearer_auth(token.to_string())
+            .send()
+    };
+    let resp = get(&d.viewer, "blob.bin").await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let h = resp.headers();
+    assert_eq!(
+        h["content-disposition"],
+        "attachment; filename=\"blob.bin\""
+    );
+    assert_eq!(h["x-content-type-options"], "nosniff");
+    assert_eq!(h["content-type"], "application/octet-stream");
+    assert_eq!(&resp.bytes().await.unwrap()[..], b"PK\x03\x04\0\0binary");
+    assert_eq!(get(&d.viewer, "id_rsa").await.unwrap().status(), 403);
+    assert_eq!(get(&d.viewer, "../secret.txt").await.unwrap().status(), 400);
+    // CR1-052 (3): a symlink out of the dir, and another workspace's member.
+    #[cfg(unix)]
+    {
+        let resp = get(&d.viewer, "escape.txt").await.unwrap();
+        assert_eq!(resp.status(), 400);
+        assert!(!resp.text().await.unwrap().contains("s3cret"));
+    }
+    let st = get(&d.outsider, "blob.bin").await.unwrap().status();
+    assert!(st == 403 || st == 404, "{st}");
+    // A name no header can carry (a control character, non-ASCII) still downloads.
+    let odd = "a\rb ü;.txt";
+    std::fs::write(d.tmp.path().join("workflow-context/run1").join(odd), "odd").unwrap();
+    let resp = get(&d.viewer, odd).await.unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers()["content-disposition"],
+        "attachment; filename=\"a_b __.txt\""
+    );
+    assert_eq!(&resp.bytes().await.unwrap()[..], b"odd");
+}
+
+/// DR-201 / DR-114: the run view carries the chat message's attachments,
+/// and an overview the row does not hold (queued, paused, restored) is
+/// recomputed on the run view and on `/progress`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_run_view_lists_its_attachments_and_recomputes_a_missing_overview() {
+    let d = boot().await;
+    let spec = otto_core::workflows::AttachmentRef {
+        name: "spec.pdf".into(),
+        mime: "application/pdf".into(),
+        size_bytes: Some(3),
+        path: Some("attachments/spec.pdf".into()),
+        error: None,
+        source: otto_core::workflows::AttachmentSource::Start,
+    };
+    std::fs::write(
+        d.tmp.path().join("workflow-context/run1/attachments.json"),
+        serde_json::to_vec(&[spec]).unwrap(),
+    )
+    .unwrap();
+    // A chat run: its origin lives in the input the progress projection strips.
+    sqlx::query("UPDATE workflow_runs SET input_json = ? WHERE id = 'run1'")
+        .bind(r#"{"trigger": "chat", "user": "vera"}"#)
+        .execute(&d.pool)
+        .await
+        .unwrap();
+    let get = |path: &str| {
+        d.http
+            .get(format!("{}/api/v1/workflow-runs/run1{path}", d.base))
+            .bearer_auth(d.viewer.clone())
+            .send()
+    };
+    let run: Value = get("").await.unwrap().json().await.unwrap();
+    assert_eq!(
+        run["attachments"][0]["path"], "attachments/spec.pdf",
+        "{run}"
+    );
+    assert_eq!(run["overview"]["state"], "succeeded", "{run}");
+    assert_eq!(run["overview"]["origin"]["user_name"], "vera", "{run}");
+    let progress: Value = get("/progress").await.unwrap().json().await.unwrap();
+    let ov = &progress["run"]["overview"];
+    assert_eq!(ov["state"], "succeeded", "{progress}");
+    assert_eq!(
+        ov["origin"], run["overview"]["origin"],
+        "/progress recomputes from the full row (CR2-005): {progress}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_credential_file_is_root_only() {
     let d = boot().await;

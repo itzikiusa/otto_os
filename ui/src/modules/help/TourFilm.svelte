@@ -68,20 +68,37 @@
   const activeChapter = $derived(chapterAt(chapters, currentTime));
 
   // Captions: bundled VTT → blob URL; else remote only from a CORS-capable host.
-  const bundledVtt = $derived(film?.captions ? BUNDLED_CAPTIONS[film.captions] : undefined);
+  const loadBundledVtt = $derived(film?.captions ? BUNDLED_CAPTIONS[film.captions] : undefined);
+  let bundledVtt = $state<string | undefined>(undefined);
+  $effect(() => {
+    bundledVtt = undefined;
+    const load = loadBundledVtt;
+    if (!load) return;
+    let live = true;
+    void load().then(
+      (raw) => {
+        if (live) bundledVtt = raw;
+      },
+      () => {}, // no captions is the fallback
+    );
+    return () => {
+      live = false;
+    };
+  });
   let captionsBlob: string | null = null;
   const captionsSrc = $derived.by(() => {
     if (captionsBlob) URL.revokeObjectURL(captionsBlob);
     captionsBlob = null;
     if (!film?.captions) return null;
-    if (bundledVtt) {
+    if (loadBundledVtt) {
+      if (!bundledVtt) return null;
       captionsBlob = URL.createObjectURL(new Blob([bundledVtt], { type: 'text/vtt' }));
       return captionsBlob;
     }
     return isGithub ? null : assetUrl(film.captions);
   });
   // A remote track needs a CORS-mode media request (never for GitHub, see above).
-  const corsMode = $derived(!!captionsSrc && !bundledVtt ? 'anonymous' : undefined);
+  const corsMode = $derived(!!captionsSrc && !loadBundledVtt ? 'anonymous' : undefined);
   onDestroy(() => {
     if (captionsBlob) URL.revokeObjectURL(captionsBlob);
   });

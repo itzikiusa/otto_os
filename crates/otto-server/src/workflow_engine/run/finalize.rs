@@ -21,6 +21,7 @@ pub(in crate::workflow_engine) async fn finish(
     canceled: bool,
     timed_out: bool,
 ) {
+    step_thread::forget(&run_id);
     // A stopped run stops its agents and reviewers NOW: the drain below can
     // take minutes (each queued chat post has a 30 s timeout on a slow or
     // offline Slack), and the agents kept editing the worktree meanwhile.
@@ -28,12 +29,16 @@ pub(in crate::workflow_engine) async fn finish(
     if canceled || timed_out {
         stop_run_reviews(&ctx, &repo, &workflow.workspace_id, &run_id, &states).await;
         kill_run_sessions(&ctx, &states).await;
+        step_thread::retain_run(&ctx, &mut states, false).await;
     }
     // Flush all streamed progress lines (close the channel, await the pump) so the
     // per-step updates land in the thread BEFORE the final summary is delivered.
     drop(progress);
     if let Some(h) = progress_pump {
         let _ = h.await;
+    }
+    if super::hold::settle_held(&ctx, &repo, &workflow, &run_id, &mut states, &input).await {
+        return;
     }
 
     if canceled {
@@ -82,18 +87,19 @@ pub(in crate::workflow_engine) async fn finish(
                 return;
             }
         };
-        deliver_run_result(&ctx, &workflow, &states, RunStatus::Error, &input, None).await;
-        emit_run_updated(
+        let ov = store_overview(&repo, &workflow, &run_id, rev).await;
+        deliver_run_result(
             &ctx,
-            &workflow.workspace_id,
+            &workflow,
             &run_id,
-            "error",
-            None,
-            rev,
-            None,
             &states,
-            false,
-        );
+            RunStatus::Error,
+            &input,
+            None,
+        )
+        .await;
+        let at = (&workflow.workspace_id, &run_id, "error", rev);
+        emit_run_updated_with(&ctx, at, None, None, &states, false, ov.as_ref());
         clear_skip_markers(&ctx, &run_id);
         reap_run_worktrees(&ctx, &run_id).await;
         return;
@@ -138,6 +144,8 @@ pub(in crate::workflow_engine) async fn finish(
     // The run's deliverable: a copy of the last content-bearing step's handoff
     // file, only on outright success — an errored run has no coherent "answer"
     // to hand back, so delivery falls back to the per-step summary.md instead.
+    let ov = store_overview(&repo, &workflow, &run_id, rev).await;
+    step_thread::retain_run(&ctx, &mut states, final_status == RunStatus::Success).await;
     let final_output = if final_status == RunStatus::Success {
         files.write_final_output()
     } else {
@@ -149,6 +157,7 @@ pub(in crate::workflow_engine) async fn finish(
     deliver_run_result(
         &ctx,
         &workflow,
+        &run_id,
         &states,
         final_status,
         &input,
@@ -156,17 +165,8 @@ pub(in crate::workflow_engine) async fn finish(
     )
     .await;
     // Final event: run complete.
-    emit_run_updated(
-        &ctx,
-        &workflow.workspace_id,
-        &run_id,
-        final_status.as_str(),
-        None,
-        rev,
-        None,
-        &states,
-        false,
-    );
+    let at = (&workflow.workspace_id, &run_id, final_status.as_str(), rev);
+    emit_run_updated_with(&ctx, at, None, None, &states, false, ov.as_ref());
     // Free the run's provisioned worktrees (+ safe branch cleanup) — repeat
     // automations must not accumulate one worktree/branch per run.
     clear_skip_markers(&ctx, &run_id);
@@ -174,4 +174,25 @@ pub(in crate::workflow_engine) async fn finish(
     // Reap earlier runs whose worktrees were kept for a reopenable session
     // that has since gone (or aged past the reopen TTL).
     sweep_stale_run_worktrees(&ctx).await;
+}
+
+/// A terminal write cleared the overview: store the settled run's (CAS on
+/// `rev`, engine.md §2.3).
+pub(in crate::workflow_engine) async fn store_overview(
+    repo: &WorkflowsRepo,
+    workflow: &Workflow,
+    run_id: &Id,
+    rev: i64,
+) -> Option<otto_core::workflows::RunOverview> {
+    let run = repo.get_run(run_id).await.ok()?;
+    let mut ov = otto_workflows::overview::run_overview(
+        &run,
+        &workflow.graph,
+        None,
+        None,
+        chrono::Utc::now(),
+    );
+    ov.rev = rev;
+    let _ = repo.set_overview(run_id, rev, &ov).await;
+    Some(ov)
 }

@@ -4,7 +4,7 @@ import { expectNoHorizontalOverflow } from './helpers';
 
 test.use({ serviceWorkers: 'block' });
 
-test.describe('Workflows & Goal Loops UX closure (phone + tablet, light + dark)', () => {
+test.describe('Workflows & older goal loops UX closure (phone + tablet, light + dark)', () => {
   for (const scheme of ['light', 'dark'] as const) {
     test(`Workflows phone layout ignores persisted dockSide, keeps single primary CTA on Run…, and keeps step zoom button outside summary (${scheme})`, async ({ page }) => {
       const { ctx, base } = await apiCtx();
@@ -24,10 +24,14 @@ test.describe('Workflows & Goal Loops UX closure (phone + tablet, light + dark)'
         workspace_id: workspace,
         name: 'Nightly Release Verification Workflow With Long Name',
         description: 'Verifies build and deploy gates',
-        nodes: [
-          { id: 'n1', kind: 'shell', name: 'Run unit suite with very long step name that used to overflow inspector header', x: 60, y: 60, config: { cmd: 'echo ok' } },
-        ],
-        edges: [],
+        instructions: '',
+        created_by: 'u',
+        graph: {
+          nodes: [
+            { id: 'n1', kind: 'shell', name: 'Run unit suite with very long step name that used to overflow inspector header', x: 60, y: 60, params: { cmd: 'echo ok' } },
+          ],
+          edges: [],
+        },
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       };
@@ -70,17 +74,16 @@ test.describe('Workflows & Goal Loops UX closure (phone + tablet, light + dark)'
 
       await page.setViewportSize({ width: 390, height: 844 });
       await page.goto(`/#/workflows/${wf.id}`);
-      await expect(page.locator('.wf-root')).toBeVisible();
-      // 01-06 / 18-01: dock-side class must not be active on phone even when persisted in localStorage
-      await expect(page.locator('.wf-root')).not.toHaveClass(/dock-side/);
+      // On a phone the editor is the read-only outline (no side-docked
+      // inspector, no canvas), and it fits the screen.
+      await expect(page.getByTestId('wf-phone-outline')).toBeVisible();
+      await expect(page.getByTestId('wf-editor-canvas')).toHaveCount(0);
       await expectNoHorizontalOverflow(page);
-
-      // 01-09: in RunSteps, "Zoom in on this step" button is a sibling inside .step-wrap, not nested inside <summary>
-      const zoomInsideSummary = await page.locator('summary button.zoom-btn').count();
-      expect(zoomInsideSummary).toBe(0);
+      // No button nested inside another control's <summary>.
+      expect(await page.locator('summary button').count()).toBe(0);
     });
 
-    test(`Goal Loops detail stepper, progress bar status colour, criteria labels, decision primary button, draft ⋯ menu, and phone session navigation (${scheme})`, async ({ page }) => {
+    test(`Older goal loop detail: stepper, progress bar status colour, criteria labels, read-only decision, Continue as a goal (${scheme})`, async ({ page }) => {
       const { ctx, base } = await apiCtx();
       const workspace = await seedWorkspace(ctx, base);
       await ctx.dispose();
@@ -189,10 +192,11 @@ test.describe('Workflows & Goal Loops UX closure (phone + tablet, light + dark)'
       await expect(page.locator('.crit-state.unmet', { hasText: 'Not met' })).toBeVisible();
       await expect(page.locator('.crit-state.unchecked', { hasText: 'Not checked' })).toBeVisible();
 
-      // 02-GL-04: Record answer is .primary while Resume is not .primary when unanswered; hint is visible
-      await expect(page.locator('.resume-hint')).toContainText('Resume stays off until this answer is recorded.');
-      await expect(page.getByRole('button', { name: 'Record answer', exact: true })).toHaveClass(/primary/);
-      await expect(page.getByRole('button', { name: 'Resume', exact: true })).not.toHaveClass(/primary/);
+      // Read-only history (goal.md §5.2): the open question is shown, nothing resumes; Continue as a goal is the one primary.
+      await expect(page.getByText('Should token TTL stay 24h?')).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Record answer', exact: true })).toHaveCount(0);
+      await expect(page.getByRole('button', { name: 'Resume', exact: true })).toHaveCount(0);
+      await expect(page.getByTestId('loop-continue')).toHaveClass(/primary/);
 
       // 02-GL-09: IterationRow renders human status label ("Failed") instead of raw "error"
       await expect(page.locator('.agent', { hasText: 'Failed' })).toBeVisible();
@@ -201,12 +205,12 @@ test.describe('Workflows & Goal Loops UX closure (phone + tablet, light + dark)'
       await page.setViewportSize({ width: 390, height: 844 });
       await expectNoHorizontalOverflow(page);
 
-      // 02-GL-06: Draft loop header has Start + More actions (⋯), no standalone Delete goal loop icon button
+      // A draft loop: Continue as a goal and ⋯ (Delete history), nothing starts it here.
       await page.evaluate((id) => { location.hash = `#/loops/${id}`; }, draftLoop.id);
       await expect(page.getByRole('heading', { name: 'Draft Goal Loop', exact: true })).toBeVisible();
-      await expect(page.getByRole('button', { name: 'Start', exact: true })).toBeVisible();
+      await expect(page.getByTestId('loop-continue')).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Start', exact: true })).toHaveCount(0);
       await expect(page.getByRole('button', { name: 'More actions', exact: true })).toBeVisible();
-      await expect(page.getByRole('button', { name: 'Delete goal loop', exact: true })).toHaveCount(0);
     });
   }
 });

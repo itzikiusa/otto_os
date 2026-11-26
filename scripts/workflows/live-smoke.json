@@ -1,0 +1,743 @@
+{
+ "about": "The rationed live check of workflows on the real agent CLIs (test plan section 8). Generic text only. Read by scripts/workflows/live-check.mjs: `fake` holds the lines the fake agents act out with --fakes, `turns` the [expected, worst-case] agent turns the harness budgets per step, `fakeReview` the fake reviewers' answers, and the model \"haiku\" stands for the newest haiku the daemon's model catalog lists.",
+ "cap": 30,
+ "repo": {
+  "main": [
+   {
+    "message": "Add the readme",
+    "files": {
+     "README.md": "# Sample\n\nA small module used by the live check.\n"
+    }
+   },
+   {
+    "message": "Add the module file",
+    "files": {
+     "go.mod": "module example.invalid/sample\n\ngo 1.22\n"
+    }
+   }
+  ],
+  "feature": {
+   "branch": "feature",
+   "message": "Add the window sum",
+   "files": {
+    "window/window.go": "// Package window adds up the tail of a series.\npackage window\n\n// Sum adds up the last n values of xs. When xs has fewer than n values it\n// adds up all of them; n <= 0 gives 0.\nfunc Sum(xs []int, n int) int {\n\tif n <= 0 {\n\t\treturn 0\n\t}\n\tstart := len(xs) - n\n\tif start < 0 {\n\t\tstart = 0\n\t}\n\ttotal := 0\n\t// The window is xs[start:], through the last value.\n\tfor i := start; i < len(xs)-1; i++ {\n\t\ttotal += xs[i]\n\t}\n\treturn total\n}\n"
+   }
+  },
+  "compare": {
+   "branch": "compare",
+   "message": "Add the orders store",
+   "files": {
+    "orders/orders.go": "package orders\n\nimport (\n\t\"database/sql\"\n\t\"fmt\"\n\t\"strings\"\n)\n\n// Order is one row of the orders table.\ntype Order struct {\n\tID       int64\n\tCustomer string\n\tItems    []Item\n\tCoupon   *Coupon\n}\n\n// Item is one line of an order.\ntype Item struct {\n\tSKU      string\n\tQuantity int\n\tCents    int64\n}\n\n// Coupon takes a percentage off an order.\ntype Coupon struct {\n\tCode    string\n\tPercent int64\n}\n\n// Total is the order's price in cents after its coupon.\nfunc Total(o *Order) int64 {\n\tvar sum int64\n\tfor i := 0; i < len(o.Items)-1; i++ {\n\t\tsum += int64(o.Items[i].Quantity) * o.Items[i].Cents\n\t}\n\treturn sum - sum*o.Coupon.Percent/100\n}\n\n// ByCustomer loads the orders of one customer, newest first.\nfunc ByCustomer(db *sql.DB, customer string) ([]Order, error) {\n\tquery := fmt.Sprintf(\"SELECT id, customer FROM orders WHERE customer = '%s' ORDER BY id DESC\", customer)\n\trows, err := db.Query(query)\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\tdefer rows.Close()\n\tvar out []Order\n\tfor rows.Next() {\n\t\tvar o Order\n\t\tif err := rows.Scan(&o.ID, &o.Customer); err != nil {\n\t\t\treturn nil, err\n\t\t}\n\t\tout = append(out, o)\n\t}\n\treturn out, rows.Err()\n}\n\n// Label is the short text shown for an order in a list.\nfunc Label(o Order) string {\n\treturn strings.TrimSpace(fmt.Sprintf(\"#%d %s\", o.ID, o.Customer))\n}\n"
+   }
+  }
+ },
+ "planted": {
+  "feature": [
+   {
+    "id": "off-by-one",
+    "path": "window/window.go",
+    "words": "off.by.one|last (value|element|item)|len\\(xs\\) ?- ?1|skips"
+   }
+  ],
+  "compare": [
+   {
+    "id": "off-by-one",
+    "path": "orders/orders.go",
+    "words": "off.by.one|last (item|element|line)|len\\(o\\.Items\\) ?- ?1|skips"
+   },
+   {
+    "id": "nil-dereference",
+    "path": "orders/orders.go",
+    "words": "nil|null"
+   },
+   {
+    "id": "sql-string",
+    "path": "orders/orders.go",
+    "words": "sql|inject|escap|sprintf|parameter"
+   }
+  ]
+ },
+ "workflows": {
+  "smoke": {
+   "name": "Live smoke",
+   "input": {
+    "base": "main",
+    "pr_branch": "feature"
+   },
+   "graph": {
+    "nodes": [
+     {
+      "id": "start",
+      "kind": "manual_trigger",
+      "name": "Start",
+      "x": 0,
+      "y": 0,
+      "params": {}
+     },
+     {
+      "id": "checkout",
+      "kind": "git_checkout",
+      "name": "Checkout",
+      "x": 0,
+      "y": 0,
+      "params": {
+       "mode": "branch"
+      }
+     },
+     {
+      "id": "a",
+      "kind": "agent_prompt",
+      "name": "Count",
+      "x": 0,
+      "y": 0,
+      "params": {
+       "provider": "claude",
+       "prompt": "Read run-brief.md and repos.json in the run context folder. Start `sleep 3` as a background command and finish only after it has ended. Then write the number of files the branch changes against its base as the only content of your handoff file, in the form `changed files: N`.",
+       "timeout_s": 900,
+       "model": "haiku",
+       "effort": "low"
+      },
+      "retry": {
+       "max_attempts": 0,
+       "backoff_ms": 0,
+       "factor": 1
+      }
+     },
+     {
+      "id": "b",
+      "kind": "agent_prompt",
+      "name": "List one",
+      "x": 0,
+      "y": 0,
+      "params": {
+       "provider": "codex",
+       "prompt": "List the files the branch changes against its base in your handoff file, one path per line.",
+       "timeout_s": 900,
+       "effort": "low"
+      },
+      "retry": {
+       "max_attempts": 0,
+       "backoff_ms": 0,
+       "factor": 1
+      }
+     },
+     {
+      "id": "c",
+      "kind": "agent_prompt",
+      "name": "List two",
+      "x": 0,
+      "y": 0,
+      "params": {
+       "provider": "agy",
+       "prompt": "List the files the branch changes against its base in your handoff file, one path per line.",
+       "timeout_s": 900
+      },
+      "retry": {
+       "max_attempts": 0,
+       "backoff_ms": 0,
+       "factor": 1
+      }
+     },
+     {
+      "id": "d",
+      "kind": "agent_prompt",
+      "name": "Repeat",
+      "x": 0,
+      "y": 0,
+      "params": {
+       "provider": "claude",
+       "prompt": "Repeat the number from your last handoff as the only content of this step's handoff file, in the form `changed files: N`.",
+       "timeout_s": 900,
+       "model": "haiku",
+       "effort": "low",
+       "continue_from": "a"
+      },
+      "retry": {
+       "max_attempts": 0,
+       "backoff_ms": 0,
+       "factor": 1
+      }
+     },
+     {
+      "id": "f",
+      "kind": "agent_prompt",
+      "name": "Sub-thread",
+      "x": 0,
+      "y": 0,
+      "params": {
+       "provider": "claude",
+       "prompt": "Open a codex sub-thread (the Otto tool otto_thread_open, provider codex) with the prompt \"Answer with the single word pong.\" Wait for its answer and read it, then finish the sub-thread so that it is removed (otto_thread_close with remove: true). Write the sub-thread's answer as the only content of your handoff file.",
+       "timeout_s": 900,
+       "model": "haiku",
+       "effort": "low"
+      },
+      "retry": {
+       "max_attempts": 0,
+       "backoff_ms": 0,
+       "factor": 1
+      }
+     },
+     {
+      "id": "review",
+      "kind": "review_run",
+      "name": "Review",
+      "x": 0,
+      "y": 0,
+      "params": {
+       "reviewers": [
+        {
+         "lens": "correctness-review",
+         "providers": [
+          "claude",
+          "codex"
+         ]
+        }
+       ],
+       "cross_provider_check": true,
+       "scope_assessment": "configured",
+       "threshold": 0,
+       "timeout_s": 1800,
+       "picks": {
+        "claude": {
+         "model": "haiku",
+         "effort": "low"
+        },
+        "codex": {
+         "effort": "low"
+        }
+       },
+       "summarizer": {
+        "provider": "claude",
+        "model": "haiku",
+        "effort": "low"
+       }
+      }
+     },
+     {
+      "id": "scored",
+      "kind": "condition",
+      "name": "Scored",
+      "x": 0,
+      "y": 0,
+      "params": {
+       "expression": "has(input, \"score\")"
+      }
+     },
+     {
+      "id": "done",
+      "kind": "log",
+      "name": "Done",
+      "x": 0,
+      "y": 0,
+      "params": {}
+     }
+    ],
+    "edges": [
+     {
+      "id": "start-checkout",
+      "source": "start",
+      "target": "checkout"
+     },
+     {
+      "id": "checkout-a",
+      "source": "checkout",
+      "target": "a"
+     },
+     {
+      "id": "a-b",
+      "source": "a",
+      "target": "b"
+     },
+     {
+      "id": "a-c",
+      "source": "a",
+      "target": "c"
+     },
+     {
+      "id": "b-d",
+      "source": "b",
+      "target": "d"
+     },
+     {
+      "id": "c-d",
+      "source": "c",
+      "target": "d"
+     },
+     {
+      "id": "d-f",
+      "source": "d",
+      "target": "f"
+     },
+     {
+      "id": "f-review",
+      "source": "f",
+      "target": "review"
+     },
+     {
+      "id": "review-scored",
+      "source": "review",
+      "target": "scored"
+     },
+     {
+      "id": "scored-done",
+      "source": "scored",
+      "target": "done",
+      "condition": "output.result"
+     }
+    ]
+   },
+   "turns": {
+    "a": [
+     2,
+     3
+    ],
+    "b": [
+     1,
+     2
+    ],
+    "c": [
+     1,
+     2
+    ],
+    "d": [
+     1,
+     2
+    ],
+    "f": [
+     3,
+     4
+    ],
+    "review": [
+     4,
+     5
+    ]
+   },
+   "fake": {
+    "a": [
+     "expect $CTX/run-brief.md",
+     "expect $CTX/repos.json",
+     "usage 1200 80",
+     "remember 1",
+     "background 3000",
+     "write $HANDOFF changed files: 1",
+     "reply done"
+    ],
+    "b": [
+     "usage 900 60",
+     "sleep 1500",
+     "write $HANDOFF window/window.go"
+    ],
+    "c": [
+     "usage 900 60",
+     "sleep 1500",
+     "write $HANDOFF window/window.go"
+    ],
+    "d": [
+     "usage 300 20",
+     "recall",
+     "write $HANDOFF changed files: 1"
+    ],
+    "f": [
+     "usage 500 40",
+     "child codex reply pong",
+     "finish-child",
+     "write $HANDOFF pong"
+    ]
+   }
+  },
+  "approval": {
+   "name": "Live approval",
+   "input": {
+    "base": "main",
+    "pr_branch": "feature"
+   },
+   "graph": {
+    "nodes": [
+     {
+      "id": "start",
+      "kind": "manual_trigger",
+      "name": "Start",
+      "x": 0,
+      "y": 0,
+      "params": {}
+     },
+     {
+      "id": "checkout",
+      "kind": "git_checkout",
+      "name": "Checkout",
+      "x": 0,
+      "y": 0,
+      "params": {
+       "mode": "branch"
+      }
+     },
+     {
+      "id": "e",
+      "kind": "agent_prompt",
+      "name": "Ask first",
+      "x": 0,
+      "y": 0,
+      "params": {
+       "provider": "claude",
+       "prompt": "Run `git log --oneline | wc -l` and write the number it prints as the only content of your handoff file, in the form `commits: N`.",
+       "timeout_s": 900,
+       "model": "haiku",
+       "effort": "low"
+      },
+      "retry": {
+       "max_attempts": 0,
+       "backoff_ms": 0,
+       "factor": 1
+      }
+     }
+    ],
+    "edges": [
+     {
+      "id": "start-checkout",
+      "source": "start",
+      "target": "checkout"
+     },
+     {
+      "id": "checkout-e",
+      "source": "checkout",
+      "target": "e"
+     }
+    ]
+   },
+   "turns": {
+    "e": [
+     1,
+     2
+    ]
+   },
+   "fake": {
+    "e": [
+     "usage 400 30",
+     "approve Bash",
+     "write $HANDOFF commits: 3"
+    ]
+   }
+  },
+  "pty": {
+   "name": "Live terminal fallback",
+   "input": {
+    "base": "main",
+    "pr_branch": "feature"
+   },
+   "graph": {
+    "nodes": [
+     {
+      "id": "start",
+      "kind": "manual_trigger",
+      "name": "Start",
+      "x": 0,
+      "y": 0,
+      "params": {}
+     },
+     {
+      "id": "checkout",
+      "kind": "git_checkout",
+      "name": "Checkout",
+      "x": 0,
+      "y": 0,
+      "params": {
+       "mode": "branch"
+      }
+     },
+     {
+      "id": "p",
+      "kind": "agent_prompt",
+      "name": "Terminal step",
+      "x": 0,
+      "y": 0,
+      "params": {
+       "provider": "claude",
+       "prompt": "Write the name of the checked-out branch as the only content of your handoff file.",
+       "timeout_s": 900,
+       "model": "haiku"
+      },
+      "retry": {
+       "max_attempts": 0,
+       "backoff_ms": 0,
+       "factor": 1
+      }
+     }
+    ],
+    "edges": [
+     {
+      "id": "start-checkout",
+      "source": "start",
+      "target": "checkout"
+     },
+     {
+      "id": "checkout-p",
+      "source": "checkout",
+      "target": "p"
+     }
+    ]
+   },
+   "turns": {
+    "p": [
+     1,
+     2
+    ]
+   },
+   "fake": {}
+  },
+  "compare": {
+   "name": "Live review comparison",
+   "input": {
+    "base": "main",
+    "pr_branch": "compare"
+   },
+   "graph": {
+    "nodes": [
+     {
+      "id": "start",
+      "kind": "manual_trigger",
+      "name": "Start",
+      "x": 0,
+      "y": 0,
+      "params": {}
+     },
+     {
+      "id": "checkout",
+      "kind": "git_checkout",
+      "name": "Checkout",
+      "x": 0,
+      "y": 0,
+      "params": {
+       "mode": "branch"
+      }
+     },
+     {
+      "id": "review",
+      "kind": "review_run",
+      "name": "Review",
+      "x": 0,
+      "y": 0,
+      "params": {
+       "reviewers": [
+        {
+         "lens": "correctness-review",
+         "providers": [
+          "claude",
+          "codex"
+         ]
+        },
+        {
+         "lens": "security-review",
+         "providers": [
+          "claude",
+          "codex"
+         ]
+        }
+       ],
+       "cross_provider_check": true,
+       "scope_assessment": "configured",
+       "threshold": 0,
+       "timeout_s": 3600,
+       "summarizer": {
+        "provider": "claude"
+       }
+      }
+     }
+    ],
+    "edges": [
+     {
+      "id": "start-checkout",
+      "source": "start",
+      "target": "checkout"
+     },
+     {
+      "id": "checkout-review",
+      "source": "checkout",
+      "target": "review"
+     }
+    ]
+   },
+   "turns": {
+    "review": [
+     6,
+     7
+    ]
+   },
+   "fake": {}
+  }
+ },
+ "fakeReview": {
+  "smoke": {
+   "reviewer.json": [
+    {
+     "path": "window/window.go",
+     "line": 16,
+     "severity": "bug",
+     "body": "Off-by-one: the loop stops at len(xs)-1 and skips the last value of the window."
+    }
+   ],
+   "summarizer.json": [
+    {
+     "source_ids": [
+      "batch:1:claim:1",
+      "batch:2:claim:1"
+     ],
+     "path": "window/window.go",
+     "line": 16,
+     "severity": "bug",
+     "body": "Off-by-one: the loop stops at len(xs)-1 and skips the last value of the window.",
+     "category": "correctness",
+     "disposition": "verified",
+     "evidence": "window/window.go:16"
+    }
+   ]
+  },
+  "compare": {
+   "reviewer-correctness-review-claude.json": [
+    {
+     "path": "orders/orders.go",
+     "line": 33,
+     "severity": "bug",
+     "body": "Off-by-one: the loop bound len(o.Items)-1 skips the last item of the order."
+    },
+    {
+     "path": "orders/orders.go",
+     "line": 36,
+     "severity": "bug",
+     "body": "Nil dereference: o.Coupon is a pointer and is read without a nil check."
+    }
+   ],
+   "reviewer-correctness-review-codex.json": [
+    {
+     "path": "orders/orders.go",
+     "line": 33,
+     "severity": "bug",
+     "body": "Off-by-one in Total: the last item is never added."
+    }
+   ],
+   "reviewer-security-review-claude.json": [
+    {
+     "path": "orders/orders.go",
+     "line": 41,
+     "severity": "bug",
+     "body": "SQL injection: the customer string is put into the query with Sprintf instead of a parameter."
+    }
+   ],
+   "reviewer-security-review-codex.json": [
+    {
+     "path": "orders/orders.go",
+     "line": 41,
+     "severity": "bug",
+     "body": "The query is built by string formatting; an unescaped customer value can inject SQL."
+    }
+   ],
+   "summarizer.json": [
+    {
+     "source_ids": [
+      "batch:1:claim:1",
+      "batch:2:claim:1"
+     ],
+     "path": "orders/orders.go",
+     "line": 33,
+     "severity": "bug",
+     "body": "Off-by-one: the loop bound len(o.Items)-1 skips the last item of the order.",
+     "category": "correctness",
+     "disposition": "verified",
+     "evidence": "orders/orders.go:33"
+    },
+    {
+     "source_ids": [
+      "batch:1:claim:2"
+     ],
+     "path": "orders/orders.go",
+     "line": 36,
+     "severity": "bug",
+     "body": "Nil dereference: o.Coupon is read without a nil check.",
+     "category": "correctness",
+     "disposition": "verified",
+     "evidence": "orders/orders.go:36"
+    },
+    {
+     "source_ids": [
+      "batch:3:claim:1",
+      "batch:4:claim:1"
+     ],
+     "path": "orders/orders.go",
+     "line": 41,
+     "severity": "bug",
+     "body": "SQL injection: the customer string is formatted into the query instead of passed as a parameter.",
+     "category": "security",
+     "disposition": "verified",
+     "evidence": "orders/orders.go:41"
+    }
+   ]
+  },
+  "compareSecond": {
+   "reviewer-correctness-review-codex.json": [
+    {
+     "path": "orders/orders.go",
+     "line": 33,
+     "severity": "bug",
+     "body": "Off-by-one in Total: the last item is never added."
+    },
+    {
+     "path": "orders/orders.go",
+     "line": 59,
+     "severity": "warn",
+     "body": "Label trims only the ends; a customer name with a newline still breaks the list row."
+    }
+   ],
+   "summarizer.json": [
+    {
+     "source_ids": [
+      "batch:1:claim:1",
+      "batch:2:claim:1"
+     ],
+     "path": "orders/orders.go",
+     "line": 33,
+     "severity": "bug",
+     "body": "Off-by-one: the loop bound len(o.Items)-1 skips the last item of the order.",
+     "category": "correctness",
+     "disposition": "verified",
+     "evidence": "orders/orders.go:33"
+    },
+    {
+     "source_ids": [
+      "batch:1:claim:2"
+     ],
+     "path": "orders/orders.go",
+     "line": 36,
+     "severity": "bug",
+     "body": "Nil dereference: o.Coupon is read without a nil check.",
+     "category": "correctness",
+     "disposition": "verified",
+     "evidence": "orders/orders.go:36"
+    },
+    {
+     "source_ids": [
+      "batch:3:claim:1",
+      "batch:4:claim:1"
+     ],
+     "path": "orders/orders.go",
+     "line": 41,
+     "severity": "bug",
+     "body": "SQL injection: the customer string is formatted into the query instead of passed as a parameter.",
+     "category": "security",
+     "disposition": "verified",
+     "evidence": "orders/orders.go:41"
+    },
+    {
+     "source_ids": [
+      "batch:2:claim:2"
+     ],
+     "path": "orders/orders.go",
+     "line": 59,
+     "severity": "warn",
+     "body": "Label trims only the ends; a customer name with a newline still breaks the list row.",
+     "category": "correctness",
+     "disposition": "verified",
+     "evidence": "orders/orders.go:59"
+    }
+   ]
+  }
+ }
+}

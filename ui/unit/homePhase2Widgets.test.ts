@@ -8,7 +8,6 @@ import { HOME_KINDS, isHomeKind, kindDef } from '../src/lib/home/kinds.ts';
 import type {
   ActiveWorkflowRun,
   GitAccount,
-  GoalLoop,
   PrSummary,
   Repo,
   Review,
@@ -65,49 +64,6 @@ function makeReview(id: string, overrides: Partial<Review> = {}): Review {
   };
 }
 
-function makeLoop(id: string, overrides: Partial<GoalLoop> = {}): GoalLoop {
-  return {
-    id,
-    workspace_id: 'ws-1',
-    name: `Loop ${id}`,
-    repo_path: '/work/repo-a',
-    definition: {
-      title: `Goal ${id}`,
-      summary: '',
-      objectives: [],
-      acceptance_criteria: [],
-      constraints: [],
-      out_of_scope: [],
-      success_signal: '',
-    },
-    limits: {
-      max_iterations: 5,
-      max_runtime_secs: 3600,
-      per_phase_timeout_secs: 300,
-      max_attempts_per_executor: 2,
-    },
-    config: {
-      executors: [],
-      planner: { provider: 'claude', model: '', prompt: '' },
-      evaluator: { provider: 'claude', model: '', prompt: '' },
-      digester: { provider: 'claude', model: '', prompt: '' },
-      definer: { provider: 'claude', model: '', prompt: '' },
-    },
-    status: 'draft',
-    phase: 'planning',
-    iterations_started: 1,
-    current_iteration: 1,
-    progress_pct: 40,
-    context_digest: '',
-    elapsed_secs: 10,
-    cost_usd: 0,
-    created_by: 'u-1',
-    created_at: '2026-11-19T10:00:00Z',
-    updated_at: '2026-11-19T12:00:00Z',
-    ...overrides,
-  };
-}
-
 function makeWorkflow(id: string, overrides: Partial<Workflow> = {}): Workflow {
   return {
     id,
@@ -159,7 +115,7 @@ test('HOME_KINDS registers pr-queue and automations with expected metadata', () 
   assert.equal(prDef.route, 'git');
 
   const autoDef = kindDef('automations');
-  assert.equal(autoDef.label, 'Workflows & loops');
+  assert.equal(autoDef.label, 'Workflows');
   assert.equal(autoDef.icon, 'split');
   assert.equal(autoDef.feature, 'workflows');
   assert.equal(autoDef.w, 6);
@@ -313,10 +269,9 @@ test('summarizePrQueue handles empty input cleanly', () => {
   });
 });
 
-// ── Workflows & Goal Loops helpers ───────────────────────────────────────────
+// ── Workflows helpers ─────────────────────────────────────────────────────────
 
-test('automationRoute builds encoded routes for loops, workflows, and runs', () => {
-  assert.equal(data.automationRoute({ kind: 'goal-loop', id: 'loop 1' }), 'loops/loop%201');
+test('automationRoute builds encoded routes for workflows and runs', () => {
   assert.equal(data.automationRoute({ kind: 'workflow', id: 'wf/2' }), 'workflows/wf%2F2');
   assert.equal(
     data.automationRoute({ kind: 'workflow-run', workflowId: 'wf/2', runId: 'run 9' }),
@@ -324,7 +279,7 @@ test('automationRoute builds encoded routes for loops, workflows, and runs', () 
   );
 });
 
-test('summarizeAutomations ranks waiting/blocked/running items first, deduplicates active workflow rows, and truncates', () => {
+test('summarizeAutomations ranks waiting and running runs first, deduplicates active workflow rows, marks goal runs, and truncates', () => {
   const summary = plain(
     data.summarizeAutomations({
       activeRuns: [
@@ -347,13 +302,9 @@ test('summarizeAutomations ranks waiting/blocked/running items first, deduplicat
           started_at: '2026-11-19T12:00:00Z',
         }),
       ],
-      loops: [
-        makeLoop('l-blocked', { status: 'blocked', current_iteration: 2, progress_pct: 60, updated_at: '2026-11-19T13:10:00Z' }),
-        makeLoop('l-running', { status: 'running', current_iteration: 3, progress_pct: 75, updated_at: '2026-11-19T13:20:00Z' }),
-        makeLoop('l-done', { status: 'succeeded', phase: 'done', progress_pct: 100, updated_at: '2026-11-19T11:00:00Z' }),
-      ],
       workflows: [
         makeWorkflow('wf-running', { name: 'Nightly CI' }),
+        makeWorkflow('wf-approve', { name: 'Goal · Green build', origin: 'goal' }),
         makeWorkflow('wf-idle-1', {
           name: 'Triage PRs',
           description: 'Review incoming PRs',
@@ -376,35 +327,31 @@ test('summarizeAutomations ranks waiting/blocked/running items first, deduplicat
           updated_at: '2026-11-19T10:30:00Z',
         }),
       ],
-      limit: 5,
+      limit: 3,
     }),
   );
 
-  // running = 2 active workflow runs + 1 running loop; workflows stat keeps all 3.
-  assert.deepEqual(summary.stats, { running: 3, loops: 3, workflows: 3 });
-  // wf-running is deduplicated from the static list: 2 runs + 3 loops + 2 idle workflows = 7.
-  assert.equal(summary.totalRows, 7);
-  assert.equal(summary.truncatedCount, 2);
+  // A goal workflow shows only through its run; the workflows stat counts the authored 3.
+  assert.deepEqual(summary.stats, { running: 2, workflows: 3 });
+  // wf-running is deduplicated from the static list: 2 runs + 2 idle workflows = 4.
+  assert.equal(summary.totalRows, 4);
+  assert.equal(summary.truncatedCount, 1);
   assert.deepEqual(
-    summary.rows.map((r: { id: string; badgeLabel: string; live: boolean }) => [r.id, r.badgeLabel, r.live]),
+    summary.rows.map((r: { id: string; badgeLabel: string; live: boolean; goal: boolean }) => [r.id, r.badgeLabel, r.live, r.goal]),
     [
-      ['loop:l-blocked', 'Blocked', false],
-      ['run:run-wait', 'Needs approval', false],
-      ['loop:l-running', 'Running', true],
-      ['run:run-live', 'Running', true],
-      ['loop:l-done', 'Succeeded', false],
+      ['run:run-wait', 'Needs approval', false, true],
+      ['run:run-live', 'Running', true, false],
+      ['wf:wf-idle-3', '3 steps', false, false],
     ],
   );
-  assert.equal(summary.rows[0].route, 'loops/l-blocked');
-  assert.equal(summary.rows[1].route, 'workflows/wf-approve/runs/run-wait');
-  assert.equal(summary.rows[3].detail, 'Workflow · step 3/5 · Run tests');
+  assert.equal(summary.rows[0].route, 'workflows/wf-approve/runs/run-wait');
+  assert.equal(summary.rows[1].detail, 'Workflow · step 3/5 · Run tests');
 });
 
 test('summarizeAutomations formats workflow step counts and handles empty state', () => {
   const full = plain(
     data.summarizeAutomations({
       activeRuns: [],
-      loops: [],
       workflows: [
         makeWorkflow('w1', {
           name: 'Single',
@@ -427,9 +374,9 @@ test('summarizeAutomations formats workflow step counts and handles empty state'
     ],
   );
 
-  const empty = plain(data.summarizeAutomations({ activeRuns: [], loops: [], workflows: [] }));
+  const empty = plain(data.summarizeAutomations({ activeRuns: [], workflows: [] }));
   assert.deepEqual(empty, {
-    stats: { running: 0, loops: 0, workflows: 0 },
+    stats: { running: 0, workflows: 0 },
     rows: [],
     totalRows: 0,
     truncatedCount: 0,

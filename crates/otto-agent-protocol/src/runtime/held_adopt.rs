@@ -22,6 +22,15 @@ use super::{
 use crate::holder::{adopt_socket, best_effort_shutdown_socket, list_holder_sockets, LineStream};
 use crate::process::ChildControl;
 
+/// What [`AgentRuntime::recover_and_adopt`] re-attached after a restart.
+#[derive(Debug, Default)]
+pub struct Adopted {
+    /// Holders whose CLI is still running.
+    pub live_ids: HashSet<Id>,
+    /// Every holder adopted, the cleanly finished ones included.
+    pub handled_ids: HashSet<Id>,
+}
+
 impl AgentRuntime {
     /// What [`Self::shutdown_for_restart`] would keep (a child in a
     /// runtime-holder, persistence on) and end (a direct child) right now —
@@ -114,9 +123,9 @@ impl AgentRuntime {
     /// Scan `<holders_dir>/*.sock`, re-attach live `runtime-holder` processes,
     /// replay any lines emitted while `ottod` was down, and settle only the
     /// remaining un-adopted SQLite sessions via [`Self::recover`]. Returns the
-    /// set of adopted live `session_id`s so session restore keeps their
-    /// `OTTO_MCP_TOKEN` credentials active.
-    pub async fn recover_and_adopt(&self) -> Result<HashSet<Id>> {
+    /// adopted live `session_id`s (so session restore keeps their
+    /// `OTTO_MCP_TOKEN` credentials active) and every holder it handled.
+    pub async fn recover_and_adopt(&self) -> Result<Adopted> {
         let mut live_ids = HashSet::new();
         let mut handled_ids = HashSet::new();
         let mut failed = Vec::new();
@@ -152,7 +161,29 @@ impl AgentRuntime {
                 )
                 .await;
         }
-        Ok(live_ids)
+        Ok(Adopted {
+            live_ids,
+            handled_ids,
+        })
+    }
+
+    /// The reviews (`meta.review_id`) with an agent among `adopted.handled_ids`
+    /// — a holder still running, or one whose CLI finished cleanly during the
+    /// restart (its turn stays `Completed`, its findings file is written):
+    /// review recovery resumes those instead of failing them (DR-115.2).
+    pub async fn held_reviews(&self, adopted: &Adopted) -> HashSet<Id> {
+        let mut out = HashSet::new();
+        for id in &adopted.handled_ids {
+            let meta = self.get(id).await.ok().and_then(|s| s.meta);
+            if let Some(r) = meta
+                .as_ref()
+                .and_then(|m| m.get("review_id"))
+                .and_then(|v| v.as_str())
+            {
+                out.insert(Id::from(r));
+            }
+        }
+        out
     }
 
     /// `failed` collects threads whose saved driver state did not load (a
@@ -372,14 +403,16 @@ impl AgentRuntime {
                     child_pid,
                 );
             }
-            tokio::spawn(pump_held(
+            let pumped = pump_held(
                 Arc::clone(&self.inner),
                 Arc::clone(&live),
                 sid.clone(),
                 epoch,
                 events,
                 claude_login,
-            ));
+            );
+            let session = live.lock().session.clone();
+            super::unattended::register_and_pump(&self.inner, &session, child_pid, pumped).await;
         }
         drop(live);
         self.flush(&sid).await;

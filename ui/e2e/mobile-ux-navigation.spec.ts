@@ -11,7 +11,7 @@ import { openPage, expectNoHorizontalOverflow, expectFullyInViewport } from './h
 
 test.use({ serviceWorkers: 'block' });
 
-const LITE_MODULES = ['threads', 'connections', 'git', 'api', 'usage'] as const;
+const LITE_MODULES = ['threads', 'workflows', 'connections', 'git', 'api', 'usage'] as const;
 const FULL_HOP_SEQUENCE = ['threads', 'git', 'connections', 'api', 'settings/appearance', 'vault', 'usage', 'agents'] as const;
 
 interface LayoutHealth {
@@ -183,7 +183,7 @@ test('Full ↔ Lite live switching works across phone & tablet (portrait and lan
   await assertViewportHealthy(page, 'after switch back to full');
 
   // Full-only pages render cleanly immediately after switching back.
-  for (const mod of ['home', 'vault', 'workflows'] as const) {
+  for (const mod of ['home', 'vault', 'kubernetes'] as const) {
     await openPage(page, mod);
     await expect(page.getByText('isn’t in the light version')).toHaveCount(0);
     await assertViewportHealthy(page, `restored full mode -> ${mod}`);

@@ -5,7 +5,7 @@ import { api, getToken, resumeAltLoopback, suspendAltLoopback, wsConnect } from 
 import { inLane } from './api/lane';
 import { auth } from './stores/auth.svelte';
 import { appLive, type LiveEvent } from './live';
-import type { EventsResyncFrame, NodeRunState, OttoEvent, UiHelloAckFrame } from './api/types';
+import type { EventsResyncFrame, NodeRunState, OttoEvent, RunOverview, UiHelloAckFrame } from './api/types';
 import { ws } from './stores/workspace.svelte';
 import { toasts } from './toast.svelte';
 import { restartSummaryText } from './status';
@@ -72,6 +72,8 @@ export class WorkflowRunBus {
   /** The changed node's full state, when the event carried it. */
   node: NodeRunState | null = $state(null);
   waitingApproval: boolean = $state(false);
+  /** The run's overview after this change, when the event carried it. */
+  overview: RunOverview | null = $state(null);
 
   apply(ev: {
     workspace_id: string;
@@ -81,6 +83,7 @@ export class WorkflowRunBus {
     rev?: number;
     node?: NodeRunState | null;
     waiting_approval?: boolean;
+    overview?: RunOverview | null;
   }): void {
     this.workspaceId = ev.workspace_id;
     this.runId = ev.run_id;
@@ -89,6 +92,7 @@ export class WorkflowRunBus {
     this.rev = ev.rev ?? 0;
     this.node = ev.node ?? null;
     this.waitingApproval = ev.waiting_approval ?? false;
+    this.overview = ev.overview ?? null;
     this.tick += 1;
   }
 }

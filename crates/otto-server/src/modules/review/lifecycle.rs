@@ -3,6 +3,25 @@
 
 use super::*;
 
+/// The thread runner a review's agents use (runtime.md §7.1), or `None` for
+/// the frozen terminal path: the run's latched choice, else the setting.
+pub(crate) async fn review_threads(
+    ctx: &ServerCtx,
+    cfg: Option<&ReviewConfig>,
+) -> Option<otto_review::thread_run::Threads> {
+    use otto_agent_protocol::step_runner::{DaemonStepHost, ThreadStepRunner};
+    let (rt, manager) = (ctx.agent_runtime.clone(), ctx.manager.clone());
+    let host = Arc::new(DaemonStepHost {
+        manager,
+        approvals: None,
+        resets: None,
+    });
+    let runner = Arc::new(ThreadStepRunner::new(rt.clone(), host));
+    let has_driver = Arc::new(move |p: &str| rt.resolve_runtime_provider(p).is_some());
+    let settings = otto_state::SettingsRepo::new(ctx.pool.clone());
+    otto_review::thread_run::threads(runner, has_driver, cfg, &settings).await
+}
+
 /// Persist a review's `status` (+ `error` note) and broadcast
 /// `Event::ReviewChanged` in ONE call, so no exit path can update the row and
 /// forget the broadcast (which leaves open panels on a stale "running"). A
@@ -78,6 +97,24 @@ pub(crate) fn sweep_review_temp_files_if_idle(
     remove_review_temp_files_in(&std::env::temp_dir(), &format!("otto-review-{review_id}"));
 }
 
+/// Stop one review agent now: a runtime thread closes (kept for the failed
+/// period), a PTY session is killed (CR1-029).
+pub(crate) async fn end_review_agent(ctx: &ServerCtx, agent: &otto_core::domain::ReviewAgentState) {
+    let Some(sid) = &agent.session_id else {
+        return;
+    };
+    if !agent.thread {
+        let _ = ctx.manager.kill_session(sid).await;
+        return;
+    }
+    let settings = otto_state::SettingsRepo::new(ctx.pool.clone());
+    let (_, failed) = otto_review::thread_run::keep_periods(&settings).await;
+    let _ = ctx
+        .agent_runtime
+        .close_retained(sid, chrono::Utc::now() + failed)
+        .await;
+}
+
 /// Shared cancellation for the review endpoint and workflows that own reviews.
 /// Signal the review itself before killing PTYs: a killed summarizer is otherwise
 /// indistinguishable from a provider failure eligible for deterministic fallback.
@@ -98,12 +135,10 @@ pub(crate) async fn cancel_running_review(ctx: &ServerCtx, review: &Review, work
         signal_review_agent_cancel(&ctx.review_agent_cancels, &review_id, i);
     }
 
-    // 2. Kill the live agent sessions — PtyHandle has no Drop-kill, so this
-    //    explicit reap is what actually stops the in-flight agents.
+    // 2. Stop the live agents — PtyHandle has no Drop-kill, and a runtime
+    //    thread is not a PTY: this explicit stop is what ends them.
     for agent in &review.agents {
-        if let Some(sid) = &agent.session_id {
-            let _ = ctx.manager.kill_session(sid).await;
-        }
+        end_review_agent(ctx, agent).await;
     }
 
     // 3. Best-effort cleanup: temp files (diff + per-agent prompt/json) AND the

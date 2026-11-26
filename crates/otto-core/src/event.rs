@@ -181,20 +181,6 @@ pub enum Event {
         review_id: Id,
         status: String,
     },
-    /// A goal loop advanced (status/phase/iteration change, after each
-    /// evaluation, or when an executor's live state flips — e.g. → waiting).
-    /// The Loops UI re-fetches `GET /goal-loops/{id}` on a matching tick and
-    /// updates the list row directly from these fields.
-    GoalLoopUpdated {
-        workspace_id: Id,
-        loop_id: Id,
-        /// `GoalLoopStatus` as snake_case.
-        status: String,
-        /// `GoalLoopPhase` as snake_case.
-        phase: String,
-        current_iteration: u32,
-        progress_pct: u32,
-    },
     /// A self-improvement run finished or an approval became pending. Lets the
     /// Self-Improvement settings pane refresh on the event instead of guessing.
     /// `kind` is "run_finished" | "approval_pending".
@@ -229,6 +215,11 @@ pub enum Event {
         nodes_total: u32,
         #[serde(default)]
         waiting_approval: bool,
+        /// The run's computed overview (≤ 4 KiB), so attention, queue,
+        /// phase and wait show without a GET. `None` from emitters that
+        /// do not compute it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        overview: Option<Box<crate::workflows::RunOverview>>,
     },
     /// A skill-evaluation run advanced. Lets the Skill-Eval UI switch from
     /// fixed-interval polling to event-driven refresh.
@@ -781,7 +772,6 @@ impl Event {
             Event::ProductChanged { .. } => "product_changed",
             Event::PlanRun { .. } => "plan_run",
             Event::ReviewChanged { .. } => "review_changed",
-            Event::GoalLoopUpdated { .. } => "goal_loop_updated",
             Event::ImprovementUpdated { .. } => "improvement_updated",
             Event::WorkflowRunUpdated { .. } => "workflow_run_updated",
             Event::SkillEvalUpdated { .. } => "skill_eval_updated",
@@ -1022,9 +1012,17 @@ mod tests {
             nodes_done: 2,
             nodes_total: 5,
             waiting_approval: false,
+            overview: Some(Box::new(crate::workflows::RunOverview {
+                rev: 7,
+                state: crate::workflows::RunState::NeedsYou,
+                headline: "Approve posting 6 comments".into(),
+                ..Default::default()
+            })),
         };
         let v: serde_json::Value = serde_json::to_value(&ev).unwrap();
         assert_eq!(v["type"], "workflow_run_updated");
+        assert_eq!(v["overview"]["state"], "needs_you");
+        assert_eq!(v["overview"]["rev"], 7);
         assert_eq!(v["rev"], 7);
         assert_eq!(v["node"]["node_id"], "step");
         assert_eq!(v["node"]["status"], "running");
@@ -1043,9 +1041,11 @@ mod tests {
             nodes_done: 5,
             nodes_total: 5,
             waiting_approval: false,
+            overview: None,
         };
         let v: serde_json::Value = serde_json::to_value(&ev).unwrap();
         assert!(v.get("node").is_none());
+        assert!(v.get("overview").is_none(), "absent overview is omitted");
     }
 
     /// `session_removed` keeps the fields the SPA reads and adds the owner

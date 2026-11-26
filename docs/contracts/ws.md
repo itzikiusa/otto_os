@@ -785,10 +785,11 @@ Notices & notifications:
   report delivery), personal agent (`personal_agent`) or workflow (`workflow`) posts one
   `error` notice; further failures stay silent until a clean run ends the streak (the
   streak set is in-memory, so after a daemon restart the next failure refreshes the same
-  row). A goal loop that becomes `exhausted`/`blocked`/`failed`/`succeeded` posts one per
-  episode (`goal_loop`; a running loop resets it; every block emits `goal_loop_updated`
-  `blocked`), a loop a daemon restart paused posts one `error` notice per restart
-  (`goal_loop_restart`), and a workflow run parked at a
+  row). A workflow run held `blocked` or out of budget posts one `warn` notice per hold
+  (`wf_hold`; a resumed run resets it; a pause posts none), a goal run that succeeds posts
+  one `info` notice ("Goal “…” reached its goal", `goal_done:<run>`), an older goal loop
+  that was running when this build booted posts one notice (`goal_loop_restart`: paused by
+  the update, continue it as a goal), and a workflow run parked at a
   human-approval step posts a `warn` notice once per gate
   (`automation:workflow_approval:<run>:<node>`). Notices are scoped to the
   task/agent/workflow/loop creator (`user_id`) and carry an `open_route` action
@@ -912,38 +913,11 @@ regression-test) spawned a live, openable session:
 - TypeScript types: added to the `OttoEvent` discriminated union in
   `ui/src/lib/api/types.ts`.
 
-## Goal-loop progress (Goal Loops)
+## Goal-loop progress (removed)
 
-Workspace-scoped. Emitted by `crates/otto-automation/src/goal_loop.rs` on every loop
-transition: status change, phase change (Plan → Execute → Evaluate → Digest), a new
-iteration, after each evaluation, and when an executor's live state flips (e.g.
-→ `waiting`). The Loops UI updates the list row directly from these fields and
-re-fetches `GET /goal-loops/{id}` (it also runs a low-frequency fallback poll while
-a loop is active, covering any missed event).
-
-```json
-{
-  "type": "goal_loop_updated",
-  "workspace_id": "<Id>",
-  "loop_id": "<loop_id>",
-  "status": "draft|running|paused|blocked|succeeded|exhausted|failed|stopped",
-  "phase": "planning|executing|evaluating|digesting|waiting|done",
-  "current_iteration": 0,
-  "progress_pct": 0
-}
-```
-
-- `status` / `phase` — mirror the `goal_loops` row (snake_case enums).
-- Managed planner/evaluator/digester/reviewer sessions are persisted in iteration `agents` after executor slots. Detail polling retrieves role status/session IDs; the existing event shape is unchanged.
-- Human verification and answers are returned by their HTTP actions. Clients re-fetch detail; no new WS event is introduced.
-
-- `current_iteration` — the iteration index in flight or last completed.
-- `progress_pct` — the latest evaluator score (0–100).
-- Executor sessions are real agent sessions and also emit the normal
-  `session_status` events, so their live status dots work without extra plumbing.
-- TypeScript type: added to the `OttoEvent` union in `ui/src/lib/api/types.ts` as
-  `{ type: 'goal_loop_updated'; workspace_id: Id; loop_id: Id; status: GoalLoopStatus;
-  phase: GoalLoopPhase; current_iteration: number; progress_pct: number }`.
+`goal_loop_updated` is no longer emitted: goals are workflow runs (`workflow_run_updated`,
+whose `overview` carries `goal` and `hold`, goal.md §7.3). The older loops' history page
+reads `GET /goal-loops/{id}` when it opens.
 
 ## Product AI-run completion (A3)
 
@@ -1022,7 +996,8 @@ non-terminal so the view converges even with no WS connection.
   "node": { "node_id": "…", "status": "…", "logs": [], "log_count": 12, "has_output": false, "detail_version": "<sha256>", "…": "…" },
   "nodes_done": 2,
   "nodes_total": 5,
-  "waiting_approval": false
+  "waiting_approval": false,
+  "overview": { "rev": 7, "state": "needs_you", "headline": "Approve posting 6 comments on PR #412", "…": "…" }
 }
 ```
 
@@ -1046,13 +1021,20 @@ non-terminal so the view converges even with no WS connection.
   in place without a second GET (`nodes_total` 0 = unknown, keep last counts).
 - `waiting_approval` — true on the pause event; the approve/reject decision
   re-emits with false.
+- `overview` — the run's computed `RunOverview` (api.md "Run view"; ≤ 4 KiB:
+  `now.node_ids` ≤ 8, `attention` ≤ 8, `deliverables` ≤ 12, `goal.awaiting` ≤ 8,
+  strings clipped), so attention, queue, phase and wait show without a GET.
+  Omitted by emitters that do not compute it; clients keep the last one then.
+  The `node` summary carries the run-view node fields `/progress` serves
+  (`phase`, `wait`, `attention`, `thread` without digest, …).
 - UI routing: `events.svelte.ts` dispatches to `workflowRunBus.apply(event)`
   (run view) **and** `ws.applyWorkflowRunEvent(event)` (in-place "Running"
   sidebar update; a full active-list refetch only for unknown run ids).
 - TypeScript type: the `OttoEvent` union in `ui/src/lib/api/types.ts` —
   `{ type: 'workflow_run_updated'; workspace_id: Id; run_id: Id; status:
   string; node_id?: Id | null; rev?: number; node?: NodeRunState | null;
-  nodes_done?: number; nodes_total?: number; waiting_approval?: boolean }` —
+  nodes_done?: number; nodes_total?: number; waiting_approval?: boolean;
+  overview?: RunOverview | null }` —
   `NodeRunState.activity?: NodeActivity` rides along inside `node`.
 
 ## Skill-eval completion (A11)

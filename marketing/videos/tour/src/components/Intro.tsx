@@ -21,7 +21,7 @@ export const WALL = [
   'capture/git.jpg',
   'capture/design-versions.jpg',
   'capture/ide-debug.jpg',
-  'capture/workflows.jpg',
+  'capture/wf/wf-fanout.jpg',
   'capture/design-lobby.jpg',
   'capture/scheduled-tasks.jpg',
 ];

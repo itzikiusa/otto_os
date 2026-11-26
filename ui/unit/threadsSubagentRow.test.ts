@@ -45,6 +45,30 @@ test('an end notice draws a row only when its start is not in the timeline', () 
   assert.deepEqual([...ct.turnSubagents([ended]).groups.keys()], ['e']);
 });
 
+test('a subagent its agent removed keeps its last end line, “· removed”, and no live state', () => {
+  const said = (id: string, turn: string, message: string) => ({ ...notice(id, turn, [K1]), message }) as TurnItem;
+  const items = [
+    open('a', 't1', K1, 'codex'),
+    said('e', 't2', `Codex finished: The flaky test. [otto-thread:${K1}:finished]`),
+    said('r', 't2', `Claude removed Check the tests [otto-thread:${K1}:removed]`),
+  ];
+  assert.equal(ct.threadNoticeOf(items[2].type === 'system_notice' ? items[2].message : '')?.event, 'removed');
+  const { groups } = ct.turnSubagents(items);
+  assert.deepEqual([...groups.keys()], ['a'], 'still the one row of the turn that opened it');
+  const kid = groups.get('a')![0];
+  assert.ok(kid.kind === 'thread' && kid.removed);
+  assert.deepEqual(kid.removed, { title: 'Check the tests', ended: 'Codex finished: The flaky test.', event: 'finished' });
+  assert.equal(ct.removedLine(kid.removed), 'Codex finished: The flaky test. · removed');
+  assert.deepEqual(ct.removedState(kid.removed), { tone: 'done', label: 'Done' });
+  // Removed without an end notice in view (paged out): its own row, no line.
+  const alone = ct.turnSubagents([items[2]]).groups.get('r')![0];
+  assert.ok(alone.kind === 'thread' && alone.removed);
+  assert.equal(ct.removedLine(alone.removed), 'Removed');
+  assert.equal(ct.removedState(alone.removed).tone, 'stopped');
+  // A kid that was not removed carries nothing extra.
+  assert.equal('removed' in ct.turnSubagents([open('b', 't1', K2, 'codex')]).groups.get('b')![0], false);
+});
+
 test('a call still opening, a failed call and a sub-item are not subagents yet', () => {
   const failed = { ...open('c', 't1', 'k9', 'codex'), error: 'no such provider' } as TurnItem;
   const inner = { ...native('i', 't1'), parent_item_id: 's' } as TurnItem;

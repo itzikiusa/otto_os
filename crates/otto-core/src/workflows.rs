@@ -9,6 +9,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::agent_runtime::{Attention, TranscriptDigest, TurnTokenUsage, WaitReason};
 use crate::Id;
 
 /// Per-node retry policy. Defaults to *no retry* (`max_attempts = 0`), so an
@@ -123,6 +124,12 @@ pub struct Workflow {
     /// interrupted step, `"fail"` preserves the legacy hard-fail behavior.
     #[serde(default = "default_on_restart")]
     pub on_restart: String,
+    /// Where the workflow came from: `None` (authored) | `goal`. Server-set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    /// `review:<id>` | `insights` | `goal_loop:<id>` | `mcp`. Server-set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_ref: Option<String>,
 }
 
 fn default_workflow_version() -> i64 {
@@ -190,9 +197,10 @@ impl RunStatus {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeStatus {
+    #[default]
     Pending,
     Running,
     Success,
@@ -245,8 +253,519 @@ pub struct NodeActivity {
     pub hold_reason: Option<String>,
 }
 
+// ---------------------------------------------------------------------------
+// Run view: step phases, people, threads and the run overview
+// (design/agreed-names.md §2). Every field is additive and optional, so the
+// previous build reads rows that carry them (it ignores unknown keys) and
+// `RunStatus` / `NodeStatus` never change. Enums end in an `Unknown`
+// catch-all so a later build can add a value without breaking a rollback.
+// ---------------------------------------------------------------------------
+
+/// Where a RUNNING step is. `None` on `NodeRunState::phase` once it settled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StepPhase {
+    /// Waiting for a run step slot (run order).
+    Queued,
+    /// Waiting for machine admission; `NodeRunState::wait` says why.
+    Waiting,
+    /// Thread created, CLI starting.
+    Starting,
+    Working,
+    /// Waiting on a person; `NodeRunState::attention` says what for.
+    NeedsYou,
+    /// The turn ended; background work, handoff nudge, copy-out, close.
+    Finishing,
+    #[serde(other)]
+    Unknown,
+}
+
+/// One entry of a step's append-only phase timeline (≤ 40 kept).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PhaseMark {
+    pub phase: StepPhase,
+    pub at: DateTime<Utc>,
+    /// ≤ 200 chars: "attempt 2 of 3 — …", a hold kind, "canceled".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// A step's agent thread.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StepThread {
+    /// Runtime session id, or the PTY session id when `runner == "pty"`.
+    pub thread_id: Id,
+    /// `threads` | `pty`.
+    pub runner: String,
+    pub provider: String,
+    /// What actually ran, not what was asked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// Node id whose thread this step continued (`continue_from`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continued_from: Option<String>,
+    /// Turn ordinal the step's prompt started at (restart: `await_settled`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_ordinal: Option<u64>,
+    /// Prompted + agent-started turns of this step.
+    #[serde(default)]
+    pub turns: u32,
+    #[serde(default)]
+    pub usage: TurnTokenUsage,
+    /// ≤ 8 KiB serialized.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<TranscriptDigest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_at: Option<DateTime<Utc>>,
+    /// Computed on read (false once retention deleted the thread); never stored.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub available: Option<bool>,
+}
+
+/// A sub-thread of a step: a reviewer, the scope agent, the summarizer, or a
+/// thread the step's agent opened.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChildThread {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<Id>,
+    /// "Correctness · Codex".
+    pub label: String,
+    pub provider: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// `queued` | `pending` | `running` | `success` | `error` | `skipped` | `needs_you`.
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<DateTime<Utc>>,
+    /// "12 findings".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    #[serde(default)]
+    pub usage: TurnTokenUsage,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliverableState {
+    Done,
+    Partial,
+    Failed,
+    PendingApproval,
+    #[serde(other)]
+    Unknown,
+}
+
+/// A file that came with the chat message that started (`start`) or
+/// steered (`steer`) a run, as copied into its context dir
+/// (`<context>/attachments.json`; addendum-chat-optimize.md §1.2, DR-114).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AttachmentRef {
+    /// The sender's file name (display only).
+    pub name: String,
+    pub mime: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+    /// Context-relative copy, `attachments/<safe name>`; absent when the
+    /// file could not be received.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub source: AttachmentSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachmentSource {
+    Start,
+    Steer,
+    #[serde(other)]
+    Unknown,
+}
+
+/// Something a step put outside Otto (PR comments, a Jira comment, a page).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Deliverable {
+    pub label: String,
+    pub state: DeliverableState,
+    /// "5 of 5 posted", "permission denied: …".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+/// What a person said to a step (an answer, a verification, a steering note).
+/// Kept on the node (≤ 20), so it survives the thread's deletion.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HumanEntry {
+    /// `answer` | `verify` | `steer`.
+    pub kind: String,
+    /// The question, or the criterion id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask: Option<String>,
+    /// ≤ 2 KiB.
+    pub text: String,
+    /// `verify` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub met: Option<bool>,
+    /// `verify` only: SHA-256 of the criterion's canonical JSON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iteration: Option<u32>,
+    /// Display name.
+    pub by: String,
+    pub at: DateTime<Utc>,
+}
+
+/// The run state shown to people (`RunOverview::state`), computed from the
+/// stored status, the hold and the steps; never stored as a status.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunState {
+    Queued,
+    Running,
+    Waiting,
+    NeedsYou,
+    Succeeded,
+    Failed,
+    Canceled,
+    Paused,
+    Blocked,
+    Exhausted,
+    #[default]
+    #[serde(other)]
+    Unknown,
+}
+
+/// A step waiting on a person, as the run overview lists it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AttentionRef {
+    pub node_id: String,
+    pub name: String,
+    #[serde(flatten)]
+    pub attention: Attention,
+}
+
+/// A fan-out's progress (reviewers of a review step).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct FanProgress {
+    pub done: u32,
+    pub total: u32,
+    pub running: u32,
+}
+
+/// What the run is doing now.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Now {
+    #[serde(default)]
+    pub node_ids: Vec<String>,
+    #[serde(default)]
+    pub node_names: Vec<String>,
+    pub phase: StepPhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fan: Option<FanProgress>,
+}
+
+/// A queued run's place in line (within its lane).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QueueInfo {
+    /// 1-based.
+    pub position: u32,
+    pub ahead: u32,
+    pub cap: u32,
+    /// `normal` | `long`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane: Option<String>,
+}
+
+/// The failing step's own error.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FailedStep {
+    pub node_id: String,
+    pub name: String,
+    pub error: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_class: Option<String>,
+}
+
+/// Where the run's wall clock went; the buckets sum to it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct TimeBuckets {
+    #[serde(default)]
+    pub queued_ms: u64,
+    #[serde(default)]
+    pub waiting_ms: u64,
+    #[serde(default)]
+    pub with_you_ms: u64,
+    #[serde(default)]
+    pub working_ms: u64,
+}
+
+/// Who or what started the run — names, not ids.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Origin {
+    /// `chat` | `manual` | `schedule` | `webhook` | `event` | `task` | `mcp` | `goal`.
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubjectPr {
+    pub repo: String,
+    pub number: u64,
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubjectTicket {
+    pub key: String,
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+}
+
+/// What the run is about.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Subject {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr: Option<SubjectPr>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<SubjectTicket>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+}
+
+/// A goal run's progress (the run's graph has a loop with a check step).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct GoalProgress {
+    pub iteration: u32,
+    /// Effective: `limits_json` over the loop's params.
+    pub max_iterations: u32,
+    pub criteria_met: u32,
+    pub criteria_total: u32,
+    #[serde(default)]
+    pub active_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_active_ms: Option<u64>,
+    /// Criterion ids parked for a person.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub awaiting: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HoldKind {
+    Paused,
+    Blocked,
+    Exhausted,
+    #[serde(other)]
+    Unknown,
+}
+
+/// A held run (`workflow_runs.hold_json`). A held run is settled: paused =
+/// status `canceled` + hold, blocked / exhausted = status `error` + hold.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RunHold {
+    pub kind: HoldKind,
+    /// ≤ 300 chars, words a person reads.
+    pub reason: String,
+    pub since: DateTime<Utc>,
+    /// The person who paused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<Id>,
+    /// Nodes to re-enter on Resume.
+    #[serde(default)]
+    pub node_ids: Vec<String>,
+    /// The loop's iteration when it stopped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iteration: Option<u32>,
+}
+
+impl RunHold {
+    /// The one effective-hold rule (DR-105): a stored hold counts only while
+    /// its kind matches the stored status — paused with `canceled`, blocked
+    /// or exhausted with `error`. A hold the previous build left behind on a
+    /// row it retried (then ran again) is ignored. `otto_state`'s `HOLD_SQL`
+    /// is the same rule in SQL.
+    pub fn is_effective(&self, status: RunStatus) -> bool {
+        matches!(
+            (self.kind, status),
+            (HoldKind::Paused, RunStatus::Canceled)
+                | (HoldKind::Blocked | HoldKind::Exhausted, RunStatus::Error)
+        )
+    }
+}
+
+/// One loop's limits raised by Resume / Extend (`limits_json.loops[<node id>]`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct LoopLimits {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_iterations: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_active_s: Option<u64>,
+    /// The iteration a person resumed a Blocked hold at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unblocked_at: Option<u32>,
+}
+
+/// `workflow_runs.limits_json`: run-level loop limits, written only by Resume.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RunLimits {
+    #[serde(default)]
+    pub loops: std::collections::BTreeMap<String, LoopLimits>,
+}
+
+/// The run's one computed summary — the UI, the chat status message, MCP and
+/// the phone read this object (field `overview`, never `summary`, which is
+/// the progress projection's boolean marker). Stored in
+/// `workflow_runs.overview_json` with the row's `rev`; a reader whose row
+/// `rev` differs treats it as stale (see `otto_state`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RunOverview {
+    pub rev: i64,
+    pub state: RunState,
+    /// One sentence, ≤ 160 chars.
+    pub headline: String,
+    pub steps_done: u32,
+    pub steps_total: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub now: Option<Now>,
+    /// Oldest first.
+    pub attention: Vec<AttentionRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queue: Option<QueueInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failed_step: Option<FailedStep>,
+    /// All steps', in step order.
+    pub deliverables: Vec<Deliverable>,
+    /// Sum over steps and children.
+    pub usage: TurnTokenUsage,
+    pub time: TimeBuckets,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<Origin>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject: Option<Subject>,
+    pub elapsed_ms: u64,
+    /// Median of the workflow's last 20 successful runs; `None` under 3.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub typical_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub goal: Option<GoalProgress>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hold: Option<RunHold>,
+}
+
+/// How a `check` criterion is verified (wire values `command` | `agent` |
+/// `human` | `expr`; the UI calls `expr` "Rule").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerifyKind {
+    Command,
+    Agent,
+    Human,
+    Expr,
+    /// A newer build's kind: "not met: unknown check".
+    #[serde(other)]
+    Unknown,
+}
+
+/// One acceptance criterion of a `check` node or a goal.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Criterion {
+    /// `[a-z0-9-]{1,64}`, unique in the node.
+    pub id: String,
+    /// What must be true, ≤ 500 chars.
+    pub text: String,
+    pub verify: VerifyKind,
+    /// Agent / human: what to inspect, ≤ 2,000 chars.
+    #[serde(default)]
+    pub how: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expr: Option<String>,
+    /// Command only; default 600, 10..=3,600.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_s: Option<u64>,
+}
+
+/// One criterion's result in a `check` step's output.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CriterionResult {
+    pub id: String,
+    pub text: String,
+    pub verify: VerifyKind,
+    pub met: bool,
+    pub evidence: String,
+    /// `command` | `rule` | `agent` | the person's name.
+    pub verified_by: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckVerdict {
+    Achieved,
+    Continue,
+    Blocked,
+    #[serde(other)]
+    Unknown,
+}
+
+/// The completion review of a `check` with `final_review` (passes only when
+/// approved with no findings).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CompletionReview {
+    pub approved: bool,
+    #[serde(default)]
+    pub findings: Vec<String>,
+}
+
+/// A `check` step's output (also rendered to its step file).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CheckOutput {
+    pub criteria: Vec<CriterionResult>,
+    pub all_met: bool,
+    pub met: u32,
+    pub total: u32,
+    pub progress_pct: u32,
+    pub verdict: CheckVerdict,
+    /// What the next iteration must do.
+    #[serde(default)]
+    pub feedback: String,
+    /// ≤ 3 KiB: unmet criteria with evidence headlines + feedback.
+    #[serde(default)]
+    pub feedback_md: String,
+    #[serde(default)]
+    pub repeat_signature: String,
+    #[serde(default)]
+    pub repeated_failures: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<CompletionReview>,
+}
+
 /// Per-node execution state, captured during a run.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NodeRunState {
     pub node_id: String,
     pub status: NodeStatus,
@@ -280,10 +799,47 @@ pub struct NodeRunState {
     /// finished (and on rows persisted before the field existed).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activity: Option<NodeActivity>,
+    /// The stable N of `stepN-…` (`None` on old rows and skipped nodes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_no: Option<u32>,
+    /// `step3-checkout-pr-branch` (no extension).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_file: Option<String>,
+    /// Only while `status == Running`; `None` once settled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<StepPhase>,
+    /// Append-only phase timeline, ≤ 40 (the first mark + the last 39).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub phases: Vec<PhaseMark>,
+    /// Set while `phase` is `waiting` (or `queued` on a run slot).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait: Option<WaitReason>,
+    /// Set while `phase` is `needs_you`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention: Option<Attention>,
+    /// Runner: `usage_limit` | `rate_limit` | `auth` | `provider` |
+    /// `stalled` | `timeout` | `spawn` | `server_restart` | `canceled`;
+    /// engine: `script` | `outcome_unknown`. `error` stays the step's own words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_class: Option<String>,
+    /// The step's agent thread (thread ids never go in `sessions`, which
+    /// stays PTY-only for the previous build's run view).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread: Option<StepThread>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<ChildThread>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deliverables: Vec<Deliverable>,
+    /// ≤ 20, oldest dropped.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub human_log: Vec<HumanEntry>,
+    /// One-line summary set at settle, ≤ 200 chars.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brief: Option<String>,
 }
 
-/// One execution of a workflow.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// One durable inner-loop attempt.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WorkflowCheckpoint {
     pub node_id: String,
     pub loop_id: String,
@@ -299,6 +855,20 @@ pub struct WorkflowCheckpoint {
     #[serde(default)]
     pub logs: Vec<String>,
     pub updated_at: DateTime<Utc>,
+    /// The attempt's wall time minus its time in `needs_you` (banked loop
+    /// time: a loop's active time is the sum over its checkpoints).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub active_ms: u64,
+    /// The inner step's thread, so a restart mid-iteration resumes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<Id>,
+    /// Turn ordinal the inner step's prompt started at (`await_settled`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_ordinal: Option<u64>,
+}
+
+fn is_zero(v: &u64) -> bool {
+    *v == 0
 }
 
 /// One execution of a workflow.
@@ -360,6 +930,25 @@ pub struct WorkflowRun {
     /// the directory exists on disk — NOT persisted; `None` otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_dir: Option<String>,
+    /// The computed run summary; `None` when the stored one is stale (its
+    /// `rev` is not the row's) — the server recomputes it then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overview: Option<RunOverview>,
+    /// Set while the run is held (paused / blocked / exhausted) — the
+    /// effective hold only ([`RunHold::is_effective`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold: Option<RunHold>,
+    /// Loop limits raised by Resume / Extend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<RunLimits>,
+    /// Steering notes queued for the next agent step (the run's
+    /// `steering.json`). Filled at the API layer — NOT persisted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steering_queued: Vec<String>,
+    /// Files sent with the starting and steering chat messages. Filled at
+    /// the API layer — NOT persisted on the row.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<AttachmentRef>,
 }
 
 /// Lightweight summary of an in-flight workflow run for the "Running" sidebar
@@ -388,6 +977,9 @@ pub struct ActiveWorkflowRun {
     pub current_node_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_step: Option<String>,
+    /// The run's stored overview when fresh (see [`WorkflowRun::overview`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overview: Option<RunOverview>,
 }
 
 /// One row of the run history (`GET /workspaces/{wid}/workflow-runs`): what a
@@ -424,6 +1016,13 @@ pub struct RunListItem {
     /// The run's error, clipped to 240 chars.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The run's stored overview when fresh (see [`WorkflowRun::overview`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overview: Option<RunOverview>,
+    /// What the run is about: its overview's subject, else derived from the
+    /// input (a run from before overviews existed stores none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<Subject>,
 }
 
 /// A page of [`RunListItem`]s, newest first; `next_cursor` is opaque and
@@ -624,4 +1223,146 @@ pub struct ConvertTaskReq {
 pub struct ConvertTaskResp {
     pub workflow_id: Id,
     pub trigger_id: Option<Id>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A node that uses none of the run-view fields writes exactly the keys
+    /// the previous build wrote, so its rows stay byte-for-byte as before.
+    #[test]
+    fn a_plain_node_writes_only_the_old_keys() {
+        let node = NodeRunState {
+            node_id: "n1".into(),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&node).unwrap();
+        let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "attempts",
+                "duration_ms",
+                "error",
+                "logs",
+                "node_id",
+                "output",
+                "review_ids",
+                "sessions",
+                "status"
+            ]
+        );
+        assert_eq!(v["status"], "pending");
+    }
+
+    /// A value a later build adds decodes as the catch-all instead of failing
+    /// the whole row (rollback safety for the next pull request).
+    #[test]
+    fn unknown_values_decode_as_the_catch_all() {
+        let phase: StepPhase = serde_json::from_value(json!("parked_somewhere")).unwrap();
+        assert_eq!(phase, StepPhase::Unknown);
+        let state: RunState = serde_json::from_value(json!("snoozed")).unwrap();
+        assert_eq!(state, RunState::Unknown);
+        let hold: HoldKind = serde_json::from_value(json!("frozen")).unwrap();
+        assert_eq!(hold, HoldKind::Unknown);
+        let verify: VerifyKind = serde_json::from_value(json!("oracle")).unwrap();
+        assert_eq!(verify, VerifyKind::Unknown);
+        let state: DeliverableState = serde_json::from_value(json!("queued")).unwrap();
+        assert_eq!(state, DeliverableState::Unknown);
+        let ov: RunOverview = serde_json::from_value(json!({"state": "needs_you"})).unwrap();
+        assert_eq!((ov.state, ov.rev), (RunState::NeedsYou, 0));
+    }
+
+    /// The overview's attention rows carry the attention's fields at the top
+    /// level beside the node id and name (the UI and chat read them flat).
+    #[test]
+    fn attention_ref_is_flat_on_the_wire() {
+        let at = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 1, 1, 0, 0, 0).unwrap();
+        let r = AttentionRef {
+            node_id: "n4".into(),
+            name: "Post comments".into(),
+            attention: Attention {
+                request_id: Some("q1".into()),
+                ..Attention::new(crate::agent_runtime::AttentionKind::Approval, "Approve", at)
+            },
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(
+            v,
+            json!({"node_id": "n4", "name": "Post comments", "kind": "approval",
+                   "text": "Approve", "since": "2026-01-01T00:00:00Z", "request_id": "q1"})
+        );
+        assert_eq!(serde_json::from_value::<AttentionRef>(v).unwrap(), r);
+    }
+
+    /// `thread.available` is computed on read: written to the API, never
+    /// taken back from a row.
+    #[test]
+    fn thread_availability_is_never_read_back() {
+        let t: StepThread = serde_json::from_value(json!({
+            "thread_id": "t1", "runner": "threads", "provider": "claude", "available": false
+        }))
+        .unwrap();
+        assert_eq!(t.available, None);
+        assert_eq!(t.turns, 0);
+        let shown = StepThread {
+            available: Some(false),
+            ..t
+        };
+        assert_eq!(serde_json::to_value(&shown).unwrap()["available"], false);
+    }
+
+    #[test]
+    fn a_hold_counts_only_with_its_matching_status() {
+        let hold = |kind| RunHold {
+            kind,
+            reason: "r".into(),
+            since: Utc::now(),
+            by: None,
+            node_ids: vec![],
+            iteration: None,
+        };
+        use HoldKind::*;
+        use RunStatus::*;
+        for (kind, status, want) in [
+            (Paused, Canceled, true),
+            (Blocked, Error, true),
+            (Exhausted, Error, true),
+            (Paused, Error, false),
+            (Blocked, Canceled, false),
+            (Paused, Success, false),
+            (Blocked, Running, false),
+            (Exhausted, Pending, false),
+            (Unknown, Error, false),
+        ] {
+            assert_eq!(
+                hold(kind).is_effective(status),
+                want,
+                "{kind:?} × {status:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn checkpoint_active_time_defaults_and_is_omitted_at_zero() {
+        let cp: WorkflowCheckpoint = serde_json::from_value(json!({
+            "node_id": "l#0.0", "loop_id": "l", "iteration": 0, "step_index": 0,
+            "kind": "agent_prompt", "name": "Work", "status": "success", "attempts": 1,
+            "input": {}, "output": null, "error": null, "updated_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap();
+        assert_eq!(cp.active_ms, 0);
+        assert!(serde_json::to_value(&cp)
+            .unwrap()
+            .get("active_ms")
+            .is_none());
+        let banked = WorkflowCheckpoint {
+            active_ms: 42,
+            ..cp
+        };
+        assert_eq!(serde_json::to_value(&banked).unwrap()["active_ms"], 42);
+    }
 }

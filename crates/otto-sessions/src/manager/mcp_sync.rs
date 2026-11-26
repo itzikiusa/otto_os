@@ -101,9 +101,9 @@ impl SessionManager {
         // untrusted read-only session) takes no servers: nothing is written
         // for it, and nothing is "skipped".
         let flag = |k: &str| session.meta.get(k).and_then(|v| v.as_bool());
+        let structured = session.meta.get("runtime").and_then(|v| v.as_str()) == Some("structured");
         let strict = cli_family == "claude"
-            && session.meta.get("runtime").and_then(|v| v.as_str()) != Some("structured")
-            && (flag("lean_turn") == Some(true)
+            && ((flag("lean_turn") == Some(true) && !structured)
                 || (flag("read_only") == Some(true) && flag("project_settings") == Some(false)));
         let has_otto = otto_tools.is_some();
         let pi_otto = otto_tools.clone().filter(|_| cli_family == "pi");
@@ -288,7 +288,6 @@ impl SessionManager {
         // stale error / skip list).
         // A structured runtime session has no `sessions` row: its thread
         // shows the same snapshot as a server list (`runtime_mcp_status`).
-        let structured = session.meta.get("runtime").and_then(|v| v.as_str()) == Some("structured");
         if structured {
             let otto_on = self.otto_mcp_enabled(&session.workspace_id).await;
             if cli_family == "pi" && delivered.is_empty() && self.pi_major().await == Some(0) {

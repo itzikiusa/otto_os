@@ -1059,8 +1059,23 @@ pub struct ReviewComment {
     pub created_at: DateTime<Utc>,
 }
 
+/// A model and reasoning effort for one provider; empty = the provider's default.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelPick {
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub effort: String,
+}
+
+impl ModelPick {
+    pub fn is_empty(&self) -> bool {
+        self.model.trim().is_empty() && self.effort.trim().is_empty()
+    }
+}
+
 /// Configuration for one review agent lens.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ReviewAgentCfg {
     pub name: String,
     /// "claude" | "codex" | "agy" — backward-compat single provider field.
@@ -1082,6 +1097,13 @@ pub struct ReviewAgentCfg {
     /// nothing inlined (the `prompt` is used verbatim).
     #[serde(default)]
     pub skill: String,
+    /// Reasoning effort on `provider`, beside `model` (empty = provider default).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub effort: String,
+    /// Model and effort per provider (key = provider slug); wins over
+    /// `model` / `effort` on that provider.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub picks: std::collections::BTreeMap<String, ModelPick>,
 }
 
 /// How the review engine runs its lenses: one reviewer session per
@@ -1133,7 +1155,7 @@ pub struct ReviewFinding {
 }
 
 /// Live state of one review agent during a run (stored as agents_json).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ReviewAgentState {
     pub name: String,
     pub provider: String,
@@ -1183,6 +1205,16 @@ pub struct ReviewAgentState {
     /// One sentence on why that score.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub score_reason: String,
+    /// The effort the agent runs with (empty = the provider's default).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub effort: String,
+    /// `session_id` names a runtime thread, not a terminal session.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub thread: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<DateTime<Utc>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -3105,6 +3137,9 @@ mod tests {
             "CORTEX_STEP_SOURCE_USER_EXPLICIT",
             // IDE plugin install `source` URL test fixture (otto-ide).
             "https://example.com/plugin",
+            // A workflow run's chat attachment origin (`AttachmentSource`), not a session.
+            "start",
+            "steer",
             // Smart mode: a model taken from the Forge library (version provenance and
             // artifact meta in otto-media's productions), not a session.
             "library",

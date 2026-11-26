@@ -1199,6 +1199,32 @@ full-access settings. Remaining permission requests still require a person.
 Typed question answers use a separate payload and never grant a permission;
 secret question forms are refused instead of being collected into history.
 
+### 7.1 Unattended turns (workflow steps, reviews, personal agents)
+
+Engines that run an agent with nobody watching wait with
+`AgentRuntime::run_turn` / `await_settled` (`runtime/unattended.rs`): the
+call returns when the thread has *settled* — no turn, no background work,
+nothing queued or announced for the queue (a sub-thread's answer is noted on
+its parent before the child looks idle), no pending request, no busy
+agent-opened sub-thread at any depth, and at most 10 s after background work
+ends for the agent's own follow-up turn. It is event-driven (every `emit`
+wakes it); deadline, no progress, the 45-minute background limit, cancel, the
+loop guard and a restart that cut the turn end it with their own reason.
+Requests waiting on a person come out as `NeedsYou` / `Resumed` events
+(a sub-thread's question only once its opener's agent left it pending).
+
+`ThreadStepRunner` (`src/step_runner.rs`) is the workflow engine's
+`StepRunner` on top: it waits for a machine place, opens or continues a
+thread, nudges once for a missing handoff file, waits out a plan usage limit
+whose reset is known and continues the same thread, and keeps the digest
+(`runtime/digest.rs`) the run view needs after retention
+(`runtime/retention.rs`) deletes the thread. Engine threads stay out of the
+person's lists; see `docs/contracts/api.md` "Engine threads". The user-facing
+side — the runner switch (`wf_step_runner`), how long a step's thread is kept
+(24 h after a successful run, 7 days after a failed one), `continue_from`, the
+4-sub-thread cap and what a restart does to a running step — is in
+[Workflows § How an agent step runs](./workflows.md#how-an-agent-step-runs).
+
 ## 8. Code map
 
 | Path | What |
@@ -1490,11 +1516,18 @@ Done · Failed · Stopped**. A subagent shows in four places only.
   (same thread id), and the new provider's first turn carries the delegation
   rules again.
 
+- **Removing a finished subagent** — `otto.thread_close` with `remove:true`
+  deletes a subagent the thread's own agent opened, once it has answered
+  (refused while it works or has open subagents of its own). Its answer has
+  already reached the parent; the parent keeps a compact record
+  (`meta.removed_children`: id, provider, model, title, status, usage) and its
+  card reads "Codex finished: … · removed", with no Open link.
+
 Not yet: a worktree per subagent, fork / merge and `@thread` mentions.
 
 Meta and markers: a child carries `meta.child_of {id, by: "person" |
 "agent"}` (the opener; `parent_id` stays the group's root). The parent's
-notices end in `[otto-thread:<id>[,<id>…]:started|finished|failed|stopped]`
+notices end in `[otto-thread:<id>[,<id>…]:started|finished|failed|stopped|removed]`
 (`threadNoticeOf` in `runtime/childThreads.ts`). Code:
 `crates/otto-agent-protocol/src/runtime/children.rs`;
 `crates/otto-agent-protocol/src/runtime/{delegation.rs,family.rs}`;
@@ -1609,6 +1642,8 @@ bound by the shell at boot) and renders it with these props:
 | `draft` | — | With `sessionId: null`: no thread yet. The embed renders the Threads start composer (`RuntimeStartComposer`, the same one the new-thread stage uses: agent · model · effort through the model picker, the access chip, attach, `@`, `/`) under the host's `lead` and suggestion chips, and starts the thread through the Threads store (see below). |
 | `onhandle(handle)` | — | The embed's send for the host's own asks (a menu, a file, a line pick): `handle.send(text, { accessMode })`. Before a thread it starts one with the composer's picks; after, it reopens a closed thread and queues behind a running turn, through the store, so the access chip, the closed state and the working dot stay true. |
 | `contextOnFresh()` | — | Text put before the first message after `/clear` (fresh context), so the agent knows again what it is looking at (a PR's context block). |
+| `readOnly` | `false` | A thread another feature drives (a workflow step's): no composer and no **Open in Threads**; its approval and question cards stay answerable, and editing or reviving a turn is off. The runtime adds no guard of its own. |
+| `onunavailable(reason)` | — | Called once when the thread is gone or not readable: `'deleted'` (the row or its conversation answers 404, or the thread was removed while shown) or `'forbidden'` (403). The embed then renders nothing of its own (no error, no Retry), so the host shows its own fallback — a workflow step shows the step's digest. |
 
 `hostCommands` handlers (all optional): `openDiff(id)` for `/diff`,
 `openFiles(id)` for `/files`, `openTerminal(id)` for `/terminal`,

@@ -19,7 +19,7 @@ test('a stored light choice changes nothing on desktop', async ({ page }) => {
   await expect.poll(() => page.evaluate(() => location.hash)).not.toBe('#/threads');
   await expect(page.locator('nav.bottomnav')).toHaveCount(0);
 
-  // Modules outside the five are in the sidebar and open normally.
+  // Modules outside the six are in the sidebar and open normally.
   for (const id of ['agents', 'home', 'kubernetes', 'git', 'usage']) {
     await expect(page.locator(`.sidebar [data-nav-id="${id}"]`).first()).toBeVisible();
   }

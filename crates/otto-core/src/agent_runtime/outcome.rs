@@ -121,6 +121,123 @@ pub fn error_class(f: &ProviderFailure) -> &'static str {
     }
 }
 
+/// Which kind of limit a `usage_limit` failure is ([`limit_kind`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LimitKind {
+    /// A per-minute 429: retry with backoff.
+    Rate,
+    /// The plan's usage limit; `resets_at` when the failure itself says.
+    Plan {
+        resets_at: Option<chrono::DateTime<chrono::Utc>>,
+    },
+    /// No credit left: nothing resets it.
+    Billing,
+}
+
+const RATE_CODES: &[&str] = &["rate_limit", "rate_limit_error"];
+const RATE_TEXT: &[&str] = &["rate limit", "rate_limit", "too many requests", "429"];
+
+/// Tell a per-minute rate limit, a plan limit and a billing failure apart;
+/// `None` when [`error_class`] is not `usage_limit`. The row's
+/// `last_error_class` keeps the one coarse class.
+pub fn limit_kind(f: &ProviderFailure) -> Option<LimitKind> {
+    if error_class(f) != ERROR_CLASS_USAGE_LIMIT {
+        return None;
+    }
+    let code = f.code.as_deref().map(|c| c.trim().trim_matches('"'));
+    let text = f.message.to_lowercase();
+    if code == Some("billing_error") || text.contains("credit balance") {
+        return Some(LimitKind::Billing);
+    }
+    let planned = code.is_some_and(|c| !RATE_CODES.contains(&c) && USAGE_CODES.contains(&c));
+    if !planned
+        && (code.is_some_and(|c| RATE_CODES.contains(&c))
+            || RATE_TEXT.iter().any(|n| text.contains(n)))
+    {
+        return Some(LimitKind::Rate);
+    }
+    let resets_at = reset_in_text(&f.message, chrono::Local::now());
+    Some(LimitKind::Plan { resets_at })
+}
+
+/// When a limit resets, from the CLI's own words (the shapes the Threads
+/// view reads, ui/src/modules/threads/runtime/usageLimit.ts): Claude's
+/// "…usage limit reached|<unix seconds>" and "…limit reached ∙ resets 3pm"
+/// / "resets at 14:00", Codex's "try again in 2 hours 5 minutes". A clock
+/// time is local (the CLI's own); one already past today means tomorrow.
+pub fn reset_in_text(
+    text: &str,
+    now: chrono::DateTime<chrono::Local>,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    if let Some(t) = text
+        .rsplit_once('|')
+        .and_then(|(_, t)| t.trim().parse().ok())
+    {
+        return chrono::DateTime::from_timestamp(t, 0);
+    }
+    let text = text.to_lowercase();
+    let after = |lead: &str| text.find(lead).map(|i| &text[i + lead.len()..]);
+    if let Some(rest) = after("try again in ").or_else(|| after("retry in ")) {
+        let secs = relative_secs(rest)?;
+        return Some(now.to_utc() + chrono::Duration::milliseconds((secs * 1000.0) as i64));
+    }
+    let rest = after("resets at ").or_else(|| after("resets "))?;
+    let (h, rest) = leading_number(rest)?;
+    let (m, rest) = match rest.strip_prefix(':') {
+        Some(r) => leading_number(r).map_or((None, r), |(m, r)| (Some(m), r)),
+        None => (None, rest),
+    };
+    let rest = rest.trim_start();
+    let pm = rest.starts_with("pm");
+    if !pm && !rest.starts_with("am") && m.is_none() {
+        return None; // "resets 3" is not a time
+    }
+    let h = match (h as u32, pm) {
+        (12, false) if rest.starts_with("am") => 0,
+        (h, true) if h < 12 => h + 12,
+        (h, _) => h,
+    };
+    let at = now
+        .date_naive()
+        .and_hms_opt(h, m.unwrap_or(0.0) as u32, 0)?
+        .and_local_timezone(chrono::Local)
+        .earliest()?;
+    let at = if at <= now {
+        at + chrono::Duration::days(1)
+    } else {
+        at
+    };
+    Some(at.to_utc())
+}
+
+/// "2 hours 5 minutes", "41.2s" → seconds.
+fn relative_secs(mut rest: &str) -> Option<f64> {
+    let mut total = 0.0;
+    while let Some((n, r)) = leading_number(rest) {
+        let r = r.trim_start();
+        let unit: String = r.chars().take_while(char::is_ascii_alphabetic).collect();
+        let scale = match unit.as_str() {
+            "d" | "day" | "days" => 86_400.0,
+            "h" | "hr" | "hrs" | "hour" | "hours" => 3_600.0,
+            "m" | "min" | "mins" | "minute" | "minutes" => 60.0,
+            "s" | "sec" | "secs" | "second" | "seconds" => 1.0,
+            _ => break,
+        };
+        total += n * scale;
+        rest = r[unit.len()..].trim_start_matches([' ', ',']);
+        rest = rest.strip_prefix("and ").unwrap_or(rest);
+    }
+    (total > 0.0).then_some(total)
+}
+
+/// The number at the start of `s` and what follows it.
+fn leading_number(s: &str) -> Option<(f64, &str)> {
+    let end = s
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(s.len());
+    Some((s[..end].parse().ok()?, &s[end..]))
+}
+
 impl RuntimeSession {
     /// Set [`Self::last_turn_status`] / [`Self::last_error_class`] from the
     /// thread's latest turn (by ordinal) and that turn's failure, if any. A
@@ -235,6 +352,96 @@ mod tests {
             error_class(&failure(Some("contextWindowExceeded"), "rate limit")),
             "provider"
         );
+    }
+
+    #[test]
+    fn limits_are_told_apart() {
+        use chrono::TimeZone;
+        let kind = |code: Option<&str>, text: &str| limit_kind(&failure(code, text));
+        assert_eq!(kind(Some("rate_limit_error"), "x"), Some(LimitKind::Rate));
+        assert_eq!(
+            kind(None, "API Error: 429 Too Many Requests"),
+            Some(LimitKind::Rate)
+        );
+        assert_eq!(
+            kind(None, "Rate limit exceeded, retry in 20s"),
+            Some(LimitKind::Rate)
+        );
+        assert_eq!(
+            kind(Some("success"), "Claude AI usage limit reached|1700000000"),
+            Some(LimitKind::Plan {
+                resets_at: Some(chrono::Utc.timestamp_opt(1_700_000_000, 0).unwrap())
+            })
+        );
+        assert!(matches!(
+            kind(
+                Some("usageLimitExceeded"),
+                "You've hit your usage limit · resets 3pm"
+            ),
+            Some(LimitKind::Plan { resets_at: Some(_) })
+        ));
+        assert_eq!(
+            kind(Some("usageLimitExceeded"), "You've hit your usage limit"),
+            Some(LimitKind::Plan { resets_at: None })
+        );
+        assert_eq!(
+            kind(Some("insufficient_quota"), "rate limit"),
+            Some(LimitKind::Plan { resets_at: None }),
+            "a plan code decides over words"
+        );
+        assert_eq!(
+            kind(None, "Credit balance is too low"),
+            Some(LimitKind::Billing)
+        );
+        assert_eq!(kind(Some("billing_error"), "x"), Some(LimitKind::Billing));
+        assert_eq!(kind(None, "API Error: 500 Internal server error"), None);
+    }
+
+    /// The CLIs' own reset words (ui/unit/runtimeUsageLimit.test.ts's cases).
+    #[test]
+    fn the_reset_is_read_from_the_providers_words() {
+        use chrono::TimeZone;
+        let now = chrono::Local
+            .with_ymd_and_hms(2026, 11, 23, 12, 0, 0)
+            .unwrap();
+        let local = |d, h, m| {
+            let t = chrono::Local
+                .with_ymd_and_hms(2026, 11, d, h, m, 0)
+                .unwrap();
+            Some(t.to_utc())
+        };
+        let at = |text: &str| reset_in_text(text, now);
+        assert_eq!(
+            at("Claude AI usage limit reached|1763906400"),
+            chrono::DateTime::from_timestamp(1_763_906_400, 0)
+        );
+        assert_eq!(at("5-hour limit reached ∙ resets 3pm"), local(23, 15, 0));
+        assert_eq!(
+            at("You've hit your usage limit · resets 3pm (Europe/London)"),
+            local(23, 15, 0)
+        );
+        assert_eq!(
+            at("limit reached, resets at 09:30"),
+            local(24, 9, 30),
+            "past today: tomorrow"
+        );
+        assert_eq!(at("resets 12am"), local(24, 0, 0));
+        let later = |s: i64| Some(now.to_utc() + chrono::Duration::seconds(s));
+        assert_eq!(
+            at("You've hit your usage limit. Upgrade to Pro or try again in 2 hours 5 minutes."),
+            later(2 * 3600 + 5 * 60)
+        );
+        assert_eq!(
+            at("Please retry in 41.2s."),
+            Some(now.to_utc() + chrono::Duration::milliseconds(41_200))
+        );
+        for none in [
+            "usage limit reached",
+            "resets 3",
+            "You've hit your usage limit. Try again later.",
+        ] {
+            assert_eq!(at(none), None, "{none}");
+        }
     }
 
     #[test]

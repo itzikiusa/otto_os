@@ -39,28 +39,55 @@ fn mark_stopped(ids: &[Id]) {
     }
 }
 
-/// `id`, then every open thread opened from one already listed, in order.
+/// `id`, then every open thread opened below it, in order — below a closed
+/// one too (it may still have open ones under it).
 pub(super) fn family_ids(id: &Id, rows: &[RuntimeSession]) -> Vec<Id> {
     let mut ids = vec![id.clone()];
     let mut i = 0;
     while i < ids.len() {
         let parent = ids[i].clone();
         for r in rows {
-            let child = r.child_of().is_some_and(|o| o.id == parent);
-            if child && r.status != RuntimeSessionStatus::Closed && !ids.contains(&r.id) {
+            if r.child_of().is_some_and(|o| o.id == parent) && !ids.contains(&r.id) {
                 ids.push(r.id.clone());
             }
         }
         i += 1;
     }
+    let closed = |s: &Id| {
+        rows.iter()
+            .any(|r| &r.id == s && r.status == RuntimeSessionStatus::Closed)
+    };
+    let mut first = true;
+    ids.retain(|s| std::mem::take(&mut first) || !closed(s));
     ids
 }
 
 impl AgentRuntime {
+    /// `id` and every open thread opened below it (a step's sub-threads),
+    /// `id` a sub-thread itself too.
+    pub async fn family(&self, id: &Id) -> Vec<Id> {
+        let Ok(me) = self.get(id).await else {
+            return vec![id.clone()];
+        };
+        let rows = self
+            .linked(me.parent_id.as_ref().unwrap_or(&me.id))
+            .await
+            .unwrap_or_default();
+        family_ids(id, &rows)
+    }
+
+    /// A linked group by its root, closed members included, live state
+    /// applied — not the person's 500-row list, which leaves engine threads
+    /// out and drops old members.
+    pub(super) async fn linked(&self, root: &Id) -> Result<Vec<RuntimeSession>> {
+        let recs = self.inner.repo.list_linked(root).await?;
+        Ok(self.with_live(recs))
+    }
+
     /// `POST /runtime-sessions/{id}/stop-family`.
     pub async fn stop_family(&self, id: &Id, background: bool) -> Result<FamilyStopResp> {
         let me = self.get(id).await?;
-        let rows = self.list(&me.workspace_id, Some(&me.created_by)).await?;
+        let rows = self.linked(me.parent_id.as_ref().unwrap_or(&me.id)).await?;
         let ids = family_ids(id, &rows);
         // Only what it delegated to is quiet: the thread Stop was pressed on,
         // when itself a subagent, still tells its lead it was stopped.
@@ -138,13 +165,14 @@ mod tests {
             row("a", Some("lead"), Working),
             row("b", Some("lead"), Closed),
             row("a1", Some("a"), Idle),
+            row("b1", Some("b"), Working),
             row("x", Some("other"), Working),
         ];
         let ids: Vec<String> = family_ids(&"lead".into(), &rows)
             .iter()
             .map(|i| i.to_string())
             .collect();
-        assert_eq!(ids, ["lead", "a", "a1"]);
+        assert_eq!(ids, ["lead", "a", "a1", "b1"], "below a closed one too");
     }
 
     #[test]

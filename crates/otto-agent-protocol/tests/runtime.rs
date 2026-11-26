@@ -1748,14 +1748,14 @@ async fn linked_threads_open_message_and_read_within_their_group() {
     // Closing: never the lead (a person's), never outside the group; the
     // lead closes its worker, which then reads as closed.
     assert!(matches!(
-        rt.close_peer(&worker.id, &lead.id).await,
+        rt.close_peer(&worker.id, &lead.id, false).await,
         Err(Error::Forbidden(_))
     ));
     assert!(matches!(
-        rt.close_peer(&lead.id, &other.id).await,
+        rt.close_peer(&lead.id, &other.id, false).await,
         Err(Error::NotFound(_))
     ));
-    let closed = rt.close_peer(&lead.id, &worker.id).await.unwrap();
+    let closed = rt.close_peer(&lead.id, &worker.id, false).await.unwrap();
     assert_eq!(
         closed.status,
         otto_core::agent_runtime::RuntimeSessionStatus::Closed
@@ -2639,6 +2639,107 @@ async fn closing_a_parent_leaves_its_children_running_and_tells_it_nothing() {
     );
     assert!(queue_texts(&host, &lead.id).unwrap_or_default().is_empty());
     rt.close(&worker.id).await.unwrap();
+}
+
+/// An agent removes a subagent it opened once it answered (runtime.md §5.1):
+/// its reply still waits for the lead, a compact record (its usage summed)
+/// stays on the lead, the lead's timeline says "removed", the row is gone
+/// and no "was stopped" wake follows. Another thread may not remove it.
+#[tokio::test]
+async fn an_agent_removes_a_subagent_it_opened_once_it_answered() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let lead = create_as(&rt, cwd, RuntimeProvider::Claude).await;
+    rt.prompt(&lead.id, "slow 30").await.unwrap();
+    let worker = rt
+        // `model`: the fake reports usage (5 in + 2 cached, 3 out).
+        .open_peer(&lead.id, worker_req("worker", Some("model")))
+        .await
+        .unwrap();
+    let sibling = rt
+        .open_peer(&lead.id, worker_req("sibling", None))
+        .await
+        .unwrap();
+    let lead_id = lead.id.clone();
+    host.wait(move |e| {
+        e.session_id == lead_id
+            && matches!(&e.body, RuntimeEventBody::QueueUpdated { queued_prompts }
+                if queued_prompts.len() == 1)
+    })
+    .await;
+
+    let other = create(&rt, cwd).await;
+    for not_opener in [&sibling.id, &other.id] {
+        assert!(matches!(
+            rt.close_peer(not_opener, &worker.id, true).await,
+            Err(Error::Forbidden(_))
+        ));
+    }
+    let closed = rt.close_peer(&lead.id, &worker.id, true).await.unwrap();
+    assert_eq!(closed.status, RuntimeSessionStatus::Closed);
+    assert!(matches!(rt.get(&worker.id).await, Err(Error::NotFound(_))));
+
+    let meta = rt.get(&lead.id).await.unwrap().meta.unwrap();
+    let kept = &meta["removed_children"][0];
+    assert_eq!(kept["id"], worker.id.as_str());
+    assert_eq!(kept["title"], "worker");
+    assert_eq!(kept["provider"], "gemini");
+    assert_eq!(kept["status"], "completed");
+    assert_eq!(kept["usage"]["input_tokens"], 7);
+    assert_eq!(kept["usage"]["output_tokens"], 3);
+    let removed = format!("Claude removed worker [otto-thread:{}:removed]", worker.id);
+    assert!(notices(&host).contains(&removed), "{:?}", notices(&host));
+
+    // Proves an absence (a stopped child's wake would be queued spawned).
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let q = queue_texts(&host, &lead.id).unwrap();
+    assert_eq!(q.len(), 1, "{q:?}");
+    assert!(
+        q[0].starts_with("[Reply from subagent \"worker\"") && q[0].contains("its turn finished"),
+        "{q:?}"
+    );
+    rt.shutdown().await;
+}
+
+/// Removing waits for the subagent: refused while it works or while it has
+/// open subagents of its own; once closed it can still be removed.
+#[tokio::test]
+async fn removing_a_busy_subagent_is_refused_and_a_closed_one_is_found() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let lead = create(&rt, cwd).await;
+    let mut req = worker_req("worker", None);
+    req.provider = RuntimeProvider::Codex;
+    let worker = rt.open_peer(&lead.id, req).await.unwrap();
+    let grandkid = rt
+        .open_peer(&worker.id, worker_req("grandkid", None))
+        .await
+        .unwrap();
+    assert!(matches!(
+        rt.close_peer(&lead.id, &worker.id, true).await,
+        Err(Error::Conflict(m)) if m.contains("subagents")
+    ));
+    rt.close_peer(&worker.id, &grandkid.id, false)
+        .await
+        .unwrap();
+
+    rt.prompt(&worker.id, "slow 30").await.unwrap();
+    assert!(matches!(
+        rt.close_peer(&lead.id, &worker.id, true).await,
+        Err(Error::Conflict(m)) if m.contains("still working")
+    ));
+    assert!(rt.get(&worker.id).await.is_ok(), "still there");
+
+    rt.close_peer(&lead.id, &worker.id, false).await.unwrap();
+    rt.close_peer(&lead.id, &worker.id, true).await.unwrap();
+    assert!(matches!(rt.get(&worker.id).await, Err(Error::NotFound(_))));
+    rt.shutdown().await;
 }
 
 #[tokio::test]

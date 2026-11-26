@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
+import { openEditor } from './workflowsUi';
 
 test('workflow preflight identifies a broken step and cron editing preserves disabled state', async ({ page }, info) => {
   test.skip(info.project.name !== 'desktop-browser', 'desktop browser only');
@@ -19,12 +20,12 @@ test('workflow preflight identifies a broken step and cron editing preserves dis
     } });
     expect(trigger.ok(), await trigger.text()).toBeTruthy();
     await page.addInitScript((id) => { localStorage.setItem('otto_workspace', id); localStorage.setItem('otto_rail_expanded', '0'); }, workspace);
-    await page.goto('/#/workflows');
-    await page.getByTestId(`wf-row-${workflow}`).click();
+    await openEditor(page, workflow);
     // Validate + Triggers live in the editor header's ⋯ menu.
     await page.locator('[data-testid="page-header"]').getByRole('button', { name: 'More actions' }).click();
     await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Validate', exact: true }).click();
-    await expect(page.locator('.preflight')).toContainText('url');
+    // The problem is named in the one line above the canvas.
+    await expect(page.locator('.ed-problems')).toContainText('url');
     await page.locator('[data-testid="page-header"]').getByRole('button', { name: 'More actions' }).click();
     await page.locator('.ctx-menu').getByRole('menuitemcheckbox', { name: 'Triggers', exact: true }).click();
     await page.getByTitle('Edit trigger', { exact: true }).click();

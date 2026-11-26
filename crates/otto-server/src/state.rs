@@ -25,6 +25,8 @@ use tokio::sync::broadcast;
 pub struct ServerCtx {
     pub pool: DbPool,
     pub secrets: Arc<dyn SecretStore>,
+    /// Where outbound workflow chat goes; a test sets a recording adapter's.
+    pub outbound: Arc<dyn otto_channels::improve_notify::OutboundAdapterFactory>,
     pub events: broadcast::Sender<Event>,
     pub authenticator: Arc<dyn TokenAuthenticator>,
     pub roles: Arc<dyn RoleChecker>,
@@ -141,8 +143,6 @@ pub struct ServerCtx {
     pub vault_docs_refine: crate::vault_docs_agent::RefineRegistry,
     // -- Goal Loops --------------------------------------------------------
     pub goal_loops_repo: otto_state::GoalLoopsRepo,
-    /// Per-loop controller runtime handles (start/pause/resume/stop).
-    pub goal_loops: crate::goal_loop::GoalLoopRegistry,
     // -- Scheduled Tasks ---------------------------------------------------
     /// Recurring agent jobs (tasks + run history). The scheduler
     /// (`scheduled_tasks_scheduler`) fires due tasks; the engine

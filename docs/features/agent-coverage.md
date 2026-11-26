@@ -32,7 +32,7 @@ reads or a few writes only. **none**: nothing. Snapshot of 2026-11-05.
 | home | none | full | boxes and views via UI only |
 | insights | none | none | |
 | kubernetes | full | full | resources, describe, logs, top, health, actions, pod HTTP |
-| loops (goal loops) | partial | partial | list + run; no create / edit |
+| goals (Goal Loops folded into Workflows) | partial | partial | MCP: list goals and older loops, start a goal (`run_goal_loop`), pause / resume / extend a run (`control_workflow_run`); UI: the older loops' history only (`loops_list`, `loops_open`) |
 | mcp (control plane) | none | none | governance stays human-only by design |
 | panels | n/a | n/a | session side panels |
 | personal-agents | full | full | **Agent admin** tools: templates, list / get / create (template + persona + schedule + primary) / update / delete, schedules add / update / remove, autonomy, Slack act-as-me (always a person's approval), run now, runs + report; plus the main agent's team tools and rooms. UI: `pa_*` |
@@ -48,7 +48,7 @@ reads or a few writes only. **none**: nothing. Snapshot of 2026-11-05.
 | usage | partial | none | usage summary |
 | vault | full | partial | list / read / search / graph / write / rename / delete; UI: list, open, search, write |
 | workbench (Scratches folder) | full | none | list / get / write (native) |
-| workflows | partial | partial | list / get / runs / run / cancel; no create or edit of a workflow graph |
+| workflows | partial | partial | list / get / runs / run / cancel, pause / resume (`control_workflow_run`); no create or edit of a workflow graph, no approve / answer / verify (a person's) |
 
 Also covered: Jira / Confluence (search, read, create, edit, comment,
 transition), Slack (as the bot or as the user), self-improvement, code-review

@@ -712,3 +712,87 @@ async fn resumed_loop_keeps_checkpoint_handoff_without_replaying_action() {
         1
     );
 }
+
+/// Engine.md §11.3: after a restart the done-file oracle checks EVERY step
+/// the restart caught, not only the first — two side-by-side agent steps
+/// whose handoff files show they finished are both adopted, and the resumed
+/// run runs neither again.
+#[tokio::test]
+async fn every_interrupted_step_with_a_finished_handoff_is_adopted() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = mem_pool().await;
+    seed_workspace(&pool, "oracle-ws").await;
+    sqlx::query("INSERT INTO users(id,username,password_hash,display_name,is_root,created_at) VALUES('root','root','x','Root',1,?)")
+        .bind(chrono::Utc::now().to_rfc3339()).execute(&pool).await.unwrap();
+    let ctx = test_ctx(&pool, dir.path().to_path_buf()).await;
+    let ws = ctx.workspaces.get(&"oracle-ws".into()).await.unwrap();
+    // Empty prompts fail if executed: only adoption can make them succeed.
+    let graph: WorkflowGraph = serde_json::from_value(json!({
+        "nodes": [
+            {"id": "start", "kind": "log", "params": {}},
+            {"id": "a", "kind": "agent_prompt", "name": "Alpha", "params": {"prompt": ""}},
+            {"id": "b", "kind": "agent_prompt", "name": "Beta", "params": {"prompt": ""}},
+        ],
+        "edges": [
+            {"id": "e1", "source": "start", "target": "a"},
+            {"id": "e2", "source": "start", "target": "b"},
+        ],
+    }))
+    .unwrap();
+    let repo = WorkflowsRepo::new(pool);
+    let wf = repo
+        .create(&ws.id, "Oracle", "", "", &graph, &"root".into())
+        .await
+        .unwrap();
+    let run = repo
+        .create_run(&wf.id, &ws.id, &json!({}), Some(&"root".into()))
+        .await
+        .unwrap();
+    let started = chrono::Utc::now() - chrono::Duration::minutes(1);
+    let node = |id: &str, status: NodeStatus, step_no: u32| NodeRunState {
+        node_id: id.into(),
+        status,
+        started_at: Some(started),
+        step_no: Some(step_no),
+        ..Default::default()
+    };
+    let nodes = vec![
+        node("start", NodeStatus::Success, 1),
+        node("a", NodeStatus::Running, 2),
+        node("b", NodeStatus::Running, 3),
+    ];
+    repo.update_run(&run.id, RunStatus::Running, &nodes, None, false)
+        .await
+        .unwrap();
+    let ctx_dir = dir.path().join("workflow-context").join(&run.id);
+    std::fs::create_dir_all(&ctx_dir).unwrap();
+    for (file, who) in [("step2-alpha.md", "Alpha"), ("step3-beta.md", "Beta")] {
+        let body = format!("# {who} handoff\nThe step finished its work before the restart.\n");
+        std::fs::write(ctx_dir.join(file), body).unwrap();
+    }
+    assert_eq!(reconcile_interrupted_runs(&ctx).await, (1, 0));
+    let started = Instant::now();
+    let run = loop {
+        let r = repo.get_run(&run.id).await.unwrap();
+        if matches!(r.status, RunStatus::Success | RunStatus::Error) {
+            break r;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "the resumed run settles"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    for id in ["a", "b"] {
+        let st = run.nodes.iter().find(|n| n.node_id == id).unwrap();
+        assert_eq!(st.status, NodeStatus::Success, "{id}: {:?}", st.error);
+        assert!(
+            st.logs
+                .iter()
+                .any(|l| l.contains("adopted after daemon restart")),
+            "{id}: {:?}",
+            st.logs
+        );
+    }
+    assert_eq!(run.status, RunStatus::Success);
+}

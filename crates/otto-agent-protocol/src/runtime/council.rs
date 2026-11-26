@@ -429,10 +429,9 @@ impl AgentRuntime {
             .ok_or_else(|| Error::Invalid("this thread is not part of a council".into()))?;
         let root = me.parent_id.clone().unwrap_or_else(|| me.id.clone());
         let members = self
-            .list(&me.workspace_id, Some(&me.created_by))
+            .linked(&root)
             .await?
             .into_iter()
-            .filter(|s| s.id == root || s.parent_id.as_ref() == Some(&root))
             .filter(|s| s.council().is_some_and(|c| c.id == council.id))
             .collect();
         Ok((council, members))

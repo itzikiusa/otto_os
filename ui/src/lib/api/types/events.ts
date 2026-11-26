@@ -18,9 +18,6 @@ import type {
   DesignAssistMode, DesignAssistStatus,
 } from './design-assist';
 import type {
-  GoalLoopPhase, GoalLoopStatus,
-} from './goal-loops';
-import type {
   ApiAutomationRun,
 } from './k8s-monitor';
 import type {
@@ -34,6 +31,7 @@ import type {
 } from './transcript';
 import type {
   NodeRunState,
+  RunOverview,
 } from './workflows';
 
 /** Per-connection `/ws/events` frame (ws.md "Lag resync frame"): the daemon
@@ -139,17 +137,6 @@ export type OttoEvent =
       review_id: Id;
       status: string;
     }
-  /** A goal loop advanced (status/phase/iteration change, after each evaluation,
-   *  or when an executor's live state flips). Drives the Loops UI re-fetch. */
-  | {
-      type: 'goal_loop_updated';
-      workspace_id: Id;
-      loop_id: Id;
-      status: GoalLoopStatus;
-      phase: GoalLoopPhase;
-      current_iteration: number;
-      progress_pct: number;
-    }
   /** A product story AI run (analysis/rewrite/plan/testcases) completed or
    *  changed. `section` ∈ "analysis" | "rewrite" | "plan" | "testcases".
    *  `status` mirrors run status ("done" | "error" | "partial").
@@ -203,6 +190,8 @@ export type OttoEvent =
       nodes_done?: number;
       nodes_total?: number;
       waiting_approval?: boolean;
+      /** The run's computed overview (≤ 4 KiB); absent from emitters that do not compute it. */
+      overview?: RunOverview | null;
     }
   /** A skill-evaluation run reached a terminal state (done/error/cancelled).
    *  Lets the Skill-Eval UI replace its 2s×600 fixed poll with event-driven

@@ -7,7 +7,7 @@
   import { auth } from '../lib/stores/auth.svelte';
   import { router } from '../lib/router.svelte';
   import { machineStatus } from '../modules/settings/machineStatus.svelte';
-  import { detailRows, queuedLine } from '../modules/settings/machineStatusText';
+  import { busyNote, detailRows, queuedLine } from '../modules/settings/machineStatusText';
 
   interface Props {
     onclose: () => void;
@@ -24,8 +24,8 @@
   {@const s = machineStatus.status}
   <Modal title="Machine" {onclose}>
     <div class="mc-body" data-testid="machine-details">
-      {#if s.busy && s.busy_reason}
-        <p class="mc-note warn"><Icon name="warning" size={12} /> Busy: {s.busy_reason}. New background agents wait their turn; your own sessions never do.</p>
+      {#if busyNote(s)}
+        <p class="mc-note warn"><Icon name="warning" size={12} /> {busyNote(s)}</p>
       {/if}
       {#if s.low_disk}
         <p class="mc-note warn"><Icon name="warning" size={12} /> Low disk space. Otto deletes nothing on its own.</p>

@@ -1,6 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
 import { expectNoHorizontalOverflow, expectFullyInViewport } from './helpers';
+import { openEditor } from './workflowsUi';
 
 async function workspace(page: Page) {
   const { ctx, base } = await apiCtx();
@@ -12,7 +13,7 @@ async function workspace(page: Page) {
   }, id);
   return id;
 }
-for (const route of ['personal-agents', 'loops']) {
+for (const route of ['personal-agents']) {
   test(`${route}: first run offers workspace setup`, async ({ page }) => {
     await page.route('**/api/v1/workspaces', r => r.fulfill({ json: [] }));
     await page.setViewportSize({ width: 375, height: 812 });
@@ -65,50 +66,6 @@ test('agent form: losing workspace preserves typed fields and explains how to sa
   // The form's error line has no live role; it is spoken via the announcer.
   await expect(dialog.locator('.qc-err')).toContainText('workspace');
   await expect(page.getByTestId('announcer-assertive')).toContainText('Select a workspace');
-});
-
-test('goal definition: workspace switching asks before discarding the complete draft', async ({ page }) => {
-  const originalId = await workspace(page);
-  const { ctx, base } = await apiCtx();
-  const nextId = await seedWorkspace(ctx, base, 'Goal draft destination');
-  await ctx.dispose();
-  let writes = 0;
-  await page.route('**/api/v1/**/goal-loops**', route => {
-    if (route.request().method() !== 'GET') {
-      writes++;
-      return route.fulfill({ status: 503, json: { message: 'Unexpected goal mutation' } });
-    }
-    return route.continue();
-  });
-  await page.goto('/#/loops');
-  await page.getByRole('button', { name: 'New goal loop', exact: true }).click();
-  await page.locator('#gl-seed').fill('Compare approaches and retain this draft');
-  await page.locator('#gl-mode').selectOption('research');
-  const switchWorkspace = () => page.evaluate(async (id) => {
-    const path = '/src/lib/stores/workspace.svelte.ts';
-    const { ws } = await import(/* @vite-ignore */ path);
-    // Exercise the same guarded public operation used by the workspace picker.
-    void ws.select(id);
-  }, nextId);
-  const currentWorkspace = () => page.evaluate(async () => {
-    const path = '/src/lib/stores/workspace.svelte.ts';
-    return (await import(/* @vite-ignore */ path)).ws.currentId;
-  });
-  await switchWorkspace();
-  const discard = page.getByRole('dialog', { name: 'Discard goal loop', exact: true });
-  await expect(discard).toContainText('The draft and your edits are lost');
-  await discard.getByRole('button', { name: 'Cancel', exact: true }).click();
-  await expect(discard).toHaveCount(0);
-  expect(await currentWorkspace()).toBe(originalId);
-  await expect(page.locator('#gl-seed')).toHaveValue('Compare approaches and retain this draft');
-  await expect(page.locator('#gl-mode')).toHaveValue('research');
-  await expect(page.getByRole('button', { name: 'Draft goal', exact: true })).toBeEnabled();
-  expect(writes).toBe(0);
-  await switchWorkspace();
-  await discard.getByRole('button', { name: 'Discard', exact: true }).click();
-  await expect.poll(currentWorkspace).toBe(nextId);
-  await expect(page.locator('#gl-seed')).toHaveCount(0);
-  expect(writes).toBe(0);
 });
 
 test('rooms: failed messages never claim an empty conversation and Retry recovers', async ({ page }) => {
@@ -186,19 +143,18 @@ test.describe('loaded automation visual and interaction fixtures', () => {
       await page.goto('/#/scheduled-tasks');
       await expect(page.getByText('Weekly review — security and release readiness', { exact: true }).first()).toBeVisible();
       await shot('scheduled-tasks');
-      await page.goto('/#/workflows');
-      await page.getByTestId(`wf-row-${workflowId}`).locator('.row-main').click();
+      await openEditor(page, workflowId);
       await shot('workflow');
-      // Runs lives in the workflow's ⋯ menu; on a narrow header that ⋯ is
-      // itself folded into the page header's overflow as "More actions…".
+      // "Runs of this workflow" (the editor's ⋯; on a narrow header that ⋯ is
+      // itself folded into the overflow as "More actions…") opens Runs filtered.
       await page.getByRole('button', { name: 'More actions', exact: true }).first().click();
-      const runsItem = page.getByRole('menuitem', { name: 'Runs', exact: true });
+      const runsItem = page.getByRole('menuitem', { name: 'Runs of this workflow', exact: true });
       const nested = page.getByRole('menuitem', { name: 'More actions…', exact: true });
       await runsItem.or(nested).first().waitFor();
       if (await nested.isVisible()) await nested.click();
       await runsItem.click();
-      await page.getByTestId('run-item').first().click();
-      await expect(page.locator('.timeline')).toBeVisible();
+      await page.getByTestId('wf-run-row').first().getByRole('button').first().click();
+      await expect(page.getByTestId('wf-run-page')).toBeVisible();
       await shot('workflow-run');
       await page.route(`**/api/v1/workspaces/${wsId}/goal-loops`, route => route.fulfill({ json: Array.from({ length: 12 }, (_, i) => ({
         id: `loop-${i}`, workspace_id: wsId, name: `Release readiness ${i + 1} ${'long goal title '.repeat(8)}`, definition: { summary: 'Verify every delivery condition and preserve the evidence. '.repeat(6), acceptance_criteria: [] },
@@ -238,35 +194,3 @@ test('rooms: phone conversation keeps its header and composer in view', async ({
   await expect.poll(() => page.getByRole('log', { name: 'Channel messages' }).evaluate(el => el.scrollHeight > el.clientHeight)).toBe(true);
 });
 
-test('goal research flow: draft, edit, launch and inspect within a phone viewport', async ({ page }) => {
-  const id = await workspace(page);
-  await page.setViewportSize({ width: 375, height: 812 });
-  const agent = { name: 'Researcher', provider: 'claude', model: '', prompt_extra: '' };
-  const draft = {
-    definition: { title: 'Research release options', summary: 'Compare two options with evidence.', acceptance_criteria: [{ id: 'c1', text: 'Compare the options', verify: 'Read the report', verify_kind: 'agent', verify_cmd: null }] },
-    suggested_limits: { max_iterations: 3, max_runtime_secs: 600, per_phase_timeout_secs: 300, max_cost_usd: null, max_attempts_per_executor: 3 },
-    suggested_config: { executors: [agent], planner: agent, evaluator: agent, digester: agent, definer: agent, mode: 'research' },
-  };
-  let launched: Record<string, unknown> | null = null;
-  const loop = { id: 'review-loop', workspace_id: id, name: draft.definition.title, repo_path: '', definition: draft.definition, limits: draft.suggested_limits, config: draft.suggested_config, status: 'paused', phase: 'planning', current_iteration: 0, iterations_started: 0, progress_pct: 0, context_digest: '', elapsed_secs: 0, cost_usd: 0, created_by: 'review', created_at: '2026-09-25T12:00:00Z', updated_at: '2026-09-25T12:00:00Z' };
-  await page.route(`**/api/v1/workspaces/${id}/goal-loops/define`, r => r.fulfill({ json: draft }));
-  await page.route(`**/api/v1/workspaces/${id}/goal-loops`, async r => {
-    if (r.request().method() === 'POST') { launched = r.request().postDataJSON(); await r.fulfill({ json: loop }); }
-    else await r.fulfill({ json: launched ? [loop] : [] });
-  });
-  // The detail is read as `/goal-loops/{id}?summary=true`.
-  await page.route(/\/api\/v1\/goal-loops\/review-loop(\?|$)/, r => r.fulfill({ json: { loop, iterations: [] } }));
-  await page.goto('/#/loops');
-  await page.getByRole('button', { name: 'New goal loop', exact: true }).click();
-  await page.locator('#gl-seed').fill('Compare release options');
-  await page.locator('#gl-mode').selectOption('research');
-  await page.getByRole('button', { name: 'Draft goal', exact: true }).click();
-  await expect(page.locator('#gl-name')).toHaveValue('Research release options');
-  await page.locator('#gl-name').fill('Reviewed research plan');
-  await expectNoHorizontalOverflow(page);
-  await page.getByRole('button', { name: 'Launch loop', exact: true }).click();
-  await expect.poll(() => launched?.name).toBe('Reviewed research plan');
-  await expect(page.getByRole('heading', { name: 'Research release options', exact: true })).toBeVisible();
-  await expectNoHorizontalOverflow(page);
-  await page.screenshot({ path: '/tmp/otto-ux-r2-automation-screens/phone-goal-detail.png' });
-});

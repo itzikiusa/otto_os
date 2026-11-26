@@ -1,5 +1,6 @@
 import { test, expect, type APIRequestContext } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
+import { headerMenu, openEditor } from './workflowsUi';
 
 // The second way a workflow is scheduled: a Scheduled task of kind `workflow`.
 // Its Triggers panel says so ("Also started by scheduled task …") and links to
@@ -58,9 +59,8 @@ test('a workflow launched by a scheduled task names it in Triggers, and the link
   expect(t.ok(), await t.text()).toBeTruthy();
   const taskId = (await t.json()).id as string;
 
-  await page.goto(`/#/workflows/${wfId}`);
-  await page.locator('[data-testid="page-header"]').getByRole('button', { name: 'More actions' }).click();
-  await page.locator('.ctx-menu').getByRole('menuitemcheckbox', { name: 'Triggers', exact: true }).click();
+  await openEditor(page, wfId);
+  await headerMenu(page, 'Triggers');
 
   const line = page.getByTestId('scheduled-by');
   await expect(line).toBeVisible({ timeout: 15_000 });

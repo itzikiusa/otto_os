@@ -456,6 +456,37 @@ previous provider identity is restored for resume, and the draft stays armed.
   **Compare answers with ▸** (`runtime/PaneStrip.svelte`,
   `runtime/paneStrip.ts`, `runtime/councilStore.svelte.ts`).
 
+## Threads that Workflows run
+
+A workflow's agent steps, a review's reviewers and summarizer, and a goal's
+Work and Check turns run on this same runtime as **engine threads** — but
+they are not yours to steer, so they are kept out of this page:
+
+- **Not in any list here.** An engine thread (its `meta.source` is
+  `workflow`, `review` or `review_summarizer`) is left out of every Threads
+  list — the inbox, History, the ⌘K thread list — and so is each sub-thread
+  its agent opens. You read one on its run's page — **Workflows → a run → a step
+  → Conversation** — where it is embedded **read-only**: no composer, no
+  **Open in Threads**; its approval and question cards stay answerable.
+- **Sub-threads.** A step's agent can open sub-threads like any thread
+  (`otto.thread_open`, or its provider's own subagents), at most **4** open at
+  a time and none while the Mac is critically short of memory. They inherit
+  the step's run, show as rows under the step, and are closed with it.
+  `otto.thread_close` with `remove: true` deletes a sub-thread the agent
+  opened once it has answered (see
+  [Threads inside a thread](threads-structured-runtime.md#threads-inside-a-thread)).
+- **Closed and removed by the run, not by you.** A step's thread is closed
+  when the step settles and kept for **24 hours** after a successful run,
+  **7 days** after a failed or canceled one (two settings); then the daemon
+  deletes it and the run keeps a summary. Your own threads are never touched
+  by this.
+- **They count at the machine.** An engine thread's agent is counted at the
+  same machine admission gate as every other agent Otto runs; a step waits
+  there for its place, and its run page says why.
+
+How a step runs on a thread, the retention settings and the runner switch:
+[Workflows](./workflows.md#how-an-agent-step-runs).
+
 ## Approvals
 
 - **Attention dock.** What the agent waits on — an approval, a question form

@@ -5,7 +5,7 @@
 // `refreshActiveWorkflowRuns`, `applyWorkflowRunEvent`) for existing callers.
 
 import { listActiveWorkflowRuns } from '../api/workflows';
-import type { ActiveWorkflowRun, Id } from '../api/types';
+import type { ActiveWorkflowRun, Id, RunOverview } from '../api/types';
 
 /** The `workflow_run_updated` fields the list needs. */
 export interface WorkflowRunEvent {
@@ -17,6 +17,8 @@ export interface WorkflowRunEvent {
   waiting_approval?: boolean;
   /** The changed node's summary (only its id + status are read here). */
   node?: { node_id: string; status: string } | null;
+  /** The run's computed overview (Runs inbox words, Needs you). */
+  overview?: RunOverview | null;
 }
 
 const TERMINAL = new Set(['success', 'error', 'canceled']);
@@ -26,11 +28,19 @@ class WorkflowRunsStore {
   list: ActiveWorkflowRun[] = $state([]);
   /** The workspace `list` belongs to; a late response for another is dropped. */
   private workspaceId: Id | null = null;
+  /** The newest list read: an older one answering later is dropped. */
+  private seq = 0;
+  /** Runs an event settled, with the `seq` it landed at: a list read started
+   *  at or before that never brings them back; a later one (a retry in place,
+   *  a reconnect's resync) is newer than the event and does. */
+  private settled = new Map<Id, number>();
 
   /** Forget the list (identity change, workspace switch, zero-workspace mode). */
   clear(workspaceId: Id | null = null): void {
     this.workspaceId = workspaceId;
     this.list = [];
+    this.settled.clear();
+    this.seq++;
   }
 
   /** Reload the runs of `workspaceId`. Cheap query; called on workspace switch
@@ -38,30 +48,44 @@ class WorkflowRunsStore {
    *  count stay live without per-page polling. */
   async refresh(workspaceId: Id | null): Promise<void> {
     this.workspaceId = workspaceId;
+    const seq = ++this.seq;
     if (!workspaceId) {
       this.list = [];
       return;
     }
     try {
       const runs = await listActiveWorkflowRuns(workspaceId);
-      // Guard against an out-of-order response after a workspace switch.
-      if (this.workspaceId === workspaceId) this.list = runs;
+      // Guard against an out-of-order response (an older read, a workspace switch).
+      if (seq !== this.seq || this.workspaceId !== workspaceId) return;
+      // Events that landed while it was in flight are newer than it.
+      const known = new Map(this.list.map((r) => [r.run_id, r]));
+      for (const [id, at] of this.settled) if (at < seq) this.settled.delete(id);
+      this.list = runs
+        .filter((r) => !this.settled.has(r.run_id))
+        .map((r) => {
+          const cur = known.get(r.run_id);
+          return cur && (cur.overview?.rev ?? 0) > (r.overview?.rev ?? 0) ? cur : r;
+        });
     } catch {
       /* transient; the next event re-fetches */
     }
   }
 
   /** Apply a `workflow_run_updated` WS event IN PLACE: update a known run's
-   *  status/progress/approval flag, drop it on a terminal status, and fall back
+   *  status/progress/approval flag/overview, drop it on a terminal status —
+   *  unless the overview says it is held (paused, blocked, out of budget: a
+   *  held run is settled but stays in the Runs inbox, DR-101) — and fall back
    *  to a full refetch only for runs the list doesn't know yet (or events from
    *  an older daemon without progress fields, signalled by `nodes_total` 0/absent). */
   apply(ev: WorkflowRunEvent, currentWorkspaceId: Id | null): void {
     if (ev.workspace_id !== currentWorkspaceId) return;
     const idx = this.list.findIndex((r) => r.run_id === ev.run_id);
-    if (TERMINAL.has(ev.status)) {
+    if (TERMINAL.has(ev.status) && !ev.overview?.hold) {
+      this.settled.set(ev.run_id, this.seq);
       if (idx >= 0) this.list.splice(idx, 1);
       return;
     }
+    this.settled.delete(ev.run_id);
     if (idx < 0) {
       // A run the list doesn't know yet (started elsewhere) — one full refetch
       // brings it in with its workflow name.
@@ -75,6 +99,7 @@ class WorkflowRunsStore {
       r.nodes_total = ev.nodes_total;
     }
     if (ev.waiting_approval !== undefined) r.waiting_approval = ev.waiting_approval;
+    if (ev.overview && (ev.overview.rev ?? 0) >= (r.overview?.rev ?? 0)) r.overview = ev.overview;
     // The current step changed (a new step started, or the current one
     // settled): refetch for its name. A few times per run, not per log line.
     const n = ev.node;

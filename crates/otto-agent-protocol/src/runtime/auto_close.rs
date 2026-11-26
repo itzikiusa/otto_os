@@ -72,7 +72,7 @@ fn idle_enough(st: &State, cutoff: DateTime<Utc>) -> bool {
 /// Whether a thread's agent process may be released now: it has one, nothing
 /// is starting or queued, and [`idle_enough`] for its cutoff (`minutes` idle,
 /// a child thread at most [`CHILD_THREAD_IDLE_RELEASE_MINUTES`]).
-fn releasable(st: &State, minutes: u64, now: DateTime<Utc>) -> bool {
+fn releasable(live: &Live, st: &State, minutes: u64, now: DateTime<Utc>) -> bool {
     let minutes = if st.session.child_of().is_some() {
         minutes.min(CHILD_THREAD_IDLE_RELEASE_MINUTES)
     } else {
@@ -83,9 +83,16 @@ fn releasable(st: &State, minutes: u64, now: DateTime<Utc>) -> bool {
         .flatten()
         .and_then(chrono::TimeDelta::try_minutes)
         .and_then(|d| now.checked_sub_signed(d));
+    // Not while the agent may still start its own turn after background
+    // work, nor while a sub-thread's answer is on its way.
+    let grace_over = st
+        .background_ended_idle_at
+        .is_none_or(|t| t.elapsed() >= super::AUTO_TURN_GRACE);
     st.proc.is_some()
         && st.starting == 0
         && st.proj.queue.is_empty()
+        && grace_over
+        && live.pending_wakes().is_empty()
         && cutoff.is_some_and(|c| idle_enough(st, c))
 }
 
@@ -93,7 +100,7 @@ fn releasable(st: &State, minutes: u64, now: DateTime<Utc>) -> bool {
 /// SIGKILL past the grace; a held child's holder exits with it, so a restart
 /// finds nothing to adopt) and revoke its per-spawn credential, leaving the
 /// thread open and `dormant`.
-fn release_locked(inner: &Arc<Inner>, live: &Live, st: &mut State) {
+pub(super) fn release_locked(inner: &Arc<Inner>, live: &Live, st: &mut State) {
     let Some(p) = st.proc.take() else {
         return;
     };
@@ -113,7 +120,7 @@ impl AgentRuntime {
             .inner
             .live
             .iter()
-            .filter(|e| releasable(&e.value().lock(), minutes, now))
+            .filter(|e| releasable(e.value(), &e.value().lock(), minutes, now))
             .map(|e| (e.key().clone(), Arc::clone(e.value())))
             .collect();
         let mut released = Vec::new();
@@ -122,7 +129,7 @@ impl AgentRuntime {
             // first (and the process stays) or respawns it.
             let _prompt = live.prompt_lock.lock().await;
             let mut st = live.lock();
-            if releasable(&st, minutes, now) {
+            if releasable(&live, &st, minutes, now) {
                 release_locked(&self.inner, &live, &mut st);
                 released.push(id);
             }

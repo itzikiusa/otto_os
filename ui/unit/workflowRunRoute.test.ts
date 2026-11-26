@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseRunRoute, runDeepLink, runOrigin, runRoutePath } from '../src/modules/workflows/runRoute.ts';
+import { parseRunRoute, parseWorkflowsRoute, runDeepLink, runOrigin, runRoutePath } from '../src/modules/workflows/runRoute.ts';
 
 test('the run route names a workflow and a run', () => {
   assert.deepEqual(parseRunRoute(['workflows', 'wf1', 'runs', 'r9']), { workflowId: 'wf1', runId: 'r9' });
@@ -30,4 +30,25 @@ test('a chat-started run says where it came from', () => {
   assert.equal(runOrigin({ trigger: 'schedule', result_channel: 'slack', result_chat: 'C1' }), null);
   assert.equal(runOrigin(null), null);
   assert.equal(runOrigin('text'), null);
+});
+
+test('a run link can name the open step and one of its reviewers', () => {
+  assert.deepEqual(parseRunRoute(['workflows', 'wf1', 'runs', 'r9', 'n7']), { workflowId: 'wf1', runId: 'r9', nodeId: 'n7' });
+  assert.deepEqual(parseRunRoute(['workflows', 'wf1', 'runs', 'r9', 'n7', 'correctness']), { workflowId: 'wf1', runId: 'r9', nodeId: 'n7', childId: 'correctness' });
+  assert.equal(runRoutePath('wf1', 'r9', 'n7', 'a b'), 'workflows/wf1/runs/r9/n7/a%20b');
+  assert.equal(runRoutePath('wf1', 'r9', null, 'x'), 'workflows/wf1/runs/r9');
+  const parts = runRoutePath('wf1', 'r9', 'n7', 'c').split('/').map(decodeURIComponent);
+  assert.deepEqual(parseRunRoute(parts), { workflowId: 'wf1', runId: 'r9', nodeId: 'n7', childId: 'c' });
+});
+
+test('every Workflows address names its screen, and old links keep landing', () => {
+  assert.deepEqual(parseWorkflowsRoute(['workflows']), { view: 'runs' });
+  assert.deepEqual(parseWorkflowsRoute(['workflows', 'all']), { view: 'list' });
+  assert.deepEqual(parseWorkflowsRoute(['workflows', 'wf1']), { view: 'editor', workflowId: 'wf1' });
+  assert.deepEqual(parseWorkflowsRoute(['workflows', 'wf1', 'optimize']), { view: 'optimize', workflowId: 'wf1' });
+  // Today's notice / "Copy link" format opens the run page.
+  assert.deepEqual(parseWorkflowsRoute(['workflows', 'wf1', 'runs', 'r9']), { view: 'run', workflowId: 'wf1', runId: 'r9' });
+  assert.deepEqual(parseWorkflowsRoute(['workflows', 'wf1', 'runs', 'r9', 'n7', 'c']), { view: 'run', workflowId: 'wf1', runId: 'r9', nodeId: 'n7', childId: 'c' });
+  // A runs segment without a run stays on the workflow.
+  assert.deepEqual(parseWorkflowsRoute(['workflows', 'wf1', 'runs']), { view: 'editor', workflowId: 'wf1' });
 });

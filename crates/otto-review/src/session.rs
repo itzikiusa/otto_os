@@ -161,10 +161,10 @@ pub fn typed_reviewer_prompt(
 pub fn augment_prompt(base_prompt: &str, findings_path: &str) -> String {
     format!(
         "{base_prompt}\n\n---\nWhen you have finished reviewing, write your findings as a JSON \
-         array (the exact schema described above) to this absolute file path, overwriting any \
-         existing content:\n\n{findings_path}\n\nWrite ONLY the JSON array (no prose, \
-         no markdown fence). Write the complete array to a sibling temporary file, then \
-         atomically rename it to the path above as your final action."
+         array (the exact schema described above) {}\n\n{findings_path}\n\nWrite ONLY the JSON \
+         array (no prose, no markdown fence). Write the complete array to a sibling temporary \
+         file, then atomically rename it to the path above as your final action.",
+        otto_core::finding::FINDINGS_PATH_INTRO
     )
 }
 
@@ -891,8 +891,11 @@ pub async fn run_agent_session_with_recovery(
     skills_add_dir: Option<&str>,
     // Orchestrator lens slugs (see `run_agent_session`); empty for fan-out.
     lens_slugs: &[String],
+    // The review's thread runner; `None` = the terminal path (frozen).
+    threads: Option<&crate::thread_run::Threads>,
 ) -> AgentRunResult {
     let attempts = effective_max_attempts(max_attempts);
+    let threads = threads.filter(|t| (t.has_driver)(provider));
     // Shared retry loop (kills the prior session + backs off between attempts).
     // The `cancel` flag, when set by a Cancel-review request, short-circuits the
     // loop with `Stopped` and is not retried.
@@ -910,15 +913,39 @@ pub async fn run_agent_session_with_recovery(
         .ok();
     let prompt_path = prompt_file.as_ref().map(|f| f.path());
     let prompt_refused = std::sync::atomic::AtomicBool::new(false);
+    // A thread attempt's failure in the runner's words (the row note names it).
+    let failure = std::sync::Mutex::new(None::<String>);
     let outcome = run_with_recovery_until(
         manager,
         attempts,
         &[REVIEW_RETRY_BACKOFF],
         cancel,
         give_up,
-        |_attempt| {
-            run_agent_session(
-                manager,
+        |_attempt| async {
+            let Some(threads) = threads else {
+                return run_agent_session(
+                    manager,
+                    reviews,
+                    states,
+                    ws,
+                    user,
+                    provider,
+                    model,
+                    cwd,
+                    review_id,
+                    agent_index,
+                    base_prompt,
+                    timeout,
+                    skills_add_dir,
+                    lens_slugs,
+                    prompt_path.as_deref(),
+                    &prompt_refused,
+                )
+                .await;
+            };
+            let dirs = review_skills_extra_dirs(&manager.cli_family(provider), skills_add_dir);
+            crate::thread_run::run_agent_thread(
+                threads,
                 reviews,
                 states,
                 ws,
@@ -930,16 +957,48 @@ pub async fn run_agent_session_with_recovery(
                 agent_index,
                 base_prompt,
                 timeout,
-                skills_add_dir,
+                dirs,
                 lens_slugs,
                 prompt_path.as_deref(),
-                &prompt_refused,
+                cancel,
+                &failure,
             )
+            .await
         },
     )
     .await;
     drop(prompt_file);
+    let refused = prompt_refused.load(std::sync::atomic::Ordering::Relaxed);
+    let failure = failure.into_inner().unwrap_or_default();
+    let (refused, failure) = (refused, failure.as_deref());
+    settle_run(
+        states,
+        reviews,
+        review_id,
+        agent_index,
+        lens_slugs,
+        outcome,
+        refused,
+        failure,
+    )
+    .await
+}
 
+/// Persist an agent row's terminal state ONCE from its final attempt
+/// (findings, note, score; `skipped` for a covered lens; `error` with the
+/// reason). `refused`: the last attempt's prompt never reached the agent.
+#[allow(clippy::too_many_arguments)]
+pub async fn settle_run(
+    states: &SharedStates,
+    reviews: &ReviewsRepo,
+    review_id: &str,
+    agent_index: usize,
+    lens_slugs: &[String],
+    outcome: RunOutcome,
+    refused: bool,
+    // The thread runner's own words for the last attempt's failure.
+    failure: Option<&str>,
+) -> AgentRunResult {
     // Persist terminal state ONCE (parse findings from the final raw result).
     if let Some(raw) = outcome.raw.as_deref() {
         let (mut findings, unreadable) = read_findings(raw).unwrap_or_default();
@@ -1000,11 +1059,14 @@ pub async fn run_agent_session_with_recovery(
             reason,
         }
     } else {
-        let refused = prompt_refused.load(std::sync::atomic::Ordering::Relaxed);
-        let note = if refused && outcome.reason == Some(FailReason::Exited) {
-            PROMPT_REFUSED_NOTE.to_string()
-        } else {
-            review_error_note(outcome.reason)
+        let note = match failure {
+            _ if refused && outcome.reason == Some(FailReason::Exited) => {
+                PROMPT_REFUSED_NOTE.to_string()
+            }
+            Some(why) if outcome.reason != Some(FailReason::Stopped) => {
+                format!("{}: {why}", review_error_note(outcome.reason))
+            }
+            _ => review_error_note(outcome.reason),
         };
         let reason = Some(note.clone());
         persist_agent(states, reviews, review_id, agent_index, move |s| {
@@ -1237,6 +1299,24 @@ mod tests {
             .ends_with("otto-review-r-2.json"));
     }
 
+    /// The fake agents find the findings path by the shared intro constant;
+    /// the reviewer's words stay exactly what they were.
+    #[test]
+    fn the_findings_hand_off_reads_as_before_and_names_the_path_after_the_shared_intro() {
+        assert_eq!(
+            augment_prompt("B", "/p.json"),
+            "B\n\n---\nWhen you have finished reviewing, write your findings as a JSON array \
+             (the exact schema described above) to this absolute file path, overwriting any \
+             existing content:\n\n/p.json\n\nWrite ONLY the JSON array (no prose, no markdown \
+             fence). Write the complete array to a sibling temporary file, then atomically rename \
+             it to the path above as your final action."
+        );
+        assert!(augment_prompt("B", "/p.json").contains(&format!(
+            "{}\n\n/p.json\n",
+            otto_core::finding::FINDINGS_PATH_INTRO
+        )));
+    }
+
     /// Reviewer prompts stored for the 2026-11-12 reviews were 130–154 KB; a
     /// paste that size never reached the agent. It goes by file now, for every
     /// provider; the typed pointer still names the findings path.
@@ -1350,6 +1430,7 @@ mod tests {
             lens_slugs: Vec::new(),
             score: None,
             score_reason: String::new(),
+            ..Default::default()
         }
     }
 

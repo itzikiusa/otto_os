@@ -148,6 +148,8 @@ export class RuntimeViews {
   projections: Record<string, RuntimeProjection> = projectionRecord();
   /** A failed first load of an open thread, by session id. */
   loadError = $state<Record<string, string>>({});
+  /** Threads that answered 404 (deleted) or 403 (not readable by this person), by session id. */
+  unavailable = $state<Record<string, 'deleted' | 'forbidden'>>({});
   /** A failed later resync (after a reconnect or a gap): the projection
    *  shown may be out of date, by session id. */
   staleError = $state<Record<string, string>>({});
@@ -232,6 +234,10 @@ export class RuntimeViews {
       if (this.staleError[id]) {
         const { [id]: _gone, ...stale } = this.staleError;
         this.staleError = stale;
+      }
+      if (this.unavailable[id]) {
+        const { [id]: _lost, ...rest } = this.unavailable;
+        this.unavailable = rest;
       }
       if (this.loadingOlder[id]) {
         const { [id]: _old, ...older } = this.loadingOlder;
@@ -469,6 +475,10 @@ export class RuntimeViews {
         const { [id]: _fresh, ...stale } = this.staleError;
         this.staleError = stale;
       }
+      if (this.unavailable[id]) {
+        const { [id]: _back, ...rest } = this.unavailable;
+        this.unavailable = rest;
+      }
       if (snapshotReload) {
         // The daemon's own snapshot is the truth: stop chasing what it never had.
         if (view.knownSequence > projection.lastSequence) view.knownSequence = projection.lastSequence;
@@ -500,6 +510,7 @@ export class RuntimeViews {
       else this.staleError = { ...this.staleError, [id]: loadErrorText(e) };
       // Gone or forbidden stays so: no retry (focus, a reconnect or Retry still read again).
       const status = (e as { status?: unknown } | null)?.status;
+      if (status === 403 || status === 404) this.unavailable = { ...this.unavailable, [id]: status === 404 ? 'deleted' : 'forbidden' };
       if (status !== 401 && status !== 403 && status !== 404) this.scheduleRetry(id, view);
     }
   }

@@ -13,6 +13,8 @@ license.workspace = true
 # on no otto-server code.
 
 [dependencies]
+# The `step::StepRunner` trait.
+async-trait.workspace = true
 otto-core.workspace = true
 otto-sessions.workspace = true
 otto-orchestrator.workspace = true
@@ -26,6 +28,7 @@ chrono.workspace = true
 futures-util.workspace = true
 # Stop kills the headless draft's whole process group (`headless::text_turn`).
 libc = "0.2.191"
+serde.workspace = true
 serde_json.workspace = true
 # Per-turn reply directories (`session_turn::reply`).
 tempfile.workspace = true

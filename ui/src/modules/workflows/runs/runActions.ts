@@ -1,0 +1,93 @@
+// The run page's writes (ux.md §4.5, engine.md §10.1, goal.md): thin calls
+// with the run page's confirmations and toasts. Every one leaves the run on
+// screen live through RunSync's event path.
+import { api } from '../../../lib/api/client';
+import { mcpCpApi } from '../../../lib/api/mcp';
+import { rereviewWorkflowRun, retryRunNode } from '../../../lib/api/workflows';
+import { confirmer } from '../../../lib/confirm.svelte';
+import { loadIdeRuntimeSessionPort } from '../../../lib/runtimeThreadPort';
+import { toasts } from '../../../lib/toast.svelte';
+import { toastError } from '../../../lib/toastError';
+import { router } from '../../../lib/router.svelte';
+import type { Attention, Review } from '../../../lib/api/types';
+
+const run = (id: string) => `/workflow-runs/${encodeURIComponent(id)}`;
+
+async function attempt(what: string, done: string | null, call: () => Promise<unknown>): Promise<boolean> {
+  try {
+    await call();
+    if (done) toasts.success(done);
+    return true;
+  } catch (e) {
+    toastError(`Couldn’t ${what}`, e);
+    return false;
+  }
+}
+
+/** "Retry step" re-runs the step and what follows it; "Retry only this step" just the step. */
+export function retryStep(runId: string, nodeId: string, downstream = true): Promise<boolean> {
+  return attempt('retry the step', 'Retrying the step', () => retryRunNode(runId, nodeId, downstream));
+}
+
+/** Stop a running run, after a confirmation. */
+export async function stopRun(runId: string): Promise<boolean> {
+  const ok = await confirmer.ask('Running agents are stopped; files written so far are kept.', { title: 'Stop run?', confirmLabel: 'Stop run', danger: true });
+  return ok && attempt('stop the run', 'Run stopped', () => api.post(`${run(runId)}/cancel`, {}));
+}
+
+/** Cancel a queued run: nothing started, no confirmation. */
+export function cancelQueued(runId: string): Promise<boolean> {
+  return attempt('cancel the run', 'Run canceled', () => api.post(`${run(runId)}/cancel`, {}));
+}
+
+export function skipStep(runId: string, nodeId: string): Promise<boolean> {
+  return attempt('skip the step', 'Step skipped', () => api.post(`${run(runId)}/nodes/${encodeURIComponent(nodeId)}/skip`, {}));
+}
+
+export function pauseRun(runId: string): Promise<boolean> {
+  return attempt('pause the run', 'Run paused', () => api.post(`${run(runId)}/pause`, {}));
+}
+
+/** Resume a held run; `extend` raises the loop's caps (new totals). */
+export function resumeRun(runId: string, extend?: { iterations?: number; active_s?: number }): Promise<boolean> {
+  return attempt('resume the run', 'Run resumed', () => api.post(`${run(runId)}/resume`, extend ? { extend } : {}));
+}
+
+/** "Add a note for the next step…": the note reaches the next agent step. */
+export async function steerRun(runId: string): Promise<boolean> {
+  const note = await confirmer.promptText('The next agent step reads this note before it starts.', { title: 'Add a note for the next step', confirmLabel: 'Add note', placeholder: 'Also check the migration rollback' });
+  return !!note?.trim() && attempt('add the note', 'Note added', () => api.post(`${run(runId)}/steer`, { note: note.trim() }));
+}
+
+export function rereview(runId: string): Promise<boolean> {
+  return attempt('start the re-review', 'Re-review started', () => rereviewWorkflowRun(runId));
+}
+
+/** Record a "you check it" criterion. */
+export function verifyCriterion(runId: string, nodeId: string, criterionId: string, met: boolean, evidence: string): Promise<boolean> {
+  return attempt('record the check', met ? 'Recorded as met' : 'Recorded as not met', () =>
+    api.post(`${run(runId)}/nodes/${encodeURIComponent(nodeId)}/criteria/${encodeURIComponent(criterionId)}/verify`, { met, evidence }));
+}
+
+/** Answer a step's approval where it was raised: a governed Otto MCP call
+ *  (`via: mcp`, `request_id` = the approval's id) in the MCP queue, with the
+ *  person's note; a provider request on the step's thread. */
+export function answerRequest(wait: Pick<Attention, 'via' | 'thread_id' | 'request_id'>, approve: boolean, note?: string | null): Promise<boolean> {
+  const { thread_id: threadId = '', request_id: requestId = '' } = wait;
+  return attempt(approve ? 'approve' : 'deny', null, async () => {
+    if (wait.via === 'mcp') {
+      await mcpCpApi.cpDecide(requestId, { approved: approve, ...(note?.trim() ? { note: note.trim() } : {}) });
+      return;
+    }
+    const port = await loadIdeRuntimeSessionPort();
+    await port.runtimeThreads.respond(threadId, requestId, approve ? 'accept' : 'decline');
+  });
+}
+
+/** "Open review": the review's page in Git (its repository from the review
+ *  itself when the step output does not name one), else the Git overview. */
+export async function openReview(reviewId: string, repoId: string | null): Promise<void> {
+  let repo = repoId;
+  if (!repo) repo = await api.get<Review>(`/reviews/${encodeURIComponent(reviewId)}`).then((r) => r.repo_id || null, () => null);
+  router.go(repo ? `git/${encodeURIComponent(repo)}/review/${encodeURIComponent(reviewId)}` : 'git');
+}

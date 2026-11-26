@@ -15,7 +15,7 @@ use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, error, info, warn};
 
-use crate::adapter::{Adapter, Inbound};
+use crate::adapter::{Adapter, Inbound, InboundAttachment};
 use crate::bridge::Bridge;
 use crate::health::Health;
 
@@ -507,6 +507,8 @@ fn seen_window(bot_token: &str) -> Arc<Mutex<DedupWindow>> {
 pub struct SlackAdapter {
     bot_token: String,
     http: reqwest::Client,
+    /// Web API origin (`https://slack.com/api`; a local fixture in tests).
+    api_base: String,
     /// The inbound message this adapter answers ([`Self::for_message`]): the
     /// exclusive end of [`Adapter::thread_history`].
     message_ts: Option<String>,
@@ -517,8 +519,22 @@ impl SlackAdapter {
         Self {
             bot_token: bot_token.into(),
             http: build_http_client(),
+            api_base: "https://slack.com/api".into(),
             message_ts: None,
         }
+    }
+
+    /// An adapter against a local Web API fixture.
+    #[cfg(test)]
+    fn with_base(bot_token: &str, base: &str) -> Self {
+        Self {
+            api_base: base.into(),
+            ..Self::new(bot_token)
+        }
+    }
+
+    fn api(&self, method: &str) -> String {
+        format!("{}/{method}", self.api_base)
     }
 
     /// The adapter for one inbound message (its `ts`), so a fresh agent's
@@ -560,7 +576,7 @@ impl Adapter for SlackAdapter {
 
         let resp = self
             .http
-            .post("https://slack.com/api/chat.postMessage")
+            .post(self.api("chat.postMessage"))
             .header("Authorization", format!("Bearer {}", self.bot_token))
             .json(&body)
             .send()
@@ -590,7 +606,7 @@ impl Adapter for SlackAdapter {
         }
         let resp = self
             .http
-            .post("https://slack.com/api/chat.postMessage")
+            .post(self.api("chat.postMessage"))
             .header("Authorization", format!("Bearer {}", self.bot_token))
             .json(&body)
             .send()
@@ -600,21 +616,25 @@ impl Adapter for SlackAdapter {
     }
 
     async fn edit(&self, chat: &str, message_id: &str, text: &str) -> anyhow::Result<()> {
-        let body = serde_json::json!({
+        self.update(serde_json::json!({
             "channel": chat,
             "ts": message_id,
             "text": text,
-        });
+        }))
+        .await
+    }
 
-        let resp = self
-            .http
-            .post("https://slack.com/api/chat.update")
-            .header("Authorization", format!("Bearer {}", self.bot_token))
-            .json(&body)
-            .send()
-            .await?;
-        api_json(resp, "chat.update").await?;
-        Ok(())
+    /// `chat.update` with mrkdwn on, cut to [`EDIT_MAX_CHARS`] after the
+    /// conversion (a longer text fails with `msg_too_long`).
+    async fn edit_formatted(&self, chat: &str, message_id: &str, text: &str) -> anyhow::Result<()> {
+        let text = crate::adapter::clip_chars(&crate::gfm::to_slack_mrkdwn(text), EDIT_MAX_CHARS);
+        self.update(serde_json::json!({
+            "channel": chat,
+            "ts": message_id,
+            "text": text,
+            "mrkdwn": true,
+        }))
+        .await
     }
 
     fn channel(&self) -> Channel {
@@ -643,12 +663,45 @@ impl Adapter for SlackAdapter {
             .get_upload_url_external(filename, content.len())
             .await?;
         self.put_bytes_to_upload_url(&upload_url, content).await?;
-        self.complete_upload_external(&file_id, filename, chat, thread)
+        self.complete_upload_external(&file_id, filename, chat, thread, None)
+            .await
+    }
+
+    /// [`Adapter::upload`] with the caption as the file's `initial_comment`.
+    async fn upload_with_caption(
+        &self,
+        chat: &str,
+        thread: Option<&str>,
+        filename: &str,
+        content: &[u8],
+        caption: &str,
+    ) -> anyhow::Result<()> {
+        let (upload_url, file_id) = self
+            .get_upload_url_external(filename, content.len())
+            .await?;
+        self.put_bytes_to_upload_url(&upload_url, content).await?;
+        let caption = crate::gfm::to_slack_mrkdwn(caption);
+        self.complete_upload_external(&file_id, filename, chat, thread, Some(&caption))
             .await
     }
 }
 
+/// Longest `chat.update` text Slack takes (it answers `msg_too_long` near 4,000).
+const EDIT_MAX_CHARS: usize = 3_900;
+
 impl SlackAdapter {
+    async fn update(&self, body: serde_json::Value) -> anyhow::Result<()> {
+        let resp = self
+            .http
+            .post(self.api("chat.update"))
+            .header("Authorization", format!("Bearer {}", self.bot_token))
+            .json(&body)
+            .send()
+            .await?;
+        api_json(resp, "chat.update").await?;
+        Ok(())
+    }
+
     /// Step 1 of the external-upload flow: `files.getUploadURLExternal`.
     ///
     /// Returns `(upload_url, file_id)`. The call is form-encoded with the
@@ -660,7 +713,7 @@ impl SlackAdapter {
     ) -> anyhow::Result<(String, String)> {
         let resp = self
             .http
-            .post("https://slack.com/api/files.getUploadURLExternal")
+            .post(self.api("files.getUploadURLExternal"))
             .header("Authorization", format!("Bearer {}", self.bot_token))
             .form(&[
                 ("filename", filename.to_string()),
@@ -720,6 +773,7 @@ impl SlackAdapter {
         filename: &str,
         channel_id: &str,
         thread: Option<&str>,
+        initial_comment: Option<&str>,
     ) -> anyhow::Result<()> {
         let files_json = serde_json::json!([{ "id": file_id, "title": filename }]).to_string();
 
@@ -730,10 +784,13 @@ impl SlackAdapter {
         if let Some(ts) = thread {
             params.push(("thread_ts", ts.to_string()));
         }
+        if let Some(c) = initial_comment {
+            params.push(("initial_comment", c.to_string()));
+        }
 
         let resp = self
             .http
-            .post("https://slack.com/api/files.completeUploadExternal")
+            .post(self.api("files.completeUploadExternal"))
             .header("Authorization", format!("Bearer {}", self.bot_token))
             .form(&params)
             .send()
@@ -1326,7 +1383,7 @@ fn drop_reason(event: &serde_json::Value) -> Option<&'static str> {
 /// everything downstream, workflow triggers included, reads plain text) with
 /// the leading bot mention stripped. Attachments are not part of it: only an
 /// admitted sender's files are downloaded ([`handle_event`]).
-fn slack_inbound(event: &serde_json::Value, integ: &Integration) -> Inbound {
+pub(crate) fn slack_inbound(event: &serde_json::Value, integ: &Integration) -> Inbound {
     let edited = event["subtype"].as_str() == Some("message_changed");
     let content = if edited { &event["message"] } else { event };
     let field = |k: &str| content[k].as_str().or_else(|| event[k].as_str());
@@ -1345,6 +1402,7 @@ fn slack_inbound(event: &serde_json::Value, integ: &Integration) -> Inbound {
             .map(str::to_string),
         text: decode_slack_text(strip_mention(content["text"].as_str().unwrap_or(""))),
         edited,
+        attachments: vec![],
     }
 }
 
@@ -1395,7 +1453,7 @@ async fn handle_event(
         return;
     }
     debug!(event_type, "slack: message-like event received");
-    let mut inbound = slack_inbound(event, integ);
+    let inbound = slack_inbound(event, integ);
 
     // The allowed-users gate runs HERE as well as in the bridge: before it,
     // anyone who could message the bot made the daemon download up to 50 MB
@@ -1417,29 +1475,9 @@ async fn handle_event(
         return;
     }
 
-    // Download any attached files to local paths so the agent can read them
-    // (Slack `url_private` needs the bot token, so the agent can't fetch them
-    // itself). Returns a note listing the saved paths, appended to the message.
-    let content = if inbound.edited {
-        &event["message"]
-    } else {
-        event
-    };
-    let files_note = collect_attachments(content, bot_token).await;
-
-    // Only skip when there is genuinely nothing to act on (no text AND no
-    // attachments). Everything else is forwarded.
-    let text = std::mem::take(&mut inbound.text);
-    inbound.text = match (text.is_empty(), files_note.is_empty()) {
-        (true, true) => {
-            info!(event_type, user = %inbound.user, "slack: no text or attachments, skipping");
-            return;
-        }
-        (false, true) => text,
-        (true, false) => format!(
-            "[The user sent attachment(s) with no message text — read them and act:]\n{files_note}"
-        ),
-        (false, false) => format!("{text}\n\n{files_note}"),
+    let Some(inbound) = with_attachments(event, inbound, bot_token).await else {
+        info!(event_type, "slack: no text or attachments, skipping");
+        return;
     };
     info!(
         workspace = %inbound.workspace_id,
@@ -1452,35 +1490,69 @@ async fn handle_event(
     bridge.handle(integ, adapter, inbound, permit).await;
 }
 
+/// The message text with a note on its attached files appended. Downloads
+/// any attached files to local paths so the agent can read them (Slack
+/// `url_private` needs the bot token, so the agent can't fetch them itself).
+/// `None` only when there is genuinely nothing to act on (no text AND no
+/// attachments); everything else is forwarded.
+pub(crate) async fn with_attachments(
+    event: &serde_json::Value,
+    mut inbound: Inbound,
+    bot_token: &str,
+) -> Option<Inbound> {
+    let content = if inbound.edited {
+        &event["message"]
+    } else {
+        event
+    };
+    let (files_note, attachments) = collect_attachments(content, bot_token).await;
+    inbound.attachments = attachments;
+    let text = std::mem::take(&mut inbound.text);
+    inbound.text = match (text.is_empty(), files_note.is_empty()) {
+        (true, true) => return None,
+        (false, true) => text,
+        (true, false) => format!(
+            "[The user sent attachment(s) with no message text — read them and act:]\n{files_note}"
+        ),
+        (false, false) => format!("{text}\n\n{files_note}"),
+    };
+    Some(inbound)
+}
+
 /// Download every file attached to a message to a local temp path and return a
 /// note (for the agent) listing the saved paths. Empty when there are no files.
 /// A file that can't be downloaded is still listed (with its permalink/URL) so
 /// the agent at least knows it exists — we never drop the message over it.
-async fn collect_attachments(content: &serde_json::Value, bot_token: &str) -> String {
+/// The same files come back as data, for a workflow run to copy (DR-109).
+async fn collect_attachments(
+    content: &serde_json::Value,
+    bot_token: &str,
+) -> (String, Vec<InboundAttachment>) {
     let files = match content["files"].as_array() {
         Some(f) if !f.is_empty() => f,
-        _ => return String::new(),
+        _ => return (String::new(), vec![]),
     };
     let client = build_download_client();
     // Up to ATTACHMENT_PARALLELISM downloads at once (a multi-file message
     // used to fetch them strictly one after another); notes keep the
     // message's file order.
     let mut notes: Vec<String> = Vec::with_capacity(files.len());
+    let mut attachments = Vec::with_capacity(files.len());
     for batch in files.chunks(ATTACHMENT_PARALLELISM) {
-        notes.extend(
-            futures_util::future::join_all(
-                batch.iter().map(|f| attachment_note(&client, f, bot_token)),
-            )
-            .await,
-        );
+        for (note, file) in futures_util::future::join_all(
+            batch.iter().map(|f| attachment_note(&client, f, bot_token)),
+        )
+        .await
+        {
+            notes.push(note);
+            attachments.push(file);
+        }
     }
-    if notes.is_empty() {
-        return String::new();
-    }
-    format!(
+    let note = format!(
         "[Attachment(s) from the user — read them from these local paths and act on them:]\n{}",
         notes.join("\n")
-    )
+    );
+    (note, attachments)
 }
 
 /// Download one attached file and describe it for the agent: its saved path,
@@ -1489,36 +1561,53 @@ async fn attachment_note(
     client: &reqwest::Client,
     f: &serde_json::Value,
     bot_token: &str,
-) -> String {
+) -> (String, InboundAttachment) {
     let name = f["name"].as_str().unwrap_or("file");
     let id = f["id"].as_str().unwrap_or("nofileid");
     let mimetype = f["mimetype"].as_str().unwrap_or("application/octet-stream");
     let url = f["url_private_download"]
         .as_str()
         .or_else(|| f["url_private"].as_str());
-    match url {
+    let mut file = InboundAttachment {
+        name: name.to_string(),
+        mime: mimetype.to_string(),
+        size_bytes: f["size"].as_u64().unwrap_or(0),
+        path: None,
+        error: None,
+    };
+    let note = match url {
         Some(u) => match download_slack_file(client, u, bot_token, id, name).await {
-            Ok(path) => format!("• {name} ({mimetype}) — saved to: {path}"),
+            Ok((path, written)) => {
+                let note = format!("• {name} ({mimetype}) — saved to: {}", path.display());
+                file.path = Some(path);
+                file.size_bytes = written;
+                note
+            }
             Err(e) => {
                 warn!("slack: failed to download attachment {name}: {e}");
+                file.error = Some(format!("could not download: {e}"));
                 let link = f["permalink"].as_str().unwrap_or(u);
                 format!("• {name} ({mimetype}) — could not download automatically; URL: {link}")
             }
         },
-        None => format!("• {name} ({mimetype}) — no download URL available"),
-    }
+        None => {
+            file.error = Some("no download URL available".into());
+            format!("• {name} ({mimetype}) — no download URL available")
+        }
+    };
+    (note, file)
 }
 
 /// GET a Slack `url_private` file (auth via the bot token) and save it under the
-/// temp dir, returning the absolute path. Filenames are sanitised so a crafted
-/// name can't escape the temp dir.
+/// temp dir, returning the absolute path and the bytes written. Filenames are
+/// sanitised so a crafted name can't escape the temp dir.
 async fn download_slack_file(
     client: &reqwest::Client,
     url: &str,
     bot_token: &str,
     id: &str,
     name: &str,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<(std::path::PathBuf, u64)> {
     let mut resp = client
         .get(url)
         .header("Authorization", format!("Bearer {bot_token}"))
@@ -1579,8 +1668,12 @@ async fn download_slack_file(
         let _ = tokio::fs::remove_file(&path).await;
         return Err(e);
     }
-    Ok(path.to_string_lossy().to_string())
+    Ok((path, written))
 }
+
+#[cfg(test)]
+#[path = "slack_edit_tests.rs"]
+mod edit_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1951,6 +2044,7 @@ mod tests {
             _thread: Option<&str>,
             _user: &str,
             text: &str,
+            _attachments: &[crate::adapter::InboundAttachment],
         ) -> Option<crate::workflow_trigger::WorkflowChatAck> {
             self.0.started.lock().unwrap().push(text.to_string());
             Some(crate::workflow_trigger::WorkflowChatAck {

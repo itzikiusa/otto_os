@@ -22,6 +22,8 @@ mod slack_history;
 pub mod slack_tools;
 pub mod slack_user_tokens;
 pub mod telegram;
+#[cfg(any(test, feature = "test-util"))]
+pub mod test_util;
 pub mod transcript;
 pub mod webhook;
 pub mod workflow_trigger;

@@ -25,15 +25,47 @@ pub fn selected_agents(
         } else if cfg.cross_provider_check {
             template.map(crate::engine::effective_providers).unwrap_or_else(|| pool.clone())
         } else { vec![pool[i % pool.len()].clone()] };
-        let model = template.filter(|a| a.provider == providers[0]).map(|a| a.model.clone()).unwrap_or_default();
+        let own = template.filter(|a| a.provider == providers[0]);
+        let model = own.map(|a| a.model.clone()).unwrap_or_default();
+        // The template's own pick stays with its provider when another one leads.
+        let mut picks = template.map(|a| a.picks.clone()).unwrap_or_default();
+        if let Some(a) = template.filter(|a| own.is_none() && providers.contains(&a.provider)) {
+            let pick = otto_core::domain::ModelPick { model: a.model.clone(), effort: a.effort.clone() };
+            picks.entry(a.provider.clone()).or_insert(pick);
+        }
         otto_core::domain::ReviewAgentCfg {
             name: lens.name.clone(), provider: providers[0].clone(), providers,
             model,
             prompt: format!("Selected because: {}\n{}\n{}\nOutput JSON findings with path, line, severity ({}), body. Include code-traced evidence and a concrete causal trigger in body.", lens.reason, lens.instructions, template.map(|a| a.prompt.as_str()).unwrap_or_default(), crate::contract::severity_legend()),
             // The method is the selected instructions. A skill is never required.
             skill: String::new(),
+            effort: own.map(|a| a.effort.clone()).unwrap_or_default(),
+            picks,
         }
     }).collect()
+}
+
+/// `scope_assessment: configured` (DECISIONS.md): the plan keeps only lenses
+/// a configured reviewer declares (case-insensitive, as the template lookup
+/// in [`selected_agents`]), in plan order — the scope agent may drop a
+/// declared lens, never add one. A plan left empty runs the configured lenses.
+pub fn keep_configured(
+    plan: &mut ReviewScopePlan,
+    cfg: &otto_core::api::ReviewConfig,
+    prior_ids: &[String],
+) {
+    if cfg.scope_assessment != otto_core::api::ScopeAssessment::Configured {
+        return;
+    }
+    let declared = |l: &ReviewScopeLens| {
+        cfg.agents
+            .iter()
+            .any(|a| a.name.eq_ignore_ascii_case(&l.name))
+    };
+    plan.lenses.retain(declared);
+    if plan.lenses.is_empty() {
+        *plan = configured_plan(cfg, prior_ids, "it kept none of the declared lenses");
+    }
 }
 
 pub fn validate(plan: &ReviewScopePlan) -> Result<(), String> {
@@ -348,11 +380,16 @@ fn json_kind(v: &serde_json::Value) -> &'static str {
 }
 
 /// Queued lenses consume no CLI process and cancellation does not wait for a
-/// busy sibling to release its slot.
+/// busy sibling to release its slot. `None` takes no slot: on the thread
+/// runner the machine's admission gate is the only limit (runtime.md §7.6) —
+/// a slot held while waiting there kept other reviews out of the gate's queue.
 pub async fn acquire_slot(
-    slots: std::sync::Arc<tokio::sync::Semaphore>,
+    slots: Option<std::sync::Arc<tokio::sync::Semaphore>>,
     cancel: &std::sync::atomic::AtomicBool,
-) -> Result<tokio::sync::OwnedSemaphorePermit, String> {
+) -> Result<Option<tokio::sync::OwnedSemaphorePermit>, String> {
+    let Some(slots) = slots else {
+        return Ok(None);
+    };
     let stopped = async {
         loop {
             if cancel.load(std::sync::atomic::Ordering::SeqCst) {
@@ -364,7 +401,7 @@ pub async fn acquire_slot(
     tokio::select! {
         biased;
         _ = stopped => Err("review cancelled while queued".into()),
-        permit = slots.acquire_owned() => permit.map_err(|e| e.to_string()),
+        permit = slots.acquire_owned() => permit.map(Some).map_err(|e| e.to_string()),
     }
 }
 
@@ -562,11 +599,14 @@ pub fn scope_summary_line(plan: &ReviewScopePlan) -> String {
 
 /// The review's only row while scope is assessed. Named for what it does:
 /// the panel labels an unnamed last row "Summarizer".
-pub fn scope_row(provider: &str, model: &str) -> otto_core::domain::ReviewAgentState {
+pub fn scope_row(
+    summarizer: &otto_core::domain::ReviewAgentCfg,
+) -> otto_core::domain::ReviewAgentState {
     otto_core::domain::ReviewAgentState {
         name: "Scope assessment".into(),
-        provider: provider.into(),
-        model: model.into(),
+        provider: summarizer.provider.clone(),
+        model: summarizer.model.clone(),
+        effort: summarizer.effort.clone(),
         status: "pending".into(),
         note: "Reading the diff and affected consumers to select lenses".into(),
         comment_count: 0,
@@ -577,6 +617,7 @@ pub fn scope_row(provider: &str, model: &str) -> otto_core::domain::ReviewAgentS
         lens_slugs: vec![],
         score: None,
         score_reason: String::new(),
+        ..Default::default()
     }
 }
 
@@ -995,7 +1036,7 @@ mod tests {
         let cancel = Arc::new(AtomicBool::new(false));
         let task = {
             let (slots, cancel) = (slots.clone(), cancel.clone());
-            tokio::spawn(async move { acquire_slot(slots, &cancel).await })
+            tokio::spawn(async move { acquire_slot(Some(slots), &cancel).await })
         };
         cancel.store(true, Ordering::SeqCst);
         assert!(

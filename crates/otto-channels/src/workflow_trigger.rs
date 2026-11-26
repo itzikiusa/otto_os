@@ -18,6 +18,8 @@
 
 use async_trait::async_trait;
 
+use crate::adapter::InboundAttachment;
+
 /// What the bridge should tell the channel after a workflow run was started.
 #[derive(Debug, Clone)]
 pub struct WorkflowChatAck {
@@ -31,6 +33,9 @@ pub struct WorkflowChatAck {
 pub trait WorkflowChatTrigger: Send + Sync {
     /// Returns `Some(ack)` if the message started a workflow run (the bridge then
     /// replies + skips normal session creation), else `None` (normal routing).
+    /// `attachments` are the files the listener downloaded for this message
+    /// ([`crate::adapter::Inbound::attachments`]) — the only files a run copies.
+    #[allow(clippy::too_many_arguments)]
     async fn try_start(
         &self,
         workspace_id: &str,
@@ -39,6 +44,7 @@ pub trait WorkflowChatTrigger: Send + Sync {
         thread: Option<&str>,
         user: &str,
         text: &str,
+        attachments: &[InboundAttachment],
     ) -> Option<WorkflowChatAck>;
 
     /// Returns `Some(ack)` if the message is a CONTROL command (`status` /
@@ -47,6 +53,8 @@ pub trait WorkflowChatTrigger: Send + Sync {
     /// routing. `None` ⇒ not a control command, or no active run matches this
     /// thread, so normal routing proceeds. Checked BEFORE `try_start` so a reply
     /// in a running run's thread controls it instead of starting a new run.
+    /// `attachments` as for [`Self::try_start`] (a steering `note` copies them).
+    #[allow(clippy::too_many_arguments)]
     async fn try_control(
         &self,
         workspace_id: &str,
@@ -55,8 +63,9 @@ pub trait WorkflowChatTrigger: Send + Sync {
         thread: Option<&str>,
         user: &str,
         text: &str,
+        attachments: &[InboundAttachment],
     ) -> Option<WorkflowChatAck> {
-        let _ = (workspace_id, channel, chat, thread, user, text);
+        let _ = (workspace_id, channel, chat, thread, user, text, attachments);
         None
     }
 

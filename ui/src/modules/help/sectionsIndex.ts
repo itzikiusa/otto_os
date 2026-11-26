@@ -24,11 +24,12 @@ const filmFiles = import.meta.glob<unknown>('../../lib/walkthroughs/film.json', 
 export const FILM: FilmManifest | null = parseFilmManifest(Object.values(filmFiles)[0]);
 
 /** Captions bundled with the app (`lib/walkthroughs/<name>.vtt`), keyed by file
- *  name. A bundled track plays from a same-origin blob: URL, which works even
- *  when the video host sends no CORS headers (GitHub release assets don't, so a
- *  remote <track> there can never load). */
-export const BUNDLED_CAPTIONS: Record<string, string> = Object.fromEntries(
-  Object.entries(
-    import.meta.glob<string>('../../lib/walkthroughs/*.vtt', { query: '?raw', import: 'default', eager: true }),
-  ).map(([p, raw]) => [p.split('/').pop() ?? p, raw]),
+ *  name and loaded when the film asks for them. A bundled track plays from a
+ *  same-origin blob: URL, which works even when the video host sends no CORS
+ *  headers (GitHub release assets don't, so a remote <track> there can never
+ *  load). */
+export const BUNDLED_CAPTIONS: Record<string, () => Promise<string>> = Object.fromEntries(
+  Object.entries(import.meta.glob<string>('../../lib/walkthroughs/*.vtt', { query: '?raw', import: 'default' })).map(
+    ([p, load]) => [p.split('/').pop() ?? p, load],
+  ),
 );

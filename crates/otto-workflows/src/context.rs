@@ -60,7 +60,7 @@ const OUTPUT_JSON_CAP: usize = 5 * 1024 * 1024;
 /// `{repo, type: "branch"|"worktree", name, source}`; resolution fills the
 /// rest. `error` marks an entry that could not be resolved — kept visible in
 /// the file rather than dropped, so a failing declaration is diagnosable.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RepoEntry {
     /// As declared: a repo id, name, or path.
     pub repo: String,
@@ -85,10 +85,31 @@ pub struct RepoEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worktree: Option<String>,
     /// Resolved base branch: declared `source`, else the detected default.
+    /// After `git_checkout` it is the merge-base SHA.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
+    /// The destination branch by name (`git_checkout`, or a Checkout agent
+    /// that writes it). Kept through every engine rewrite of `repos.json`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_branch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+/// Whether `name` is a bare file name in the run's context dir: not empty,
+/// not absolute, no `/`, `\\`, `..` or NUL (DR-002). Definition-supplied
+/// names (`script.output_file`, `post_review_comments.summary_files[]`) must
+/// be bare; validation rejects the rest at save.
+pub fn is_bare_name(name: &str) -> bool {
+    !matches!(name.trim(), "" | ".")
+        && !name.contains(['/', '\\', '\0'])
+        && !name.contains("..")
+        && !Path::new(name).is_absolute()
+}
+
+/// The step number of a step file name (`step12-review-iter2.md` → 12).
+pub fn step_no_of(name: &str) -> Option<u32> {
+    name.strip_prefix("step")?.split('-').next()?.parse().ok()
 }
 
 /// Parse the run input's `repos` array (tolerant: non-object items and
@@ -122,7 +143,7 @@ pub fn parse_repo_entries(v: &Value) -> Vec<RepoEntry> {
             source: get("source"),
             worktree: get("worktree"),
             base: get("base"),
-            error: None,
+            ..Default::default()
         });
     }
     out
@@ -420,19 +441,31 @@ pub fn agent_preamble(
 
 /// Handle on one run's context directory. `dir = None` = disabled (creation
 /// failed or intentionally off) — every method becomes a no-op so callers
-/// never branch. The repos registry lives here because the engine is the
-/// single writer (nodes run sequentially); a `std::sync::Mutex` (never held
-/// across an await) keeps it `Sync` for the shared `RunEnv`.
+/// never branch. Steps run side by side, so the repos registry is changed
+/// only through [`RunContextFiles::update_repos`]: its `std::sync::Mutex`
+/// (never held across an await) is held across reload → change → write, and
+/// every file is written to a temp name and renamed, so a reader never sees a
+/// half-written file.
 pub struct RunContextFiles {
     dir: Option<PathBuf>,
     run_id: String,
     repos: Mutex<Vec<RepoEntry>>,
-    /// `base_name` (no extension) of the last step `persist_step` recorded as
-    /// content-bearing: `error.is_none() && !is_utility_kind(kind)`. Source
-    /// for `write_final_output` — the run's deliverable is whatever the last
-    /// substantive, successful step left behind.
-    content_step: Mutex<Option<String>>,
+    /// `(step number, base_name)` of the content-bearing step
+    /// (`error.is_none() && !is_utility_kind(kind)`) with the highest step
+    /// number `persist_step` / `adopt_step` saw. Source for
+    /// `write_final_output`: the run's deliverable is the latest substantive,
+    /// successful step in run order — whichever finished last.
+    content_step: Mutex<Option<(u32, String)>>,
+    /// Per step number, the step numbers whose files it is told to read
+    /// ([`RunContextFiles::set_listed_steps`]); a step not in it lists all.
+    listed: Mutex<std::collections::HashMap<usize, std::collections::HashSet<u32>>>,
 }
+
+/// Most bytes [`RunContextFiles::read_confined`] returns (CR1-066).
+pub const READ_CONFINED_CAP: u64 = 1 << 20;
+
+/// Unique suffix for atomic writes' temp names (several writers per process).
+static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 impl RunContextFiles {
     /// Create `<data_dir>/workflow-context/<run_id>/`; on failure log and
@@ -445,6 +478,7 @@ impl RunContextFiles {
                 run_id: run_id.to_string(),
                 repos: Mutex::new(vec![]),
                 content_step: Mutex::new(None),
+                listed: Mutex::default(),
             },
             Err(e) => {
                 tracing::warn!("workflow-context: create {} failed: {e}", dir.display());
@@ -459,6 +493,7 @@ impl RunContextFiles {
             run_id: run_id.to_string(),
             repos: Mutex::new(vec![]),
             content_step: Mutex::new(None),
+            listed: Mutex::default(),
         }
     }
 
@@ -495,13 +530,27 @@ impl RunContextFiles {
 
     /// Replace the registry (run start) and persist `repos.json`.
     pub fn set_repos(&self, entries: Vec<RepoEntry>) {
-        *self.repos.lock().unwrap() = entries;
-        self.write_repos_json();
+        let mut repos = self.repos.lock().unwrap();
+        *repos = entries;
+        self.write_repos_json(&repos);
     }
 
     pub fn repos(&self) -> Vec<RepoEntry> {
-        self.reload_repos_json();
-        self.repos.lock().unwrap().clone()
+        let mut repos = self.repos.lock().unwrap();
+        self.reload_repos_json(&mut repos);
+        repos.clone()
+    }
+
+    /// Change the registry as one step: reload `repos.json` (a step may have
+    /// corrected it), apply `f`, write it back — all under the registry lock,
+    /// so two engine writers never lose each other's change. Two AGENTS
+    /// editing the file at the same moment stay last-writer-wins.
+    pub fn update_repos<R>(&self, f: impl FnOnce(&mut Vec<RepoEntry>) -> R) -> R {
+        let mut repos = self.repos.lock().unwrap();
+        self.reload_repos_json(&mut repos);
+        let out = f(&mut repos);
+        self.write_repos_json(&repos);
+        out
     }
 
     /// Re-read `repos.json` from disk into the in-memory registry.
@@ -516,13 +565,13 @@ impl RunContextFiles {
     /// Tolerant by design: unreadable, unparseable or empty content leaves the
     /// current registry untouched. An agent caught mid-write must never blank
     /// out the run's targets.
-    fn reload_repos_json(&self) {
+    fn reload_repos_json(&self, repos: &mut Vec<RepoEntry>) {
         let Some(dir) = &self.dir else { return };
         let Ok(text) = std::fs::read_to_string(dir.join("repos.json")) else {
             return;
         };
         match serde_json::from_str::<Vec<RepoEntry>>(&text) {
-            Ok(entries) if !entries.is_empty() => *self.repos.lock().unwrap() = entries,
+            Ok(entries) if !entries.is_empty() => *repos = entries,
             Ok(_) => {}
             Err(e) => tracing::warn!(
                 "workflow-context({}): repos.json is not valid JSON ({e}) — keeping the in-memory registry",
@@ -538,9 +587,7 @@ impl RunContextFiles {
     pub fn merge_published(&self, repo_id: &str, base: Option<&str>, worktree: Option<&str>) {
         // Merge onto what the FILE says, not onto run-start memory — a step may
         // have corrected an entry since, and this call rewrites the file.
-        self.reload_repos_json();
-        {
-            let mut repos = self.repos.lock().unwrap();
+        self.update_repos(|repos| {
             if let Some(e) = repos
                 .iter_mut()
                 .find(|e| e.repo_id.as_deref() == Some(repo_id))
@@ -563,11 +610,10 @@ impl RunContextFiles {
                     source: None,
                     worktree: worktree.map(str::to_string).filter(|s| !s.is_empty()),
                     base: base.map(str::to_string).filter(|s| !s.is_empty()),
-                    error: None,
+                    ..Default::default()
                 });
             }
-        }
-        self.write_repos_json();
+        });
     }
 
     pub fn step_md_path(&self, base_name: &str) -> Option<PathBuf> {
@@ -577,7 +623,17 @@ impl RunContextFiles {
     /// Restore the deliverable pointer without rewriting an adopted handoff.
     pub fn adopt_step(&self, base_name: &str, kind: &str) {
         if !is_utility_kind(kind) && self.step_md_path(base_name).is_some_and(|p| p.is_file()) {
-            *self.content_step.lock().unwrap() = Some(base_name.to_string());
+            self.note_content_step(base_name);
+        }
+    }
+
+    /// Point the deliverable at `base_name` unless a step with a higher step
+    /// number already holds it (an equal number is a later loop iteration).
+    fn note_content_step(&self, base_name: &str) {
+        let n = step_no_of(base_name).unwrap_or(0);
+        let mut cur = self.content_step.lock().unwrap();
+        if cur.as_ref().is_none_or(|(m, _)| n >= *m) {
+            *cur = Some((n, base_name.to_string()));
         }
     }
 
@@ -591,9 +647,37 @@ impl RunContextFiles {
     /// Read a file from the run context dir. `None` when files are disabled or
     /// the file doesn't exist — every caller treats missing context as "no
     /// context", never as an error.
+    ///
+    /// Engine-internal, fixed names only: a name from a definition goes
+    /// through [`RunContextFiles::read_confined`].
     pub fn read_named(&self, name: &str) -> Option<String> {
         let dir = self.dir.as_ref()?;
         std::fs::read_to_string(dir.join(name)).ok()
+    }
+
+    /// Read a context file whose name came from a definition or an agent
+    /// (`script.output_file`, `post_review_comments.summary_files[]`, a
+    /// resolved step file) — confined to the run dir (DR-002): absolute and
+    /// `..` names are refused, and so is a symlink or path that resolves
+    /// outside it. `None` like [`RunContextFiles::read_named`].
+    #[allow(clippy::disallowed_methods)] // sync fs, like every reader here
+    pub fn read_confined(&self, name: &str) -> Option<String> {
+        let dir = self.dir.as_ref()?;
+        let joined = otto_core::paths::confine_join(dir, name.trim())?;
+        let root = dir.canonicalize().ok()?;
+        let canonical = joined.canonicalize().ok()?;
+        if !canonical.starts_with(&root) {
+            return None;
+        }
+        // Capped: a runaway file must not land whole in a post or a step's input.
+        let mut bytes = Vec::new();
+        let file = std::fs::File::open(canonical).ok()?;
+        std::io::Read::read_to_end(
+            &mut std::io::Read::take(file, READ_CONFINED_CAP),
+            &mut bytes,
+        )
+        .ok()?;
+        Some(String::from_utf8_lossy(&bytes).into_owned())
     }
 
     /// The `jira-<KEY>.md` this run fetched, if any. The engine writes exactly
@@ -630,6 +714,17 @@ impl RunContextFiles {
                 .unwrap_or(u64::MAX);
             (num, n.clone())
         });
+        out
+    }
+
+    /// The `step*.md` files of the given step numbers (a node's settled
+    /// ancestors, incl. their `-iterK` files), sorted by step number — what a
+    /// step is told to read under parallelism (engine.md §5.2). For a linear
+    /// graph the ancestors are every earlier step, so this equals
+    /// [`RunContextFiles::list_step_mds`] at that point.
+    pub fn list_step_mds_of(&self, step_nos: &std::collections::HashSet<u32>) -> Vec<String> {
+        let mut out = self.list_step_mds();
+        out.retain(|n| step_no_of(n).is_some_and(|k| step_nos.contains(&k)));
         out
     }
 
@@ -681,23 +776,22 @@ impl RunContextFiles {
                 lines.push(format!("context: wrote {base_name}.md"));
             }
         }
-        // Track the run's current deliverable candidate: the latest step that
-        // succeeded (no error) and isn't bookkeeping/control-only. Overwritten
-        // by every later qualifying step — `write_final_output` reads whatever
-        // this points at when the run concludes.
+        // Track the run's deliverable candidate: the successful, substantive
+        // step with the highest step number — in a parallel run finish order
+        // does not matter. `write_final_output` reads it at the end.
         if error.is_none() && !is_utility_kind(kind) {
-            *self.content_step.lock().unwrap() = Some(base_name.to_string());
+            self.note_content_step(base_name);
         }
         lines
     }
 
-    /// Copy the last content-bearing, error-free step's `.md` to
+    /// Copy the highest-numbered content-bearing, error-free step's `.md` to
     /// `FINAL_OUTPUT_FILE`. `None` when disabled, no qualifying step ran yet,
     /// or the source file is unreadable — best-effort, like every write here.
     /// Returns the copied bytes (the caller uses them for delivery) on success.
     pub fn write_final_output(&self) -> Option<Vec<u8>> {
         let dir = self.dir.as_ref()?;
-        let base = self.content_step.lock().unwrap().clone()?;
+        let (_, base) = self.content_step.lock().unwrap().clone()?;
         let bytes = match std::fs::read(dir.join(format!("{base}.md"))) {
             Ok(b) => b,
             Err(e) => {
@@ -708,12 +802,7 @@ impl RunContextFiles {
                 return None;
             }
         };
-        if let Err(e) = std::fs::write(dir.join(FINAL_OUTPUT_FILE), &bytes) {
-            tracing::warn!(
-                "workflow-context({}): write {FINAL_OUTPUT_FILE} failed: {e}",
-                self.run_id
-            );
-        }
+        self.write_bytes(FINAL_OUTPUT_FILE, &bytes);
         Some(bytes)
     }
 
@@ -730,6 +819,39 @@ impl RunContextFiles {
         iter: Option<u64>,
         inner_idx: Option<usize>,
     ) -> String {
+        let listed = self
+            .listed
+            .lock()
+            .ok()
+            .and_then(|m| m.get(&step_no).cloned());
+        let prior = match listed {
+            Some(set) => self.list_step_mds_of(&set),
+            None => self.list_step_mds(),
+        };
+        self.preamble_listing(step_no, display_name, iter, inner_idx, &prior)
+    }
+
+    /// Under parallelism the engine names, before step `step_no` starts, the
+    /// step numbers whose files its preamble lists: its settled ancestors'
+    /// (and its own, for a loop's earlier iterations), engine.md §5.2.
+    pub fn set_listed_steps(&self, step_no: usize, step_nos: std::collections::HashSet<u32>) {
+        if let Ok(mut m) = self.listed.lock() {
+            m.insert(step_no, step_nos);
+        }
+    }
+
+    /// [`RunContextFiles::preamble_for`] with the prior step files given by
+    /// the caller: under parallelism the engine lists only the node's settled
+    /// ancestors' files ([`RunContextFiles::list_step_mds_of`], engine.md
+    /// §5.2), so the listing never depends on which sibling finished first.
+    pub fn preamble_listing(
+        &self,
+        step_no: usize,
+        display_name: &str,
+        iter: Option<u64>,
+        inner_idx: Option<usize>,
+        prior_mds: &[String],
+    ) -> String {
         let Some(dir) = self.dir_str() else {
             return String::new();
         };
@@ -742,7 +864,7 @@ impl RunContextFiles {
             self.has_file(INSTRUCTIONS_FILE),
             self.has_file(PROMPT_FILE),
             !self.repos().is_empty(),
-            &self.list_step_mds(),
+            prior_mds,
             &own_md,
         );
         if self.has_file("previous-review.md") {
@@ -751,16 +873,36 @@ impl RunContextFiles {
         preamble
     }
 
-    fn write_repos_json(&self) {
-        let repos = self.repos.lock().unwrap().clone();
-        let json = serde_json::to_string_pretty(&repos).unwrap_or_else(|_| "[]".into());
+    fn write_repos_json(&self, repos: &[RepoEntry]) {
+        let json = serde_json::to_string_pretty(repos).unwrap_or_else(|_| "[]".into());
         self.write_file("repos.json", &json);
     }
 
     /// Best-effort write; warns (never errors). True on success.
     fn write_file(&self, name: &str, content: &str) -> bool {
+        self.write_bytes(name, content.as_bytes())
+    }
+
+    /// Write through a temp file in the same directory and `rename` it over
+    /// the target, so a reader (an agent, a sibling step) sees the old or the
+    /// new file, never a half-written one.
+    fn write_bytes(&self, name: &str, content: &[u8]) -> bool {
         let Some(dir) = &self.dir else { return false };
-        match std::fs::write(dir.join(name), content) {
+        let target = dir.join(name);
+        let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = target.with_file_name(format!(
+            ".{}.tmp-{}-{seq}",
+            target
+                .file_name()
+                .map(|f| f.to_string_lossy())
+                .unwrap_or_default(),
+            std::process::id()
+        ));
+        let res = std::fs::write(&tmp, content).and_then(|()| std::fs::rename(&tmp, &target));
+        if res.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        match res {
             Ok(()) => true,
             Err(e) => {
                 tracing::warn!(
@@ -832,7 +974,7 @@ mod tests {
             source: None,
             worktree: Some("/w".into()),
             base: Some("develop".into()),
-            error: None,
+            ..Default::default()
         };
         let t = entry_to_target(&e);
         assert_eq!(
@@ -853,7 +995,7 @@ mod tests {
             source: Some("main".into()),
             worktree: Some("/w/x".into()),
             base: Some("main".into()),
-            error: None,
+            ..Default::default()
         }]
     }
 
@@ -1200,7 +1342,7 @@ mod tests {
             source: None,
             worktree: Some("/w".into()),
             base: None,
-            error: None,
+            ..Default::default()
         };
         let bad = RepoEntry {
             repo: "typo".into(),
@@ -1212,6 +1354,7 @@ mod tests {
             worktree: None,
             base: None,
             error: Some("branch 'feat/typo' is not checked out anywhere in typo".into()),
+            base_branch: None,
         };
         // No declarations at all → legacy fallback allowed.
         assert!(all_declared_errored(&[]).is_none());
@@ -1251,7 +1394,7 @@ mod tests {
             source: Some("develop".into()),
             worktree: None,
             base: Some("develop".into()),
-            error: None,
+            ..Default::default()
         }]);
         f.merge_published("A", Some("main"), Some("/w/a")); // published base must NOT clobber declared source
         let r = f.repos();
@@ -1328,7 +1471,7 @@ mod tests {
             source: None,
             worktree: Some("/w/e".into()),
             base: Some("feature/X-1".into()), // the bad base, as declared
-            error: None,
+            ..Default::default()
         }]);
         let path = tmp
             .path()
@@ -1354,5 +1497,242 @@ mod tests {
         // Garbage on disk never blanks the registry.
         std::fs::write(&path, "{ not json").unwrap();
         assert_eq!(f.repos()[0].base.as_deref(), Some("develop"));
+    }
+
+    #[test]
+    fn base_branch_survives_every_engine_rewrite_of_repos_json() {
+        let td = tempfile::tempdir().unwrap();
+        let f = RunContextFiles::create(td.path(), "rb");
+        f.set_repos(vec![RepoEntry {
+            repo: "r".into(),
+            repo_id: Some("rid".into()),
+            kind: "worktree".into(),
+            name: "/w".into(),
+            ..Default::default()
+        }]);
+        // The Checkout step writes the destination into the file …
+        let path = td.path().join("workflow-context/rb/repos.json");
+        std::fs::write(
+            &path,
+            r#"[{"repo":"r","repo_id":"rid","type":"worktree","name":"/w","source":"feature/x","base":"0123abc","base_branch":"develop"}]"#,
+        )
+        .unwrap();
+        // … and the next engine write (every agent step's settle) keeps it;
+        // a set `source` keeps the merge-base too.
+        f.merge_published("rid", Some("main"), Some("/w"));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"base_branch\": \"develop\""), "{text}");
+        assert_eq!(f.repos()[0].base_branch.as_deref(), Some("develop"));
+        assert_eq!(f.repos()[0].base.as_deref(), Some("0123abc"));
+    }
+
+    /// Engine writers run side by side now: every `update_repos` lands, and a
+    /// reader of `repos.json` never sees a half-written file.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // a sync test
+    fn concurrent_registry_writes_all_land_and_readers_never_see_a_partial_file() {
+        for round in 0..20 {
+            let td = tempfile::tempdir().unwrap();
+            let f = std::sync::Arc::new(RunContextFiles::create(td.path(), "rc"));
+            f.set_repos(vec![]);
+            let path = td.path().join("workflow-context/rc/repos.json");
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let reader = {
+                let (path, stop) = (path.clone(), stop.clone());
+                std::thread::spawn(move || {
+                    let mut reads = 0;
+                    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        let text = std::fs::read_to_string(&path).unwrap();
+                        serde_json::from_str::<Vec<RepoEntry>>(&text)
+                            .unwrap_or_else(|e| panic!("partial repos.json ({e}): {text}"));
+                        reads += 1;
+                    }
+                    reads
+                })
+            };
+            let writers: Vec<_> = (0..8)
+                .map(|i| {
+                    let f = f.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_micros(
+                            ((i * 37 + round) % 11) * 100,
+                        ));
+                        f.merge_published(
+                            &format!("repo-{i}"),
+                            Some("main"),
+                            Some(&format!("/w/{i}")),
+                        );
+                    })
+                })
+                .collect();
+            for w in writers {
+                w.join().unwrap();
+            }
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            assert!(reader.join().unwrap() > 0);
+            let mut ids: Vec<String> = f.repos().into_iter().filter_map(|e| e.repo_id).collect();
+            ids.sort();
+            assert_eq!(
+                ids,
+                (0..8).map(|i| format!("repo-{i}")).collect::<Vec<_>>(),
+                "round {round}"
+            );
+            let left: Vec<String> = std::fs::read_dir(td.path().join("workflow-context/rc"))
+                .unwrap()
+                .filter_map(|e| e.ok()?.file_name().into_string().ok())
+                .filter(|n| n.contains(".tmp-"))
+                .collect();
+            assert!(left.is_empty(), "no temp files left: {left:?}");
+        }
+    }
+
+    #[test]
+    fn update_repos_returns_its_result_and_writes_once() {
+        let td = tempfile::tempdir().unwrap();
+        let f = RunContextFiles::create(td.path(), "ru");
+        let n = f.update_repos(|r| {
+            r.push(RepoEntry {
+                repo: "a".into(),
+                name: "a".into(),
+                ..Default::default()
+            });
+            r.len()
+        });
+        assert_eq!(n, 1);
+        assert_eq!(f.repos().len(), 1);
+    }
+
+    /// In a parallel run the deliverable is the highest-numbered successful
+    /// content step, not the one that finished last.
+    #[test]
+    fn final_output_is_the_highest_step_number_whatever_the_finish_order() {
+        let td = tempfile::tempdir().unwrap();
+        let f = RunContextFiles::create(td.path(), "rp");
+        let step = |base: &str, reply: &str| {
+            f.persist_step(
+                base,
+                "agent_prompt",
+                base,
+                &json!({ "reply": reply }),
+                &[],
+                None,
+                None,
+            );
+        };
+        step("step6-summary", "SIX");
+        step("step5-gates", "FIVE"); // finished after step 6
+        let s = String::from_utf8(f.write_final_output().unwrap()).unwrap();
+        assert!(s.contains("SIX"), "{s}");
+        // A later iteration of the same step wins.
+        step("step7-review-iter1", "ITER1");
+        step("step7-review-iter2", "ITER2");
+        let s = String::from_utf8(f.write_final_output().unwrap()).unwrap();
+        assert!(s.contains("ITER2"), "{s}");
+        assert_eq!(step_no_of("step12-x-iter3.md"), Some(12));
+        assert_eq!(step_no_of("run-brief.md"), None);
+    }
+
+    #[test]
+    fn a_step_reads_only_the_listing_its_caller_gives() {
+        let td = tempfile::tempdir().unwrap();
+        let f = RunContextFiles::create(td.path(), "rl");
+        for name in [
+            "step1-start",
+            "step2-vault",
+            "step3-gates",
+            "step4-review-iter1",
+            "step4-review-iter2",
+            "step10-tail",
+        ] {
+            f.write_named(&format!("{name}.md"), "x");
+        }
+        let ancestors = std::collections::HashSet::from([1, 4, 10]);
+        let listing = f.list_step_mds_of(&ancestors);
+        assert_eq!(
+            listing,
+            [
+                "step1-start.md",
+                "step4-review-iter1.md",
+                "step4-review-iter2.md",
+                "step10-tail.md"
+            ]
+        );
+        let p = f.preamble_listing(11, "next", None, None, &listing);
+        assert!(
+            p.contains("Prior step summaries: step1-start.md, step4-review-iter1.md"),
+            "{p}"
+        );
+        assert!(
+            !p.contains("step2-vault.md") && !p.contains("step3-gates.md"),
+            "{p}"
+        );
+        // The old entry point still lists every step file.
+        assert!(f
+            .preamble_for(11, "next", None, None)
+            .contains("step3-gates.md"));
+    }
+
+    #[test]
+    fn read_confined_refuses_names_and_links_that_leave_the_run_dir() {
+        let td = tempfile::tempdir().unwrap();
+        let f = RunContextFiles::create(td.path(), "rx");
+        let dir = td.path().join("workflow-context/rx");
+        std::fs::write(td.path().join("secret.txt"), "SECRET").unwrap();
+        f.write_named("go-standards-evals.md", "gates");
+        std::fs::create_dir_all(dir.join("attachments")).unwrap();
+        std::fs::write(dir.join("attachments/a.txt"), "att").unwrap();
+        std::os::unix::fs::symlink(td.path().join("secret.txt"), dir.join("link.md")).unwrap();
+        assert_eq!(
+            f.read_confined("go-standards-evals.md").as_deref(),
+            Some("gates")
+        );
+        assert_eq!(f.read_confined("attachments/a.txt").as_deref(), Some("att"));
+        for bad in [
+            "../../secret.txt",
+            "../rx/../../secret.txt",
+            "link.md",
+            "missing.md",
+        ] {
+            assert_eq!(f.read_confined(bad), None, "{bad}");
+        }
+        let abs = td.path().join("secret.txt");
+        assert_eq!(f.read_confined(abs.to_str().unwrap()), None, "absolute");
+        assert_eq!(
+            f.read_named("../../secret.txt").as_deref(),
+            Some("SECRET"),
+            "why read_named stays engine-internal"
+        );
+        // CR1-066: a runaway file is read up to the cap, not whole.
+        std::fs::write(
+            dir.join("big.md"),
+            "x".repeat(READ_CONFINED_CAP as usize + 10),
+        )
+        .unwrap();
+        assert_eq!(
+            f.read_confined("big.md").map(|s| s.len()),
+            Some(READ_CONFINED_CAP as usize)
+        );
+    }
+
+    #[test]
+    fn bare_names() {
+        for ok in ["go-standards-evals.md", "x.output.json", "a b.md"] {
+            assert!(is_bare_name(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            " ",
+            "/etc/passwd",
+            "../x",
+            "a/b.md",
+            "a\\b",
+            "..",
+            ".",
+            " . ",
+            "x\0y",
+            "a..b",
+        ] {
+            assert!(!is_bare_name(bad), "{bad:?}");
+        }
     }
 }

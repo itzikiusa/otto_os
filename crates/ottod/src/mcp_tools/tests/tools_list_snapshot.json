@@ -57,6 +57,7 @@
     "otto_comment_issue",
     "otto_comment_pr",
     "otto_consume_broker_messages",
+    "otto_control_workflow_run",
     "otto_create_confluence_page",
     "otto_create_issue",
     "otto_create_personal_agent",
@@ -305,7 +306,6 @@
     "otto_rollback_improvement_edit",
     "otto_room_post",
     "otto_room_read",
-    "otto_run_goal_loop",
     "otto_run_scheduled_task",
     "otto_run_self_improvement",
     "otto_run_workflow",
@@ -402,6 +402,7 @@
     "otto_comment_issue",
     "otto_comment_pr",
     "otto_consume_broker_messages",
+    "otto_control_workflow_run",
     "otto_create_confluence_page",
     "otto_create_issue",
     "otto_create_personal_agent",
@@ -581,6 +582,7 @@
     "otto_comment_confluence_page",
     "otto_comment_issue",
     "otto_consume_broker_messages",
+    "otto_control_workflow_run",
     "otto_create_confluence_page",
     "otto_create_issue",
     "otto_create_personal_agent",
@@ -772,7 +774,6 @@
     "otto_rollback_improvement_edit",
     "otto_room_post",
     "otto_room_read",
-    "otto_run_goal_loop",
     "otto_run_scheduled_task",
     "otto_run_self_improvement",
     "otto_run_workflow",
@@ -2492,6 +2493,9 @@
       "properties": {
         "peer_session_id": {
           "type": "string"
+        },
+        "remove": {
+          "type": "boolean"
         }
       }
     },
@@ -2858,37 +2862,6 @@
         },
         "story_id": {
           "type": "string"
-        }
-      }
-    },
-    "otto_run_goal_loop": {
-      "type": "object",
-      "required": [
-        "workspace_id",
-        "name",
-        "repo_path",
-        "definition",
-        "limits",
-        "config"
-      ],
-      "properties": {
-        "workspace_id": {
-          "type": "string"
-        },
-        "name": {
-          "type": "string"
-        },
-        "repo_path": {
-          "type": "string"
-        },
-        "definition": {
-          "type": "object"
-        },
-        "limits": {
-          "type": "object"
-        },
-        "config": {
-          "type": "object"
         }
       }
     },
@@ -5058,6 +5031,59 @@
         },
         "schedule_id": {
           "type": "string"
+        }
+      }
+    },
+    "otto_run_goal_loop": {
+      "type": "object",
+      "required": [
+        "workspace_id",
+        "name",
+        "repo_path",
+        "definition",
+        "limits",
+        "config"
+      ],
+      "properties": {
+        "workspace_id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "repo_path": {
+          "type": "string"
+        },
+        "definition": {
+          "type": "object"
+        },
+        "limits": {
+          "type": "object"
+        },
+        "config": {
+          "type": "object"
+        }
+      }
+    },
+    "otto_control_workflow_run": {
+      "type": "object",
+      "required": [
+        "run_id",
+        "action"
+      ],
+      "properties": {
+        "run_id": {
+          "type": "string"
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "pause",
+            "resume"
+          ]
+        },
+        "extend": {
+          "type": "object"
         }
       }
     },

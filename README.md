@@ -7,11 +7,55 @@ multi-agent code review, Jira/Confluence product workflows, SSH/database
 connections, an HTTP API client, real token-usage tracking, and Slack/Telegram
 bridges so an agent can work a ticket from a chat thread.
 
-**Version 0.6.1** · macOS (Apple Silicon; Intel from source) · actively developed, so
+**Version 0.7.0** · macOS (Apple Silicon; Intel from source) · actively developed, so
 expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
 
-🎬 **[Watch the product tour](https://github.com/itzikiusa/otto_os/releases/download/walkthroughs/otto-tour-20261125.mp4)**
-(3 minutes, Otto 0.6.0; also in the app under **Help → Walkthroughs**).
+🎬 **[Watch the product tour](https://github.com/itzikiusa/otto_os/releases/download/walkthroughs/otto-tour-20261126.mp4)**
+(3 minutes, Otto 0.7.0; also in the app under **Help → Walkthroughs**).
+
+### What's new in 0.7.0
+
+- **Workflows, rebuilt around runs.** Workflows opens on **Runs**: *Needs
+  you*, *Running* and *Recent*, each run in words: what it is about, what it
+  is doing, why it waits. A run has its own page with one ring for progress,
+  every step in the order it ran (steps that ran side by side are grouped
+  under *In parallel*), a failed step's own error first with **Retry step**,
+  and each agent step's conversation beside the list. **Pause**, **Resume**,
+  *Skip this step* and *Add a note for the next step…* work while it runs. The
+  same pages work on the phone, with touch.
+- **Agent steps run as threads, side by side.** An agent step is a thread, as
+  in Threads, instead of a terminal session, and steps that do not depend on
+  each other run at the same time (up to 4 per run). The fixed wait before
+  every agent start is gone; a step that has to wait for the machine says why.
+  Replaying 149 recorded review runs on the new engine, with the agents' time
+  as recorded, took the typical PR review from about 60 minutes to about 18
+  without changing the workflow. A run's threads are closed when it ends and
+  removed after 24 hours (7 days for a failed run), and they stay out of your
+  Threads lists. The terminal runner remains behind the daemon setting
+  `wf_step_runner`.
+- **Model and effort per step.** Each agent step picks its provider, model and
+  effort with the Threads picker; *Default* follows the provider's own
+  setting.
+- **Steps that need no agent.** *Check out PR / branch*, *Run script*, *Post
+  review comments* and *Check criteria* do their work without an agent turn.
+  **Optimize…** drafts a version of a workflow that uses them and saves it
+  only when you apply it.
+- **Goals are workflows.** Goal Loops moved into Workflows: *Run… ▸ A goal…*
+  opens the **New goal** form (what must be true, how it is checked, the
+  budget). A goal that stops short is held as *Paused*, *Blocked* or *Out of
+  budget*, with **Resume** or **Extend and resume…**. Loops made before this
+  release stay readable under *Older goal loops*, and an unfinished one has
+  **Continue as a goal**.
+- **Chat.** A run started from chat keeps one live status message in its
+  thread instead of a message per step. Each step's file is still posted, and
+  files attached to the Slack message that starts a run reach the run. The
+  Start step's *Updates in the chat thread* brings back a message per step.
+- **Limits and restarts.** A step that hits a usage limit with a known reset
+  waits and continues when the limit resets, and a run cut by a restart or an
+  update continues from the step it was on.
+- **For agents (MCP).** `otto.thread_close` can remove a sub-thread the agent
+  no longer needs. `otto.control_workflow_run` is new, off by default and
+  asks before it acts.
 
 ### What's new in 0.6.1
 
@@ -465,11 +509,13 @@ including behaviour changes to know before upgrading.
 - **Broadcast & Peer Messaging** — send one literal message to many live agent
   sessions at once (⌘⇧B, no AI in the loop) or relay structured session-to-session
   messages with full sender attribution.
-- **Goal Loops** — give a **goal**, machine-checkable acceptance criteria, and a
-  **budget** (max iterations + active time). A team of agents iterates
-  **Plan → Execute → Evaluate → Digest** on an isolated `goal-loop/<id>` branch,
-  repeating until the criteria pass or the budget runs out — with live
-  phase/iteration monitoring and openable executor sessions.
+- **Goals** (inside Workflows) — give a **goal**, criteria and a **budget**
+  (iterations + active time). An agent works in an isolated worktree (branch
+  `otto-wf/<run>`) or a research folder, and a check step decides every
+  criterion with evidence — a command, a checker agent, or you — repeating
+  until all are met or the run is held (**Paused**, **Blocked**, **Out of
+  budget**), where you **Resume** or **Extend and resume…**. Loops made with
+  the earlier Goal Loops feature are a read-only history.
 - **Connections** — open SSH / MySQL / PostgreSQL / Redis / MongoDB / ClickHouse
   sessions side-by-side with agents. One sidebar entry holds the **unified
   hub**: every connection and Kafka cluster in one folder tree with per-kind
@@ -617,15 +663,19 @@ including behaviour changes to know before upgrading.
   settings in **MCP → Otto Server**.
 - **Workflows** — a visual workflow engine that chains steps (agent prompts, HTTP
   requests, DB queries, broker peeks, channel notifications, human approvals,
-  …) into runnable graphs, with per-workflow instructions +
-  `prompt.md` context files, per-step retry / re-run-from-here, a stall
-  watchdog, and a concurrency cap with queueing. Runs **survive daemon
-  restarts**: finished steps are adopted from the persisted per-node state and
-  the interrupted step resumes (side-effect steps are never blindly re-fired;
-  a per-workflow toggle opts out). A comma-separated Working Directory declares
-  a **multi-repo run**. Manual, webhook, **chat** (run a workflow from a bound
-  Slack/Telegram channel), **schedule** (interval / daily / weekly / cron) and
-  event triggers fire today; a few Product/Review nodes are still being wired.
+  …) into runnable graphs. Agent steps run as **threads** (provider · model ·
+  effort per step), **independent steps run side by side**, and steps that
+  need no agent check out a PR, run a script, post review comments or check
+  criteria. A **Runs** inbox shows what **needs you**; each run has its own
+  page with every step's conversation. Per-workflow instructions +
+  `prompt.md` context files, **Retry step**, and a run queue. Runs **survive
+  daemon restarts**: finished steps are adopted from the persisted per-node
+  state and an interrupted agent step goes on in the same conversation
+  (side-effect steps are never blindly re-fired; a per-workflow toggle opts
+  out). A comma-separated Working Directory declares a **multi-repo run**.
+  Manual, webhook, **chat** (run a workflow from a bound Slack/Telegram
+  channel, with one live status message in the thread), **schedule**
+  (interval / daily / weekly / cron) and event triggers fire today.
 - **Scheduled Tasks & Personal Agents (Unified Hub)** — one sidebar entry with
   three tabs (**Tasks · Agents · Agent channels**):
   - **Tasks:** recurring agent jobs on an **interval / daily / weekly** schedule

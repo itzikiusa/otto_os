@@ -93,6 +93,14 @@ pub struct RunPr {
     pub head_sha: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head_ref: Option<String>,
+    /// The forge's view (DR-008): `overview.subject.pr` and
+    /// `post_review_comments` read them; absent in rows of older builds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<otto_core::api::PrState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 /// The run context file listing the run's resolved PRs (read back by the
@@ -267,7 +275,7 @@ mod tests {
             source: None,
             worktree: Some(path.into()),
             base: None,
-            error: None,
+            ..Default::default()
         }
     }
 
@@ -281,6 +289,9 @@ mod tests {
             base: "y".into(),
             head_sha: None,
             head_ref: None,
+            state: None,
+            url: None,
+            title: None,
         };
         let mut es = vec![entry("games", "/src/g")];
         es[0].base = Some("main".into());

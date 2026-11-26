@@ -23,6 +23,7 @@ mod children;
 mod client_calls;
 pub mod council;
 mod delegation;
+mod digest;
 mod drain;
 mod family;
 pub use secret_request::{answer_secret_request, pending_secret_requests};
@@ -30,6 +31,7 @@ mod descendants;
 mod fresh;
 mod handoff;
 mod held_adopt;
+pub use held_adopt::Adopted;
 mod held_proc;
 mod keep_awake;
 mod loop_guard;
@@ -39,17 +41,23 @@ mod peers;
 mod provider_lists;
 mod reopen;
 mod request_ids;
+mod retention;
 mod secret_request;
 mod selection;
 mod swarm_resume;
 mod task_stop;
+mod unattended;
 mod usage_hook;
 pub use admission::{HANDSHAKE_TIMEOUT, MAX_QUEUED_BYTES, MAX_QUEUED_PROMPTS};
 pub use archive::settle_archived_entity_json;
 pub use loop_guard::{AGENT_HOPS_MAX, PAUSED_ERROR, PAUSED_NOTICE, PAUSED_QUEUED};
 use request_ids::RequestIds;
+pub use retention::{retain_stamp, RETAIN_UNTIL_KEY};
 pub use selection::check_effort;
 pub use task_stop::{TaskStopAllResp, TaskStopEntry, TaskStopOutcome, TaskStopResp};
+pub use unattended::{
+    Ended, SettledTurn, TurnOpts, AUTO_TURN_GRACE, BACKGROUND_LIMIT, RESUME_REFUSED,
+};
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -126,6 +134,8 @@ pub struct RuntimeConfig {
     /// A spawned CLI that has not answered its handshake after this long
     /// is stopped with a clear error ([`HANDSHAKE_TIMEOUT`]). Zero disables.
     pub handshake_timeout: Duration,
+    /// Where children start; `None` = the OS (holders when configured).
+    pub transport: Option<Arc<dyn crate::process::ChildTransport>>,
 }
 
 impl Default for RuntimeConfig {
@@ -144,6 +154,7 @@ impl Default for RuntimeConfig {
             holders_dir: None,
             holder_launcher: None,
             handshake_timeout: HANDSHAKE_TIMEOUT,
+            transport: None,
         }
     }
 }
@@ -504,6 +515,9 @@ pub(super) struct State {
     /// The idle release stopped its process: once that process is gone,
     /// nothing of the thread stays loaded (T3 Code #39049).
     released: bool,
+    /// Background work ended with no turn running: the agent may start its
+    /// own turn within `unattended::AUTO_TURN_GRACE`.
+    background_ended_idle_at: Option<Instant>,
 }
 
 impl State {
@@ -532,6 +546,13 @@ pub(super) struct Live {
     /// Set during `shutdown_for_restart` so `descendants::watch` does not kill
     /// Claude background processes when `st.proc` is detached.
     pub(super) detaching_for_restart: std::sync::atomic::AtomicBool,
+    /// Sub-threads' wakes announced but not queued yet (`unattended`).
+    pending_wakes: Mutex<Vec<String>>,
+    /// Who is answering a request (`RuntimeRequest::resolved_by`), by id.
+    resolvers: Mutex<HashMap<Id, Id>>,
+    /// A pre-admitted machine place for the next spawn (`TurnOpts::permit`,
+    /// or the create's `meta.admission_permit`, stripped before the row).
+    permit: Mutex<Option<String>>,
 }
 
 impl Live {
@@ -678,12 +699,24 @@ impl AgentRuntime {
             let is_child = rec.session.child_of().is_some();
             // The latest turn this restart cut off (ordinal, id).
             let mut cut: Option<(u32, Id)> = None;
+            let mut cut_turn: Option<(u32, Id)> = None;
+            // The latest turn, and whether background work it left died.
+            let mut latest: Option<(u32, Id)> = None;
+            let mut background_cut = false;
             for mut r in entities {
                 let changed = match r.kind.as_str() {
                     K_TURN => serde_json::from_value::<ProviderTurn>(r.payload.clone())
                         .ok()
+                        .inspect(|t| {
+                            if latest.as_ref().is_none_or(|(o, _)| t.ordinal > *o) {
+                                latest = Some((t.ordinal, t.id.clone()));
+                            }
+                        })
                         .filter(|t| !t.status.is_terminal())
                         .map(|mut t| {
+                            if cut_turn.as_ref().is_none_or(|(o, _)| t.ordinal > *o) {
+                                cut_turn = Some((t.ordinal, t.id.clone()));
+                            }
                             if is_child && cut.as_ref().is_none_or(|(o, _)| t.ordinal > *o) {
                                 cut = Some((t.ordinal, t.id.clone()));
                             }
@@ -717,6 +750,7 @@ impl AgentRuntime {
                         })
                         .map(|mut s| {
                             // The process (and its background work) is gone.
+                            background_cut |= !s.background_tasks.is_empty();
                             s.background_tasks.clear();
                             s.status = ProviderSessionStatus::Stopped;
                             s.updated_at = now;
@@ -734,6 +768,18 @@ impl AgentRuntime {
             if !rows.is_empty() {
                 touched += 1;
                 self.inner.repo.upsert_entities(&sid, &rows).await?;
+            }
+            // An engine thread remembers which turn the restart cut (or whose
+            // background work it killed), so its step ends as a server
+            // restart even after a second restart.
+            let cut_turn = cut_turn.or(latest.filter(|_| background_cut));
+            if let (Some((_, turn)), true) = (
+                &cut_turn,
+                otto_core::agent_runtime::is_engine_thread(rec.session.meta.as_ref()),
+            ) {
+                let mut mark = serde_json::Map::new();
+                mark.insert(unattended::RESTART_CUT_KEY.into(), turn.clone().into());
+                self.inner.repo.patch_meta(&sid, &mark.into()).await?;
             }
             if let Some((_, turn)) = cut {
                 cut_children.push((rec.session, turn));
@@ -922,6 +968,11 @@ impl AgentRuntime {
         if let Some(m) = &model {
             crate::http::drafts::validate_model_name(m)?;
         }
+        // A pre-admitted place rides the create; its key never reaches the row.
+        let mut meta = req.meta;
+        let permit = meta
+            .as_mut()
+            .and_then(otto_sessions::admission::take_permit_key);
         let rec = self
             .inner
             .repo
@@ -937,9 +988,7 @@ impl AgentRuntime {
                     .unwrap_or_else(|| self.inner.host.default_access_mode()),
                 created_by: user.clone(),
                 parent_id,
-                meta: req
-                    .meta
-                    .filter(|m| m.as_object().is_some_and(|o| !o.is_empty())),
+                meta: meta.filter(|m| m.as_object().is_some_and(|o| !o.is_empty())),
             })
             .await?;
         let id = rec.session.id.clone();
@@ -951,6 +1000,7 @@ impl AgentRuntime {
         }
         // Spawn now so a refused folder / missing CLI fails the create.
         let live = self.live(&id).await?;
+        *live.permit.lock().unwrap_or_else(|e| e.into_inner()) = permit;
         if let Err(e) = self.ensure_process(&live).await {
             self.inner.live.remove(&id);
             let _ = self.inner.repo.delete(&id).await;
@@ -1083,9 +1133,13 @@ impl AgentRuntime {
                     model_from_provider: false,
                     switch_from: None,
                     released: false,
+                    background_ended_idle_at: None,
                 }),
                 persist: tx,
                 detaching_for_restart: std::sync::atomic::AtomicBool::new(false),
+                pending_wakes: Mutex::new(Vec::new()),
+                resolvers: Mutex::default(),
+                permit: Mutex::default(),
             });
             let entry = self.inner.live.entry(id.clone()).or_insert_with(|| {
                 tokio::spawn(persister(self.inner.repo.clone(), id.clone(), rx));
@@ -1112,7 +1166,7 @@ impl AgentRuntime {
         };
         otto_telemetry::context::measure_result(
             "threads.spawn_driver",
-            self.spawn_driver_inner(live, session),
+            otto_core::heap(|| self.spawn_driver_inner(live, session)),
         )
         .await?;
         admission::watch_handshake(&self.inner, live);
@@ -1120,6 +1174,10 @@ impl AgentRuntime {
     }
 
     async fn spawn_driver_inner(&self, live: &Arc<Live>, session: RuntimeSession) -> Result<()> {
+        // The machine place: a pre-admitted one claimed, else reserved at once
+        // for a gated source — never a wait. Held until the child registered.
+        let key = live.permit.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let _place = self.inner.host.admit_spawn(&session, key);
         let mut driver = self.inner.drivers.create(session.provider).ok_or_else(|| {
             Error::Invalid(format!(
                 "no structured driver for provider '{}'",
@@ -1174,7 +1232,8 @@ impl AgentRuntime {
             cwd: session.cwd.clone(),
             env: spec.env,
         };
-        if let Some(holders_dir) = self.inner.config.holders_dir.as_deref() {
+        let transport = self.inner.config.transport.as_ref();
+        if let (None, Some(holders_dir)) = (transport, self.inner.config.holders_dir.as_deref()) {
             if !self.inner.host.network_profile_active(&session)
                 && self.inner.host.session_persistence_enabled().await
             {
@@ -1209,7 +1268,8 @@ impl AgentRuntime {
                 }
             }
         }
-        let child = spawn_child(&cmd)
+        let child = transport
+            .map_or_else(|| spawn_child(&cmd), |t| t.spawn(&cmd))
             .map_err(|e| map_spawn_error(session.provider.as_str(), &spec.program, e))?;
         let cli_pid = child.pid;
         let (epoch, flushed) = {
@@ -1244,7 +1304,7 @@ impl AgentRuntime {
             apply_step_opts(&self.inner, live, &mut st, step, true, true);
             (epoch, frx)
         };
-        if claude_login.is_some() {
+        if claude_login.is_some() && cli_pid != 0 {
             // Claude Code moves some jobs out of its group (see the module).
             descendants::watch(
                 Arc::clone(&self.inner),
@@ -1254,14 +1314,15 @@ impl AgentRuntime {
                 cli_pid,
             );
         }
-        tokio::spawn(pump(
+        let pumped = pump(
             Arc::clone(&self.inner),
             Arc::clone(live),
             session.id.clone(),
             epoch,
             child.messages,
             claude_login,
-        ));
+        );
+        unattended::register_and_pump(&self.inner, &session, cli_pid, pumped).await;
         // This life's sequence floor is durable before we return.
         let _ = flushed.await;
         Ok(())
@@ -1281,7 +1342,7 @@ impl AgentRuntime {
         let _prompt = live.prompt_lock.lock().await;
         otto_telemetry::context::measure_result(
             "threads.prompt",
-            self.prompt_locked(id, &live, req),
+            otto_core::heap(|| self.prompt_locked(id, &live, req)),
         )
         .await
     }
@@ -1337,7 +1398,7 @@ impl AgentRuntime {
         }
         let switch = self.provider_switch(live, req)?;
         if req.fresh_context || switch.is_some() {
-            return self.prompt_fresh(id, live, req, switch).await;
+            return otto_core::heap(|| self.prompt_fresh(id, live, req, switch)).await;
         }
         for _ in 0..8 {
             if !poll_driver_sideband(&self.inner, live, None).await {
@@ -1363,7 +1424,7 @@ impl AgentRuntime {
             }
             (r, _) => r?,
         }
-        match self.prompt_now(id, live, req).await {
+        match otto_core::heap(|| self.prompt_now(id, live, req)).await {
             Err(Error::Conflict(m)) if m == TURN_RUNNING && req.delivery.is_some() => {
                 let d = req.delivery.unwrap_or(PromptDelivery::Queue);
                 self.deliver_busy(id, live, req, d).await
@@ -1382,7 +1443,7 @@ impl AgentRuntime {
         let live = Arc::clone(live);
         let _starting = Starting::new(&live);
         let req = &self.apply_selection(&live, req).await?;
-        self.spawn_resuming(id, &live).await?;
+        otto_core::heap(|| self.spawn_resuming(id, &live)).await?;
         if req.fresh_context && !self.fresh_process_ready(&live).await {
             return Err(fresh::not_started(&live.lock()));
         }
@@ -1483,6 +1544,7 @@ impl AgentRuntime {
             None,
         );
         st.session.last_active_at = now;
+        st.background_ended_idle_at = None;
         apply_step_opts(&self.inner, live, &mut st, step, true, true);
         let stop = std::mem::take(&mut st.stop_requested);
         drop(st);
@@ -1978,7 +2040,7 @@ impl AgentRuntime {
         if live.lock().proc.is_some() {
             return Ok(());
         }
-        self.ensure_process(live).await?;
+        otto_core::heap(|| self.ensure_process(live)).await?;
         let resume = live.lock().session.native_thread_id.clone();
         if resume.is_none() {
             return Ok(());
@@ -1991,14 +2053,18 @@ impl AgentRuntime {
         // network blip, a busy transcript): resume once more before giving
         // the thread up (T3 Code #34762 keeps the native session too).
         if !resume_refused_for_good(&live.lock()) {
-            self.ensure_process(live).await?;
+            otto_core::heap(|| self.ensure_process(live)).await?;
             if self.wait_started(live).await {
                 return Ok(());
             }
         }
+        // An engine thread never forgets silently: its step fails instead.
+        if otto_core::agent_runtime::is_engine_thread(live.lock().session.meta.as_ref()) {
+            return Err(Error::Invalid(unattended::RESUME_REFUSED.into()));
+        }
         // Keep the old key until the fresh thread is up.
         live.lock().session.native_thread_id = None;
-        let fresh = self.ensure_process(live).await;
+        let fresh = otto_core::heap(|| self.ensure_process(live)).await;
         if fresh.is_err() || !self.wait_started(live).await {
             live.lock().session.native_thread_id = resume;
             fresh?;
@@ -2162,9 +2228,22 @@ fn check_can_prompt(st: &State) -> Result<()> {
 /// and the auto-close sweep treats it alike. A daemon caller's own `source`
 /// (a delegated personal agent) is left as it is.
 fn inherit_embedded_origin(opener: &RuntimeSession, meta: &mut Option<serde_json::Value>) {
-    if !otto_core::agent_runtime::is_embedded_thread(opener.meta.as_ref()) {
+    // An engine thread's sub-thread belongs to its run: hidden from the
+    // person's lists, deleted with the step, counted with it.
+    let keys: &[&str] = if otto_core::agent_runtime::is_engine_thread(opener.meta.as_ref()) {
+        &[
+            "source",
+            "run_id",
+            "node_id",
+            "wf_name",
+            "review_id",
+            "work",
+        ]
+    } else if otto_core::agent_runtime::is_embedded_thread(opener.meta.as_ref()) {
+        &["source", "origin"]
+    } else {
         return;
-    }
+    };
     let Some(from) = opener.meta.as_ref().and_then(|m| m.as_object()) else {
         return;
     };
@@ -2175,7 +2254,7 @@ fn inherit_embedded_origin(opener: &RuntimeSession, meta: &mut Option<serde_json
     if o.contains_key("source") {
         return;
     }
-    for key in ["source", "origin"] {
+    for &key in keys {
         if let Some(v) = from.get(key) {
             o.insert(key.into(), v.clone());
         }
@@ -2556,6 +2635,7 @@ fn open_agent_turn(inner: &Inner, live: &Live, st: &mut State, turn_id: String) 
     };
     set_session_status(inner, live, st, status, None);
     st.session.last_active_at = now;
+    st.background_ended_idle_at = None;
 }
 
 /// The process (and so its background work) is gone: settle every
@@ -2949,6 +3029,9 @@ fn resolve_request(
     req.resolved_at = Some(now);
     req.decision = decision;
     req.cancel_reason = cancel_reason;
+    req.resolved_by = (status == RuntimeRequestStatus::Resolved)
+        .then(|| unattended::take_resolver(live, request_id))
+        .flatten();
     emit(
         inner,
         live,
@@ -3016,6 +3099,7 @@ fn finish_turn(
     let Some(active) = st.turn.take() else {
         return;
     };
+    st.session.last_active_at = Utc::now();
     let reason = if active.stalled {
         Some("stalled".to_string())
     } else {
@@ -3255,6 +3339,7 @@ pub(super) fn apply_step_opts(
                     question_title: None,
                     answers: None,
                     for_person: false,
+                    resolved_by: None,
                 };
                 let mut item = item(
                     format!("{}:approval:{id}", turn_id.as_deref().unwrap_or_default()),
@@ -3305,6 +3390,7 @@ pub(super) fn apply_step_opts(
                     question_title: title,
                     answers: None,
                     for_person,
+                    resolved_by: None,
                 };
                 emit(
                     inner,
@@ -3416,6 +3502,11 @@ pub(super) fn apply_step_opts(
             DriverEvent::BackgroundTasks(tasks) => {
                 let tasks = task_stop::carry_marks(&st.session.background_tasks, tasks);
                 if st.session.background_tasks != tasks {
+                    // The idle release waits as long after background work as after a turn.
+                    st.session.last_active_at = Utc::now();
+                    st.background_ended_idle_at = (tasks.is_empty() && st.turn.is_none())
+                        .then(Instant::now)
+                        .or(st.background_ended_idle_at.filter(|_| tasks.is_empty()));
                     st.session.background_tasks = tasks;
                     let (status, last_error) = current_status(st);
                     set_session_status(inner, live, st, status, last_error);

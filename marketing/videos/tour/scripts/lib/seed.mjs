@@ -257,31 +257,6 @@ export async function seedAll(api, { dataDir, home, fakeBin, repoRoot, docker })
     await api.try('POST', '/mcp/tokens', { label: 'ci-readonly', scope: { allow_writes: false, tools: null, workspace_id: null } });
   }
 
-  // ── Goal loop (draft) ────────────────────────────────────────────────────
-  const loop = await api.try('POST', `${W}/goal-loops`, {
-    name: 'Checkout p95 under 300 ms', repo_path: repoDir, autostart: false,
-    definition: {
-      title: 'Checkout p95 under 300 ms', summary: 'Bring checkout latency down without changing behaviour.',
-      objectives: ['Remove the N+1 query on order items', 'Cache regional tax rules', 'Keep every existing test green'],
-      acceptance_criteria: [
-        { id: 'c1', text: 'All tests pass', verify: 'npm test', verify_kind: 'command', verify_cmd: 'npm test' },
-        { id: 'c2', text: 'p95 under 300 ms in the load test', verify: 'k6 run load/checkout.js', verify_kind: 'command', verify_cmd: 'k6 run load/checkout.js' },
-        { id: 'c3', text: 'Runbook explains the new cache', verify: 'docs mention the tax cache', verify_kind: 'agent' },
-      ],
-      constraints: ['No new runtime dependencies'], out_of_scope: ['Frontend changes'], success_signal: 'Load test p95 < 300 ms',
-    },
-    limits: { max_iterations: 6, max_runtime_secs: 5400, per_phase_timeout_secs: 900, max_attempts_per_executor: 2 },
-    config: {
-      mode: 'build', allow_commits: false, require_review: true, skills: [], source_links: [],
-      executors: [{ name: 'Implementer', provider: 'claude', model: '', prompt_extra: '' }, { name: 'Perf tester', provider: 'codex', model: '', prompt_extra: '' }],
-      planner: { provider: 'claude', model: '', prompt: 'Plan the next step.' },
-      evaluator: { provider: 'claude', model: '', prompt: 'Evaluate against the criteria.' },
-      digester: { provider: 'claude', model: '', prompt: 'Digest.' },
-      definer: { provider: 'claude', model: '', prompt: 'Define.' },
-    },
-  });
-  ids.loop = loop?.id;
-
   // ── Workflows ────────────────────────────────────────────────────────────
   const node = (id, kind, name, x, y, params = null) => ({ id, kind, name, x, y, params });
   const edge = (source, target) => ({ id: `${source}-${target}`, source, target, condition: null });

@@ -296,12 +296,17 @@ jobs:
             --archive-file "$RUNNER_TEMP/nextest.tar.zst"
           test -x target/debug/ottod || cargo build --bin ottod --features otto-server/test-util
           test -x target/debug/ottod
+          # The fake agent CLIs the E2E daemon's shims exec (ui/e2e/global-setup.ts).
+          test -x target/debug/otto-fake-agent || cargo build -p otto-agent-protocol --bins
+          for f in otto-fake-claude otto-fake-codex otto-fake-agent; do test -x "target/debug/$f"; done
 
       # A UI-only change: no Rust changed, so only the E2E daemon is needed —
       # the same units the archive build compiles (a cache hit from main).
       - name: Build the test daemon only (UI-only change)
         if: needs.changes.outputs.rust != 'true'
-        run: cargo build --workspace --bins --features otto-server/test-util
+        run: |
+          cargo build --workspace --bins --features otto-server/test-util
+          for f in otto-fake-claude otto-fake-codex otto-fake-agent; do test -x "target/debug/$f"; done
 
       - name: nextest override filters match tests
         if: needs.changes.outputs.rust == 'true'
@@ -315,7 +320,12 @@ jobs:
         uses: actions/upload-artifact@v7.0.2
         with:
           name: ottod-debug
-          path: target/debug/ottod
+          # The daemon and the fake agent CLIs its E2E shims exec, flat in one artifact.
+          path: |
+            target/debug/ottod
+            target/debug/otto-fake-claude
+            target/debug/otto-fake-codex
+            target/debug/otto-fake-agent
           retention-days: 1
           if-no-files-found: error
 
@@ -451,6 +461,7 @@ jobs:
           python3 -B -m unittest discover -s scripts -p 'test_ci_cargo_cache.py'
           python3 -B -m unittest discover -s scripts -p 'test_ci_route.py'
           python3 -B -m unittest discover -s scripts -p 'test_repo_guards.py'
+          python3 -B -m unittest discover -s scripts -p 'test_scrub_workflow_export.py'
 
       - name: Repo static guards (UI + control bytes)
         working-directory: .
@@ -578,7 +589,7 @@ jobs:
           path: target/debug
 
       - name: Make the test daemon executable
-        run: chmod +x target/debug/ottod
+        run: chmod +x target/debug/ottod target/debug/otto-fake-claude target/debug/otto-fake-codex target/debug/otto-fake-agent
 
       - name: Install Node
         uses: actions/setup-node@v7.1.0
@@ -612,6 +623,7 @@ jobs:
         working-directory: ui
         env:
           OTTO_E2E_BIN: ${{ github.workspace }}/target/debug/ottod
+          OTTO_E2E_REQUIRE_FAKES: '1'
           OTTO_E2E_SLOT: '${{ matrix.slot }}'
           OTTO_E2E_FUNCTIONAL_ONLY: '1'
           OTTO_E2E_GATE: '1'
@@ -708,7 +720,7 @@ jobs:
           path: target/debug
 
       - name: Make the test daemon executable
-        run: chmod +x target/debug/ottod
+        run: chmod +x target/debug/ottod target/debug/otto-fake-claude target/debug/otto-fake-codex target/debug/otto-fake-agent
 
       - name: Install Node
         uses: actions/setup-node@v7.1.0

@@ -67,6 +67,8 @@ export default async function globalSetup(_config: FullConfig): Promise<void> {
   // echoes input, so a session still looks alive to the UI.
   const fakeBin = join(dataDir, 'fake-agent-bin');
   mkdirSync(fakeBin, { recursive: true });
+  const fakeReviewDir = join(dataDir, 'fake-review');
+  mkdirSync(fakeReviewDir, { recursive: true });
   // A structured-runtime codex thread (`codex … app-server`) gets the
   // daemon build's fake app-server instead (otto-agent-protocol's
   // `otto-fake-codex`, built next to ottod), so Threads specs can drive a
@@ -78,11 +80,26 @@ export default async function globalSetup(_config: FullConfig): Promise<void> {
   // `slow <s>` and `silent`.
   const fakeClaude = join(dirname(OTTOD), 'otto-fake-claude');
   // The ACP agents with a stand-in here (`gemini --acp`, `agy acp`, `grok …
-  // agent stdio`) get `otto-fake-agent`: echo, `ask` (a
-  // permission request), `hang` (Stop), `plan`, and two slash commands. It
-  // has no steer, like every ACP agent but Grok's interject.
+  // agent stdio`, `opencode acp`, `muse acp`) get `otto-fake-agent`: echo,
+  // `ask` (a permission request), `hang` (Stop), `plan`, and two slash
+  // commands. It has no steer, like every ACP agent but Grok's interject.
   const fakeAcp = join(dirname(OTTOD), 'otto-fake-agent');
-  const ACP = ['agy', 'gemini', 'grok'];
+  const ACP = ['agy', 'gemini', 'grok', 'opencode', 'muse'];
+  // Workflow steps run on the THREAD runner — the product's runner — with
+  // the fakes below acting out each step's `OTTO_FAKE:` script (test-plan §1:
+  // the e2e short-circuit stays on the PTY fallback only). Set explicitly, so
+  // the specs never depend on the daemon's default for OTTO_E2E;
+  // OTTO_WF_STEP_RUNNER=pty in this process runs the PTY-only specs instead.
+  const stepRunner = process.env.OTTO_WF_STEP_RUNNER ?? 'threads';
+  // Every fake also acts out the `OTTO_FAKE:` step scripts
+  // (crates/otto-agent-protocol/src/fake_script.rs); the daemon inherits this
+  // process's env, so `OTTO_FAKE_*` reach them. CI sets
+  // OTTO_E2E_REQUIRE_FAKES=1: a missing fake fails here instead of every
+  // runtime spec hanging on the `exec cat` stand-in.
+  const missing = [fakeCodex, fakeClaude, fakeAcp].filter((f) => !existsSync(f));
+  if (process.env.OTTO_E2E_REQUIRE_FAKES === '1' && missing.length) {
+    throw new Error(`[e2e] OTTO_E2E_REQUIRE_FAKES=1 but the fake agents are missing: ${missing.join(', ')} (build them with cargo build -p otto-agent-protocol --bins)`);
+  }
   for (const cli of ['claude', 'codex', ...ACP]) {
     const shim = join(fakeBin, cli);
     const runtime =
@@ -127,6 +144,18 @@ export default async function globalSetup(_config: FullConfig): Promise<void> {
       // meaningfully, so this only makes that already-doomed path quick + and
       // deterministic; no other spec exercises agent execution.
       CLAUDE_BIN: '/nonexistent/otto-e2e-no-claude',
+      OTTO_WF_STEP_RUNNER: stepRunner,
+      // A workflow step without a script acts as the step persona: it reads
+      // the context files its preamble names, writes its handoff and answers.
+      OTTO_FAKE_DEFAULT: process.env.OTTO_FAKE_DEFAULT ?? 'step',
+      // `remember` / `fail-attempts` state per run, never the shared $TMPDIR one.
+      OTTO_FAKE_STATE_DIR: join(dataDir, 'fake-state'),
+      // The review engine's prompts (scope, reviewer, summarizer) get the
+      // review persona: each writes its result file — `<role>[-<lens>-<provider>].json`
+      // from this dir, or an empty valid one. Without it a fake reviewer acts
+      // as the step persona, exits without findings and every review is
+      // incomplete (which fails a review step).
+      OTTO_FAKE_REVIEW_DIR: fakeReviewDir,
       // Isolate runtime plugins: without this, a spec that installs a plugin
       // would write into the user's REAL ~/otto-plugins.
       OTTO_PLUGINS_HOME: join(dataDir, 'plugins-home'),

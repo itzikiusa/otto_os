@@ -1,6 +1,8 @@
 //! Step-retry policy: classify a failure into a retry class and compute the
 //! next backoff. Pure — moved out of otto-server's `workflow_engine`.
 
+use otto_core::workflows::RetryPolicy;
+
 /// A completed operation can fail a workflow gate without failing execution.
 /// Preserve its evidence and never replay it through the transport retry loop.
 /// The reserved marker is persisted in node/checkpoint output for recovery.
@@ -98,6 +100,41 @@ pub fn retry_backoff(
     (attempt <= max_eff).then_some((sleep_ms, max_eff, reason))
 }
 
+/// The effective retry policy for a node: an explicit `node.retry`, else a
+/// `params.retry` object, else the default (no retry). Clamped to sane bounds.
+pub fn resolve_retry(node: &otto_core::workflows::WorkflowNode) -> RetryPolicy {
+    if let Some(p) = &node.retry {
+        return p.clamped();
+    }
+    if let Some(rp) = node.params.get("retry") {
+        if let Ok(p) = serde_json::from_value::<RetryPolicy>(rp.clone()) {
+            return p.clamped();
+        }
+    }
+    // Default: agent steps get a small retry budget (2 retries = 3 attempts) so a
+    // transient stuck/no-op spawn — e.g. a startup screen that swallowed the prompt,
+    // surfaced as the 3-min no-progress error — is re-attempted with a FRESH session,
+    // then errors ("call it a day"). Every other kind keeps the no-retry default.
+    // `prepare_context` only reaches an agent turn when it has a non-empty
+    // `params.prompt` — treat it like `agent_prompt` exactly in that case.
+    let has_agent_phase = node.kind == "prepare_context"
+        && node
+            .params
+            .get("prompt")
+            .and_then(serde_json::Value::as_str)
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+    if node.kind == "agent_prompt" || has_agent_phase {
+        return RetryPolicy {
+            max_attempts: 2,
+            backoff_ms: 2000,
+            factor: 2.0,
+        }
+        .clamped();
+    }
+    RetryPolicy::default()
+}
+
 /// Whether the outer workflow executor retry loop should retry a node kind.
 /// Interactive / entry kinds are never retried, and `loop` nodes already own
 /// durable retries through [`crate::checkpoint`] so the outer loop must not
@@ -120,6 +157,78 @@ pub fn retry_log_line(next: u32, of: u32, sleep_ms: u64, reason: &str) -> String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use otto_core::workflows::WorkflowNode;
+    use serde_json::{json, Value};
+
+    fn node(id: &str, kind: &str) -> WorkflowNode {
+        WorkflowNode {
+            id: id.into(),
+            kind: kind.into(),
+            name: String::new(),
+            x: 0.0,
+            y: 0.0,
+            params: Value::Null,
+            retry: None,
+        }
+    }
+
+    #[test]
+    fn explicit_zero_disables_even_transient_retries() {
+        let mut node = node("agent", "agent_prompt");
+        node.retry = Some(otto_core::workflows::RetryPolicy::default());
+        let policy = resolve_retry(&node);
+        assert_eq!(policy.max_attempts, 0);
+        assert!(retry_backoff("529 overloaded", &policy, 1, 0, 0).is_none());
+    }
+
+    #[test]
+    fn retry_policy_resolution_and_clamps() {
+        let mut n = node("a", "agent_prompt");
+        // R5: agent steps default to a small retry budget (2 retries = 3 attempts)
+        // so a stuck no-op spawn is re-attempted with a fresh session.
+        assert_eq!(
+            resolve_retry(&n).max_attempts,
+            2,
+            "agent_prompt default 2 retries"
+        );
+        // Non-agent kinds keep the no-retry default.
+        assert_eq!(
+            resolve_retry(&node("b", "log")).max_attempts,
+            0,
+            "non-agent no retry"
+        );
+        n.params = json!({ "retry": { "max_attempts": 99, "backoff_ms": 999999 } });
+        let p = resolve_retry(&n);
+        assert_eq!(p.max_attempts, 5, "clamped to 5");
+        assert_eq!(p.backoff_ms, 60_000, "clamped to 60s");
+        assert!(is_outer_retryable("agent_prompt"));
+        assert!(!is_outer_retryable("human_approval"));
+        assert!(!is_outer_retryable("manual_trigger"));
+    }
+
+    #[test]
+    fn prepare_context_gets_agent_retry_budget_only_with_a_prompt() {
+        // No prompt (pure Jira-fetch step) → default no-retry, like any other kind.
+        let no_prompt = node("p", "prepare_context");
+        assert_eq!(
+            resolve_retry(&no_prompt).max_attempts,
+            0,
+            "no agent phase → no retry"
+        );
+        // A blank/whitespace prompt doesn't count as an agent phase either.
+        let mut blank_prompt = node("p", "prepare_context");
+        blank_prompt.params = json!({ "prompt": "   " });
+        assert_eq!(resolve_retry(&blank_prompt).max_attempts, 0);
+        // Non-empty prompt → same retry budget as agent_prompt.
+        let mut with_prompt = node("p", "prepare_context");
+        with_prompt.params = json!({ "prompt": "analyze the ticket" });
+        assert_eq!(
+            resolve_retry(&with_prompt).max_attempts,
+            2,
+            "agent phase → agent_prompt budget"
+        );
+        assert!(is_outer_retryable("prepare_context"));
+    }
 
     #[test]
     fn retry_log_line_shows_sub_second_backoff_in_ms() {

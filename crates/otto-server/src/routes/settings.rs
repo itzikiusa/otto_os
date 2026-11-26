@@ -23,6 +23,10 @@ pub async fn get_all(
 /// `POST /settings/import`, and `POST /state/restore`). Returns validated
 /// `kubeconfig_exec_plugins` names when present.
 pub(crate) fn validate_settings_patch(body: &Map<String, Value>) -> ApiResult<Option<Vec<String>>> {
+    for (k, v) in body {
+        otto_workflows::validation::engine_setting(k, v)
+            .map_err(|e| ApiError(otto_core::Error::Invalid(e)))?;
+    }
     match body.get(otto_core::kubeconfig_policy::EXTRA_PLUGINS_SETTING) {
         Some(value) => {
             let names: Vec<String> = serde_json::from_value(value.clone()).map_err(|_| {

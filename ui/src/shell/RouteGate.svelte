@@ -49,7 +49,7 @@
         variant="page"
         icon="phone"
         title={`${label} isn’t in the light version`}
-        body="The light version shows Threads, Connections, Git, API and Usage. The full app has everything."
+        body="The light version shows Threads, Workflows, Connections, Git, API and Usage. The full app has everything."
         actionLabel="Open the full app"
         onaction={() => void lightMode.set(false)}
       >

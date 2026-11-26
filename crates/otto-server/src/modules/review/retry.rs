@@ -331,14 +331,14 @@ pub(crate) async fn retry_review_agent(
     // bundle and re-read the lens method inline from the persisted prompt.
     let review_skills_dir = stage_all_review_skills(&ctx.context_library).await;
     let agent_cancels_reg = ctx.review_agent_cancels.clone();
-    let slots = reviewer_slots();
-    let ctx_bg = ctx.clone();
+    let threads = review_threads(&ctx, None).await;
+    let (slots, ctx_bg) = (threads.is_none().then(reviewer_slots), ctx.clone());
     claim.disarm(); // the spawned task owns the row now
     tokio::spawn(async move {
-        let _slot = slots.acquire_owned().await.ok(); // SI-11 reviewer cap
-                                                      // A PR reviewer must verify against the PR head, not the user's
-                                                      // checkout (the original run's worktree is gone) — rebuild one, unique
-                                                      // per retry so concurrent retries never tear down each other's tree.
+        let _slot = otto_review::scope::acquire_slot(slots, &agent_cancel).await; // SI-11 reviewer cap
+                                                                                  // A PR reviewer must verify against the PR head, not the user's
+                                                                                  // checkout (the original run's worktree is gone) — rebuild one, unique
+                                                                                  // per retry so concurrent retries never tear down each other's tree.
         let suffix = format!("-a{index}-{}", chrono::Utc::now().timestamp_millis());
         let (cwd, pr_wt) = if pr_number != 0 {
             let wt =
@@ -378,6 +378,7 @@ pub(crate) async fn retry_review_agent(
             Some(&agent_cancel), // per-agent Stop works on retried agents too
             review_skills_dir.as_deref(),
             &lens_slugs,
+            threads.as_ref(),
         )
         .await;
         if let Some(wt) = pr_wt {
@@ -535,7 +536,7 @@ pub(crate) async fn rerun_summarizer(ctx: &ServerCtx, review_id: &Id, user: User
             &user,
             &repo_id,
             pr_number,
-            &cfg.summarizer,
+            &cfg,
             &agent_findings,
             // A retry re-runs ONLY this stage, from findings stored earlier; the
             // run that produced them is long gone, so there is no context to
@@ -652,9 +653,7 @@ pub(crate) async fn stop_review_agent(
     // (Stopped, not SessionGone-then-auto-retry) — same ordering as Product's
     // per-agent stop.
     signal_review_agent_cancel(&ctx.review_agent_cancels, &review_id, index);
-    if let Some(sid) = review.agents[index].session_id.as_ref() {
-        let _ = ctx.manager.kill_session(sid).await;
-    }
+    end_review_agent(&ctx, &review.agents[index]).await;
     // Persist the terminal row immediately so the UI reflects the stop without
     // waiting for the recovery loop to unwind (it re-persists the same
     // status/note via review_error_note(Stopped)).

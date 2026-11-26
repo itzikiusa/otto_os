@@ -1,6 +1,6 @@
 // Pure side-effect preflight classifier for Workflow graphs. Identifies
-// outward/mutating steps (product_publish, git_pr, http_request, prod db_query,
-// channel_notify — including loop inner steps) for canvas badges and the
+// outward/mutating steps (product_publish, git_pr, post_review_comments,
+// http_request, prod db_query, channel_notify — including loop inner steps) for canvas badges and the
 // RunInputPanel "What this run will touch" summary.
 import type { Connection, WorkflowGraph, WorkflowNode } from '../../lib/api/types';
 
@@ -58,6 +58,15 @@ function classifyStep(
         kind,
         badge: 'Opens PR',
         summary: 'Pushes and opens or updates a pull request',
+        danger: true,
+      };
+    case 'post_review_comments':
+      return {
+        nodeId,
+        nodeName,
+        kind,
+        badge: 'Posts comments',
+        summary: 'Posts review comments on the pull request',
         danger: true,
       };
     case 'channel_notify': {

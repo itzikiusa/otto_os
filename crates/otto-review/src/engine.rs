@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use otto_core::api::ReviewConfig;
-use otto_core::domain::{ReviewAgentCfg, ReviewComment};
+use otto_core::domain::{ModelPick, ReviewAgentCfg, ReviewComment};
 use otto_core::{Error, Id};
 use serde::Deserialize;
 use serde_json::Value;
@@ -242,6 +242,7 @@ pub fn default_review_config(default_provider: &str) -> ReviewConfig {
                     crate::contract::finding_schema()
                 ),
                 skill: "correctness-review".to_string(),
+                ..Default::default()
             },
             ReviewAgentCfg {
                 name: "Security & error handling".to_string(),
@@ -256,6 +257,7 @@ pub fn default_review_config(default_provider: &str) -> ReviewConfig {
                     crate::contract::finding_schema()
                 ),
                 skill: "security-review".to_string(),
+                ..Default::default()
             },
         ],
         summarizer: ReviewAgentCfg {
@@ -281,6 +283,7 @@ pub fn default_review_config(default_provider: &str) -> ReviewConfig {
                 crate::contract::severity_choices()
             ),
             skill: String::new(),
+            ..Default::default()
         },
         custom_presets: vec![],
         max_attempts: None,
@@ -288,6 +291,11 @@ pub fn default_review_config(default_provider: &str) -> ReviewConfig {
         large_pr_lines: None,
         medium_pr_lines: None,
         mode: None,
+        picks: Default::default(),
+        reviewer_time_box_secs: None,
+        scope_assessment: Default::default(),
+        runner: None,
+        thread_meta: Value::Null,
     }
 }
 
@@ -358,6 +366,20 @@ pub const CHECKS_REVIEWER_NAME: &str = "Required checks";
 /// second is what pushes a codex launch past two minutes.
 pub const REVIEW_SPAWN_STAGGER: Duration = Duration::from_millis(1_500);
 
+/// The same gap on the thread runner, where admission already bounds the
+/// storm: only enough to keep the start order (Codex first, DR-023.5) into
+/// admission's first-in first-out queue.
+pub const THREAD_SPAWN_STAGGER: Duration = Duration::from_millis(250);
+
+/// The gap before the next reviewer spawn on the thread runner or on PTY.
+pub fn spawn_gap(threads: bool) -> Duration {
+    if threads {
+        THREAD_SPAWN_STAGGER
+    } else {
+        REVIEW_SPAWN_STAGGER
+    }
+}
+
 /// The order `run_review_core` does its per-agent work in: `(register step,
 /// spawn step)` per reviewer. EVERY cancel flag is registered before the first
 /// session is spawned, so a Stop landing during the stagger reaches reviewers
@@ -366,6 +388,60 @@ pub const REVIEW_SPAWN_STAGGER: Duration = Duration::from_millis(1_500);
 #[cfg(test)]
 pub fn spawn_plan(run_count: usize) -> Vec<(usize, usize)> {
     (0..run_count).map(|i| (i, run_count + i)).collect()
+}
+
+/// Build a dedicated "Required checks" review agent: it RUNS each user-defined
+/// command in the reviewed worktree and reports any that fail (non-zero exit) as
+/// a blocking (`bug`) finding. Delegated to the review agent (which has the repo
+/// and the implementer's context) rather than executed by the engine — so it
+/// fans out through the same multi-agent review pipeline and its failures drop
+/// the score, keeping a fix→review loop iterating until the checks pass.
+pub fn checks_review_agent(default_provider: &str, checks: &[(String, String)]) -> ReviewAgentCfg {
+    let list = checks
+        .iter()
+        .map(|(n, c)| {
+            if n == c {
+                format!("- {c}")
+            } else {
+                format!("- {n}: {c}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let prompt = format!(
+        "You are a CI gate for this change. RUN EACH command below in the repository root \
+         (your current working directory) and capture its exit status and output. For any \
+         command that FAILS (non-zero exit), output one finding object \
+         {{\"path\":\".\",\"line\":0,\"severity\":\"bug\",\"body\":\"check failed: <command>\\n<the last ~40 lines of its output>\"}}. \
+         Do NOT output anything for a command that passes. Output ONLY a JSON array (no prose, \
+         no markdown fence); output [] when every command passes.\n\nCommands:\n{list}"
+    );
+    ReviewAgentCfg {
+        name: CHECKS_REVIEWER_NAME.to_string(),
+        provider: default_provider.to_string(),
+        providers: vec![default_provider.to_string()],
+        prompt,
+        ..Default::default()
+    }
+}
+
+/// Pre-trust the checkout for every provider a review runs (reviewers + the
+/// claude summarizer), so no agent stalls on the "trust this folder?" prompt.
+pub fn trust_checkout(runs: &[AgentRun], repo_path: &str) {
+    let mut trusted = std::collections::HashSet::<&str>::new();
+    for provider in runs.iter().map(|r| r.provider.as_str()).chain(["claude"]) {
+        if trusted.insert(provider) {
+            otto_sessions::trust::ensure_trusted(provider, repo_path);
+        }
+    }
+}
+
+/// The order reviewers are started in: slowest provider first (Codex before
+/// the others, DR-023.5), otherwise row order — the rows keep their order.
+pub fn in_spawn_order(runs: Vec<AgentRun>) -> Vec<(usize, AgentRun)> {
+    let mut order: Vec<_> = runs.into_iter().enumerate().collect();
+    order.sort_by_key(|(_, r)| r.provider != "codex");
+    order
 }
 
 /// Hard ceiling on an orchestrator reviewer's grace period. It runs every lens,
@@ -383,6 +459,7 @@ pub struct AgentRun {
     pub lens: String,
     pub provider: String,
     pub model: String,
+    pub effort: String,
     /// Fan-out: the composed lens prompt. Orchestrator: empty — the prompt
     /// names per-lens output paths, which need the run's index, so it is
     /// composed in the spawn loop from `lenses`.
@@ -421,6 +498,23 @@ pub fn effective_providers(a: &ReviewAgentCfg) -> Vec<String> {
     } else {
         a.providers.clone()
     }
+}
+
+/// The model and effort lens `a` runs with on provider `p` (runtime.md
+/// §7.3): its pick for `p`, else its own model and effort when `p` is its
+/// provider (a model belongs to the configured primary provider; secondary
+/// providers use their own default), else the review-wide pick for `p`, else
+/// the provider's default.
+pub fn resolve_pick(a: &ReviewAgentCfg, cfg: &ReviewConfig, p: &str) -> ModelPick {
+    let own = (a.provider == p).then(|| ModelPick {
+        model: a.model.clone(),
+        effort: a.effort.clone(),
+    });
+    [a.picks.get(p).cloned(), own, cfg.picks.get(p).cloned()]
+        .into_iter()
+        .flatten()
+        .find(|k| !k.is_empty())
+        .unwrap_or_default()
 }
 
 /// The lens SKILL name for a reviewer: the explicit `skill` field, falling back
@@ -479,16 +573,12 @@ pub fn expand_agent_runs(
                     a.name.clone()
                 };
                 let prompt_lens = compose_review_lens_prompt(&lens, &skill_text, &a.prompt);
+                let pick = resolve_pick(a, cfg, &p);
                 AgentRun {
                     display_name,
                     lens: a.name.clone(),
-                    // A model belongs to the configured primary provider.
-                    // Secondary providers use their own default model.
-                    model: if p == a.provider {
-                        a.model.clone()
-                    } else {
-                        String::new()
-                    },
+                    model: pick.model,
+                    effort: pick.effort,
                     provider: p,
                     prompt_lens,
                     lenses: Vec::new(),
@@ -540,19 +630,31 @@ pub fn orchestrator_runs(cfg: &ReviewConfig, library: &otto_context::Library) ->
     providers
         .into_iter()
         .map(|p| {
-            // The first configured model that actually applies to this provider
-            // (a per-lens model on another provider must not leak across).
-            let model = cfg
+            // A lens's pick for this provider, else the first configured
+            // model that actually applies to it (a per-lens model on another
+            // provider must not leak across), else the review-wide pick.
+            let pick = cfg
                 .agents
                 .iter()
-                .find(|a| !a.model.trim().is_empty() && effective_providers(a).contains(&p))
-                .map(|a| a.model.clone())
+                .find_map(|a| a.picks.get(&p).filter(|k| !k.is_empty()).cloned())
+                .or_else(|| {
+                    // A lens's own model and effort belong to its own provider
+                    // (as `resolve_pick`): a Claude model on Codex fails its spawn.
+                    let own = cfg.agents.iter().filter(|a| a.provider == p);
+                    own.map(|a| ModelPick {
+                        model: a.model.clone(),
+                        effort: a.effort.clone(),
+                    })
+                    .find(|k| !k.is_empty())
+                })
+                .or_else(|| cfg.picks.get(&p).cloned())
                 .unwrap_or_default();
             AgentRun {
                 display_name: format!("{p} \u{00b7} orchestrator ({n} lenses)"),
                 lens: String::new(),
                 provider: p,
-                model,
+                model: pick.model,
+                effort: pick.effort,
                 prompt_lens: String::new(),
                 lenses: lenses.clone(),
             }
@@ -1523,6 +1625,7 @@ pub fn workflow_review_config(
                 model: String::new(),
                 prompt: workflow_review_lens_prompt(),
                 skill: lens.clone(),
+                ..Default::default()
             })
             .collect();
     }
@@ -1605,6 +1708,12 @@ pub fn workflow_review_config_from_json(
                 model,
                 prompt,
                 skill: lens,
+                effort: r
+                    .get("effort")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                picks: picks_of(r),
             })
         })
         .collect();
@@ -1623,6 +1732,9 @@ pub fn workflow_review_config_from_json(
         if let Some(m) = s.get("model").and_then(Value::as_str) {
             base.summarizer.model = m.to_string();
         }
+        if let Some(e) = s.get("effort").and_then(Value::as_str) {
+            base.summarizer.effort = e.to_string();
+        }
         if let Some(instr) = s
             .get("instructions")
             .and_then(Value::as_str)
@@ -1636,6 +1748,51 @@ pub fn workflow_review_config_from_json(
         }
     }
     base
+}
+
+/// The `picks` object of a reviewer or of the node (`{<provider>: {model,
+/// effort}}`); anything unreadable is no pick.
+fn picks_of(v: &Value) -> std::collections::BTreeMap<String, ModelPick> {
+    v.get("picks")
+        .and_then(|p| serde_json::from_value(p.clone()).ok())
+        .unwrap_or_default()
+}
+
+/// Whether a `review_run` node sets any review-wide key
+/// [`apply_node_review_params`] reads.
+pub fn has_node_review_params(p: &Value) -> bool {
+    [
+        "cross_provider_check",
+        "previous_review_id",
+        "picks",
+        "scope_assessment",
+        "reviewer_time_box_secs",
+    ]
+    .iter()
+    .any(|k| p.get(k).is_some())
+}
+
+/// The `review_run` node's review-wide keys onto `cfg` (runtime.md §7.3,
+/// §7.7): explicit comparison, rerun lineage, the per-provider default
+/// picks, drop-only scope and the reviewer time box.
+pub fn apply_node_review_params(cfg: &mut ReviewConfig, p: &Value) {
+    cfg.cross_provider_check = p
+        .get("cross_provider_check")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    cfg.previous_review_id = p
+        .get("previous_review_id")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    if p.get("picks").is_some() {
+        cfg.picks = picks_of(p);
+    }
+    if p.get("scope_assessment").and_then(Value::as_str) == Some("configured") {
+        cfg.scope_assessment = otto_core::api::ScopeAssessment::Configured;
+    }
+    if let Some(s) = p.get("reviewer_time_box_secs").and_then(Value::as_u64) {
+        cfg.reviewer_time_box_secs = Some(s).filter(|s| *s > 0);
+    }
 }
 
 /// Compose a review agent's prompt body: prepend the inlined lens method
@@ -1807,6 +1964,7 @@ mod orchestrator_tests {
             model: model.to_string(),
             prompt: format!("{name} instructions"),
             skill: String::new(),
+            ..Default::default()
         }
     }
 
@@ -1879,9 +2037,9 @@ mod orchestrator_tests {
             runs[0].lens_slugs(),
             vec!["correctness-review", "security-review", "test-review"]
         );
-        // The model is the first configured one that applies to THIS provider.
+        // A lens's model is its own provider's only (CR1-011).
         assert_eq!(runs[0].model, "gpt-5");
-        assert_eq!(runs[1].model, "gpt-5");
+        assert_eq!(runs[1].model, "");
         // The prompt is composed per index in the spawn loop, not here.
         assert!(runs.iter().all(|r| r.prompt_lens.is_empty()));
     }
@@ -2264,3 +2422,7 @@ pub async fn append_to_review_file(
     file.write_all(bullet.as_bytes()).await?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "engine_picks_tests.rs"]
+mod picks_tests;

@@ -94,6 +94,18 @@ fn is_resource_access_route(p: &str) -> bool {
 /// Root-only daemon diagnostics (`Settings:Admin`).
 const ROOT_DIAGNOSTICS: [&str; 3] = ["/capabilities", "/support-bundle", "/system/restart-impact"];
 
+/// Workflows: View reads, Edit changes — except the read-shaped POSTs, a
+/// validation and an Optimize preview, which save nothing (their handlers
+/// gate at ws Viewer); `/optimize/apply` stays Edit.
+fn workflows_tier(method: &Method, p: &str) -> Capability {
+    let preview = matches!(p, "/workflows/{id}/validate" | "/workflows/{id}/optimize");
+    if method == Method::GET || (method == Method::POST && preview) {
+        Capability::View
+    } else {
+        Capability::Edit
+    }
+}
+
 /// Map an `(method, matched_path)` pair to its feature-axis [`PolicyDecision`].
 ///
 /// `matched_path` is the Axum route **template** with `{id}`-style placeholders,
@@ -926,10 +938,9 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     }
 
     // ---- Goal Loops -----------------------------------------------------------
-    // Workspace-axis feature: every handler enforces ws Viewer/Editor via the
-    // role check (`require_ws_role`), so the feature-capability axis is not gated
-    // here. (A dedicated GoalLoops capability is a possible future enhancement.)
-    if p.starts_with("/goal-loops/")
+    // Workspace-axis: handlers enforce ws Viewer/Editor (`require_ws_role`), so no
+    // feature gate — except Continue, which starts a goal (Workflows, below).
+    if (p.starts_with("/goal-loops/") && !p.ends_with("/continue"))
         || p == "/goal-loops"
         || p.starts_with("/workspaces/{id}/goal-loops")
     {
@@ -959,10 +970,11 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         || p == "/workflows"
         || p.starts_with("/workflow-runs/")
         || p.starts_with("/workflow-triggers/")
-        || p.starts_with("/workspaces/{wid}/workflows")
-        || p.starts_with("/workspaces/{wid}/workflow-runs")
+        || p.starts_with("/workspaces/{wid}/workflow")
+        || p.starts_with("/workspaces/{wid}/goals")
+        || p == "/goal-loops/{id}/continue"
     {
-        return Require(Workflows, if get { View } else { Edit });
+        return Require(Workflows, workflows_tier(method, p));
     }
 
     // ---- Channels (Slack / Telegram / Webhook integrations) -------------------
@@ -3307,6 +3319,13 @@ mod tests {
             pol(Method::GET, "/api/v1/workflows/templates"),
             Require(Workflows, View)
         );
+        // Continuing an older loop starts a goal workflow (CR2-002); the
+        // loop's read-only history stays on the workspace-role check.
+        assert_eq!(
+            pol(Method::POST, "/api/v1/goal-loops/{id}/continue"),
+            Require(Workflows, Edit)
+        );
+        assert_eq!(pol(Method::GET, "/api/v1/goal-loops/{id}"), Exempt);
         // Run-scoped context files (PC-1) are reads at Workflows:View, NOT the
         // `/fs/*` Agents:Edit tier — a workspace Viewer opens their runs' files.
         for p in [

@@ -12,7 +12,10 @@
 
 use crate::convert::{dberr, ts};
 use crate::DbPool;
-use otto_core::workflows::{NodeStatus, RunListItem, RunListPage, RunStatus, WorkflowGraph};
+use otto_core::workflows::{
+    NodeStatus, RunListItem, RunListPage, RunStatus, Subject, SubjectPr, SubjectTicket,
+    WorkflowGraph,
+};
 use otto_core::{Error, Id, Result};
 use serde_json::Value;
 use sqlx::Row;
@@ -33,6 +36,9 @@ pub struct RunSearch {
     pub q: Option<String>,
     /// Status filter (`running`, `success`, …); empty = any.
     pub statuses: Vec<String>,
+    /// Only runs waiting on a person: running with a step on a person or an
+    /// approval pause, or held blocked / exhausted (the Runs inbox "Needs you").
+    pub attention: bool,
     pub limit: Option<u32>,
     pub cursor: Option<String>,
 }
@@ -88,10 +94,22 @@ pub async fn search_runs(pool: &DbPool, s: &RunSearch) -> Result<RunListPage> {
     let cursor = s.cursor.as_deref().map(parse_cursor).transpose()?;
     let mut sql = String::from(
         "SELECT r.id, r.workflow_id, w.name AS workflow_name, r.status, r.started_at,
-                r.finished_at, r.error, r.input_json,
+                r.finished_at, r.error, r.input_json, r.overview_json, r.rev,
                 COALESCE(r.progress_json, r.nodes_json) AS nodes_json, w.graph_json
-         FROM (SELECT * FROM workflow_runs WHERE workspace_id = ?
-               ORDER BY started_at DESC, id DESC LIMIT ?) r
+         FROM (SELECT * FROM workflow_runs WHERE workspace_id = ?",
+    );
+    if s.attention {
+        // Repeats the partial index's predicate, so the scan uses
+        // `idx_workflow_runs_ws_attention` (running or held rows only).
+        sql.push_str(
+            " AND (status = 'running' OR hold_json IS NOT NULL)
+              AND ((status = 'running' AND (attention > 0 OR waiting_approval = 1))
+                   OR (status = 'error'
+                       AND json_extract(hold_json, '$.kind') IN ('blocked', 'exhausted')))",
+        );
+    }
+    sql.push_str(
+        " ORDER BY started_at DESC, id DESC LIMIT ?) r
          JOIN workflows w ON w.id = r.workflow_id
          WHERE 1 = 1",
     );
@@ -194,17 +212,11 @@ fn row_to_item(r: &sqlx::sqlite::SqliteRow) -> Result<RunListItem> {
         .transpose()?;
     let status = RunStatus::parse(&r.get::<String, _>("status"))
         .ok_or_else(|| Error::Internal("bad run status".into()))?;
-    let repo = str_of(&input, "working_directory")
-        .and_then(|w| w.split(',').next())
-        .map(basename)
-        .or_else(|| {
-            input
-                .get("repos")
-                .and_then(Value::as_array)
-                .and_then(|a| a.first())
-                .and_then(|e| str_of(e, "repo").or_else(|| str_of(e, "name")))
-                .map(basename)
-        });
+    let repo = input_repo(&input);
+    let overview = crate::workflows::fresh_overview(
+        r.get::<Option<String>, _>("overview_json").as_deref(),
+        r.get("rev"),
+    );
     let pr = match input.get("pr") {
         Some(Value::Number(n)) => Some(n.to_string()),
         Some(Value::String(s)) if !s.trim().is_empty() => Some(s.trim().to_string()),
@@ -235,6 +247,104 @@ fn row_to_item(r: &sqlx::sqlite::SqliteRow) -> Result<RunListItem> {
             .get::<Option<String>, _>("error")
             .filter(|e| !e.trim().is_empty())
             .map(|e| clip(&e, 240)),
+        subject: overview
+            .as_ref()
+            .and_then(|o| o.subject.clone())
+            .or_else(|| subject_from_input(&input)),
+        overview,
+    })
+}
+
+/// Repo (last path segment of the working directory / first declared repo).
+fn input_repo(input: &Value) -> Option<String> {
+    str_of(input, "working_directory")
+        .and_then(|w| w.split(',').next())
+        .map(basename)
+        .or_else(|| {
+            input
+                .get("repos")
+                .and_then(Value::as_array)
+                .and_then(|a| a.first())
+                .and_then(|e| str_of(e, "repo").or_else(|| str_of(e, "name")))
+                .map(basename)
+        })
+}
+
+/// What a run is about, from its input alone — the pull request, the ticket,
+/// the branch and the repository it names — for a run whose overview carries
+/// no subject (every run from before overviews existed). The base branch is
+/// where the work merges, not what it is about, so it is never the subject.
+/// `None` when the input names none of them.
+pub fn subject_from_input(input: &Value) -> Option<Subject> {
+    let repo = input_repo(input);
+    // The PRs admission resolved (`prs[]`, as in the run's prs.json), else the
+    // one the input names.
+    let resolved = input
+        .get("prs")
+        .and_then(Value::as_array)
+        .and_then(|a| a.first());
+    let pr = match resolved {
+        Some(p) => p
+            .get("number")
+            .and_then(Value::as_u64)
+            .map(|number| SubjectPr {
+                repo: str_of(p, "repo_path")
+                    .map(basename)
+                    .or_else(|| repo.clone())
+                    .unwrap_or_default(),
+                number,
+                url: str_of(p, "url").unwrap_or_default().to_string(),
+                title: str_of(p, "title").map(str::to_string),
+            }),
+        None => input.get("pr").and_then(|v| named_pr(v, repo.as_deref())),
+    };
+    let ticket = str_of(input, "jira_ticket").and_then(|t| {
+        Some(SubjectTicket {
+            key: otto_core::text::issue_key(&t.to_ascii_uppercase())?,
+            url: Some(t)
+                .filter(|t| t.starts_with("http"))
+                .unwrap_or_default()
+                .to_string(),
+            title: None,
+        })
+    });
+    let subject = Subject {
+        pr,
+        ticket,
+        repo,
+        branch: str_of(input, "pr_branch").map(str::to_string),
+    };
+    (subject != Subject::default()).then_some(subject)
+}
+
+/// The first pull request `input.pr` names: `15`, `"#15"`,
+/// `"repo-a#15, repo-b#340"` or a PR's URL (`…/repo/pull/15`,
+/// `…/repo/pull-requests/15`); the run's repo when it names none.
+fn named_pr(v: &Value, run_repo: Option<&str>) -> Option<SubjectPr> {
+    let text = match v {
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => s
+            .split(',')
+            .next()?
+            .trim()
+            .trim_end_matches('/')
+            .to_string(),
+        _ => return None,
+    };
+    let is_url = text.starts_with("http");
+    let (before, number) = text.rsplit_once(['#', '/']).unwrap_or(("", &text));
+    let number: u64 = number.trim().parse().ok().filter(|n| *n > 0)?;
+    // A URL's repo is the segment before "pull" / "pull-requests".
+    let named = if is_url {
+        before.rsplit('/').nth(1).filter(|r| *r != "-")
+    } else {
+        Some(before.trim()).filter(|r| !r.is_empty())
+    };
+    Some(SubjectPr {
+        repo: named.or(run_repo).map(basename).unwrap_or_default(),
+        number,
+        url: if is_url { text.clone() } else { String::new() },
+        title: None,
     })
 }
 

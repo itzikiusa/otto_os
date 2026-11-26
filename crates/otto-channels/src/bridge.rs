@@ -908,6 +908,7 @@ impl Bridge {
                     msg.thread.as_deref(),
                     &msg.user,
                     &msg.text,
+                    &msg.attachments,
                 )
                 .await
             {
@@ -936,6 +937,7 @@ impl Bridge {
                     msg.thread.as_deref(),
                     &msg.user,
                     &msg.text,
+                    &msg.attachments,
                 )
                 .await
             {
@@ -1438,6 +1440,7 @@ mod conv_lock_tests {
             user_name: None,
             text: "hello".into(),
             edited: false,
+            attachments: vec![],
         };
         let telegram = conversation_key(Channel::Telegram, &msg);
         let webhook = conversation_key(Channel::Webhook, &msg);
@@ -2014,6 +2017,7 @@ mod tests {
             user_name: None,
             text: text.into(),
             edited: false,
+            attachments: vec![],
         }
     }
 

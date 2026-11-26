@@ -9,6 +9,7 @@
 export const MACHINE_KEYS = {
   admission: 'agent_admission_enabled',
   maxLive: 'agent_background_max_live',
+  pressureFloor: 'agent_admission_pressure_floor',
   maxLoadPerCore: 'agent_admission_max_load_per_core',
   maxWaitSecs: 'agent_admission_max_wait_secs',
   lowPriority: 'agent_background_low_priority',
@@ -31,8 +32,12 @@ type Num = number | null | undefined;
 
 export interface MachineForm {
   admission: boolean;
-  /** Blank = automatic (three quarters of the cores, at least 2); 0 = no ceiling. */
+  /** Blank = automatic (three quarters of the cores, one per 3 GB of memory,
+   *  at least 2); 0 = no ceiling. */
   maxLive: Num;
+  /** Blank = automatic (half the ceiling, at least 1); 0 = pressure holds
+   *  every background agent. */
+  pressureFloor: Num;
   /** Blank = 1.5. */
   maxLoadPerCore: Num;
   /** Blank = 300. */
@@ -47,9 +52,17 @@ export interface MachineForm {
   lowDiskGb: Num;
 }
 
-/** The automatic background-agent ceiling (`default_max_live`). */
-export function defaultMaxLive(cores: number): number {
-  return Math.max(2, Math.floor((Math.max(1, cores) * 3) / 4));
+/** The automatic background-agent ceiling (`default_max_live`): three
+ *  quarters of the cores, one agent per 3 GB of memory (when known), at least 2. */
+export function defaultMaxLive(cores: number, ramBytes?: number | null): number {
+  const byCores = Math.floor((Math.max(1, cores) * 3) / 4);
+  const byRam = ramBytes ? Math.floor(Math.floor(ramBytes / 1024 ** 3) / 3) : Infinity;
+  return Math.max(2, Math.min(byCores, byRam));
+}
+
+/** The automatic pressure floor (`default_pressure_floor`): half the ceiling, at least 1. */
+export function defaultPressureFloor(ceiling: number): number {
+  return Math.max(1, Math.floor(ceiling / 2));
 }
 
 const isUint = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v) && v >= 0;
@@ -72,6 +85,7 @@ export function machineFormFrom(settings: Record<string, unknown>): MachineForm 
   return {
     admission: get(MACHINE_KEYS.admission) !== false,
     maxLive: isUint(get(MACHINE_KEYS.maxLive)) ? (get(MACHINE_KEYS.maxLive) as number) : null,
+    pressureFloor: isUint(get(MACHINE_KEYS.pressureFloor)) ? (get(MACHINE_KEYS.pressureFloor) as number) : null,
     maxLoadPerCore: typeof load === 'number' && Number.isFinite(load) && load > 0 ? load : null,
     maxWaitSecs: isUint(get(MACHINE_KEYS.maxWaitSecs)) ? (get(MACHINE_KEYS.maxWaitSecs) as number) : null,
     lowPriority: get(MACHINE_KEYS.lowPriority) !== false,
@@ -91,6 +105,9 @@ export function machineFormErrors(f: MachineForm): MachineErrors {
   const whole = (v: Num, max: number): boolean => isUint(v) && v <= max;
   if (!blank(f.maxLive) && !whole(f.maxLive, 256)) {
     e.maxLive = 'Enter a whole number from 0 (no limit) to 256, or leave it blank for automatic.';
+  }
+  if (!blank(f.pressureFloor) && !whole(f.pressureFloor, 256)) {
+    e.pressureFloor = 'Enter a whole number from 0 (always hold) to 256, or leave it blank for automatic.';
   }
   if (!blank(f.maxLoadPerCore) && !(typeof f.maxLoadPerCore === 'number' && f.maxLoadPerCore > 0 && f.maxLoadPerCore <= 50)) {
     e.maxLoadPerCore = 'Enter a number above 0 and up to 50, or leave it blank for 1.5.';
@@ -129,6 +146,7 @@ export function machineValues(f: MachineForm): Record<string, unknown> {
   return {
     [MACHINE_KEYS.admission]: f.admission,
     [MACHINE_KEYS.maxLive]: norm(f.maxLive),
+    [MACHINE_KEYS.pressureFloor]: norm(f.pressureFloor),
     [MACHINE_KEYS.maxLoadPerCore]: norm(f.maxLoadPerCore),
     [MACHINE_KEYS.maxWaitSecs]: norm(f.maxWaitSecs),
     [MACHINE_KEYS.lowPriority]: f.lowPriority,

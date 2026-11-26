@@ -114,6 +114,27 @@ pub trait RuntimeHost: Send + Sync + 'static {
     /// Deliver one event to WebSocket clients (owner / admin / root).
     fn publish(&self, session: &RuntimeSession, event: Arc<RuntimeEvent>);
 
+    /// The machine place for a spawn about to happen: claims the
+    /// pre-admitted `permit_key`, else (a gated source) reserves one at once.
+    /// Never waits. Held until [`Self::register_runtime`] returned.
+    fn admit_spawn(&self, _session: &RuntimeSession, _permit_key: Option<String>) -> Box<dyn Send> {
+        Box::new(())
+    }
+
+    /// Count a spawned (or adopted) agent process until `exit` closes.
+    async fn register_runtime(
+        &self,
+        _session: &RuntimeSession,
+        _pid: Option<u32>,
+        _exit: tokio::sync::watch::Receiver<Option<i32>>,
+    ) {
+    }
+
+    /// Memory pressure is critical: an engine thread opens no sub-thread.
+    async fn memory_critical(&self) -> bool {
+        false
+    }
+
     /// Thread `session` began waiting on its person (`Some(what)`: what its
     /// approval, question or secret request asks) or stopped waiting
     /// (`None`) — once per waiting episode (`runtime/attention.rs`; never
@@ -340,6 +361,28 @@ impl RuntimeHost for SessionManagerHost {
 
     fn attention(&self, session: &RuntimeSession, what: Option<&str>) {
         self.notices.signal(session, what);
+    }
+
+    fn admit_spawn(&self, session: &RuntimeSession, permit_key: Option<String>) -> Box<dyn Send> {
+        Box::new(
+            self.manager
+                .admit_runtime_spawn(&as_agent_session(session), permit_key.as_deref()),
+        )
+    }
+
+    async fn register_runtime(
+        &self,
+        session: &RuntimeSession,
+        pid: Option<u32>,
+        exit: tokio::sync::watch::Receiver<Option<i32>>,
+    ) {
+        self.manager
+            .register_runtime_child(&as_agent_session(session), pid, exit)
+            .await;
+    }
+
+    async fn memory_critical(&self) -> bool {
+        self.manager.memory_pressure_critical().await
     }
 
     fn publish(&self, session: &RuntimeSession, event: Arc<RuntimeEvent>) {

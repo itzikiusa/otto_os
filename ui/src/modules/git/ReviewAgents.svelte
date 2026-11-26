@@ -17,6 +17,9 @@
   import Badge from '../../lib/components/Badge.svelte';
   import { summaryFallback, summaryFallbackTitle } from './reviewFallback';
   import { agentRowKey, agentRowRetryAction, canStopReviewAgent } from './reviewAgentsRow';
+  import type { Component } from 'svelte';
+  import { loadRuntimeThreadView, type RuntimeThreadViewProps } from '../../lib/runtimeThreadPort';
+  import { ws } from '../../lib/stores/workspace.svelte';
 
   interface Props {
     review: Review;
@@ -36,8 +39,20 @@
 
   // Inline live terminals (multiple may be open at once), keyed by session id.
   let openTerminals = $state<Set<string>>(new Set());
-  function toggleTerminal(sessionId: string | null | undefined): void {
+  // A row whose agent ran as a runtime thread opens the read-only thread view
+  // (loaded on the first Open); a terminal row opens its terminal.
+  let ThreadView = $state<Component<RuntimeThreadViewProps> | null>(null);
+  let removedThreads = $state<Set<string>>(new Set());
+  function toggleTerminal(sessionId: string | null | undefined, thread = false): void {
     if (!sessionId) return;
+    if (thread && !ThreadView) {
+      loadRuntimeThreadView().then(
+        (m) => {
+          ThreadView = m.default as Component<RuntimeThreadViewProps>;
+        },
+        (e) => toastError('Couldn’t open the conversation', e),
+      );
+    }
     const next = new Set(openTerminals);
     if (next.has(sessionId)) next.delete(sessionId);
     else next.add(sessionId);
@@ -116,7 +131,7 @@
         <span class="chip rp-agent-chip">{agent.provider}{agent.model ? ' · ' + agent.model : ''}</span>
         <span class="grow"></span>
         {#if agent.session_id}
-          <button class="btn small ghost" onclick={() => toggleTerminal(agent.session_id)}>
+          <button class="btn small ghost" onclick={() => toggleTerminal(agent.session_id, agent.thread)}>
             {openTerminals.has(agent.session_id) ? 'Hide' : 'Open'}
           </button>
         {/if}
@@ -192,7 +207,22 @@
           respond (for example, approve folder access).
         </p>
       {/if}
-      {#if agent.session_id && openTerminals.has(agent.session_id)}
+      {#if agent.session_id && openTerminals.has(agent.session_id) && agent.thread}
+        {#if removedThreads.has(agent.session_id)}
+          <p class="rp-agent-gone">The conversation was removed after the review. Its findings are kept.</p>
+        {:else if ThreadView}
+          {@const sid = agent.session_id}
+          <div class="rp-thread">
+            <ThreadView
+              sessionId={sid}
+              workspaceId={ws.currentId ?? ''}
+              readOnly
+              hideEmbedBarWhenUnlinked
+              onunavailable={() => (removedThreads = new Set([...removedThreads, sid]))}
+            />
+          </div>
+        {/if}
+      {:else if agent.session_id && openTerminals.has(agent.session_id)}
         <div class="rp-term">
           <!-- No {#key} here. Terminal retargets its WS internally when
                `sessionId` changes (no xterm/WS teardown — see Terminal's
@@ -290,6 +320,18 @@
     overflow: hidden;
     overscroll-behavior: contain;
     background: var(--term-bg);
+  }
+  .rp-thread {
+    height: min(420px, 65vh);
+    margin: 8px 0 2px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
+    overflow: hidden;
+  }
+  .rp-agent-gone {
+    margin: 6px 0 0;
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
   }
   .rp-agent-findings {
     list-style: none;

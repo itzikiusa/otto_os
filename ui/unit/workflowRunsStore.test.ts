@@ -14,6 +14,7 @@ function fixture() {
   return { workflowRuns, calls };
 }
 
+const flushAll = () => new Promise<void>((r) => setImmediate(r));
 const run = (id: string, status = 'running') => ({ run_id: id, workflow_id: 'wf', status, nodes_done: 0, nodes_total: 3, waiting_approval: false, started_at: 't' });
 
 test('a late response for the previous workspace never replaces the current list', async () => {
@@ -44,4 +45,85 @@ test('events patch known runs in place, drop terminal ones and refetch unknown o
   workflowRuns.apply({ workspace_id: 'A', run_id: 'new', status: 'running' }, 'A');
   assert.equal(calls.length, 2, 'an unknown run triggers one refetch');
   assert.equal(calls[1].wsId, 'A');
+});
+
+test('a held run stays listed with its overview; a plain terminal run leaves (DR-101)', async () => {
+  const { workflowRuns, calls } = fixture();
+  const first = workflowRuns.refresh('A');
+  calls[0].result.resolve([run('held'), run('done')]);
+  await first;
+  const hold = { kind: 'blocked', reason: 'Check failed twice', since: 't', node_ids: [] };
+  workflowRuns.apply({ workspace_id: 'A', run_id: 'held', status: 'error', overview: { state: 'blocked', hold } as any }, 'A');
+  workflowRuns.apply({ workspace_id: 'A', run_id: 'done', status: 'error', overview: { state: 'failed' } as any }, 'A');
+  assert.deepEqual(workflowRuns.list.map((r: any) => r.run_id), ['held']);
+  assert.equal(workflowRuns.list[0].status, 'error');
+  assert.equal(workflowRuns.list[0].overview.state, 'blocked');
+  workflowRuns.apply({ workspace_id: 'A', run_id: 'held', status: 'running', overview: { state: 'running' } as any }, 'A');
+  assert.equal(workflowRuns.list[0].overview.state, 'running', 'a resumed run patches its overview in place');
+  assert.equal(calls.length, 1);
+});
+
+test('an older overview never replaces a newer one (CR1-037)', async () => {
+  const { workflowRuns, calls } = fixture();
+  const first = workflowRuns.refresh('A');
+  calls[0].result.resolve([run('r1')]);
+  await first;
+  workflowRuns.apply({ workspace_id: 'A', run_id: 'r1', status: 'running', nodes_total: 3, overview: { rev: 7, state: 'needs_you' } as any }, 'A');
+  workflowRuns.apply({ workspace_id: 'A', run_id: 'r1', status: 'running', nodes_total: 3, overview: { rev: 5, state: 'running' } as any }, 'A');
+  assert.equal(workflowRuns.list[0].overview.state, 'needs_you');
+});
+
+test('a list read in flight never resurrects a run an event settled, nor rolls back its overview (CR1-037)', async () => {
+  const { workflowRuns, calls } = fixture();
+  const first = workflowRuns.refresh('A');
+  calls[0].result.resolve([run('r1'), run('r2')]);
+  await first;
+  // A step transition starts a refetch; meanwhile r1 finishes and r2 asks for an approval.
+  workflowRuns.apply({ workspace_id: 'A', run_id: 'r1', status: 'running', nodes_total: 3, node: { node_id: 'n2', status: 'running' } }, 'A');
+  assert.equal(calls.length, 2);
+  workflowRuns.apply({ workspace_id: 'A', run_id: 'r1', status: 'success' }, 'A');
+  workflowRuns.apply({ workspace_id: 'A', run_id: 'r2', status: 'running', nodes_total: 3, waiting_approval: true, overview: { rev: 9, state: 'needs_you' } as any }, 'A');
+  calls[1].result.resolve([run('r1'), { ...run('r2'), overview: { rev: 8, state: 'running' } }]);
+  await flushAll();
+  assert.deepEqual(workflowRuns.list.map((r: any) => r.run_id), ['r2'], 'the settled run stays gone');
+  assert.equal(workflowRuns.list[0].overview.state, 'needs_you', 'the newer overview stays');
+  // A retried run (same id) comes back with its next running event.
+  workflowRuns.apply({ workspace_id: 'A', run_id: 'r1', status: 'running' }, 'A');
+  calls[2].result.resolve([run('r1'), run('r2')]);
+  await flushAll();
+  assert.ok(workflowRuns.list.some((r: any) => r.run_id === 'r1'));
+});
+
+test('of two list reads, the older answer arriving last is dropped (CR1-037)', async () => {
+  const { workflowRuns, calls } = fixture();
+  const a = workflowRuns.refresh('A');
+  const b = workflowRuns.refresh('A');
+  calls[1].result.resolve([run('new')]);
+  await b;
+  calls[0].result.resolve([run('old')]);
+  await a;
+  assert.deepEqual(workflowRuns.list.map((r: any) => r.run_id), ['new']);
+});
+
+test('a settled run retried in place comes back with the next list read, as after a socket reconnect (CR2-008)', async () => {
+  const { workflowRuns, calls } = fixture();
+  const first = workflowRuns.refresh('A');
+  calls[0].result.resolve([run('r1')]);
+  await first;
+  workflowRuns.apply({ workspace_id: 'A', run_id: 'r1', status: 'error' }, 'A');
+  assert.equal(workflowRuns.list.length, 0);
+  // The socket slept through the retry's events; the reconnect reads the list again.
+  const again = workflowRuns.refresh('A');
+  calls[1].result.resolve([run('r1')]);
+  await again;
+  assert.deepEqual(workflowRuns.list.map((r: any) => r.run_id), ['r1']);
+});
+
+test('clear() drops a list read already in flight (CR2-008)', async () => {
+  const { workflowRuns, calls } = fixture();
+  const read = workflowRuns.refresh('A');
+  workflowRuns.clear('A');
+  calls[0].result.resolve([run('r1')]);
+  await read;
+  assert.equal(workflowRuns.list.length, 0);
 });

@@ -498,8 +498,6 @@ const INTERVAL_ALLOW = new Set([
   'src/App.svelte', // offline boot retry
   'src/shell/StatusBar.svelte',
   'src/shell/NotificationBell.svelte',
-  'src/modules/workflows/RunSteps.svelte',
-  'src/modules/workflows/RunAgents.svelte',
   'src/modules/product/design/DesignArena.svelte',
   'src/modules/git/CreatePr.svelte',
   'src/modules/git/WipPanel.svelte',

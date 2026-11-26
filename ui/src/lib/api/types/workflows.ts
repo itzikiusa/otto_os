@@ -7,6 +7,12 @@ import type {
 import type {
   ReviewMode,
 } from './review';
+import type {
+  Attention,
+  TranscriptDigest,
+  TurnTokenUsage,
+  WaitReason,
+} from './agent-runtime';
 
 // ---------------------------------------------------------------------------
 // Workflow engine (mirrors otto_core::workflows)
@@ -60,6 +66,24 @@ export interface Workflow {
   created_by: Id;
   created_at: string;
   updated_at: string;
+  /** Where it came from (server-set): `goal`, or absent for an authored workflow. */
+  origin?: string;
+  /** `review:<id>` · `insights` · `goal_loop:<id>` · `mcp` (server-set). */
+  origin_ref?: string;
+  /** `GET /workspaces/{wid}/workflows` only: the newest run (null: never ran). */
+  last_run?: WorkflowLastRun | null;
+  /** `GET /workspaces/{wid}/workflows` only: its pending/running runs. */
+  running_count?: number;
+}
+
+export interface WorkflowLastRun {
+  id: Id;
+  status: string;
+  /** The stored `overview.state` (absent on rows of older builds). */
+  overview_state: string | null;
+  attention: boolean;
+  ended_at: string | null;
+  duration_ms: number | null;
 }
 
 // NOTE: named `WorkflowRunStatus` (not `RunStatus`) to avoid colliding with the
@@ -89,6 +113,329 @@ export interface NodeActivity {
   hold_reason?: string | null;
 }
 
+// ---------------------------------------------------------------------------
+// Run view: phases, people, threads and the run overview (api.md "Run view").
+// Every field is optional on the wire; `unknown` / `other` values come from a
+// newer daemon.
+// ---------------------------------------------------------------------------
+
+/** Where a RUNNING step is (absent once it settled). */
+export type StepPhase =
+  | 'queued' | 'waiting' | 'starting' | 'working' | 'needs_you' | 'finishing' | 'unknown';
+
+export interface PhaseMark {
+  phase: StepPhase;
+  at: string;
+  /** ≤ 200 chars ("attempt 2 of 3 — …", a hold kind, "canceled"). */
+  note?: string;
+}
+
+/** A step's agent thread. `thread_id` is a PTY session id when `runner` is `pty`. */
+export interface StepThread {
+  thread_id: Id;
+  runner: 'threads' | 'pty';
+  provider: string;
+  /** What actually ran. */
+  model?: string;
+  effort?: string;
+  continued_from?: string;
+  start_ordinal?: number;
+  turns: number;
+  usage: TurnTokenUsage;
+  /** Absent on `/progress`; on the full node. */
+  digest?: TranscriptDigest;
+  closed_at?: string;
+  /** Computed on read: false once retention deleted the thread. */
+  available?: boolean;
+}
+
+export type ChildThreadStatus =
+  | 'queued' | 'pending' | 'running' | 'success' | 'error' | 'skipped' | 'needs_you';
+
+/** A reviewer, the scope agent, the summarizer, or a thread the step's agent opened. */
+export interface ChildThread {
+  id: string;
+  thread_id?: Id;
+  /** "Correctness · Codex". */
+  label: string;
+  provider: string;
+  model?: string;
+  effort?: string;
+  status: ChildThreadStatus;
+  started_at?: string;
+  ended_at?: string;
+  /** "12 findings". */
+  note?: string;
+  /** Absent on `/progress`; on the full node. */
+  usage?: TurnTokenUsage;
+}
+
+export type DeliverableState = 'done' | 'partial' | 'failed' | 'pending_approval' | 'unknown';
+
+/** A file from the chat message that started (`start`) or steered (`steer`) a
+ *  run, as copied into its context dir (`attachments.json`). */
+export interface AttachmentRef {
+  name: string;
+  mime: string;
+  size_bytes?: number;
+  /** Context-relative, `attachments/<safe name>`; absent when not received. */
+  path?: string;
+  error?: string;
+  source: 'start' | 'steer';
+}
+
+/** Something a step put outside Otto. */
+export interface Deliverable {
+  label: string;
+  state: DeliverableState;
+  detail?: string;
+  url?: string;
+}
+
+/** What a person said to a step; kept on the node (≤ 20). */
+export interface HumanEntry {
+  kind: 'answer' | 'verify' | 'steer';
+  ask?: string;
+  /** ≤ 2 KiB. */
+  text: string;
+  met?: boolean;
+  revision?: string;
+  iteration?: number;
+  by: string;
+  at: string;
+}
+
+/** The run state shown to people — computed, never a stored status. */
+export type RunState =
+  | 'queued' | 'running' | 'waiting' | 'needs_you' | 'succeeded' | 'failed' | 'canceled'
+  | 'paused' | 'blocked' | 'exhausted' | 'unknown';
+
+/** A step waiting on a person: the attention's fields plus the step. */
+export interface AttentionRef extends Attention {
+  node_id: string;
+  name: string;
+}
+
+export interface FanProgress {
+  done: number;
+  total: number;
+  running: number;
+}
+
+export interface RunNow {
+  node_ids: string[];
+  node_names: string[];
+  phase: StepPhase;
+  wait_text?: string;
+  fan?: FanProgress;
+}
+
+export interface QueueInfo {
+  /** 1-based, within the lane. */
+  position: number;
+  ahead: number;
+  cap: number;
+  lane?: 'normal' | 'long';
+}
+
+export interface FailedStep {
+  node_id: string;
+  name: string;
+  error: string;
+  error_class?: string;
+}
+
+/** Where the run's wall clock went; the buckets sum to it. */
+export interface TimeBuckets {
+  queued_ms: number;
+  waiting_ms: number;
+  with_you_ms: number;
+  working_ms: number;
+}
+
+export interface RunOrigin {
+  kind: 'chat' | 'manual' | 'schedule' | 'webhook' | 'event' | 'task' | 'mcp' | 'goal';
+  channel_name?: string;
+  user_name?: string;
+  thread_url?: string;
+}
+
+export interface RunSubject {
+  pr?: { repo: string; number: number; url: string; title?: string };
+  ticket?: { key: string; url: string; title?: string };
+  repo?: string;
+  branch?: string;
+}
+
+/** A goal run's progress. */
+export interface GoalProgress {
+  iteration: number;
+  max_iterations: number;
+  criteria_met: number;
+  criteria_total: number;
+  active_ms: number;
+  max_active_ms?: number;
+  /** Criterion ids parked for a person. */
+  awaiting?: string[];
+}
+
+export type HoldKind = 'paused' | 'blocked' | 'exhausted' | 'unknown';
+
+/** A held run (paused = status canceled, blocked/exhausted = status error); a hold
+ *  whose kind does not match the status is stale and never sent. */
+export interface RunHold {
+  kind: HoldKind;
+  reason: string;
+  since: string;
+  by?: Id;
+  node_ids: string[];
+  iteration?: number;
+}
+
+export interface LoopLimits {
+  max_iterations?: number;
+  max_active_s?: number;
+  unblocked_at?: number;
+}
+
+/** Run-level loop limits raised by Resume / Extend. */
+export interface RunLimits {
+  loops: Record<string, LoopLimits>;
+}
+
+/** The run's one computed summary (never `summary`, which is the `/progress` marker). */
+export interface RunOverview {
+  rev: number;
+  state: RunState;
+  /** One sentence, ≤ 160 chars. */
+  headline: string;
+  steps_done: number;
+  steps_total: number;
+  now?: RunNow;
+  /** Oldest first. */
+  attention: AttentionRef[];
+  queue?: QueueInfo;
+  failed_step?: FailedStep;
+  deliverables: Deliverable[];
+  usage: TurnTokenUsage;
+  time: TimeBuckets;
+  origin?: RunOrigin;
+  subject?: RunSubject;
+  elapsed_ms: number;
+  typical_ms?: number;
+  goal?: GoalProgress;
+  hold?: RunHold;
+}
+
+/** How a criterion is checked; the UI calls `expr` "Rule". */
+export type VerifyKind = 'command' | 'agent' | 'human' | 'expr' | 'unknown';
+
+export interface Criterion {
+  id: string;
+  text: string;
+  verify: VerifyKind;
+  /** Agent / human: what to inspect. */
+  how: string;
+  command?: string;
+  expr?: string;
+  timeout_s?: number;
+}
+
+export interface CriterionResult {
+  id: string;
+  text: string;
+  verify: VerifyKind;
+  met: boolean;
+  evidence: string;
+  /** `command` · `rule` · `agent` · the person's name. */
+  verified_by: string;
+}
+
+export type CheckVerdict = 'achieved' | 'continue' | 'blocked' | 'unknown';
+
+/** A `check` step's output. */
+export interface CheckOutput {
+  criteria: CriterionResult[];
+  all_met: boolean;
+  met: number;
+  total: number;
+  progress_pct: number;
+  verdict: CheckVerdict;
+  feedback: string;
+  feedback_md: string;
+  repeat_signature: string;
+  repeated_failures: number;
+  review?: { approved: boolean; findings: string[] };
+}
+
+// Goals (otto-core api/goals.rs).
+
+export type GoalWork = { kind: 'build'; repo_id: Id; base?: string | null } | { kind: 'research' };
+
+export interface GoalBudget {
+  /** 1..=50, default 5. */
+  iterations: number;
+  /** 900..=28,800, default 3,600. */
+  active_s: number;
+  /** 300..=7,200, default 1,200. */
+  step_timeout_s: number;
+}
+
+/** Empty = the run default. */
+export interface AgentChoice {
+  provider?: string;
+  model?: string;
+  effort?: string;
+  instructions?: string;
+}
+
+export interface NamedAgentChoice extends AgentChoice {
+  name: string;
+}
+
+export interface GoalSpec {
+  title: string;
+  goal: string;
+  objectives?: string[];
+  constraints?: string[];
+  out_of_scope?: string[];
+  criteria: Criterion[];
+  work: GoalWork;
+  budget?: GoalBudget;
+  worker?: AgentChoice;
+  extra_workers?: NamedAgentChoice[];
+  checker?: AgentChoice;
+  final_review?: boolean;
+  links?: string[];
+  skills?: string[];
+  continue_loop_id?: Id;
+  from?: 'insights';
+}
+
+export interface GoalStartResp {
+  workflow: Workflow;
+  run: WorkflowRun;
+}
+
+/** New totals for the loop that ran out. */
+export interface ExtendReq {
+  iterations?: number;
+  active_s?: number;
+}
+
+export interface ResumeReq {
+  extend?: ExtendReq;
+}
+
+export interface SteerReq {
+  note: string;
+}
+
+export interface VerifyCriterionReq {
+  met: boolean;
+  evidence: string;
+}
+
 export interface NodeRunState {
   /** Present on a lightweight summary; expand to fetch this exact body version. */
   detail_version?: string;
@@ -111,6 +458,26 @@ export interface NodeRunState {
   review_ids?: string[];
   /** Present only while the node runs (agent steps): phase + sub-agents. */
   activity?: NodeActivity | null;
+  /** The stable N of `stepN-…`. */
+  step_no?: number;
+  /** `step3-checkout-pr-branch` (no extension). */
+  step_file?: string;
+  /** Only while running. */
+  phase?: StepPhase;
+  /** ≤ 40 (`/progress`: the newest 12). */
+  phases?: PhaseMark[];
+  wait?: WaitReason;
+  attention?: Attention;
+  /** `usage_limit` · `rate_limit` · `auth` · `provider` · `stalled` · `timeout` · `spawn` ·
+   *  `server_restart` · `canceled` · `script` · `outcome_unknown`. */
+  error_class?: string;
+  thread?: StepThread;
+  children?: ChildThread[];
+  deliverables?: Deliverable[];
+  /** ≤ 20 (`/progress`: the newest 5). */
+  human_log?: HumanEntry[];
+  /** One-line summary, ≤ 200 chars. */
+  brief?: string;
 }
 
 export interface WorkflowRun {
@@ -159,6 +526,15 @@ export interface WorkflowRun {
    *  with `browseRunContext` / `readRunContext` (`lib/api/workflows.ts`), which
    *  take paths RELATIVE to it — `/fs/*` refuses Otto's data dir to non-root users. */
   context_dir?: string | null;
+  /** The computed run summary; absent (null on `/progress`) when the stored one is stale. */
+  overview?: RunOverview | null;
+  /** Set while the run is held. */
+  hold?: RunHold | null;
+  limits?: RunLimits;
+  /** Steering notes not yet taken by an agent step. */
+  steering_queued?: string[];
+  /** Files sent with the starting and steering chat messages. */
+  attachments?: AttachmentRef[];
 }
 
 export interface WorkflowCheckpoint {
@@ -179,6 +555,11 @@ export interface WorkflowCheckpoint {
   error?: string | null;
   logs: string[];
   updated_at: string;
+  /** The attempt's time minus its time on a person (omitted at 0). */
+  active_ms?: number;
+  /** The inner step's thread and the turn ordinal its prompt started at. */
+  thread_id?: Id;
+  start_ordinal?: number;
 }
 
 export interface WorkflowValidationIssue {
@@ -186,6 +567,8 @@ export interface WorkflowValidationIssue {
   edge_id: string | null;
   field: string;
   message: string;
+  /** `save`: the definition is invalid · `run`: a draft's missing piece (saves, does not run) · `warning`: never blocks (DR-028). */
+  class: 'save' | 'run' | 'warning';
 }
 
 /** `POST /workflows/{id}/run` body. `review_mode` seeds `input.review_mode` and overrides every
@@ -219,6 +602,10 @@ export interface RunListItem {
   /** The running step's name (running runs only). */
   current_step?: string | null;
   error?: string | null;
+  overview?: RunOverview;
+  /** What the run is about: the overview's subject, else derived from the
+   *  input (a run from before overviews existed). */
+  subject?: RunSubject;
 }
 
 /** A page of run history, newest first. */
@@ -243,6 +630,7 @@ export interface ActiveWorkflowRun {
    *  once something ran) and its display name. Absent before the first step. */
   current_node_id?: string | null;
   current_step?: string | null;
+  overview?: RunOverview;
 }
 
 // ---------------------------------------------------------------------------

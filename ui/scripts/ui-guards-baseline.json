@@ -48,9 +48,6 @@
     "src/modules/skills-lab/SkillsLabPage.svelte": 1,
     "src/modules/vault/FileViewer.svelte": 1,
     "src/modules/vault/NoteView.svelte": 1,
-    "src/modules/workflows/RunAgents.svelte": 1,
-    "src/modules/workflows/RunContextSidebar.svelte": 1,
-    "src/modules/workflows/RunMonitor.svelte": 1,
     "src/modules/workflows/runSync.svelte.ts": 1
   },
   "danger-menu-ellipsis": {},
@@ -203,7 +200,6 @@
     "src/modules/vault/GraphView.svelte": 1980,
     "src/modules/vault/VaultPage.svelte": 915,
     "src/modules/vault/vault.svelte.ts": 1385,
-    "src/modules/workflows/WorkflowsPage.svelte": 2473,
     "src/shell/App.svelte": 1466,
     "src/shell/Navigator.svelte": 1399,
     "src/shell/NotificationBell.svelte": 814,
@@ -309,9 +305,7 @@
   "inline-retry": {
     "src/App.svelte": 1,
     "src/modules/agents/HandoverDeliveryPanel.svelte": 1,
-    "src/modules/loops/IterationRow.svelte": 1,
     "src/modules/mcp/AuditTab.svelte": 1,
-    "src/modules/workflows/RunSteps.svelte": 1,
     "src/shell/Palette.svelte": 1,
     "src/shell/RightPanel.svelte": 1,
     "src/shell/SidePane.svelte": 1
@@ -376,7 +370,6 @@
     "unit/needsYouInbox.test.ts": 1,
     "unit/newSessionRecovery.test.ts": 1,
     "unit/notificationsIngest.test.ts": 1,
-    "unit/orchestrationForms.test.ts": 1,
     "unit/p04-k8sMonitor.test.ts": 1,
     "unit/p06-listWindow.test.ts": 5,
     "unit/p06-loadStatesAndTabs.test.ts": 4,

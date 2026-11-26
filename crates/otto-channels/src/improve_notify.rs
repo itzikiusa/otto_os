@@ -316,6 +316,25 @@ pub async fn send_to(
     adapter.send_formatted(chat, thread, text).await.is_ok()
 }
 
+/// Builds the adapter outbound workflow chat posts through (the progress
+/// lines, the final result, `channel_notify`, the dequeue announcement).
+/// [`BotTokenAdapters`] is the daemon's; a test substitutes
+/// `test_util::RecordingAdapter::factory`.
+#[async_trait::async_trait]
+pub trait OutboundAdapterFactory: Send + Sync {
+    async fn adapter(&self, integ: &Integration) -> Option<Arc<dyn Adapter>>;
+}
+
+/// [`build_adapter`] over a secret store.
+pub struct BotTokenAdapters(pub Arc<dyn SecretStore>);
+
+#[async_trait::async_trait]
+impl OutboundAdapterFactory for BotTokenAdapters {
+    async fn adapter(&self, integ: &Integration) -> Option<Arc<dyn Adapter>> {
+        build_adapter(&self.0, integ).await
+    }
+}
+
 /// Build the outbound adapter for an integration, resolving its bot token from
 /// the secret store (same refs the channel manager uses). Returns `None` when the
 /// token is missing/empty (nothing to send with). The Keychain read goes through

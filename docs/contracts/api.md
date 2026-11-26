@@ -142,7 +142,7 @@ connection library unusable for every non-root account.)
 | 56b | GET /api/v1/repos/{id}/prs/{number}/checks | ws viewer | — | `PrChecksResp {ci: CiStatus, checks: PrCheck[] {name, state, url?, started_at?, completed_at?}}` |
 | 56c | GET /api/v1/repos/{id}/prs/{number}/readiness | ws viewer | — | `PrReadiness {ci_status, approvals, mergeable, conflicts, review?, unpushed, branch_freshness}` — PR-keyed twin of `/reviews/{id}/merge-readiness`; `unpushed`/`branch_freshness` computed from the local checkout when the source branch exists locally |
 | 57 | GET /api/v1/settings | root | — | `{ "<key>": <value_json>, ... }` |
-| 58 | PUT /api/v1/settings | root | same shape | same shape. `trusted_client_ip_header` (string): which forwarded-client header the Host guard trusts for a loopback request that named a non-loopback DNS host (a tunnel on this Mac) — e.g. `"CF-Connecting-IP"` trusts it for every allowed tunnel host; `""`/`"none"` trusts none; **unset** = `CF-Connecting-IP` only for the `share_base_url` host and never when that host is a Tailscale Funnel `*.ts.net` name. Comma lists use the last entry. |
+| 58 | PUT /api/v1/settings | root | same shape | same shape. `trusted_client_ip_header` (string): which forwarded-client header the Host guard trusts for a loopback request that named a non-loopback DNS host (a tunnel on this Mac) — e.g. `"CF-Connecting-IP"` trusts it for every allowed tunnel host; `""`/`"none"` trusts none; **unset** = `CF-Connecting-IP` only for the `share_base_url` host and never when that host is a Tailscale Funnel `*.ts.net` name. Comma lists use the last entry. The workflow engine's keys are range-checked (**400** otherwise; `null` clears): `wf_step_runner` `"threads"\|"pty"`, `wf_max_parallel_steps` 1–8 (default 4), `workflow_thread_retention_success_hours` / `workflow_thread_retention_failed_hours` 0–8760 (defaults 24 / 168). |
 
 Usage & metrics (embedded ClickHouse; types in `crates/otto-usage`). Reads need
 `Usage:View`: **root sees every session (`scope:"all"`); a non-root caller sees only the
@@ -1138,8 +1138,8 @@ attachments.
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| GET /runtime-sessions | authenticated (Agents View) | — | `RuntimeSession[]` across **every** workspace, newest activity first, max 500: the caller's own threads (root: everyone's), minus those of a workspace the caller cannot view (viewer+; scratch counts). Threads merges it into its list so a thread started on another device (the phone keeps its own selected workspace) shows on every device of that user |
-| GET /workspaces/{id}/runtime-sessions | ws viewer | optional query `source`, `origin_id` | `RuntimeSession[]`, newest activity first (own; all for admin/root), max 500. With `source` and/or `origin_id`, only the rows whose `meta.source` / `meta.origin.id` equal them (both may be combined; an empty value counts as absent) — **closed threads included** (their `status` tells): how an embedded page finds the thread it opened for this PR or connection. The owner scope is unchanged — a non-admin's filter only narrows their own threads |
+| GET /runtime-sessions | authenticated (Agents View) | — | `RuntimeSession[]` across **every** workspace, newest activity first, max 500: the caller's own threads (root: everyone's), minus those of a workspace the caller cannot view (viewer+; scratch counts). Threads merges it into its list so a thread started on another device (the phone keeps its own selected workspace) shows on every device of that user. Engine threads — `meta.source` `workflow`, `review` or `review_summarizer`, and the sub-threads their agents open, which inherit the source — are never listed here (see "Engine threads"); they are read by id, or with `?source=` on the workspace list. |
+| GET /workspaces/{id}/runtime-sessions | ws viewer | optional query `source`, `origin_id` | `RuntimeSession[]`, newest activity first (own; all for admin/root), max 500. With `source` and/or `origin_id`, only the rows whose `meta.source` / `meta.origin.id` equal them (both may be combined; an empty value counts as absent) — **closed threads included** (their `status` tells): how an embedded page finds the thread it opened for this PR or connection. The owner scope is unchanged — a non-admin's filter only narrows their own threads. Without `source`, engine threads are left out (as on `GET /runtime-sessions`); `?source=workflow` (or `review`, `review_summarizer`) lists them |
 | POST /workspaces/{id}/runtime-sessions | ws editor, person | `{provider, cwd?, title?, title_auto?, model?, effort?, access_mode?, source?, origin?, account_id?, network_profile_id?}` (`effort` — one of the provider's `capabilities.efforts`, else **400** before anything is created — becomes the session's `effort`, sent with its first turn and every respawn; `title_auto: true` marks `title` a placeholder the agent's own name replaces; `account_id` — a named provider account — and `network_profile_id` — one of the workspace's network profiles — go to `meta` as for a terminal session and are applied at every spawn: the account's home and credentials, the profile's SSH tunnels and proxy env, kept up until the child exits; an unknown, foreign or other-provider account, or an unusable profile, fails the spawn with **400/403**, never a silent fallback) (`cwd` absolute, default the workspace root; `access_mode` default `full-access` while Settings › Providers skips permission prompts — the `agent_skip_permissions` setting, on by default, the rule terminal sessions follow — else `approval-required`). `provider` ∈ `claude \| codex \| gemini \| grok \| agy \| opencode \| pi` or an enabled custom provider slug whose CLI binary maps to one of those 7 protocol families (e.g. `claudework` → `claude`; the custom slug is recorded on `meta.provider_slug` so UI surfaces preserve its configured identity, icon, and model catalog). **Embedded threads:** `source` ∈ `pr-agent \| connection-diagnose` and `origin: {kind: "pr" \| "connection", id, label?}` (`kind` pairs with the source — `pr-agent` ↔ `pr`, `connection-diagnose` ↔ `connection`; `id` 1–200 characters, `label` ≤ 200, a blank label is dropped) are copied into the server-owned `meta` as `meta.source` / `meta.origin`; nothing else in the body reaches `meta`. **400** for any other `source`, an `origin` without `source`, a kind that does not match, an empty / over-long `id` or an over-long `label`. An embedded thread is **closed** (as by `…/close`: kept in History, reopenable, never deleted) once open, with no turn, background work or pending approval / question, and idle for the daemon setting `embedded_thread_auto_close_hours` (integer, default `12`, `0` = never; checked shortly after boot, then hourly, at most 50 per pass). A thread opened from one (`…/peers`) inherits its `meta.source` / `meta.origin`. **Idle release (every thread):** an open thread whose agent process has had no turn, background work, pending approval / question, starting prompt or queued message for the daemon setting `thread_idle_release_minutes` (integer, default `30`, `0` = never; a child thread — `meta.child_of` — after at most `5`; checked every minute) has that process and its MCP servers stopped; the thread stays open with status `dormant` (`provider_session.status: stopped`, no `last_error`) and its next prompt respawns the agent resuming `native_thread_id` | **201** `RuntimeSession` (with `meta.source` / `meta.origin` / `meta.provider_slug` when applicable — also on get and list). The child is spawned (and its handshake started) before the response: a refused folder, a missing CLI or a provider without a driver fails the create (**400**) and leaves no row |
 | GET /runtime-sessions/{id} | ws viewer + owner-or-admin | — | `RuntimeSession` with its live `status` |
 | PATCH /runtime-sessions/{id} | owner-or-admin, person; `meta` also ws **editor** | `UpdateRuntimeSessionReq {title?, meta?}` — at least one. `title` trimmed, non-empty. `meta`: a merge patch of the **client-owned thread keys** only — `thread_pinned` (bool), `thread_history` (bool: moved to History), `thread_seen_at` (RFC 3339: when the person last had the thread in front of them); `null` removes a key; any other key, a wrong type or an empty object is **400**. A share / guest, agent or MCP credential is **403** (person only), so is a workspace viewer for `meta`. The same keys go on a terminal session through `PATCH /sessions/{id}` `meta` | `RuntimeSession` with the new title / `meta` (the server-owned keys untouched). Allowed on a `closed` session too (it stays listed as history). Every client hears a `meta` change live: `provider_session.updated` carries the thread keys as `provider_session.thread` (ws.md). **400** empty title |
@@ -1149,7 +1149,7 @@ attachments.
 | POST /runtime-sessions/{id}/queue/{queued_id} | owner-or-admin, person | `QueuedDeliverReq {delivery: "queue"\|"steer"\|"interrupt"}` | **202** `RuntimePromptResp` — delivers a queued message now (`steer` into the running turn, or stop it and send this next; with no turn running it simply starts one). `queue` on a message whose last delivery failed (`QueuedPrompt.error`) clears the error and sends it in its place in line (Retry); on any other message it is a no-op. A failed delivery here puts the message back first in the queue with its `error`. **404** no longer queued |
 | DELETE /runtime-sessions/{id}/queue/{queued_id} | owner-or-admin, person | — | `UnqueuePromptResp {ok: true, text, images: PromptImage[], files: PromptFile[]}` — removes a queued message and returns its stored text + image/PDF payloads so the composer can restore the full draft on Edit. Waits for a delivery in flight (the prompt lock), so a message being sent is never also handed back: it answers **404** no longer queued once sent |
 | POST /runtime-sessions/{id}/interrupt | owner-or-admin, person | — | `{interrupted, background_tasks}` — `interrupted: false` when no turn was running; `background_tasks`: how many background tasks still run. **It does not stop background work** — `POST …/tasks/stop` does. Pending requests → `cancelled` (`cancel_reason: "interrupt"`); the provider ends the turn (`turn.terminal` `interrupted`); if it has not within 10 s its process group is killed and the turn ends `interrupted` anyway |
-| POST /runtime-sessions/{id}/requests/{request_id} | owner-or-admin, person (`Admin` class) | Exactly one of `{decision}` for an approval, `{answers: QuestionAnswer[]}` for a question, or `{question_action: "decline"|"cancel"}` to dismiss a question (see below) | **204** resolved; **404** unknown / no longer pending, **400** wrong response kind, missing/duplicate field, invalid option or unoffered decision, **409** provider cannot accept the response |
+| POST /runtime-sessions/{id}/requests/{request_id} | owner-or-admin, person (`Admin` class) | Exactly one of `{decision}` for an approval, `{answers: QuestionAnswer[]}` for a question, or `{question_action: "decline"|"cancel"}` to dismiss a question (see below) | **204** resolved; **404** unknown / no longer pending, **400** wrong response kind, missing/duplicate field, invalid option or unoffered decision, **409** provider cannot accept the response. The resolved request carries `resolved_by`: the answering person's user id (`thread:<id>` when a parent thread's agent answered through `…/peers/{peer}/answer`) |
 | POST /runtime-sessions/{id}/close | owner-or-admin, person | — | `RuntimeSession` (`status: closed`). Pending requests → `cancelled` (`cancel_reason: "closed"`). Ends a running turn `interrupted`, closes the child's stdin (SIGTERM / SIGKILL to its group after 3 s each). Idempotent; later prompts **409** (reopen first) |
 | POST /runtime-sessions/{id}/resume-at | owner-or-admin, person | `ResumeAtReq {at: RFC 3339 \| null}` | `RuntimeSession` — "Resume at reset" for a thread whose last turn hit its provider's usage limit: stores `meta.resume_at` (server-owned; sent to clients with the thread keys, `provider_session.thread`) and at that time sends ONE short "continue" prompt (respawning the agent if needed), then clears it. Cancelled by `POST …/interrupt` (Stop, a family Stop) and by any new prompt (a provider switch, a fresh start, a message). Skipped when it was cancelled (`at: null`) or moved meanwhile, the thread was closed, or its last turn no longer ended on the usage limit (the person sent something). A daemon restart re-arms it (one already due fires at boot). **400** more than 7 days ahead |
 | POST /runtime-sessions/{id}/reopen | owner-or-admin, person | — | `RuntimeSession` — revives a `closed` or `dormant` session without sending a prompt: its agent respawns now, resuming `native_thread_id` (a refused resume → a fresh conversation + `system_notice`). Its `meta` is kept. No-op while the agent process is live. Spawn failures as for create (**400**; the session stays open, the next prompt retries) |
@@ -1170,7 +1170,7 @@ attachments.
 | POST /runtime-sessions/{id}/peers/{peer}/message | same | `PeerMessageReq {text}` | **202** `{turn_id, sequence}` — `text` becomes `{peer}`'s next turn, prefixed with the sender. **404** not in the group, **400** `{peer}` = `{id}`, **409** while `{peer}` runs a turn, or (agent credential) once the group paused — see "Agent-to-agent loop guard" below |
 | POST /runtime-sessions/{id}/peers/{peer}/answer | same (a person or `{id}`'s own agent) | `{request_id, answers: QuestionAnswer[]}` | **204** — `{id}` answers a QUESTION its own subagent `{peer}` asks (`meta.child_of.id` = `{id}`, else **403**); the answer goes through `{peer}`'s request route (`otto.thread_answer`). A subagent's pending question (one the agent opened) first wakes `{id}`'s agent as `[Question from subagent "…" (…, id …): … Answer it with otto_thread_answer (peer_session_id …, request_id …) …]` + each question (`question_id`, kind, option values); left unanswered after that agent's turn, it shows in `{id}`'s dock as "Question from <title>". A subagent's APPROVAL never wakes `{id}`'s agent: the person answers it ("Approval needed from <title>"). |
 | GET /runtime-sessions/{id}/peers/{peer}/reply?wait_secs= | same | `wait_secs` 0..25 (default 20) | `PeerReply {peer, busy, background_tasks, turn_status?, text}` — waits for `{peer}` to settle (no turn — its own included — and no background work), then the assistant text of its last turn that has any (a subagent's own text excluded); `busy: true` when the wait ran out |
-| POST /runtime-sessions/{id}/peers/{peer}/close | same | — | `RuntimeSession` — closes linked thread `{peer}` of `{id}`'s group (stops its agent; it stays in History). `400` for `{id}` itself, `403` for the group's lead (`parent_id` null — a person closes it), `404` outside the group. MCP: `otto.thread_close` |
+| POST /runtime-sessions/{id}/peers/{peer}/close | same | optional `{remove: true}` (the MCP tool sends it only when true) | `RuntimeSession` — closes linked thread `{peer}` of `{id}`'s group (stops its agent; it stays in History). `400` for `{id}` itself, `403` for the group's lead (`parent_id` null — a person closes it), `404` outside the group. With `remove: true` it also **deletes** `{peer}` (closed ones included): only a subagent `{id}`'s own agent opened (`meta.child_of = {id: {id}, by: agent}`, else **403** `only the thread that opened it can remove it — close it instead`); **409** while it works (`it is still working — …`) or has open subagents (`close its subagents first`). Its answer reaches `{id}` first (the ended notice and the queued reply), then `{id}` keeps a compact record in `meta.removed_children` (newest last, at most 20: `{id, provider, model, title, status, usage: TurnTokenUsage}` summed over its turns) and its timeline gets `<Provider> removed <title> [otto-thread:<peer>:removed]`; no "was stopped" reply follows. The response is `{peer}` as closed, before the delete. MCP: `otto.thread_close` (`remove`) |
 | POST /workspaces/{id}/runtime-sessions/council | ws editor, person | `CreateCouncilReq {prompt, title?, cwd?, seats: [{provider, provider_slug?, model?, effort?}], images?}` — 2–4 seats (`provider` accepts enabled built-in or custom provider slugs; the same provider may sit more than once) | **201** `CouncilResp {seats: RuntimeSession[]}`, seat 1 first. One linked group: seat 1 is the root, seats 2–4 have `parent_id` = seat 1. Every seat carries `meta.council {id, seat, role: "seat", effort?, provider?, model?}` (`seat` 1-based; `provider` = the custom slug picked, else the built-in id; `model` / `effort` only when picked — rows made before these keys existed lack `provider`) and `meta.read_only: true`, and is titled `<council title> · Seat <n> · <Provider>[ <model>][ <Effort>]` (`Provider` = `Claude`, `Codex`, `Gemini`, … or the custom slug; the effort's first letter upper-cased: `Cache choice · Seat 3 · Claude High`) (read-only Seatbelt profile and tool list; `access_mode` `approval-required`), so parallel seats never write the same files. All seats are created or none: a seat that fails to start (refused folder, missing CLI, disabled/unknown provider) removes the seats already made, and so does a refused prompt (an image a provider cannot take); the error names it — `seat N (provider [model]): …`, same status. The prompt then goes to every seat at once (`effort` per seat). **400** fewer than 2 / more than 4 seats or an empty prompt. A council is started and watched by a person: it takes no background-admission slot. No new WS events — each seat streams on its own `agent_runtime_event` channel |
 | POST /runtime-sessions/{id}/council/synthesize | ws editor + owner-or-admin, person | `SynthesizeCouncilReq {provider, provider_slug?, model?, effort?, stop_background?}` — the judge (enabled built-in or custom provider slug); `{id}` = any thread of the council | **201** `RuntimeSession` — the judge of each seat's LATEST exchange: a thread linked to seat 1 (`meta.council {id, seat: 0, role: "synthesis", effort?, provider?, model?}`, read-only like the seats), titled `<council title> · synthesis`. Its first prompt is built by the daemon — for every seat its last top-level user message and the answer after it (a follow-up typed in that seat's own composer counts like any other; ≤ 24 000 characters each; a cut-off answer is marked as possibly incomplete); one shared question is shown once, differing questions are shown per seat; a line names every seat without an answer — never silently dropped — and the task: where they agree, where they disagree and who is right, a pick or a merge, open questions — and is sent without the "Opened by …" header. Counts against the group's open-thread cap (`MAX_LINKED_OPEN`, 8 besides the root). **400** `{id}` is not in a council; **409** while a seat or an earlier synthesis is still working, while seat 1 is closed, before any seat has answered, or when the group is full |
 
@@ -1935,6 +1935,12 @@ must-fix); on the summarizer row they are the verifier's overall rating after
 verification. Agents emit it as one `{"lens_score": n, "score_reason": "…"}`
 element of their JSON array, which is never stored as a finding or comment.
 The workflow `review_run` node outputs them as `lens_scores: [{lens, score, reason}]`.
+`effort` (optional) is the effort the row runs with (empty = provider default).
+`thread` (optional, true) says `session_id` names a runtime thread (open it in
+the embedded thread view) rather than a terminal session; `started_at` /
+`finished_at` (optional) time the row's agent. On the thread runner an
+admission wait keeps the row `pending` with the wait's words in `note`, and a
+question or approval makes it `waiting` with "needs you: …".
 A scope assessment's `related_modules`/`risks` entries may arrive as strings or
 objects; objects are folded into one `"a — b"` string each.
 Recovery policy for a failed agent: up to `ReviewConfig.max_attempts`
@@ -2777,25 +2783,28 @@ workspace from the workflow/run row.
 |---|---|---|---|
 | GET /workflows/node-types | member | — | available node type descriptors |
 | GET /workflows/templates | member | — | workflow templates |
-| GET /workspaces/{wid}/workflows | ws viewer | — | `Workflow[]` |
-| POST /workspaces/{wid}/workflows | ws editor | CreateWorkflowReq | Workflow |
+| GET /workspaces/{wid}/workflows | ws viewer | — | `Workflow[]`, each with `last_run: {id, status, overview_state?, attention, ended_at?, duration_ms?} \| null` (its newest run; `overview_state` is the stored `overview.state`) and `running_count` (its `pending`/`running` runs) — one grouped query, so the Workflows tab needs no call per workflow |
+| POST /workspaces/{wid}/workflows | ws editor | CreateWorkflowReq | Workflow — **400** when the graph has a `save`-class problem (see validate); a draft with only `run` problems saves (DR-028). Import goes through this route |
 | POST /workspaces/{wid}/workflows/from-template | ws editor | FromTemplateReq | Workflow |
 | POST /workspaces/{wid}/workflows/generate | ws editor | GenerateWorkflowReq | Workflow (AI-generated) |
 | GET /workflows/{id} | ws viewer | — | Workflow |
-| PATCH /workflows/{id} | ws editor | UpdateWorkflowReq (`expected_version?`: the version the edit started from) | Workflow — a graph change records a new `workflow_versions` row by the caller; trigger/schedule/webhook/chat runs then act as the latest changer (PC-3). **409** when `expected_version` is set and the stored version differs (saved elsewhere); nothing is saved |
+| PATCH /workflows/{id} | ws editor | UpdateWorkflowReq (`expected_version?`: the version the edit started from) | Workflow — a graph change records a new `workflow_versions` row by the caller; trigger/schedule/webhook/chat runs then act as the latest changer (PC-3). **409** when `expected_version` is set and the stored version differs (saved elsewhere); nothing is saved. **400** when a new graph has a `save`-class problem |
 | DELETE /workflows/{id} | ws editor | — | 204; **409** while the workflow has a `pending`/`running` run (cancel it first — the cascade would orphan the live driver). In the same transaction it pauses (`enabled=false`, `last_status='error'`) every scheduled task whose `workflow_id` is this workflow and records a "workflow deleted – task paused" error run on each |
 | POST /workflows/{id}/run | ws editor | `RunWorkflowReq? {input?, start_node?, only_node?, review_mode?}` | WorkflowRun — created immediately; may start **queued** (see Run queue) — `review_mode` ("fan_out"\|"orchestrator") seeds `input.review_mode` (400 on an unknown value or a non-object `input`); the engine reads it from the run input and it takes precedence over every `review_run` node's `params.mode`, regardless of graph position (order: run input → node `mode` → stored `ReviewConfig.mode` → `fan_out`). **Run location (S3-302):** `input.working_directory` (comma-separated paths, `~` ok), `input.repos[]` (each `repo` a registered id/name/path, a `worktree`-type `name` path, `worktree`, `repo_id`) and `input.repo_id` must name a repo registered in Otto — in **any** workspace, so one workflow can work on a repo another workspace registered — or a linked git worktree of one, or the workflow's workspace root, and paths inside them; an unregistered folder, a relative path, a `..` escape or anything else is **400** naming the value, and no run row is created. A **manual** run on a person's credential, when that person is the root user, may instead name an existing absolute directory (`~` expanded, no `..` component, not `/`, not a file, not a path that does not exist yet). A path that still fails for that caller says it must already exist, be a directory, contain no `..`, and not be the filesystem root. An agent credential of that same root user keeps the registered-repo refusal and does not get that explanation. Workspace Admin and a Workflows capability do not grant that. The same registered-repo rule refuses a chat `Working Directory:` / repos, including when the workflow owner is root: nothing starts and the reply in the thread says why (`⚠️ Can't start **<workflow>**: <reason>.`) |
-| POST /workflows/{id}/validate | ws viewer | `{graph?: WorkflowGraph}` (omitted uses saved graph) | `{valid: boolean, issues: WorkflowValidationIssue[]}`; each issue has `field`, `message`, optional `node_id`/`edge_id`; no execution |
+| POST /workflows/{id}/validate | ws viewer | `{graph?: WorkflowGraph}` (omitted uses saved graph) | `{valid: boolean, issues: WorkflowValidationIssue[]}`; each issue has `field`, `message`, `class` (`save` — the definition is invalid; `run` — a draft's missing piece, it saves but Run and triggers refuse it; `warning` — never blocks, DR-028), optional `node_id`/`edge_id`; `valid` is false only for `save` / `run` issues (warnings never block); no execution |
+| POST /workflows/{id}/optimize | ws viewer | `{change_ids?: string[]}` (absent = the pre-selected changes) | `OptimizeDraft {base_version, changes: OptimizeChange[], not_offered: [{rule, nodes, reason}], draft_graph, estimate: {runs, since?, typical_before_ms?, typical_after_ms?, slow_before_ms?, slow_after_ms?, note?} (the four times are absent, and `note` says why, under 3 runs or when the draft saves under 5 % of the typical run or under a second — a slower "after" is never sent), checks: {numbering, renumbered, files: [{node_id, reads, writes, reads_added, reads_lost, listing_removed}], warnings}}` — rule-based only (no agent turn), from the workflow's newest 50 runs (its successful ones); `OptimizeChange {id: "<rule>:<node>", rule, nodes, title, why, effect: same_contract\|may_change_output\|changes_findings, preselected, saving_ms? (absent under a second)}`, `rule` ∈ `parallel · git_checkout · go_gates_script · step_timeout · single_repo_skip · post_review_comments · review_declared_lenses` (addendum §2). Nothing is saved |
+| POST /workflows/{id}/optimize/apply | ws editor, a person's credential (an agent credential is **403**, as a graph edit) | `{base_version, change_ids}` | Workflow — the graph is re-derived from the stored workflow with exactly those changes and every check re-run (a client graph is never read), then published with `expected_version = base_version` in the same UPDATE; the previous version stays in Versions and the new one's note is `Optimized by <user>: <change titles>`. **409** when the workflow is no longer at `base_version`; **422** `{code, message}` when a chosen change is unknown or now fails a check |
 | POST /workflows/{id}/triggers/preview | ws viewer | `{kind, spec}` | `{kind, next_fire_times: string[]}`; validates trigger and returns next five schedule times (UTC timestamps), empty list for other kinds; does not save or advance cursor |
 | GET /workflows/{id}/runs | ws viewer | `?summary=true` (rows without node/input bodies); `?q=&status=&limit=&cursor=` | `WorkflowRun[]` (newest 50). With any of `q` / `status` / `cursor` it answers the workspace history search below, scoped to this workflow: a `RunListPage` |
-| GET /workspaces/{wid}/workflow-runs | ws viewer | `?q=` open text (≤ 200 chars, ≤ 8 whitespace-separated terms, every term must match), `status=` comma list of run statuses, `workflow_id=`, `limit=` (1–100, default 30; larger values clamp), `cursor=` (opaque, from the previous page) | `RunListPage {items: RunListItem[], next_cursor?}` — the workspace's run history, newest first. Each term matches (ASCII case-insensitive substring) the workflow name, the run input (trigger message / prompt / goals / repo / branch / PR…), the run error, the workflow's step names and the run's step summaries (phases, step errors). Scans the newest 5000 runs of the workspace. `400` for a too-long `q`, too many terms, an unknown status or a bad cursor |
-| GET /workspaces/{wid}/workflow-runs/active | ws viewer | — | `ActiveWorkflowRun[]` — in-flight runs (pending\|running) across the workspace, newest first; backs the "Running" sidebar list |
+| GET /workspaces/{wid}/workflow-runs | ws viewer | `?q=` open text (≤ 200 chars, ≤ 8 whitespace-separated terms, every term must match), `status=` comma list of run statuses, `workflow_id=`, `limit=` (1–100, default 30; larger values clamp), `cursor=` (opaque, from the previous page), `attention=1` (only runs waiting on a person: `running` with a step on a person or an approval pause, or held `blocked` / `exhausted` — the Runs inbox "Needs you") | `RunListPage {items: RunListItem[], next_cursor?}` — the workspace's run history, newest first; each row carries `overview?` (see Run view). Each term matches (ASCII case-insensitive substring) the workflow name, the run input (trigger message / prompt / goals / repo / branch / PR…), the run error, the workflow's step names and the run's step summaries (phases, step errors). Scans the newest 5000 runs of the workspace. `400` for a too-long `q`, too many terms, an unknown status or a bad cursor |
+| GET /workspaces/{wid}/workflow-runs/active | ws viewer | — | `ActiveWorkflowRun[]` — in-flight runs (pending\|running) plus effectively held runs (paused `canceled`, blocked/exhausted `error`, see Run view) across the workspace, newest first, each with `overview?`; backs the "Running" sidebar list |
 | GET /workspaces/{wid}/workflow-runs/queue | ws viewer | — | `WorkflowRunQueue {max_parallel_runs, queued: [{run_id, position}]}` — the daemon-wide parallel-run cap (`OTTO_WF_MAX_PARALLEL_RUNS`, default 2) and THIS workspace's queued runs (fresh `pending`, no step progress) with their 1-based place in the global FIFO line; runs of other workspaces are never listed, only counted in the positions. Backs the Running list's "2nd in line, behind …" |
-| GET /workflow-runs/{id} | ws viewer | — | WorkflowRun |
+| GET /workflow-runs/{id} | ws viewer | — | WorkflowRun — with `context_dir?` and `attachments` (read from `<context>/attachments.json`) when the context dir exists, and `overview` recomputed when the stored one is stale or missing (also on `/progress`) |
 | GET /workflow-runs/{id}/context/browse | ws viewer on the run's workspace (root passes; share / MCP-only / agent-session tokens 403, as `get_run`) | `?path=<rel>` — relative to the run's context dir `<data_dir>/workflow-context/<run_id>`; empty/absent = its root | `FsBrowse` (the `/fs/browse?files=true` shape) with `path`, `parent` and every entry `path` RELATIVE to the context dir (`parent: null` at its root). Symlinks are followed only to targets inside the dir; escaping or broken links are not listed. `400` absolute path, `..`, or a path whose canonical target escapes the dir (symlink); `403` not a member; `404` unknown run, no context dir, or missing path. Exists because `/fs/*` refuses Otto's data dir to non-root callers |
-| GET /workflow-runs/{id}/context/read | ws viewer on the run's workspace (as `context/browse`) | `?path=<rel>` (required) | `FsRead` (the `/fs/read` shape and ~400 KiB bound; binary → empty `content`, `truncated: true`) with a relative `path`. The run's deliverable is `?path=final-output.md`. Same `400`/`403`/`404` rules as `context/browse`; a key-like file name (the `/fs/read` deny list) is `403` for non-root |
+| GET /workflow-runs/{id}/context/read | ws viewer on the run's workspace (as `context/browse`) | `?path=<rel>` (required) | `FsRead` (the `/fs/read` shape and ~400 KiB bound; binary → empty `content`, `truncated: true`) with a relative `path`. The run's deliverable is `?path=final-output.md`. Same `400`/`403`/`404` rules as `context/browse`; a key-like file name (the `/fs/read` deny list) is `403` for non-root. With `&download=1` the response is the file's bytes (`application/octet-stream`, `Content-Disposition: attachment; filename="<name>"`, `X-Content-Type-Options: nosniff`) under the same rules; over 50 MiB is `400` (DR-114: binary attachments on the run page) |
 | GET /sessions/{id}/files/browse | session owner, ws admin or root, plus ws viewer (share / MCP-only / agent-session tokens 403, as `/fs/*`) | `?path=<rel>` — relative to the session's canonical `cwd`; empty/absent = its root | `FsBrowse` (the `/fs/browse?files=true` shape) with `path`, `parent` and every entry `path` RELATIVE to the cwd (`parent: null` at its root). Joined with `confine_join`; symlinks are followed only to targets inside the cwd. Non-root: key-like files, `otto.db*` / `secrets.json` are `403`, and so is any protected dir (Otto's data dir, `~/.ssh`, …) unless the session's cwd is itself one work dir strictly inside an agent work area (`AGENT_DATA_SUBDIRS`, never the area itself) — a cwd of `~` does not open other users' work dirs. `400` absolute path, `..` or an escaping symlink; `403` not allowed; `404` unknown session or missing path. At most four admitted per route — **409** "Filesystem access is busy. Retry shortly." beyond that — and a 10 s deadline, **502** on timeout (as `/fs/read`). Exists because engine-made session cwds (workflow worktrees, persona folders, goal-loop / scheduled / swarm work dirs) live in Otto's data dir, which `/fs/*` refuses non-root callers; `/fs/*` is unchanged |
 | GET /sessions/{id}/files/read | as `files/browse` | `?path=<rel>` (required) | `FsRead` (the `/fs/read` shape and ~400 KiB bound; binary → empty `content`, `truncated: true`) with a relative `path`. Same `400`/`403`/`404` rules, busy **409** and timeout **502** as `files/browse` |
+| POST /workflow-runs/{id}/nodes/{node_id}/skip | ws editor | — | `{ok: true}` — skips that one running step (the chat `skip` marker): the step stops and is settled skipped, its running siblings continue, the effect arrives as `workflow_run_updated`. **409** when the step is not running or is the approval gate the run waits on |
 | POST /workflow-runs/{id}/cancel | ws editor | — | WorkflowRun — cancel a `pending`/`running` run (status-only, conditional: a no-op once the run settled; never rewrites `nodes` — the engine stops the in-flight step, marks the rest skipped and re-emits). A cancel that lands while the run is still starting up is honored: nothing executes |
 | POST /workflow-runs/{id}/retry-node | ws editor | `{node_id, include_downstream?}` | WorkflowRun — re-enter a **finished** run in place: the run reopens (back to running), out-of-scope nodes keep their prior state/output, in-scope nodes re-execute (same run id ⇒ same context dir + `otto-wf/<run_id>` worktree/branch — unlike the canvas "run from here", which mints a fresh run/worktree), then the run's final status is recomputed. Scope: the target step only (default; target must be `error`), or target + descendants with `include_downstream: true` (any settled target). A single-step retry whose target has a descendant that never succeeded (skipped because the target failed) re-runs those descendants too, as if `include_downstream` were set — otherwise the run would finish `success` with its later steps never run. `409` while the run is still active — including a just-canceled run whose engine driver has not stopped yet ("still stopping"; retry in a few seconds); `400` on a bad target. A retry starts a fresh restart-resume budget |
 | GET /workflows/{id}/versions | ws viewer | `?summary=true&limit=50&before_version=N` | Array, newest first. Default `limit=50`, clamped to 1–100; `before_version` is exclusive. `summary=true` returns `WorkflowVersionSummary[]` without definition bodies; otherwise returns full `WorkflowVersion[]` with the same page bound. Continue from the last version of a full page; an empty page ends history. |
@@ -2942,13 +2951,14 @@ resumes are bounded by the resume cap above. Backed by migration
 
 **Running list.** `GET /workspaces/{wid}/workflow-runs/active` returns
 `RunListItem = {id, workflow_id, workflow_name, status, started_at, finished_at?,
-duration_ms?, trigger, message?, repo?, branch?, pr?, current_step?, error?}` — one
+duration_ms?, trigger, message?, repo?, branch?, pr?, current_step?, error?, subject?}` — one
 run-history row with no node/input bodies: `trigger` is the run input's
 `trigger` (`chat`, `schedule`, `event`, `webhook`…) or `manual` when none was
 recorded; `message` the input's `msg` (else `prompt`, ≤ 160 chars); `repo` the
 last path segment of the input's working directory (else of its first declared
 repo); `branch` the input's `pr_branch` (else `base`); `pr` the input's `pr` as
-given; `current_step` the running step's name (running runs only); `error` the
+given; `subject` what the run is about (the overview's, else derived from the input
+as below — every row from before overviews existed); `current_step` the running step's name (running runs only); `error` the
 run error (≤ 240 chars).
 
 `ActiveWorkflowRun = {run_id, workflow_id, workspace_id, workflow_name, status,
@@ -2963,10 +2973,106 @@ node's display name (its `name`, else its `kind`); both are omitted before the
 first step starts. Clients refetch the list when an event's `node` starts a
 different step or settles the current one.
 
+**Run view (0233, 0234 — workflows on threads).** Additive and optional throughout:
+`RunStatus` / `NodeStatus` and the `workflow_runs.status` CHECK are unchanged, every
+new field is omitted when empty, and a node that uses none of them serializes exactly
+as before, so the previous build reads every row. New enums end in a catch-all
+(`unknown`) so a later value decodes.
+
+- `NodeRunState` gains `step_no?` (the stable N of `stepN-…`), `step_file?`
+  (`step3-checkout-pr-branch`, no extension), `phase?: StepPhase` (`queued | waiting |
+  starting | working | needs_you | finishing`; only while running), `phases?: PhaseMark[]`
+  (`{phase, at, note?}`, ≤ 40), `wait?: WaitReason` (`{code: slots|memory|load|run_slots|run_order,
+  text, since, detail?: {live, max?, floor?, ahead?, holders?: string[]}}`), `attention?:
+  Attention` (`{kind: approval|question|usage_limit|verify, via?: provider|mcp, text ≤ 300,
+  since, thread_id?, request_id?, resets_at?, criterion_id?}` — `criterion_id` for `verify`; answered through `POST
+  /runtime-sessions/{id}/requests/{request_id}`, an approval `via: mcp` through `POST /mcp/approvals/{request_id}/decide`), `error_class?` (runner: `usage_limit ·
+  rate_limit · auth · provider · stalled · timeout · spawn · server_restart · canceled`;
+  engine: `script · outcome_unknown`; `error` stays the step's own words), `thread?:
+  StepThread` (`{thread_id, runner: threads|pty, provider, model?, effort?, continued_from?,
+  start_ordinal?, turns, usage: TurnTokenUsage, digest?: TranscriptDigest, closed_at?,
+  available?}` — `available` is computed on read, never stored), `children?: ChildThread[]`
+  (`{id, thread_id?, label, provider, model?, effort?, status: queued|pending|running|success|error|skipped|needs_you,
+  started_at?, ended_at?, note?, usage}`), `deliverables?: Deliverable[]` (`{label, state:
+  done|partial|failed|pending_approval, detail?, url?}`), `human_log?: HumanEntry[]` (`{kind:
+  answer|verify|steer, ask?, text ≤ 2 KiB, met?, revision?, iteration?, by, at}`, ≤ 20) and
+  `brief?` (≤ 200 chars). Thread ids never go in `sessions`, which stays PTY-only.
+  `TranscriptDigest = {turns, tool_calls, files_changed, last_answer_excerpt, errors, actions:
+  [{tool, target?, outcome: ok|failed|pending_approval, message?}], started_at?, ended_at?}`.
+- `WorkflowRun`, `RunListItem` and `ActiveWorkflowRun` gain `overview?: RunOverview` =
+  `{rev, state, headline, steps_done, steps_total, now?, attention: AttentionRef[], queue?,
+  failed_step?, deliverables, usage, time, origin?, subject?, elapsed_ms, typical_ms?, goal?,
+  hold?}` — `state`: `queued · running · waiting · needs_you · succeeded · failed · canceled ·
+  paused · blocked · exhausted` (+ `unknown`); `now = {node_ids, node_names, phase, wait_text?,
+  fan?: {done, total, running}}` (`fan` counts a review's reviewers only — not its scope
+  assessment or summarizer; a settled run has no `now` and no `attention`, whatever
+  status an older engine left on its steps); `AttentionRef` = `Attention` + `{node_id, name}` (flat);
+  `queue = {position, ahead, cap, lane?}`; `failed_step = {node_id, name, error, error_class?}`;
+  `time = {queued_ms, waiting_ms, with_you_ms, working_ms}`; `origin = {kind:
+  chat|manual|schedule|webhook|event|task|mcp|goal, channel_name?, user_name?, thread_url?}`;
+  `subject = {pr?: {repo, number, url, title?}, ticket?: {key, url, title?}, repo?, branch?}`
+  (recorded at admission, else derived from the input: `pr` from `prs[0]` or `pr` — a
+  number, `#15`, `repo#15` or a PR URL; `ticket` the issue key in `jira_ticket`; `branch`
+  the `pr_branch`, never the `base`; `url` is `""` when the input has none);
+  `goal = GoalProgress {iteration, max_iterations, criteria_met, criteria_total, active_ms,
+  max_active_ms?, awaiting?}` (while the loop runs the counts are the newest check's, 0 of
+  the check's criteria before the first); `hold = RunHold`. The field is `overview`, never
+  `summary` (`/progress` keeps its boolean `summary: true` marker). Stored in
+  `workflow_runs.overview_json` stamped with the row's `rev` by the same progress write;
+  it is absent from a response when the stored one is stale (its `rev` is not the row's —
+  a status write, the previous build, a raw write or an archive restore) or missing, and the
+  server recomputes it. Every status writer clears it and `workflow_runs.attention` (the
+  number of running steps on a person).
+- `WorkflowRun` also gains `hold?: RunHold` (`{kind: paused|blocked|exhausted, reason ≤ 300,
+  since, by?, node_ids, iteration?}`; a held run is settled — paused = `canceled`,
+  blocked/exhausted = `error`). **One effective-hold rule:** a stored hold counts only while
+  its kind matches the status (paused with `canceled`, blocked/exhausted with `error`); any
+  other pair — a hold the previous build left on a row it retried — is never sent and is
+  ignored by every query. The new build's status writers (`write_run`, retry, reopen,
+  cancel) clear `hold_json`. An effectively held run is never pruned, stays in
+  `GET /workspaces/{wid}/workflow-runs/active` (status `canceled`/`error`, with its
+  overview's `hold`) and is the run a chat control reply in its thread finds (`status`,
+  `skip`, `abort`, `re-review`, `help` — there is no chat `pause`, `resume` or `note` op); the
+  orphan sweep still sees only `pending`/`running`. Pausing writes the hold in the same
+  statement that settles the run, before any step unwinds. `limits?: RunLimits`
+  (`{loops: {<node id>: {max_iterations?, max_active_s?, unblocked_at?}}}`, written only by
+  Resume), `steering_queued?: string[]` (notes queued for the next agent step; filled
+  from the run's context dir, not stored) and `attachments?: AttachmentRef[]` (`{name, mime,
+  size_bytes?, path? (context-relative `attachments/<name>`), error?, source: start|steer}` —
+  files sent with the starting and steering chat messages; not stored on the row). `Workflow` gains `origin?` (`goal` or absent) and
+  `origin_ref?` (`review:<id>` · `insights` · `goal_loop:<id>` · `mcp`), both server-set.
+  `WorkflowCheckpoint` gains `active_ms?` (the attempt's time minus its time on a person;
+  omitted at 0), `thread_id?` and `start_ordinal?` (the inner step's thread, resumed after a
+  restart mid-iteration). A `check` step's output is `CheckOutput {criteria: [{id, text,
+  verify, met, evidence, verified_by}], all_met, met, total, progress_pct, verdict:
+  achieved|continue|blocked, feedback, feedback_md, repeat_signature, repeated_failures,
+  review?: {approved, findings}}`.
+- `PATCH /workflows/{id}` checks `expected_version` in the same statement that saves, so two
+  saves from one base never both land (the second answers **409**).
+- Run retention: goal workflows keep no run by count (the 30-day age rule still keeps recent
+  ones) and a goal workflow left with no run is deleted in the same pass.
+- Backed by migrations **0233** (`workflow_runs.overview_json`, `attention INTEGER NOT NULL
+  DEFAULT 0`, `hold_json`, `chat_status_json`, partial index
+  `idx_workflow_runs_ws_attention`), **0234** (`workflows.origin`, `origin_ref`,
+  `workflow_runs.limits_json`, `workflow_runs.lane` — `NULL` normal, `long`; the long lane's
+  cap is env `OTTO_WF_MAX_LONG_RUNS`) and **0235** (index
+  `idx_agent_runtime_sessions_parent` on `agent_runtime_sessions(parent_id)`).
+
 **Node kinds (catalog).** `GET /workflows/node-types` returns each kind's
 `NodeTypeSpec`, now including `output_schema` (declared output shape; drives UI
-expression hints + warn-only runtime validation) and `params_schema` (which now
-declares `review_run`'s `mode`). The control flow / wired kinds added in this
+expression hints + warn-only runtime validation) and `params_schema` (declared
+for `review_run` (`mode`, `scope_assessment`, `timeout_s`), `agent_prompt`
+(`effort`, `timeout_s`, `continue_from`), `manual_trigger` (`chat_updates`,
+`inputs` — UI-only, never seeded into the run input —, `lane`), `loop`
+(`steps[].same_thread`, `max_active_s`, `stop_on_repeat_failure`,
+`hold_when_unmet`) and the new kinds `git_checkout` (`mode: pr|branch`),
+`script` (`command`, `timeout_s` required; `foreach`, `cwd`, `output_file`,
+`ok_exit_codes`, `allow_failure`, `idempotent`), `post_review_comments`
+(`review_from`, `inline`, `info`, `summary`, `summary_intro_from`,
+`summary_files`, `max_inline`) and `check` (`criteria`, `evaluator`,
+`instructions`, `final_review`); `null` for the rest). Context-file names
+(`script.output_file`, `post_review_comments.summary_files[]`) must be bare file
+names (no `/`, `\\`, `..`, NUL, not absolute) — a `save` issue otherwise (DR-002). The control flow / wired kinds added in this
 wave: `condition`, `loop`, `product_analyze`, `product_rewrite`, `product_plan`,
 `product_publish`, `review_run`, `canvas`, `git_pr`, `prepare_context` (see the
 Workflows feature doc for each kind's params/output).
@@ -3452,9 +3558,9 @@ The audit log is an **append-only** ledger written best-effort by the daemon at 
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| GET /machine/status | any signed-in user (policy `Exempt`; share links refused by the scope guard) | — | MachineStatus `{load1: number\|null, cores, load_per_core, memory_pressure: "unknown"\|"normal"\|"warn"\|"critical", swap_used_bytes: number\|null, admission_enabled, max_load_per_core, max_wait_secs, background_live, background_max_live: number\|null, agents_live, busy, busy_reason: string\|null, queued: QueuedAgent[], disk_free_bytes: number\|null, low_disk_gb, low_disk}`; `QueuedAgent` = `{source, waiting_secs, reason: string\|null}` (oldest first) |
+| GET /machine/status | any signed-in user (policy `Exempt`; share links refused by the scope guard) | — | MachineStatus `{load1: number\|null, cores, load_per_core, memory_pressure: "unknown"\|"normal"\|"warn"\|"critical", swap_used_bytes: number\|null, ram_bytes: number\|null, admission_enabled, max_load_per_core, max_wait_secs, background_live, background_max_live: number\|null, pressure_floor, agents_live, busy, busy_reason: string\|null, admission: AdmissionWait\|null, queued: QueuedAgent[], disk_free_bytes: number\|null, low_disk_gb, low_disk}`; `QueuedAgent` = `{source, waiting_secs, reason: string\|null, wait: AdmissionWait\|null}` (oldest first); `AdmissionWait` = `{kind: "queue", ahead} \| {kind: "spacing"} \| {kind: "live_ceiling", live, max, holders: AgentHolder[]} \| {kind: "load", load1, limit, live, floor} \| {kind: "memory_pressure", level, live, floor}`; `AgentHolder` = `{session_id: string\|null, source, label, run_id: string\|null, since}` |
 
-Workspace-independent: one Mac, one daemon. `busy` = a background agent arriving now would queue (always false while `agent_admission_enabled` is off); `background_live` counts gated background agents running or admitted-and-starting against the `background_max_live` ceiling (`null` = no ceiling). Machine samples are cached 2 s and the settings 5 s, so polling it every few seconds costs a couple of syscalls. `disk_free_bytes` is what `df` calls "Avail" on the volume holding Otto's data dir; `low_disk` = below `machine_low_disk_gb` GiB (default 10; 0 = off). The read also notices low disk: the first read below the floor posts one `System` warning (`source_key` `machine:low_disk`) to the notification centre and the first read above it refreshes that row as an info notice. Types: `crates/otto-sessions/src/admission.rs`, mirrored in `ui/src/lib/api/types/machine.ts`.
+Workspace-independent: one Mac, one daemon. `busy` / `busy_reason` = the machine is under load or memory pressure, whatever Otto runs (always false while `agent_admission_enabled` is off; the same test defers maintenance); `admission` = what a background agent arriving now would wait for (`null` = it would start at once): pressure holds one only while at least `pressure_floor` background agents are live (1 under critical memory pressure, where the hold never gives way). `background_live` counts gated background agents — PTY sessions and structured-runtime threads — running or admitted-and-starting against the `background_max_live` ceiling (`null` = no ceiling; default `max(2, min(cores × 3/4, ram_gb / 3))`); `agents_live` counts every agent process, runtime children included. `reason` strings are the words of `wait` ("Waiting for the machine — load 30.0 (limit 12.0), 2 Otto agents are running", "Waiting for memory — …", "Waiting for a free agent slot — 5 of 5 running" / "— 2 ahead in line"). Machine samples are cached 2 s and the settings 5 s, so polling it every few seconds costs a couple of syscalls. `disk_free_bytes` is what `df` calls "Avail" on the volume holding Otto's data dir; `low_disk` = below `machine_low_disk_gb` GiB (default 10; 0 = off). The read also notices low disk: the first read below the floor posts one `System` warning (`source_key` `machine:low_disk`) to the notification centre and the first read above it refreshes that row as an info notice. Types: `crates/otto-sessions/src/admission.rs`, mirrored in `ui/src/lib/api/types/machine.ts`.
 
 ## Restart impact (what a daemon restart keeps and ends)
 
@@ -3462,7 +3568,7 @@ Workspace-independent: one Mac, one daemon. `busy` = a background agent arriving
 |---|---|---|---|
 | GET /system/restart-impact | root, a person's own credential (policy `Settings:Admin` + handler `require_root` / `require_human`: an agent, MCP or share credential is refused) | — | RestartImpact `{keeps: RestartImpactItem[], ends: RestartImpactItem[]}`; `RestartImpactItem` = `{kind, label, count, detail?: string[]}` |
 
-Asked by the update dialog before "Restart to update" (and usable by any restart prompt), so it tells the truth about what ends. Each crate counts the work it owns, the way the daemon's shutdown treats it: PTY sessions in a holder (setting `session_persistence`, default on) and structured threads in a runtime-holder are `keeps` (`kind` `sessions` / `background_agents`); every other live session ends — `connection_terminals`, `background_agents` (`meta.source` in `BACKGROUND_SESSION_SOURCES`, or a `meta.work.origin` other than `manual`), unheld `sessions`. Also ending: running IDE runs and dev servers (`ide_runs`), live debug sessions (`debug_sessions`), Otto's own container runtime when it started it (`container_runtime`; an external Docker keeps running), Kafka tunnels (`broker_tunnels`), live Database Explorer SSH tunnels (`db_tunnels`), the daemon's own in-memory jobs (`daemon_jobs`: running Goal Loops, Blender renders and Vault docs runs; `detail` = e.g. `"Goal Loop × 2"`), every session room (`session_rooms`, in memory), live browser sessions (`live_browser`), and phones used in the last 10 minutes (`phones`; a phone's last use is recorded at most every 5 minutes, so this is "recently", not "connected now"). `label` already agrees with `count`; `detail` holds up to 5 titles; kinds with a zero count are omitted. Types: `crates/otto-core/src/restart.rs`, mirrored in `ui/src/lib/api/types/machine.ts`.
+Asked by the update dialog before "Restart to update" (and usable by any restart prompt), so it tells the truth about what ends. Each crate counts the work it owns, the way the daemon's shutdown treats it: PTY sessions in a holder (setting `session_persistence`, default on) and structured threads in a runtime-holder are `keeps` (`kind` `sessions` / `background_agents`); every other live session ends — `connection_terminals`, `background_agents` (`meta.source` in `BACKGROUND_SESSION_SOURCES`, or a `meta.work.origin` other than `manual`), unheld `sessions`. Also ending: running IDE runs and dev servers (`ide_runs`), live debug sessions (`debug_sessions`), Otto's own container runtime when it started it (`container_runtime`; an external Docker keeps running), Kafka tunnels (`broker_tunnels`), live Database Explorer SSH tunnels (`db_tunnels`), the daemon's own in-memory jobs (`daemon_jobs`: Blender renders and Vault docs runs; `detail` = e.g. `"docs run × 2"`), every session room (`session_rooms`, in memory), live browser sessions (`live_browser`), and phones used in the last 10 minutes (`phones`; a phone's last use is recorded at most every 5 minutes, so this is "recently", not "connected now"). `label` already agrees with `count`; `detail` holds up to 5 titles; kinds with a zero count are omitted. Types: `crates/otto-core/src/restart.rs`, mirrored in `ui/src/lib/api/types/machine.ts`.
 
 ## Database maintenance
 
@@ -3621,6 +3727,15 @@ Filesystem paths are on the **daemon host**, including when the caller uses a re
 - `large_pr_lines?: number | null` — changed lines (tests included) above which a PR is LARGE: no scope assessment, every configured lens on every configured provider. Default 5000.
 - `medium_pr_lines?: number | null` — changed lines above which a PR is MEDIUM (recorded on the plan; lenses stay agent-selected, as for SMALL). Default 1000.
 - `ReviewScopePlan` additionally carries `size` (`small|medium|large`), `changed_lines` and `all_providers` (true for LARGE PRs). A failed scope assessment never stops a review: it falls back to every configured lens (`source` says so).
+
+**Model and effort per reviewer and provider; drop-only scope (additive, optional, all `serde(default)`):**
+- `ModelPick { model, effort }` — empty = the provider's default (no flag sent).
+- `ReviewAgentCfg.effort?: string` (beside `model`, on `provider`) and `ReviewAgentCfg.picks?: { <provider>: ModelPick }`.
+- `ReviewConfig.picks?: { <provider>: ModelPick }` — the review-wide default per provider; also reaches lenses the scope assessment adds.
+- Resolution for a row "lens L on provider P": `L.picks[P]` → `(L.model, L.effort)` when `L.provider == P` → `picks[P]` → provider default (an empty pick falls through). An orchestrator row (one per provider) takes the first lens pick for P, else the first configured model that applies to P, else `picks[P]`. The summarizer and the scope assessment run on `summarizer.{provider, model, effort}`.
+- `ReviewConfig.scope_assessment?: "auto" | "configured"` (absent = `auto`, today's behaviour). `configured`: the scope assessment still runs, then the plan keeps only lenses a configured reviewer declares (name, case-insensitive), in plan order — it may drop a declared lens, never add one; a plan left empty runs every configured lens.
+- `ReviewConfig.reviewer_time_box_secs?: number` — reserved (accepted and stored; not enforced yet).
+- A `review_run` node takes the same keys: `reviewers[].effort`, `reviewers[].picks`, node-level `picks`, `summarizer.effort`, `scope_assessment`, `reviewer_time_box_secs`.
 
 **`Review` DTO additions (A2 — additive, optional):**
 - `verdict?: "approved" | "changes_requested" | "incomplete" | null` — computed at read time (every review read route) from the review's tracked findings: `incomplete` when `error` carries `Review incomplete — not a verdict:`, else for a `done` review `changes_requested` when `blocker_count > 0`, `approved` otherwise; `null` while running, cancelled or failed with nothing usable.
@@ -4078,6 +4193,27 @@ result goes and where agents run; which trigger may set them:
 | `result_channel`, `result_chat`, `result_thread`, `result_webhook`, `callback_url` | yes | yes (`result_*`) | yes | dropped |
 | `working_directory`, `repos`, `worktree`, `worktree_path`, `cwd` | `working_directory` | webhook spec: `working_directory`, `repos` | yes | dropped |
 | `repo_id`, `base`, `pr`, `pr_branch` | — | webhook spec | yes (`repo_id` must be in the workflow's workspace, else **400**) | dropped |
+| `chat_updates` (`live` \| `per_step`; also a Start node param) | chat binding spec | — | yes | dropped |
+| `attachments`, a non-boolean `research_dir` | engine only | dropped (Start node params too) | dropped | dropped |
+
+**Chat thread style (`chat_updates`).** `live` (the default) posts one status message
+and edits it in place, captions every step's file, and posts new messages only for
+needs-you, holds and the final result (+ `final-output.md`); `per_step` is the pre-0.7
+thread byte for byte (a line and a file per step). Resolved from the run input, else
+the Start node's param (`otto_workflows::chat_status::ChatUpdates::resolve`). In a run's
+thread, `status` replies with that status message's text; `skip` skips the running step,
+and while several run it asks for `skip <step name>` (a name prefix, then a substring,
+case-insensitive; the others keep running).
+
+**Files from the chat message.** The Slack listener passes the files it downloaded for
+a message as data (`Inbound.attachments`, never parsed back out of the text; `input.raw`
+keeps the `saved to:` note unchanged). When a chat message starts a run, each is copied —
+before the run can queue — to `<data>/workflow-context/<run>/attachments/<safe name>`
+(`[A-Za-z0-9._-]`, `-2`… on a clash, never through a symlink, only regular files the
+listener saved in the canonical temp dir, at most 10 files / 50 MiB per run) and listed
+in `<context>/attachments.json` as `AttachmentRef[]` `{name, mime, size_bytes?, path?
+("attachments/<safe name>"), error?, source: "start" | "steer"}`; a file that was not
+received or not copied has `error` and no `path`. Telegram receives no files.
 
 Results always post through the **workflow's own** workspace integration: an
 `origin_workspace_id` naming another workspace is ignored (chat triggers only
@@ -4106,7 +4242,8 @@ every inbound Slack/Telegram/webhook message *before* normal session routing. Re
    falls through (bare "run" reads too much like ordinary English to hijack the message).
 3. **Channel bindings** — enabled `chat`-kind `WorkflowTrigger`s pin a workflow to a
    channel/chat(/thread): spec shape `{"channel": "slack"|"telegram", "chat": "<id>", "thread"?:
-   "<ts>", "mention_only"?: bool}`. `channel`+`chat` must match exactly; an absent `thread` in the
+   "<ts>", "mention_only"?: bool, "chat_updates"?: "live" | "per_step"}` (`chat_updates` is
+   copied into the run input). `channel`+`chat` must match exactly; an absent `thread` in the
    spec matches any thread (a present one requires an exact match — a thread-pinned binding is
    preferred over an unpinned one when both match); `mention_only` (default false) requires the
    inbound text to @-mention someone (an `@word`; Slack mentions arrive decoded as `@name`, the
@@ -4175,99 +4312,50 @@ just MySQL), a server-side schema-children `filter`, and a `mask` flag that reda
 cells / broker payloads server-side via `otto_core::redact` (the response carries a `masked`
 flag) — all on the EXISTING query/consume routes.
 
-## Goal Loops
+## Goals
 
-Bounded, goal-directed multi-agent iteration. A loop runs Plan → Execute → Evaluate →
-Digest cycles on an isolated git branch (`goal-loop/<id>`) or research directory until the goal's
-acceptance criteria are met or a hard limit (iterations / active time) is hit. Live
-updates arrive over `/ws/events` (`goal_loop_updated`). Item routes resolve the
-workspace from the loop row; every handler enforces ws Viewer/Editor.
-
-DTOs are `otto_core::api::{DefineGoalReq, GoalLoopDraft, CreateGoalLoopReq,
-UpdateGoalLoopReq}` and domain types `otto_core::domain::{GoalLoop, GoalLoopDetail}`.
-
-| # | Method & path | Auth | Request | Response |
-|---|---|---|---|---|
-| 91 | POST /api/v1/workspaces/{id}/goal-loops/define | ws editor | DefineGoalReq | GoalLoopDraft (runs the AI definer; creates a managed definer session; `feedback` refines) |
-| 92 | GET /api/v1/workspaces/{id}/goal-loops | ws viewer | — | `GoalLoop[]` |
-| 93 | POST /api/v1/workspaces/{id}/goal-loops | ws editor | CreateGoalLoopReq | GoalLoop (validates non-empty `verify`; limits must be positive and `per_phase_timeout_secs` at most 86400, else 400; starts when `autostart`) |
-| 94 | GET /api/v1/goal-loops/{id}?summary= | ws viewer | — | GoalLoopDetail (`{loop, iterations, spent_usd?, steering_notes}`). `summary=true` (additive): `plan`, `context_in` and `context_out` are `""` on every iteration except the newest — read one via row 94a |
-| 94a | GET /api/v1/goal-loops/{id}/iterations/{idx} | ws viewer | — | GoalLoopIteration — one iteration in full (`idx` is 1-based) |
-| 95 | PATCH /api/v1/goal-loops/{id} | ws editor; a `config` change needs the loop's creator, a ws admin or root (else 403) | UpdateGoalLoopReq | GoalLoop (`name` non-terminal; `limits` not while Running; `config` Draft-only with at least one executor). All fields are validated before a single atomic update; rejection preserves every prior field. |
-| 96 | POST /api/v1/goal-loops/{id}/start | ws editor | — | GoalLoop |
-| 97 | POST /api/v1/goal-loops/{id}/pause | ws editor | — | GoalLoop |
-| 98 | POST /api/v1/goal-loops/{id}/resume | ws editor | — | GoalLoop. Paused, blocked or exhausted. An `exhausted` loop resumes only when its limits leave room (iterations started < `max_iterations`, unless a pending human-only re-evaluation needs no new iteration; active time < `max_runtime_secs`); otherwise 409 naming the limit to raise. A loop the 4 h run cap stopped has room and starts a new run window |
-| 99 | POST /api/v1/goal-loops/{id}/stop | ws editor | — | GoalLoop |
-| 99a | POST /api/v1/goal-loops/{id}/steer | human + ws editor | `SteerGoalLoopReq {note}` | `SteerGoalLoopResp {loop_id, note, queued_notes}` (queues a human steering note for the next iteration; 409 on terminal loops) |
-| 99b | GET /api/v1/goal-loops/{id}/diff | ws viewer | — | `GoalLoopDiff` (bounded worktree diff against the loop's base ref) |
-| 100 | POST /api/v1/goal-loops/{id}/iterations/{idx}/agents/{agent}/retry | ws editor | — | 202 (re-run a stuck executor) |
-| 101 | DELETE /api/v1/goal-loops/{id} | ws editor | — | 204 (stops and deletes history; **retains working files and branch**) |
-
-### Goal execution and verification contract
-
-`GoalLoopConfig` adds optional `allow_commits` (default false), `mode` (`build` default or
-`research`), `source_links: string[]`, `skills: string[]`, and `require_review` (default false).
-Local commits are instructed only when explicitly enabled; push/publish are separately
-permissioned. Selected skills and source links enter the role context. Missing skills must
-be reported by agents; there is no preflight availability guarantee for custom skills.
-Research requires no repository and writes `findings.md` inside the retained research directory.
-Planner/evaluator/digester sessions append to each iteration's `agents` after executor slots;
-existing executor indices remain stable. Every role honors its configured provider/model.
-The definer accepts optional `provider`, `model`, and `mode` in `DefineGoalReq`.
-
-Criterion `verify_kind` accepts `command`, `agent`, `human`, and legacy `manual` (agent-assessed).
-The model cannot satisfy `human`; approval requires an authenticated explicit action from a
-person. Both human-decision endpoints reject managed session credentials (including author
-API tokens and internal MCP tokens) with 403:
+A goal is a workflow of one fixed shape (goal.md §3.2): Start (`lane: long`) → loop
+"Work toward the goal" { Work (agent, keeps its thread across iterations) → Check criteria
+(`check`) }. Each goal is its own workflow row with `origin = "goal"` and a server-set
+`origin_ref` (`review:<id>`, `insights`, `goal_loop:<id>`, `mcp` or none); its run is an
+ordinary workflow run (`GET /workflow-runs/{id}`, `workflow_run_updated`). Built by
+`otto_workflows::goal`, started by `otto_server::goals`. DTOs: `otto_core::api::{GoalSpec,
+GoalWork, GoalBudget, AgentChoice, NamedAgentChoice, GoalStartResp, ResumeReq, ExtendReq,
+SteerReq, VerifyCriterionReq}`.
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| POST /api/v1/goal-loops/{id}/criteria/{criterion}/verify | ws editor | `{ "evidence": "Observed the expected result" }` | GoalLoop; only paused/blocked/exhausted human criteria |
-| POST /api/v1/goal-loops/{id}/questions/{question}/answer | ws editor | `{ "answer": "Use the existing endpoint" }` | GoalLoop; only an unanswered question on a blocked loop |
+| POST /api/v1/workspaces/{wid}/goals | ws editor (Workflows Edit) | `GoalSpec` (+ `from?: "insights"`) | `GoalStartResp {workflow, run}`. 400 naming the field (`title` 1–120, `goal` 1–8,000, `criteria` 1–40 with unique `[a-z0-9-]` ids, a command / rule criterion needs its command / rule, `budget.iterations` 1–50, `budget.active_s` 900–28,800, `budget.step_timeout_s` 300–7,200), or naming the invalid built graph; 400 when the workspace budget is blocked. Build: `work.repo_id` must be a repository of the workspace; the run input is `{goal: {title}, repos: [{repo, type: "worktree", name: <repo path>, source: <base or HEAD sha>}]}` (DR-102). Research: `{goal: {title}, research_dir: true}` and the check gains `report` (`test -s findings.md`) |
+| GET /api/v1/workspaces/{wid}/goals | ws viewer (Workflows View) | — | Array: goal runs (each goal workflow's latest run, newest goal first, at most 50: `{id: <run id>, run_id, workflow_id, name, state, started_at, ended_at}`) followed by the workspace's older loops (`{id, name, status, legacy: true}`). The directory list route of kind `goal` |
+| POST /api/v1/workspaces/{wid}/goals/from-loop | ws editor (Workflows Edit) | `CreateGoalLoopReq` (MCP `otto.run_goal_loop`; `autostart` ignored) | `{workflow, run, workflow_id, run_id, ignored: ["planner", "digester", "definer"]}`; `origin_ref = "mcp"`. Criteria: `command` → command (`verify_cmd`, else `verify`), `agent` / legacy `manual` → agent with `how = verify`, `human` → human; ids lower-cased to `[a-z0-9-]`; limits clamped into the goal ranges; `executors[0]` → worker, the rest → extra workers; `evaluator` → checker; `require_review` → `final_review`; `mode: research` → research. 400: `config.graph` ("Engineering-graph goals are not supported any more: put the tasks on a workflow canvas"), a non-null `max_cost_usd`, or a build `repo_path` that is not a registered repository of the workspace |
+| POST /api/v1/goal-loops/{id}/continue | ws editor (Workflows Edit) | `GoalSpec` (the form prefilled from the loop) | `GoalStartResp`; `origin_ref = "goal_loop:<id>"`. Only for a `draft`, `paused`, `blocked` or `exhausted` loop (else 409; 409 when it was continued already). The working place comes from the loop row, never the client: build → `repos: [{repo: <registered repo of repo_path>, type: "worktree", name: <worktree_path, else the repo path>, source: <base_commit, else HEAD>}]`; research → `research_dir: <worktree_path, else <data_dir>/goal-loops/<id>/work>` when that folder exists, else `true` (a fresh `<context>/research`, never the workspace root). Surviving executor sessions of the loop are killed first; the goal text gains "Where the earlier loop got to: …", "Next action: …" and a graph loop's "Tasks, in order: …". The loop is then `stopped` with summary "Continued as a goal — run <id>" |
+| POST /api/v1/reviews/{review_id}/fix-goal | human credential + ws editor | `{target_score?}` | see Code review (`{workflow_id, run_id}`) |
 
-Invalid/empty input returns 400; unknown criterion/question returns 404; workspace permission
-failures use the usual authorization error. `GoalLoop.ledger` holds `verifications[]`
-(`criterion_id`, exact serialized `criterion_revision`, server-derived `verified_by`, `evidence`,
-`verified_at`), `questions[]` (`id`, `question`, nullable `answer`, `answered_by`, `answered_at`),
-`next_action`, `last_failure_signature`, `repeated_failures`, `review_summary`, `review_passed`,
-and nullable `resume_evaluation_iteration` (server-owned pending evaluation after an executor retry).
-Legacy rows default to an empty ledger. Answers do not auto-resume; unanswered questions block Resume.
-Lifecycle and human-decision mutations serialize per loop. Approval/Resume while execution is
-still stopping returns 409. Explicit executor retry owns Running state, cancels with Pause/Stop,
-clears old output/evaluation/approvals, and returns to Blocked for fresh evaluation. Only the
-current iteration can be retried. Resume evaluates that iteration without another planner or
-executor fleet and without spending an iteration; pause/restart preserves this continuation.
-Active runtime bounds the entire controller, including retries, and each executor attempt has
-an absolute phase deadline with bounded cleanup. Build/Research mode cannot change after creation.
-Further executor work invalidates human approvals; changed criterion contracts cannot reuse them.
-Final human verification rechecks the current iteration without rerunning executors or consuming
-another iteration, subject to the active-time and phase limits.
+**Any workflow run** (goals included; Workflows class of `/workflow-runs/*`):
 
-Two identical unmet-criterion/evidence outcomes block the loop with a persisted question
-(compared on the evidence headline, without any verify output).
-Optional completion review must return approval with no unresolved findings before success.
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| POST /api/v1/workflow-runs/{id}/pause | ws editor | — | `WorkflowRun` with `hold {kind: "paused", reason: "Paused by <name>", by}`, status `canceled`. The hold is written before the cancel is announced (`request_pause`, DR-106). 409 when the run is not `pending` / `running` |
+| POST /api/v1/workflow-runs/{id}/resume | ws editor | `ResumeReq {extend?: {iterations?, active_s?}}` (new totals) | `WorkflowRun` re-entered: every step not settled re-runs (a step left `running` by a crash is `pending` again), the rest is adopted. Extend merges into `limits.loops[<loop>]` (`max_iterations`, `max_active_s`; a blocked hold also sets `unblocked_at` = its iteration). 409: no effective hold; the driver is still stopping; an exhausted run whose limits leave no room ("Raise the iteration limit to resume: 6 of 6 iterations are used." / "Raise the active-time limit to resume: …") |
+| POST /api/v1/workflow-runs/{id}/steer | human credential + ws editor | `SteerReq {note}` (trimmed, ≤ 4,000 chars) | `{queued: [String]}` — queued in `<context>/steering.json` for the next agent step (`otto_workflows::steering`). 400 empty / too long; 409 when the run finished without a hold or 20 notes wait |
+| POST /api/v1/workflow-runs/{id}/nodes/{node_id}/criteria/{criterion_id}/verify | human credential + ws editor | `VerifyCriterionReq {met, evidence}` (evidence non-empty, ≤ 2,000) | `{ok: true}`. `node_id` is the top-level node: the check itself, or the loop around it (DR-107). 400 bad evidence; 409 when that node's attention is not `verify` on `criterion_id`; 404 unknown criterion. The record (`HumanEntry {kind: "verify", ask: <criterion id>, met, revision: criteria::revision, iteration}`) goes to the parked check |
+| POST /api/v1/workflow-runs/{id}/cancel | ws editor | — | as before; on a held run it drops the hold (`clear_hold`) and keeps the settled status |
 
-`GoalLoopIteration.evaluation.criteria[].evidence` is never blank for a met criterion: a met
-claim with blank evidence is stored as not met with the evidence "Marked met without evidence,
-…". A command criterion's evidence is `verify command exited 0` or
-`verify command failed (exit N)`, followed by `"\n--- verify output ---\n"` and the last 8 KB of
-the command's output when it printed anything (`ledger.graph_nodes` keep the headline only).
-When every criterion is met with evidence, a `continue` verdict becomes `achieved` and the
-evaluator's request is kept in `rationale`; `blocked` is never overridden. One run (start or
-resume until it settles) stops after at most 4 h of active time (`MAX_RUN_ACTIVE_SECS`),
-whatever `max_runtime_secs` says; the loop is then `exhausted` with summary
-"time cap reached: Otto stops a run after 4 hours of active time".
+## Older goal loops (read-only history)
 
-Stop, failure, success, restart and history deletion retain working files. Boot recovery pauses
-active loops and preserves blocked questions (a blocked loop keeps its own `error` and
-`finished_at`), allowing explicit Resume; sessions are reaped.
-A loop the restart paused keeps `error` = "Interrupted by a daemon restart — Resume to continue
-with preserved work." (`RESTART_PAUSE_NOTE`; Resume clears it), emits `goal_loop_updated`
-`paused`, and gets one notice (`automation:goal_loop_restart:<id>`, route `loops/<id>`).
-Per-loop token and cost totals are not recorded: iteration `tokens_input`/`tokens_output`/`cost_usd`
-and loop `cost_usd` stay 0.
-Per-loop cost accounting is not wired: non-null `max_cost_usd` is rejected at create/patch;
-legacy loops carrying one block before execution. Workspace usage-budget gates remain in force.
+The Goal Loops controller is gone; its tables stay. These routes serve the history page
+(`#/loops`); every other `/goal-loops` route answers 404. Handlers enforce ws Viewer/Editor
+(the policy exempts `/goal-loops*` except Continue, which starts a goal and is Workflows Edit).
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /api/v1/workspaces/{id}/goal-loops | ws viewer | — | `GoalLoop[]` |
+| GET /api/v1/goal-loops/{id}?summary= | ws viewer | — | GoalLoopDetail (`{loop, iterations, spent_usd, steering_notes}`; `spent_usd` is always `null`, it was never tracked). `summary=true`: `plan`, `context_in` and `context_out` are `""` on every iteration except the newest |
+| GET /api/v1/goal-loops/{id}/iterations/{idx} | ws viewer | — | GoalLoopIteration in full (`idx` 1-based) |
+| GET /api/v1/goal-loops/{id}/diff | ws viewer | — | `GoalLoopDiff` (bounded diff of the kept worktree against the loop's base ref) |
+| DELETE /api/v1/goal-loops/{id} | ws editor | — | 204 (deletes history; **retains working files and branch**) |
+| POST /api/v1/goal-loops/{id}/continue | ws editor (Workflows Edit) | `GoalSpec` | see Goals |
+
 
 ## Canvas Studio
 
@@ -4887,7 +4975,9 @@ CP24's per-tool `approval_exempt` (and top-level `approval_exempt_tools`) = the 
 
 **Cross-workspace list tools (CP26).** `otto.list_workspaces`, `list_workflows`, `list_connections`, `list_broker_clusters`, `list_swarms`, `list_scheduled_tasks`, `list_goal_loops`, `list_agent_rooms`, `list_issue_accounts` and `list_product_stories` answer the `AgentRefDirectory` shape (`{kind, items, current_workspace_id, workspace_count}`) — every workspace the caller can read unless `workspace_id` narrows it. (Breaking for callers of the previous single-workspace bare arrays: read `items`.) `list_connections` rows carry no connection params or secret refs.
 
-**The workspace pin is enforced on the resolved object (CP26).** A `kind='mcp'` token's `workspace_id` pin is re-checked after resolution against the workspace the target actually lives in: a named object's own workspace, a repo's, a design artifact's, or — for id-only objects — the workspace read back from the object (`get_workflow_run`, `cancel_workflow_run`, `get_session`, `wait_session`, `send_message`, `get_improvement_run`). Tools that address no workspace-owned object (AWS / K8s console rows, the caller's own issue accounts, the product-story library, usage, the skill catalogue, the directory list tools which the pin itself narrows) run without one. A pinned token is DENIED any other tool whose workspace Otto cannot establish (`create_work_item`, `list_swarm_tasks`, `list_findings`, `get_finding`, `approve|reject|rollback_improvement_edit`) — previously an id-keyed call bypassed the pin.
+**The workspace pin is enforced on the resolved object (CP26).** A `kind='mcp'` token's `workspace_id` pin is re-checked after resolution against the workspace the target actually lives in: a named object's own workspace, a repo's, a design artifact's, or — for id-only objects — the workspace read back from the object (`get_workflow_run`, `cancel_workflow_run`, `control_workflow_run`, `get_session`, `wait_session`, `send_message`, `get_improvement_run`). Tools that address no workspace-owned object (AWS / K8s console rows, the caller's own issue accounts, the product-story library, usage, the skill catalogue, the directory list tools which the pin itself narrows) run without one. A pinned token is DENIED any other tool whose workspace Otto cannot establish (`create_work_item`, `list_swarm_tasks`, `list_findings`, `get_finding`, `approve|reject|rollback_improvement_edit`) — previously an id-keyed call bypassed the pin.
+
+**Goals (goal.md §8).** `otto.run_goal_loop` keeps its name and input schema and starts a goal (`POST /workspaces/{ws}/goals/from-loop`; returns the route's `{workflow, run, workflow_id, run_id, ignored}`). `otto.list_goal_loops` lists the directory kind `goal` (`GET /workspaces/{ws}/goals`: goal runs, then older loops with `legacy: true`). New `otto.control_workflow_run {run_id, action: pause|resume, extend?: {iterations?, active_s?}}` (Workflows, mutating, DANGEROUS) → `POST /workflow-runs/{id}/pause` or `/resume {extend}`; its approval card reads "Pause workflow run '<id>'" / "Resume workflow run '<id>'" / "… with up to N iterations, up to M min of active time". Both are governed only (never native twins, DR-104): sessions see `otto_run_goal_loop` / `otto_control_workflow_run` through the governed bridge, so every call passes the allow-list, the approval queue and audit; review sessions do not list them. The specs, routes and approval texts live in `otto-mcp`'s `outward/goals.rs`.
 
 **New tools (CP26).** Reads (default on): `list_workspaces`, `list_goal_loops`, `list_agent_rooms`, `list_issue_accounts`, `list_issue_transitions`, `get_scheduled_task`, `list_swarm_projects`, `list_swarm_tasks`, `list_design_projects`, `list_pr_reviews` (the `review_id` for `list_findings`), `get_pr_checks`. Opt-in read: `get_pr_diff`. Mutating (DANGEROUS, off by default): `merge_pr`, `vault_write_file`. Existing installs keep their saved `mcp_otto_server_tools` list — tick the new tools under MCP → Otto server. Other fixes: `list_prs` pages (`page`, `per_page`); `create_pr` forwards `draft`, `reviewers`, `proof_pack_id`; `start_pr_review` forwards `context`, `issue_key`, `issue_account_id`; `list_workflow_runs` defaults to summary rows (`summary`); `list_improvement_edits` takes `status`; `get_swarm_board` / `list_swarm_runs` take their filters; `search_issues` pages with `start_at` (its `query` is free text, not JQL); `k8s_describe` omits `namespace` for cluster-scoped kinds; `update_scheduled_task` exposes `model` / `cwd` and clears `workflow_id` / `skill` with `null`; `api_upsert_request` on update keeps every omitted field (the stored request fills them — the PATCH route replaces the row) and returns the masked agent shape; `api_execute` forwards `decode_jwt`. A self-call error now carries the daemon's whole message (≤ 4000 chars) and a 204 answers `{"ok":true}`; self-calls that legitimately run long (an API request up to its `timeout_ms`, automations, pod logs, Athena) get a longer budget than the default 30 s.
 
@@ -6595,9 +6685,115 @@ Transcript session GETs reuse bounded immutable folds (32 retained entries / 128
 
 `status`, `duration_ms`, `request_id`, `source.session_id` and `source.via` may be null. `source.kind` defaults to `human` when absent/null and retains explicit legacy kinds. Summaries omit request/response bodies, headers and authentication. Fetch `GET /workspaces/{wid}/api-client/history/{id}` for the original full `ApiHistoryEntry` before replay. The existing full `/history` route and MCP history behavior remain unchanged. Cross-workspace detail access is rejected; missing detail is 404 and insufficient workspace access is 403. Listing causes no remote request execution or credential lookup.
 
+### Steps side by side and the step runner
+
+- **Parallel steps:** a run starts every step whose inputs have settled, in
+  run order (a step starts only after every step before it in run order has
+  started or been skipped), so each step keeps the number the one-at-a-time
+  engine gave it (`NodeRunState.step_no` / `step_file`, stored once
+  numbered). Setting `wf_max_parallel_steps` (default 4, 1–8; 1 = one at a
+  time) caps the running steps that hold an agent or a process; a step over
+  the cap is `running` with `phase: "queued"` and the log line "waiting for a
+  step slot (N of M in use)".
+- A step's `[workflow context]` preamble lists the step files of its settled
+  ancestors (and its own earlier loop iterations), never a sibling's.
+- While every running step of a run waits on a person (approval, question),
+  the run gives its run-queue slot back and its active-time budget stops; the
+  first step to work again takes both back first.
+- **Step runner:** agent steps run on structured runtime threads (engine
+  threads, below) unless `OTTO_WF_STEP_RUNNER=pty` or the setting
+  `wf_step_runner: "pty"` (read once per run execution; a provider the
+  runtime has no driver for always runs on PTY). A thread step records
+  `NodeRunState.thread` (runner `threads`, usage, turns, model, effort) —
+  never `sessions` — and its `agent_prompt` output carries `thread_id`
+  instead of `session_id`. Agent step params `effort`, `timeout_s`
+  (60–36,000) and `continue_from` (a node id: continue that step's thread;
+  a removed thread starts a fresh one) reach the runner. The thread's phases
+  (`waiting` with `wait`, `starting`, `working`, `needs_you` with
+  `attention`, `finishing`) are appended to `phases`; an answered question
+  is kept in `human_log`. The thread is closed when the step settles (unless
+  a later step continues it) and kept until the run's end plus the retention
+  period below.
+- **Needs you, limits, deliverables.** A step entering `needs_you` (an
+  approval, a question, or a usage limit with a known reset — the step parks
+  until `attention.resets_at` (read from the CLI's own words, else the usage
+  meter) and then continues on the same thread; with no known reset it fails
+  at once with class `usage_limit`, never retried by backoff) posts one notification
+  ("Workflow “…” needs you") per episode and, in the live chat style, one new
+  post in the run's thread. `deliverables` come from the thread digest's
+  outward actions (agent steps) or a built-in node's `output.deliverables`.
+  A retry appends a `queued` phase mark noted "attempt 2 of 3 — <reason>"; a
+  step that waits on an earlier one in run order logs "waiting for <step> to
+  start (run order)"; a step running when the run is canceled settles
+  `skipped` with `error_class: "canceled"` and a phase mark noted
+  `canceled`. The newest ≤ 50 timeline items of a step's thread are kept in
+  the run's context dir as `.threads/<node_id>-<attempt>.json`.
+  `GET /workflow-runs/{id}` fills `thread.available` (`false` once
+  retention deleted the thread). After a restart the done-file oracle checks
+  every interrupted PTY agent step, not only the first.
+- **Chat style.** A chat-started run reports in the `live` style unless its
+  input or Start node sets `chat_updates: "per_step"` (today's thread). Live:
+  one status message posted when the run starts — or while it is still queued
+  for a run slot — and edited in place (≤ 1 edit / 3 s), its id stored in
+  `chat_status_json` so a restart or retry edits the same message; a run
+  canceled while queued edits it to "canceled while queued"; per-step text
+  lines are dropped, step files are captioned; the final post is
+  `render_final` (what was delivered, in words) with the same attachment as
+  before. The offline e2e daemon (`OTTO_E2E`) keeps `per_step` unless the
+  run sets the key.
+
+### Goals inside the engine: check, loop budgets, holds
+
+- **`check` step:** command criteria run one after another in the run's
+  working directory through `verify_command` (env `OTTO_RUN_ID`,
+  `OTTO_CONTEXT_DIR`, `OTTO_WORKTREE`; exit 0 = met, the evaluator cannot
+  change it; evidence keeps the exit status and an 8 KiB output tail, every
+  byte in `<step base>.<criterion id>.log`); rule criteria (`verify: expr`)
+  read `{iteration, steps, last, input}`; agent criteria get one evaluator
+  turn on a fresh thread (`evaluator.{provider, model, effort}`) that writes
+  `<step base>.output.json` — a "met" without evidence counts as not met, no
+  valid answer leaves every agent criterion unmet. When every other criterion
+  is met and a human one has no record for this iteration, the step waits
+  (`phase: needs_you`, `attention {kind: verify, criterion_id}`) for
+  `POST /workflow-runs/{id}/nodes/{node_id}/criteria/{criterion_id}/verify`
+  (`node_id` = the check, or the loop around it); the record lands in that
+  node's `human_log`. `final_review: true` adds one review turn on a fresh
+  thread after an `achieved` verdict (passes only approved with no
+  findings). The output is `CheckOutput` (above) plus `summary`, and the
+  step file is its table.
+- **`loop`:** `max_iterations` 1..=10, or 1..=50 with `max_active_s`
+  (300..=28,800; banked as the sum of the inner checkpoints' `active_ms`,
+  never counting time on a person, a pause or downtime). An inner `check`
+  whose verdict is `achieved` ends the loop satisfied at once; `blocked`,
+  or two identical unmet signatures with `stop_on_repeat_failure`, stops
+  it. With `hold_when_unmet` a stop without the check passing (out of
+  iterations or time, blocked, a failed inner step) **holds the run**
+  (output `_workflow_hold = {kind, reason, iteration}`) instead of ending
+  `satisfied: false`. `steps[].same_thread` continues the step's thread
+  from the previous iteration; an inner agent step a restart caught resumes
+  its thread. The run's `limits.loops[<node id>]` (Resume) wins over the
+  params.
+- **Holds:** Pause writes the hold before anything unwinds; the driver then
+  stores the in-flight steps (and a held loop's skipped branch) as
+  `pending` with a `queued` phase mark noting the kind, reports the hold where
+  the run reports its result (the chat thread — in the live style "⏸ … paused —
+  …" / "⚠️ … is blocked — …" / "⚠️ … is out of budget — …" — and a result
+  webhook), and reaps no worktree. Resume re-enters with every unsettled step (finished
+  steps and iterations are adopted); after Exhausted it needs new totals
+  above what is used ("Raise the iteration limit to resume: 6 of 6
+  iterations are used."), after Blocked it goes on with the next iteration.
+  Cancel of a held run drops the hold (the status stays) and reaps.
+- **Steering:** `POST /workflow-runs/{id}/steer` queues a note (≤ 4,000
+  chars, ≤ 20 waiting) in `<context>/steering.json`; the next agent step
+  that starts takes them all as a `[steering]` section and records each in
+  its node's `human_log`.
+- **Run lanes:** a run whose Start node has `lane: "long"` waits on its own
+  gate (env `OTTO_WF_MAX_LONG_RUNS`, default 2, 1..=4), not the ordinary
+  slots; queue places count within the lane.
+
 ### Lightweight workflow progress and lazy details
 
-`GET /api/v1/workflow-runs/{id}/progress?after_rev=N` requires workspace Viewer before reading/returning either branch. It returns 200 `{"changed":false,"rev":N}` if current, or `{"changed":true,"rev":N,"run":WorkflowRun}` with `run.summary=true`, lightweight nodes and `checkpoint_rev`, `checkpoint_generation`, `checkpoint_count`, `checkpoint_done`. Input/output/log bodies are omitted (`input`/`output` null, `logs` empty); node summaries add `detail_version`, `log_count`, `has_output`, bounded error/phase previews and session references. Context directory/approval/proof/version metadata remain available. Missing imported projections repair from authoritative JSON before the conditional comparison; busy admission returns 409, never a fabricated empty run.
+`GET /api/v1/workflow-runs/{id}/progress?after_rev=N` requires workspace Viewer before reading/returning either branch. It returns 200 `{"changed":false,"rev":N}` if current, or `{"changed":true,"rev":N,"run":WorkflowRun}` with `run.summary=true`, lightweight nodes and `checkpoint_rev`, `checkpoint_generation`, `checkpoint_count`, `checkpoint_done`. Input/output/log bodies are omitted (`input`/`output` null, `logs` empty); node summaries add `detail_version`, `log_count`, `has_output`, bounded error/phase previews and session references, and copy the run-view fields `step_no`, `step_file`, `phase`, `wait`, `attention`, `error_class`, `deliverables`, `brief`, the newest 12 `phases` and 5 `human_log` entries, `thread` without `digest` and `children` without `usage` (the full node from `…/nodes/{node_id}` has both). The run adds `overview` (null when stale) and `hold` beside the unchanged `summary: true`. Context directory/approval/proof/version metadata remain available. Missing imported projections repair from authoritative JSON before the conditional comparison; busy admission returns 409, never a fabricated empty run.
 
 `GET /api/v1/workflow-runs/{id}/checkpoints?cursor=&limit=100` returns `{checkpoint_rev,generation,items:[WorkflowCheckpoint],next_cursor}`. Items are summaries with the same body descriptors; no input/output/log bodies. Limit 1–200. Opaque ≤4 KiB cursor binds run, reset generation and insertion order. Ordinary node/log/checkpoint updates do not invalidate pagination; append remains discoverable. Retry/deletion/reset returns 409 for an old generation and requires reloading checkpoints. Native SQLite insertion identity is not imported/exported as authoritative data.
 
@@ -6907,6 +7103,45 @@ task is cancelled. Story deletion still
 cancels all its studio turns through the existing story lifecycle.
 
 
+### Engine threads (workflow steps, reviews)
+
+A thread whose `meta.source` is in `ENGINE_THREAD_SOURCES` (`workflow`, `review`,
+`review_summarizer`; `crates/otto-core/src/agent_runtime.rs`) runs with nobody
+watching:
+- It is left out of every Threads list (above); a sub-thread its agent opens
+  (`…/peers`) inherits `source, run_id, node_id, wf_name, review_id, work`.
+  At most **4** sub-threads of one engine thread's group are open at once
+  (**409** "a workflow step may have 4 open sub-threads at once …").
+- `otto.request_secret` from it is refused at once (**400** "an unattended
+  workflow step cannot ask for a secret …").
+- A respawn whose provider cannot resume the conversation fails (the step
+  fails as `provider`) instead of starting a fresh conversation.
+- A daemon restart that cuts an unheld engine thread's turn records the turn
+  as `meta.restart_cut_turn` (server-owned), so the step ends as
+  `server_restart` even after a second restart.
+- Every runtime agent process — a person's thread too — is counted by the
+  machine's admission gate while it runs (`GET /api/v1/machine/status`
+  `agents_live`); a pre-admitted place rides the create as
+  `meta.admission_permit`, which is never stored.
+- A governed Otto MCP call from a `workflow` runtime thread with a `run_id`
+  holds as long as a person's session would (300 s for claude, codex, gemini,
+  grok); other runs keep the 15 s headless hold.
+- Review and summarizer threads get no "Otto subagents" rules on their first
+  prompt.
+- **Retention:** closing a step stamps `meta.retain_until` (RFC 3339, ms, `Z`)
+  on the thread and its sub-threads; the engine moves it at the run's end
+  (settings `workflow_thread_retention_success_hours`, default 24, and
+  `workflow_thread_retention_failed_hours`, default 168). Every 10 minutes
+  (skipped while the machine is busy) the daemon deletes at most 200 closed
+  threads past their `retain_until`. A thread without the key is never
+  touched.
+
+An untrusted read-only thread (`meta.read_only: true` and
+`meta.project_settings: false`, a PR's reviewer) gets **no** MCP servers on
+the structured runtime — no `otto`, none of the workspace's — as its terminal
+would; a runtime Claude spawn also gets `--add-dir` for each `meta.extra_dirs`
+entry, and a read-only Codex thread no `--search`.
+
 ### Structured runtime questions
 
 `runtime_request.kind: "question"` carries `questions: [{id, header, prompt,
@@ -7043,7 +7278,7 @@ and false-green test gaps matter; exhaustive hypothetical branch coverage does n
 
 | Method | Access | Request | Response |
 | --- | --- | --- | --- |
-| POST /reviews/{review_id}/fix-goal | human credential + ws editor | `{ "target_score"?: number }` (default 9.5, finite 1–10) | Existing/new `GoalLoop`; new/draft loops start immediately |
+| POST /reviews/{review_id}/fix-goal | human credential + ws editor | `{ "target_score"?: number }` (default 9.5, finite 1–10) | `{workflow_id, run_id}` — a goal (`origin_ref = "review:<id>"`, goal.md §4.1): Start (`lane: long`) → loop { fix → review (the review engine, `base` = the scope plan's merge-base, `previous_review_id` = this review, `chain_iterations`, threshold = target × 10, the scope plan's lenses) → check ("the review passes" + "critical-checks") }, up to 6 iterations or 2 h of active time, held when unmet; the run worktree is cut at the reviewed head SHA. A second click returns the same goal's latest run. 400: not a completed PR review, no recorded checkout, a head that is not a full SHA or differs from the scope plan's, or a blocked budget |
 
 Fix goals require a completed PR review with a scope plan and matching durable
 full head SHA. Legacy/local/running/incomplete reviews are rejected with 400;

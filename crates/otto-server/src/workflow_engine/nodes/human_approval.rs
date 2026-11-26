@@ -4,6 +4,30 @@
 use super::super::*;
 use super::NodeCall;
 
+/// The gate each run waits at and the output it exposes meanwhile (a
+/// publication preview), for the run's board: a sibling's publish must not
+/// compute the run as if nobody were asked (CR1-007), nor drop the preview
+/// the approval is checked against.
+type Gate = (String, Option<Value>);
+fn gates() -> &'static std::sync::Mutex<HashMap<Id, Gate>> {
+    static G: OnceLock<std::sync::Mutex<HashMap<Id, Gate>>> = OnceLock::new();
+    G.get_or_init(Default::default)
+}
+
+pub(in crate::workflow_engine) fn waiting_gate(run_id: &str) -> Option<Gate> {
+    gates().lock().ok()?.get(run_id).cloned()
+}
+
+/// Leaves the gate on any end of the wait (decision, timeout, cancel).
+struct Waiting<'a>(&'a Id);
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut g) = gates().lock() {
+            g.remove(self.0);
+        }
+    }
+}
+
 pub(in crate::workflow_engine) async fn execute(
     call: NodeCall<'_>,
 ) -> Result<(Value, Vec<String>)> {
@@ -17,7 +41,7 @@ pub(in crate::workflow_engine) async fn execute(
     } = call;
     let run_id: &Id = &env.run_id;
     let p = &node.params;
-    product_publication::expose_pending(ctx, run_id, node, &input).await?;
+    let exposed = product_publication::expose_pending(ctx, run_id, node, &input).await?;
     let prompt = p
         .get("prompt")
         .and_then(Value::as_str)
@@ -31,6 +55,12 @@ pub(in crate::workflow_engine) async fn execute(
     // it does is never missed.
     let mut decisions = ctx.events.subscribe();
     let pool = &ctx.pool;
+    // The board knows the gate before the row says "waiting": a sibling's
+    // publish in between would store the run as working again (CR2-007).
+    if let Ok(mut g) = gates().lock() {
+        g.insert(run_id.clone(), (node.id.clone(), exposed));
+    }
+    let waiting = Waiting(run_id);
     let rev: i64 = sqlx::query_scalar(
         "UPDATE workflow_runs
                  SET waiting_approval = 1, approval_node_id = ?,
@@ -45,17 +75,14 @@ pub(in crate::workflow_engine) async fn execute(
     .await
     .map_err(|e| otto_core::Error::Internal(format!("human_approval mark: {e}")))?
     .ok_or_else(|| otto_core::Error::Conflict("human_approval: run is no longer running".into()))?;
-    emit_run_updated(
-        ctx,
-        &ws.id,
-        run_id,
-        "running",
-        Some(&node.id),
-        rev,
-        None,
-        &[],
-        true,
-    );
+    // The stored overview and the event say "needs you" at once.
+    let repo = WorkflowsRepo::new(pool.clone());
+    let wf = repo
+        .definition_for_run(&repo.get_run(run_id).await?)
+        .await?;
+    let ov = super::super::run::finalize::store_overview(&repo, &wf, run_id, rev).await;
+    let at = (&ws.id, run_id, "running", rev);
+    emit_run_updated_with(ctx, at, Some(&node.id), None, &[], true, ov.as_ref());
 
     // Poll for the operator's decision. Operators are HUMANS: the
     // deadline defaults to 24h and is node-tunable via
@@ -67,10 +94,10 @@ pub(in crate::workflow_engine) async fn execute(
         .unwrap_or(86_400)
         .max(60);
     let deadline = Instant::now() + Duration::from_secs(timeout_s);
-    // A parked run hands its run-gate slot back while a human decides
-    // (up to 24h) and re-takes it — FIFO — once decided.
-    let released = release_run_permit();
-    let approval_pause = env.budget.pause();
+    // Parked while a human decides (up to 24h): when nothing else of the run
+    // works, the run hands its run-gate slot back and re-takes it — FIFO —
+    // once decided (`ActiveBudget::park`).
+    let park = env.budget.park();
     let tokio_deadline = tokio::time::Instant::from_std(deadline);
     let decision = loop {
         // Wake on THIS gate's decision (`approve_run` emits a
@@ -157,7 +184,9 @@ pub(in crate::workflow_engine) async fn execute(
             }
         }
     };
-    reacquire_run_permit(released).await;
-    drop(approval_pause);
+    // Decided: no sibling's publish says "waiting" while this step waits
+    // for the run's slot.
+    drop(waiting);
+    park.unpark().await;
     decision
 }

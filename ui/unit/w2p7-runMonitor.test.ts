@@ -238,3 +238,14 @@ test('workflow final output renders line breaks and hides silently only when the
   assert.equal(JSON.stringify(denied.finalOutputError), JSON.stringify({ runId: 'run', text: 'You don’t have access to this.' }), 'the real load-error copy');
   assert.equal(denied.finalOutputRunId, null, 'a failed read is forgotten so Retry / the next update can try again');
 });
+
+test('a contiguous bus event updates the on-screen overview in place (CR1-016)', () => {
+  const { mon, bus } = monitor({ progress: async () => { throw new Error('no refetch expected'); } });
+  const run = { id: 'r1', status: 'running', rev: 4, summary: true, checkpoint_rev: 0, overview: { rev: 4, state: 'running', headline: 'Working on Build' }, nodes: [node('a', 'running')] };
+  mon.run = run;
+  Object.assign(bus, { runId: 'r1', rev: 5, status: 'running', waitingApproval: true, node: node('a', 'running'), overview: { rev: 5, state: 'needs_you', headline: 'Build asks to go ahead' } });
+  mon.applyBusEvent();
+  assert.equal(run.rev, 5);
+  assert.equal(run.overview.state, 'needs_you');
+  assert.equal(run.overview.headline, 'Build asks to go ahead');
+});

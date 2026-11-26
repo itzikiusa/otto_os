@@ -254,7 +254,10 @@ pub(super) fn read_only_args(provider: &str, meta: &serde_json::Value) -> Vec<St
             }
             args
         }
-        "codex" if untrusted => vec!["-c".to_string(), "project_doc_max_bytes=0".to_string()],
+        // No project docs, and none of the user's own MCP servers either.
+        "codex" if untrusted => ["-c", "project_doc_max_bytes=0", "-c", "mcp_servers={}"]
+            .map(String::from)
+            .to_vec(),
         _ => vec![],
     }
 }

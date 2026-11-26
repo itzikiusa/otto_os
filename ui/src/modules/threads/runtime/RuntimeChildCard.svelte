@@ -13,7 +13,7 @@
   it answered, "Send the answer to <agent>" passes it on in one click.
 -->
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { getContext, untrack } from 'svelte';
   import Markdown from '../../agents/conversation/Markdown.svelte'; // ui-guards: allow — shared chat markdown
   import { formatEffortShort, formatModelLabel } from '../../../lib/providerModels';
   import { harnessLabel } from '../../../lib/providers';
@@ -22,10 +22,10 @@
   import { toastError } from '../../../lib/toastError';
   import { formatDuration } from './workLog';
   import { toasts } from '../../../lib/toast.svelte';
-  import { activityOf, answerOf, childOf, childState, elapsedMs, firstLine, rowTone } from './childThreads';
+  import { activityOf, answerOf, childOf, childState, elapsedMs, firstLine, removedLine, removedState, rowTone, type RemovedKid } from './childThreads';
   import { answerHandoff } from './askAgents';
   import { stopThreadWork } from './taskStops.svelte';
-  import { mainViewKey, openChildThread } from './childNav';
+  import { mainViewKey, openChildThread, READ_ONLY_CTX } from './childNav';
   import RuntimeAgentRow from './RuntimeAgentRow.svelte';
   import { runtimeThreads } from './runtimeThreads.svelte';
   import { runtimeViews } from './runtimeView.svelte';
@@ -35,8 +35,12 @@
     id: string;
     /** What the opener said about it (an agent's `thread_open` input), until its row loads. */
     hint?: { provider?: string | null; title?: string | null; model?: string | null; effort?: string | null };
+    /** Its parent's agent removed it: what it left in the parent's timeline (no live row to follow). */
+    removed?: RemovedKid;
   }
-  let { id, hint = {} }: Props = $props();
+  let { id, hint = {}, removed }: Props = $props();
+  /** In a read-only host (a workflow step) the card only shows: no Open, Stop or hand-over. */
+  const readOnly = getContext<(() => boolean) | undefined>(READ_ONLY_CTX);
 
   let gone = $state(false);
   let open = $state(false);
@@ -44,11 +48,12 @@
 
   $effect(() => {
     const child = id;
+    if (removed) return;
     return untrack(() => runtimeViews.open(child));
   });
   $effect(() => {
     const child = id;
-    if (untrack(() => runtimeThreads.get(child))) return;
+    if (removed || untrack(() => runtimeThreads.get(child))) return;
     untrack(() => void runtimeThreads.loadOne(child).catch(() => (gone = true)));
   });
 
@@ -104,6 +109,12 @@
   }
 </script>
 
+{#if removed}
+  {@const rs = removedState(removed)}
+  <div class="rc" data-testid="runtime-child-{id}" data-state={rs.tone}>
+    <RuntimeAgentRow {provider} name={hint.title ?? removed.title} {sub} tone={rowTone(rs.tone)} status={rs.label} elapsed={null} result={removedLine(removed)} expanded={false} testid="runtime-child-row-{id}" />
+  </div>
+{:else}
 <div class="rc" data-testid="runtime-child-{id}" data-state={st.tone}>
   <RuntimeAgentRow
     {provider}
@@ -115,11 +126,11 @@
     result={line}
     expanded={open}
     ontoggle={answer ? () => { open = !open; if (open) threadMeta.markSeen(id); } : undefined}
-    onstop={live && !gone && s?.status !== 'closed' && !stopping ? () => void stop() : undefined}
-    onrow={gone ? undefined : (e) => openChildThread(id, mainViewKey(e))}
+    onstop={live && !gone && s?.status !== 'closed' && !stopping && !readOnly?.() ? () => void stop() : undefined}
+    onrow={gone || readOnly?.() ? undefined : (e) => openChildThread(id, mainViewKey(e))}
     testid="runtime-child-row-{id}"
   />
-  {#if parentRow && parentRow.status !== 'closed' && answer && !live && !gone}
+  {#if parentRow && parentRow.status !== 'closed' && answer && !live && !gone && !readOnly?.()}
     <button
       type="button"
       class="btn small ghost rc-hand"
@@ -137,6 +148,7 @@
     </div>
   {/if}
 </div>
+{/if}
 
 <style>
   .rc {

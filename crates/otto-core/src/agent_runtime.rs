@@ -792,9 +792,16 @@ pub use questions::{
     validate_question_answers, QuestionAnswer, QuestionKind, QuestionOption, RuntimeQuestion,
 };
 
+mod step;
+pub use step::{
+    clip, Attention, AttentionKind, AttentionVia, DigestItem, OutwardAction, OutwardOutcome,
+    SubThreadUse, TranscriptDigest, WaitDetail, WaitReason, ATTENTION_TEXT_MAX,
+};
+
 mod outcome;
 pub use outcome::{
-    error_class, TurnOutcome, ERROR_CLASS_AUTH, ERROR_CLASS_PROVIDER, ERROR_CLASS_USAGE_LIMIT,
+    error_class, limit_kind, LimitKind, TurnOutcome, ERROR_CLASS_AUTH, ERROR_CLASS_PROVIDER,
+    ERROR_CLASS_USAGE_LIMIT,
 };
 
 /// An approval or structured question the agent is blocked on (`OrchestrationV2RuntimeRequest`).
@@ -828,6 +835,10 @@ pub struct RuntimeRequest {
     /// subagent; `otto.thread_answer` refuses it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub for_person: bool,
+    /// Who answered it: a person's user id, or `thread:<id>` when a parent
+    /// thread's agent answered with `otto.thread_answer`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_by: Option<Id>,
 }
 
 /// Why a request was cancelled: the provider withdrew it (`agent` — Claude
@@ -1343,6 +1354,22 @@ pub struct CreateRuntimeSessionReq {
 /// (UI mirror: `EMBEDDED_THREAD_SOURCES` in `ui/src/modules/threads/threadOrigins.ts`)
 /// and the runtime closes them after `embedded_thread_auto_close_hours` idle.
 pub const EMBEDDED_THREAD_SOURCES: [&str; 2] = ["pr-agent", "connection-diagnose"];
+
+/// `meta.source` of the threads Otto's engines run with nobody watching (a
+/// workflow step, a review's reviewers and summarizer). They — and the
+/// sub-threads their agents open, which inherit the source — are left out of
+/// a person's Threads lists and read by id or `?source=` only.
+pub const ENGINE_THREAD_SOURCES: [&str; 3] = ["workflow", "review", "review_summarizer"];
+
+/// Whether a thread's meta names an engine source ([`ENGINE_THREAD_SOURCES`]).
+pub fn is_engine_thread(meta: Option<&serde_json::Value>) -> bool {
+    meta.and_then(|m| m.get("source"))
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| ENGINE_THREAD_SOURCES.contains(&s))
+}
+
+/// Open sub-threads one engine thread's agent may have at once.
+pub const ENGINE_SUB_THREADS_MAX: usize = 4;
 
 /// The `origin.kind` each embedded source must carry.
 fn embedded_origin_kind(source: &str) -> Option<&'static str> {
@@ -2451,6 +2478,7 @@ mod tests {
                     question_title: None,
                     answers: None,
                     for_person: false,
+                    resolved_by: None,
                 },
             },
             RuntimeEventBody::PlanUpdated {
@@ -2874,6 +2902,7 @@ mod tests {
             question_title: None,
             answers: None,
             for_person: false,
+            resolved_by: None,
         };
         let old: OldRequest = serde_json::from_value(serde_json::to_value(&req).unwrap()).unwrap();
         assert_eq!(old.decision, Some(OldDecision::Decline));

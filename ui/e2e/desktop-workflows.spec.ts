@@ -1,6 +1,10 @@
 import { execFileSync } from 'node:child_process';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test, expect, type APIRequestContext } from '@playwright/test';
 import { apiCtx, seedWorkspace, seedGitRepo } from './seed';
+import { headerMenu, runsTab, workflowRow, workflowsTab } from './workflowsUi';
 
 // Workflow orchestrator E2E. Drives the API against the isolated OTTO_E2E daemon
 // (agent turns return a deterministic canned reply + a session id, so agent nodes
@@ -158,11 +162,13 @@ test('conditional branching: true branch runs, false branch is branch-skipped (n
   expect(failedLogs.toLowerCase()).toContain('branch not taken');
 });
 
-test('agent node surfaces an openable session on its step', async () => {
+test('agent node surfaces an openable conversation on its step', async () => {
   const run = await runToCompletion(sessionWfId);
   const agent = nodeState(run, 'agent');
   expect(agent.status).toBe('success');
-  expect(Array.isArray(agent.sessions) && agent.sessions.length >= 1).toBeTruthy();
+  // The thread runner records the step's runtime thread; the PTY runner a session.
+  if (process.env.OTTO_WF_STEP_RUNNER === 'pty') expect(Array.isArray(agent.sessions) && agent.sessions.length >= 1).toBeTruthy();
+  else expect(agent.thread).toMatchObject({ runner: 'threads', thread_id: expect.any(String) });
 });
 
 test('loop stops when the until-expression is satisfied', async () => {
@@ -234,6 +240,9 @@ test('convert a scheduled task into a workflow', async () => {
 
 test('manual_trigger node fields seed the run input', async () => {
   // Fields configured on the Start node become the run input (overridable by /run).
+  // A working directory outside the registered repos must exist (the run refuses
+  // any other), so the field names a real one.
+  const dir = mkdtempSync(join(tmpdir(), 'otto-e2e-wd-'));
   const wfId = await createWorkflow(
     'E2E Trigger Fields',
     [
@@ -243,18 +252,18 @@ test('manual_trigger node fields seed the run input', async () => {
         name: 'Start',
         x: 0,
         y: 0,
-        params: { msg: 'do the thing', goals: ['g1', 'g2'], working_directory: '~/x' },
+        params: { msg: 'do the thing', goals: ['g1', 'g2'], working_directory: dir },
       },
       node('echo', 'log'),
     ],
     [edge('trigger', 'echo')],
   );
   const run = await runToCompletion(wfId);
-  expect(run.status).toBe('success');
+  expect(run.status, JSON.stringify(run.nodes, null, 2)).toBe('success');
   const out = nodeState(run, 'trigger').output;
   expect(out.msg).toBe('do the thing');
   expect(out.goals).toEqual(['g1', 'g2']);
-  expect(out.working_directory).toBe('~/x');
+  expect(out.working_directory).toBe(dir);
 });
 
 test('orchestrator example templates are offered', async () => {
@@ -281,13 +290,14 @@ test('code templates auto-open the PR on review pass (no human approval)', async
     // The edge into the PR step is GATED on the review having passed.
     const prEdge = t.graph.edges.find((e: any) => e.target === pr.id);
     expect(prEdge?.condition, `${id} PR edge is conditional`).toBeTruthy();
-    // The loop is REVIEW-first then fix (design §E): review precedes fix, and
-    // the until references the review step by name.
+    // The loop is REVIEW-first then fix (design §E) as the one review→fix rule
+    // (goal.md §4.1): review → check "the review passes" → fix, no `until`.
     const loop = t.graph.nodes.find((n: any) => n.kind === 'loop');
     const stepKinds = loop.params.steps.map((s: any) => s.kind);
-    expect(stepKinds[0], `${id} reviews before fixing`).toBe('review_run');
-    expect(stepKinds).toContain('agent_prompt');
-    expect(loop.params.until, `${id} until references the review step`).toContain('steps.review');
+    expect(stepKinds, `${id} reviews, checks, then fixes`).toEqual(['review_run', 'check', 'agent_prompt']);
+    expect(loop.params.until, `${id} ends on the check, not an until`).toBeUndefined();
+    const check = loop.params.steps.find((s: any) => s.kind === 'check');
+    expect(check.params.criteria[0].expr, `${id} the check reads the review`).toContain('steps.review');
     // Per-lens multi-agent reviewers + a summarizer + a scoring guideline (design §F/§G).
     const review = loop.params.steps.find((s: any) => s.kind === 'review_run');
     expect(Array.isArray(review.params.reviewers), `${id} review has reviewers`).toBeTruthy();
@@ -474,26 +484,26 @@ test.describe('workflows page (desktop)', () => {
     }, ws);
   });
 
-  test('renders the workflows page and lists a seeded workflow', async ({ page }) => {
-    await page.goto('/#/workflows');
-    await expect(page.getByText('E2E Branching').first()).toBeVisible({ timeout: 30_000 });
+  test('renders the Workflows tab and lists a seeded workflow', async ({ page }) => {
+    await workflowsTab(page);
+    await expect(workflowRow(page, branchWfId)).toContainText('E2E Branching', { timeout: 30_000 });
   });
 
-  test('rename a workflow from the sidebar; the new name sticks server-side', async ({ page }) => {
+  test('rename a workflow from its row menu; the new name sticks server-side', async ({ page }) => {
     // A dedicated workflow so renaming it can't disturb the other UI tests. This
     // is the "same template → many differently-named workflows" need: each must
     // carry its own name so triggers (Slack/Telegram) can target it.
     const wfId = await createWorkflow('E2E Rename Me', [node('trigger', 'manual_trigger')], []);
-    await page.goto('/#/workflows');
-    const row = page.getByTestId(`wf-row-${wfId}`);
+    await workflowsTab(page);
+    const row = workflowRow(page, wfId);
     await expect(row).toBeVisible({ timeout: 30_000 });
-    await row.getByTestId('wf-row-more').click();
-    await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Rename' }).click();
-    const input = row.getByTestId('wf-rename-input');
+    await row.getByRole('button', { name: 'Workflow actions' }).click();
+    await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Rename…' }).click();
+    const input = page.getByRole('dialog').getByRole('textbox');
     await input.fill('E2E Renamed Flow');
     await input.press('Enter');
     // The row (same id) now shows the new name; the old name is gone from the list.
-    await expect(row.getByText('E2E Renamed Flow')).toBeVisible({ timeout: 10_000 });
+    await expect(row).toContainText('E2E Renamed Flow', { timeout: 10_000 });
     await expect(page.getByText('E2E Rename Me')).toHaveCount(0);
     // And it persisted on the server (so a trigger can match the new name).
     const wf = await (await ctx.get(`${base}${V1}/workflows/${wfId}`)).json();
@@ -506,10 +516,10 @@ test.describe('workflows page (desktop)', () => {
       [node('trigger', 'manual_trigger'), node('a', 'log')],
       [edge('trigger', 'a')],
     );
-    await page.goto('/#/workflows');
-    const row = page.getByTestId(`wf-row-${wfId}`);
+    await workflowsTab(page);
+    const row = workflowRow(page, wfId);
     await expect(row).toBeVisible({ timeout: 30_000 });
-    await row.getByTestId('wf-row-more').click();
+    await row.getByRole('button', { name: 'Workflow actions' }).click();
     await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Duplicate' }).click();
     // Server-side: a NEW workflow (different id) named "<src> (copy)" appears.
     let copy: { id: string; name: string } | undefined;
@@ -524,51 +534,51 @@ test.describe('workflows page (desktop)', () => {
       )
       .toBe(1);
     expect(copy!.id).not.toBe(wfId);
-    // Its row is in the sidebar, and it carries the SAME graph (2 nodes).
-    await expect(page.getByTestId(`wf-row-${copy!.id}`)).toBeVisible({ timeout: 10_000 });
+    // The copy opens in its editor, has its own row, and carries the SAME graph (2 nodes).
+    await expect(page).toHaveURL(new RegExp(`#/workflows/${copy!.id}$`), { timeout: 10_000 });
+    await expect(page.getByTestId('wf-node')).toHaveCount(2, { timeout: 20_000 });
+    await workflowsTab(page);
+    await expect(workflowRow(page, copy!.id)).toBeVisible({ timeout: 10_000 });
     const full = await (await ctx.get(`${base}${V1}/workflows/${copy!.id}`)).json();
     expect(full.graph.nodes.length).toBe(2);
   });
 
-  test('delete asks first (Cancel keeps it), then opens a neighbour', async ({ page }) => {
+  test('delete asks first (Cancel keeps it); deleting from the editor lands on the Workflows tab', async ({ page }) => {
     const wfId = await createWorkflow('E2E Delete Me', [node('trigger', 'manual_trigger')], []);
-    await page.goto('/#/workflows');
-    const row = page.getByTestId(`wf-row-${wfId}`);
+    await workflowsTab(page);
+    const row = workflowRow(page, wfId);
     await expect(row).toBeVisible({ timeout: 30_000 });
-    await row.locator('.row-main').click();
-    await expect(row).toHaveClass(/active/);
-    await row.getByTestId('wf-row-more').click();
-    await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Delete…' }).click();
+    await row.getByRole('button', { name: 'Workflow actions' }).click();
+    await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Delete workflow…' }).click();
     await expect(page.locator('.cf-msg')).toContainText('Delete “E2E Delete Me”');
     await page.getByRole('dialog').getByRole('button', { name: 'Cancel' }).click();
     expect((await ctx.get(`${base}${V1}/workflows/${wfId}`)).ok()).toBe(true);
 
-    await row.getByTestId('wf-row-more').click();
-    await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Delete…' }).click();
+    // The open workflow's ⋯ deletes it too, and the page never strands on it.
+    await row.getByRole('button').first().click();
+    await expect(page.getByTestId('wf-editor-canvas')).toBeVisible({ timeout: 20_000 });
+    await headerMenu(page, 'Delete workflow…');
     await page.getByRole('dialog').getByRole('button', { name: 'Delete workflow' }).click();
-    await expect(row).toHaveCount(0, { timeout: 10_000 });
+    await expect(page).toHaveURL(/#\/workflows\/all$/, { timeout: 10_000 });
+    await expect(workflowRow(page, wfId)).toHaveCount(0, { timeout: 10_000 });
     await expect.poll(async () => (await ctx.get(`${base}${V1}/workflows/${wfId}`)).ok()).toBe(false);
-    // Another workflow is open — never the empty "Pick a workflow" pane.
-    await expect(page.getByText('Pick a workflow')).toHaveCount(0);
+    // The other workflows are still listed — never an empty "pick one" pane.
+    await expect(workflowRow(page, branchWfId)).toBeVisible();
   });
 
-  test('templates live in a dropdown (room freed); no always-open "Game templates"', async ({
-    page,
-  }) => {
-    await page.goto('/#/workflows');
-    await expect(page.getByText('E2E Branching').first()).toBeVisible({ timeout: 30_000 });
-    // The old always-open template list is gone (room freed for Workflows/Running).
+  test('templates live in New workflow (room freed); no always-open "Game templates"', async ({ page }) => {
+    await workflowsTab(page);
+    await expect(workflowRow(page, branchWfId)).toBeVisible({ timeout: 30_000 });
+    // The old always-open template list is gone.
     await expect(page.getByText('Game templates')).toHaveCount(0);
-    // Templates are reachable via a collapsed dropdown.
-    const btn = page.getByRole('button', { name: /Templates/ });
-    await expect(btn).toBeVisible();
-    await btn.click();
-    await expect(page.getByText('Write tests for a story').first()).toBeVisible();
+    // Templates are one step away: the header's New workflow.
+    await page.getByTestId('page-header').getByRole('button', { name: 'New workflow' }).click();
+    const modal = page.getByTestId('wf-new-workflow');
+    await expect(modal).toBeVisible();
+    await expect(modal.getByText('Write tests for a story').first()).toBeVisible();
   });
 
-  test('Running list shows an in-flight run; the detail auto-updates to success', async ({
-    page,
-  }) => {
+  test('Runs inbox shows an in-flight run; its page auto-updates to success', async ({ page }) => {
     const wfId = await createWorkflow(
       'E2E Live',
       [node('trigger', 'manual_trigger'), node('wait', 'delay', { ms: 6000 }), node('done', 'log')],
@@ -576,22 +586,23 @@ test.describe('workflows page (desktop)', () => {
     );
     // Navigate FIRST so the page is up before the (short) run starts — under
     // load a cold page boot outlasts the delay node and the run would already be
-    // finished by the time the Running section renders.
-    await page.goto('/#/workflows');
-    await expect(page.getByText('E2E Live').first()).toBeVisible({ timeout: 15_000 });
+    // finished by the time the Running fold renders.
+    await runsTab(page);
+    await expect(page.getByTestId('wf-tab-runs')).toHaveAttribute('aria-selected', 'true', { timeout: 15_000 });
     const r = await ctx.post(`${base}${V1}/workflows/${wfId}/run`, { data: {} });
     expect(r.ok(), await r.text()).toBeTruthy();
+    const runId = (await r.json()).id as string;
 
-    // The Running section lists the in-flight run.
-    const running = page.getByTestId('running-workflows');
-    await expect(running).toBeVisible({ timeout: 15_000 });
-    await expect(running.getByText('E2E Live')).toBeVisible();
+    // The Running fold lists the in-flight run.
+    const row = page.getByTestId('wf-runs-running').locator(`[data-testid="wf-run-row"][data-run-id="${runId}"]`);
+    await expect(row).toBeVisible({ timeout: 15_000 });
+    await expect(row).toContainText('E2E Live');
 
-    // Open it from the Running list, then watch the status flip to success IN
-    // PLACE — no re-navigation — once the delay elapses (live auto-update).
-    await running.getByText('E2E Live').click();
-    const label = page.locator('.insp-bar .tl-label');
-    await expect(label).toBeVisible({ timeout: 10_000 });
-    await expect(label).toContainText('Succeeded', { timeout: 25_000 });
+    // Open it, then watch the run flip to success IN PLACE — no re-navigation —
+    // once the delay elapses (live auto-update).
+    await row.click();
+    const run = page.locator(`[data-testid="wf-run-page"][data-run-id="${runId}"]`);
+    await expect(run).toBeVisible({ timeout: 10_000 });
+    await expect(run).toHaveAttribute('data-state', 'succeeded', { timeout: 25_000 });
   });
 });

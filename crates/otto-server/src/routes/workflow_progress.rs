@@ -48,6 +48,14 @@ pub async fn progress(
                 result["run"]["context_dir"] = Value::String(dir.to_string_lossy().into_owned());
             }
         }
+        if result["run"]["overview"].is_null() {
+            // The full row: the summary projection strips input, outputs and usage.
+            if let Ok(run) = super::workflows::repo(&ctx).get_run(&id).await {
+                if let Some(ov) = super::workflows::recompute_overview(&ctx, &run).await {
+                    result["run"]["overview"] = serde_json::json!(ov);
+                }
+            }
+        }
     }
     Ok(Json(result))
 }

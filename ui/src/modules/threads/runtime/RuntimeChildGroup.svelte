@@ -14,7 +14,7 @@
   import { now } from '../../../lib/stores/now.svelte';
   import RuntimeChildCard from './RuntimeChildCard.svelte';
   import RuntimeSubagentCard from './RuntimeSubagentCard.svelte';
-  import { childState, elapsedMs, kidKey, nativeTone, subagentTally, type Kid } from './childThreads';
+  import { childState, elapsedMs, kidKey, nativeTone, removedState, subagentTally, type Kid } from './childThreads';
   import { runtimeThreads } from './runtimeThreads.svelte';
   import { runtimeViews } from './runtimeView.svelte';
   import { formatDuration } from './workLog';
@@ -31,7 +31,11 @@
   const EMPTY: TurnItem[] = [];
   const own = $derived(runtimeThreads.get(sessionId)?.provider ?? null);
   const providerOf = (k: Kid): string | null => (k.kind === 'thread' ? (runtimeThreads.get(k.id)?.provider ?? k.hint?.provider ?? null) : own);
-  const tones = $derived(kids.map((k) => (k.kind === 'thread' ? childState(runtimeThreads.get(k.id), runtimeViews.projections[k.id] ?? null).tone : nativeTone(k.item))));
+  const tones = $derived(
+    kids.map((k) =>
+      k.kind === 'native' ? nativeTone(k.item) : k.removed ? removedState(k.removed).tone : childState(runtimeThreads.get(k.id), runtimeViews.projections[k.id] ?? null).tone,
+    ),
+  );
   const tally = $derived(subagentTally(tones));
   const icons = $derived(kids.slice(0, 3).map(providerOf));
   const elapsed = $derived.by(() => {
@@ -56,7 +60,7 @@
 
 {#snippet row(k: Kid)}
   {#if k.kind === 'thread'}
-    <RuntimeChildCard id={k.id} hint={k.hint} />
+    <RuntimeChildCard id={k.id} hint={k.hint} removed={k.removed} />
   {:else}
     <RuntimeSubagentCard {sessionId} item={k.item} activity={activity.get(k.item.id) ?? EMPTY} {output} />
   {/if}

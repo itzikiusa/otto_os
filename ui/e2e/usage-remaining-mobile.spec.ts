@@ -1,5 +1,5 @@
 // Usage ▸ Remaining on a phone (390 px portrait / landscape): Usage is one of
-// the five tabs of the phone light version, so the per-login limits must read
+// the six modules of the phone light version (in its ⋯ sheet), so the per-login limits must read
 // at that width — every window's name, bar and "N% left · resets in …" line
 // fits without horizontal scroll, the stale verdict stays visible, and the
 // light version reaches the section too.

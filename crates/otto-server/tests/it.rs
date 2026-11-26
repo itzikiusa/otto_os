@@ -104,6 +104,20 @@ mod slack_as_me;
 mod transcript_long_session;
 #[path = "ui_control.rs"]
 mod ui_control;
+#[path = "wf_compat.rs"]
+mod wf_compat;
+#[path = "wf_goal.rs"]
+mod wf_goal;
+#[path = "wf_lifecycle.rs"]
+mod wf_lifecycle;
+#[path = "wf_restart.rs"]
+mod wf_restart;
+#[path = "wf_retry.rs"]
+mod wf_retry;
+#[path = "wf_threads.rs"]
+mod wf_threads;
+#[path = "wf_timing.rs"]
+mod wf_timing;
 #[path = "workflow_run_files.rs"]
 mod workflow_run_files;
 
@@ -133,5 +147,3 @@ fn every_integration_test_file_is_linked() {
 
 #[path = "draft_headless.rs"]
 mod draft_headless;
-#[path = "goal_graph_routes.rs"]
-mod goal_graph_routes;

@@ -28,4 +28,7 @@ export function openChildThread(id: string, modifier = false): void {
 }
 
 /** A click's "open elsewhere" modifier. */
+/** Context key: a getter, true while the thread view is read-only (a workflow step's embed). */
+export const READ_ONLY_CTX = 'runtimeReadOnly';
+
 export const mainViewKey = (e: MouseEvent | KeyboardEvent): boolean => e.metaKey || e.ctrlKey;

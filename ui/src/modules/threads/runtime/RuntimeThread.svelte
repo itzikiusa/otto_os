@@ -45,6 +45,7 @@
   import { threadPrefs } from './threadPrefs.svelte';
   import { recallPrompt, sentPrompts, type HistoryState } from './promptHistory';
   import { dropAttachments, fileDrop } from './composerDrop';
+  import { READ_ONLY_CTX } from './childNav';
   import RuntimeModelControl from './RuntimeModelControl.svelte';
   import { switchPromptFields } from './providerSwitch';
   import RuntimeNextLine from './RuntimeNextLine.svelte';
@@ -93,6 +94,8 @@
     agentChat?: string;
     hostCommands?: RuntimeHostCommands;
     compact?: boolean;
+    /** No composer: another feature drives this thread (its cards stay answerable). */
+    readOnly?: boolean;
     accessModeOverride?: RuntimeAccessMode | null;
     onaccessmodechange?: (mode: RuntimeAccessMode) => void;
     fallbackCwd?: string | null;
@@ -110,7 +113,7 @@
   }
 
   let {
-    sessionId, focused, onswitch, agentChat, hostCommands, compact = false, accessModeOverride = null,
+    sessionId, focused, onswitch, agentChat, hostCommands, compact = false, readOnly = false, accessModeOverride = null,
     onaccessmodechange, fallbackCwd = null, hasExternalContext = false, transformOutgoingText,
     transformRestoredQueuedText, onExternalContextConsumed, onopenpath, formatAssistantText,
     assistantFooter, composerTopSlot, composerFootLeadSlot, testIds,
@@ -128,6 +131,8 @@
   const session = $derived(runtimeThreads.get(sessionId));
   const effectiveCwd = $derived(session?.cwd ?? fallbackCwd ?? null);
   setContext(PATH_LINK_CTX, () => ({ sessionId, cwd: effectiveCwd, workspaceId: session?.workspace_id }));
+  // Another feature drives a read-only thread: its sub-thread cards neither open nor stop.
+  setContext(READ_ONLY_CTX, () => readOnly);
 
   const p = $derived(runtimeViews.projections[sessionId] ?? null);
   const loadError = $derived(runtimeViews.loadError[sessionId] ?? null);
@@ -192,7 +197,7 @@
   const failedQuiet = $derived(!!failure && dormant);
   const queueShown = $derived((background.length > 0 && !closed) || (p?.queued.length ?? 0) > 0 || (needsRevive && !failedQuiet));
   const banners = $derived(buildRuntimeBanners({
-    sessionError, uiAsk, queueShown, needsRevive, freshContext: draft.freshContext, switchTo: draft.provider, limited: failure?.cause === 'usage_limit' && !closed,
+    sessionError, uiAsk, queueShown, needsRevive, freshContext: draft.freshContext, switchTo: draft.provider, limited: failure?.cause === 'usage_limit' && !closed, readOnly,
     hasQuestions: Boolean(p?.requests.some((r) => r.kind === 'question' && r.status !== 'pending')),
     hasPlan: Boolean(plan),
   }));
@@ -423,6 +428,7 @@
   };
   /** ⌘. stops the turn from anywhere in this pane (the composer handles its own keys). */
   function onWindowKey(e: KeyboardEvent): void {
+    if (readOnly) return;
     const pane = scroller?.parentElement;
     const here = !!pane && (pane.contains(document.activeElement) || (focused && document.activeElement === document.body));
     if (here && running && !ui.overlayOpen && isStopChord(e)) {
@@ -443,7 +449,7 @@
 </script>
 
 <svelte:window onkeydown={onWindowKey} />
-<section class="rt" class:compact aria-label="Conversation" data-testid="runtime-thread-{sessionId}" use:fileDrop={{ box: () => composerBoxEl, onfiles: (f) => dropAttachments(ownerId, draft, f, caps, agentName) }}>
+<section class="rt" class:compact aria-label="Conversation" data-testid="runtime-thread-{sessionId}" use:fileDrop={{ box: () => composerBoxEl, onfiles: (f) => { if (!readOnly) dropAttachments(ownerId, draft, f, caps, agentName); } }}>
   {#if onswitch}<RuntimeLinkedThreads {sessionId} {onswitch} />{/if}
   <div class="rt-scroll" class:isolated={!ui.overlayOpen} bind:this={scroller}>
     <div class="rt-stream" bind:this={streamEl} data-runtime-stream>
@@ -477,7 +483,7 @@
               workspaceId={session?.workspace_id}
               onrespond={respond}
               hideItemId={failedError?.id ?? null}
-              onedituser={closed ? undefined : (m) => void restoreFailedTurnToDraft({ sessionId, draft, text: m.text, attachments: m.attachments, transformText: transformRestoredQueuedText, focusComposer })}
+              onedituser={closed || readOnly ? undefined : (m) => void restoreFailedTurnToDraft({ sessionId, draft, text: m.text, attachments: m.attachments, transformText: transformRestoredQueuedText, focusComposer })}
               {onopenpath}
               onopendiff={hostCommands?.openDiff ? (path) => hostCommands.openDiff!(sessionId, path) : undefined}
               {formatAssistantText}
@@ -493,8 +499,8 @@
             {outcome}
             {failure}
             {agentName}
-            revive={failedQuiet && !draft.reopening ? () => void reopen() : undefined}
-            disabled={closed}
+            revive={failedQuiet && !draft.reopening && !readOnly ? () => void reopen() : undefined}
+            disabled={closed || readOnly}
             onedit={(t, atts) => void restoreFailedTurnToDraft({ sessionId, draft, text: t, attachments: atts, transformText: transformRestoredQueuedText, focusComposer })}
             onresend={async (t, atts) => {
               try {
@@ -562,6 +568,7 @@
     <RuntimeChildApprovals {sessionId} />{#if p && session && !closed}<RuntimeMcpChanged {sessionId} workspaceId={session?.workspace_id} idle={!running} />{/if}
     {#if composerTopSlot}{@render composerTopSlot({ focusComposer })}{/if}
 
+    {#if !readOnly}
     <div class="rt-composer" class:rt-folded={composerFolded} style:border-color={planOn ? 'color-mix(in srgb, var(--warning) 42%, var(--border))' : undefined} bind:this={composerBoxEl}>
       {#if suggestions.length > 0 && StageSlashView.component}
         <StageSlashView.component id={popId} items={suggestions} active={cmdIdx} onaccept={acceptCmd} onhover={(i) => (cmdIdx = i)} />
@@ -648,6 +655,7 @@
         />
       </div>
     </div>
+    {/if}
   </div>
 </section>
 

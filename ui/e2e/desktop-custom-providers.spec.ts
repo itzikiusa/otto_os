@@ -108,117 +108,48 @@ test('Insights settings offers a custom provider for report generation', async (
   await expect(providerSelect.locator('option', { hasText: /^grok$/ })).toHaveCount(1);
 });
 
-test('Workflow agent node offers provider + model from the registry', async ({ page }) => {
-  await openPage(page, 'workflows');
-
-  // Start a blank workflow to open the editor (empty state otherwise).
-  await page.getByRole('button', { name: 'Start blank' }).click();
-
-  // Open the node palette and add an Agent node.
-  const nodeBtn = page.locator('[data-testid="page-header"] button', { hasText: 'Node' });
-  await expect(nodeBtn).toBeVisible({ timeout: 10_000 });
-  await nodeBtn.click();
-  await page.locator('.pal-item', { hasText: 'Agent' }).first().click();
-
-  // The new node is auto-selected → its inspector shows the Provider select +
-  // the shared catalog-backed ModelPicker ("Model (optional)", shown for the
-  // default provider) — agent_prompt was Model-only before, no provider.
-  const providerSelect = page.locator('#np-provider');
-  await expect(providerSelect).toBeVisible({ timeout: 10_000 });
-  await expect(providerSelect.locator('option', { hasText: /^grok$/ })).toHaveCount(1);
-  await expect(page.getByLabel('Model (optional)')).toBeVisible();
-});
-
-test('Workflow node inspector docks to a resizable side panel', async ({ page }) => {
-  await openPage(page, 'workflows');
-  await page.getByRole('button', { name: 'Start blank' }).click();
-
-  // Add + select a node so the inspector shows.
-  const nodeBtn = page.locator('[data-testid="page-header"] button', { hasText: 'Node' });
-  await nodeBtn.click();
-  await page.locator('.pal-item', { hasText: 'Agent' }).first().click();
-
-  const inspector = page.locator('.inspector');
-  await expect(inspector).toBeVisible({ timeout: 10_000 });
-  // Bottom dock by default (no .side).
-  await expect(inspector).not.toHaveClass(/\bside\b/);
-
-  // Toggle to the side dock → the inspector becomes a right column. The dock
-  // toggle is a checkable row in the editor header's ⋯ menu.
-  const clickDock = async (): Promise<void> => {
-    await page.locator('[data-testid="page-header"]').getByRole('button', { name: 'More actions' }).click();
-    await page.getByRole('menuitemcheckbox', { name: 'Inspector on the side' }).click();
-  };
-  await clickDock();
-  await expect(inspector).toHaveClass(/\bside\b/);
-  const box = await inspector.boundingBox();
-  const vw = page.viewportSize()!.width;
-  // It sits on the right half of the viewport (a real side column).
-  expect(box!.x).toBeGreaterThan(vw / 2);
-
-  // Drag the vertical grip left to widen it; width grows and persists.
-  const before = box!.width;
-  const grip = page.locator('.insp-grip.side');
-  const gb = (await grip.boundingBox())!;
-  await page.mouse.move(gb.x + gb.width / 2, gb.y + 200);
-  await page.mouse.down();
-  await page.mouse.move(gb.x - 140, gb.y + 200, { steps: 6 });
-  await page.mouse.up();
-  const after = (await inspector.boundingBox())!.width;
-  expect(after).toBeGreaterThan(before + 80);
-
-  // Toggle back to the bottom dock.
-  await clickDock();
-  await expect(inspector).not.toHaveClass(/\bside\b/);
-});
-
-test('Provider "default" option reads claude (the daemon fallback), not agy', async ({ page }) => {
-  await openPage(page, 'workflows');
-  await page.getByRole('button', { name: 'Start blank' }).click();
-
-  // Add + select an Agent node → its Provider select renders.
-  const nodeBtn = page.locator('[data-testid="page-header"] button', { hasText: 'Node' });
-  await nodeBtn.click();
-  await page.locator('.pal-item', { hasText: 'Agent' }).first().click();
-
-  // The empty (unset) option must label the ACTUAL runtime default. With no
-  // configured default_provider, resolve_provider falls back to "claude" — so it
-  // must read "default (claude)", never "default (agy)" (alphabetically first).
-  const defOpt = page.locator('.inspector select option[value=""]').first();
-  await expect(defOpt).toHaveText('default (claude)');
-});
-
-// Every AGENT-running workflow node must expose a Provider selector — not just
-// agent_prompt. These cover the gaps the user hit: prepare_context, loop
-// sub-steps, and self_improve.
+// Workflows: a step is added from the editor's "+ Step" menu on a blank
+// workflow (New workflow → Start blank). Agent steps choose provider · model ·
+// effort with the Threads picker (StepModel); loop sub-steps and Self-Improve
+// keep their own provider controls.
 async function addWfNode(page: import('@playwright/test').Page, label: string): Promise<void> {
-  await openPage(page, 'workflows');
+  await page.goto('/#/workflows/all');
+  await page.getByRole('button', { name: 'New workflow' }).first().click();
   await page.getByRole('button', { name: 'Start blank' }).click();
-  await page.locator('[data-testid="page-header"] button', { hasText: 'Node' }).click();
-  await page.locator('.pal-item', { hasText: label }).first().click();
+  await expect(page.getByTestId('wf-editor-canvas')).toBeVisible({ timeout: 15_000 });
+  await page.getByTestId('page-header').first().getByRole('button', { name: 'Step' }).click();
+  await page.locator('.ctx-menu').getByRole('menuitem', { name: label }).first().click();
+  await expect(page.getByTestId('wf-inspector')).toBeVisible({ timeout: 10_000 });
 }
 
-test('prepare_context node exposes a Provider selector', async ({ page }) => {
+test('Workflow agent step offers provider + model through the Threads picker', async ({ page }) => {
+  await addWfNode(page, 'Agent');
+  // Unset reads the ACTUAL runtime default (claude — resolve_provider's
+  // fallback), never the alphabetically first provider.
+  const chip = page.getByTestId('wf-step-model');
+  await expect(chip).toHaveAttribute('aria-label', /Claude, model Default/);
+  await chip.click();
+  await expect(page.getByRole('dialog').or(page.locator('.ctx-menu, [role="listbox"]')).first()).toBeVisible();
+});
+
+test('prepare_context step exposes the agent picker', async ({ page }) => {
   await addWfNode(page, 'Prepare relevant data');
-  const defOpt = page.locator('.inspector select#np-provider option[value=""]');
-  await expect(defOpt).toHaveText('default (claude)');
-  // …and the live registry providers are listed (grok from beforeAll).
-  await expect(page.locator('.inspector select#np-provider option', { hasText: /^grok$/ })).toHaveCount(1);
+  await expect(page.getByTestId('wf-inspector').getByTestId('wf-step-model')).toHaveAttribute('aria-label', /Claude/);
 });
 
 test('loop sub-steps expose a Provider selector (not raw JSON only)', async ({ page }) => {
   await addWfNode(page, 'Repeat (Until)');
   // Add an agent sub-step → its Provider select appears with the default label.
   await page.getByRole('button', { name: 'Add step' }).click();
-  const prov = page.locator('.inspector .ls-prov').first();
+  const prov = page.getByTestId('wf-inspector').locator('.ls-prov').first();
   await expect(prov).toBeVisible();
   await expect(prov.locator('option[value=""]')).toHaveText('default (claude)');
   await expect(prov.locator('option', { hasText: /^grok$/ })).toHaveCount(1);
 });
 
-test('self_improve node exposes provider chips', async ({ page }) => {
+test('self_improve step exposes provider chips', async ({ page }) => {
   await addWfNode(page, 'Self-Improve (offer)');
-  const chips = page.locator('.inspector .rv-chip');
+  const chips = page.getByTestId('wf-inspector').locator('.rv-chip');
   // One chip per registered agent provider (claude + the custom grok present).
   await expect(chips.filter({ hasText: 'claude' })).toHaveCount(1);
   await expect(chips.filter({ hasText: 'grok' })).toHaveCount(1);
@@ -253,37 +184,3 @@ test('Excluding a provider hides it from /meta and every picker', async ({ page 
   }
 });
 
-test('Dock opens a persistent side panel with a working close button', async ({ page }) => {
-  await openPage(page, 'workflows');
-  await page.getByRole('button', { name: 'Start blank' }).click();
-
-  // Press Dock with NOTHING selected → the side panel appears immediately with a
-  // centered placeholder (previously nothing happened, which is what the user hit).
-  const inspector = page.locator('.inspector.side');
-  await expect(inspector).toHaveCount(0);
-  // The dock toggle is a checkable row in the editor header's ⋯ menu.
-  const more = page.locator('[data-testid="page-header"]').getByRole('button', { name: 'More actions' });
-  await more.click();
-  await page.locator('.ctx-menu').getByRole('menuitemcheckbox', { name: 'Inspector on the side' }).click();
-  await expect(inspector).toBeVisible({ timeout: 10_000 });
-  await expect(inspector.locator('.insp-blank')).toContainText(/select a node/i);
-
-  // The panel header holds only the title + close (×): the notification bell
-  // lives in the sidebar on every page, so nothing floats over the dock.
-  await expect(inspector.locator('.insp-side-head .bell-wrap')).toHaveCount(0);
-  await expect(page.locator('.sidebar').getByRole('button', { name: 'Notifications' })).toBeVisible();
-
-  // The panel reaches the trailing edge of the page column (the shell's Side
-  // panel rail sits beyond it) — no gutter black-strip.
-  const box = (await inspector.boundingBox())!;
-  const content = (await page.locator('#app-content').boundingBox())!;
-  expect(box.x + box.width).toBeGreaterThan(content.x + content.width - 4);
-
-  // The × close button in the side header dismisses the dock.
-  await inspector.getByRole('button', { name: 'Close panel' }).click();
-  await expect(page.locator('.inspector.side')).toHaveCount(0);
-  // The dock toggle returns to unchecked (bottom mode).
-  await more.click();
-  await expect(page.locator('.ctx-menu').getByRole('menuitemcheckbox', { name: 'Inspector on the side' })).toHaveAttribute('aria-checked', 'false');
-  await page.keyboard.press('Escape');
-});

@@ -256,7 +256,7 @@ mod tests {
         events: tokio::sync::broadcast::Sender<Event>,
         workspaces: otto_state::WorkspacesRepo,
         issues: otto_state::IssuesRepo,
-        secrets: std::sync::Arc<dyn otto_core::secrets::SecretStore>,
+        outbound: std::sync::Arc<dyn otto_channels::improve_notify::OutboundAdapterFactory>,
     }
 
     struct NoSecrets;
@@ -276,6 +276,9 @@ mod tests {
         fn pool(&self) -> &otto_state::DbPool {
             &self.pool
         }
+        fn data_dir(&self) -> &std::path::Path {
+            std::path::Path::new("/nonexistent")
+        }
         fn events(&self) -> &tokio::sync::broadcast::Sender<Event> {
             &self.events
         }
@@ -285,8 +288,10 @@ mod tests {
         fn issues_store(&self) -> &otto_state::IssuesRepo {
             &self.issues
         }
-        fn secrets(&self) -> &std::sync::Arc<dyn otto_core::secrets::SecretStore> {
-            &self.secrets
+        fn outbound(
+            &self,
+        ) -> &std::sync::Arc<dyn otto_channels::improve_notify::OutboundAdapterFactory> {
+            &self.outbound
         }
         fn spawn_run(
             &self,
@@ -345,7 +350,9 @@ mod tests {
             events: tokio::sync::broadcast::channel(16).0,
             workspaces,
             issues: otto_state::IssuesRepo::new(pool.clone()),
-            secrets: std::sync::Arc::new(NoSecrets),
+            outbound: std::sync::Arc::new(otto_channels::improve_notify::BotTokenAdapters(
+                std::sync::Arc::new(NoSecrets),
+            )),
             pool,
         };
         (dir, ctx, ws.id, t.id)

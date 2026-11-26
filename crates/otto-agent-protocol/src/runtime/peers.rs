@@ -77,11 +77,10 @@ impl AgentRuntime {
             .clone()
             .unwrap_or_else(|| caller.id.clone());
         Ok(self
-            .list(&caller.workspace_id, Some(&caller.created_by))
+            .linked(&root)
             .await?
             .into_iter()
             .filter(|s| s.status != RuntimeSessionStatus::Closed)
-            .filter(|s| s.id == root || s.parent_id.as_ref() == Some(&root))
             .collect())
     }
 
@@ -89,7 +88,21 @@ impl AgentRuntime {
     /// confused agent must not fan out without bound: `group` lists the OPEN
     /// threads of this linked group, the root included.
     pub(super) async fn ensure_group_room(&self, c: &RuntimeSession) -> Result<()> {
-        if self.group(c).await?.len() > MAX_LINKED_OPEN {
+        let open = self.group(c).await?.len();
+        let engine = otto_core::agent_runtime::is_engine_thread(c.meta.as_ref());
+        if engine && self.inner.host.memory_critical().await {
+            return Err(Error::Conflict(
+                "the machine is short of memory — do this part yourself".into(),
+            ));
+        }
+        if engine && open > otto_core::agent_runtime::ENGINE_SUB_THREADS_MAX {
+            return Err(Error::Conflict(format!(
+                "a workflow step may have {} open sub-threads at once — close one \
+                 (otto_thread_close) or do this part yourself",
+                otto_core::agent_runtime::ENGINE_SUB_THREADS_MAX
+            )));
+        }
+        if open > MAX_LINKED_OPEN {
             return Err(Error::Conflict(format!(
                 "this thread group already has {MAX_LINKED_OPEN} open linked threads — close \
                  one (otto_thread_close) before opening another"
@@ -358,8 +371,14 @@ impl AgentRuntime {
     }
 
     /// Close linked thread `peer` (stop its agent; it stays in History).
-    pub async fn close_peer(&self, caller: &Id, peer: &Id) -> Result<RuntimeSession> {
+    /// `remove` also deletes it — only a subagent `caller`'s own agent
+    /// opened, once it has answered: its answer has reached `caller` and a
+    /// compact record of it stays on `caller` (`meta.removed_children`).
+    pub async fn close_peer(&self, caller: &Id, peer: &Id, remove: bool) -> Result<RuntimeSession> {
         let c = self.get(caller).await?;
+        if remove {
+            return self.remove_child(&c, peer).await;
+        }
         let p = self.group_member(&c, peer).await?;
         if p.parent_id.is_none() {
             return Err(Error::Forbidden(
@@ -367,6 +386,73 @@ impl AgentRuntime {
             ));
         }
         self.close(&p.id).await
+    }
+
+    /// [`Self::close_peer`] with `remove`. The child may already be closed.
+    async fn remove_child(&self, c: &RuntimeSession, peer: &Id) -> Result<RuntimeSession> {
+        let p = self.get(peer).await?;
+        let mine = p.child_of().is_some_and(|of| {
+            of.id == c.id && of.by == otto_core::agent_runtime::ChildOpener::Agent
+        });
+        if !mine || p.created_by != c.created_by {
+            return Err(Error::Forbidden(
+                "only the thread that opened it can remove it — close it instead".into(),
+            ));
+        }
+        let live = self.live(&p.id).await?;
+        if is_busy(&live.lock()) {
+            return Err(Error::Conflict(
+                "it is still working — wait for its answer or close it first".into(),
+            ));
+        }
+        if self
+            .group(c)
+            .await?
+            .iter()
+            .any(|s| s.child_of().is_some_and(|of| of.id == p.id))
+        {
+            return Err(Error::Conflict("close its subagents first".into()));
+        }
+        // Its answer reaches the parent before the child goes (the wake it
+        // announced as its turn ended leaves the parent's pending set).
+        let parent = self.live(&c.id).await?;
+        loop {
+            let changed = parent.deadline_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if !parent.pending_wakes().contains(&p.id) {
+                break;
+            }
+            changed.await;
+        }
+        let record = {
+            let st = live.lock();
+            removed_record(&st.session, &st.proj.snapshot().turns)
+        };
+        // Two removals at once (parallel tool calls) each append to what the
+        // other wrote: read and write the list under the parent's prompt lock.
+        let meta_lock = parent.prompt_lock.lock().await;
+        let mut kept: Vec<serde_json::Value> = parent
+            .lock()
+            .session
+            .meta
+            .as_ref()
+            .and_then(|m| m.get(REMOVED_CHILDREN_META_KEY))
+            .and_then(|v| v.as_array().cloned())
+            .unwrap_or_default();
+        kept.push(record);
+        let over = kept.len().saturating_sub(REMOVED_CHILDREN_KEPT);
+        kept.drain(..over);
+        let mut patch = serde_json::Map::new();
+        patch.insert(REMOVED_CHILDREN_META_KEY.into(), kept.into());
+        self.update_thread_meta(&c.id, patch).await?;
+        drop(meta_lock);
+        let closed = self.close(&p.id).await?;
+        self.delete(&p.id).await?;
+        if let Err(e) = self.notice(&c.id, &children::removed_notice(c, &p)).await {
+            tracing::debug!(session = %c.id, "removed-child notice skipped: {e}");
+        }
+        Ok(closed)
     }
 
     /// Linked thread `peer`'s latest reply: waits up to `wait` for its
@@ -433,6 +519,39 @@ impl AgentRuntime {
             text,
         })
     }
+}
+
+/// `meta` key on a parent: the subagents its agent removed (newest last).
+pub(super) const REMOVED_CHILDREN_META_KEY: &str = "removed_children";
+/// How many of them the parent keeps.
+const REMOVED_CHILDREN_KEPT: usize = 20;
+
+/// The compact record a removed subagent leaves on its parent: who it was,
+/// how its last turn ended and what all its turns used.
+fn removed_record(s: &RuntimeSession, turns: &[ProviderTurn]) -> serde_json::Value {
+    let mut usage = otto_core::agent_runtime::TurnTokenUsage::default();
+    for u in turns.iter().filter_map(|t| t.turn_token_usage.as_ref()) {
+        usage.add(u);
+    }
+    let model = turns
+        .iter()
+        .max_by_key(|t| t.ordinal)
+        .and_then(|t| t.model.clone())
+        .or_else(|| s.model.clone());
+    let status = s
+        .last_turn_status
+        .and_then(|o| serde_json::to_value(o).ok())
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_else(|| "idle".into());
+    serde_json::to_value(otto_core::agent_runtime::SubThreadUse {
+        id: s.id.clone(),
+        provider: s.provider_slug().to_string(),
+        model,
+        title: Some(s.title.clone()),
+        status,
+        usage,
+    })
+    .unwrap_or_default()
 }
 
 /// Allowlist metadata keys an agent credential may supply when opening a peer

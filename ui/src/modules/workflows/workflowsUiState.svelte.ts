@@ -1,5 +1,5 @@
 import { api, ApiError } from '../../lib/api/client';
-import type { Workflow, WorkflowGraph } from '../../lib/api/types';
+import type { Workflow, WorkflowGraph, WorkflowRun } from '../../lib/api/types';
 import { patchWorkflow } from '../../lib/api/workflows';
 import { confirmer } from '../../lib/confirm.svelte';
 import { rememberSelection } from '../../lib/lastSelection';
@@ -9,9 +9,10 @@ import { toastError } from '../../lib/toastError';
 class WorkflowsUiState {
   prompt = $state('');
   generating = $state(false);
-  instructionsOpen = $state(false);
-  triggersOpen = $state(false);
-  selectedNodeByWorkflow = new Map<string, string | null>();
+  /** The Runs tab's workflow filter ("Runs of this workflow"); kept across visits. */
+  runsFilter = $state<string | null>(null);
+  /** The run the run page shows (the agent port's `currentRun`). */
+  shownRun = $state.raw<WorkflowRun | null>(null);
 
   async generate(wsId: string | null | undefined): Promise<Workflow | null> {
     const desc = this.prompt.trim();
@@ -61,9 +62,8 @@ class WorkflowsUiState {
   resetForTests(): void {
     this.prompt = '';
     this.generating = false;
-    this.instructionsOpen = false;
-    this.triggersOpen = false;
-    this.selectedNodeByWorkflow.clear();
+    this.runsFilter = null;
+    this.shownRun = null;
   }
 }
 

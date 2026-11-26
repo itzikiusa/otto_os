@@ -36,6 +36,7 @@ impl WorkflowChatTrigger for Trigger {
         _thread: Option<&str>,
         _user: &str,
         _text: &str,
+        _attachments: &[otto_channels::adapter::InboundAttachment],
     ) -> Option<WorkflowChatAck> {
         self.0.started.fetch_add(1, Ordering::SeqCst);
         // Claim the message, so an admitted one stops here (no session).
@@ -103,6 +104,7 @@ fn inbound(workspace_id: &str, user: &str, edited: bool) -> Inbound {
         user_name: None,
         text: "run PR Reviewer: go".into(),
         edited,
+        attachments: vec![],
     }
 }
 

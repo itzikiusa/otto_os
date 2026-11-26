@@ -7,6 +7,7 @@
 
 use super::super::*;
 use super::state::RunState;
+use otto_workflows::run_state::{scope_set, seed_from_manual_trigger};
 
 /// A run that passed admission: what the node loop and finalize need.
 pub(in crate::workflow_engine) struct Admitted {
@@ -35,7 +36,7 @@ pub(in crate::workflow_engine) async fn admit(
     repo: &WorkflowsRepo,
     active_budget: Duration,
 ) -> Option<Admitted> {
-    let order = valid_order(ctx, repo, workflow, run_id).await?;
+    let order = valid_order(ctx, repo, workflow, run_id, prior_nodes.unwrap_or(&[])).await?;
     let RunScope {
         start_node,
         only_node,
@@ -118,12 +119,14 @@ pub(in crate::workflow_engine) async fn admit(
     otto_workflows::review_history::write_previous_context(&ctx.pool, workflow, &input, &files)
         .await;
     let prepared = prepare_input(ctx, ws, workflow, input, &files).await;
-    write_brief(
+    otto_workflows::run_state::write_brief(
         workflow,
         run_id,
         &order,
         run_set.as_ref(),
-        &prepared,
+        &prepared.input,
+        prepared.has_instructions,
+        prepared.has_prompt,
         &files,
     );
     let env = run_env(ctx, ws, workflow, run_id, &prepared, &files, active_budget).await;
@@ -140,12 +143,13 @@ pub(in crate::workflow_engine) async fn admit(
 }
 
 /// The graph's topological order, or — for an invalid graph — the run
-/// settled as Error and `None`.
+/// settled as Error and `None`. A re-entered run keeps its node states.
 async fn valid_order(
     ctx: &ServerCtx,
     repo: &WorkflowsRepo,
     workflow: &Workflow,
     run_id: &Id,
+    nodes: &[NodeRunState],
 ) -> Option<Vec<String>> {
     match crate::workflow_validation::ensure_valid(&workflow.graph)
         .map_err(|e| e.to_string())
@@ -160,7 +164,7 @@ async fn valid_order(
                     run_id,
                     &[RunStatus::Pending, RunStatus::Running],
                     RunStatus::Error,
-                    &[],
+                    nodes,
                     Some(&e),
                     true,
                 )
@@ -176,83 +180,11 @@ async fn valid_order(
                 None,
                 rev,
                 None,
-                &[],
+                nodes,
                 false,
             );
             None
         }
-    }
-}
-
-/// The set of nodes to actually execute (start-from-here / run-only); `None`
-/// means the whole graph. Nodes outside the set are marked skipped. An
-/// `adopt_start` scope (restart resume whose entry step provably finished)
-/// treats the entry itself as done — it drops OUT of the set so the adoption
-/// pass keeps its prior Success state/output while its descendants run.
-pub(in crate::workflow_engine) fn scope_set(
-    graph: &WorkflowGraph,
-    start_node: Option<&str>,
-    only_node: bool,
-    adopt_start: bool,
-) -> Option<HashSet<String>> {
-    match start_node {
-        None => None,
-        Some(s) if only_node => {
-            let mut set: HashSet<String> = std::iter::once(s.to_string()).collect();
-            if adopt_start {
-                // Single-step scope whose step is already proven done —
-                // nothing executes; the run finalizes over adopted states.
-                set.remove(s);
-            }
-            Some(set)
-        }
-        Some(s) => {
-            let mut set = descendants_inclusive(graph, s);
-            if adopt_start {
-                set.remove(s);
-            }
-            Some(set)
-        }
-    }
-}
-
-/// Seed the run input from the entry manual_trigger node's configured fields
-/// (its inspector — prompt/working_directory/repo_id/goals/…), letting the
-/// actual /run body or chat-trigger input override per key. This is what makes
-/// the Start node the place to set the input for a manual run.
-fn seed_from_manual_trigger(workflow: &Workflow, input: Value) -> Value {
-    let mut seeded = serde_json::Map::new();
-    if let Some(mt) = workflow
-        .graph
-        .nodes
-        .iter()
-        .find(|n| n.kind == "manual_trigger")
-    {
-        // Strip reserved trigger/routing keys from manual_trigger params so a
-        // saved graph cannot forge `origin_workspace_id`, `channel`, `chat`,
-        // `thread`, etc.
-        let mut params = mt.params.clone();
-        otto_workflows::triggers::strip_reserved_input(
-            &mut params,
-            otto_workflows::triggers::InputSource::Manual,
-        );
-        if let Some(o) = params.as_object() {
-            for (k, v) in o {
-                if !v.is_null() {
-                    seeded.insert(k.clone(), v.clone());
-                }
-            }
-        }
-    }
-    if let Some(o) = input.as_object() {
-        for (k, v) in o {
-            seeded.insert(k.clone(), v.clone());
-        }
-    }
-    if seeded.is_empty() {
-        input
-    } else {
-        Value::Object(seeded)
     }
 }
 
@@ -311,7 +243,7 @@ async fn isolate_repos(
                     source: None,
                     worktree: None,
                     base: None,
-                    error: None,
+                    ..Default::default()
                 });
             }
         }
@@ -408,7 +340,16 @@ async fn isolate_repos(
             .ok()
             .flatten();
         if let Some(rev) = rev {
-            deliver_run_result(ctx, workflow, &nodes, RunStatus::Error, &input, None).await;
+            deliver_run_result(
+                ctx,
+                workflow,
+                run_id,
+                &nodes,
+                RunStatus::Error,
+                &input,
+                None,
+            )
+            .await;
             emit_run_updated(
                 ctx,
                 &workflow.workspace_id,
@@ -495,6 +436,16 @@ async fn prepare_input(
         .filter(|s| !s.trim().is_empty())
         .map(expand_tilde)
         .unwrap_or_else(|| ws.root_path.clone());
+    // A research goal works in its own folder (goal.md §2.5).
+    let dir = files.dir_str();
+    let mut research =
+        otto_workflows::goal::research_cwd(&input, dir.as_deref(), &ctx.data_dir).await;
+    // A kept folder that is gone or refused: a fresh one, never the workspace root.
+    if research.is_none() && input.get("research_dir").is_some() {
+        let fresh = json!({"research_dir": true});
+        research = otto_workflows::goal::research_cwd(&fresh, dir.as_deref(), &ctx.data_dir).await;
+    }
+    let run_cwd = research.unwrap_or(run_cwd);
     // Run-level base branch: the ambient PR/review base for the whole run, so a
     // `review_run`/`git_pr` is aware of the run's base even after intervening
     // agent nodes (which return `{reply}`) drop it from the data flow. Per-node
@@ -533,44 +484,6 @@ async fn prepare_input(
         run_cwd,
         run_base,
     }
-}
-
-/// The run's mission brief (`run-brief.md`): mission, repos table, planned
-/// steps (IN-SCOPE only, so numbering matches what actually executes on a
-/// start-from-here run) and the step-file protocol.
-fn write_brief(
-    workflow: &Workflow,
-    run_id: &Id,
-    order: &[String],
-    run_set: Option<&HashSet<String>>,
-    prepared: &PreparedInput,
-    files: &crate::workflow_context::RunContextFiles,
-) {
-    let planned: Vec<(String, String)> = order
-        .iter()
-        .filter(|nid| run_set.map(|s| s.contains(*nid)).unwrap_or(true))
-        .filter_map(|nid| workflow.graph.nodes.iter().find(|n| &n.id == nid))
-        .map(|n| {
-            (
-                if n.name.is_empty() {
-                    n.kind.clone()
-                } else {
-                    n.name.clone()
-                },
-                n.kind.clone(),
-            )
-        })
-        .collect();
-    files.write_brief(&crate::workflow_context::render_brief(
-        &workflow.name,
-        &workflow.description,
-        run_id,
-        &prepared.input,
-        &files.repos(),
-        &planned,
-        prepared.has_instructions,
-        prepared.has_prompt,
-    ));
 }
 
 /// The per-node execution environment (run identity + ambient cwd/base +
@@ -662,6 +575,7 @@ pub(in crate::workflow_engine) async fn mark_running(
 /// UI / webhook-only runs get a disabled (no-op) sink.
 pub(in crate::workflow_engine) fn open_progress(
     ctx: &ServerCtx,
+    run_id: &Id,
     workflow: &Workflow,
     input: &Value,
     steps: usize,
@@ -669,7 +583,8 @@ pub(in crate::workflow_engine) fn open_progress(
 ) -> (ProgressSink, Option<tokio::task::JoinHandle<()>>) {
     let (progress, progress_pump) = match resolve_chat_target(workflow, input) {
         Some(target) => {
-            let (sink, handle) = spawn_progress_pump(ctx.clone(), target);
+            let style = super::chat::style(workflow, input);
+            let (sink, handle) = spawn_progress_pump(ctx.clone(), run_id.clone(), target, style);
             (sink, Some(handle))
         }
         None => (ProgressSink::disabled(), None),
@@ -695,50 +610,4 @@ pub(in crate::workflow_engine) fn open_progress(
         ));
     }
     (progress, progress_pump)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use otto_core::workflows::{WorkflowGraph, WorkflowNode};
-
-    #[test]
-    fn seed_from_manual_trigger_strips_reserved_routing_keys() {
-        let wf = Workflow {
-            id: "wf-1".into(),
-            workspace_id: "ws-1".into(),
-            name: "test".into(),
-            description: String::new(),
-            instructions: String::new(),
-            graph: WorkflowGraph {
-                nodes: vec![WorkflowNode {
-                    id: "start".into(),
-                    kind: "manual_trigger".into(),
-                    name: "Start".into(),
-                    x: 0.0,
-                    y: 0.0,
-                    params: json!({
-                        "prompt": "hello",
-                        "origin_workspace_id": "ws-victim",
-                        "channel": "slack",
-                        "chat": "C-VICTIM",
-                        "thread": "123.45",
-                    }),
-                    retry: None,
-                }],
-                edges: vec![],
-            },
-            created_by: "u-1".into(),
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-            version: 1,
-            on_restart: "resume".into(),
-        };
-        let merged = seed_from_manual_trigger(&wf, json!({ "prompt": "override" }));
-        assert_eq!(merged["prompt"], "override");
-        assert!(merged.get("origin_workspace_id").is_none());
-        assert!(merged.get("channel").is_none());
-        assert!(merged.get("chat").is_none());
-        assert!(merged.get("thread").is_none());
-    }
 }

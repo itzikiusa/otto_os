@@ -16,6 +16,7 @@
 
 pub mod catalog;
 pub mod exec;
+pub mod goals;
 pub mod jsonrpc;
 pub mod refs;
 pub mod simulators;

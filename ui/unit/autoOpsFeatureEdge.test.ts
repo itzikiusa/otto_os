@@ -56,6 +56,8 @@ test('Feature Edge 1: Workflows side-effect preflight flags outward/mutating and
   assert.equal(nodeSideEffect(nodes[2], conns)?.danger, true);
   assert.equal(nodeSideEffect(nodes[7], conns)?.badge, 'Prod DB');
   assert.equal(graphHasDbQuery(graph), true);
+  const post = nodeSideEffect({ id: 'n-post', kind: 'post_review_comments', name: 'Post comments', x: 0, y: 0, params: {} });
+  assert.deepEqual([post?.danger, post?.summary], [true, 'Posts review comments on the pull request'], 'posting PR comments is outward');
 
   const all = graphSideEffects(graph, conns);
   assert.equal(all.length, 7);

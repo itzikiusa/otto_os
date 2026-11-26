@@ -3,20 +3,24 @@
   diagnose): the group an agent built with `otto.thread_open`, as one small
   chip that shows only while the thread has linked threads. It opens a
   popover listing them with their status: a click switches the host's view
-  (`onswitch`), "Open in Threads" opens one there. Inside Threads the
+  (`onswitch`), "Open in Threads" opens one there (not from a read-only view:
+  a workflow step's threads are not listed in Threads). Inside Threads the
   header's Related threads chip does this job (RelatedThreadsChip.svelte).
 -->
 <script lang="ts">
+  import { getContext } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import ProviderIcon, { hasProviderIcon } from '../../../lib/components/ProviderIcon.svelte';
   import { harnessLabel } from '../../../lib/providers';
   import { router } from '../../../lib/router.svelte';
   import { relatedStatus } from '../relatedThreads';
   import ThreadPopover from '../ThreadPopover.svelte';
+  import { READ_ONLY_CTX } from './childNav';
   import { runtimeThreads } from './runtimeThreads.svelte';
 
   let { sessionId, onswitch }: { sessionId: string; onswitch?: (id: string) => void } = $props();
   const linked = $derived(runtimeThreads.group(sessionId));
+  const readOnly = getContext<(() => boolean) | undefined>(READ_ONLY_CTX);
   let open = $state(false);
   let btn = $state<HTMLButtonElement | null>(null);
 
@@ -64,9 +68,11 @@
             <span class="rt-title ellipsis" dir="auto">{t.title}</span>
             <span class="rt-meta">{current ? 'Shown' : st.text}</span>
           </button>
-          <button type="button" class="icon-btn" aria-label="Open {t.title} in Threads" title="Open in Threads" onclick={() => pick(t.id, true)}>
-            <Icon name="external" size={12} />
-          </button>
+          {#if !readOnly?.()}
+            <button type="button" class="icon-btn" aria-label="Open {t.title} in Threads" title="Open in Threads" onclick={() => pick(t.id, true)}>
+              <Icon name="external" size={12} />
+            </button>
+          {/if}
         </li>
       {/each}
     </ul>

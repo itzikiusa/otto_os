@@ -1,7 +1,6 @@
 <script lang="ts">
   import { loops } from '../../lib/stores/loops.svelte';
-  import { toastError } from '../../lib/toastError';
-  import type { GoalLoopIteration, LoopAgentState } from '../../lib/api/types';
+  import type { GoalLoopIteration } from '../../lib/api/types';
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
@@ -13,18 +12,12 @@
   let {
     iter,
     loopId,
-    loopStatus,
-    executorCount,
-    hasGraph = false,
     open = false,
     criteria = {},
     onopensession,
   }: {
     iter: GoalLoopIteration;
     loopId: string;
-    loopStatus: string;
-    executorCount: number;
-    hasGraph?: boolean;
     open?: boolean;
     /** Criterion id → text, so evaluation chips name what they judged. */
     criteria?: Record<string, string>;
@@ -81,25 +74,6 @@
         return 'dot';
     }
   }
-
-  let retryingIdx = $state<number | null>(null);
-  async function retry(agentIndex: number): Promise<void> {
-    if (retryingIdx !== null) return;
-    retryingIdx = agentIndex;
-    try {
-      await loops.retryExecutor(loopId, iter.idx, agentIndex);
-    } catch (e) {
-      toastError('Couldn’t retry the agent', e);
-    } finally {
-      retryingIdx = null;
-    }
-  }
-
-  // Retry is only valid while the loop is blocked (no live controller); a
-  // running loop's controller owns the executor and a second run would race it.
-  function canRetry(a: LoopAgentState): boolean {
-    return !hasGraph && loopStatus === 'blocked' && (a.status === 'waiting' || a.status === 'error');
-  }
 </script>
 
 <div class="iter">
@@ -140,11 +114,6 @@
             {/if}
             {#if a.session_id}
               <button class="btn ghost small" title="Open {a.name}’s session" onclick={() => onopensession(a.session_id ?? '')}>Open session</button>
-            {/if}
-            {#if i < executorCount && canRetry(a)}
-              <button class="btn small" disabled={retryingIdx !== null} onclick={() => void retry(i)}>
-                {retryingIdx === i ? 'Retrying…' : 'Retry'}
-              </button>
             {/if}
           </div>
         {/each}

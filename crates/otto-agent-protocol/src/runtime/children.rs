@@ -198,6 +198,16 @@ pub(super) fn ended_notice(
     format!("{body} [otto-thread:{}:{event}]", child.id)
 }
 
+/// The parent's notice for a subagent its agent removed (`close_peer`).
+pub(super) fn removed_notice(parent: &RuntimeSession, child: &RuntimeSession) -> String {
+    format!(
+        "{} removed {} [otto-thread:{}:removed]",
+        session_provider_label(parent),
+        child.title,
+        child.id
+    )
+}
+
 /// The parent's notice for a child turn a daemon restart cut off (the card
 /// reads it as stopped; the words say why).
 pub(super) fn restart_notice(child: &RuntimeSession, answer: &str) -> String {
@@ -327,10 +337,15 @@ pub(super) fn on_turn_end(inner: &Inner, st: &State, turn_id: &Id, status: TurnT
     let (answer, asked) = turn_reply(st.proj.items.values(), turn_id, &of.id);
     let child = st.session.clone();
     let turn = turn_id.clone();
+    // Under this child's lock: an unattended wait on the parent never sees
+    // the child idle before its answer is queued.
+    unattended::wake_announced(inner, &of.id, &child.id);
     let rt = AgentRuntime { inner: me };
     tokio::spawn(async move {
+        let (parent, key) = (of.id.clone(), child.id.clone());
         rt.child_turn_ended(child, of, turn, status, answer, asked, false)
             .await;
+        unattended::wake_done(&rt.inner, &parent, &key);
     });
 }
 
@@ -782,6 +797,10 @@ mod tests {
         );
         let long = "x".repeat(400);
         assert!(ended_notice(&a, TurnTerminalStatus::Failed, &long).contains("…"));
+        assert_eq!(
+            removed_notice(&session(RuntimeProvider::Claude), &a),
+            "Claude removed Check the tests [otto-thread:kid:removed]"
+        );
     }
 
     #[test]

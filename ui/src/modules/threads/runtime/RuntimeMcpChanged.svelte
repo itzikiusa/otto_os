@@ -3,11 +3,14 @@
   // thread's agent started: "MCP servers changed · Restart agent to apply"
   // (close + reopen: the agent resumes the same conversation with the new
   // set). Read on mount and whenever the agent reports its servers again —
-  // never per stream event; the workspace list is shared for 15 s.
+  // never per stream event; the workspace list is shared for 15 s. A read-only
+  // view (a workflow step's thread) never offers it: the engine owns that agent.
+  import { getContext } from 'svelte';
   import { announceShown } from '../../../lib/announce.svelte';
   import { api } from '../../../lib/api/client';
   import type { McpServerStatus } from '../../../lib/api/types';
   import { toastError } from '../../../lib/toastError';
+  import { READ_ONLY_CTX } from './childNav';
   import { mcpChanged } from './mcpServers';
   import { nativeServerNames } from './nativeServers';
   import { mcpAsks } from './mcpAsksStore.svelte';
@@ -26,6 +29,7 @@
   /** The agent's own list: a derived value, so the effect below re-runs when
    *  the agent reports its servers again, never per stream batch. */
   const servers = $derived(runtimeViews.projections[sessionId]?.mcpServers ?? NONE);
+  const readOnly = getContext<(() => boolean) | undefined>(READ_ONLY_CTX);
   let enabled = $state<string[] | null>(null);
   // Keeps the thread's MCP approval cards live (its dock shows them).
   $effect(() => mcpAsks.hold());
@@ -34,7 +38,7 @@
   $effect(() => {
     void servers;
     const ws = workspaceId;
-    if (!ws) return;
+    if (!ws || readOnly?.()) return;
     let live = true;
     void nativeServerNames(ws, (path) => api.get(path)).then((n) => { if (live) enabled = n; });
     return () => { live = false; };

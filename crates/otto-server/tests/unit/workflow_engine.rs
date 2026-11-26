@@ -249,7 +249,7 @@ async fn run_gate_caps_parallel_runs_at_two() {
         return;
     }
     assert_eq!(max_parallel_runs(), 2);
-    let gate = run_gate();
+    let gate = otto_workflows::run_queue::run_gate();
     let a = gate.try_acquire().expect("first run starts");
     let b = gate.try_acquire().expect("second run starts");
     assert!(gate.try_acquire().is_err(), "third run must queue");
@@ -259,28 +259,6 @@ async fn run_gate_caps_parallel_runs_at_two() {
         .expect("a slot frees when a run finishes");
     drop(b);
     drop(c);
-}
-
-#[test]
-fn topo_orders_a_chain() {
-    let g = WorkflowGraph {
-        nodes: vec![
-            node("c", "log"),
-            node("a", "manual_trigger"),
-            node("b", "log"),
-        ],
-        edges: vec![edge("a", "b"), edge("b", "c")],
-    };
-    assert_eq!(topo_order(&g).unwrap(), vec!["a", "b", "c"]);
-}
-
-#[test]
-fn topo_detects_cycle() {
-    let g = WorkflowGraph {
-        nodes: vec![node("a", "log"), node("b", "log")],
-        edges: vec![edge("a", "b"), edge("b", "a")],
-    };
-    assert!(topo_order(&g).is_err());
 }
 
 fn nstate(id: &str, status: NodeStatus) -> NodeRunState {
@@ -296,269 +274,7 @@ fn nstate(id: &str, status: NodeStatus) -> NodeRunState {
         sessions: vec![],
         review_ids: Vec::new(),
         activity: None,
-    }
-}
-
-fn mk_run(status: RunStatus, nodes: Vec<NodeRunState>) -> WorkflowRun {
-    WorkflowRun {
-        checkpoints: vec![],
-        id: "r1".into(),
-        workflow_id: "wf1".into(),
-        workspace_id: "ws1".into(),
-        status,
-        input: Value::Null,
-        nodes,
-        error: None,
-        started_at: chrono::Utc::now(),
-        finished_at: None,
-        rev: 0,
-        waiting_approval: false,
-        approval_node_id: None,
-        approved_by: None,
-        created_by: None,
-        approval_note: None,
-        approved_at: None,
-        workflow_version: None,
-        resume_attempts: 0,
-        context_dir: None,
-    }
-}
-
-/// A restart that caught an idempotent step mid-flight resumes AT it:
-/// the step flips back to Pending, finished siblings keep their states.
-#[test]
-fn classify_resume_reenters_at_interrupted_idempotent_step() {
-    let g = WorkflowGraph {
-        nodes: vec![
-            node("a", "manual_trigger"),
-            node("b", "agent_prompt"),
-            node("c", "git_pr"),
-        ],
-        edges: vec![edge("a", "b"), edge("b", "c")],
-    };
-    let run = mk_run(
-        RunStatus::Running,
-        vec![
-            nstate("a", NodeStatus::Success),
-            nstate("b", NodeStatus::Running),
-            nstate("c", NodeStatus::Pending),
-        ],
-    );
-    match classify_resume(&g, &run, None) {
-        ResumeDecision::Resume { scope, nodes } => {
-            assert_eq!(scope.start_node, None);
-            assert!(scope.continue_unfinished);
-            assert!(!scope.only_node && !scope.adopt_start);
-            assert_eq!(
-                nodes[1].status,
-                NodeStatus::Pending,
-                "interrupted step re-runs"
-            );
-            assert_eq!(
-                nodes[0].status,
-                NodeStatus::Success,
-                "finished step adopted"
-            );
-        }
-        other => panic!("expected Resume, got {other:?}"),
-    }
-}
-
-#[test]
-fn retry_consumer_receives_adopted_output_but_fresh_partial_run_uses_input() {
-    let scope = std::collections::HashSet::from(["consumer".to_string()]);
-    let prior = vec![nstate("fetch", NodeStatus::Success)];
-    let outputs = HashMap::from([("fetch".to_string(), json!({"fetched":42}))]);
-    assert!(dependency_is_relevant("fetch", Some(&scope), Some(&prior)));
-    assert!(!dependency_is_relevant("fetch", Some(&scope), None));
-    assert_eq!(
-        assemble_input(&["fetch".into()], &outputs, &json!({"seed":1})),
-        json!({"fetched":42})
-    );
-    assert_eq!(
-        assemble_input(&[], &outputs, &json!({"seed":1})),
-        json!({"seed":1})
-    );
-}
-
-#[test]
-fn restart_keeps_pending_sibling_in_original_scope() {
-    let g = WorkflowGraph {
-        nodes: vec![
-            node("start", "manual_trigger"),
-            node("a", "delay"),
-            node("b", "log"),
-        ],
-        edges: vec![edge("start", "a"), edge("start", "b")],
-    };
-    let run = mk_run(
-        RunStatus::Running,
-        vec![
-            nstate("start", NodeStatus::Success),
-            nstate("a", NodeStatus::Running),
-            nstate("b", NodeStatus::Pending),
-        ],
-    );
-    match classify_resume(&g, &run, None) {
-        ResumeDecision::Resume { scope, .. } => assert_eq!(
-            scope.start_node, None,
-            "restart must preserve whole-graph scope, including pending sibling b"
-        ),
-        other => panic!("expected continuation, got {other:?}"),
-    }
-}
-
-#[test]
-fn interrupted_loop_requires_checkpoint_before_replay() {
-    let mut loop_node = node("loop", "loop");
-    loop_node.params =
-        json!({"steps":[{"kind":"channel_notify","params":{"text":"once"}}, {"kind":"delay"}]});
-    let graph = WorkflowGraph {
-        nodes: vec![loop_node],
-        edges: vec![],
-    };
-    let run = mk_run(
-        RunStatus::Running,
-        vec![nstate("loop", NodeStatus::Running)],
-    );
-    assert!(
-        matches!(
-            classify_resume(&graph, &run, None),
-            ResumeDecision::Fail { .. }
-        ),
-        "a legacy loop has no checkpoint proving which external actions completed"
-    );
-}
-
-#[test]
-fn checkpointed_loop_resumes_safe_inner_work_and_preserves_siblings() {
-    let loop_node = node("loop", "loop");
-    let graph = WorkflowGraph {
-        nodes: vec![loop_node.clone(), node("sibling", "log")],
-        edges: vec![],
-    };
-    let mut run = mk_run(
-        RunStatus::Running,
-        vec![
-            nstate("loop", NodeStatus::Running),
-            nstate("sibling", NodeStatus::Pending),
-        ],
-    );
-    let mut root = loop_checkpoint(&loop_node, "loop", 0, 0, json!({}));
-    root.status = NodeStatus::Running;
-    let mut sent = loop_checkpoint(&node("loop#1.0", "http_request"), "loop", 1, 0, json!({}));
-    sent.status = NodeStatus::Success;
-    let mut waiting = loop_checkpoint(&node("loop#1.1", "delay"), "loop", 1, 1, json!({}));
-    waiting.status = NodeStatus::Running;
-    run.checkpoints = vec![root, sent, waiting];
-    match classify_resume(&graph, &run, None) {
-        ResumeDecision::Resume { scope, nodes } => {
-            assert!(scope.continue_unfinished);
-            assert_eq!(scope.start_node, None);
-            assert_eq!(nodes[1].status, NodeStatus::Pending);
-        }
-        other => panic!("expected safe continuation, got {other:?}"),
-    }
-    run.checkpoints[1].status = NodeStatus::Running;
-    assert!(
-        matches!(
-            classify_resume(&graph, &run, None),
-            ResumeDecision::Fail { .. }
-        ),
-        "unknown external outcome still prevents automatic replay"
-    );
-}
-
-/// A restart that caught a SIDE-EFFECT step mid-flight must NOT replay it —
-/// the step is marked unknown-outcome and the run fails.
-#[test]
-fn classify_resume_fails_on_interrupted_side_effect_step() {
-    let g = WorkflowGraph {
-        nodes: vec![
-            node("a", "agent_prompt"),
-            node("b", "git_pr"),
-            node("c", "log"),
-        ],
-        edges: vec![edge("a", "b"), edge("b", "c")],
-    };
-    let run = mk_run(
-        RunStatus::Running,
-        vec![
-            nstate("a", NodeStatus::Success),
-            nstate("b", NodeStatus::Running),
-            nstate("c", NodeStatus::Pending),
-        ],
-    );
-    match classify_resume(&g, &run, None) {
-        ResumeDecision::Fail { nodes, error } => {
-            assert!(error.contains("outcome is unknown"), "{error}");
-            assert_eq!(nodes[1].status, NodeStatus::Error);
-            assert_eq!(nodes[2].status, NodeStatus::Skipped);
-        }
-        other => panic!("expected Fail, got {other:?}"),
-    }
-}
-
-/// A run paused at a human approval resumes AT the approval node — the
-/// cheapest case: nothing but the wait is lost.
-#[test]
-fn classify_resume_reenters_at_waiting_approval_node() {
-    let g = WorkflowGraph {
-        nodes: vec![
-            node("a", "log"),
-            node("gate", "human_approval"),
-            node("b", "channel_notify"),
-        ],
-        edges: vec![edge("a", "gate"), edge("gate", "b")],
-    };
-    let mut run = mk_run(
-        RunStatus::Running,
-        vec![
-            nstate("a", NodeStatus::Success),
-            nstate("gate", NodeStatus::Running),
-            nstate("b", NodeStatus::Pending),
-        ],
-    );
-    run.waiting_approval = true;
-    run.approval_node_id = Some("gate".into());
-    match classify_resume(&g, &run, None) {
-        ResumeDecision::Resume { scope, .. } => {
-            assert_eq!(scope.start_node, None);
-            assert!(scope.continue_unfinished);
-        }
-        other => panic!("expected Resume, got {other:?}"),
-    }
-}
-
-/// A STALE approval flag (the run had moved past its gate) must not mask
-/// a side-effect step caught mid-flight: that step's outcome is unknown,
-/// so the run fails instead of replaying it as a "resumable approval".
-#[test]
-fn classify_resume_stale_approval_flag_never_masks_a_side_effect_step() {
-    let g = WorkflowGraph {
-        nodes: vec![
-            node("gate", "human_approval"),
-            node("pr", "git_pr"),
-            node("c", "log"),
-        ],
-        edges: vec![edge("gate", "pr"), edge("pr", "c")],
-    };
-    let mut run = mk_run(
-        RunStatus::Running,
-        vec![
-            nstate("gate", NodeStatus::Success),
-            nstate("pr", NodeStatus::Running),
-            nstate("c", NodeStatus::Pending),
-        ],
-    );
-    run.waiting_approval = true;
-    run.approval_node_id = Some("gate".into());
-    match classify_resume(&g, &run, None) {
-        ResumeDecision::Fail { nodes, error } => {
-            assert!(error.contains("'pr'"), "{error}");
-            assert_eq!(nodes[1].status, NodeStatus::Error);
-        }
-        other => panic!("expected Fail, got {other:?}"),
+        ..Default::default()
     }
 }
 
@@ -634,150 +350,9 @@ async fn orphan_sweep_errors_driverless_runs_after_two_passes() {
 }
 
 #[test]
-fn settle_interrupted_nodes_leaves_nothing_running() {
-    let nodes = settle_interrupted_nodes(vec![
-        nstate("a", NodeStatus::Success),
-        nstate("b", NodeStatus::Running),
-        nstate("c", NodeStatus::Pending),
-        nstate("d", NodeStatus::Error),
-    ]);
-    let st: Vec<NodeStatus> = nodes.iter().map(|n| n.status).collect();
-    assert_eq!(
-        st,
-        vec![
-            NodeStatus::Success,
-            NodeStatus::Error,
-            NodeStatus::Skipped,
-            NodeStatus::Error
-        ]
-    );
-    assert!(nodes[1].error.as_deref().unwrap().contains("interrupted"));
-}
-
-#[test]
 fn skip_marker_key_is_per_run_and_step() {
     assert_eq!(skip_marker_key("r1", "n2"), "r1/n2");
     assert_ne!(skip_marker_key("r1", "n2"), skip_marker_key("r1", "n3"));
-}
-
-/// A re-queued retry-a-step (pending with progress) resumes its PERSISTED
-/// scope verbatim; without one (pre-0108 row) it fails like before.
-#[test]
-fn classify_resume_honors_persisted_retry_scope() {
-    let g = WorkflowGraph {
-        nodes: vec![node("a", "log"), node("b", "agent_prompt")],
-        edges: vec![edge("a", "b")],
-    };
-    let run = mk_run(
-        RunStatus::Pending,
-        vec![
-            nstate("a", NodeStatus::Success),
-            nstate("b", NodeStatus::Error),
-        ],
-    );
-    let scope = RunScope {
-        continue_unfinished: false,
-        start_node: Some("b".into()),
-        only_node: true,
-        adopt_start: false,
-    };
-    match classify_resume(&g, &run, Some(scope.clone())) {
-        ResumeDecision::Resume { scope: got, .. } => assert_eq!(got, scope),
-        other => panic!("expected Resume, got {other:?}"),
-    }
-    match classify_resume(&g, &run, None) {
-        ResumeDecision::Fail { error, .. } => assert!(error.contains("retry scope was lost")),
-        other => panic!("expected Fail, got {other:?}"),
-    }
-}
-
-/// Died between the last node and the finalize write → just stamp the
-/// terminal status the settled nodes imply.
-#[test]
-fn classify_resume_finishes_a_fully_settled_run() {
-    let g = WorkflowGraph {
-        nodes: vec![node("a", "log"), node("b", "log")],
-        edges: vec![edge("a", "b")],
-    };
-    let run = mk_run(
-        RunStatus::Running,
-        vec![
-            nstate("a", NodeStatus::Success),
-            nstate("b", NodeStatus::Success),
-        ],
-    );
-    match classify_resume(&g, &run, None) {
-        ResumeDecision::Finish { status, error, .. } => {
-            assert_eq!(status, RunStatus::Success);
-            assert!(error.is_none());
-        }
-        other => panic!("expected Finish, got {other:?}"),
-    }
-    // …and Error when a settled node failed.
-    let run = mk_run(
-        RunStatus::Running,
-        vec![
-            nstate("a", NodeStatus::Success),
-            nstate("b", NodeStatus::Error),
-        ],
-    );
-    match classify_resume(&g, &run, None) {
-        ResumeDecision::Finish { status, .. } => assert_eq!(status, RunStatus::Error),
-        other => panic!("expected Finish, got {other:?}"),
-    }
-}
-
-/// Died between node boundaries with work remaining → resume at the first
-/// still-pending node in topo order.
-#[test]
-fn classify_resume_resumes_at_first_pending_between_boundaries() {
-    let g = WorkflowGraph {
-        nodes: vec![node("a", "log"), node("b", "log"), node("c", "log")],
-        edges: vec![edge("a", "b"), edge("b", "c")],
-    };
-    let run = mk_run(
-        RunStatus::Running,
-        vec![
-            nstate("a", NodeStatus::Success),
-            nstate("b", NodeStatus::Pending),
-            nstate("c", NodeStatus::Pending),
-        ],
-    );
-    match classify_resume(&g, &run, None) {
-        ResumeDecision::Resume { scope, .. } => {
-            assert_eq!(scope.start_node, None);
-            assert!(scope.continue_unfinished);
-        }
-        other => panic!("expected Resume, got {other:?}"),
-    }
-}
-
-#[test]
-fn side_effect_kinds_are_not_restart_resumable() {
-    for k in [
-        "git_pr",
-        "channel_notify",
-        "product_publish",
-        "api_run",
-        "http_request",
-        "self_improve",
-        "product_rewrite",
-        "product_plan",
-    ] {
-        assert!(!is_restart_resumable_kind(k), "{k} must not auto-replay");
-    }
-    for k in [
-        "agent_prompt",
-        "transform",
-        "condition",
-        "delay",
-        "log",
-        "human_approval",
-        "review_run",
-        "prepare_context",
-    ] {
-        assert!(is_restart_resumable_kind(k), "{k} should be restart-safe");
-    }
 }
 
 #[test]
@@ -790,164 +365,6 @@ fn canvas_node_ext_matches_mode() {
         "mmd",
         "unrecognized modes default to mermaid"
     );
-}
-
-#[test]
-fn descendants_scope_is_self_plus_downstream() {
-    let g = WorkflowGraph {
-        nodes: vec![
-            node("a", "log"),
-            node("b", "log"),
-            node("c", "log"),
-            node("d", "log"),
-        ],
-        edges: vec![edge("a", "b"), edge("b", "c"), edge("a", "d")],
-    };
-    let set = descendants_inclusive(&g, "b");
-    assert!(set.contains("b") && set.contains("c"), "self + downstream");
-    assert!(
-        !set.contains("a") && !set.contains("d"),
-        "not upstream/siblings"
-    );
-}
-
-fn view(source: &str, errored: bool, has_output: bool, edge_active: bool) -> EdgeView {
-    EdgeView {
-        source: source.into(),
-        errored,
-        has_output,
-        edge_active,
-    }
-}
-
-#[test]
-fn decide_entry_node_runs_with_no_sources() {
-    assert_eq!(decide_node(&[]), NodeDecision::Run(vec![]));
-}
-
-#[test]
-fn decide_errored_predecessor_poisons() {
-    let v = vec![view("a", true, false, true)];
-    assert_eq!(decide_node(&v), NodeDecision::ErrorSkip);
-    // error wins even if a sibling succeeded
-    let v = vec![view("a", true, false, true), view("b", false, true, true)];
-    assert_eq!(decide_node(&v), NodeDecision::ErrorSkip);
-}
-
-#[test]
-fn decide_active_branch_runs() {
-    let v = vec![view("a", false, true, true)];
-    assert_eq!(decide_node(&v), NodeDecision::Run(vec!["a".into()]));
-}
-
-#[test]
-fn decide_inactive_only_branch_skips() {
-    // condition pruned the only incoming edge
-    let v = vec![view("a", false, true, false)];
-    assert_eq!(decide_node(&v), NodeDecision::BranchSkip);
-    // upstream was branch-skipped (no output, not errored)
-    let v = vec![view("a", false, false, true)];
-    assert_eq!(decide_node(&v), NodeDecision::BranchSkip);
-}
-
-#[test]
-fn decide_join_runs_from_active_side_only() {
-    // if/else join: a=true branch produced output (active), b=false branch pruned
-    let v = vec![view("a", false, true, true), view("b", false, true, false)];
-    assert_eq!(decide_node(&v), NodeDecision::Run(vec!["a".into()]));
-    // and the other way
-    let v = vec![view("a", false, true, false), view("b", false, true, true)];
-    assert_eq!(decide_node(&v), NodeDecision::Run(vec!["b".into()]));
-}
-
-#[test]
-fn eval_outgoing_prunes_false_edges() {
-    let mut g = WorkflowGraph {
-        nodes: vec![node("c", "condition"), node("t", "log"), node("f", "log")],
-        edges: vec![
-            WorkflowEdge {
-                id: "c-t".into(),
-                source: "c".into(),
-                target: "t".into(),
-                condition: Some("output.result == true".into()),
-            },
-            WorkflowEdge {
-                id: "c-f".into(),
-                source: "c".into(),
-                target: "f".into(),
-                condition: Some("output.result == false".into()),
-            },
-        ],
-    };
-    let cnode = g.nodes[0].clone();
-    let out = json!({ "result": true });
-    let (inactive, _logs) = eval_outgoing(&g, &cnode, &out, &Value::Null, &Value::Null);
-    assert_eq!(inactive, vec!["c-f".to_string()], "false branch pruned");
-    // flip
-    let out = json!({ "result": false });
-    let (inactive, _) = eval_outgoing(&g, &cnode, &out, &Value::Null, &Value::Null);
-    assert_eq!(inactive, vec!["c-t".to_string()]);
-    g.edges.clear();
-    let (inactive, _) = eval_outgoing(&g, &cnode, &out, &Value::Null, &Value::Null);
-    assert!(inactive.is_empty(), "no edges → nothing pruned");
-}
-
-#[test]
-fn explicit_zero_disables_even_transient_retries() {
-    let mut node = node("agent", "agent_prompt");
-    node.retry = Some(otto_core::workflows::RetryPolicy::default());
-    let policy = resolve_retry(&node);
-    assert_eq!(policy.max_attempts, 0);
-    assert!(retry_backoff("529 overloaded", &policy, 1, 0, 0).is_none());
-}
-
-#[test]
-fn retry_policy_resolution_and_clamps() {
-    let mut n = node("a", "agent_prompt");
-    // R5: agent steps default to a small retry budget (2 retries = 3 attempts)
-    // so a stuck no-op spawn is re-attempted with a fresh session.
-    assert_eq!(
-        resolve_retry(&n).max_attempts,
-        2,
-        "agent_prompt default 2 retries"
-    );
-    // Non-agent kinds keep the no-retry default.
-    assert_eq!(
-        resolve_retry(&node("b", "log")).max_attempts,
-        0,
-        "non-agent no retry"
-    );
-    n.params = json!({ "retry": { "max_attempts": 99, "backoff_ms": 999999 } });
-    let p = resolve_retry(&n);
-    assert_eq!(p.max_attempts, 5, "clamped to 5");
-    assert_eq!(p.backoff_ms, 60_000, "clamped to 60s");
-    assert!(is_retryable("agent_prompt"));
-    assert!(!is_retryable("human_approval"));
-    assert!(!is_retryable("manual_trigger"));
-}
-
-#[test]
-fn prepare_context_gets_agent_retry_budget_only_with_a_prompt() {
-    // No prompt (pure Jira-fetch step) → default no-retry, like any other kind.
-    let no_prompt = node("p", "prepare_context");
-    assert_eq!(
-        resolve_retry(&no_prompt).max_attempts,
-        0,
-        "no agent phase → no retry"
-    );
-    // A blank/whitespace prompt doesn't count as an agent phase either.
-    let mut blank_prompt = node("p", "prepare_context");
-    blank_prompt.params = json!({ "prompt": "   " });
-    assert_eq!(resolve_retry(&blank_prompt).max_attempts, 0);
-    // Non-empty prompt → same retry budget as agent_prompt.
-    let mut with_prompt = node("p", "prepare_context");
-    with_prompt.params = json!({ "prompt": "analyze the ticket" });
-    assert_eq!(
-        resolve_retry(&with_prompt).max_attempts,
-        2,
-        "agent phase → agent_prompt budget"
-    );
-    assert!(is_retryable("prepare_context"));
 }
 
 #[test]
@@ -967,6 +384,8 @@ fn run_summary_has_status_steps_and_score() {
         updated_at: chrono::Utc::now(),
         version: 1,
         on_restart: "resume".into(),
+        origin: None,
+        origin_ref: None,
     };
     let mk = |id: &str, status: NodeStatus, out: Value| NodeRunState {
         node_id: id.into(),
@@ -980,6 +399,7 @@ fn run_summary_has_status_steps_and_score() {
         sessions: vec![],
         review_ids: Vec::new(),
         activity: None,
+        ..Default::default()
     };
     let states = vec![
         mk(
@@ -1079,6 +499,8 @@ fn chat_target_resolves_origin_and_override() {
         updated_at: chrono::Utc::now(),
         version: 1,
         on_restart: "resume".into(),
+        origin: None,
+        origin_ref: None,
     };
     // Slack origin from a chat trigger.
     let t = resolve_chat_target(
@@ -1353,6 +775,7 @@ fn entry(
         worktree: worktree.map(str::to_string),
         base: base.map(str::to_string),
         error: error.map(str::to_string),
+        base_branch: None,
     }
 }
 
@@ -1714,6 +1137,7 @@ fn activity_snapshots_are_rate_limited_and_bounded() {
         sessions: vec!["01ABCDEF".into()],
         review_ids: Vec::new(),
         activity: Some(a),
+        ..Default::default()
     };
     let n = serde_json::to_string(&state).unwrap().len();
     assert!(n < NODE_EVENT_MAX_BYTES, "node row was {n} bytes");

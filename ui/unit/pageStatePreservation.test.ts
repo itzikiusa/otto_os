@@ -212,8 +212,7 @@ test('skillsLabState and workflowsUi preserve filters, selections, and in-flight
   );
   workflowsUi.resetForTests();
   workflowsUi.prompt = 'Summarize repo daily';
-  workflowsUi.instructionsOpen = true;
-  workflowsUi.selectedNodeByWorkflow.set('wf-existing', 'node-2');
+  workflowsUi.runsFilter = 'wf-existing';
 
   const genPromise = workflowsUi.generate('ws-1');
   assert.equal(workflowsUi.generating, true);
@@ -221,8 +220,7 @@ test('skillsLabState and workflowsUi preserve filters, selections, and in-flight
   const created = await genPromise;
   assert.equal(created?.id, 'wf-generated');
   assert.equal(workflowsUi.prompt, '');
-  assert.equal(workflowsUi.instructionsOpen, true);
-  assert.equal(workflowsUi.selectedNodeByWorkflow.get('wf-existing'), 'node-2');
+  assert.equal(workflowsUi.runsFilter, 'wf-existing');
   assert.deepEqual(remembered, [['workflows', 'wf-generated']]);
 });
 

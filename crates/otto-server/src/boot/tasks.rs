@@ -107,6 +107,10 @@ pub async fn spawn_background(ctx: &ServerCtx, root_user_id: Option<String>) -> 
     // Embedded threads (PR / connection pages) close after their idle hours.
     ctx.agent_runtime
         .spawn_embedded_auto_close(SettingsRepo::new(ctx.pool.clone()));
+    // Closed workflow / review threads go once past their retain_until.
+    bg.keep(AbortOnDrop(
+        ctx.agent_runtime.spawn_retention_sweep(ctx.manager.clone()),
+    ));
     // Hold off idle sleep while any agent turn runs.
     ctx.agent_runtime
         .spawn_keep_awake(otto_state::SessionsRepo::new(ctx.pool.clone()));
@@ -559,7 +563,15 @@ fn spawn_workflow_run_retention(ctx: &ServerCtx) -> tokio::task::JoinHandle<()> 
                 )
                 .await
             {
-                Ok(ids) if !ids.is_empty() => {
+                Ok(otto_state::workflows::PrunedRuns {
+                    run_ids: ids,
+                    thread_ids,
+                }) if !ids.is_empty() => {
+                    // A thread the retention sweep never got (no
+                    // retain_until: an earlier crash) goes with its run.
+                    for t in &thread_ids {
+                        let _ = ctx.agent_runtime.delete(t).await;
+                    }
                     let root = ctx_root.clone();
                     let n = ids.len();
                     // Runs inside spawn_blocking (std fs is fine there).

@@ -10,7 +10,6 @@
     "otto-server": 89160
   },
   "functions": {
-    "crates/otto-automation/src/goal_loop.rs::controller_inner": 404,
     "crates/otto-design/src/site/render.rs::body": 408,
     "crates/otto-issues/src/confluence.rs::storage_to_markdown_depth": 535,
     "crates/otto-issues/src/jira.rs::parse_issue_full": 427,

@@ -15,16 +15,16 @@ pub async fn recover_before_serve(ctx: &ServerCtx, boot: &mut BootPhases) -> Res
     // Adopt detached runtime-holder processes before `restore_sessions` sweeps
     // per-session `OTTO_MCP_TOKEN` credentials so live runtime sessions keep
     // working MCP tools across restart, while unadopted turns end `interrupted`.
-    let adopted_runtime = match ctx.agent_runtime.recover_and_adopt().await {
-        Ok(ids) => ids,
+    let adopted = match ctx.agent_runtime.recover_and_adopt().await {
+        Ok(adopted) => adopted,
         Err(e) => {
             tracing::warn!("agent-runtime recovery: {e}");
-            std::collections::HashSet::new()
+            Default::default()
         }
     };
-    restore_sessions(ctx, &adopted_runtime).await?;
+    restore_sessions(ctx, &adopted.live_ids).await?;
     boot.mark("restore");
-    fail_orphaned_reviews(ctx).await;
+    fail_orphaned_reviews(ctx, &adopted).await;
     fail_orphaned_skill_evals(ctx).await;
     warn_on_err(
         "3D job and production recovery",
@@ -123,17 +123,39 @@ async fn restore_sessions(
 
 /// Settle reviews orphaned by the previous process exit: a review's
 /// background task dies with the process, so a row left `running` would
-/// otherwise poll forever in the UI. One whose reviewers had all finished
-/// gets ONLY its summarizer re-run over their stored findings (at most twice
-/// per review — `otto_review::restart`); the rest fail as re-runnable, and
-/// every live agent row (a per-agent retry's) is settled too.
-async fn fail_orphaned_reviews(ctx: &ServerCtx) {
-    let resume = otto_review::restart::settle_after_restart(&ctx.reviews_store).await;
-    let users = otto_state::UsersRepo::new(ctx.pool.clone());
-    for id in resume
+/// otherwise poll forever in the UI. One whose agents survived in their
+/// holders (`held`) keeps running and gets a driver that awaits them; one
+/// whose reviewers had all finished gets ONLY its summarizer re-run over
+/// their stored findings (at most twice per review — `otto_review::restart`);
+/// the rest fail as re-runnable, and every live agent row is settled too.
+async fn fail_orphaned_reviews(ctx: &ServerCtx, adopted: &otto_agent_protocol::Adopted) {
+    let held = ctx.agent_runtime.held_reviews(adopted).await;
+    let settled = otto_review::restart::settle_after_restart(&ctx.reviews_store, &held).await;
+    let settled = settled
         .inspect_err(|e| tracing::warn!("review recovery: {e}"))
-        .unwrap_or_default()
-    {
+        .unwrap_or_default();
+    use otto_core::cancel::CancelRegistryExt as _;
+    // An adopted thread of a review that does not resume stops now (CR1-027).
+    let rt = &ctx.agent_runtime;
+    for id in &adopted.handled_ids {
+        let meta = rt.get(id).await.ok().and_then(|s| s.meta);
+        let review = meta.as_ref().and_then(|m| m.get("review_id")?.as_str());
+        if review.is_some_and(|r| !settled.resume_held.iter().any(|h| h == r)) {
+            let until = chrono::Utc::now() + chrono::Duration::hours(168);
+            let _ = rt.close_retained(id, until).await;
+        }
+    }
+    for id in settled.resume_held {
+        // Registered before the task runs: a resumed workflow step sees it live.
+        let live = ctx.review_cancels.register(&id);
+        tokio::spawn(crate::modules::review::resume_held_review(
+            ctx.clone(),
+            id,
+            live,
+        ));
+    }
+    let users = otto_state::UsersRepo::new(ctx.pool.clone());
+    for id in settled.summarizer_resume {
         let user = otto_review::restart::review_user(&users).await;
         let resumed = async { crate::modules::review::rerun_summarizer(ctx, &id, user?).await };
         match resumed.await {
@@ -219,13 +241,14 @@ where
     });
 }
 
-/// Goal loops: each loop's controller dies with the process, so a row left
-/// running/paused/blocked is orphaned. Pause active loops, preserve blocked
-/// decisions and all working files, and reap only execution resources.
+/// Older goal loops (goal.md §5.4): a loop still running when this build
+/// boots has no controller any more. Pause it (its time banked), keep every
+/// working file, kill its surviving executor sessions and post one notice
+/// offering Continue as a goal. Nothing is started.
 pub async fn recover_goal_loops(ctx: &ServerCtx) {
     match ctx
         .goal_loops_repo
-        .fail_running(crate::goal_loop::RESTART_PAUSE_NOTE)
+        .fail_running(otto_automation::goal_loop_history::RESTART_PAUSE_NOTE)
         .await
     {
         Ok(loops) => {
@@ -235,7 +258,7 @@ pub async fn recover_goal_loops(ctx: &ServerCtx) {
                     loops.len()
                 );
             }
-            crate::goal_loop::announce_restart_pause(ctx, &loops).await;
+            otto_automation::goal_loop_history::announce_restart_pause(ctx, &loops).await;
         }
         Err(e) => tracing::warn!("goal-loop recovery: {e}"),
     }

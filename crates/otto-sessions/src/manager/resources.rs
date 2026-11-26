@@ -11,7 +11,14 @@
 //!   ([`SessionManager::with_machine_budget`]) and, for local spawns,
 //!   [`SessionManager::spawn_local_pty`] lowers a gated agent's priority and
 //!   registers the process with the gate until it exits;
-//! - the structured runtime (`prepare_runtime_spawn`) gets the build budget.
+//! - the structured runtime (`prepare_runtime_spawn`) gets the build budget;
+//!   an engine pre-admits its thread with
+//!   [`SessionManager::admit_background_with`] outside every runtime lock,
+//!   the spawn itself only claims that place or takes one at once
+//!   ([`SessionManager::admit_runtime_spawn`] — it never waits, so closing a
+//!   thread is never stuck behind the gate), and every runtime child is
+//!   counted and, when gated, reniced
+//!   ([`SessionManager::register_runtime_child`]).
 
 use super::*;
 
@@ -47,27 +54,29 @@ impl SessionManager {
             .flatten()
     }
 
-    /// The gate's current thresholds. Disabled without a settings store:
-    /// the gate is armed only in the daemon, never in a bare harness.
+    /// The gate's current thresholds (the machine's cores and RAM from its
+    /// sample). Disabled without a settings store: the gate is armed only in
+    /// the daemon, never in a bare harness.
     pub async fn admission_policy(&self) -> AdmissionPolicy {
-        let cores = logical_cores();
         if self.settings.is_none() {
-            return AdmissionPolicy::disabled(cores);
+            return AdmissionPolicy::disabled(logical_cores());
+        }
+        let sample = self.admission.monitor().current().await;
+        let mut values: [Option<serde_json::Value>; 5] = Default::default();
+        let keys = [
+            admission::ADMISSION_ENABLED_SETTING,
+            admission::BACKGROUND_MAX_LIVE_SETTING,
+            admission::PRESSURE_FLOOR_SETTING,
+            admission::MAX_LOAD_PER_CORE_SETTING,
+            admission::MAX_WAIT_SETTING,
+        ];
+        for (value, key) in values.iter_mut().zip(keys) {
+            *value = self.resource_setting(key).await;
         }
         AdmissionPolicy::from_settings(
-            cores,
-            self.resource_setting(admission::ADMISSION_ENABLED_SETTING)
-                .await
-                .as_ref(),
-            self.resource_setting(admission::BACKGROUND_MAX_LIVE_SETTING)
-                .await
-                .as_ref(),
-            self.resource_setting(admission::MAX_LOAD_PER_CORE_SETTING)
-                .await
-                .as_ref(),
-            self.resource_setting(admission::MAX_WAIT_SETTING)
-                .await
-                .as_ref(),
+            sample.cores,
+            sample.ram_bytes,
+            values.each_ref().map(Option::as_ref),
         )
     }
 
@@ -176,10 +185,72 @@ impl SessionManager {
     /// the gate does not hold back or while the gate is off. Cancellable:
     /// dropping the future leaves the queue.
     pub async fn admit_background(&self, source: &str) -> AdmissionPermit {
+        self.admit_background_with(source, source, |_| {}).await
+    }
+
+    /// [`Self::admit_background`] for an engine that shows its wait: `label`
+    /// names the agent while it holds a place (`AdmissionWait::LiveCeiling`'s
+    /// holders), and `on_wait` hears every new reason (a different kind or
+    /// count; never the few seconds of spacing). The structured runtime's
+    /// engines call it OUTSIDE every runtime lock, before `create` or a
+    /// respawning turn, and stamp the permit onto the thread's meta.
+    pub async fn admit_background_with(
+        &self,
+        source: &str,
+        label: &str,
+        on_wait: impl FnMut(&admission::AdmissionWait) + Send,
+    ) -> AdmissionPermit {
         if !admission::is_gated_source(source) {
             return AdmissionPermit::none();
         }
-        self.wait_for_admission(source).await
+        self.wait_for_admission(source, label, on_wait).await
+    }
+
+    /// Before a structured-runtime child spawns (never waits): take over the
+    /// pre-admitted place `permit_key` names ([`admission::take_permit_key`],
+    /// stripped before the thread's row was written), or for a gated thread
+    /// nobody pre-admitted — a person's prompt into a dormant engine thread, a
+    /// sub-thread, a wake — a place at once. Hold the permit until
+    /// [`Self::register_runtime_child`] has run. `session` is the thread's
+    /// PTY-shaped view (`as_agent_session`).
+    pub fn admit_runtime_spawn(
+        &self,
+        session: &Session,
+        permit_key: Option<&str>,
+    ) -> AdmissionPermit {
+        if let Some((ticket, key)) = permit_key.and_then(|k| self.admission.claim(k)) {
+            return AdmissionPermit::reserved(Arc::clone(&self.admission), ticket, key);
+        }
+        match admission::gated_source(session.kind, Some(&session.meta)) {
+            Some(source) => self.admission.reserve_now(source, &session.title),
+            None => AdmissionPermit::none(),
+        }
+    }
+
+    /// A structured-runtime child just spawned (or a held one was adopted
+    /// after a restart): count it — `agents_live`, the build budget and, for a
+    /// gated thread, the ceiling — until `exit` reads an exit code or its
+    /// sender drops, and drop a gated one to [`admission::BACKGROUND_NICE`]
+    /// as the PTY spawn does. `pid` is the agent CLI's own.
+    pub async fn register_runtime_child(
+        &self,
+        session: &Session,
+        pid: Option<u32>,
+        exit: tokio::sync::watch::Receiver<Option<i32>>,
+    ) {
+        self.lower_gated_priority(session, pid).await;
+        if counts_toward_cap(session) {
+            self.admission
+                .register(&session.id, gated_holder(session), exit);
+        }
+    }
+
+    /// Memory pressure is critical (and the gate is on): an engine thread's
+    /// agent may not open another sub-thread.
+    pub async fn memory_pressure_critical(&self) -> bool {
+        self.admission_policy().await.enabled
+            && self.admission.monitor().current().await.pressure
+                == machine_load::MemoryPressure::Critical
     }
 
     /// [`Self::admit_background`] as a `'static` hook for engines that spawn
@@ -235,15 +306,8 @@ impl SessionManager {
         &self,
         mut req: CreateSessionReq,
     ) -> (CreateSessionReq, AdmissionPermit) {
-        let key = req
-            .meta
-            .as_mut()
-            .and_then(serde_json::Value::as_object_mut)
-            .and_then(|m| m.remove(admission::PERMIT_META_KEY));
-        let claimed = key
-            .as_ref()
-            .and_then(serde_json::Value::as_str)
-            .and_then(|k| self.admission.claim(k));
+        let key = req.meta.as_mut().and_then(admission::take_permit_key);
+        let claimed = key.as_deref().and_then(|k| self.admission.claim(k));
         if let Some((ticket, key)) = claimed {
             let gate = Arc::clone(&self.admission);
             return (req, AdmissionPermit::reserved(gate, ticket, key));
@@ -252,20 +316,27 @@ impl SessionManager {
         let Some(source) = source else {
             return (req, AdmissionPermit::none());
         };
-        let permit = self.wait_for_admission(&source).await;
+        let label = req.title.clone().unwrap_or_else(|| source.clone());
+        let permit = self.wait_for_admission(&source, &label, |_| {}).await;
         (req, permit)
     }
 
     /// Queue, then poll until admitted (see [`crate::admission`]).
-    async fn wait_for_admission(&self, source: &str) -> AdmissionPermit {
+    async fn wait_for_admission(
+        &self,
+        source: &str,
+        label: &str,
+        mut on_wait: impl FnMut(&admission::AdmissionWait) + Send,
+    ) -> AdmissionPermit {
         let mut policy = self.admission_policy().await;
         if !policy.enabled {
             return AdmissionPermit::none();
         }
         let gate = Arc::clone(&self.admission);
-        let ticket = gate.enqueue(source, std::time::Instant::now());
+        let ticket = gate.enqueue(source, label, std::time::Instant::now());
         let mut queued = admission::QueuedTicket::new(&gate, ticket);
         let mut announced = false;
+        let mut told = None;
         loop {
             let sample = gate.monitor().current().await;
             // Before the poll: a release in between still wakes us.
@@ -274,7 +345,7 @@ impl SessionManager {
             match gate.poll(ticket, &sample, &policy, now) {
                 Poll::Admitted(a) => {
                     queued.disarm();
-                    if let Some(reason) = a.overdue {
+                    if let Some(reason) = &a.overdue {
                         tracing::warn!(
                             source,
                             waited_secs = a.waited.as_secs(),
@@ -291,8 +362,13 @@ impl SessionManager {
                     return AdmissionPermit::reserved(Arc::clone(&gate), ticket, a.key);
                 }
                 Poll::Gone => return AdmissionPermit::none(),
+                Poll::Wait(admission::AdmissionWait::Spacing) => {}
                 Poll::Wait(reason) => {
-                    if !announced && !matches!(reason, admission::WaitReason::Spacing) {
+                    if told != Some(reason.news_key()) {
+                        told = Some(reason.news_key());
+                        on_wait(&reason);
+                    }
+                    if !announced {
                         announced = true;
                         self.announce_queued(source, &reason, now);
                     }
@@ -315,26 +391,23 @@ impl SessionManager {
     fn announce_queued(
         &self,
         source: &str,
-        reason: &admission::WaitReason,
+        reason: &admission::AdmissionWait,
         now: std::time::Instant,
     ) {
         tracing::info!(
             source,
             reason = %reason.describe(),
-            "admission: background agent queued — machine busy"
+            "admission: background agent queued"
         );
-        if matches!(reason, admission::WaitReason::Queue) || !self.admission.take_busy_notice(now) {
+        if matches!(reason, admission::AdmissionWait::Queue { .. })
+            || !self.admission.take_busy_notice(now)
+        {
             return;
         }
         let _ = self.events.send(Event::Notice {
             level: "info".into(),
             title: "Background agents queued".into(),
-            body: format!(
-                "The machine is busy ({}). Otto starts reviews, workflow steps, scheduled \
-                 tasks and other background agents as it frees up. Your own sessions are \
-                 not delayed.",
-                reason.describe()
-            ),
+            body: queued_notice_body(reason),
         });
     }
 
@@ -391,30 +464,35 @@ impl SessionManager {
         let handle = tokio::task::spawn_blocking(move || PtyHandle::spawn_sized(&spec, cols, rows))
             .await
             .unwrap_or_else(|e| Err(Error::Internal(format!("pty spawn task: {e}"))))?;
-        if admission::is_gated_session(session) {
-            let low = admission::low_priority_enabled(
-                self.resource_setting(admission::LOW_PRIORITY_SETTING)
-                    .await
-                    .as_ref(),
-            );
-            if let (true, Some(pid)) = (low, handle.pid()) {
-                if let Err(e) = admission::lower_priority(pid) {
-                    tracing::debug!(session = %session.id, pid, "lower priority: {e}");
-                }
+        self.lower_gated_priority(session, handle.pid()).await;
+        Ok(self.track_spawn(session, handle))
+    }
+
+    /// A gated background agent's process drops to
+    /// [`admission::BACKGROUND_NICE`] unless `agent_background_low_priority`
+    /// is off.
+    async fn lower_gated_priority(&self, session: &Session, pid: Option<u32>) {
+        let Some(pid) = pid.filter(|_| admission::is_gated_session(session)) else {
+            return;
+        };
+        let low = admission::low_priority_enabled(
+            self.resource_setting(admission::LOW_PRIORITY_SETTING)
+                .await
+                .as_ref(),
+        );
+        if low {
+            if let Err(e) = admission::lower_priority(pid) {
+                tracing::debug!(session = %session.id, pid, "lower priority: {e}");
             }
         }
-        Ok(self.track_spawn(session, handle))
     }
 
     /// Count an agent's fresh process with the gate until it exits (its exit
     /// watch, so no teardown path has to remember to unregister it).
     pub(super) fn track_spawn(&self, session: &Session, handle: PtyHandle) -> PtyHandle {
         if counts_toward_cap(session) {
-            self.admission.register(
-                &session.id,
-                admission::is_gated_session(session),
-                handle.on_exit(),
-            );
+            self.admission
+                .register(&session.id, gated_holder(session), handle.on_exit());
         }
         handle
     }
@@ -457,6 +535,32 @@ impl SessionManager {
     }
 }
 
+/// What a gated session's running process tells the ceiling's holders.
+fn gated_holder(session: &Session) -> Option<admission::AgentHolder> {
+    let source = admission::gated_source(session.kind, Some(&session.meta))?;
+    Some(admission::AgentHolder {
+        session_id: Some(session.id.clone()),
+        source: source.to_string(),
+        label: session.title.clone(),
+        run_id: session
+            .meta
+            .get("run_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        since: chrono::Utc::now(),
+    })
+}
+
+/// The "Background agents queued" notice: the wait in words, then what Otto
+/// does about it.
+fn queued_notice_body(reason: &admission::AdmissionWait) -> String {
+    format!(
+        "{}. Otto starts reviews, workflow steps, scheduled tasks and other background \
+         agents as it frees up. Your own sessions are not delayed.",
+        reason.describe()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -471,12 +575,17 @@ mod tests {
                 cores: 8,
                 pressure: MemoryPressure::Normal,
                 swap_used_bytes: None,
+                ram_bytes: None,
                 taken: std::time::Instant::now(),
             }
         }
     }
 
     async fn manager(settings: bool, load: f64) -> SessionManager {
+        manager_on(settings, Arc::new(Fixed(load))).await
+    }
+
+    async fn manager_on(settings: bool, sampler: Arc<dyn Sampler>) -> SessionManager {
         let dir = tempfile::tempdir().unwrap();
         let pool = otto_state::open(&dir.path().join("t.db")).await.unwrap();
         crate::test_tmp::keep_until_exit(dir);
@@ -486,7 +595,7 @@ mod tests {
             events,
             ProviderRegistry::new(None),
         )
-        .with_machine_sampler(Arc::new(Fixed(load)));
+        .with_machine_sampler(sampler);
         if settings {
             m = m.with_settings_repo(otto_state::SettingsRepo::new(pool));
         }
@@ -767,5 +876,249 @@ mod tests {
         .await;
         assert_eq!(m.admission.live_counts(), (1, 0));
         let _ = h2.kill();
+    }
+
+    /// The forced machine reading (`OTTO_TEST_MACHINE_SAMPLE`) of a Mac
+    /// that never calms down.
+    fn always_busy() -> Arc<dyn Sampler> {
+        Arc::new(machine_load::test_sampler(true, Some("busy")).unwrap())
+    }
+
+    async fn put(m: &SessionManager, key: &str, v: serde_json::Value) {
+        m.settings.as_ref().unwrap().put(key, &v).await.unwrap();
+    }
+
+    /// An exit watch for a process that is still running.
+    fn alive() -> (
+        tokio::sync::watch::Sender<Option<i32>>,
+        tokio::sync::watch::Receiver<Option<i32>>,
+    ) {
+        tokio::sync::watch::channel(None)
+    }
+
+    /// THE DEFECT (runtime.md §3.1): on a permanently loaded machine every
+    /// agent of a lone run waited the full 300 s and then started anyway.
+    #[tokio::test]
+    async fn a_lone_run_under_permanent_pressure_starts_every_agent_at_once() {
+        let m = manager_on(true, always_busy()).await;
+        assert!(admission::machine_busy(
+            &m.admission.monitor().current().await,
+            &m.admission_policy().await
+        ));
+        for source in [
+            "workflow",
+            "workflow",
+            "review",
+            "review_summarizer",
+            "workflow",
+        ] {
+            let permit = tokio::time::timeout(Duration::from_secs(5), m.admit_background(source))
+                .await
+                .expect("admitted at once, not after 300 s");
+            assert!(permit.is_reserved());
+            // The step's agent runs, then its thread is closed.
+        }
+        // The pre-2026-11-26 rule (floor 0) would hold the same step.
+        put(&m, admission::PRESSURE_FLOOR_SETTING, serde_json::json!(0)).await;
+        tokio::time::sleep(SETTINGS_TTL).await;
+        let held =
+            tokio::time::timeout(Duration::from_secs(3), m.admit_background("workflow")).await;
+        assert!(held.is_err(), "floor 0 holds a lone agent");
+    }
+
+    /// Runtime children are counted exactly like PTY agents (DR-009.3), name
+    /// what fills the ceiling, and a gated one runs at nice 10.
+    #[tokio::test]
+    async fn a_runtime_child_is_counted_named_and_reniced_until_it_exits() {
+        let m = manager(true, 0.5).await;
+        put(
+            &m,
+            admission::BACKGROUND_MAX_LIVE_SETTING,
+            serde_json::json!(1),
+        )
+        .await;
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let step = agent(
+            "t1",
+            serde_json::json!({ "runtime": "structured", "source": "workflow", "run_id": "run-9" }),
+        );
+        let (exit_tx, exit_rx) = alive();
+        m.register_runtime_child(&step, Some(child.id()), exit_rx)
+            .await;
+        let mine = agent("t2", serde_json::json!({ "runtime": "structured" }));
+        let (mine_tx, mine_rx) = alive();
+        m.register_runtime_child(&mine, None, mine_rx).await;
+        let s = m.machine_status().await;
+        assert_eq!((s.agents_live, s.background_live), (2, 1));
+        let Some(admission::AdmissionWait::LiveCeiling { holders, .. }) = s.admission else {
+            panic!("the ceiling is full: {:?}", s.admission);
+        };
+        assert_eq!(holders.len(), 1);
+        assert_eq!(holders[0].session_id.as_deref(), Some("t1"));
+        assert_eq!(holders[0].run_id.as_deref(), Some("run-9"));
+        assert_eq!(holders[0].label, "t");
+        #[cfg(target_os = "macos")]
+        {
+            // SAFETY: plain syscall on our own child's pid.
+            let nice = unsafe { libc::getpriority(libc::PRIO_PROCESS, child.id()) };
+            assert_eq!(nice, admission::BACKGROUND_NICE);
+        }
+        // The build budget splits the cores between both agents.
+        assert_eq!(m.admission.live_agents_except(&"t1".to_string()), 1);
+        exit_tx.send(Some(0)).unwrap();
+        drop(mine_tx);
+        let s = m.machine_status().await;
+        assert_eq!((s.agents_live, s.background_live), (0, 0));
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// DR-009.1: the spawn never waits — it claims the pre-admitted place or
+    /// takes one at once — so a close can never be stuck behind the gate,
+    /// and the permit key never reaches the stored row.
+    #[tokio::test]
+    async fn a_runtime_spawn_never_waits_and_claims_its_pre_admitted_place() {
+        let critical = Arc::new(machine_load::FixedSampler {
+            load1: 500.0,
+            pressure: machine_load::MemoryPressure::Critical,
+        });
+        let m = manager_on(true, critical).await;
+        put(
+            &m,
+            admission::BACKGROUND_MAX_LIVE_SETTING,
+            serde_json::json!(2),
+        )
+        .await;
+        // Pre-admitted alone (critical, nobody else running: it starts).
+        let permit = m.admit_background_with("workflow", "WF step", |_| {}).await;
+        let mut meta = serde_json::json!({ "source": "workflow" });
+        permit.stamp(&mut meta);
+        let key = admission::take_permit_key(&mut meta);
+        assert!(
+            meta.get(admission::PERMIT_META_KEY).is_none(),
+            "never stored"
+        );
+        let step = agent("s1", meta);
+        let spawn = m.admit_runtime_spawn(&step, key.as_deref());
+        drop(permit);
+        assert_eq!(
+            m.machine_status().await.background_live,
+            1,
+            "claimed, counted once"
+        );
+        let (_tx, rx) = alive();
+        m.register_runtime_child(&step, None, rx).await;
+        drop(spawn);
+        assert_eq!(
+            m.machine_status().await.background_live,
+            1,
+            "the process holds it now"
+        );
+        // Critical memory and one running: a pre-admission would wait, but a
+        // spawn nobody pre-admitted takes its place at once and is counted.
+        let wake = agent("s2", serde_json::json!({ "source": "review" }));
+        let place = m.admit_runtime_spawn(&wake, None);
+        assert!(place.is_reserved());
+        assert_eq!(m.machine_status().await.background_live, 2);
+        // A person's own thread takes no place.
+        assert!(!m
+            .admit_runtime_spawn(&agent("s3", serde_json::json!({})), None)
+            .is_reserved());
+        assert!(m.memory_pressure_critical().await);
+    }
+
+    /// DR-115.4: a person's thread spawn reserves nothing (the gated count
+    /// stays 0); a gated spawn's reservation is gone once its process
+    /// registered — only the process holds the place, until it exits.
+    #[tokio::test]
+    async fn a_spawn_reservation_is_dropped_once_the_process_registers() {
+        let m = manager(true, 0.5).await;
+        let person = agent("p1", serde_json::json!({ "runtime": "structured" }));
+        let none = m.admit_runtime_spawn(&person, None);
+        assert!(!none.is_reserved());
+        assert_eq!(m.machine_status().await.background_live, 0);
+        let (_p_tx, p_rx) = alive();
+        m.register_runtime_child(&person, None, p_rx).await;
+        drop(none);
+        let s = m.machine_status().await;
+        assert_eq!((s.agents_live, s.background_live), (1, 0));
+
+        let step = agent("g1", serde_json::json!({ "source": "workflow" }));
+        let place = m.admit_runtime_spawn(&step, None);
+        assert_eq!(m.machine_status().await.background_live, 1, "reserved");
+        let (g_tx, g_rx) = alive();
+        m.register_runtime_child(&step, None, g_rx).await;
+        drop(place);
+        assert_eq!(m.machine_status().await.background_live, 1, "the process");
+        g_tx.send(Some(0)).unwrap();
+        assert_eq!(
+            m.machine_status().await.background_live,
+            0,
+            "no reservation left behind"
+        );
+    }
+
+    /// The waiter hears each new reason in words; the notice says the same.
+    #[tokio::test]
+    async fn a_waiting_engine_hears_why_and_the_notice_uses_the_same_words() {
+        let m = Arc::new(manager(true, 0.5).await);
+        put(
+            &m,
+            admission::BACKGROUND_MAX_LIVE_SETTING,
+            serde_json::json!(1),
+        )
+        .await;
+        let mut events = m.events.subscribe();
+        let (busy_tx, busy_rx) = alive();
+        m.register_runtime_child(
+            &agent("r1", serde_json::json!({ "source": "review" })),
+            None,
+            busy_rx,
+        )
+        .await;
+        let (heard_tx, mut heard) = tokio::sync::mpsc::unbounded_channel();
+        let waiter = {
+            let m = Arc::clone(&m);
+            tokio::spawn(async move {
+                m.admit_background_with("workflow", "WF step", move |w| {
+                    let _ = heard_tx.send(w.clone());
+                })
+                .await
+                .is_reserved()
+            })
+        };
+        let first = tokio::time::timeout(Duration::from_secs(5), heard.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.code(), Some("slots"));
+        assert_eq!(
+            first.describe(),
+            "Waiting for a free agent slot — 1 of 1 running"
+        );
+        let queued = m.machine_status().await.queued;
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].wait.as_ref(), Some(&first));
+        busy_tx.send(Some(0)).unwrap();
+        assert!(tokio::time::timeout(Duration::from_secs(5), waiter)
+            .await
+            .unwrap()
+            .unwrap());
+        let notice = loop {
+            match events.try_recv() {
+                Ok(Event::Notice { title, body, .. }) if title == "Background agents queued" => {
+                    break body
+                }
+                Ok(_) => continue,
+                Err(e) => panic!("no notice: {e}"),
+            }
+        };
+        assert!(
+            notice.starts_with("Waiting for a free agent slot — 1 of 1 running. Otto starts"),
+            "{notice}"
+        );
     }
 }

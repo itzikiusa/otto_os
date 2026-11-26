@@ -258,6 +258,57 @@ pub fn bytes_sha256(bytes: &[u8]) -> String {
     hex::encode(h.finalize())
 }
 
+/// The first issue key (Jira, Linear) in `text`. Hand-rolled scanner (no
+/// regex dependency): the first
+/// `[A-Z][A-Z0-9]{1,9}-[0-9]{1,7}` token in `text` with a non-alphanumeric
+/// character (or a string edge) on both sides.
+pub fn issue_key(text: &str) -> Option<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    let is_alnum = |c: char| c.is_ascii_alphanumeric();
+    for i in 0..n {
+        if !chars[i].is_ascii_uppercase() {
+            continue;
+        }
+        let boundary_before = i == 0 || !is_alnum(chars[i - 1]);
+        if !boundary_before {
+            continue;
+        }
+        // Consume [A-Z0-9]{1,9} after the leading letter — bounded, and the
+        // char class itself stops the run at the first char that doesn't fit
+        // (e.g. the '-', a lowercase letter, or punctuation), so no
+        // backtracking is needed: whatever `j` lands on after this loop is
+        // where a dash would have to be for this candidate to match.
+        let mut j = i + 1;
+        let max_j = (i + 1 + 9).min(n);
+        while j < max_j && (chars[j].is_ascii_uppercase() || chars[j].is_ascii_digit()) {
+            j += 1;
+        }
+        if j <= i + 1 {
+            // Needs at least 1 char after the leading letter (min total 2).
+            continue;
+        }
+        if j >= n || chars[j] != '-' {
+            continue;
+        }
+        let mut d = j + 1;
+        let max_d = (j + 1 + 7).min(n);
+        while d < max_d && chars[d].is_ascii_digit() {
+            d += 1;
+        }
+        let digit_len = d - (j + 1);
+        if digit_len == 0 {
+            continue;
+        }
+        let boundary_after = d == n || !is_alnum(chars[d]);
+        if !boundary_after {
+            continue;
+        }
+        return Some(chars[i..d].iter().collect());
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

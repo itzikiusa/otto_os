@@ -513,6 +513,48 @@ Either way, **the agent never posts to the chat itself and never touches tokens*
   20 MB are refused; the refusal is logged and noted in the thread.
 - **Chat → agent (Slack only):** attached files are downloaded to temp paths and
   the agent is told where to read them. (Telegram inbound files are not relayed.)
+  When the message starts a workflow run, the run also keeps its own copy —
+  see *Workflow runs in a thread* below.
+
+### Workflow runs in a thread
+
+A message that starts a workflow (`Action: Workflow`, `run <name>: …`, or a
+channel binding — see [Workflows § Triggers](./workflows.md#5-triggers)) turns
+the thread into that run's thread. What the bot posts there:
+
+- **One live status message** (the default). The bot posts one message for
+  the run — already while the run waits for a run slot — and **edits it in
+  place** as the run moves: a first line with the
+  workflow's name, its state, "5 of 9 steps" and the elapsed time, then one
+  line per step. Edits come at most every 3 seconds and do not notify. Slack
+  edits with `chat.update`, Telegram with `editMessageText`; if the message
+  can no longer be edited (deleted, or past the service's edit window) the
+  bot posts a new status message and edits that one from then on. A daemon
+  restart, a Resume and a retry keep editing the same message.
+- **Every step's file is still posted**, each with a one-line caption ("✅
+  Checkout PR branch · 14s", "❌ Go gates failed — …"), and the final result
+  comes with `final-output.md` (or `summary.md`), as before.
+- **New messages only when someone must look**: the run needs a person (on
+  Slack the person who started the run is mentioned: "⚠️ @dana *PR Reviewer*
+  needs you — *Post comments* is waiting for an approval — … Approve it in
+  Otto (Workflows → Runs)."), the run is held (paused, blocked, out of
+  budget), and the final result.
+- **The earlier style is one setting away.** On the workflow's Start step,
+  **Updates in the chat thread → A message and a file per step, as before**
+  (`chat_updates: per_step`; a chat binding's spec can set it too) brings
+  back a start line, a ▶ / ✅ / ❌ line per step with its file, and the 🔍
+  review block.
+
+Replies in the run's thread control it: `status`, `skip` (`skip <step name>`
+when several steps run), `abort`, `re-review`, `help`. Approving, answering
+a question, pausing and resuming are done in Otto — a reply cannot do them.
+
+**Files with the starting message (Slack).** Files attached to the message
+that starts a run are downloaded as for any message, and the run keeps its
+own copy of each (at most 10 files and 50 MiB per run) under its context
+folder; the run page lists them under **Result → Input → Files sent with the
+run**, with Preview and Download. A file Slack did not deliver is listed with
+the reason. Telegram messages bring no files.
 
 ### Lifecycle & idle auto-archive
 
@@ -764,6 +806,10 @@ is no dedicated channel WS event. See `docs/contracts/ws.md`.
 - Outbound file uploads (both channels) and inbound file download (Slack).
 - Allowed-users allow-list; local quick commands.
 - Opt-in event notifications to the default chat.
+- Workflow runs report in their thread: one live status message edited in
+  place (or a message per step), every step's file, a new post when the run
+  needs a person, and the files sent with the starting Slack message kept
+  with the run (§5 *Workflow runs in a thread*).
 - Bulk seed from a Loom `.loom.env` file (`POST …/integrations/seed-from-loom`):
   reads `LOOM_<WORKSPACE>_SLACK_TOKEN` / `…_SLACK_APP_TOKEN` /
   `…_TELEGRAM_TOKEN` / `…_ALLOWED_USERS` (falling back to `LOOM_DEFAULT_*`) from

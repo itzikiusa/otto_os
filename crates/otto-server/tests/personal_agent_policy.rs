@@ -857,7 +857,7 @@ async fn agent_tokens_lose_root_authority_on_unreviewed_writes() {
     // below its `human_approval` gate; the person can.
     let graph = json!({
         "nodes": [
-            {"id": "implement", "kind": "agent"},
+            {"id": "implement", "kind": "agent_prompt"},
             {"id": "approve", "kind": "human_approval"},
             {"id": "pr", "kind": "git_pr"}
         ],

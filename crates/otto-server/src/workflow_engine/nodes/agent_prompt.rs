@@ -85,6 +85,10 @@ pub(in crate::workflow_engine) async fn execute(
             truncate(&input.to_string(), 4000)
         ),
     );
+    let full = format!(
+        "{full}{}",
+        super::super::run::hold::take_steering(env, session_tx)
+    );
     let acwd = node_cwd(node, &input, run_cwd);
     let done = env
         .files
@@ -97,22 +101,24 @@ pub(in crate::workflow_engine) async fn execute(
     let (reply, sid, reused) = if let Some(reply) = cached {
         (reply, None, true)
     } else {
-        let (reply, sid) = run_node_agent(
-            ctx,
-            ws,
-            user,
-            node,
-            &env.wf_name,
-            &env.run_id,
-            provider,
-            model,
-            &full,
-            &acwd,
-            done,
-            session_tx,
-            log_tx,
-            activity_tx,
-        )
+        let (reply, sid) = otto_core::heap(|| {
+            run_node_agent(
+                ctx,
+                ws,
+                user,
+                node,
+                &env.wf_name,
+                &env.run_id,
+                provider,
+                model,
+                &full,
+                &acwd,
+                done,
+                session_tx,
+                log_tx,
+                activity_tx,
+            )
+        })
         .await?;
         (reply, Some(sid), false)
     };
@@ -123,7 +129,8 @@ pub(in crate::workflow_engine) async fn execute(
     let mut out = serde_json::Map::new();
     out.insert("reply".into(), json!(reply));
     if let Some(sid) = sid {
-        out.insert("session_id".into(), json!(sid));
+        let key = super::super::step_thread::id_key(ctx, &env.run_id, provider).await;
+        out.insert(key.into(), json!(sid));
     }
     if reused {
         out.insert("context_reused".into(), json!(true));
