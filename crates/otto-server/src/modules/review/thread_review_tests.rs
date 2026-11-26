@@ -10,19 +10,29 @@ use serde_json::json;
 const LENSES: usize = 6;
 const REVIEWERS: usize = 2 * LENSES;
 
-async fn rig() -> (
+type Rig = (
     tempfile::TempDir,
     ServerCtx,
     Workspace,
     otto_core::domain::Repo,
-) {
+);
+
+async fn rig() -> Rig {
+    rig_with(&[]).await
+}
+
+/// `extra`: lenses the scope agent adds beyond the declared ones.
+async fn rig_with(extra: &[&str]) -> Rig {
     let tmp = tempfile::tempdir().unwrap();
     let pool = otto_state::db::test_pool().await;
     let mut ctx = ServerCtx::for_tests(&pool, tmp.path().join("data")).await;
     let fakes = tmp.path().join("fakes");
     std::fs::create_dir_all(&fakes).unwrap();
-    let lenses: Vec<_> = (1..=LENSES)
-        .map(|i| json!({"name": format!("Lens {i}"), "reason": "touched", "instructions": "look"}))
+    let names = (1..=LENSES)
+        .map(|i| format!("Lens {i}"))
+        .chain(extra.iter().map(|s| s.to_string()));
+    let lenses: Vec<_> = names
+        .map(|name| json!({"name": name, "reason": "touched", "instructions": "look"}))
         .collect();
     let plan =
         json!({"summary": "small change", "related_modules": [], "risks": [], "lenses": lenses});
@@ -238,6 +248,22 @@ async fn a_whole_review_runs_on_threads_scope_twelve_reviewers_and_the_summarize
     assert!(review_threads
         .iter()
         .all(|t| t.status == otto_core::agent_runtime::RuntimeSessionStatus::Closed));
+    // Codex reviewers start first (DR-023.5); the rows keep their order.
+    let mut started: Vec<_> = review_threads
+        .iter()
+        .filter(|t| t.title.starts_with("Lens"))
+        .collect();
+    started.sort_by_key(|t| t.created_at);
+    let first: Vec<_> = started
+        .iter()
+        .take(LENSES)
+        .map(|t| t.provider_slug())
+        .collect();
+    assert_eq!(
+        first,
+        vec!["codex"; LENSES],
+        "every Codex reviewer before any Claude one"
+    );
     let codex = review_threads
         .iter()
         .find(|t| t.title == rows[1].name)
@@ -268,4 +294,54 @@ async fn the_terminal_runner_stays_behind_the_switch() {
         review_threads(&ctx, Some(&latched)).await.is_some(),
         "a run's latch wins over the setting"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_configured_scope_drops_the_lens_the_scope_agent_adds() {
+    let (_tmp, ctx, ws, repo) = rig_with(&["Invented by scope"]).await;
+    let review = ctx
+        .reviews_store
+        .create_review(&repo.id, LOCAL_REVIEW_PR_NUMBER)
+        .await
+        .unwrap();
+    let mut cfg = config();
+    cfg.cross_provider_check = false;
+    cfg.scope_assessment = otto_core::api::ScopeAssessment::Configured;
+    let res = run_review_core(
+        &ctx,
+        &review.id,
+        &repo.path,
+        DIFF.into(),
+        None,
+        None,
+        &ws,
+        &repo.id,
+        0,
+        None,
+        Some(cfg),
+        None,
+    )
+    .await;
+    let done = ctx.reviews_store.get_review(&review.id).await.unwrap();
+    let lenses: Vec<_> = done
+        .scope_plan
+        .as_ref()
+        .unwrap()
+        .lenses
+        .iter()
+        .map(|l| l.name.clone())
+        .collect();
+    assert_eq!(
+        lenses,
+        (1..=LENSES)
+            .map(|i| format!("Lens {i}"))
+            .collect::<Vec<_>>(),
+        "{res:?}"
+    );
+    assert_eq!(
+        done.agents.len(),
+        LENSES + 1,
+        "one reviewer per declared lens + the summarizer"
+    );
+    assert!(done.agents.iter().all(|a| a.name != "Invented by scope"));
 }
