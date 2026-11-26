@@ -5,7 +5,6 @@
 import type {
   ActiveWorkflowRun,
   GitAccount,
-  GoalLoop,
   PrSummary,
   Repo,
   Review,
@@ -218,17 +217,15 @@ export function summarizePrQueue(input: {
 }
 
 // ---------------------------------------------------------------------------
-// Workflows & Goal Loops (`automations`)
+// Workflows (`automations`) — goals are workflows too (goal.md §4.5)
 // ---------------------------------------------------------------------------
 
 export type AutomationRouteTarget =
-  | { kind: 'goal-loop'; id: string }
   | { kind: 'workflow'; id: string }
   | { kind: 'workflow-run'; workflowId: string; runId: string };
 
-/** Build the router path for a goal loop, workflow, or active workflow run. */
+/** Build the router path for a workflow or an active workflow run. */
 export function automationRoute(target: AutomationRouteTarget): string {
-  if (target.kind === 'goal-loop') return `loops/${encodeURIComponent(target.id)}`;
   if (target.kind === 'workflow-run') {
     return `workflows/${encodeURIComponent(target.workflowId)}/runs/${encodeURIComponent(target.runId)}`;
   }
@@ -237,7 +234,9 @@ export function automationRoute(target: AutomationRouteTarget): string {
 
 export interface AutomationRow {
   id: string;
-  kind: 'workflow-run' | 'goal-loop' | 'workflow';
+  kind: 'workflow-run' | 'workflow';
+  /** A goal's run (its workflow was built from a goal). */
+  goal: boolean;
   title: string;
   detail: string;
   route: string;
@@ -251,54 +250,11 @@ export interface AutomationRow {
 export interface AutomationsSummary {
   stats: {
     running: number;
-    loops: number;
     workflows: number;
   };
   rows: AutomationRow[];
   totalRows: number;
   truncatedCount: number;
-}
-
-function classifyLoop(loop: GoalLoop): {
-  priority: number;
-  badgeLabel: string;
-  badgeTone: BadgeTone;
-  live: boolean;
-} {
-  switch (loop.status) {
-    case 'blocked':
-      return { priority: 0, badgeLabel: 'Blocked', badgeTone: 'warn', live: false };
-    case 'running':
-      return { priority: 1, badgeLabel: 'Running', badgeTone: 'info', live: true };
-    case 'paused':
-      return { priority: 2, badgeLabel: 'Paused', badgeTone: 'warn', live: false };
-    case 'failed':
-      return { priority: 3, badgeLabel: 'Failed', badgeTone: 'bad', live: false };
-    case 'exhausted':
-      return { priority: 3, badgeLabel: 'Exhausted', badgeTone: 'warn', live: false };
-    case 'succeeded':
-      return { priority: 4, badgeLabel: 'Succeeded', badgeTone: 'ok', live: false };
-    case 'stopped':
-      return { priority: 5, badgeLabel: 'Stopped', badgeTone: 'neutral', live: false };
-    default:
-      return { priority: 5, badgeLabel: 'Draft', badgeTone: 'neutral', live: false };
-  }
-}
-
-function loopDetail(loop: GoalLoop): string {
-  const maxIter = loop.limits?.max_iterations ?? 0;
-  const iterPart = maxIter > 0 ? `iter ${loop.current_iteration}/${maxIter}` : '';
-  const pct = Number.isFinite(loop.progress_pct) ? `${Math.round(loop.progress_pct)}%` : '';
-  const parts = ['Goal loop'];
-  if (loop.status === 'running' || loop.status === 'paused' || loop.status === 'blocked') {
-    if (iterPart) parts.push(iterPart);
-    if (pct) parts.push(pct);
-  } else if (loop.phase && loop.phase !== 'done') {
-    parts.push(loop.phase);
-  } else if (pct && loop.progress_pct > 0) {
-    parts.push(pct);
-  }
-  return parts.join(' · ');
 }
 
 function runDetail(run: ActiveWorkflowRun): string {
@@ -310,17 +266,19 @@ function runDetail(run: ActiveWorkflowRun): string {
   return parts.join(' · ');
 }
 
-/** Combine live workflow runs, workspace goal loops and workflows into one
- *  ranked summary for the Home Automations box. */
+/** Combine live workflow runs (goals' included) and the workspace's own
+ *  workflows into one ranked summary for the Home Automations box. Goal
+ *  workflows show only through their runs. */
 export function summarizeAutomations(input: {
   activeRuns: readonly ActiveWorkflowRun[];
-  loops: readonly GoalLoop[];
   workflows: readonly Workflow[];
   limit?: number;
 }): AutomationsSummary {
   const limit = input.limit ?? DEFAULT_BOX_ROW_LIMIT;
   const rows: AutomationRow[] = [];
   const runningWorkflowIds = new Set<string>();
+  const goalIds = new Set(input.workflows.filter((w) => w.origin === 'goal').map((w) => w.id));
+  const authored = input.workflows.filter((w) => !goalIds.has(w.id));
 
   for (const run of input.activeRuns) {
     runningWorkflowIds.add(run.workflow_id);
@@ -329,6 +287,7 @@ export function summarizeAutomations(input: {
     rows.push({
       id: `run:${run.run_id}`,
       kind: 'workflow-run',
+      goal: goalIds.has(run.workflow_id),
       title: run.workflow_name || 'Workflow run',
       detail: runDetail(run),
       route: automationRoute({ kind: 'workflow-run', workflowId: run.workflow_id, runId: run.run_id }),
@@ -340,31 +299,14 @@ export function summarizeAutomations(input: {
     });
   }
 
-  let runningLoops = 0;
-  for (const loop of input.loops) {
-    if (loop.status === 'running') runningLoops += 1;
-    const cls = classifyLoop(loop);
-    rows.push({
-      id: `loop:${loop.id}`,
-      kind: 'goal-loop',
-      title: loop.name || loop.definition?.title || 'Goal loop',
-      detail: loopDetail(loop),
-      route: automationRoute({ kind: 'goal-loop', id: loop.id }),
-      badgeLabel: cls.badgeLabel,
-      badgeTone: cls.badgeTone,
-      live: cls.live,
-      priority: cls.priority,
-      at: loop.updated_at || loop.created_at || '',
-    });
-  }
-
-  for (const wf of input.workflows) {
+  for (const wf of authored) {
     if (runningWorkflowIds.has(wf.id)) continue;
     const nodeCount = wf.graph?.nodes?.length ?? 0;
     const stepLabel = nodeCount > 0 ? plural(nodeCount, 'step') : 'Workflow';
     rows.push({
       id: `wf:${wf.id}`,
       kind: 'workflow',
+      goal: false,
       title: wf.name || 'Untitled workflow',
       detail: wf.description?.trim() || 'Workflow',
       route: automationRoute({ kind: 'workflow', id: wf.id }),
@@ -386,9 +328,8 @@ export function summarizeAutomations(input: {
   const bounded = limit >= 0 ? rows.slice(0, limit) : rows;
   return {
     stats: {
-      running: input.activeRuns.length + runningLoops,
-      loops: input.loops.length,
-      workflows: input.workflows.length,
+      running: input.activeRuns.length,
+      workflows: authored.length,
     },
     rows: bounded,
     totalRows: rows.length,
