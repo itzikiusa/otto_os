@@ -153,7 +153,7 @@ pub(super) async fn run(
     };
     let continued_from = text("continue_from");
     // A loop step with `same_thread` names the previous iteration's thread.
-    let mut continue_thread = text("continue_thread").map(Id::from);
+    let mut continue_thread = text("continue_thread");
     if let Some(src) = continued_from
         .as_ref()
         .filter(|_| continue_thread.is_none())
@@ -221,7 +221,7 @@ pub(super) async fn run(
             start_ordinal,
             provider: provider.to_string(),
             continued_from: continued_from.clone(),
-            label: otto_workflows::step_util::iteration_label(&node.id, &label),
+            label: otto_workflows::step_util::iteration_label(&node.id, label),
         }),
         StepEvent::Working => note(StepNote::Phase(StepPhase::Working, None)),
         StepEvent::NeedsYou(a) => note(StepNote::NeedsYou(a)),
