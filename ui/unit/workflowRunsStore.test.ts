@@ -45,3 +45,19 @@ test('events patch known runs in place, drop terminal ones and refetch unknown o
   assert.equal(calls.length, 2, 'an unknown run triggers one refetch');
   assert.equal(calls[1].wsId, 'A');
 });
+
+test('a held run stays listed with its overview; a plain terminal run leaves (DR-101)', async () => {
+  const { workflowRuns, calls } = fixture();
+  const first = workflowRuns.refresh('A');
+  calls[0].result.resolve([run('held'), run('done')]);
+  await first;
+  const hold = { kind: 'blocked', reason: 'Check failed twice', since: 't', node_ids: [] };
+  workflowRuns.apply({ workspace_id: 'A', run_id: 'held', status: 'error', overview: { state: 'blocked', hold } as any }, 'A');
+  workflowRuns.apply({ workspace_id: 'A', run_id: 'done', status: 'error', overview: { state: 'failed' } as any }, 'A');
+  assert.deepEqual(workflowRuns.list.map((r: any) => r.run_id), ['held']);
+  assert.equal(workflowRuns.list[0].status, 'error');
+  assert.equal(workflowRuns.list[0].overview.state, 'blocked');
+  workflowRuns.apply({ workspace_id: 'A', run_id: 'held', status: 'running', overview: { state: 'running' } as any }, 'A');
+  assert.equal(workflowRuns.list[0].overview.state, 'running', 'a resumed run patches its overview in place');
+  assert.equal(calls.length, 1);
+});
