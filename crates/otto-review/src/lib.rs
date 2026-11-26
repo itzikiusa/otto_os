@@ -23,6 +23,7 @@ pub mod fallback;
 pub mod fix_goal;
 pub mod handoff;
 pub mod history;
+pub mod promote;
 pub mod prompts;
 pub mod resolution;
 pub mod restart;
