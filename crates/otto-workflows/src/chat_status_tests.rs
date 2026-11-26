@@ -559,3 +559,146 @@ fn the_stored_status_message_round_trips() {
     );
     assert_eq!(serde_json::from_value::<StatusMessage>(v).unwrap(), msg);
 }
+
+/// The thread in each style for the same run (owner's answer 1): live keeps
+/// every step file and the final output, and only the text lines go.
+async fn drive(style: ChatUpdates, ws: &str) -> Vec<Recorded> {
+    let rec = RecordingAdapter::new(Channel::Slack, ws, "C1", Some("t1"));
+    let mut thread = ChatThread::new(style, rec.clone(), status_msg());
+    thread.status("*PR Reviewer* · working".into()).await;
+    thread.line("▶ *Checkout* started").await;
+    thread.line("✅ *Checkout* done (14.0s)").await;
+    thread
+        .status("*PR Reviewer* · working · 1 of 2".into())
+        .await;
+    thread
+        .step_file("step2-checkout.md", b"# Checkout", "✅ Checkout · 14s")
+        .await;
+    thread.line("❌ *Gates* failed").await;
+    thread
+        .step_file("step3-gates.md", b"# Gates", "❌ Gates failed — build")
+        .await;
+    thread
+        .post("❌ *PR Reviewer* failed at *Gates* — build")
+        .await;
+    thread.file("final-output.md", b"# Final").await;
+    rec.recorded()
+}
+
+fn uploads(log: &[Recorded]) -> Vec<(String, Option<String>)> {
+    log.iter()
+        .filter_map(|r| match r {
+            Recorded::Upload { name, caption, .. } => Some((name.clone(), caption.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test(start_paused = true)]
+async fn live_style_drops_only_the_text_lines_and_keeps_every_file() {
+    let live = drive(ChatUpdates::Live, "ws-thread-1").await;
+    assert_eq!(
+        uploads(&live),
+        [
+            (
+                "step2-checkout.md".to_string(),
+                Some("✅ Checkout · 14s".to_string())
+            ),
+            (
+                "step3-gates.md".to_string(),
+                Some("❌ Gates failed — build".to_string())
+            ),
+            ("final-output.md".to_string(), None),
+        ]
+    );
+    let sends: Vec<&str> = live
+        .iter()
+        .filter_map(|r| match r {
+            Recorded::Send { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        sends,
+        [
+            "*PR Reviewer* · working",
+            "❌ *PR Reviewer* failed at *Gates* — build"
+        ],
+        "the status message first, then the final post; no step lines"
+    );
+    assert!(
+        matches!(&live[0], Recorded::Send { .. }),
+        "the status message is the first post"
+    );
+    // The second status text came within 3 s: kept, then shown before the final post.
+    let final_at = live
+        .iter()
+        .position(|r| matches!(r, Recorded::Send { text, .. } if text.starts_with("❌")))
+        .unwrap();
+    assert!(matches!(&live[final_at - 1], Recorded::Edit { text, .. } if text.ends_with("1 of 2")));
+}
+
+#[tokio::test]
+async fn per_step_style_is_todays_lines_and_uncaptioned_files() {
+    let old = drive(ChatUpdates::PerStep, "ws-thread-2").await;
+    let shape: Vec<String> = old
+        .iter()
+        .map(|r| match r {
+            Recorded::Send { text, .. } => format!("send {text}"),
+            Recorded::Edit { .. } => "edit".into(),
+            Recorded::Upload { name, caption, .. } => format!("upload {name} {caption:?}"),
+        })
+        .collect();
+    assert_eq!(
+        shape,
+        [
+            "send ▶ *Checkout* started",
+            "send ✅ *Checkout* done (14.0s)",
+            "upload step2-checkout.md None",
+            "send ❌ *Gates* failed",
+            "upload step3-gates.md None",
+            "send ❌ *PR Reviewer* failed at *Gates* — build",
+            "upload final-output.md None",
+        ]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_rate_limited_upload_is_retried_and_a_failed_one_never_stops_the_rest() {
+    let rec = RecordingAdapter::new(Channel::Slack, "ws-thread-3", "C1", Some("t1"));
+    let mut thread = ChatThread::new(ChatUpdates::Live, rec.clone(), status_msg());
+    rec.fail_next_upload("slack upload PUT: ratelimited (retry after 3s)");
+    let t0 = tokio::time::Instant::now();
+    thread.step_file("a.md", b"a", "✅ A · 1s").await;
+    assert!(t0.elapsed() >= Duration::from_secs(3));
+    rec.fail_next_upload("slack files.completeUploadExternal: not_in_channel");
+    thread.step_file("b.md", b"b", "✅ B · 1s").await;
+    thread.step_file("c.md", b"c", "✅ C · 1s").await;
+    let names: Vec<String> = uploads(&rec.recorded())
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    assert_eq!(
+        names,
+        ["a.md", "c.md"],
+        "b failed and was skipped; c still arrived in order"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn status_edits_collapse_to_the_newest_with_a_trailing_edit() {
+    let rec = RecordingAdapter::new(Channel::Slack, "ws-thread-4", "C1", Some("t1"));
+    let mut thread = ChatThread::new(ChatUpdates::Live, rec.clone(), status_msg());
+    assert!(thread.status("v1".into()).await, "the first status posts");
+    for v in ["v2", "v3", "v4"] {
+        assert!(!thread.status(v.into()).await);
+    }
+    let wait = thread.flush_in().expect("a kept text");
+    assert!(wait <= STATUS_EDIT_EVERY);
+    tokio::time::sleep(wait).await;
+    thread.flush().await;
+    assert_eq!(thread.flush_in(), None);
+    let log = rec.recorded();
+    assert_eq!(log.len(), 2, "{log:?}");
+    assert!(matches!(&log[1], Recorded::Edit { text, .. } if text == "v4"));
+}

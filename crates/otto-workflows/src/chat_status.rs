@@ -1,14 +1,14 @@
 //! What a workflow run says in its chat thread (engine.md §9, ux.md §11,
 //! addendum-chat-optimize.md §1.1): the live status message, the final post,
 //! the needs-you post and the step-file captions — pure renderers over the
-//! run's nodes and [`RunOverview`] — and [`LiveStatus`], the one status
-//! message the engine's progress pump keeps edited in place.
+//! run's nodes and [`RunOverview`] — and [`ChatThread`] / [`LiveStatus`],
+//! what the engine's progress pump posts through in either style.
 //!
 //! Text is GFM; each adapter converts it (`send_formatted` /
 //! `edit_formatted` / `upload_with_caption`).
 
 use std::collections::{HashMap, VecDeque};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use chrono::{DateTime, FixedOffset, Utc};
 use otto_channels::adapter::{edit_needs_new_post, Adapter};
@@ -19,6 +19,7 @@ use otto_core::workflows::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tokio::time::Instant;
 
 /// How a chat-started run reports in its thread: the run input's
 /// `chat_updates` (a chat binding's spec value is copied there), else the
@@ -444,6 +445,145 @@ impl LiveStatus {
             .await?;
         self.msg.message_id = Some(id);
         Ok(true)
+    }
+}
+
+/// One run's chat thread as the progress pump drives it, in either style
+/// (owner's answer 1): `live` drops the per-step text lines and keeps one
+/// status message, but every step file is still posted (captioned) and the
+/// final post and its file still follow; `per_step` is today's thread.
+/// Posting is serialized by the caller (one pump per run).
+pub struct ChatThread {
+    pub style: ChatUpdates,
+    /// The status message (its `msg` is `chat_status_json`).
+    pub live: LiveStatus,
+    adapter: std::sync::Arc<dyn Adapter>,
+    pending: Option<String>,
+}
+
+impl ChatThread {
+    pub fn new(
+        style: ChatUpdates,
+        adapter: std::sync::Arc<dyn Adapter>,
+        msg: StatusMessage,
+    ) -> Self {
+        Self {
+            style,
+            live: LiveStatus::new(msg),
+            adapter,
+            pending: None,
+        }
+    }
+
+    fn chat(&self) -> (String, Option<String>) {
+        (self.live.msg.chat.clone(), self.live.msg.thread.clone())
+    }
+
+    /// A per-step text line (today's "▶ started" / "✅ done" / review lines).
+    /// Live style drops it: the status message says it.
+    pub async fn line(&mut self, text: &str) {
+        if self.style == ChatUpdates::PerStep {
+            self.send(text).await;
+        }
+    }
+
+    /// The status message's newest text: shown now when the last edit is 3 s
+    /// old, else kept (newer texts replace it) until [`Self::flush`]. Per-step
+    /// style has no status message. `true`: the message moved — persist
+    /// `live.msg`.
+    pub async fn status(&mut self, text: String) -> bool {
+        if self.style == ChatUpdates::PerStep {
+            return false;
+        }
+        self.pending = Some(text);
+        if self.live.wait().is_zero() {
+            self.flush().await
+        } else {
+            false
+        }
+    }
+
+    /// When the pump should call [`Self::flush`] (a kept status text waits).
+    pub fn flush_in(&self) -> Option<Duration> {
+        self.pending.as_ref().map(|_| self.live.wait())
+    }
+
+    /// Show the kept status text, if any (the guaranteed trailing edit).
+    pub async fn flush(&mut self) -> bool {
+        let Some(text) = self.pending.take() else {
+            return false;
+        };
+        match self.live.show(self.adapter.as_ref(), &text).await {
+            Ok(moved) => moved,
+            Err(e) => {
+                tracing::warn!("workflow chat: status message update failed: {e}");
+                false
+            }
+        }
+    }
+
+    /// A step's handoff file, when the step settles — in both styles; live
+    /// style captions it. A rate limit is waited out and the upload retried
+    /// once; a file that still fails is logged and skipped.
+    pub async fn step_file(&mut self, name: &str, content: &[u8], caption: &str) {
+        let (chat, thread) = self.chat();
+        let caption = (self.style == ChatUpdates::Live).then_some(caption);
+        let upload = || async {
+            match caption {
+                Some(c) => {
+                    self.adapter
+                        .upload_with_caption(&chat, thread.as_deref(), name, content, c)
+                        .await
+                }
+                None => {
+                    self.adapter
+                        .upload(&chat, thread.as_deref(), name, content)
+                        .await
+                }
+            }
+        };
+        let mut result = upload().await;
+        if let Some(delay) = result
+            .as_ref()
+            .err()
+            .and_then(otto_channels::mirror::retry_after_hint)
+        {
+            tokio::time::sleep(delay.min(MAX_RATE_WAIT)).await;
+            result = upload().await;
+        }
+        if let Err(e) = result {
+            tracing::warn!("workflow chat: step file {name} not posted: {e}");
+        }
+    }
+
+    /// A new post (needs-you, hold, the final message), after the status
+    /// message is brought up to date.
+    pub async fn post(&mut self, text: &str) {
+        self.flush().await;
+        self.send(text).await;
+    }
+
+    /// A file after a post (`final-output.md`), uncaptioned in both styles.
+    pub async fn file(&mut self, name: &str, content: &[u8]) {
+        let (chat, thread) = self.chat();
+        if let Err(e) = self
+            .adapter
+            .upload(&chat, thread.as_deref(), name, content)
+            .await
+        {
+            tracing::warn!("workflow chat: {name} not posted: {e}");
+        }
+    }
+
+    async fn send(&self, text: &str) {
+        let (chat, thread) = self.chat();
+        if let Err(e) = self
+            .adapter
+            .send_formatted(&chat, thread.as_deref(), text)
+            .await
+        {
+            tracing::warn!("workflow chat: post failed: {e}");
+        }
     }
 }
 
