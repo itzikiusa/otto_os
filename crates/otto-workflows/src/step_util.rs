@@ -300,6 +300,8 @@ pub enum StepNote {
         answer: Option<String>,
         by: Option<Id>,
     },
+    /// A person's verification or a consumed steering note (goal.md §2.4).
+    Human(HumanEntry),
     Settled(Box<Settled>),
 }
 
@@ -370,21 +372,25 @@ pub fn record(st: &mut NodeRunState, n: StepNote) -> bool {
         StepNote::Resumed { answer, by } => {
             let asked = st.attention.take();
             if let (Some(text), Some(a)) = (answer, asked) {
-                st.human_log.push(HumanEntry {
-                    kind: "answer".into(),
-                    ask: Some(a.text),
-                    text: otto_core::text::clip_bytes(&text, 2048).to_string(),
-                    met: None,
-                    revision: None,
-                    iteration: None,
-                    by: by.unwrap_or_default(),
-                    at: chrono::Utc::now(),
-                });
-                if st.human_log.len() > 20 {
-                    st.human_log.remove(0);
-                }
+                push_human(
+                    &mut st.human_log,
+                    HumanEntry {
+                        kind: "answer".into(),
+                        ask: Some(a.text),
+                        text: otto_core::text::clip_bytes(&text, 2048).to_string(),
+                        met: None,
+                        revision: None,
+                        iteration: None,
+                        by: by.unwrap_or_default(),
+                        at: chrono::Utc::now(),
+                    },
+                );
             }
             mark(st, StepPhase::Working);
+            true
+        }
+        StepNote::Human(e) => {
+            push_human(&mut st.human_log, e);
             true
         }
         StepNote::Settled(o) => {
@@ -417,6 +423,25 @@ pub fn record(st: &mut NodeRunState, n: StepNote) -> bool {
     }
 }
 
+/// Append to a node's `human_log` (≤ 20). Over the cap the oldest entry goes
+/// — never a `verify` record of the newest iteration, which the current check
+/// depends on (goal.md §2.4).
+pub fn push_human(log: &mut Vec<HumanEntry>, e: HumanEntry) {
+    log.push(e);
+    let current = log
+        .iter()
+        .filter(|e| e.kind == "verify")
+        .filter_map(|e| e.iteration)
+        .max();
+    while log.len() > 20 {
+        let i = log
+            .iter()
+            .position(|e| !(e.kind == "verify" && e.iteration == current))
+            .unwrap_or(0);
+        log.remove(i);
+    }
+}
+
 /// Enter `phase` (a new mark on the timeline, capped at 40: the first and
 /// the last 39); `false` when the node already is in it.
 fn mark(st: &mut NodeRunState, phase: StepPhase) -> bool {
@@ -433,4 +458,44 @@ fn mark(st: &mut NodeRunState, phase: StepPhase) -> bool {
         st.phases.remove(1);
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(kind: &str, text: &str, iteration: Option<u32>) -> HumanEntry {
+        HumanEntry {
+            kind: kind.into(),
+            ask: Some("c1".into()),
+            text: text.into(),
+            met: Some(true),
+            revision: None,
+            iteration,
+            by: "Ann".into(),
+            at: chrono::Utc::now(),
+        }
+    }
+
+    /// 25 notes and the 3 current verifications: the cap drops old notes,
+    /// never the records the current check depends on (GL24.6).
+    #[test]
+    fn the_human_log_cap_keeps_the_current_iterations_verify_records() {
+        let mut log = vec![];
+        push_human(&mut log, entry("verify", "old", Some(1)));
+        for i in 0..3 {
+            push_human(&mut log, entry("verify", &format!("v{i}"), Some(2)));
+        }
+        for i in 0..25 {
+            push_human(&mut log, entry("steer", &format!("n{i}"), None));
+        }
+        assert_eq!(log.len(), 20);
+        let kept: Vec<&str> = log
+            .iter()
+            .filter(|e| e.kind == "verify")
+            .map(|e| e.text.as_str())
+            .collect();
+        assert_eq!(kept, ["v0", "v1", "v2"]);
+        assert_eq!(log.last().unwrap().text, "n24");
+    }
 }

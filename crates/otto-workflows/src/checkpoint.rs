@@ -149,12 +149,208 @@ where
 pub async fn execute_with_cancel<F, Fut, O>(
     repo: &WorkflowsRepo,
     run_id: &Id,
+    checkpoint: WorkflowCheckpoint,
+    policy: &RetryPolicy,
+    restart_safe: bool,
+    action: F,
+    observe: O,
+    cancel: Option<&CancelSignal>,
+) -> Result<CheckpointOutcome>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<(Value, Vec<String>)>>,
+    O: FnMut(String),
+{
+    run_checkpoint(
+        repo,
+        run_id,
+        checkpoint,
+        policy,
+        restart_safe,
+        action,
+        observe,
+        cancel,
+        None,
+    )
+    .await
+}
+
+/// How often a running inner attempt banks its active time (DR-111): a crash
+/// loses at most this much of one attempt, and only ever undercounts.
+pub const HEARTBEAT: Duration = Duration::from_secs(60);
+
+/// What a loop's inner attempt reports while it runs: time parked on a
+/// person (never active time) and the thread it works on. [`execute_timed`]
+/// banks both into the attempt's checkpoint — `active_ms += wall − parked`
+/// on every heartbeat, at settle and when the attempt is dropped (a pause or
+/// cancel), and `thread_id` / `start_ordinal` as soon as the thread starts.
+#[derive(Default)]
+pub struct AttemptClock {
+    state: std::sync::Mutex<ClockState>,
+    changed: tokio::sync::Notify,
+}
+
+#[derive(Default)]
+struct ClockState {
+    parked_ms: u64,
+    parked_since: Option<std::time::Instant>,
+    thread: Option<(Id, u64)>,
+}
+
+impl AttemptClock {
+    fn lock(&self) -> std::sync::MutexGuard<'_, ClockState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    /// The attempt waits on a person.
+    pub fn park(&self) {
+        self.lock()
+            .parked_since
+            .get_or_insert_with(std::time::Instant::now);
+    }
+    /// The person answered.
+    pub fn unpark(&self) {
+        let mut s = self.lock();
+        if let Some(t) = s.parked_since.take() {
+            s.parked_ms += t.elapsed().as_millis() as u64;
+        }
+    }
+    /// The attempt's thread started (stamped and saved at once).
+    pub fn thread_started(&self, thread_id: Id, start_ordinal: u64) {
+        self.lock().thread = Some((thread_id, start_ordinal));
+        self.changed.notify_one();
+    }
+    fn parked_ms(&self) -> u64 {
+        let s = self.lock();
+        s.parked_ms + s.parked_since.map_or(0, |t| t.elapsed().as_millis() as u64)
+    }
+}
+
+/// The running attempt's banked time and thread, as of now.
+struct Bank<'a> {
+    clock: &'a AttemptClock,
+    started: std::time::Instant,
+    parked0: u64,
+    banked0: u64,
+}
+
+impl Bank<'_> {
+    fn apply(&self, cp: &mut WorkflowCheckpoint) {
+        let wall = self.started.elapsed().as_millis() as u64;
+        let parked = self.clock.parked_ms().saturating_sub(self.parked0);
+        cp.active_ms = self.banked0 + wall.saturating_sub(parked);
+        if let Some((id, ordinal)) = self.clock.lock().thread.clone() {
+            cp.thread_id = Some(id);
+            cp.start_ordinal = Some(ordinal);
+        }
+    }
+}
+
+/// Banks the attempt's time when it is dropped mid-way (pause, cancel).
+struct BankOnDrop<'a> {
+    bank: Bank<'a>,
+    repo: WorkflowsRepo,
+    run_id: Id,
+    cp: Option<WorkflowCheckpoint>,
+}
+
+impl Drop for BankOnDrop<'_> {
+    fn drop(&mut self) {
+        let (Some(mut cp), Ok(rt)) = (self.cp.take(), tokio::runtime::Handle::try_current()) else {
+            return;
+        };
+        self.bank.apply(&mut cp);
+        let (repo, run_id) = (self.repo.clone(), self.run_id.clone());
+        rt.spawn(async move {
+            let _ = repo.save_checkpoint(&run_id, &cp).await;
+        });
+    }
+}
+
+/// As [`execute_observed`], banking the attempt's active time and thread
+/// from `clock` into the checkpoint (a loop's inner steps, DR-111).
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_timed<F, Fut, O>(
+    repo: &WorkflowsRepo,
+    run_id: &Id,
+    checkpoint: WorkflowCheckpoint,
+    policy: &RetryPolicy,
+    restart_safe: bool,
+    action: F,
+    observe: O,
+    clock: &AttemptClock,
+) -> Result<CheckpointOutcome>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<(Value, Vec<String>)>>,
+    O: FnMut(String),
+{
+    run_checkpoint(
+        repo,
+        run_id,
+        checkpoint,
+        policy,
+        restart_safe,
+        action,
+        observe,
+        None,
+        Some(clock),
+    )
+    .await
+}
+
+/// Run `fut` while banking its time into `cp` (every [`HEARTBEAT`], at a
+/// new thread, and on drop); `cp` holds the attempt's time when it returns.
+async fn timed<Fut>(
+    repo: &WorkflowsRepo,
+    run_id: &Id,
+    cp: &mut WorkflowCheckpoint,
+    clock: &AttemptClock,
+    fut: Fut,
+) -> Result<(Value, Vec<String>)>
+where
+    Fut: Future<Output = Result<(Value, Vec<String>)>>,
+{
+    let bank = Bank {
+        clock,
+        started: std::time::Instant::now(),
+        parked0: clock.parked_ms(),
+        banked0: cp.active_ms,
+    };
+    let mut guard = BankOnDrop {
+        bank,
+        repo: repo.clone(),
+        run_id: run_id.clone(),
+        cp: Some(cp.clone()),
+    };
+    tokio::pin!(fut);
+    let mut beat = tokio::time::interval_at(tokio::time::Instant::now() + HEARTBEAT, HEARTBEAT);
+    let out = loop {
+        tokio::select! {
+            biased;
+            r = &mut fut => break r,
+            _ = beat.tick() => {}
+            () = clock.changed.notified() => {}
+        }
+        guard.bank.apply(cp);
+        let _ = repo.save_checkpoint(run_id, cp).await;
+        guard.cp = Some(cp.clone());
+    };
+    guard.cp = None;
+    guard.bank.apply(cp);
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_checkpoint<F, Fut, O>(
+    repo: &WorkflowsRepo,
+    run_id: &Id,
     mut checkpoint: WorkflowCheckpoint,
     policy: &RetryPolicy,
     restart_safe: bool,
     mut action: F,
     mut observe: O,
     cancel: Option<&CancelSignal>,
+    clock: Option<&AttemptClock>,
 ) -> Result<CheckpointOutcome>
 where
     F: FnMut() -> Fut,
@@ -225,7 +421,11 @@ where
             "{} — attempt {}/{} (iteration {})",
             checkpoint.name, checkpoint.attempts, attempt_limit, checkpoint.iteration
         ));
-        match action().await {
+        let result = match clock {
+            Some(clock) => timed(repo, run_id, &mut checkpoint, clock, action()).await,
+            None => action().await,
+        };
+        match result {
             Ok((output, mut logs)) => {
                 checkpoint.error = crate::retry::outcome_error(&output).map(str::to_owned);
                 checkpoint.status = if checkpoint.error.is_some() {
@@ -366,6 +566,106 @@ mod tests {
             ..Default::default()
         };
         (dir, repo, run.id, cp)
+    }
+
+    /// DR-111: an inner attempt banks its wall time minus the time it was
+    /// parked on a person, and its thread as soon as it starts.
+    #[tokio::test]
+    async fn a_timed_attempt_banks_active_time_and_its_thread() {
+        let (_dir, repo, run_id, cp) = fixture().await;
+        let clock = AttemptClock::default();
+        let policy = RetryPolicy::default();
+        let sleep = |ms| tokio::time::sleep(Duration::from_millis(ms));
+        execute_timed(
+            &repo,
+            &run_id,
+            cp.clone(),
+            &policy,
+            true,
+            || async {
+                sleep(150).await;
+                clock.park();
+                sleep(300).await;
+                clock.unpark();
+                clock.thread_started("th-1".into(), 3);
+                sleep(50).await;
+                Ok((json!({}), vec![]))
+            },
+            |_| {},
+            &clock,
+        )
+        .await
+        .unwrap();
+        let saved = repo
+            .checkpoint(&run_id, &cp.node_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!((195..400).contains(&saved.active_ms), "{}", saved.active_ms);
+        assert_eq!(saved.thread_id.as_deref(), Some("th-1"));
+        assert_eq!(saved.start_ordinal, Some(3));
+    }
+
+    /// A pause drops the attempt mid-way: its time is still banked, and the
+    /// next attempt adds to it (accumulated, never overwritten).
+    #[tokio::test]
+    async fn a_dropped_attempt_banks_its_time_and_the_next_one_adds_to_it() {
+        let (_dir, repo, run_id, cp) = fixture().await;
+        let clock = AttemptClock::default();
+        let policy = RetryPolicy::default();
+        let dropped = tokio::time::timeout(
+            Duration::from_millis(200),
+            execute_timed(
+                &repo,
+                &run_id,
+                cp.clone(),
+                &policy,
+                true,
+                || async {
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    Ok((json!({}), vec![]))
+                },
+                |_| {},
+                &clock,
+            ),
+        )
+        .await;
+        assert!(dropped.is_err());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let saved = repo
+            .checkpoint(&run_id, &cp.node_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.status, NodeStatus::Running);
+        assert!(saved.active_ms >= 100, "{}", saved.active_ms);
+        let first = saved.active_ms;
+        execute_timed(
+            &repo,
+            &run_id,
+            cp.clone(),
+            &policy,
+            true,
+            || async {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                Ok((json!({}), vec![]))
+            },
+            |_| {},
+            &clock,
+        )
+        .await
+        .unwrap();
+        let saved = repo
+            .checkpoint(&run_id, &cp.node_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.status, NodeStatus::Success);
+        assert!(
+            saved.active_ms >= first + 95,
+            "{} after {first}",
+            saved.active_ms
+        );
     }
 
     #[tokio::test]
