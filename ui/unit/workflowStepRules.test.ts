@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  continueChoices, continueClashes, missingSkills, slug, stepFile, resolvedReviewerPick, reviewerPick, wireAfter, withNodePick, withReviewerPick,
+  continueChoices, continueClashes, issueBlocks, missingSkills, slug, stepFile, resolvedReviewerPick, reviewerPick, wireAfter, withNodePick, withReviewerPick,
 } from '../src/modules/workflows/editor/stepRules.ts';
 
 const n = (id: string, params: Record<string, unknown> = {}, kind = 'agent_prompt', name = id) => ({ id, kind, name, x: 0, y: 0, params });
@@ -76,4 +76,10 @@ test('the step file a step writes: the engine’s order and slug, the trigger is
 test('skills not installed for the provider are named (nothing known yet: none)', () => {
   assert.deepEqual(missingSkills(['okf-authoring', 'gone'], new Set(['okf-authoring'])), ['gone']);
   assert.deepEqual(missingSkills(['x'], null), []);
+});
+
+test('save is blocked only by a save issue; a run by save and run issues; a warning never (DR-028, CR1-019/064)', () => {
+  const at = (cls: 'save' | 'run' | 'warning') => ({ node_id: 'a', edge_id: null, field: 'prompt', message: cls, class: cls });
+  assert.deepEqual(['save', 'run', 'warning'].map((c) => issueBlocks(at(c as 'save'), 'save')), [true, false, false]);
+  assert.deepEqual(['save', 'run', 'warning'].map((c) => issueBlocks(at(c as 'save'), 'run')), [true, true, false]);
 });

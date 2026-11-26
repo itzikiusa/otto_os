@@ -16,6 +16,7 @@
   import type { ReviewMode, RunWorkflowReq, Workflow, WorkflowRun, WorkflowValidationIssue } from '../../../lib/api/types';
   import { graphSideEffects } from '../sideEffects';
   import { resultDestinations } from '../runInput';
+  import { issueBlocks } from '../editor/stepRules';
   import { buildInput, chatOrigin, fromJson, prefill as prefillState, startFields, startProblem, type FormState } from './startForm';
 
   interface Props {
@@ -95,8 +96,9 @@
       if (beforeRun && !(await beforeRun())) return;
       const check = await api.post<{ valid: boolean; issues?: WorkflowValidationIssue[]; problems?: WorkflowValidationIssue[] }>(
         `/workflows/${target.id}/validate`, { graph: target.graph });
-      const found = [...(check.problems ?? []), ...(check.issues ?? [])];
-      if (!check.valid || (check.problems?.length ?? 0) > 0) {
+      // A warning never stops a run (DR-028): count and quote only what does.
+      const found = [...(check.problems ?? []), ...(check.issues ?? []).filter((i) => issueBlocks(i, 'run'))];
+      if (!check.valid || found.length > 0) {
         const n = Math.max(1, found.length);
         error = `Couldn’t start the run. The workflow has ${n} ${n === 1 ? 'problem' : 'problems'}${found[0] ? `: ${found[0].message}` : ''}. Open the workflow to fix it.`;
         return;

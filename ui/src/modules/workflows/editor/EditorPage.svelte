@@ -34,7 +34,7 @@
   import { autoLayout } from './autoLayout';
   import EditorCanvas from './EditorCanvas.svelte';
   import PhoneOutline from './PhoneOutline.svelte';
-  import { continueClashes, missingSkills, stepProvider, wireAfter } from './stepRules';
+  import { continueClashes, issueBlocks, missingSkills, stepProvider, wireAfter } from './stepRules';
 
   interface Props {
     workflowId: string;
@@ -97,7 +97,8 @@
   const selected = $derived(selectedId ? graph.nodes.find((n) => n.id === selectedId) ?? null : null);
   const zoomText = $derived(zoom && selected ? String((selected.params as Record<string, unknown> | null)?.[zoom.field] ?? '') : '');
   const invalid = $derived(Object.fromEntries(issues.filter((i) => i.node_id).map((i) => [i.node_id!, i.message])));
-  const problems = $derived([...blockers, ...issues.map((i) => i.message)]);
+  const problems = $derived([...blockers.map((text) => ({ text, warning: false })), ...issues.map((i) => ({ text: i.message, warning: i.class === 'warning' }))]);
+  const onlyWarnings = $derived(problems.every((p) => p.warning));
 
   function edit(mutate: (n: WorkflowNode) => void): void {
     if (!selected) return;
@@ -166,7 +167,8 @@
     try {
       const check = await api.post<{ valid: boolean; issues: WorkflowValidationIssue[] }>(`/workflows/${id}/validate`, { graph });
       issues = check.issues ?? [];
-      if (!check.valid) {
+      // A draft saves with its run issues (DR-028); only a save issue stops it.
+      if (issues.some((i) => issueBlocks(i, 'save'))) {
         showProblems = true;
         toasts.error('Not saved — resolve the problems above the canvas');
         return false;
@@ -314,10 +316,10 @@
     <div class="ed">
       <div class="ed-main">
         {#if problems.length}
-          <div class="ed-problems">
-            <Icon name="warning" size={12} />{problems.length} {problems.length === 1 ? 'problem' : 'problems'} ·
+          <div class="ed-problems" class:warn={onlyWarnings} data-testid="wf-editor-problems">
+            <Icon name="warning" size={12} />{problems.length} {onlyWarnings ? 'warning' : 'problem'}{problems.length === 1 ? '' : 's'} ·
             <button type="button" class="ed-link" aria-expanded={showProblems} onclick={() => (showProblems = !showProblems)}>{showProblems ? 'Hide' : 'Show'}</button>
-            {#if showProblems}<ul>{#each problems as p, i (i)}<li>{p}</li>{/each}</ul>{/if}
+            {#if showProblems}<ul>{#each problems as p, i (i)}<li class:warn={p.warning}>{p.warning ? 'Warning: ' : ''}{p.text}</li>{/each}</ul>{/if}
           </div>
         {/if}
         <EditorCanvas {graph} {selectedId} {selectedEdgeId} {invalid} {triggers} {defaultProvider}
@@ -415,6 +417,13 @@
     background: var(--danger-soft);
     color: var(--danger);
     font-size: var(--fs-s);
+  }
+  .ed-problems.warn {
+    background: var(--warning-soft);
+    color: var(--warning);
+  }
+  .ed-problems li.warn {
+    color: var(--text-dim);
   }
   .ed-problems ul {
     flex-basis: 100%;
