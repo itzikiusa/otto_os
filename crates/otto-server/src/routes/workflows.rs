@@ -1205,8 +1205,10 @@ fn flow_templates() -> Vec<WorkflowTemplate> {
                     edge("implement", "iterate"),
                     // Open the PR only when the review→fix loop passed.
                     edge_if("iterate", "pr", "output.satisfied == true"),
-                    // Offer improvements after the loop, pass or fail.
+                    // Offer improvements after the loop, pass or fail — after the
+                    // PR (DR-014: steps run side by side, two outward steps never do).
                     edge("iterate", "improve"),
+                    edge("pr", "improve"),
                 ],
             },
         },
@@ -1249,8 +1251,10 @@ fn flow_templates() -> Vec<WorkflowTemplate> {
                     edge("implement", "iterate"),
                     // Open the PR only when the review→fix loop passed.
                     edge_if("iterate", "pr", "output.satisfied == true"),
-                    // Offer improvements after the loop, pass or fail.
+                    // Offer improvements after the loop, pass or fail — after the
+                    // PR (DR-014: steps run side by side, two outward steps never do).
                     edge("iterate", "improve"),
+                    edge("pr", "improve"),
                 ],
             },
         },
@@ -1368,10 +1372,14 @@ fn flow_templates() -> Vec<WorkflowTemplate> {
                     // Deleting this edge would silently make the self-improve offer
                     // the run's deliverable instead of the report.
                     edge("pr", "report"),
-                    // The final report always runs, even when the loop didn't pass.
+                    // The final report always runs, even when the loop didn't pass,
+                    // and comes last: after the offer too.
                     edge("iterate", "report"),
-                    // Offer improvements after the loop, pass or fail.
+                    edge("improve", "report"),
+                    // Offer improvements after the loop, pass or fail — after the
+                    // PR (DR-014: steps run side by side, two outward steps never do).
                     edge("iterate", "improve"),
+                    edge("pr", "improve"),
                 ],
             },
         },
@@ -1445,10 +1453,14 @@ fn flow_templates() -> Vec<WorkflowTemplate> {
                     // Deleting this edge would silently make the self-improve offer
                     // the run's deliverable instead of the report.
                     edge("pr", "report"),
-                    // The final report always runs, even when the loop didn't pass.
+                    // The final report always runs, even when the loop didn't pass,
+                    // and comes last: after the offer too.
                     edge("iterate", "report"),
-                    // Offer improvements after the loop, pass or fail.
+                    edge("improve", "report"),
+                    // Offer improvements after the loop, pass or fail — after the
+                    // PR (DR-014: steps run side by side, two outward steps never do).
                     edge("iterate", "improve"),
+                    edge("pr", "improve"),
                 ],
             },
         },
@@ -2341,6 +2353,37 @@ mod tests {
             template.description.contains("account") && template.description.contains("space"),
             "destination prerequisites visible before running"
         );
+    }
+
+    /// DR-014: steps run side by side now, so no shipped graph may run two
+    /// steps with an outward effect at once — one must wait for the other.
+    #[test]
+    fn no_side_effect_step_beside_another_in_shipped_graphs() {
+        const OUTWARD: [&str; 7] = [
+            "git_pr",
+            "channel_notify",
+            "product_publish",
+            "api_run",
+            "http_request",
+            "self_improve",
+            "post_review_comments",
+        ];
+        for t in flow_templates() {
+            let g = &t.graph;
+            let outward: Vec<&str> = g
+                .nodes
+                .iter()
+                .filter(|n| OUTWARD.contains(&n.kind.as_str()))
+                .map(|n| n.id.as_str())
+                .collect();
+            for (i, a) in outward.iter().enumerate() {
+                for b in &outward[i + 1..] {
+                    let ordered = otto_workflows::graph::ancestors(g, a).contains(*b)
+                        || otto_workflows::graph::ancestors(g, b).contains(*a);
+                    assert!(ordered, "{}: {a} and {b} can run at the same time", t.id);
+                }
+            }
+        }
     }
 
     #[test]
