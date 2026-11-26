@@ -7,11 +7,24 @@ multi-agent code review, Jira/Confluence product workflows, SSH/database
 connections, an HTTP API client, real token-usage tracking, and Slack/Telegram
 bridges so an agent can work a ticket from a chat thread.
 
-**Version 0.5.0** · macOS (Apple Silicon; Intel from source) · actively developed, so
+**Version 0.6.1** · macOS (Apple Silicon; Intel from source) · actively developed, so
 expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
 
 🎬 **[Watch the product tour](https://github.com/itzikiusa/otto_os/releases/download/walkthroughs/otto-tour-20261125.mp4)**
 (3 minutes, Otto 0.6.0; also in the app under **Help → Walkthroughs**).
+
+### What's new in 0.6.1
+
+- **Signed and notarized by Apple.** Otto is now signed with an Apple
+  Developer ID and notarized. The download opens like any other Mac app: macOS
+  asks once whether to open an app downloaded from the internet, with no
+  **Open Anyway** step in Privacy & Security.
+- **Otto updates itself.** This is the first release that installs updates:
+  *Otto ▸ Check for Updates…* (or the row at the bottom of the sidebar)
+  downloads the new version, verifies it and restarts into it.
+- **Coming from 0.6.0 or earlier:** install this DMG by hand once. The signer
+  changed, so macOS asks again for the permissions Otto uses (Accessibility,
+  Screen Recording, Microphone, the Keychain).
 
 ### What's new in 0.6.0
 
