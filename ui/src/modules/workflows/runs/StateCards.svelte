@@ -80,7 +80,7 @@
       return;
     }
     busy = approve ? 'approve' : 'deny';
-    await answerRequest(wait.thread_id, wait.request_id, approve);
+    await answerRequest(wait, approve, note);
     busy = null;
   }
 

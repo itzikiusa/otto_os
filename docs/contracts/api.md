@@ -2985,7 +2985,7 @@ as before, so the previous build reads every row. New enums end in a catch-all
   text, since, detail?: {live, max?, floor?, ahead?, holders?: string[]}}`), `attention?:
   Attention` (`{kind: approval|question|usage_limit|verify, via?: provider|mcp, text ≤ 300,
   since, thread_id?, request_id?, resets_at?, criterion_id?}` — `criterion_id` for `verify`; answered through `POST
-  /runtime-sessions/{id}/requests/{request_id}`), `error_class?` (runner: `usage_limit ·
+  /runtime-sessions/{id}/requests/{request_id}`, an approval `via: mcp` through `POST /mcp/approvals/{request_id}/decide`), `error_class?` (runner: `usage_limit ·
   rate_limit · auth · provider · stalled · timeout · spawn · server_restart · canceled`;
   engine: `script · outcome_unknown`; `error` stays the step's own words), `thread?:
   StepThread` (`{thread_id, runner: threads|pty, provider, model?, effort?, continued_from?,
