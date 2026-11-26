@@ -9,6 +9,7 @@ pub mod catalog;
 pub mod chat;
 pub mod chat_rejected;
 pub mod chat_resolve;
+pub mod chat_status;
 pub mod checkpoint;
 pub mod context;
 pub mod http;
