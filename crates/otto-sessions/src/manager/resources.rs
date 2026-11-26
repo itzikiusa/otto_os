@@ -1030,6 +1030,37 @@ mod tests {
         assert!(m.memory_pressure_critical().await);
     }
 
+    /// DR-115.4: a person's thread spawn reserves nothing (the gated count
+    /// stays 0); a gated spawn's reservation is gone once its process
+    /// registered — only the process holds the place, until it exits.
+    #[tokio::test]
+    async fn a_spawn_reservation_is_dropped_once_the_process_registers() {
+        let m = manager(true, 0.5).await;
+        let person = agent("p1", serde_json::json!({ "runtime": "structured" }));
+        let none = m.admit_runtime_spawn(&person, None);
+        assert!(!none.is_reserved());
+        assert_eq!(m.machine_status().await.background_live, 0);
+        let (_p_tx, p_rx) = alive();
+        m.register_runtime_child(&person, None, p_rx).await;
+        drop(none);
+        let s = m.machine_status().await;
+        assert_eq!((s.agents_live, s.background_live), (1, 0));
+
+        let step = agent("g1", serde_json::json!({ "source": "workflow" }));
+        let place = m.admit_runtime_spawn(&step, None);
+        assert_eq!(m.machine_status().await.background_live, 1, "reserved");
+        let (g_tx, g_rx) = alive();
+        m.register_runtime_child(&step, None, g_rx).await;
+        drop(place);
+        assert_eq!(m.machine_status().await.background_live, 1, "the process");
+        g_tx.send(Some(0)).unwrap();
+        assert_eq!(
+            m.machine_status().await.background_live,
+            0,
+            "no reservation left behind"
+        );
+    }
+
     /// The waiter hears each new reason in words; the notice says the same.
     #[tokio::test]
     async fn a_waiting_engine_hears_why_and_the_notice_uses_the_same_words() {
