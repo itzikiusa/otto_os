@@ -32,7 +32,8 @@ pub fn effective_hold(status: RunStatus, hold: Option<&RunHold>) -> Option<&RunH
 /// the clock (the end of a run that has not finished). `origin` and
 /// `subject` are computed once at admission (names from the directory
 /// cache, PR URLs) and carried over from `run.overview`; without one, the
-/// origin falls back to the trigger in the run input. `rev` is the row's.
+/// origin falls back to the trigger in the run input and the subject to
+/// what the input names (its PR, ticket, branch, repo). `rev` is the row's.
 pub fn run_overview(
     run: &WorkflowRun,
     graph: &WorkflowGraph,
@@ -179,7 +180,9 @@ pub fn run_overview(
         origin: prev
             .and_then(|o| o.origin.clone())
             .or_else(|| origin_from_input(&run.input)),
-        subject: prev.and_then(|o| o.subject.clone()),
+        subject: prev
+            .and_then(|o| o.subject.clone())
+            .or_else(|| otto_state::workflow_run_search::subject_from_input(&run.input)),
         elapsed_ms: millis(run.started_at, end),
         typical_ms,
         goal: goal_progress(run, graph, prev.and_then(|o| o.goal.as_ref())),

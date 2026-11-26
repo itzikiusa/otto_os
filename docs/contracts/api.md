@@ -2951,13 +2951,14 @@ resumes are bounded by the resume cap above. Backed by migration
 
 **Running list.** `GET /workspaces/{wid}/workflow-runs/active` returns
 `RunListItem = {id, workflow_id, workflow_name, status, started_at, finished_at?,
-duration_ms?, trigger, message?, repo?, branch?, pr?, current_step?, error?}` — one
+duration_ms?, trigger, message?, repo?, branch?, pr?, current_step?, error?, subject?}` — one
 run-history row with no node/input bodies: `trigger` is the run input's
 `trigger` (`chat`, `schedule`, `event`, `webhook`…) or `manual` when none was
 recorded; `message` the input's `msg` (else `prompt`, ≤ 160 chars); `repo` the
 last path segment of the input's working directory (else of its first declared
 repo); `branch` the input's `pr_branch` (else `base`); `pr` the input's `pr` as
-given; `current_step` the running step's name (running runs only); `error` the
+given; `subject` what the run is about (the overview's, else derived from the input
+as below — every row from before overviews existed); `current_step` the running step's name (running runs only); `error` the
 run error (≤ 240 chars).
 
 `ActiveWorkflowRun = {run_id, workflow_id, workspace_id, workflow_name, status,
@@ -3009,7 +3010,10 @@ as before, so the previous build reads every row. New enums end in a catch-all
   `queue = {position, ahead, cap, lane?}`; `failed_step = {node_id, name, error, error_class?}`;
   `time = {queued_ms, waiting_ms, with_you_ms, working_ms}`; `origin = {kind:
   chat|manual|schedule|webhook|event|task|mcp|goal, channel_name?, user_name?, thread_url?}`;
-  `subject = {pr?: {repo, number, url, title?}, ticket?: {key, url, title?}, repo?, branch?}`;
+  `subject = {pr?: {repo, number, url, title?}, ticket?: {key, url, title?}, repo?, branch?}`
+  (recorded at admission, else derived from the input: `pr` from `prs[0]` or `pr` — a
+  number, `#15`, `repo#15` or a PR URL; `ticket` the issue key in `jira_ticket`; `branch`
+  the `pr_branch`, never the `base`; `url` is `""` when the input has none);
   `goal = GoalProgress {iteration, max_iterations, criteria_met, criteria_total, active_ms,
   max_active_ms?, awaiting?}` (while the loop runs the counts are the newest check's, 0 of
   the check's criteria before the first); `hold = RunHold`. The field is `overview`, never

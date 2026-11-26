@@ -603,6 +603,9 @@ export interface RunListItem {
   current_step?: string | null;
   error?: string | null;
   overview?: RunOverview;
+  /** What the run is about: the overview's subject, else derived from the
+   *  input (a run from before overviews existed). */
+  subject?: RunSubject;
 }
 
 /** A page of run history, newest first. */

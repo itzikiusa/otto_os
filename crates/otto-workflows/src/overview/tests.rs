@@ -344,6 +344,36 @@ fn a_settled_run_has_no_now_even_when_a_step_was_left_running() {
     assert_eq!(ov(&r).now.unwrap().node_ids, ["n2"]);
 }
 
+/// The subject is what the run's input names — the pull request, the ticket,
+/// the branch, the repository — and never the base branch; one recorded
+/// earlier is kept.
+#[test]
+fn the_subject_comes_from_the_input_when_none_was_recorded() {
+    let mut r = run("success", json!([done("n1")]));
+    r.input = json!({"trigger": "chat", "jira_ticket": "OT-12", "base": "develop",
+        "working_directory": "/src/accounts-service", "pr": "accounts-service#88"});
+    let s = ov(&r).subject.expect("a subject from the input");
+    let pr = s.pr.expect("the pull request");
+    assert_eq!((pr.repo.as_str(), pr.number), ("accounts-service", 88));
+    assert_eq!(s.ticket.unwrap().key, "OT-12");
+    assert_eq!(
+        (s.repo.as_deref(), s.branch),
+        (Some("accounts-service"), None)
+    );
+
+    r.overview = Some(RunOverview {
+        subject: Some(otto_core::workflows::Subject {
+            branch: Some("feature/kept".into()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    assert_eq!(
+        ov(&r).subject.unwrap().branch.as_deref(),
+        Some("feature/kept")
+    );
+}
+
 #[test]
 fn a_passed_review_leads_with_its_score_and_what_was_posted() {
     let mut review = done("n5");

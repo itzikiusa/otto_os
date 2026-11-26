@@ -1019,6 +1019,10 @@ pub struct RunListItem {
     /// The run's stored overview when fresh (see [`WorkflowRun::overview`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overview: Option<RunOverview>,
+    /// What the run is about: its overview's subject, else derived from the
+    /// input (a run from before overviews existed stores none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<Subject>,
 }
 
 /// A page of [`RunListItem`]s, newest first; `next_cursor` is opaque and

@@ -12,6 +12,7 @@ import type {
   RunListItem,
   RunOverview,
   RunState,
+  RunSubject,
 } from '../../../lib/api/types';
 import { elapsed, type StatusWord } from '../../../lib/statusWords.ts';
 
@@ -106,6 +107,8 @@ export interface InboxRun {
   finishedAt: string | null;
   durationMs: number | null;
   overview: RunOverview | null;
+  /** A history row's own subject, for a row without an overview. */
+  subject?: RunSubject | null;
   state: RunState;
   /** The first line of the ask (history rows). */
   message: string | null;
@@ -129,7 +132,7 @@ export function fromHistory(r: RunListItem): InboxRun {
   return {
     id: r.id, workflowId: r.workflow_id, workflowName: r.workflow_name, status: r.status,
     startedAt: r.started_at, finishedAt: r.finished_at ?? null, durationMs: r.duration_ms ?? null,
-    overview: r.overview ?? null, state: r.overview?.state ?? fallbackState(r.status),
+    overview: r.overview ?? null, subject: r.subject ?? null, state: r.overview?.state ?? fallbackState(r.status),
     message: r.message ?? null, repo: r.repo ?? null, branch: r.branch ?? null, pr: r.pr ?? null,
     currentStep: r.current_step ?? null, error: r.error ?? null,
   };
@@ -153,9 +156,9 @@ export function inboxFolds(runs: readonly InboxRun[], unread: (r: InboxRun) => b
 }
 
 /** Line 2 of a row: the PR or ticket, else the branch or repository, else the ask, else "{workflow} run". */
-export function runTitle(r: Pick<InboxRun, 'overview' | 'message' | 'branch' | 'repo' | 'pr' | 'workflowName'>): string {
-  const s = r.overview?.subject;
-  if (s?.pr) return s.pr.title ? `PR #${s.pr.number} · ${s.pr.title}` : `${s.pr.repo} #${s.pr.number}`;
+export function runTitle(r: Pick<InboxRun, 'overview' | 'subject' | 'message' | 'branch' | 'repo' | 'pr' | 'workflowName'>): string {
+  const s = r.overview?.subject ?? r.subject;
+  if (s?.pr) return s.pr.title ? `PR #${s.pr.number} · ${s.pr.title}` : `${s.pr.repo || 'PR'} #${s.pr.number}`;
   if (s?.ticket) return s.ticket.title ? `${s.ticket.key} · ${s.ticket.title}` : s.ticket.key;
   if (s?.branch || s?.repo) return (s.branch ?? s.repo)!;
   if (r.pr) return r.repo ? `${r.repo} #${r.pr.replace(/^#/, '')}` : `PR ${r.pr}`;
@@ -165,8 +168,8 @@ export function runTitle(r: Pick<InboxRun, 'overview' | 'message' | 'branch' | '
 }
 
 /** Line 1 of a row: "{workflow} · {repository or ticket}". */
-export function runContext(r: Pick<InboxRun, 'overview' | 'workflowName' | 'repo'>): string {
-  const s = r.overview?.subject;
+export function runContext(r: Pick<InboxRun, 'overview' | 'subject' | 'workflowName' | 'repo'>): string {
+  const s = r.overview?.subject ?? r.subject;
   const where = s?.pr?.repo ?? s?.repo ?? s?.ticket?.key ?? r.repo;
   return where ? `${r.workflowName} · ${where}` : r.workflowName;
 }
