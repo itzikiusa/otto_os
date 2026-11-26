@@ -573,6 +573,21 @@ pub struct RunHold {
     pub iteration: Option<u32>,
 }
 
+impl RunHold {
+    /// The one effective-hold rule (DR-105): a stored hold counts only while
+    /// its kind matches the stored status — paused with `canceled`, blocked
+    /// or exhausted with `error`. A hold the previous build left behind on a
+    /// row it retried (then ran again) is ignored. `otto_state`'s `HOLD_SQL`
+    /// is the same rule in SQL.
+    pub fn is_effective(&self, status: RunStatus) -> bool {
+        matches!(
+            (self.kind, status),
+            (HoldKind::Paused, RunStatus::Canceled)
+                | (HoldKind::Blocked | HoldKind::Exhausted, RunStatus::Error)
+        )
+    }
+}
+
 /// One loop's limits raised by Resume / Extend (`limits_json.loops[<node id>]`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct LoopLimits {
@@ -665,6 +680,76 @@ pub struct Criterion {
     /// Command only; default 600, 10..=3,600.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_s: Option<u64>,
+}
+
+/// One criterion's result in a `check` step's output.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CriterionResult {
+    pub id: String,
+    pub text: String,
+    pub verify: VerifyKind,
+    pub met: bool,
+    pub evidence: String,
+    /// `command` | `rule` | `agent` | the person's name.
+    pub verified_by: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckVerdict {
+    Achieved,
+    Continue,
+    Blocked,
+    #[serde(other)]
+    Unknown,
+}
+
+/// The completion review of a `check` with `final_review` (passes only when
+/// approved with no findings).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CompletionReview {
+    pub approved: bool,
+    #[serde(default)]
+    pub findings: Vec<String>,
+}
+
+/// A `check` step's output (also rendered to its step file).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CheckOutput {
+    pub criteria: Vec<CriterionResult>,
+    pub all_met: bool,
+    pub met: u32,
+    pub total: u32,
+    pub progress_pct: u32,
+    pub verdict: CheckVerdict,
+    /// What the next iteration must do.
+    #[serde(default)]
+    pub feedback: String,
+    /// ≤ 3 KiB: unmet criteria with evidence headlines + feedback.
+    #[serde(default)]
+    pub feedback_md: String,
+    #[serde(default)]
+    pub repeat_signature: String,
+    #[serde(default)]
+    pub repeated_failures: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<CompletionReview>,
+}
+
+/// A file sent with the chat message that started or steered a run.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AttachmentRef {
+    pub name: String,
+    pub mime: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+    /// Context-relative (`attachments/<name>`); absent when the copy failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// `start` | `steer`.
+    pub source: String,
 }
 
 /// Per-node execution state, captured during a run.
@@ -762,6 +847,12 @@ pub struct WorkflowCheckpoint {
     /// time: a loop's active time is the sum over its checkpoints).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub active_ms: u64,
+    /// The inner step's thread, so a restart mid-iteration resumes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<Id>,
+    /// Turn ordinal the inner step's prompt started at (`await_settled`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_ordinal: Option<u64>,
 }
 
 fn is_zero(v: &u64) -> bool {
@@ -831,7 +922,8 @@ pub struct WorkflowRun {
     /// `rev` is not the row's) — the server recomputes it then.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overview: Option<RunOverview>,
-    /// Set while the run is held (paused / blocked / exhausted).
+    /// Set while the run is held (paused / blocked / exhausted) — the
+    /// effective hold only ([`RunHold::is_effective`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hold: Option<RunHold>,
     /// Loop limits raised by Resume / Extend.
@@ -841,6 +933,10 @@ pub struct WorkflowRun {
     /// `steering.json`). Filled at the API layer — NOT persisted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steering_queued: Vec<String>,
+    /// Files sent with the starting and steering chat messages. Filled at
+    /// the API layer — NOT persisted on the row.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<AttachmentRef>,
 }
 
 /// Lightweight summary of an in-flight workflow run for the "Running" sidebar
@@ -1201,6 +1297,37 @@ mod tests {
             ..t
         };
         assert_eq!(serde_json::to_value(&shown).unwrap()["available"], false);
+    }
+
+    #[test]
+    fn a_hold_counts_only_with_its_matching_status() {
+        let hold = |kind| RunHold {
+            kind,
+            reason: "r".into(),
+            since: Utc::now(),
+            by: None,
+            node_ids: vec![],
+            iteration: None,
+        };
+        use HoldKind::*;
+        use RunStatus::*;
+        for (kind, status, want) in [
+            (Paused, Canceled, true),
+            (Blocked, Error, true),
+            (Exhausted, Error, true),
+            (Paused, Error, false),
+            (Blocked, Canceled, false),
+            (Paused, Success, false),
+            (Blocked, Running, false),
+            (Exhausted, Pending, false),
+            (Unknown, Error, false),
+        ] {
+            assert_eq!(
+                hold(kind).is_effective(status),
+                want,
+                "{kind:?} × {status:?}"
+            );
+        }
     }
 
     #[test]

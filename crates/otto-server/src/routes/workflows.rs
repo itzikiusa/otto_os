@@ -107,6 +107,7 @@ pub async fn update_workflow(
                 "edited",
                 Some(&user.id),
                 None,
+                req.expected_version,
             )
             .await
             .map_err(ApiError)?,
@@ -194,6 +195,7 @@ pub async fn restore_version(
                 &note,
                 Some(&user.id),
                 Some((&ver.name, &ver.description)),
+                None,
             )
             .await
             .map_err(ApiError)?,

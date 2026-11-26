@@ -255,7 +255,8 @@ export interface GoalProgress {
 
 export type HoldKind = 'paused' | 'blocked' | 'exhausted' | 'unknown';
 
-/** A held run (paused = status canceled, blocked/exhausted = status error). */
+/** A held run (paused = status canceled, blocked/exhausted = status error); a hold
+ *  whose kind does not match the status is stale and never sent. */
 export interface RunHold {
   kind: HoldKind;
   reason: string;
@@ -312,6 +313,44 @@ export interface Criterion {
   command?: string;
   expr?: string;
   timeout_s?: number;
+}
+
+export interface CriterionResult {
+  id: string;
+  text: string;
+  verify: VerifyKind;
+  met: boolean;
+  evidence: string;
+  /** `command` · `rule` · `agent` · the person's name. */
+  verified_by: string;
+}
+
+export type CheckVerdict = 'achieved' | 'continue' | 'blocked' | 'unknown';
+
+/** A `check` step's output. */
+export interface CheckOutput {
+  criteria: CriterionResult[];
+  all_met: boolean;
+  met: number;
+  total: number;
+  progress_pct: number;
+  verdict: CheckVerdict;
+  feedback: string;
+  feedback_md: string;
+  repeat_signature: string;
+  repeated_failures: number;
+  review?: { approved: boolean; findings: string[] };
+}
+
+/** A file sent with the chat message that started or steered a run. */
+export interface AttachmentRef {
+  name: string;
+  mime: string;
+  size_bytes?: number;
+  /** Context-relative (`attachments/<name>`); absent when the copy failed. */
+  path?: string;
+  error?: string;
+  source: 'start' | 'steer';
 }
 
 // Goals (otto-core api/goals.rs).
@@ -479,6 +518,8 @@ export interface WorkflowRun {
   limits?: RunLimits;
   /** Steering notes not yet taken by an agent step. */
   steering_queued?: string[];
+  /** Files sent with the starting and steering chat messages. */
+  attachments?: AttachmentRef[];
 }
 
 export interface WorkflowCheckpoint {
@@ -501,6 +542,9 @@ export interface WorkflowCheckpoint {
   updated_at: string;
   /** The attempt's time minus its time on a person (omitted at 0). */
   active_ms?: number;
+  /** The inner step's thread and the turn ordinal its prompt started at. */
+  thread_id?: Id;
+  start_ordinal?: number;
 }
 
 export interface WorkflowValidationIssue {

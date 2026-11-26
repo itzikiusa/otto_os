@@ -326,6 +326,7 @@ fn mk_run(status: RunStatus, nodes: Vec<NodeRunState>) -> WorkflowRun {
         hold: None,
         limits: None,
         steering_queued: vec![],
+        attachments: vec![],
     }
 }
 

@@ -40,6 +40,8 @@ export interface Attention {
   request_id?: Id;
   /** `usage_limit`: when the provider's limit resets. */
   resets_at?: string;
+  /** `verify`: the criterion a person must record. */
+  criterion_id?: string;
 }
 
 export type OutwardOutcome = 'ok' | 'failed' | 'pending_approval';

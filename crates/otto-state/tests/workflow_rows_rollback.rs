@@ -156,6 +156,8 @@ async fn rows_with_run_view_fields_decode_in_old_types() {
         logs: vec![],
         updated_at: t(4),
         active_ms: 61_000,
+        thread_id: Some("t1".into()),
+        start_ordinal: Some(3),
     };
     repo.save_checkpoint(&run.id, &cp).await.unwrap();
 

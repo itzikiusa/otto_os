@@ -363,7 +363,7 @@ mod tests {
             error: None,
             logs: vec![],
             updated_at: chrono::Utc::now(),
-            active_ms: 0,
+            ..Default::default()
         };
         (dir, repo, run.id, cp)
     }
