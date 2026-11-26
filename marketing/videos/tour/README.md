@@ -21,6 +21,8 @@ scripts/soundtrack.mjs    the score + UI accents, arranged from timing.json → 
 scripts/capture.mjs       isolated daemon + demo DBs + seed + Playwright → public/capture/
 scripts/capture-agent-debug.mjs an agent debugging a real Go service (real delve, MariaDB, Redis) + DB Watch → public/capture/dbg/
 scripts/agent-debug/film.ts  the film's test, appended to the helpers of ui/e2e/desktop-ide-agent-debug-real.spec.ts
+scripts/capture-workflows.mjs Workflows on the fake agents (real runs on the isolated e2e daemon) → public/capture/wf/
+scripts/workflows/film.spec.ts the film's Workflows test, on ui/e2e/workflowsFixture.ts
 scripts/capture-rooms.mjs genuine two-person Rooms footage → public/capture/rooms/
 scripts/reuse-rooms.mjs   the same genuine Rooms clips, cut from the published (hash-checked) capture
 scripts/lib/demo-codex.mjs scripted `codex app-server` for Threads / Personal Agents on the structured runtime
@@ -44,7 +46,7 @@ and is arranged from the edit's music sections in `chapters.json`:
 |---|---|---|
 | Intro build | Meet Otto | The filter opens on a supersaw pad, the pluck arp comes in, then the kick from bar 3, a snare roll, a riser and half a beat of silence |
 | Drop / chorus | Home → Threads | Four-on-the-floor kick, clap with a short room, swung 16th hats with open off-beats, pumping 8th bass, side-chained pad, arp and the lead hook. The last 4 bars are a post-chorus. |
-| Verse | Goal Loops, Workflows, Personal Agents | Lighter hats, a syncopated bass, a darker pad and a prominent arp, with the hook's figure answered on the pluck |
+| Verse | Workflows, Personal Agents | Lighter hats, a syncopated bass, a darker pad and a prominent arp, with the hook's figure answered on the pluck |
 | Chorus | IDE (Beta) → Vault and Skills Lab (incl. Debug with an agent, DB Watch, Git) | Riser and impact in, then the hook again. The last 4 bars are a post-chorus. |
 | Verse | Database Explorer, Connections and cloud | As the first verse |
 | Breakdown | Insights | Drums out, a resonant pad sweep, the hook on the pluck, then a 2-bar riser and snare roll |
@@ -141,6 +143,10 @@ node scripts/contact.mjs public/capture            # optional: contact sheets in
 #     an ottod built with the test-util feature, as the e2e uses).
 OTTO_E2E_BIN=/path/to/ottod OTTO_E2E_GO_DIR=/dir/with/dlv \
   nice -n 10 node scripts/capture-agent-debug.mjs
+
+# 1c. Workflows: real runs acted out by the build's fake agents (otto-fake-claude,
+#     -codex, -agent next to OTTO_E2E_BIN), never a real agent CLI.
+OTTO_E2E_BIN=/path/to/ottod nice -n 10 node scripts/capture-workflows.mjs
 
 # 2. Rooms footage: re-capture, OR reuse a previous genuine capture verbatim.
 OTTO_E2E_BIN=/path/to/ottod OTTO_E2E_PORT=7831 OTTO_E2E_PW_PORT=5231 \
@@ -241,6 +247,20 @@ basename.
   and the phone browser reaches the UI through a local proxy that adds what
   `tailscale serve` adds (the ts.net Host and a 100.x `X-Forwarded-For`). The
   real tailnet, hostname and device tokens never appear on screen.
+
+## Workflows: what is staged
+
+`scripts/capture-workflows.mjs` runs `scripts/workflows/film.spec.ts` with the
+UI's Playwright and `ui/e2e/global-setup.ts`: an isolated daemon (temp data
+dir, its own port, HOME outside the temp dir), the dev UI, and the build's
+fake agent CLIs as the only agents on its PATH. Every run on screen is a real
+run of the engine on the Threads runtime: workflows built with
+`ui/e2e/workflowsFixture.ts`, their steps acted out by `OTTO_FAKE:` scripts
+(a question, a signed-out failure, a goal's edits), the twelve reviewers by
+the fake review persona (`fake-review/reviewer.pre` gives them their work
+time). The goal's checks are real commands (`node --test`, `grep`) on a
+fictional `acme-storefront` repository; Optimize reads the workflow's own
+three runs. Only the agents' words are scripted.
 
 ## Debug with an agent, DB Watch and Updates: what is staged
 

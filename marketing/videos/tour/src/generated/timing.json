@@ -1,12 +1,12 @@
 {
-  "edition": "20261125",
+  "edition": "20261126",
   "bpm": 120,
   "fps": 30,
   "beatFrames": 15,
   "barFrames": 60,
-  "totalBars": 90,
-  "totalFrames": 5400,
-  "totalSeconds": 180,
+  "totalBars": 94,
+  "totalFrames": 5640,
+  "totalSeconds": 188,
   "chapters": [
     {
       "id": "intro",
@@ -119,46 +119,44 @@
       ]
     },
     {
-      "id": "loops",
-      "section": "loops",
-      "title": "Goal Loops",
-      "music": "verse",
-      "startBar": 24,
-      "bars": 3,
-      "startFrame": 1440,
-      "frames": 180,
-      "lines": [
-        {
-          "text": "Give a goal and acceptance checks.",
-          "start": 48.25,
-          "end": 50.85
-        },
-        {
-          "text": "Goal loops plan, execute and evaluate until every check passes.",
-          "start": 51,
-          "end": 53.85
-        }
-      ]
-    },
-    {
       "id": "workflows",
       "section": "workflows",
-      "title": "Workflows and Scheduled Tasks",
-      "music": null,
-      "startBar": 27,
-      "bars": 3,
-      "startFrame": 1620,
-      "frames": 180,
+      "title": "Workflows",
+      "music": "verse",
+      "startBar": 24,
+      "bars": 9,
+      "startFrame": 1440,
+      "frames": 540,
       "lines": [
         {
-          "text": "Workflows chain agents, approvals and tools.",
-          "start": 54.25,
-          "end": 56.85
+          "text": "Workflows opens on Runs: what needs you, what is running and what just finished, in words.",
+          "start": 48.25,
+          "end": 49.85
         },
         {
-          "text": "Scheduled tasks run agents on a cadence and report back.",
-          "start": 57,
-          "end": 59.85
+          "text": "A run page lists every step in order. A review fans out to twelve named reviewers, each with its own conversation.",
+          "start": 50,
+          "end": 54.85
+        },
+        {
+          "text": "A failed run leads with the step's own error and Retry step, on your Mac or your phone.",
+          "start": 55,
+          "end": 58.85
+        },
+        {
+          "text": "Pick each step’s model and effort, as in Threads.",
+          "start": 59,
+          "end": 60.85
+        },
+        {
+          "text": "A goal is a workflow too: it works until every criterion is checked and met.",
+          "start": 61,
+          "end": 64.35
+        },
+        {
+          "text": "Optimize drafts a faster version; you apply it.",
+          "start": 64.5,
+          "end": 65.85
         }
       ]
     },
@@ -167,15 +165,20 @@
       "section": "personal-agents",
       "title": "Personal Agents",
       "music": null,
-      "startBar": 30,
-      "bars": 2,
-      "startFrame": 1800,
-      "frames": 120,
+      "startBar": 33,
+      "bars": 3,
+      "startFrame": 1980,
+      "frames": 180,
       "lines": [
         {
           "text": "A personal agent's Chat is a thread on the same runtime, with its tools and routines.",
-          "start": 60.25,
-          "end": 63.85
+          "start": 66.25,
+          "end": 69.85
+        },
+        {
+          "text": "Scheduled tasks run agents on a cadence and report back.",
+          "start": 70,
+          "end": 71.85
         }
       ]
     },
@@ -184,25 +187,25 @@
       "section": "ide",
       "title": "IDE (Beta)",
       "music": "chorus",
-      "startBar": 32,
+      "startBar": 36,
       "bars": 6,
-      "startFrame": 1920,
+      "startFrame": 2160,
       "frames": 360,
       "lines": [
         {
           "text": "The IDE keeps your projects in the order you added them, and brings back every tab after a restart.",
-          "start": 64.25,
-          "end": 67.85
+          "start": 72.25,
+          "end": 75.85
         },
         {
           "text": "Type with the language server beside you, run a test configuration and see the results.",
-          "start": 68,
-          "end": 71.85
+          "start": 76,
+          "end": 79.85
         },
         {
           "text": "Debug with breakpoints, frames and variables, or ask the agent about the selected code.",
-          "start": 72,
-          "end": 75.85
+          "start": 80,
+          "end": 83.85
         }
       ]
     },
@@ -211,25 +214,25 @@
       "section": "ide",
       "title": "Debug with an agent",
       "music": null,
-      "startBar": 38,
+      "startBar": 42,
       "bars": 6,
-      "startFrame": 2280,
+      "startFrame": 2520,
       "frames": 360,
       "lines": [
         {
           "text": "Ask an agent to debug with Otto. Before anything runs, you see exactly what it will start.",
-          "start": 76.25,
-          "end": 79.85
+          "start": 84.25,
+          "end": 87.85
         },
         {
           "text": "Its breakpoints are marked as its own. At every stop it says what the values show, and waits.",
-          "start": 80,
-          "end": 83.85
+          "start": 88,
+          "end": 91.85
         },
         {
           "text": "Press Proceed to let it go on, or use the debugger yourself to take over.",
-          "start": 84,
-          "end": 87.85
+          "start": 92,
+          "end": 95.85
         }
       ]
     },
@@ -238,15 +241,15 @@
       "section": "ide",
       "title": "DB Watch",
       "music": null,
-      "startBar": 44,
+      "startBar": 48,
       "bars": 2,
-      "startFrame": 2640,
+      "startFrame": 2880,
       "frames": 120,
       "lines": [
         {
           "text": "DB Watch shows the rows your code wrote at every stop: changed cells only, before → after.",
-          "start": 88.25,
-          "end": 91.85
+          "start": 96.25,
+          "end": 99.85
         }
       ]
     },
@@ -255,20 +258,20 @@
       "section": "git",
       "title": "Git and AI review",
       "music": null,
-      "startBar": 46,
+      "startBar": 50,
       "bars": 4,
-      "startFrame": 2760,
+      "startFrame": 3000,
       "frames": 240,
       "lines": [
         {
           "text": "Git opens on History. Your uncommitted changes are its top row.",
-          "start": 92.25,
-          "end": 95.85
+          "start": 100.25,
+          "end": 103.85
         },
         {
           "text": "Stage, commit and draft the message there. Multi-agent review turns findings into tracked fixes.",
-          "start": 96,
-          "end": 99.85
+          "start": 104,
+          "end": 107.85
         }
       ]
     },
@@ -277,20 +280,20 @@
       "section": "product",
       "title": "Product and Design Hall",
       "music": null,
-      "startBar": 50,
+      "startBar": 54,
       "bars": 4,
-      "startFrame": 3000,
+      "startFrame": 3240,
       "frames": 240,
       "lines": [
         {
           "text": "A story's Design tab lists the designs that implement it.",
-          "start": 100.25,
-          "end": 103.85
+          "start": 108.25,
+          "end": 111.85
         },
         {
           "text": "Design Hall is the one home for designs: versions, compare, approve, and comments pinned on the design.",
-          "start": 104,
-          "end": 107.85
+          "start": 112,
+          "end": 115.85
         }
       ]
     },
@@ -299,15 +302,15 @@
       "section": "vault",
       "title": "Vault and Skills Lab",
       "music": null,
-      "startBar": 54,
+      "startBar": 58,
       "bars": 2,
-      "startFrame": 3240,
+      "startFrame": 3480,
       "frames": 120,
       "lines": [
         {
           "text": "The Vault links your docs with backlinks. Skills Lab is the one home for agent skills.",
-          "start": 108.25,
-          "end": 111.85
+          "start": 116.25,
+          "end": 119.85
         }
       ]
     },
@@ -316,20 +319,20 @@
       "section": "database",
       "title": "Database Explorer",
       "music": "verse",
-      "startBar": 56,
+      "startBar": 60,
       "bars": 4,
-      "startFrame": 3360,
+      "startFrame": 3600,
       "frames": 240,
       "lines": [
         {
           "text": "Query MySQL, Postgres, MongoDB, Redis and ClickHouse.",
-          "start": 112.25,
-          "end": 115.85
+          "start": 120.25,
+          "end": 123.85
         },
         {
           "text": "A read-only connection refuses writes. History spans every connection.",
-          "start": 116,
-          "end": 119.85
+          "start": 124,
+          "end": 127.85
         }
       ]
     },
@@ -338,20 +341,20 @@
       "section": "connections",
       "title": "Connections and cloud",
       "music": null,
-      "startBar": 60,
+      "startBar": 64,
       "bars": 4,
-      "startFrame": 3600,
+      "startFrame": 3840,
       "frames": 240,
       "lines": [
         {
           "text": "SSH, AWS, Kubernetes, APIs and the web.",
-          "start": 120.25,
-          "end": 123.85
+          "start": 128.25,
+          "end": 131.85
         },
         {
           "text": "An MCP server that runs through Otto can be available in every workspace, with one set of credentials.",
-          "start": 124,
-          "end": 127.85
+          "start": 132,
+          "end": 135.85
         }
       ]
     },
@@ -360,20 +363,20 @@
       "section": "insights",
       "title": "Insights and Usage",
       "music": "breakdown",
-      "startBar": 64,
+      "startBar": 68,
       "bars": 4,
-      "startFrame": 3840,
+      "startFrame": 4080,
       "frames": 240,
       "lines": [
         {
           "text": "Insights turns your activity into key findings.",
-          "start": 128.25,
-          "end": 131.85
+          "start": 136.25,
+          "end": 139.85
         },
         {
           "text": "Usage shows what is left on each plan, per login.",
-          "start": 132,
-          "end": 135.85
+          "start": 140,
+          "end": 143.85
         }
       ]
     },
@@ -382,35 +385,35 @@
       "section": "rooms",
       "title": "Rooms · collaborate and recap",
       "music": "final",
-      "startBar": 68,
+      "startBar": 72,
       "bars": 8,
-      "startFrame": 4080,
+      "startFrame": 4320,
       "frames": 480,
       "lines": [
         {
           "text": "Start a room from a live session. The host admits who joins.",
-          "start": 136.25,
-          "end": 138.85
+          "start": 144.25,
+          "end": 146.85
         },
         {
           "text": "Share a screen and talk it through.",
-          "start": 139,
-          "end": 141.85
+          "start": 147,
+          "end": 149.85
         },
         {
           "text": "Teammates draw on the shared screen, with permission.",
-          "start": 142,
-          "end": 144.85
+          "start": 150,
+          "end": 152.85
         },
         {
           "text": "Hand over terminal control, and take it back at any time.",
-          "start": 145,
-          "end": 147.85
+          "start": 153,
+          "end": 155.85
         },
         {
           "text": "With everyone's consent, get a local recap: decisions and action items.",
-          "start": 148,
-          "end": 151.85
+          "start": 156,
+          "end": 159.85
         }
       ]
     },
@@ -419,20 +422,20 @@
       "section": "phone-and-remote",
       "title": "Phone access",
       "music": null,
-      "startBar": 76,
+      "startBar": 80,
       "bars": 4,
-      "startFrame": 4560,
+      "startFrame": 4800,
       "frames": 240,
       "lines": [
         {
           "text": "Continue on phone: scan, approve the match on your Mac, and the thread opens.",
-          "start": 152.25,
-          "end": 155.85
+          "start": 160.25,
+          "end": 163.85
         },
         {
           "text": "Or switch the phone to the light version: five tabs, one tap back.",
-          "start": 156,
-          "end": 159.85
+          "start": 164,
+          "end": 167.85
         }
       ]
     },
@@ -441,20 +444,20 @@
       "section": "desktop-app",
       "title": "Updates",
       "music": null,
-      "startBar": 80,
+      "startBar": 84,
       "bars": 4,
-      "startFrame": 4800,
+      "startFrame": 5040,
       "frames": 240,
       "lines": [
         {
           "text": "Check for Updates… shows what is new and downloads the new version.",
-          "start": 160.25,
-          "end": 163.85
+          "start": 168.25,
+          "end": 171.85
         },
         {
           "text": "Restart to finish: Otto lists what keeps running first.",
-          "start": 164,
-          "end": 167.85
+          "start": 172,
+          "end": 175.85
         }
       ]
     },
@@ -463,20 +466,20 @@
       "section": "channels",
       "title": "Everywhere",
       "music": "outro",
-      "startBar": 84,
+      "startBar": 88,
       "bars": 6,
-      "startFrame": 5040,
+      "startFrame": 5280,
       "frames": 360,
       "lines": [
         {
           "text": "Snip the screen, bridge Slack and Telegram, and take Otto with you.",
-          "start": 168.25,
-          "end": 173.85
+          "start": 176.25,
+          "end": 181.85
         },
         {
           "text": "Otto. All your agents, one home.",
-          "start": 174,
-          "end": 179.85
+          "start": 182,
+          "end": 187.85
         }
       ]
     }

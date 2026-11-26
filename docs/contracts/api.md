@@ -4320,7 +4320,7 @@ SteerReq, VerifyCriterionReq}`.
 | POST /api/v1/workspaces/{wid}/goals | ws editor (Workflows Edit) | `GoalSpec` (+ `from?: "insights"`) | `GoalStartResp {workflow, run}`. 400 naming the field (`title` 1–120, `goal` 1–8,000, `criteria` 1–40 with unique `[a-z0-9-]` ids, a command / rule criterion needs its command / rule, `budget.iterations` 1–50, `budget.active_s` 900–28,800, `budget.step_timeout_s` 300–7,200), or naming the invalid built graph; 400 when the workspace budget is blocked. Build: `work.repo_id` must be a repository of the workspace; the run input is `{goal: {title}, repos: [{repo, type: "worktree", name: <repo path>, source: <base or HEAD sha>}]}` (DR-102). Research: `{goal: {title}, research_dir: true}` and the check gains `report` (`test -s findings.md`) |
 | GET /api/v1/workspaces/{wid}/goals | ws viewer (Workflows View) | — | Array: goal runs (each goal workflow's latest run, newest goal first, at most 50: `{id: <run id>, run_id, workflow_id, name, state, started_at, ended_at}`) followed by the workspace's older loops (`{id, name, status, legacy: true}`). The directory list route of kind `goal` |
 | POST /api/v1/workspaces/{wid}/goals/from-loop | ws editor (Workflows Edit) | `CreateGoalLoopReq` (MCP `otto.run_goal_loop`; `autostart` ignored) | `{workflow, run, workflow_id, run_id, ignored: ["planner", "digester", "definer"]}`; `origin_ref = "mcp"`. Criteria: `command` → command (`verify_cmd`, else `verify`), `agent` / legacy `manual` → agent with `how = verify`, `human` → human; ids lower-cased to `[a-z0-9-]`; limits clamped into the goal ranges; `executors[0]` → worker, the rest → extra workers; `evaluator` → checker; `require_review` → `final_review`; `mode: research` → research. 400: `config.graph` ("Engineering-graph goals are not supported any more: put the tasks on a workflow canvas"), a non-null `max_cost_usd`, or a build `repo_path` that is not a registered repository of the workspace |
-| POST /api/v1/goal-loops/{id}/continue | ws editor | `GoalSpec` (the form prefilled from the loop) | `GoalStartResp`; `origin_ref = "goal_loop:<id>"`. Only for a `draft`, `paused`, `blocked` or `exhausted` loop (else 409; 409 when it was continued already). The working place comes from the loop row, never the client: build → `repos: [{repo: <registered repo of repo_path>, type: "worktree", name: <worktree_path, else the repo path>, source: <base_commit, else HEAD>}]`; research → `research_dir: <worktree_path, else <data_dir>/goal-loops/<id>/work>`. Surviving executor sessions of the loop are killed first; the goal text gains "Where the earlier loop got to: …", "Next action: …" and a graph loop's "Tasks, in order: …". The loop is then `stopped` with summary "Continued as a goal — run <id>" |
+| POST /api/v1/goal-loops/{id}/continue | ws editor (Workflows Edit) | `GoalSpec` (the form prefilled from the loop) | `GoalStartResp`; `origin_ref = "goal_loop:<id>"`. Only for a `draft`, `paused`, `blocked` or `exhausted` loop (else 409; 409 when it was continued already). The working place comes from the loop row, never the client: build → `repos: [{repo: <registered repo of repo_path>, type: "worktree", name: <worktree_path, else the repo path>, source: <base_commit, else HEAD>}]`; research → `research_dir: <worktree_path, else <data_dir>/goal-loops/<id>/work>` when that folder exists, else `true` (a fresh `<context>/research`, never the workspace root). Surviving executor sessions of the loop are killed first; the goal text gains "Where the earlier loop got to: …", "Next action: …" and a graph loop's "Tasks, in order: …". The loop is then `stopped` with summary "Continued as a goal — run <id>" |
 | POST /api/v1/reviews/{review_id}/fix-goal | human credential + ws editor | `{target_score?}` | see Code review (`{workflow_id, run_id}`) |
 
 **Any workflow run** (goals included; Workflows class of `/workflow-runs/*`):
@@ -4337,7 +4337,7 @@ SteerReq, VerifyCriterionReq}`.
 
 The Goal Loops controller is gone; its tables stay. These routes serve the history page
 (`#/loops`); every other `/goal-loops` route answers 404. Handlers enforce ws Viewer/Editor
-(the policy exempts `/goal-loops*`).
+(the policy exempts `/goal-loops*` except Continue, which starts a goal and is Workflows Edit).
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
@@ -4346,7 +4346,7 @@ The Goal Loops controller is gone; its tables stay. These routes serve the histo
 | GET /api/v1/goal-loops/{id}/iterations/{idx} | ws viewer | — | GoalLoopIteration in full (`idx` 1-based) |
 | GET /api/v1/goal-loops/{id}/diff | ws viewer | — | `GoalLoopDiff` (bounded diff of the kept worktree against the loop's base ref) |
 | DELETE /api/v1/goal-loops/{id} | ws editor | — | 204 (deletes history; **retains working files and branch**) |
-| POST /api/v1/goal-loops/{id}/continue | ws editor | `GoalSpec` | see Goals |
+| POST /api/v1/goal-loops/{id}/continue | ws editor (Workflows Edit) | `GoalSpec` | see Goals |
 
 
 ## Canvas Studio

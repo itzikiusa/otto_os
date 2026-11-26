@@ -5,7 +5,8 @@
 // Coordinates are normalized to the captured page (1600×900 CSS px @2x):
 // x 0..1 left→right, y 0..1 top→bottom.
 // Stills/clips come from scripts/capture.mjs → public/capture/, the agent-debug
-// and DB Watch stills from scripts/capture-agent-debug.mjs → public/capture/dbg/
+// and DB Watch stills from scripts/capture-agent-debug.mjs → public/capture/dbg/,
+// the Workflows chapter from scripts/capture-workflows.mjs → public/capture/wf/
 // (the IDE opens beside the agent's session, so those shots frame the right
 // half), and the Rooms clips from scripts/capture-rooms.mjs (or
 // scripts/reuse-rooms.mjs: the same footage, cropped clear of the published
@@ -15,6 +16,7 @@ import type { ChapterSpec } from './types';
 
 const cap = (f: string) => `capture/${f}`;
 const dbg = (f: string) => `capture/dbg/${f}`;
+const wf = (f: string) => `capture/wf/${f}`;
 const room = (f: string) => `capture/rooms/${f}`;
 
 export const SCENES: Record<string, ChapterSpec> = {
@@ -201,63 +203,112 @@ export const SCENES: Record<string, ChapterSpec> = {
     ],
   },
 
-  // 3 bars = 12 beats — verse
-  loops: {
-    id: 'loops',
-    group: 'Automate',
-    title: 'Goal Loops',
-    kicker: 'Plan, execute and evaluate until every acceptance check passes',
-    shots: [
-      {
-        kind: 'screen',
-        src: cap('loops.jpg'),
-        beats: 12,
-        label: 'Goal Loops: autonomous iterations with hard budgets',
-        cam: [
-          { b: 0, x: 0.5, y: 0.45, z: 1.05 },
-          { b: 2, x: 0.45, y: 0.3, z: 1.45 },
-          { b: 6.5, x: 0.32, y: 0.74, z: 1.45 },
-        ],
-        callouts: [
-          { b: 1.5, until: 6, x: 0.53, y: 0.24, label: 'Plan → execute → evaluate', side: 'bottom' },
-          { b: 7.5, x: 0.17, y: 0.85, label: 'Machine-checked acceptance criteria', side: 'right' },
-        ],
-      },
-    ],
-  },
-
-  // 3 bars = 12 beats
+  // 9 bars = 36 beats — verse: Workflows on the Threads runtime, captured by
+  // scripts/capture-workflows.mjs (isolated e2e daemon, fake agents, real runs).
   workflows: {
     id: 'workflows',
     group: 'Automate',
-    title: 'Workflows and Scheduled Tasks',
-    kicker: 'Pipelines and schedules in one place',
+    title: 'Workflows',
+    kicker: 'Runs you can read at a glance, on your Mac and your phone',
     shots: [
       {
         kind: 'screen',
-        src: cap('workflows.jpg'),
-        beats: 6,
-        label: 'Workflows chain agents, approvals and tools',
+        src: wf('wf-inbox.jpg'),
+        beats: 4,
+        label: 'Runs: needs you, running, recent',
         cam: [
-          { b: 0, x: 0.5, y: 0.5, z: 1 },
-          { b: 1.5, x: 0.62, y: 0.3, z: 1.35 },
+          { b: 0, x: 0.5, y: 0.45, z: 1.05 },
+          { b: 1, x: 0.56, y: 0.3, z: 1.6 },
+        ],
+        callouts: [{ b: 1.5, x: 0.75, y: 0.115, label: 'Needs you: a question', side: 'left' }],
+      },
+      {
+        kind: 'screen',
+        src: wf('wf-fanout.mp4'),
+        from: 0,
+        rate: 1.6,
+        beats: 6,
+        transition: 'push',
+        label: 'The run page: every step in order, the review fanned out',
+        cam: [
+          { b: 0, x: 0.45, y: 0.45, z: 1.1 },
+          { b: 1.5, x: 0.32, y: 0.42, z: 1.35 },
+        ],
+        callouts: [{ b: 2, x: 0.19, y: 0.2, label: 'One tick per reviewer', side: 'bottom' }],
+      },
+      {
+        kind: 'screen',
+        src: wf('wf-reviewer.jpg'),
+        beats: 4,
+        transition: 'whip',
+        label: "A reviewer's conversation, beside the list",
+        cam: [
+          { b: 0, x: 0.5, y: 0.45, z: 1.1 },
+          { b: 1, x: 0.56, y: 0.35, z: 1.4 },
         ],
       },
       {
         kind: 'screen',
-        src: cap('scheduled-tasks.jpg'),
-        beats: 6,
-        transition: 'push',
-        label: 'Scheduled tasks run agents on a cadence and report back',
+        src: wf('wf-failed.jpg'),
+        beats: 4,
+        transition: 'wipe',
+        label: "A failed run leads with the step's own error",
         cam: [
-          { b: 0, x: 0.5, y: 0.4, z: 1.08 },
-          { b: 1.5, x: 0.5, y: 0.22, z: 1.45 },
+          { b: 0, x: 0.5, y: 0.4, z: 1.2 },
+          { b: 1, x: 0.42, y: 0.22, z: 1.75 },
+        ],
+        highlights: [{ b: 1.5, x: 0.16, y: 0.2, w: 0.26, h: 0.083 }],
+        callouts: [{ b: 2, x: 0.912, y: 0.026, label: 'Retry step', side: 'bottom' }],
+      },
+      { kind: 'custom', id: 'wf-phone', beats: 4, label: 'The same run, on your phone' },
+      {
+        kind: 'screen',
+        src: wf('wf-editor-model.jpg'),
+        beats: 4,
+        transition: 'push',
+        label: "Each step's model and effort, as in Threads",
+        cam: [
+          { b: 0, x: 0.5, y: 0.45, z: 1.1 },
+          { b: 1, x: 0.66, y: 0.38, z: 1.5 },
+        ],
+      },
+      {
+        kind: 'screen',
+        src: wf('wf-goal-form.jpg'),
+        beats: 3,
+        transition: 'whip',
+        label: 'A goal: what must be true, and how it is checked',
+        cam: [
+          { b: 0, x: 0.5, y: 0.45, z: 1.15 },
+          { b: 1, x: 0.5, y: 0.42, z: 1.45 },
+        ],
+      },
+      {
+        kind: 'screen',
+        src: wf('wf-goal-run.jpg'),
+        beats: 4,
+        transition: 'push',
+        label: 'It works until every criterion is met',
+        cam: [
+          { b: 0, x: 0.45, y: 0.35, z: 1.2 },
+          { b: 1, x: 0.29, y: 0.33, z: 1.9 },
+        ],
+      },
+      {
+        kind: 'screen',
+        src: wf('wf-optimize.jpg'),
+        beats: 3,
+        transition: 'wipe',
+        label: 'Optimize drafts a faster version; you apply it',
+        cam: [
+          { b: 0, x: 0.5, y: 0.45, z: 1.1 },
+          { b: 1, x: 0.68, y: 0.36, z: 1.5 },
         ],
       },
     ],
   },
 
-  // 2 bars = 8 beats — a personal agent's Chat is a runtime thread
+  // 3 bars = 12 beats — a personal agent's Chat is a runtime thread; Scheduled Tasks
   'personal-agents': {
     id: 'personal-agents',
     group: 'Automate',
@@ -274,6 +325,17 @@ export const SCENES: Record<string, ChapterSpec> = {
         cam: [
           { b: 0, x: 0.45, y: 0.78, z: 1.4 },
           { b: 2.5, x: 0.4, y: 0.42, z: 1.42 },
+        ],
+      },
+      {
+        kind: 'screen',
+        src: cap('scheduled-tasks.jpg'),
+        beats: 4,
+        transition: 'push',
+        label: 'Scheduled tasks run agents on a cadence and report back',
+        cam: [
+          { b: 0, x: 0.5, y: 0.4, z: 1.08 },
+          { b: 1.5, x: 0.5, y: 0.22, z: 1.45 },
         ],
       },
     ],

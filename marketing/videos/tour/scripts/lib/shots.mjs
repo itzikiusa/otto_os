@@ -319,7 +319,7 @@ export const SHOTS = {
     await approval.waitFor({ timeout: 20_000 });
     await wait(1400);
     await still(page, c, 'threads-approval');
-    await glide(page, approval.getByRole('button', { name: /^(Approve|Allow once)/ }).first());
+    await glide(page, page.getByRole('button', { name: /^(Approve|Allow once)/ }).first());
     await thread.getByText('Draft PR', { exact: false }).last().waitFor({ timeout: 20_000 }).catch(() => console.log('  (no draft PR yet)'));
     await wait(2200);
     await still(page, c, 'threads-pr');
@@ -425,20 +425,6 @@ export const SHOTS = {
     await context.close();
   },
   // ── Automate ──────────────────────────────────────────────────────────────
-  loops: async (c) => {
-    const { context, page } = await open(c, 'loops', { settle: 3500 });
-    await tryClick(page.getByText('Checkout p95 under 300 ms'), 'loop card');
-    await wait(3000);
-    await still(page, c, 'loops');
-    await context.close();
-  },
-  workflows: async (c) => {
-    const { context, page } = await open(c, c.meta.ids.workflow ? `workflows/${c.meta.ids.workflow}` : 'workflows', { settle: 3500 });
-    await tryClick(page.getByText('PR review pipeline', { exact: true }), 'pick workflow');
-    await wait(2500);
-    await still(page, c, 'workflows');
-    await context.close();
-  },
   'scheduled-tasks': async (c) => {
     const { context, page } = await open(c, 'scheduled-tasks', { settle: 3000 });
     await still(page, c, 'scheduled-tasks');
@@ -916,7 +902,7 @@ export const SHOTS = {
     await still(page, c, 'phone');
     await context.close();
   },
-  // The opt-in light version on a phone: five tabs, one tap back.
+  // The opt-in light version on a phone: five tabs (Workflows among them), one tap back.
   'phone-light': async (c) => {
     const { context, page } = await open(c, 'threads', { settle: 5000, viewport: { width: 390, height: 844 }, dpr: 3, mobile: true });
     await tryClick(page.getByRole('button', { name: /^More/ }), 'more sheet');
@@ -925,9 +911,9 @@ export const SHOTS = {
     if (await tryClick(page.getByTestId('light-toggle'), 'light toggle')) {
       await wait(3000);
       await still(page, c, 'phone-light');
-      await tryClick(page.getByRole('button', { name: /^Usage/ }).or(page.getByRole('link', { name: /^Usage/ })), 'usage tab');
+      await tryClick(page.getByRole('button', { name: /^Workflows/ }).or(page.getByRole('link', { name: /^Workflows/ })), 'workflows tab');
       await wait(3500);
-      await still(page, c, 'phone-light-usage');
+      await still(page, c, 'phone-light-workflows');
     }
     await context.close();
   },

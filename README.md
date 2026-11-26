@@ -10,7 +10,7 @@ bridges so an agent can work a ticket from a chat thread.
 **Version 0.6.1** · macOS (Apple Silicon; Intel from source) · actively developed, so
 expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
 
-🎬 **[Watch the product tour](https://github.com/itzikiusa/otto_os/releases/download/walkthroughs/otto-tour-20261125.mp4)**
+🎬 **[Watch the product tour](https://github.com/itzikiusa/otto_os/releases/download/walkthroughs/otto-tour-20261126.mp4)**
 (3 minutes, Otto 0.6.0; also in the app under **Help → Walkthroughs**).
 
 ### What's new in 0.6.1

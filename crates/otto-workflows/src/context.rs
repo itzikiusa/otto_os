@@ -101,7 +101,7 @@ pub struct RepoEntry {
 /// names (`script.output_file`, `post_review_comments.summary_files[]`) must
 /// be bare; validation rejects the rest at save.
 pub fn is_bare_name(name: &str) -> bool {
-    !name.trim().is_empty()
+    !matches!(name.trim(), "" | ".")
         && !name.contains(['/', '\\', '\0'])
         && !name.contains("..")
         && !Path::new(name).is_absolute()
@@ -1706,6 +1706,8 @@ mod tests {
             "a/b.md",
             "a\\b",
             "..",
+            ".",
+            " . ",
             "x\0y",
             "a..b",
         ] {

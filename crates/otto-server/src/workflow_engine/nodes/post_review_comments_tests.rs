@@ -395,3 +395,54 @@ async fn summary_files_outside_the_bare_names_are_never_posted() {
     assert!(summary.contains("| gate | ok |"), "{summary}");
     assert!(!summary.contains("INTERNAL"), "{summary}");
 }
+
+/// CR1-052 (4): a bare summary-file name that is a symlink out of the run
+/// dir is never read into the PR summary.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_bare_summary_file_name_that_links_out_of_the_run_dir_is_never_posted() {
+    let p = post_fixture(201).await;
+    p.seed_run("passed", true).await;
+    let dir = p.f.files.dir_str().unwrap();
+    let secret = p.f.dir.path().join("secret.md");
+    std::fs::write(&secret, "OUTSIDE").unwrap();
+    std::os::unix::fs::symlink(&secret, format!("{dir}/leak.md")).unwrap();
+    p.run(json!({"summary_files": ["leak.md", "go-standards-evals.md"]}))
+        .await
+        .unwrap();
+    let notes = p.posts("/notes").await;
+    let summary = notes.last().expect("a summary");
+    assert!(summary.contains("| gate | ok |"), "{summary}");
+    assert!(!summary.contains("OUTSIDE"), "{summary}");
+}
+
+/// CR1-052 (4): one inline post failing and one landing is a partial
+/// delivery, not done and not failed.
+#[tokio::test]
+async fn one_inline_post_failing_of_two_is_a_partial_delivery() {
+    let p = post_fixture(201).await;
+    Mock::given(method("POST"))
+        .and(path(format!("{MR}/discussions")))
+        .and(body_string_contains("bug A"))
+        .respond_with(ResponseTemplate::new(500))
+        .with_priority(1)
+        .mount(&p.forge)
+        .await;
+    p.draft(CommentSeverity::Bug, Some("a.rs"), Some(3), "bug A")
+        .await;
+    p.draft(CommentSeverity::Bug, Some("b.rs"), Some(4), "bug B")
+        .await;
+    p.seed_run("passed", true).await;
+    let (out, _) = p.run(json!({"summary": false})).await.unwrap();
+    assert_eq!(
+        (out["posted"].as_u64(), out["failed"].as_u64()),
+        (Some(1), Some(1)),
+        "{out}"
+    );
+    let d = &out["deliverables"][0];
+    assert_eq!(
+        (d["label"].as_str(), d["state"].as_str()),
+        (Some("PR comments"), Some("partial")),
+        "{out}"
+    );
+}

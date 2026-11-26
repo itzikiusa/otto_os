@@ -45,6 +45,8 @@ async function until(api, id, pred, ms = 60000) {
     await sleep(500);
   }
 }
+/** Like `until`, but a timeout returns the last view, so the check itself can fail. */
+const poll = (api, id, pred, ms) => until(api, id, pred, ms).catch(() => api('GET', '/workflow-runs/' + id));
 async function setup(api, d) {
   const ws = await api('POST', '/workspaces', { name: 'Upgrade', root_path: path.dirname(d['ws/repo']) });
   await api('POST', '/workspaces/' + ws.id + '/repos', { path: d['ws/repo'], name: 'repo' });
@@ -95,9 +97,10 @@ async function upgrade() {
     check('(b) approving after the upgrade finishes the run', ga.status === 'success', ga.status + ' ' + (ga.error ?? ''));
     const afterOk = await life.api('GET', '/workflow-runs/' + ok.id), afterBad = await life.api('GET', '/workflow-runs/' + bad.id);
     check('(f) finished runs unchanged', afterOk.status === beforeRuns.ok.status && afterBad.status === beforeRuns.bad.status, afterOk.status + ' / ' + afterBad.status);
+    // The failure was settled before the retry: only a later revision that is settled again is the retry's outcome.
     await life.api('POST', '/workflow-runs/' + bad.id + '/retry-node', { node_id: 'n2' });
-    const rr = await until(life.api, bad.id, (r) => settled(r) && r.nodes.find((n) => n.node_id === 'n2').attempts !== undefined, 60000);
-    check('(f) retry-node of the old failure runs on the new engine', settled(rr), rr.status + ' ' + (rr.error ?? ''));
+    const rr = await poll(life.api, bad.id, (r) => r.rev > afterBad.rev && settled(r), 60000);
+    check('(f) retry-node of the old failure runs on the new engine', rr.rev > afterBad.rev && settled(rr), 'rev ' + afterBad.rev + ' → ' + rr.rev + ', ' + rr.status + ' ' + (rr.error ?? ''));
     const after = Object.fromEntries(await Promise.all(Object.entries(wfs).map(async ([k, w]) => [k, JSON.stringify((await life.api('GET', '/workflows/' + w.id)).graph)])));
     check('definitions unchanged by the upgrade', Object.keys(before).every((k) => before[k] === after[k]), Object.keys(before).filter((k) => before[k] !== after[k]).join(','));
     await life.stop();
@@ -131,8 +134,8 @@ async function rollback() {
     const gate = await run('gate');
     await until(life.api, gate.id, (r) => r.waiting_approval);
     const sideRun = await run('side');
-    await until(life.api, sideRun.id, (r) => r.nodes?.filter((n) => n.status === 'running').length === 2);
-    check('new build: two steps running side by side at the stop', true);
+    const both = await poll(life.api, sideRun.id, (r) => r.nodes?.filter((n) => n.status === 'running').length === 2);
+    check('new build: two steps running side by side at the stop', both.nodes?.filter((n) => n.status === 'running').length === 2, JSON.stringify(both.nodes?.map((n) => [n.node_id, n.status])));
     await life.stop();
 
     life = await boot(OLD, iso, PORT, OLD_ENV, path.join(OUT, 'rollback-old.log'));
@@ -145,9 +148,9 @@ async function rollback() {
       const res = await Promise.all(routes.map((p) => life.api('GET', p).then(() => 'ok', (e) => p + ' ' + e.status)));
       check('old build opens run ' + id + "'s page routes", res.every((r) => r === 'ok'), res.filter((r) => r !== 'ok').join(', '));
     }
-    await sleep(3000);
-    const sv = await life.api('GET', '/workflow-runs/' + sideRun.id);
-    check('old build settles or resumes the side-by-side run it found running', true, sv.status + ' ' + (sv.error ?? ''));
+    // Its steps' scripted work is 60 s: resumed or failed, the run settles well inside 180 s.
+    const sv = await poll(life.api, sideRun.id, settled, 180000);
+    check('old build settles the side-by-side run it found running', settled(sv), sv.status + ' ' + (sv.error ?? '') + ' ' + JSON.stringify(sv.nodes?.map((n) => [n.node_id, n.status])));
     const gv = await life.api('GET', '/workflow-runs/' + gate.id);
     check('old build still shows the parked approval', gv.waiting_approval, gv.status);
     await life.stop();

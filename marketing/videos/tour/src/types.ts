@@ -58,7 +58,7 @@ export interface ScreenShot {
 
 export interface CustomShot {
   kind: 'custom';
-  id: 'intro' | 'desktop' | 'outro' | 'phone-pair' | 'phone-light';
+  id: 'intro' | 'desktop' | 'outro' | 'phone-pair' | 'phone-light' | 'wf-phone';
   beats: number;
   label?: string;
 }

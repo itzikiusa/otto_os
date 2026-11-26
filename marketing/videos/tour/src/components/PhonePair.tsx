@@ -5,7 +5,7 @@ import { SNAP, beats, sp } from '../motion';
 
 const TINT = GROUP_TINT.Everywhere;
 
-const Phone: React.FC<{ src: string; label: string; step: string; k: number; x: number; rot: number }> = ({ src, label, step, k, x, rot }) => (
+const Phone: React.FC<{ src: string; label: string; step: string; k: number; x: number; rot: number; tint?: string }> = ({ src, label, step, k, x, rot, tint = TINT }) => (
   <div
     style={{
       position: 'absolute',
@@ -22,7 +22,7 @@ const Phone: React.FC<{ src: string; label: string; step: string; k: number; x: 
         borderRadius: 58,
         background: '#0d0d10',
         padding: 14,
-        boxShadow: `0 40px 100px rgba(0,0,0,0.6), 0 0 0 2px #3a3a42, inset 0 0 0 2px #1d1d22, 0 0 70px ${rgba(TINT, 0.25)}`,
+        boxShadow: `0 40px 100px rgba(0,0,0,0.6), 0 0 0 2px #3a3a42, inset 0 0 0 2px #1d1d22, 0 0 70px ${rgba(tint, 0.25)}`,
       }}
     >
       <div style={{ width: '100%', height: '100%', borderRadius: 45, overflow: 'hidden', position: 'relative' }}>
@@ -31,7 +31,7 @@ const Phone: React.FC<{ src: string; label: string; step: string; k: number; x: 
       </div>
     </div>
     <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, justifyContent: 'center', marginTop: 22 }}>
-      <span style={{ font: `800 26px ${FONT}`, color: TINT }}>{step}</span>
+      <span style={{ font: `800 26px ${FONT}`, color: tint }}>{step}</span>
       <span style={{ font: `700 28px ${FONT}`, color: C.text, letterSpacing: -0.4 }}>{label}</span>
     </div>
   </div>
@@ -82,7 +82,7 @@ export const PhoneLight: React.FC<{ frames: number }> = () => {
   return (
     <AbsoluteFill>
       <Phone src="capture/phone-light.jpg" step="1" label="Five tabs, opening on Threads" k={sp(f, beats(0.25), SNAP)} x={430} rot={-2.5} />
-      <Phone src="capture/phone-light-usage.jpg" step="2" label="Usage, a tap away" k={sp(f, beats(1.25), SNAP)} x={1130} rot={2.5} />
+      <Phone src="capture/phone-light-workflows.jpg" step="2" label="Workflows, a tap away" k={sp(f, beats(1.25), SNAP)} x={1130} rot={2.5} />
       <div
         style={{
           position: 'absolute',
@@ -102,6 +102,20 @@ export const PhoneLight: React.FC<{ frames: number }> = () => {
       >
         Opt-in · one tap back to the full app
       </div>
+    </AbsoluteFill>
+  );
+};
+
+/**
+ * Workflows on a phone (captured by scripts/capture-workflows.mjs at 390 px):
+ * the Runs inbox, then the review's run page. Lands on successive downbeats.
+ */
+export const PhoneWorkflows: React.FC<{ frames: number }> = () => {
+  const f = useCurrentFrame();
+  return (
+    <AbsoluteFill>
+      <Phone src="capture/wf/wf-phone-inbox.jpg" step="1" label="Runs, in words" k={sp(f, beats(0.25), SNAP)} x={430} rot={-2.5} tint={GROUP_TINT.Automate} />
+      <Phone src="capture/wf/wf-phone-run.jpg" step="2" label="The review, live" k={sp(f, beats(1.25), SNAP)} x={1130} rot={2.5} tint={GROUP_TINT.Automate} />
     </AbsoluteFill>
   );
 };

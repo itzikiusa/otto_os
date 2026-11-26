@@ -1,6 +1,6 @@
 {
   "title": "Otto — product tour",
-  "edition": "20261125",
+  "edition": "20261126",
   "bpm": 120,
   "fps": 30,
   "chapters": [
@@ -57,33 +57,40 @@
       ]
     },
     {
-      "id": "loops",
-      "section": "loops",
-      "title": "Goal Loops",
-      "bars": 3,
-      "music": "verse",
-      "captions": [
-        "Give a goal and acceptance checks.",
-        "Goal loops plan, execute and evaluate until every check passes."
-      ]
-    },
-    {
       "id": "workflows",
       "section": "workflows",
-      "title": "Workflows and Scheduled Tasks",
-      "bars": 3,
+      "title": "Workflows",
+      "bars": 9,
+      "music": "verse",
+      "captionBeats": [
+        4,
+        10,
+        8,
+        4,
+        7,
+        3
+      ],
       "captions": [
-        "Workflows chain agents, approvals and tools.",
-        "Scheduled tasks run agents on a cadence and report back."
+        "Workflows opens on Runs: what needs you, what is running and what just finished, in words.",
+        "A run page lists every step in order. A review fans out to twelve named reviewers, each with its own conversation.",
+        "A failed run leads with the step's own error and Retry step, on your Mac or your phone.",
+        "Pick each step’s model and effort, as in Threads.",
+        "A goal is a workflow too: it works until every criterion is checked and met.",
+        "Optimize drafts a faster version; you apply it."
       ]
     },
     {
       "id": "personal-agents",
       "section": "personal-agents",
       "title": "Personal Agents",
-      "bars": 2,
+      "bars": 3,
       "captions": [
-        "A personal agent's Chat is a thread on the same runtime, with its tools and routines."
+        "A personal agent's Chat is a thread on the same runtime, with its tools and routines.",
+        "Scheduled tasks run agents on a cadence and report back."
+      ],
+      "captionBeats": [
+        8,
+        4
       ]
     },
     {

@@ -604,6 +604,8 @@ async fn older_loops_are_read_only_history_and_continue_as_a_goal_once() {
         "{goals}"
     );
 
+    let kept = d.tmp.path().join("goal-loops").join(&l.id).join("work");
+    std::fs::create_dir_all(&kept).unwrap();
     let (st, body) = d
         .call(
             &d.root,
@@ -617,7 +619,6 @@ async fn older_loops_are_read_only_history_and_continue_as_a_goal_once() {
         body["workflow"]["origin_ref"],
         format!("goal_loop:{}", l.id)
     );
-    let kept = d.tmp.path().join("goal-loops").join(&l.id).join("work");
     assert_eq!(
         body["run"]["input"]["research_dir"],
         json!(kept.to_string_lossy())
@@ -656,6 +657,19 @@ async fn older_loops_are_read_only_history_and_continue_as_a_goal_once() {
         .call(&d.root, "GET", "/workspaces/ws1/goal-loops", None)
         .await;
     assert_eq!(list, json!([]));
+    // CR2-006: a loop whose kept folder is gone gets a fresh research folder,
+    // never the workspace root.
+    let gone = d.seed_loop("research").await;
+    let (st, body) = d
+        .call(
+            &d.root,
+            "POST",
+            &format!("/goal-loops/{}/continue", gone.id),
+            Some(research_spec("No folder")),
+        )
+        .await;
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(body["run"]["input"]["research_dir"], true, "{body}");
 }
 
 /// proves: G-20, GL18.3 / GL24.7 — a loop still running when this build boots

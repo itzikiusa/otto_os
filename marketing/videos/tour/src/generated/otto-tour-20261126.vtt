@@ -1,0 +1,189 @@
+WEBVTT
+
+1
+00:00:00.250 --> 00:00:03.850
+Your agents. Your repos. Your data. Your infrastructure.
+
+2
+00:00:04.000 --> 00:00:07.850
+Otto: every coding agent, one native Mac app.
+
+3
+00:00:08.250 --> 00:00:10.850
+Home shows live sessions, dashboards, usage and findings.
+
+4
+00:00:11.000 --> 00:00:13.850
+Light, dark and right-to-left, one design system.
+
+5
+00:00:14.250 --> 00:00:17.850
+Press ⌘K, type or speak. Otto runs it or answers.
+
+6
+00:00:18.000 --> 00:00:21.850
+⌥Space calls the bar from anywhere on your Mac.
+
+7
+00:00:22.250 --> 00:00:27.850
+Agents is one workspace: your sessions in an inbox beside the canvas, status in words.
+
+8
+00:00:28.000 --> 00:00:33.850
+Switch a session between Terminal and Chat, tile it with the rest, or broadcast one prompt to many.
+
+9
+00:00:34.250 --> 00:00:40.850
+Threads run every structured agent: Claude, Codex, Antigravity, OpenCode, pi, Gemini, Grok and Muse.
+
+10
+00:00:41.000 --> 00:00:47.850
+Plans, commands and diffs stream live. Approve inline, or compare models side by side.
+
+11
+00:00:48.250 --> 00:00:49.850
+Workflows opens on Runs: what needs you, what is running and what just finished, in words.
+
+12
+00:00:50.000 --> 00:00:54.850
+A run page lists every step in order. A review fans out to twelve named reviewers, each with its own conversation.
+
+13
+00:00:55.000 --> 00:00:58.850
+A failed run leads with the step's own error and Retry step, on your Mac or your phone.
+
+14
+00:00:59.000 --> 00:01:00.850
+Pick each step’s model and effort, as in Threads.
+
+15
+00:01:01.000 --> 00:01:04.350
+A goal is a workflow too: it works until every criterion is checked and met.
+
+16
+00:01:04.500 --> 00:01:05.850
+Optimize drafts a faster version; you apply it.
+
+17
+00:01:06.250 --> 00:01:09.850
+A personal agent's Chat is a thread on the same runtime, with its tools and routines.
+
+18
+00:01:10.000 --> 00:01:11.850
+Scheduled tasks run agents on a cadence and report back.
+
+19
+00:01:12.250 --> 00:01:15.850
+The IDE keeps your projects in the order you added them, and brings back every tab after a restart.
+
+20
+00:01:16.000 --> 00:01:19.850
+Type with the language server beside you, run a test configuration and see the results.
+
+21
+00:01:20.000 --> 00:01:23.850
+Debug with breakpoints, frames and variables, or ask the agent about the selected code.
+
+22
+00:01:24.250 --> 00:01:27.850
+Ask an agent to debug with Otto. Before anything runs, you see exactly what it will start.
+
+23
+00:01:28.000 --> 00:01:31.850
+Its breakpoints are marked as its own. At every stop it says what the values show, and waits.
+
+24
+00:01:32.000 --> 00:01:35.850
+Press Proceed to let it go on, or use the debugger yourself to take over.
+
+25
+00:01:36.250 --> 00:01:39.850
+DB Watch shows the rows your code wrote at every stop: changed cells only, before → after.
+
+26
+00:01:40.250 --> 00:01:43.850
+Git opens on History. Your uncommitted changes are its top row.
+
+27
+00:01:44.000 --> 00:01:47.850
+Stage, commit and draft the message there. Multi-agent review turns findings into tracked fixes.
+
+28
+00:01:48.250 --> 00:01:51.850
+A story's Design tab lists the designs that implement it.
+
+29
+00:01:52.000 --> 00:01:55.850
+Design Hall is the one home for designs: versions, compare, approve, and comments pinned on the design.
+
+30
+00:01:56.250 --> 00:01:59.850
+The Vault links your docs with backlinks. Skills Lab is the one home for agent skills.
+
+31
+00:02:00.250 --> 00:02:03.850
+Query MySQL, Postgres, MongoDB, Redis and ClickHouse.
+
+32
+00:02:04.000 --> 00:02:07.850
+A read-only connection refuses writes. History spans every connection.
+
+33
+00:02:08.250 --> 00:02:11.850
+SSH, AWS, Kubernetes, APIs and the web.
+
+34
+00:02:12.000 --> 00:02:15.850
+An MCP server that runs through Otto can be available in every workspace, with one set of credentials.
+
+35
+00:02:16.250 --> 00:02:19.850
+Insights turns your activity into key findings.
+
+36
+00:02:20.000 --> 00:02:23.850
+Usage shows what is left on each plan, per login.
+
+37
+00:02:24.250 --> 00:02:26.850
+Start a room from a live session. The host admits who joins.
+
+38
+00:02:27.000 --> 00:02:29.850
+Share a screen and talk it through.
+
+39
+00:02:30.000 --> 00:02:32.850
+Teammates draw on the shared screen, with permission.
+
+40
+00:02:33.000 --> 00:02:35.850
+Hand over terminal control, and take it back at any time.
+
+41
+00:02:36.000 --> 00:02:39.850
+With everyone's consent, get a local recap: decisions and action items.
+
+42
+00:02:40.250 --> 00:02:43.850
+Continue on phone: scan, approve the match on your Mac, and the thread opens.
+
+43
+00:02:44.000 --> 00:02:47.850
+Or switch the phone to the light version: five tabs, one tap back.
+
+44
+00:02:48.250 --> 00:02:51.850
+Check for Updates… shows what is new and downloads the new version.
+
+45
+00:02:52.000 --> 00:02:55.850
+Restart to finish: Otto lists what keeps running first.
+
+46
+00:02:56.250 --> 00:03:01.850
+Snip the screen, bridge Slack and Telegram, and take Otto with you.
+
+47
+00:03:02.000 --> 00:03:07.850
+Otto. All your agents, one home.

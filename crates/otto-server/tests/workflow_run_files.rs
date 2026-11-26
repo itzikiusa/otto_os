@@ -295,6 +295,15 @@ async fn download_returns_the_bytes_as_an_attachment() {
     assert_eq!(&resp.bytes().await.unwrap()[..], b"PK\x03\x04\0\0binary");
     assert_eq!(get(&d.viewer, "id_rsa").await.unwrap().status(), 403);
     assert_eq!(get(&d.viewer, "../secret.txt").await.unwrap().status(), 400);
+    // CR1-052 (3): a symlink out of the dir, and another workspace's member.
+    #[cfg(unix)]
+    {
+        let resp = get(&d.viewer, "escape.txt").await.unwrap();
+        assert_eq!(resp.status(), 400);
+        assert!(!resp.text().await.unwrap().contains("s3cret"));
+    }
+    let st = get(&d.outsider, "blob.bin").await.unwrap().status();
+    assert!(st == 403 || st == 404, "{st}");
     // A name no header can carry (a control character, non-ASCII) still downloads.
     let odd = "a\rb ü;.txt";
     std::fs::write(d.tmp.path().join("workflow-context/run1").join(odd), "odd").unwrap();
@@ -326,6 +335,12 @@ async fn the_run_view_lists_its_attachments_and_recomputes_a_missing_overview() 
         serde_json::to_vec(&[spec]).unwrap(),
     )
     .unwrap();
+    // A chat run: its origin lives in the input the progress projection strips.
+    sqlx::query("UPDATE workflow_runs SET input_json = ? WHERE id = 'run1'")
+        .bind(r#"{"trigger": "chat", "user": "vera"}"#)
+        .execute(&d.pool)
+        .await
+        .unwrap();
     let get = |path: &str| {
         d.http
             .get(format!("{}/api/v1/workflow-runs/run1{path}", d.base))
@@ -338,10 +353,13 @@ async fn the_run_view_lists_its_attachments_and_recomputes_a_missing_overview() 
         "{run}"
     );
     assert_eq!(run["overview"]["state"], "succeeded", "{run}");
+    assert_eq!(run["overview"]["origin"]["user_name"], "vera", "{run}");
     let progress: Value = get("/progress").await.unwrap().json().await.unwrap();
+    let ov = &progress["run"]["overview"];
+    assert_eq!(ov["state"], "succeeded", "{progress}");
     assert_eq!(
-        progress["run"]["overview"]["state"], "succeeded",
-        "{progress}"
+        ov["origin"], run["overview"]["origin"],
+        "/progress recomputes from the full row (CR2-005): {progress}"
     );
 }
 
