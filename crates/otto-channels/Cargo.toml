@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# The recording channel adapter (`otto_channels::test_util`) for other crates'
+# tests; enabled by otto-server's `test-util`.
+test-util = []
+
 [dependencies]
 otto-core.workspace = true
 otto-state.workspace = true

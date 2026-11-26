@@ -326,6 +326,10 @@ pub async fn build_adapter(
     integ: &Integration,
 ) -> Option<Arc<dyn Adapter>> {
     let ws = &integ.workspace_id;
+    #[cfg(any(test, feature = "test-util"))]
+    if let Some(recording) = crate::test_util::installed(ws.as_str()) {
+        return Some(recording);
+    }
     match integ.channel {
         Channel::Telegram => {
             let token = otto_core::secrets::get_async(secrets, &format!("chan-bot-{ws}-telegram"))
