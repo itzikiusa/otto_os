@@ -158,6 +158,18 @@ export interface ChildThread {
 
 export type DeliverableState = 'done' | 'partial' | 'failed' | 'pending_approval' | 'unknown';
 
+/** A file from the chat message that started (`start`) or steered (`steer`) a
+ *  run, as copied into its context dir (`attachments.json`). */
+export interface AttachmentRef {
+  name: string;
+  mime: string;
+  size_bytes?: number;
+  /** Context-relative, `attachments/<safe name>`; absent when not received. */
+  path?: string;
+  error?: string;
+  source: 'start' | 'steer';
+}
+
 /** Something a step put outside Otto. */
 export interface Deliverable {
   label: string;

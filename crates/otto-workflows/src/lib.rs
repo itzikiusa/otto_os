@@ -5,6 +5,7 @@
 //! rebuilding otto-server. The engine (`otto_server::workflow_engine`) and the
 //! routes re-use these through `crate::workflow_*` aliases in otto-server.
 
+pub mod attachments;
 pub mod catalog;
 pub mod chat;
 pub mod chat_rejected;
@@ -42,6 +43,8 @@ use tokio::sync::broadcast;
 pub trait WorkflowCtx: Clone + Send + Sync + 'static {
     /// The daemon state DB (workflows, triggers, runs).
     fn pool(&self) -> &DbPool;
+    /// The daemon data dir (runs' context dirs live under it).
+    fn data_dir(&self) -> &std::path::Path;
     /// The daemon event bus (subscribed to by the event-trigger listener).
     fn events(&self) -> &broadcast::Sender<Event>;
     /// Workspace lookups (a run executes in its workflow's workspace).
