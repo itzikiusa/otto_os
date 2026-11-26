@@ -23,7 +23,7 @@ pub mod connection_export;
 pub mod email_sender;
 pub mod findings;
 pub mod fs;
-pub mod goal_loops;
+pub mod goals;
 pub mod grants;
 pub mod grpc;
 pub mod handover;

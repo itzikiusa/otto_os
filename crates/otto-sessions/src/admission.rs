@@ -141,7 +141,7 @@ pub fn take_permit_key(meta: &mut Value) -> Option<String> {
 /// Also the [`ORCHESTRATOR_TURN_SOURCES`]: headless one-shot turns engines run
 /// through the orchestrator's own claude PTY, gated via
 /// `SessionManager::background_admission_hook`.
-pub const ADMISSION_GATED_SOURCES: [&str; 17] = [
+pub const ADMISSION_GATED_SOURCES: [&str; 16] = [
     "review",
     "review_summarizer",
     "skilleval",
@@ -152,7 +152,6 @@ pub const ADMISSION_GATED_SOURCES: [&str; 17] = [
     "vault-docs-review",
     "insights",
     "run_with_otto",
-    "goal_loop",
     "scheduled_task",
     "finding",
     "personal_agent",
@@ -1240,13 +1239,7 @@ mod tests {
     #[test]
     fn only_unattended_background_agents_are_gated() {
         let meta = |s: &str| json!({ "source": s });
-        for s in [
-            "review",
-            "review_summarizer",
-            "workflow",
-            "scheduled_task",
-            "goal_loop",
-        ] {
+        for s in ["review", "review_summarizer", "workflow", "scheduled_task"] {
             assert_eq!(
                 gated_source(SessionKind::Agent, Some(&meta(s))),
                 Some(s),

@@ -540,3 +540,48 @@ fn a_goal_run_carries_its_progress_and_says_it_reached_the_goal() {
         "Goal reached — 2 of 2 criteria met in 3 iterations"
     );
 }
+
+/// goal.md §3.5: while its loop runs, a goal run says which iteration it is
+/// in, and keeps the last check's counts it already knew.
+#[test]
+fn a_running_goal_says_which_iteration_it_is_in() {
+    let mut g = graph();
+    g.nodes.push(WorkflowNode {
+        id: "goal".into(),
+        kind: "loop".into(),
+        name: "Work toward the goal".into(),
+        x: 0.0,
+        y: 0.0,
+        params: json!({"steps": [{"kind": "agent_prompt"}, {"kind": "check"}]}),
+        retry: None,
+    });
+    let mut r: WorkflowRun = serde_json::from_value(json!({
+        "id": "r1", "workflow_id": "wf", "workspace_id": "ws", "status": "running",
+        "input": {}, "started_at": t(0), "rev": 3,
+        "nodes": [{"node_id": "goal", "status": "running", "started_at": t(0), "step_no": 1,
+            "logs": ["🔁 iteration 1/6", "▶ Work — iteration 1…", "🔁 iteration 2/6"]}],
+    }))
+    .unwrap();
+    let before = otto_core::workflows::GoalProgress {
+        iteration: 1,
+        max_iterations: 6,
+        criteria_met: 1,
+        criteria_total: 3,
+        ..Default::default()
+    };
+    r.overview = Some(RunOverview {
+        goal: Some(before),
+        ..Default::default()
+    });
+    let o = run_overview(&r, &g, None, None, t(100));
+    let goal = o.goal.clone().expect("goal progress while running");
+    assert_eq!(
+        (goal.iteration, goal.max_iterations, goal.criteria_met),
+        (2, 6, 1)
+    );
+    assert!(
+        o.headline.starts_with("Iteration 2 of 6 — "),
+        "{}",
+        o.headline
+    );
+}

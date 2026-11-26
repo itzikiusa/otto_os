@@ -143,8 +143,6 @@ pub struct ServerCtx {
     pub vault_docs_refine: crate::vault_docs_agent::RefineRegistry,
     // -- Goal Loops --------------------------------------------------------
     pub goal_loops_repo: otto_state::GoalLoopsRepo,
-    /// Per-loop controller runtime handles (start/pause/resume/stop).
-    pub goal_loops: crate::goal_loop::GoalLoopRegistry,
     // -- Scheduled Tasks ---------------------------------------------------
     /// Recurring agent jobs (tasks + run history). The scheduler
     /// (`scheduled_tasks_scheduler`) fires due tasks; the engine

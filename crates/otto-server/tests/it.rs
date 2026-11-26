@@ -106,6 +106,8 @@ mod transcript_long_session;
 mod ui_control;
 #[path = "wf_compat.rs"]
 mod wf_compat;
+#[path = "wf_goal.rs"]
+mod wf_goal;
 #[path = "wf_lifecycle.rs"]
 mod wf_lifecycle;
 #[path = "workflow_run_files.rs"]
@@ -137,5 +139,3 @@ fn every_integration_test_file_is_linked() {
 
 #[path = "draft_headless.rs"]
 mod draft_headless;
-#[path = "goal_graph_routes.rs"]
-mod goal_graph_routes;

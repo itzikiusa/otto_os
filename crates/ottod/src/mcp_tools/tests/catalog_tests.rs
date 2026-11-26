@@ -123,6 +123,36 @@ fn pr_number_accepts_the_outward_name_and_its_alias() {
     assert!(arg_pr_number(&json!({})).unwrap_err().contains("`number`"));
 }
 
+/// `otto.control_workflow_run` (DR-104) is a governed DANGEROUS tool: a
+/// session sees it only when enabled, and never as a native twin, so every
+/// call goes through the governed invoke route (allow-list → approval → audit).
+#[test]
+fn control_workflow_run_is_governed_never_native() {
+    let tool = "otto_control_workflow_run";
+    let on = EnabledInfo {
+        names: vec!["otto.control_workflow_run".into()],
+        ui_granted: false,
+        filter: None,
+    };
+    let listed = |info: &EnabledInfo| {
+        governed_tools_for_session(info)
+            .iter()
+            .any(|t| t["name"] == tool)
+    };
+    assert!(listed(&on));
+    assert!(!listed(&EnabledInfo {
+        names: vec![],
+        ..on
+    }));
+    let native = tool_catalog_for_source(None);
+    assert!(!native["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t["name"] == tool));
+    assert!(otto_mcp::outward::DANGEROUS.contains(&"control_workflow_run"));
+}
+
 /// The `tools/list` size budget: everything a default session can be
 /// shown, UI tools hidden (no grant). Fails when the catalog silently
 /// grows past the budget — raise it deliberately, with a reason.

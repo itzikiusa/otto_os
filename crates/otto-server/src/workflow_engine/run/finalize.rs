@@ -201,10 +201,8 @@ pub(super) async fn store_overview(
     workflow: &Workflow,
     run_id: &Id,
     rev: i64,
-) {
-    let Ok(run) = repo.get_run(run_id).await else {
-        return;
-    };
+) -> Option<otto_core::workflows::RunOverview> {
+    let run = repo.get_run(run_id).await.ok()?;
     let mut ov = otto_workflows::overview::run_overview(
         &run,
         &workflow.graph,
@@ -214,4 +212,5 @@ pub(super) async fn store_overview(
     );
     ov.rev = rev;
     let _ = repo.set_overview(run_id, rev, &ov).await;
+    Some(ov)
 }

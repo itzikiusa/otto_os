@@ -152,8 +152,12 @@ pub(super) async fn run(
             .map(str::to_string)
     };
     let continued_from = text("continue_from");
-    let mut continue_thread = None;
-    if let Some(src) = &continued_from {
+    // A loop step with `same_thread` names the previous iteration's thread.
+    let mut continue_thread = text("continue_thread");
+    if let Some(src) = continued_from
+        .as_ref()
+        .filter(|_| continue_thread.is_none())
+    {
         continue_thread = source_thread(ctx, run_id, src).await;
         if continue_thread.is_none() {
             let _ = log_tx.send(format!("thread of {src} was removed — started a fresh one"));
@@ -217,6 +221,7 @@ pub(super) async fn run(
             start_ordinal,
             provider: provider.to_string(),
             continued_from: continued_from.clone(),
+            label: otto_workflows::step_util::iteration_label(&node.id, label),
         }),
         StepEvent::Working => note(StepNote::Phase(StepPhase::Working, None)),
         StepEvent::NeedsYou(a) => note(StepNote::NeedsYou(a)),
@@ -354,7 +359,8 @@ pub(super) async fn close_settled(
     for c in st
         .children
         .iter()
-        .filter(|c| c.status == "success" && c.label.ends_with("earlier turn"))
+        .filter(|c| c.status == "success")
+        .filter(|c| c.label.ends_with("earlier turn") || c.label.contains(" · iteration "))
     {
         if let Some(id) = &c.thread_id {
             r.close(id, until).await;

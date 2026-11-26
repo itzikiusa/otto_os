@@ -36,22 +36,33 @@ pub(in crate::workflow_engine) async fn execute(
     let steps = input.get("_steps").cloned().unwrap_or_else(|| json!({}));
     let ictx =
         json!({"iteration": iteration, "steps": steps, "last": input, "input": env.run_input});
-    let at = otto_workflows::script_run::ScriptRun {
-        files: &env.files,
-        run_id: run_id.as_str(),
-        run_cwd: &env.run_cwd,
-        step_base: &base,
-    };
-    let host = super::script::Host(ctx);
-    // Boxed: a check inside a loop must fit a 2 MiB worker stack.
-    let decided = Box::pin(check_run::decide_commands_and_rules(
-        &host,
-        &at,
-        &cp.criteria,
-        &ictx,
-    ))
-    .await
-    .map_err(otto_core::Error::Upstream)?;
+    // On a task of its own (a fresh stack): a check inside a loop sits deep
+    // in the driver's poll stack, and its commands' frames overflowed a
+    // 2 MiB worker on Resume. Dropping the step aborts the task (and so the
+    // command's process group).
+    let (cx, files, rid, cwd, b) = (
+        ctx.clone(),
+        env.files.clone(),
+        run_id.to_string(),
+        env.run_cwd.clone(),
+        base.clone(),
+    );
+    let (criteria, ic) = (cp.criteria.clone(), ictx.clone());
+    let task = tokio::spawn(async move {
+        let at = otto_workflows::script_run::ScriptRun {
+            files: &files,
+            run_id: &rid,
+            run_cwd: &cwd,
+            step_base: &b,
+        };
+        check_run::decide_commands_and_rules(&super::script::Host(&cx), &at, &criteria, &ic).await
+    });
+    let guard = Abort(task.abort_handle());
+    let decided = task
+        .await
+        .map_err(|e| otto_core::Error::Internal(e.to_string()))?;
+    drop(guard);
+    let decided = decided.map_err(otto_core::Error::Upstream)?;
     let handoff = |ext: &str| env.files.step_md_path(&base).map(|p| p.with_extension(ext));
     // One agent turn on a fresh thread — never the worker's: independence.
     let turn = async |label: &str, prompt: &str, h: Option<std::path::PathBuf>| {
@@ -158,4 +169,13 @@ pub(in crate::workflow_engine) async fn execute(
         .write_named(&format!("{base}.md"), &out.step_file());
     logs.push(format!("{} of {} criteria met", out.met, out.total));
     Ok((check_run::output(&out), logs))
+}
+
+/// Aborts the command task when the step is dropped (cancel, pause, skip).
+struct Abort(tokio::task::AbortHandle);
+
+impl Drop for Abort {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }

@@ -524,7 +524,6 @@ fn scope_of(event: &Event) -> Scope<'_> {
         | Event::PlanRun { workspace_id, .. }
         // Review, workflow, and skill-eval events are workspace-scoped too.
         | Event::ReviewChanged { workspace_id, .. }
-        | Event::GoalLoopUpdated { workspace_id, .. }
         | Event::WorkflowRunUpdated { workspace_id, .. }
         | Event::SkillEvalUpdated { workspace_id, .. }
         | Event::SkillReviewUpdated { workspace_id, .. }

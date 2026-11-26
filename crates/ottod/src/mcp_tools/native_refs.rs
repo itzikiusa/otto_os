@@ -14,7 +14,7 @@ use super::*;
 pub(super) const NATIVE_DIRECTORY_TOOLS: &[(&str, &str)] = &[
     ("otto_list_workspaces", "workspace"),
     ("otto_list_workflows", "workflow"),
-    ("otto_list_goal_loops", "goal_loop"),
+    ("otto_list_goal_loops", "goal"),
     ("otto_list_broker_clusters", "broker_cluster"),
     ("otto_list_product_stories", "product_story"),
     ("otto_list_agent_rooms", "agent_room"),

@@ -19,6 +19,7 @@ use std::sync::{Mutex, OnceLock};
 
 use otto_core::domain::{NoticeAction, NoticeKind, NoticeSeverity};
 use otto_core::event::Event;
+use otto_core::workflows::{HoldKind, RunHold};
 use otto_state::{NewNotice, WorkflowsRepo};
 use tokio::sync::broadcast::error::RecvError;
 use tracing::{info, warn};
@@ -97,7 +98,7 @@ pub async fn post(ctx: &ServerCtx, n: RunNotice) {
     }
 }
 
-/// Workflow runs and goal loops report through the event bus; this listener
+/// Workflow runs (goals included) report through the event bus; this listener
 /// turns their terminal / attention states into notices (scheduled tasks and
 /// personal agents notify inline from their engines). Parks on the bus, so it
 /// costs no idle wakeups.
@@ -116,21 +117,18 @@ pub fn spawn_listener(ctx: ServerCtx) {
                     return;
                 }
             };
-            match ev {
-                Event::WorkflowRunUpdated {
-                    run_id,
-                    status,
-                    node_id,
-                    waiting_approval,
-                    ..
-                } => {
-                    on_workflow_run(&ctx, &run_id, &status, node_id.as_deref(), waiting_approval)
-                        .await
-                }
-                Event::GoalLoopUpdated {
-                    loop_id, status, ..
-                } => on_goal_loop(&ctx, &loop_id, &status).await,
-                _ => {}
+            if let Event::WorkflowRunUpdated {
+                run_id,
+                status,
+                node_id,
+                waiting_approval,
+                overview,
+                ..
+            } = ev
+            {
+                let hold = overview.and_then(|o| o.hold);
+                let ev = (status.as_str(), node_id.as_deref(), waiting_approval);
+                on_workflow_run(&ctx, &run_id, ev, hold).await
             }
         }
     });
@@ -145,14 +143,19 @@ enum RunVerdict {
     Succeeded,
     /// Parked at a human-approval node: one notice per (run, node).
     NeedsApproval,
+    /// Held blocked or out of budget (goal.md §6.4): one notice per hold.
+    Held,
     Nothing,
 }
 
-fn run_verdict(status: &str, waiting_approval: bool) -> RunVerdict {
-    match status {
-        "error" => RunVerdict::Failed,
-        "success" => RunVerdict::Succeeded,
-        "running" if waiting_approval => RunVerdict::NeedsApproval,
+fn run_verdict(status: &str, waiting_approval: bool, hold: Option<HoldKind>) -> RunVerdict {
+    match (status, hold) {
+        (_, Some(HoldKind::Blocked | HoldKind::Exhausted)) => RunVerdict::Held,
+        // Paused: the person did it.
+        (_, Some(_)) => RunVerdict::Nothing,
+        ("error", _) => RunVerdict::Failed,
+        ("success", _) => RunVerdict::Succeeded,
+        ("running", _) if waiting_approval => RunVerdict::NeedsApproval,
         _ => RunVerdict::Nothing,
     }
 }
@@ -175,14 +178,18 @@ fn clear_approval_gates(run_id: &str) {
 async fn on_workflow_run(
     ctx: &ServerCtx,
     run_id: &str,
-    status: &str,
-    node_id: Option<&str>,
-    waiting_approval: bool,
+    (status, node_id, waiting_approval): (&str, Option<&str>, bool),
+    hold: Option<RunHold>,
 ) {
-    if matches!(status, "success" | "error" | "canceled") {
-        clear_approval_gates(run_id);
+    let hold_key = streak_key("wf_hold", run_id);
+    match status {
+        "success" | "error" | "canceled" => clear_approval_gates(run_id),
+        _ => clear_streak(&hold_key), // a resumed run: its next hold notifies again
     }
-    let verdict = run_verdict(status, waiting_approval);
+    let verdict = run_verdict(status, waiting_approval, hold.as_ref().map(|h| h.kind));
+    if verdict == RunVerdict::Held && !begin_streak(&hold_key) {
+        return;
+    }
     if verdict == RunVerdict::Nothing {
         return;
     }
@@ -204,7 +211,13 @@ async fn on_workflow_run(
     let key = streak_key("workflow", &run.workflow_id);
     if verdict == RunVerdict::Succeeded {
         clear_streak(&key);
-        return;
+        if !run
+            .workflow_name
+            .as_deref()
+            .is_some_and(|n| n.starts_with("Goal · "))
+        {
+            return;
+        }
     }
     let Ok(wf) = repo.get(&run.workflow_id).await else {
         return;
@@ -219,6 +232,37 @@ async fn on_workflow_run(
         workspace_id: Some(run.workspace_id.clone()),
         user_id: Some(wf.created_by.clone()),
     };
+    if let Some(hold) = hold.filter(|_| verdict == RunVerdict::Held) {
+        let what = match hold.kind {
+            HoldKind::Exhausted => "ran out of budget",
+            _ => "is blocked and needs you",
+        };
+        let (title, body) = (format!("“{}” {what}", wf.name), hold.reason);
+        let n = RunNotice {
+            key: hold_key,
+            severity: NoticeSeverity::Warn,
+            title,
+            body,
+            ..base
+        };
+        return post(ctx, n).await;
+    }
+    if verdict == RunVerdict::Succeeded {
+        if wf.origin.as_deref() == Some("goal") {
+            let title = format!(
+                "Goal “{}” reached its goal",
+                wf.name.trim_start_matches("Goal · ")
+            );
+            let n = RunNotice {
+                key: format!("goal_done:{run_id}"),
+                severity: NoticeSeverity::Info,
+                title,
+                ..base
+            };
+            post(ctx, n).await;
+        }
+        return;
+    }
     if let Some(gate) = gate {
         post(
             ctx,
@@ -242,47 +286,6 @@ async fn on_workflow_run(
                 .clone()
                 .unwrap_or_else(|| "The run ended with an error.".into()),
             ..base
-        },
-    )
-    .await;
-}
-
-/// Goal-loop status → (severity, title suffix) for statuses worth a notice;
-/// `None` for the rest. A running loop ends the streak.
-fn loop_notice(status: &str) -> Option<(NoticeSeverity, &'static str)> {
-    match status {
-        "exhausted" => Some((NoticeSeverity::Warn, "ran out of budget")),
-        "blocked" => Some((NoticeSeverity::Warn, "is blocked and needs you")),
-        "failed" => Some((NoticeSeverity::Error, "failed")),
-        "succeeded" => Some((NoticeSeverity::Info, "reached its goal")),
-        _ => None,
-    }
-}
-
-async fn on_goal_loop(ctx: &ServerCtx, loop_id: &str, status: &str) {
-    let key = streak_key("goal_loop", loop_id);
-    let Some((severity, what)) = loop_notice(status) else {
-        if status == "running" {
-            clear_streak(&key);
-        }
-        return;
-    };
-    if !begin_streak(&key) {
-        return;
-    }
-    let Ok(l) = ctx.goal_loops_repo.get(&loop_id.to_string()).await else {
-        return;
-    };
-    post(
-        ctx,
-        RunNotice {
-            key,
-            severity,
-            title: format!("Goal loop “{}” {what}", l.name),
-            body: l.error.clone().or(l.summary.clone()).unwrap_or_default(),
-            route: format!("loops/{}", l.id),
-            workspace_id: Some(l.workspace_id.clone()),
-            user_id: Some(l.created_by.clone()),
         },
     )
     .await;
@@ -346,12 +349,32 @@ mod tests {
 
     #[test]
     fn workflow_events_map_to_verdicts() {
-        assert_eq!(run_verdict("error", false), RunVerdict::Failed);
-        assert_eq!(run_verdict("success", false), RunVerdict::Succeeded);
-        assert_eq!(run_verdict("running", true), RunVerdict::NeedsApproval);
-        assert_eq!(run_verdict("running", false), RunVerdict::Nothing);
+        assert_eq!(run_verdict("error", false, None), RunVerdict::Failed);
+        assert_eq!(run_verdict("success", false, None), RunVerdict::Succeeded);
+        assert_eq!(
+            run_verdict("running", true, None),
+            RunVerdict::NeedsApproval
+        );
+        assert_eq!(run_verdict("running", false, None), RunVerdict::Nothing);
         // A user's cancel is not a failure to tell them about.
-        assert_eq!(run_verdict("canceled", false), RunVerdict::Nothing);
+        assert_eq!(run_verdict("canceled", false, None), RunVerdict::Nothing);
+    }
+
+    #[test]
+    fn a_hold_is_a_notice_only_when_it_needs_a_person() {
+        assert_eq!(
+            run_verdict("error", false, Some(HoldKind::Blocked)),
+            RunVerdict::Held
+        );
+        assert_eq!(
+            run_verdict("error", false, Some(HoldKind::Exhausted)),
+            RunVerdict::Held
+        );
+        assert_eq!(
+            run_verdict("canceled", false, Some(HoldKind::Paused)),
+            RunVerdict::Nothing
+        );
+        assert_eq!(run_verdict("error", false, None), RunVerdict::Failed);
     }
 
     #[test]
@@ -366,17 +389,6 @@ mod tests {
         assert!(!begin_streak(&other), "other runs' gates untouched");
         clear_approval_gates("run-gate-test");
         clear_approval_gates("run-gate-other");
-    }
-
-    #[test]
-    fn goal_loop_statuses_worth_a_notice() {
-        assert!(loop_notice("exhausted").is_some());
-        assert!(loop_notice("blocked").is_some());
-        assert!(loop_notice("failed").is_some());
-        assert!(loop_notice("succeeded").is_some());
-        assert!(loop_notice("running").is_none());
-        assert!(loop_notice("paused").is_none());
-        assert!(loop_notice("stopped").is_none());
     }
 
     #[test]

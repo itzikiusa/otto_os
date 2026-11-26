@@ -249,7 +249,7 @@ async fn run_gate_caps_parallel_runs_at_two() {
         return;
     }
     assert_eq!(max_parallel_runs(), 2);
-    let gate = run_gate();
+    let gate = otto_workflows::run_queue::run_gate();
     let a = gate.try_acquire().expect("first run starts");
     let b = gate.try_acquire().expect("second run starts");
     assert!(gate.try_acquire().is_err(), "third run must queue");
