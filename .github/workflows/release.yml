@@ -19,7 +19,8 @@ name: Release
 # Nothing reaches users until the owner publishes the draft: the in-app updater
 # reads https://github.com/<repo>/releases/latest/download/latest.json, which
 # only resolves to a published, non-prerelease release. A -rc tag makes a
-# prerelease draft. Setup and the one-step release: docs/RELEASE.md.
+# prerelease draft; published, it reaches only the copies that opted in to
+# release candidates. Setup and the one-step release: docs/RELEASE.md.
 #
 # Every job refuses the TEST signing identity / TEST update key the repo
 # carries until the owner's real ones replace them. Actions are pinned to commit

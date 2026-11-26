@@ -50,7 +50,15 @@ source build — updates come from git".
 
 **Settings → Updates** (System group; root; desktop app only): the running
 version and channel, the last check, **Check for updates**, **Install updates
-automatically**, and the skipped version with **Unskip**.
+automatically**, **Include release candidates**, and the skipped version with
+**Unskip**.
+
+**Include release candidates** (off by default): Otto normally offers final
+versions only — GitHub's latest release, which is never a pre-release. With
+the switch on it offers the newest release of any kind, so a candidate such
+as 0.6.2-rc.1 shows up, and later the final 0.6.2. Changing the switch checks
+again at once; turning it off forgets a candidate that was on offer and keeps
+the installed version until a newer final one is out.
 
 ## Safety
 
@@ -70,13 +78,17 @@ automatically**, and the skipped version with **Unskip**.
 | Update dialog, per-window host | `ui/src/shell/UpdateDialog.svelte`, `UpdateHost.svelte` (lazy, `overlays.svelte.ts`) |
 | Menu item | `check-updates` in `ui/src/lib/menu.ts` |
 | Settings | `ui/src/modules/settings/UpdatesSettings.svelte` (`sections.ts` id `updates`, `desktopOnly`) |
-| Shell commands | `update_state`, `update_check`, `update_download`, `update_restart`, `update_set_auto`, `update_skip`, `update_result_seen`; event `otto://update` (the finisher's log is revealed with the opener's `reveal_item_in_dir`) |
+| Shell commands | `update_state`, `update_check`, `update_download`, `update_restart`, `update_set_auto`, `update_set_prereleases`, `update_skip`, `update_result_seen`; event `otto://update` (the finisher's log is revealed with the opener's `reveal_item_in_dir`) |
 | Daemon | `GET /api/v1/system/restart-impact` (see `docs/contracts/api.md`) |
 
 ## Troubleshooting
 
 - **No row although a release is out** — the account is not root, this is a
   source build, or the version is skipped (Settings → Updates → Unskip).
+- **No candidate although one is published** — **Include release candidates**
+  is off, the candidate is still a draft, or GitHub's API refused the list
+  (it limits anonymous requests per address; Otto then looks at the latest
+  final release and tries again at the next check).
 - **"Couldn't check for updates"** — the Mac is offline or GitHub is
   unreachable; **Retry**.
 - **Update failed and was undone** — **Details → Show the update log**.

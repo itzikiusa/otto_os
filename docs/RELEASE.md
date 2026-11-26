@@ -56,6 +56,9 @@ commit, and nothing reads or writes a cache.
 Nothing reaches anyone until you **publish** the draft. Installed apps read
 `https://github.com/itzikiusa/otto_os/releases/latest/download/latest.json`,
 which resolves only to the newest published release that is not a prerelease.
+A copy with **Settings ▸ Updates ▸ Include release candidates** on reads the
+newest published release of any kind instead (GitHub's API list), so a
+published pre-release reaches those copies and no others.
 
 ### One-time setup (owner)
 
@@ -193,20 +196,26 @@ need a Mac (or a macOS VM) that has never had Otto, under a normal user
 account. Use release candidates built by the workflow, e.g. `0.6.1-rc.1`,
 `0.6.1-rc.2` and `0.6.1-rc.3`.
 
-Installed apps look only at `/releases/latest`, and GitHub never counts a
-pre-release as "latest". So publish each candidate as the **Latest release**,
-not as a pre-release. The workflow drafts `-rc` versions as pre-releases, so
-change that when you publish:
-`gh release edit v0.6.1-rc.2 --repo itzikiusa/otto_os --draft=false --prerelease=false --latest`.
+A candidate stays a **pre-release**, which is how the workflow drafts a `-rc`
+version: publish the draft as it is
+(`gh release edit v0.6.1-rc.4 --repo itzikiusa/otto_os --draft=false`).
+GitHub never counts a pre-release as "latest", so only copies with
+**Settings ▸ Updates ▸ Include release candidates** on are offered it. Turn
+that on on the test Mac. Every copy, with the switch on or off, moves to
+0.6.1 when it is published, since 0.6.1 > 0.6.1-rc.N.
 
-This is safe only **before 0.6.1 itself is published**. No installed copy has
-the updater until then, so only the test Mac ever sees a candidate.
-Afterwards:
-- delete the candidates: `gh release delete v0.6.1-rc.N --repo itzikiusa/otto_os --yes`;
-- publish 0.6.1. The test Mac then updates to it, since 0.6.1 > 0.6.1-rc.N.
+0.6.1-rc.2 has no such switch and looks only at `/releases/latest`. To move
+a copy of it on, publish the next candidate as the Latest release once, and
+set it back when that copy has updated:
 
-Once 0.6.1 is out, never mark a candidate Latest again; every installed copy
-would update to it.
+```bash
+gh release edit v0.6.1-rc.3 --repo itzikiusa/otto_os --draft=false --prerelease=false --latest
+gh release edit v0.6.1-rc.3 --repo itzikiusa/otto_os --prerelease
+```
+
+This is safe only **before 0.6.1 itself is published**: no other installed
+copy has the updater until then. Once 0.6.1 is out, never mark a candidate
+Latest; every installed copy would update to it.
 
 1. Download the rc.1 DMG with Safari, drag Otto to /Applications, open it:
    macOS must ask only its usual "downloaded from the Internet" question, with
@@ -215,7 +224,7 @@ would update to it.
    (Accessibility), take a snip (Screen Recording), dictate (Microphone), save a
    secret (one Keychain "Always Allow" for `ottod`).
 3. Start a shell session, a Threads conversation mid-turn and an SSH terminal.
-4. Publish rc.2 as Latest (above). Within 6 h (or Otto ▸ Check for
+4. Publish rc.2 (above). Within 6 h (or Otto ▸ Check for
    Updates…) the sidebar shows the update. Download it; the restart dialog must list the SSH terminal as
    ending and the shell and thread as kept.
 5. Restart to update. Check:
@@ -226,7 +235,7 @@ would update to it.
    - no permission and no Keychain prompt is asked again;
    - `~/Library/Application Support/Otto/updates/previous/Otto.app` is rc.1 and
      `xattr -l /Applications/Otto.app` shows no `com.apple.quarantine`.
-6. Failure path: publish, as Latest, an rc.3 whose daemon exits at start.
+6. Failure path: publish an rc.3 whose daemon exits at start.
    The update must roll back to rc.2 by itself, say "failed and was undone", and not offer
    rc.3 again.
 7. A standard (non-admin) account: the update row says the account can't

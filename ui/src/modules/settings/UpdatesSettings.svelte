@@ -1,6 +1,6 @@
 <script lang="ts">
   // Settings ▸ Updates (desktop app, root): the running version, the last
-  // check, automatic download, and the skipped version. The shell's updater
+  // check, automatic download, release candidates, and the skipped version. The shell's updater
   // owns all of it (lib/stores/updates.svelte.ts); a source build only says
   // where its updates come from.
   import PageHeader from '../../lib/components/PageHeader.svelte';
@@ -38,6 +38,13 @@
           checked={!!s?.auto_install}
           onchange={(v) => updates.setAuto(v)}
           testid="updates-auto"
+        />
+        <SettingToggle
+          label="Include release candidates"
+          hint="Also offers early builds of the next version, for trying it before it is final."
+          checked={!!s?.prereleases}
+          onchange={(v) => updates.setPrereleases(v)}
+          testid="updates-prereleases"
         />
         {#if s?.skipped}
           <div class="upd-row">

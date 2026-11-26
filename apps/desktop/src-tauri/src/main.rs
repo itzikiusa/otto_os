@@ -264,6 +264,7 @@ fn main() {
             updater::update_download,
             updater::update_restart,
             updater::update_set_auto,
+            updater::update_set_prereleases,
             updater::update_skip,
             updater::update_result_seen,
         ])
