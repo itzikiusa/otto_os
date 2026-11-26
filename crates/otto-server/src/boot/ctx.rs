@@ -204,6 +204,9 @@ impl ServerCtx {
             ide,
             simulators,
             containers,
+            outbound: Arc::new(otto_channels::improve_notify::BotTokenAdapters(
+                secrets.clone(),
+            )),
             secrets,
             events,
             pool,

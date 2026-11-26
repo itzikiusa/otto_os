@@ -88,7 +88,6 @@ pub(in crate::workflow_engine) async fn execute(
         ));
     }
 
-    let secrets = &ctx.secrets;
     let mut sent = 0usize;
     for integ in &targets {
         let ws_id = &integ.workspace_id;
@@ -98,12 +97,9 @@ pub(in crate::workflow_engine) async fn execute(
             origin_chat.as_deref(),
             origin_thread.as_deref(),
         );
-        // The same outbound adapter improve_notify builds (bot token from the
-        // secret store; none when it is missing — or for a webhook, which
-        // `targets` already excludes). Under `test-util` it can be the
-        // recording channel adapter.
-        let Some(adapter) = otto_channels::improve_notify::build_adapter(secrets, integ).await
-        else {
+        // The context's outbound adapter (the bot token's; none when it is
+        // missing — or for a webhook, which `targets` already excludes).
+        let Some(adapter) = ctx.outbound.adapter(integ).await else {
             tracing::debug!(workspace = %ws_id, channel = integ.channel.as_str(), "channel_notify: bot token missing");
             continue;
         };

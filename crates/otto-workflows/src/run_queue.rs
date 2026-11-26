@@ -256,7 +256,7 @@ pub async fn announce_dequeued<C: WorkflowCtx>(
             .get(&target.ws, target.channel)
             .await
             .ok()??;
-        let adapter = otto_channels::improve_notify::build_adapter(ctx.secrets(), &integ).await?;
+        let adapter = ctx.outbound().adapter(&integ).await?;
         let text = otto_core::redact::redact_text(&text).value;
         adapter
             .send_formatted(&target.chat, target.thread.as_deref(), &text)
