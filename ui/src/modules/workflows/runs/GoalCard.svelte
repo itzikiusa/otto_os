@@ -8,7 +8,7 @@
   import { elapsed } from '../../../lib/statusWords';
   import type { Criterion, GoalProgress, WorkflowCheckpoint, WorkflowRun } from '../../../lib/api/types';
   import CriteriaTable from '../goal/CriteriaTable.svelte';
-  import { criterionRows, isCheckOutput, latestCheck, newestCheckpoint, readsCheckpoints } from '../goal/goalCheck';
+  import { activeMs, criterionRows, isCheckOutput, latestCheck, metCount, newestCheckpoint, readsCheckpoints } from '../goal/goalCheck';
 
   interface Props {
     goal: GoalProgress;
@@ -45,6 +45,7 @@
 
   const check = $derived(latestCheck(run.nodes, fetched ?? run.checkpoints));
   const rows = $derived(criterionRows(criteria, check, goal.awaiting ?? []));
+  const count = $derived(metCount(rows, goal));
   const settled = $derived(run.status !== 'pending' && run.status !== 'running');
   const kept = $derived.by(() => {
     const input = (run.input ?? {}) as { research_dir?: unknown; repos?: unknown[] };
@@ -53,10 +54,10 @@
   });
 </script>
 
-<h3 class="title">Criteria {goal.criteria_met} of {goal.criteria_total} met</h3>
+<h3 class="title">Criteria {count.met} of {count.total} met</h3>
 {#if rows.length}<CriteriaTable {rows} />{/if}
 <p class="meta" data-testid="wf-goal-budget">
-  Iteration {goal.iteration} of {goal.max_iterations} · {elapsed(goal.active_ms)}{goal.max_active_ms ? ` of ${elapsed(goal.max_active_ms)}` : ''} active
+  Iteration {goal.iteration} of {goal.max_iterations} · {elapsed(activeMs(goal, fetched ?? run.checkpoints))}{goal.max_active_ms ? ` of ${elapsed(goal.max_active_ms)}` : ''} active
 </p>
 {#if settled && kept}<p class="meta" data-testid="wf-goal-kept">{kept}</p>{/if}
 

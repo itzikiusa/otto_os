@@ -1,7 +1,7 @@
 // A goal run's criteria rows (goal.md §3.5, GL8.1) — workflows/goal/goalCheck.ts.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { criterionRows, graphCriteria, latestCheck, newestCheckpoint, readsCheckpoints } from '../src/modules/workflows/goal/goalCheck.ts';
+import { activeMs, criterionRows, graphCriteria, latestCheck, metCount, newestCheckpoint, readsCheckpoints } from '../src/modules/workflows/goal/goalCheck.ts';
 import type { CheckOutput, Criterion, NodeRunState, WorkflowCheckpoint } from '../src/lib/api/types.ts';
 
 const criteria: Criterion[] = [
@@ -76,4 +76,19 @@ test('a live goal run re-reads its checkpoints as iterations land; a settled run
   assert.equal(readsCheckpoints({ status: 'success', checkpoints: page }, false), false);
   // Read while live, then it settled: once more, for the last iteration's check.
   assert.equal(readsCheckpoints({ status: 'success', checkpoints: page }, true), true);
+});
+
+// Seen on a running goal: "Criteria 0 of 0 met" over three rows, two of them
+// Met, and "0s active" a minute in — the run's counts lag the check the card reads.
+test('the card counts the criteria it lists, and a running loop shows the time its attempts banked', () => {
+  const rows = criterionRows(criteria, out({ tests: [true, 'verify command exited 0'], docs: [false, 'no'], ui: [true, 'seen'] }));
+  assert.deepEqual(metCount(rows, { criteria_met: 0, criteria_total: 0 }), { met: 2, total: 3 });
+  // A criterion parked for a person is not met yet.
+  assert.deepEqual(metCount(criterionRows(criteria, out({ tests: [true, 'ok'], ui: [true, 'old'] }), ['ui']), { criteria_met: 2, criteria_total: 3 }), { met: 1, total: 3 });
+  // Nothing listed (no criteria on the graph, no check yet): the run's counts.
+  assert.deepEqual(metCount([], { criteria_met: 1, criteria_total: 4 }), { met: 1, total: 4 });
+
+  assert.equal(activeMs({ active_ms: 0 }, [cp(1, 0, null, { active_ms: 30_000 }), cp(1, 1, null, { active_ms: 8_000 }), cp(2, 0, null)]), 38_000);
+  assert.equal(activeMs({ active_ms: 81_000 }, [cp(1, 0, null, { active_ms: 30_000 })]), 81_000, 'a stopped loop says its own');
+  assert.equal(activeMs({ active_ms: 0 }), 0);
 });

@@ -98,4 +98,17 @@ export function criterionRows(criteria: readonly Criterion[], check: CheckOutput
   });
 }
 
+/** The card's "Criteria m of t met", counted from the rows it lists so the
+ *  line and the table never disagree; the run's own counts when it lists none. */
+export function metCount(rows: readonly Pick<CriterionRow, 'state'>[], goal: { criteria_met: number; criteria_total: number }): { met: number; total: number } {
+  if (!rows.length) return { met: goal.criteria_met, total: goal.criteria_total };
+  return { met: rows.filter((r) => r.state === 'met').length, total: rows.length };
+}
+
+/** A goal's active time: the loop's own once it stopped; while it runs (the
+ *  run says 0 then), what its settled attempts banked. */
+export function activeMs(goal: { active_ms: number }, checkpoints: readonly Pick<WorkflowCheckpoint, 'active_ms'>[] = []): number {
+  return goal.active_ms || checkpoints.reduce((sum, c) => sum + (c.active_ms ?? 0), 0);
+}
+
 export const STATE_WORD: Record<CriterionState, string> = { met: 'Met', not_met: 'Not met', verify: 'Verify', pending: 'Not checked' };
