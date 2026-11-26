@@ -28,7 +28,8 @@ test.beforeEach(async ({ page }, info) => {
 test('a state change is on screen within a second; non-terminal events fetch no list', async ({ page }) => {
   const wf = await createWorkflow(api, 'E2E Live', chain(agentStep('a', 'Ask first', ['approve Bash', 'sleep 3000'])));
   await runsTab(page);
-  await expect(page.getByTestId('wf-runs-recent')).toBeVisible({ timeout: 20_000 });
+  // The inbox has loaded: Recent, or the empty workspace's "No runs yet".
+  await expect(page.getByTestId('wf-runs-recent').or(page.getByText('No runs yet'))).toBeVisible({ timeout: 20_000 });
   const lists: number[] = [];
   page.on('request', (r) => { if (/\/workspaces\/[^/]+\/workflow-runs\?/.test(r.url())) lists.push(Date.now()); });
   const run = await startRun(api, wf);
@@ -40,7 +41,11 @@ test('a state change is on screen within a second; non-terminal events fetch no 
 });
 
 test('an open running step fetches its body at most once a second', async ({ page }) => {
-  const wf = await createWorkflow(api, 'E2E Live body', chain(agentStep('a', 'Stream', ['stream 4000 8000'])));
+  // On the thread runner a streaming turn lives in the thread and leaves the
+  // node alone; a turn that ends with background work and the CLI's own
+  // follow-up turn do change it (working ↔ finishing): every 600 ms for ~10 s.
+  const churn = Array.from({ length: 8 }, () => ['sleep 600', 'background 600']).flat();
+  const wf = await createWorkflow(api, 'E2E Live body', chain(agentStep('a', 'Churn', churn)));
   const run = await startRun(api, wf);
   await waitRun(api, run, (r) => r.nodes.some((n) => n.node_id === 'a' && n.status === 'running'));
   const bodies: number[] = [];
@@ -48,8 +53,8 @@ test('an open running step fetches its body at most once a second', async ({ pag
   await openRun(page, wf, run, 'a');
   await page.getByTestId('wf-step-tab-output').click();
   await page.waitForTimeout(5_000); // ui-guards: allow (counting requests over a fixed window)
-  // The stream changes the node all the time: the body is read again, but no
-  // more than once a second (2–6 reads in 5 s; 0 or 1 would prove nothing).
+  // The node changes faster than once a second: the body is read again, but
+  // no more than once a second (2–6 reads in 5 s; 0 or 1 would prove nothing).
   expect(bodies.length, `${bodies.length} body reads`).toBeGreaterThanOrEqual(2);
   expect(bodies.length).toBeLessThanOrEqual(6);
   const gaps = bodies.slice(1).map((t, i) => t - bodies[i]);

@@ -24,10 +24,14 @@ test.describe('Workflows & older goal loops UX closure (phone + tablet, light + 
         workspace_id: workspace,
         name: 'Nightly Release Verification Workflow With Long Name',
         description: 'Verifies build and deploy gates',
-        nodes: [
-          { id: 'n1', kind: 'shell', name: 'Run unit suite with very long step name that used to overflow inspector header', x: 60, y: 60, config: { cmd: 'echo ok' } },
-        ],
-        edges: [],
+        instructions: '',
+        created_by: 'u',
+        graph: {
+          nodes: [
+            { id: 'n1', kind: 'shell', name: 'Run unit suite with very long step name that used to overflow inspector header', x: 60, y: 60, params: { cmd: 'echo ok' } },
+          ],
+          edges: [],
+        },
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       };

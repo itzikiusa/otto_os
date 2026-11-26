@@ -1,4 +1,7 @@
 import { execFileSync } from 'node:child_process';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test, expect, type APIRequestContext } from '@playwright/test';
 import { apiCtx, seedWorkspace, seedGitRepo } from './seed';
 import { headerMenu, runsTab, workflowRow, workflowsTab } from './workflowsUi';
@@ -237,6 +240,9 @@ test('convert a scheduled task into a workflow', async () => {
 
 test('manual_trigger node fields seed the run input', async () => {
   // Fields configured on the Start node become the run input (overridable by /run).
+  // A working directory outside the registered repos must exist (the run refuses
+  // any other), so the field names a real one.
+  const dir = mkdtempSync(join(tmpdir(), 'otto-e2e-wd-'));
   const wfId = await createWorkflow(
     'E2E Trigger Fields',
     [
@@ -246,18 +252,18 @@ test('manual_trigger node fields seed the run input', async () => {
         name: 'Start',
         x: 0,
         y: 0,
-        params: { msg: 'do the thing', goals: ['g1', 'g2'], working_directory: '~/x' },
+        params: { msg: 'do the thing', goals: ['g1', 'g2'], working_directory: dir },
       },
       node('echo', 'log'),
     ],
     [edge('trigger', 'echo')],
   );
   const run = await runToCompletion(wfId);
-  expect(run.status).toBe('success');
+  expect(run.status, JSON.stringify(run.nodes, null, 2)).toBe('success');
   const out = nodeState(run, 'trigger').output;
   expect(out.msg).toBe('do the thing');
   expect(out.goals).toEqual(['g1', 'g2']);
-  expect(out.working_directory).toBe('~/x');
+  expect(out.working_directory).toBe(dir);
 });
 
 test('orchestrator example templates are offered', async () => {
@@ -284,13 +290,14 @@ test('code templates auto-open the PR on review pass (no human approval)', async
     // The edge into the PR step is GATED on the review having passed.
     const prEdge = t.graph.edges.find((e: any) => e.target === pr.id);
     expect(prEdge?.condition, `${id} PR edge is conditional`).toBeTruthy();
-    // The loop is REVIEW-first then fix (design §E): review precedes fix, and
-    // the until references the review step by name.
+    // The loop is REVIEW-first then fix (design §E) as the one review→fix rule
+    // (goal.md §4.1): review → check "the review passes" → fix, no `until`.
     const loop = t.graph.nodes.find((n: any) => n.kind === 'loop');
     const stepKinds = loop.params.steps.map((s: any) => s.kind);
-    expect(stepKinds[0], `${id} reviews before fixing`).toBe('review_run');
-    expect(stepKinds).toContain('agent_prompt');
-    expect(loop.params.until, `${id} until references the review step`).toContain('steps.review');
+    expect(stepKinds, `${id} reviews, checks, then fixes`).toEqual(['review_run', 'check', 'agent_prompt']);
+    expect(loop.params.until, `${id} ends on the check, not an until`).toBeUndefined();
+    const check = loop.params.steps.find((s: any) => s.kind === 'check');
+    expect(check.params.criteria[0].expr, `${id} the check reads the review`).toContain('steps.review');
     // Per-lens multi-agent reviewers + a summarizer + a scoring guideline (design §F/§G).
     const review = loop.params.steps.find((s: any) => s.kind === 'review_run');
     expect(Array.isArray(review.params.reviewers), `${id} review has reviewers`).toBeTruthy();

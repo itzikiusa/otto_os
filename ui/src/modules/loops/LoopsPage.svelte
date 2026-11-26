@@ -26,11 +26,15 @@
   });
 
   // A workspace switch closes the open loop (it belongs to the previous workspace).
+  // The first workspace of a cold load is not a switch: a pasted `#/loops/<id>`
+  // mounts before the workspace is selected and must stay on its loop.
   let viewWs = untrack(() => ws.currentId);
   $effect(() => {
     const id = ws.currentId;
     if (id === viewWs) return;
+    const was = viewWs;
     viewWs = id;
+    if (was === null) return;
     untrack(() => {
       if (selectedId) back();
     });

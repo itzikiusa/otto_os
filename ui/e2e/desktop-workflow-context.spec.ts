@@ -272,12 +272,11 @@ test('two declared repos → review aggregates both → git_pr drafts one PR per
       node('review', 'review_run', {
         await: true,
         timeout_s: 120,
-        // Reviewer sessions are real PTYs — OTTO_E2E stubs agent TURNS, not
-        // reviewer sessions — so with a non-empty diff a `claude` reviewer
-        // launches the host's real CLI. A provider that doesn't exist fails
-        // each reviewer fast (as desktop-review-agent-stop does); what's under
-        // test is the per-repo aggregation and the PR fan-out, not findings.
-        providers: ['e2e-no-such-cli'],
+        // The fake claude reviews (the harness puts only fakes on PATH): an
+        // incomplete review fails the step, so a reviewer that cannot start
+        // no longer stands in. What's under test is the per-repo aggregation
+        // and the PR fan-out, not findings.
+        providers: ['claude'],
         lenses: ['correctness-review'],
       }),
       node('pr', 'git_pr', { open: false }),

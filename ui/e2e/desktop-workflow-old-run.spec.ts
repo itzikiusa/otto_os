@@ -36,6 +36,13 @@ test('a run from before the upgrade says so and lists its sessions', async ({ pa
     r.nodes = r.nodes.map((n: Record<string, unknown>) => ({ ...n, phases: undefined, thread: undefined, sessions: n.node_id === 'a' ? ['sess_old_1'] : [] }));
     await route.fulfill({ response: res, json: r });
   });
+  // …and so is its step's full node: no thread.
+  await page.route(`**/api/v1/workflow-runs/${run}/nodes/a`, async (route) => {
+    const res = await route.fetch();
+    const body = await res.json();
+    body.body = { ...body.body, phases: undefined, thread: undefined, sessions: ['sess_old_1'] };
+    await route.fulfill({ response: res, json: body });
+  });
   await openRun(page, wf, run, 'a');
   await expect(page.getByText('Older run')).toBeVisible();
   await expect(stepPane(page)).toContainText(/Session/);
@@ -49,7 +56,11 @@ test('a deleted thread shows the kept digest, read-only', async ({ page }) => {
   await page.route(`**/api/v1/workflow-runs/${run}/nodes/a`, async (route) => {
     const res = await route.fetch();
     const body = await res.json();
-    body.body.thread = { ...(node.thread ?? { thread_id: 'gone', runner: 'threads', provider: 'claude', turns: 1, usage: {} }), available: false, digest: { last_answer_excerpt: 'The answer the run kept.' } };
+    // The digest the step really kept, with a known answer (TranscriptDigest
+    // always carries its lists).
+    const thread = body.body.thread ?? node.thread ?? { thread_id: 'gone', runner: 'threads', provider: 'claude', turns: 1, usage: {} };
+    const kept = thread.digest ?? { turns: 1, tool_calls: 0, files_changed: [], errors: [], actions: [] };
+    body.body.thread = { ...thread, available: false, digest: { ...kept, last_answer_excerpt: 'The answer the run kept.' } };
     await route.fulfill({ response: res, json: body });
   });
   await page.route(`**/api/v1/workflow-runs/${run}`, async (route) => {

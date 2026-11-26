@@ -4,8 +4,12 @@
 // fail …, crates/otto-agent-protocol/src/fake_script.rs), runs started through
 // the API, and polling until a run reaches the state a spec needs. Never a
 // real agent CLI; never the owner's daemon.
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { expect, type APIRequestContext } from '@playwright/test';
-import { apiCtx, seedWorkspace } from './seed';
+import { apiCtx, seedGitRepo, seedWorkspace } from './seed';
 import type { WorkflowGraph, WorkflowNode, WorkflowRun } from '../src/lib/api/types';
 
 const V1 = '/api/v1';
@@ -102,6 +106,18 @@ export function prShape(): WorkflowGraph {
   for (const s of side) { g.edges.push({ id: `e-${s.id}`, source: prev, target: s.id }); prev = s.id; }
   g.edges.push({ id: 'e-review', source: prev, target: 'review' }, { id: 'e-multi', source: 'review', target: 'multi', condition: 'len(run.repos) > 0' });
   return g;
+}
+
+/** Run input that gives a review step something to review: a registered repo
+ *  whose work sits on its own branch in a linked worktree with an uncommitted
+ *  change (a review needs a repo, and an empty diff starts no reviewer). */
+export async function reviewTarget(api: WfApi): Promise<Record<string, unknown>> {
+  const { dir } = await seedGitRepo(api.ctx, api.base, api.ws);
+  const source = execFileSync('git', ['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD'], { encoding: 'utf8' }).trim();
+  const path = join(mkdtempSync(join(tmpdir(), 'otto-e2e-wt-')), 'e2e-review');
+  execFileSync('git', ['-C', dir, 'worktree', 'add', '-q', '-b', 'e2e-review', path], { stdio: 'ignore' });
+  writeFileSync(join(path, 'file_00.txt'), 'changed for the review\n');
+  return { repos: [{ repo: dir, type: 'worktree', name: path, source }] };
 }
 
 /** A review step with `n` named reviewers over claude and codex (the fan-out fixture). */

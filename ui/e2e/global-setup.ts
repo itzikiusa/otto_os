@@ -67,6 +67,8 @@ export default async function globalSetup(_config: FullConfig): Promise<void> {
   // echoes input, so a session still looks alive to the UI.
   const fakeBin = join(dataDir, 'fake-agent-bin');
   mkdirSync(fakeBin, { recursive: true });
+  const fakeReviewDir = join(dataDir, 'fake-review');
+  mkdirSync(fakeReviewDir, { recursive: true });
   // A structured-runtime codex thread (`codex … app-server`) gets the
   // daemon build's fake app-server instead (otto-agent-protocol's
   // `otto-fake-codex`, built next to ottod), so Threads specs can drive a
@@ -148,6 +150,12 @@ export default async function globalSetup(_config: FullConfig): Promise<void> {
       OTTO_FAKE_DEFAULT: process.env.OTTO_FAKE_DEFAULT ?? 'step',
       // `remember` / `fail-attempts` state per run, never the shared $TMPDIR one.
       OTTO_FAKE_STATE_DIR: join(dataDir, 'fake-state'),
+      // The review engine's prompts (scope, reviewer, summarizer) get the
+      // review persona: each writes its result file — `<role>[-<lens>-<provider>].json`
+      // from this dir, or an empty valid one. Without it a fake reviewer acts
+      // as the step persona, exits without findings and every review is
+      // incomplete (which fails a review step).
+      OTTO_FAKE_REVIEW_DIR: fakeReviewDir,
       // Isolate runtime plugins: without this, a spec that installs a plugin
       // would write into the user's REAL ~/otto-plugins.
       OTTO_PLUGINS_HOME: join(dataDir, 'plugins-home'),

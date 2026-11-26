@@ -122,8 +122,11 @@ test('generic context files + final output', async () => {
   expect(readFileSync(join(dir, 'prompt.md'), 'utf8')).toBe('the ask from slack');
   expect(existsSync(join(dir, 'run-brief.md'))).toBe(true);
   // final output = the agent step's handoff (log is bookkeeping-only), not the
-  // trailing `log` utility step.
-  expect(readFileSync(join(dir, 'final-output.md'), 'utf8')).toContain('work');
+  // trailing `log` utility step: a copy of the work step's own file.
+  const work = run.nodes.find((n: any) => n.node_id === 'work');
+  const handoff = readFileSync(join(dir, `${work.step_file}.md`), 'utf8');
+  expect(handoff.length).toBeGreaterThan(0);
+  expect(readFileSync(join(dir, 'final-output.md'), 'utf8')).toBe(handoff);
 });
 
 test('prepare_context no-op without a ticket', async () => {

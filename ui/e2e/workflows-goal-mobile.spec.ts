@@ -7,6 +7,10 @@ import { apiCtx, seedWorkspace } from './seed';
 import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 import { GOAL_RUN, GOAL_WF, serveGoalRun } from './fixtures/goalRun';
 
+// Once sw.js claims the page its fetches bypass `page.route`, and the run
+// served below never reaches the run page.
+test.use({ serviceWorkers: 'block' });
+
 async function open(page: import('@playwright/test').Page, state: 'needs_you' | 'exhausted') {
   const { ctx, base } = await apiCtx();
   const ws = await seedWorkspace(ctx, base);
