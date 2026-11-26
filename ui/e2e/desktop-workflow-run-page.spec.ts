@@ -23,6 +23,7 @@ test.afterAll(async () => {
 /** The open step's ⋯ menu items. */
 async function stepMenu(page: import('@playwright/test').Page): Promise<string[]> {
   await stepPane(page).getByRole('button', { name: 'Step actions' }).click();
+  await expect(page.locator('.ctx-menu')).toBeVisible();
   const items = await page.locator('.ctx-menu').getByRole('menuitem').allTextContents();
   await page.keyboard.press('Escape');
   return items.map((t) => t.trim());
@@ -35,14 +36,17 @@ test.beforeEach(async ({ page }, info) => {
   }, api.ws);
 });
 
-test('a 12-child fan-out: named reviewer rows, one ring tick each, no "Open session" wall', async ({ page }) => {
-  // 11 reviewers and the summarizer: the ring counts every child the step
-  // list shows (ux.md §4.3 children), one tick each up to 12 (DR-020).
-  const wf = await createWorkflow(api, 'E2E Fan-out 12', chain(agentStep('prep', 'Prepare'), reviewStep('review', 11)));
+test('a wide fan-out: named reviewer rows, one ring tick each, no "Open session" wall', async ({ page }) => {
+  // The scope plan keeps at most 10 of the 11 declared lenses; with the
+  // summarizer the ring counts every child the step list shows (ux.md §4.3
+  // children), one tick each up to 12 (DR-020).
+  const wf = await createWorkflow(api, 'E2E Fan-out', chain(agentStep('prep', 'Prepare'), reviewStep('review', 11)));
   const run = await startRun(api, wf, await reviewTarget(api));
-  await waitRun(api, run, (r) => (r.nodes.find((n) => n.node_id === 'review')?.children?.length ?? 0) >= 12);
+  const children = (await waitRun(api, run, settled)).nodes.find((n) => n.node_id === 'review')?.children?.length ?? 0;
+  expect(children).toBeGreaterThanOrEqual(11);
+  expect(children).toBeLessThanOrEqual(12);
   await openRun(page, wf, run, 'review');
-  await expect(page.getByTestId('wf-run-orbit')).toHaveAttribute('data-children', '12');
+  await expect(page.getByTestId('wf-run-orbit')).toHaveAttribute('data-children', String(children));
   await expect(page.getByTestId('wf-run-orbit')).toHaveAttribute('data-grouped', 'false');
   // Reviewers are named rows (done ones may sit under their "N reviewers done" fold); the summarizer trails.
   const kids = page.getByTestId('wf-step-child');
