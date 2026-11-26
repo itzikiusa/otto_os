@@ -469,20 +469,18 @@ async fn thread_died() {
         .unwrap();
     assert_eq!(threads, 1, "no second thread");
     // The cut turn ended as a server restart; the one turn sent after it on
-    // the same thread is the handoff nudge (the fake echoes an unscripted
-    // prompt), and the step file falls back to the engine's rendering.
+    // the same thread repeats the task after the restart notice (CR1-081):
+    // the script runs to its end and the agent writes its own handoff.
     let reply = n2
         .output
         .as_ref()
         .and_then(|o| o["reply"].as_str())
         .unwrap_or_default();
-    assert!(
-        reply.starts_with("echo: You did not write ") && reply.contains("step2-step-2.md"),
-        "{reply}"
-    );
-    assert!(
-        turns(&rig).is_empty(),
-        "the cut scripted turn never finished: {:?}",
+    assert_eq!(reply, "done");
+    assert_eq!(
+        turns(&rig).len(),
+        1,
+        "only the repeated task finished a scripted turn: {:?}",
         turns(&rig)
     );
     ctx.agent_runtime.shutdown().await;
