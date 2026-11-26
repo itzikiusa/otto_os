@@ -188,3 +188,185 @@ async fn a_cancel_stops_every_running_node_at_once() {
         assert_ne!(state(&run, id).status, NodeStatus::Success, "{id}");
     }
 }
+
+/// A stand-in for the thread runner: reports the agreed events (a machine
+/// wait, the thread, a question answered by a person), writes the handoff
+/// and returns its usage; records what the engine closes and keeps.
+#[derive(Default)]
+struct FakeRunner {
+    turns: std::sync::Mutex<Vec<otto_agent_run::step::StepTurn>>,
+    closed: std::sync::Mutex<Vec<Id>>,
+    retained: std::sync::Mutex<Vec<Id>>,
+}
+
+#[async_trait::async_trait]
+impl otto_agent_run::step::StepRunner for FakeRunner {
+    async fn run(
+        &self,
+        t: otto_agent_run::step::StepTurn,
+        ev: tokio::sync::mpsc::UnboundedSender<otto_agent_run::step::StepEvent>,
+        _cancel: otto_core::cancel_signal::CancelSignal,
+    ) -> Result<otto_agent_run::step::StepOutcome> {
+        use otto_agent_run::step::StepEvent as E;
+        use otto_core::agent_runtime::{Attention, AttentionKind, WaitReason};
+        self.turns.lock().unwrap().push(t.clone());
+        let now = chrono::Utc::now();
+        let wait = WaitReason {
+            code: "slots".into(),
+            text: "Waiting for a free agent slot — 5 of 5 running".into(),
+            since: now,
+            detail: None,
+        };
+        let ask = Attention {
+            kind: AttentionKind::Question,
+            via: None,
+            text: "Which branch?".into(),
+            since: now,
+            thread_id: Some("th-1".into()),
+            request_id: Some("rq-1".into()),
+            resets_at: None,
+            criterion_id: None,
+        };
+        let _ = ev.send(E::Waiting(wait));
+        let _ = ev.send(E::Started {
+            thread_id: "th-1".into(),
+            start_ordinal: 0,
+        });
+        let _ = ev.send(E::Working);
+        let _ = ev.send(E::NeedsYou(ask));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let _ = ev.send(E::Resumed {
+            request_id: Some("rq-1".into()),
+            answer: Some("main".into()),
+            by: Some("root".into()),
+        });
+        std::fs::write(t.handoff.as_ref().unwrap(), "# done\n").unwrap();
+        let _ = ev.send(E::Finishing);
+        Ok(otto_agent_run::step::StepOutcome {
+            thread_id: "th-1".into(),
+            reply: "all done".into(),
+            handoff_written: true,
+            turn_status: "completed".into(),
+            error: None,
+            context_usage: None,
+            turns: 2,
+            usage: otto_core::agent_runtime::TurnTokenUsage {
+                input_tokens: 7,
+                output_tokens: 3,
+                ..Default::default()
+            },
+            model: Some("fake-model".into()),
+            effort: t.effort.clone(),
+            sub_threads: vec![],
+            digest: None,
+        })
+    }
+    async fn resume(
+        &self,
+        _: &Id,
+        _: u32,
+        _: &otto_agent_run::step::StepTurn,
+        _: tokio::sync::mpsc::UnboundedSender<otto_agent_run::step::StepEvent>,
+        _: otto_core::cancel_signal::CancelSignal,
+    ) -> Result<otto_agent_run::step::StepOutcome> {
+        unreachable!("no restart in this test")
+    }
+    async fn close(&self, id: &Id, _: chrono::DateTime<chrono::Utc>) {
+        self.closed.lock().unwrap().push(id.clone());
+    }
+    async fn set_retain_until(&self, ids: &[Id], _: chrono::DateTime<chrono::Utc>) {
+        self.retained.lock().unwrap().extend(ids.iter().cloned());
+    }
+    async fn release_process(&self, _: &Id) {}
+    async fn delete(&self, _: &Id) {}
+}
+
+/// Test plan §2 agent steps: an agent step runs on a runtime thread by
+/// default; its phases, machine wait, question and answer land on the node,
+/// the thread (not a PTY session) is recorded with its usage, effort and
+/// timeout reach the runner, and the thread is closed at settle and kept
+/// at the run's end.
+#[tokio::test]
+async fn an_agent_step_runs_on_a_thread_and_leaves_its_record_on_the_run() {
+    let fake = std::sync::Arc::new(FakeRunner::default());
+    super::super::super::step_thread::FAKE_RUNNER.with(|f| *f.borrow_mut() = Some(fake.clone()));
+    let graph = WorkflowGraph {
+        nodes: vec![
+            node("start", "log", json!({})),
+            node(
+                "agent",
+                "agent_prompt",
+                json!({"prompt": "do it", "provider": "claude", "effort": "high", "timeout_s": 120}),
+            ),
+        ],
+        edges: vec![edge("start", "agent")],
+    };
+    let (ctx, ws, wf, run_id, repo, _tmp) = setup("thread-ws", graph).await;
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        run_workflow(
+            ctx,
+            ws,
+            wf,
+            run_id.clone(),
+            json!({}),
+            RunScope::default(),
+            None,
+        ),
+    )
+    .await
+    .expect("the run settles");
+    let run = repo.get_run(&run_id).await.unwrap();
+    assert_eq!(run.status, RunStatus::Success, "{:?}", run.error);
+    let st = state(&run, "agent");
+    let t = st.thread.as_ref().expect("the thread is on the node");
+    assert_eq!(
+        (t.thread_id.as_str(), t.runner.as_str()),
+        ("th-1", "threads")
+    );
+    assert_eq!(
+        (t.turns, t.usage.input_tokens, t.usage.output_tokens),
+        (2, 7, 3)
+    );
+    assert_eq!(t.effort.as_deref(), Some("high"));
+    assert!(t.closed_at.is_some(), "closed at settle");
+    assert!(
+        st.sessions.is_empty(),
+        "a thread is never listed as a PTY session"
+    );
+    let out = st.output.as_ref().unwrap();
+    assert_eq!(out["thread_id"], "th-1");
+    assert!(out.get("session_id").is_none());
+    let phases: Vec<_> = st.phases.iter().map(|m| m.phase).collect();
+    use otto_core::workflows::StepPhase as P;
+    assert_eq!(
+        phases,
+        [
+            P::Waiting,
+            P::Starting,
+            P::Working,
+            P::NeedsYou,
+            P::Working,
+            P::Finishing
+        ]
+    );
+    assert!(st.phase.is_none(), "settled is not a phase");
+    assert!(st.attention.is_none() && st.wait.is_none());
+    assert_eq!(st.human_log.len(), 1);
+    assert_eq!(
+        (
+            st.human_log[0].ask.as_deref(),
+            st.human_log[0].text.as_str()
+        ),
+        (Some("Which branch?"), "main")
+    );
+    let turn = fake.turns.lock().unwrap()[0].clone();
+    assert_eq!(turn.effort.as_deref(), Some("high"));
+    assert_eq!(turn.timeout, Some(Duration::from_secs(120)));
+    assert!(turn
+        .prompt
+        .contains("[workflow step — completion protocol]"));
+    assert_eq!(turn.meta["work"]["kind"], "workflow_run");
+    assert!(fake.closed.lock().unwrap().contains(&"th-1".to_string()));
+    assert!(fake.retained.lock().unwrap().contains(&"th-1".to_string()));
+}

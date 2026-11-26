@@ -21,6 +21,7 @@ pub(in crate::workflow_engine) async fn finish(
     canceled: bool,
     timed_out: bool,
 ) {
+    step_thread::forget(&run_id);
     // A stopped run stops its agents and reviewers NOW: the drain below can
     // take minutes (each queued chat post has a 30 s timeout on a slow or
     // offline Slack), and the agents kept editing the worktree meanwhile.
@@ -28,6 +29,7 @@ pub(in crate::workflow_engine) async fn finish(
     if canceled || timed_out {
         stop_run_reviews(&ctx, &repo, &workflow.workspace_id, &run_id, &states).await;
         kill_run_sessions(&ctx, &states).await;
+        step_thread::retain_run(&ctx, &states, false).await;
     }
     // Flush all streamed progress lines (close the channel, await the pump) so the
     // per-step updates land in the thread BEFORE the final summary is delivered.
@@ -138,6 +140,7 @@ pub(in crate::workflow_engine) async fn finish(
     // The run's deliverable: a copy of the last content-bearing step's handoff
     // file, only on outright success — an errored run has no coherent "answer"
     // to hand back, so delivery falls back to the per-step summary.md instead.
+    step_thread::retain_run(&ctx, &states, final_status == RunStatus::Success).await;
     let final_output = if final_status == RunStatus::Success {
         files.write_final_output()
     } else {

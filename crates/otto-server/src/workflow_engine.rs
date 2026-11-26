@@ -52,18 +52,25 @@ use otto_workflows::retry::{
 use otto_workflows::run_queue::{
     max_parallel_runs, resolve_chat_target, result_workspace, run_gate, ChatTarget,
 };
+use otto_workflows::step_util::{
+    brief_summary, canvas_node_ext, extract_code_block, is_reportable, node_label,
+    node_skill_names, normalize_prompt, param_str_list, seed_input_from_entries,
+};
 
 /// Session and review associations share the ordered progress stream. Reviews
 /// are recorded as soon as they exist, even when the step does not await them.
 enum AgentAssociation {
     Session(String),
     Review(String),
+    /// A runtime thread's progress and record (`step_thread`).
+    Step(step_thread::StepNote),
 }
 
 fn record_association(state: &mut NodeRunState, association: AgentAssociation) -> bool {
     let (ids, id) = match association {
         AgentAssociation::Session(id) => (&mut state.sessions, id),
         AgentAssociation::Review(id) => (&mut state.review_ids, id),
+        AgentAssociation::Step(n) => return step_thread::record(state, n),
     };
     if ids.contains(&id) {
         return false;
@@ -475,91 +482,6 @@ fn spawn_progress_pump(
     (ProgressSink { tx: Some(tx) }, handle)
 }
 
-/// A label for a node in progress messages: its name, else its kind.
-fn node_label(node: &WorkflowNode) -> String {
-    if node.name.trim().is_empty() {
-        node.kind.clone()
-    } else {
-        node.name.clone()
-    }
-}
-
-/// Whether a node kind is worth a "started/finished" line in the chat thread.
-/// Structural/plumbing kinds (log/transform/delay/condition/manual_trigger) are
-/// skipped so a long pipeline doesn't drown the thread — the user asked for the
-/// meaningful steps, "without it being too overwhelming". `review_run` is excluded
-/// here because it streams its OWN richer block (started → score → findings).
-fn is_reportable(kind: &str) -> bool {
-    !matches!(
-        kind,
-        "manual_trigger" | "log" | "transform" | "delay" | "condition" | "review_run"
-    )
-}
-
-/// Collapse runs of whitespace/newlines into single spaces and trim.
-fn collapse_ws(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// Truncate to at most `max` chars, preferring to cut at the last sentence
-/// terminator so the snippet reads as whole sentences (the user wants brief,
-/// well-formatted summaries — ≤ a short paragraph). Appends `…` if cut.
-fn truncate_sentences(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    let head: String = s.chars().take(max).collect();
-    // Prefer the last sentence boundary in the kept window (only if it keeps a
-    // reasonable amount, so we don't truncate to almost nothing).
-    if let Some(cut) = head.rfind(['.', '!', '?', '\n']) {
-        if cut >= max / 2 {
-            return format!("{}…", head[..=cut].trim());
-        }
-    }
-    format!("{}…", head.trim())
-}
-
-/// A short, chat-friendly summary of a node's product (agent reply / analysis /
-/// plan / summary text), whitespace-collapsed and truncated to a brief block.
-/// Returns `None` for purely structural outputs (nothing worth posting).
-fn brief_summary(output: &Value) -> Option<String> {
-    let raw = ["reply", "analysis", "plan_md", "body_md", "summary", "note"]
-        .iter()
-        .find_map(|k| output.get(*k).and_then(Value::as_str))
-        .map(str::to_string)?;
-    let s = truncate_sentences(&collapse_ws(&raw), 700);
-    if s.is_empty() || s == "…" {
-        None
-    } else {
-        Some(s)
-    }
-}
-
-/// Collect skill names a node wants injected: `skill` (string) and/or `skills`
-/// (array of strings), de-duplicated, in declared order.
-fn node_skill_names(params: &Value) -> Vec<String> {
-    let mut out: Vec<String> = vec![];
-    let mut push = |s: &str| {
-        let s = s.trim();
-        if !s.is_empty() && !out.iter().any(|x| x == s) {
-            out.push(s.to_string());
-        }
-    };
-    if let Some(s) = params.get("skill").and_then(Value::as_str) {
-        push(s);
-    }
-    for key in ["skills", "lenses"] {
-        if let Some(arr) = params.get(key).and_then(Value::as_array) {
-            for v in arr {
-                if let Some(s) = v.as_str() {
-                    push(s);
-                }
-            }
-        }
-    }
-    out
-}
-
 /// Prepend each resolved skill (body + references) ahead of `base`, in the same
 /// shape the review engine uses (`{skill}\n\n---\n\n{prompt}`). Lets any
 /// agent-backed step run a specific skill/method "via prompt".
@@ -578,25 +500,6 @@ fn prepend_skills(ctx: &ServerCtx, params: &Value, base: &str) -> String {
     }
     out.push_str(base);
     out
-}
-
-/// Parse a node param into a `Vec<String>` (accepts a JSON array of strings or a
-/// comma-separated string), trimmed + non-empty. Used for `providers`/`lenses`.
-fn param_str_list(params: &Value, key: &str) -> Vec<String> {
-    match params.get(key) {
-        Some(Value::Array(a)) => a
-            .iter()
-            .filter_map(|v| v.as_str())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect(),
-        Some(Value::String(s)) => s
-            .split(',')
-            .map(|x| x.trim().to_string())
-            .filter(|x| !x.is_empty())
-            .collect(),
-        _ => vec![],
-    }
 }
 
 // (Cross-run node-result caching removed: the cache keyed only on
@@ -2081,14 +1984,6 @@ const WF_STEP_RULES: &str = "\n\n[workflow step — completion protocol]\n\
     - Do not end with \"waiting for …\": if you are waiting, keep waiting (the harness will wake you when a task finishes).\n\
     - Stop every background process you started (dev servers, watchers) before you finish.\n";
 
-/// Default no-REAL-progress trip for agent-backed workflow steps (overridable
-/// via the `wf_step_stall_secs` setting; 0 disables). Progress means the
-/// provider's transcript/rollout growing or child processes burning CPU — not
-/// PTY repaints, which a stuck TUI spinner keeps emitting forever. A tripped
-/// step is retried per `resolve_retry`. Separate from — and never longer
-/// than — the 10h max session lifespan backstop. See design R5.
-const WF_STEP_STALL_DEFAULT: Duration = Duration::from_secs(5 * 60);
-
 /// Stop each inner attempt before the checkpoint driver can retry it. Forward
 /// associations immediately so run cancellation can still own every child.
 #[allow(clippy::too_many_arguments)]
@@ -2160,6 +2055,7 @@ where
             match &association {
                 AgentAssociation::Session(id) => sessions.push(id.clone()),
                 AgentAssociation::Review(id) => reviews.push(id.clone()),
+                AgentAssociation::Step(_) => {}
             }
             let _ = session_tx.send(association);
         };
@@ -2339,364 +2235,11 @@ async fn resolve_run_user(ctx: &ServerCtx, created_by: &Id) -> User {
         })
 }
 
-/// Run one agent turn as a visible, openable session (reusing the shared
-/// `run_session_turn` flow), reporting the session id over `session_tx` the
-/// moment the session exists so the run view can open it live. Returns
-/// `(reply, session_id)`.
 /// Last 6 chars of a run id — a compact, human-scannable tag that disambiguates
 /// concurrent runs of the same workflow in session titles / lists.
 fn short_id(id: &Id) -> String {
     let n = id.chars().count();
     id.chars().skip(n.saturating_sub(6)).collect()
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn run_node_agent(
-    ctx: &ServerCtx,
-    ws: &Workspace,
-    user: &User,
-    node: &WorkflowNode,
-    wf_name: &str,
-    run_id: &Id,
-    provider: &str,
-    // Optional model alias (e.g. "opus"/"haiku"). Empty/None = provider default.
-    // Forwarded via `meta.model` so `SessionManager::model_args` adds `--model`.
-    model: Option<&str>,
-    prompt: &str,
-    cwd: &str,
-    // The step's handoff `.md` (named by the preamble) as a completion MARKER:
-    // for providers without a pollable transcript (codex/agy) it is the ONLY
-    // positive "the step finished" signal — without it they sit at their input
-    // box until the stall trip errors the step. `None` for steps whose reply
-    // must come from the transcript (canvas/goals/PR-draft agents).
-    done_file: Option<std::path::PathBuf>,
-    session_tx: &tokio::sync::mpsc::UnboundedSender<AgentAssociation>,
-    // The node's LIVE log channel: the oracle's phase lines stream here as the
-    // turn runs and are kept in the step's logs afterwards (R1.4/R5.5).
-    log_tx: &tokio::sync::mpsc::UnboundedSender<String>,
-    // Live sub-agent snapshot for the run view's chip + nested rows.
-    activity_tx: &tokio::sync::mpsc::UnboundedSender<NodeActivity>,
-) -> Result<(String, Id)> {
-    // Title carries the workflow name, the step, and a short run id so two
-    // concurrent runs of the same workflow are distinguishable in the Agents
-    // list (they'd otherwise both read "Workflow: Write tests").
-    let label = if node.name.is_empty() {
-        node.kind.as_str()
-    } else {
-        node.name.as_str()
-    };
-    let title = format!("WF {wf_name} · {label} · run {}", short_id(run_id));
-    // Stamp the FULL run id (+ workflow name) into meta so every workflow-spawned
-    // session is provably attributable to its specific run — the UI/global Agents
-    // list can filter + group sessions by exact run.
-    let mut meta = json!({
-        "source": "workflow",
-        "run_id": run_id,
-        "wf_name": wf_name,
-        "node_id": node.id,
-        "node_kind": node.kind,
-        "cwd": cwd,
-    });
-    // Forward the model alias so the spawn adds `--model` (providers without the
-    // flag ignore it). Empty string = provider default → omitted.
-    if let Some(m) = model.map(str::trim).filter(|m| !m.is_empty()) {
-        meta["model"] = json!(m);
-    }
-    // R5.5: the step's phases are visible from the first line. The engine logs
-    // the boot line itself (the oracle's `Phase::Booting` is therefore never
-    // re-logged by the forwarder below).
-    let _ = log_tx.send(format!("⏳ starting {provider} session"));
-    // E2E: the offline daemon never spawns a CLI, so a spec that needs a step
-    // with sub-agents drives a synthetic sequence off a prompt sentinel.
-    if otto_e2e() {
-        if let Some((n, hold)) = e2e_subagents(prompt) {
-            e2e_subagent_sequence(n, hold, log_tx, activity_tx).await;
-        }
-    }
-    let tx = session_tx.clone();
-    // The session id the turn creates — the phase forwarder needs it to ask the
-    // oracle for this step's sub-agent rows (it only exists once `on_ready`
-    // fires, a few seconds in).
-    let live_sid: std::sync::Arc<std::sync::Mutex<Option<Id>>> = Default::default();
-    let sid_slot = live_sid.clone();
-    // R1.3: sub-agents ARE allowed; the appended block is a completion protocol
-    // (finish every task you launched, handoff LAST) and the turn oracle holds
-    // the step open until the parent's pending set is empty.
-    let guarded = format!("{prompt}{WF_STEP_RULES}");
-    // R5: EVERY agent-backed step gets the no-real-progress trip (retryable via
-    // resolve_retry). Heavy kinds are safe under a short threshold because the
-    // clock only counts genuine stalls — transcript/rollout growth and child
-    // CPU reset it (see agent_session), so a long review or quiet test run
-    // never false-trips while a codex spinner can no longer mask a hang.
-    let stall = otto_state::SettingsRepo::new(ctx.pool.clone())
-        .get("wf_step_stall_secs")
-        .await
-        .ok()
-        .flatten()
-        .and_then(|v| v.as_u64())
-        .map_or(WF_STEP_STALL_DEFAULT, Duration::from_secs);
-    let stuck_after = if stall.is_zero() {
-        crate::agent_session::STUCK_IDLE
-    } else {
-        stall
-    };
-    // A leftover handoff from a PRIOR attempt/run of this step would complete
-    // the new turn instantly with stale content — clear it before submitting.
-    if let Some(df) = &done_file {
-        let _ = std::fs::remove_file(df);
-    }
-    // Steps whose reply must come from the transcript (goals eval, PR draft,
-    // canvas) never name a handoff file — the oracle completes them on the turn
-    // ending with nothing pending, and the "handoff missing" ⚠ line would be a
-    // lie for them.
-    let expects_handoff = done_file.is_some();
-    // R1: the turn ORACLE decides completion for workflow steps — a claude
-    // `end_turn` while sub-agents are still working is not "done". Phases stream
-    // back on `phase_tx`; the accepted rule rides `outcome_tx`.
-    let (phase_tx, mut phase_rx) = tokio::sync::mpsc::unbounded_channel::<Phase>();
-    let (outcome_tx, outcome_rx) = tokio::sync::oneshot::channel::<CompleteVia>();
-    let turn = crate::agent_session::run_session_turn_with(
-        ctx,
-        ws,
-        user,
-        None,
-        &title,
-        cwd,
-        provider,
-        meta,
-        &guarded,
-        stuck_after,
-        crate::agent_session::TurnOpts {
-            done_file,
-            done_file_validator: None,
-            transcript_fallback: false,
-            cancel: None,
-            // Silence is not evidence that delegated work has completed.
-            quiet_done: None,
-            // The retry spawns a fresh session; don't leave the stuck one
-            // alive (its spinner defeats the idle-suspend sweep).
-            kill_on_stall: true,
-            oracle: true,
-            phase_tx: Some(phase_tx),
-            outcome_tx: Some(outcome_tx),
-        },
-        move |id| {
-            let _ = tx.send(AgentAssociation::Session(id.to_string()));
-            if let Ok(mut slot) = sid_slot.lock() {
-                *slot = Some(id.clone());
-            }
-        },
-    );
-    tokio::pin!(turn);
-    // Phase → log/activity forwarder. Runs BESIDE the turn (not spawned) so it
-    // can read the live session without cloning the whole context.
-    let mut feed = PhaseFeed::new(provider);
-    let result = loop {
-        tokio::select! {
-            biased;
-            Some(p) = phase_rx.recv() => {
-                let sid = live_sid.lock().ok().and_then(|g| g.clone());
-                feed.on_phase(ctx, sid.as_ref(), p, log_tx, activity_tx).await;
-            }
-            r = &mut turn => break r,
-        }
-    };
-    while let Ok(p) = phase_rx.try_recv() {
-        let sid = live_sid.lock().ok().and_then(|g| g.clone());
-        feed.on_phase(ctx, sid.as_ref(), p, log_tx, activity_tx)
-            .await;
-    }
-    let out = result.map_err(|e| e.0)?;
-    // How the oracle accepted the turn — `Err` means the sender was dropped
-    // without a send (E2E short-circuit / legacy path): nothing to report.
-    if let Ok(via) = outcome_rx.await {
-        if expects_handoff || via != CompleteVia::IdleTurnNoHandoff {
-            let _ = log_tx.send(feed.completion_line(via));
-        }
-    }
-    Ok(out)
-}
-
-/// Turns the oracle's phase stream into the node's kept log lines and the live
-/// `activity` snapshot.
-///
-/// Emission rule (R5.5): a line is logged only when the phase IDENTITY changes
-/// (`phase_key` ignores a countdown's remaining time), and an identity re-logs
-/// at most once per 5 s — so `⚙ working` appears once, the countdown phases
-/// once on entry, and `🧩 sub-agents: …` on every count change.
-struct PhaseFeed {
-    provider: String,
-    /// Seeded with `Booting`: `run_node_agent` already logged its `⏳` line.
-    last_key: Option<(u8, usize, usize)>,
-    logged_at: HashMap<(u8, usize, usize), Instant>,
-    /// `📄 handoff file written` is logged once, the first time a phase implies
-    /// the file exists.
-    handoff_logged: bool,
-    last_probe: Option<Instant>,
-    subagents: Vec<SubagentActivity>,
-    last_progress_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// Remembered for the completion line's `{n}` / `{id}`.
-    pending: usize,
-    running_id: Option<String>,
-    /// Incremental reader behind the sub-agent snapshot (see [`StepProbe`]).
-    probe: Option<StepProbe>,
-}
-
-impl PhaseFeed {
-    fn new(provider: &str) -> Self {
-        Self {
-            provider: provider.to_string(),
-            last_key: Some(turn_oracle::phase_key(&Phase::Booting)),
-            logged_at: HashMap::new(),
-            handoff_logged: false,
-            last_probe: None,
-            subagents: vec![],
-            last_progress_at: None,
-            pending: 0,
-            running_id: None,
-            probe: None,
-        }
-    }
-
-    async fn on_phase(
-        &mut self,
-        ctx: &ServerCtx,
-        sid: Option<&Id>,
-        p: Phase,
-        log_tx: &tokio::sync::mpsc::UnboundedSender<String>,
-        activity_tx: &tokio::sync::mpsc::UnboundedSender<NodeActivity>,
-    ) {
-        let key = turn_oracle::phase_key(&p);
-        if self.last_key == Some(key) {
-            return;
-        }
-        self.last_key = Some(key);
-        // Refresh the sub-agent snapshot (one transcript read, ≤ once per 5s).
-        // A `Subagents` phase gets the read unconditionally: its identity only
-        // changes when a count changes (≤ 2 × pending ids over a step), and the
-        // snapshot it is annotated with — and the rows the run view shows —
-        // would otherwise describe the PREVIOUS count.
-        if matches!(p, Phase::Subagents { .. })
-            || self
-                .last_probe
-                .is_none_or(|t| t.elapsed() >= Duration::from_secs(5))
-        {
-            self.last_probe = Some(Instant::now());
-            if let Some((subs, stamp)) = step_activity_probe(ctx, sid, &mut self.probe).await {
-                self.running_id = subs
-                    .iter()
-                    .find(|s| s.status == turn_oracle::SubStatus::Running)
-                    .map(|s| s.id.clone());
-                self.subagents = subs.iter().map(to_subagent_activity).collect();
-                self.last_progress_at = stamp.map(chrono::DateTime::<chrono::Utc>::from);
-            }
-        }
-        let mut line = turn_oracle::phase_line(&p, &self.provider);
-        // Name the description that just completed, when we know it.
-        if let Phase::Subagents { done, .. } = &p {
-            if *done > 0 {
-                if let Some(d) = self
-                    .subagents
-                    .iter()
-                    .rfind(|s| s.status == "done")
-                    .map(|s| s.description.clone())
-                {
-                    line.push_str(&format!(" ({d} ✓)"));
-                }
-            }
-        }
-        // `hold_reason` is for a step the engine is deliberately HOLDING while
-        // it looks idle. A handoff written with nothing pending is just the turn
-        // finishing, so it is not one of them.
-        let holds = matches!(
-            p,
-            Phase::IdleConfirming { .. }
-                | Phase::HandoffMissingGrace { .. }
-                | Phase::HandoffWrittenWaiting { pending: 1.. }
-                | Phase::BashLinger { .. }
-        );
-        self.pending = match &p {
-            Phase::HandoffWrittenWaiting { pending } | Phase::BashLinger { pending, .. } => {
-                *pending
-            }
-            Phase::Subagents { running, .. } => *running,
-            _ => 0,
-        };
-        // The handoff file is on disk the moment either of these phases holds.
-        if !self.handoff_logged
-            && matches!(
-                p,
-                Phase::IdleConfirming { .. } | Phase::HandoffWrittenWaiting { .. }
-            )
-        {
-            self.handoff_logged = true;
-            let _ = log_tx.send("📄 handoff file written".to_string());
-        }
-        // 5s floor per identity: A→B→A inside the window logs A once.
-        let recent = self
-            .logged_at
-            .get(&key)
-            .is_some_and(|t| t.elapsed() < Duration::from_secs(5));
-        if !recent {
-            self.logged_at.insert(key, Instant::now());
-            let _ = log_tx.send(line.clone());
-        }
-        let _ = activity_tx.send(bound_activity(NodeActivity {
-            phase: phase_text(&line),
-            updated_at: chrono::Utc::now(),
-            last_progress_at: self.last_progress_at,
-            pending_tasks: self.pending as u32,
-            subagents: self.subagents.clone(),
-            hold_reason: holds.then(|| line.clone()),
-        }));
-    }
-
-    /// The `✓`/`⚠` line that closes an accepted step (design §4, verbatim).
-    fn completion_line(&self, via: CompleteVia) -> String {
-        match via {
-            CompleteVia::HandoffAndIdleTurn => "✓ step complete (handoff + idle turn)".into(),
-            CompleteVia::CodexTaskComplete => {
-                "✓ step complete (codex task_complete + handoff)".into()
-            }
-            CompleteVia::IdleTurnNoHandoff => {
-                "⚠ handoff file missing — accepted the agent's final reply after 90s idle".into()
-            }
-            CompleteVia::HandoffLingerCap => format!(
-                "⚠ handoff written; {} sub-agent{} never reported after 15m — moving on",
-                self.pending,
-                if self.pending == 1 { "" } else { "s" }
-            ),
-            CompleteVia::BashLingerCap => format!(
-                "⚠ background task {} never finished after 15m — moving on",
-                self.running_id.as_deref().unwrap_or("(unknown)")
-            ),
-            CompleteVia::QuietFallback => {
-                "⚠ legacy completion record: silence fallback (no longer accepted)".into()
-            }
-        }
-    }
-}
-
-/// A phase log line without its glyph — what `NodeActivity.phase` carries.
-fn phase_text(line: &str) -> String {
-    line.trim_start_matches(|c: char| !c.is_alphanumeric())
-        .trim()
-        .to_string()
-}
-
-fn to_subagent_activity(s: &turn_oracle::SubagentInfo) -> SubagentActivity {
-    SubagentActivity {
-        id: s.id.chars().take(64).collect(),
-        description: s.description.chars().take(80).collect(),
-        status: match s.status {
-            turn_oracle::SubStatus::Running => "running",
-            turn_oracle::SubStatus::Done => "done",
-            turn_oracle::SubStatus::Failed => "failed",
-        }
-        .to_string(),
-        started_at: s.started_at.map(chrono::DateTime::<chrono::Utc>::from),
-        finished_at: s.finished_at.map(chrono::DateTime::<chrono::Utc>::from),
-    }
 }
 
 /// Clamp an activity snapshot to the documented bounds (§2): ≤ 40 sub-agents,
@@ -2718,164 +2261,65 @@ fn bound_activity(mut a: NodeActivity) -> NodeActivity {
     a
 }
 
-/// The running step's sub-agents + newest child-file mtime, straight from the
-/// oracle. `None` until the session exists (or for a provider with no
-/// transcript) — the snapshot then simply carries no rows.
-///
-/// Each probe used to re-read and re-parse the WHOLE step transcript on the
-/// runtime (once per sub-agent start/finish — ~40 × 40 ms on a 30 MB step). The
-/// [`StepProbe`] kept in `slot` reads only what was appended since the last
-/// probe and re-reads only new/changed sidecars, off the runtime.
-async fn step_activity_probe(
+/// One agent turn of a step on the run's latched step runner (DR-019): a
+/// structured runtime thread (`step_thread`, the default) or a PTY session
+/// (`step_pty`, frozen). Returns `(reply, thread or session id)`.
+#[allow(clippy::too_many_arguments)]
+async fn run_node_agent(
     ctx: &ServerCtx,
-    sid: Option<&Id>,
-    slot: &mut Option<StepProbe>,
-) -> Option<(
-    Vec<turn_oracle::SubagentInfo>,
-    Option<std::time::SystemTime>,
-)> {
-    let sid = sid?;
-    let s = ctx.manager.get(sid).await.ok()?;
-    if s.provider != "claude" {
-        return None;
-    }
-    let psid = s.provider_session_id.clone()?;
-    let mut probe = match slot.take() {
-        Some(p) if &p.sid == sid && p.psid == psid => p,
-        _ => {
-            let (sid, cwd) = (sid.clone(), s.cwd.clone());
-            crate::offload::blocking(move || StepProbe::new(sid, &cwd, psid)).await
-        }
-    };
-    let (probe, out) = crate::offload::blocking(move || {
-        let out = probe.run();
-        (probe, out)
-    })
-    .await;
-    *slot = Some(probe);
-    out
-}
-
-/// Per-step incremental state for [`step_activity_probe`].
-struct StepProbe {
-    sid: Id,
-    psid: String,
-    proj: std::path::PathBuf,
-    main: std::path::PathBuf,
-    tail: turn_oracle::ClaudeTail,
-    metas: turn_oracle::SubagentMetaCache,
-}
-
-impl StepProbe {
-    /// Resolve the transcript paths. Blocking (canonicalize).
-    fn new(sid: Id, cwd: &str, psid: String) -> Self {
-        // claude symlink-resolves the spawn cwd for its transcript dir.
-        let cwd = std::fs::canonicalize(cwd)
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| cwd.to_string());
-        let proj = otto_orchestrator::claude_pty::project_dir(&cwd);
-        let main = proj.join(format!("{psid}.jsonl"));
-        Self {
-            sid,
-            tail: turn_oracle::ClaudeTail::new(&main),
-            psid,
-            proj,
-            main,
-            metas: turn_oracle::SubagentMetaCache::default(),
-        }
-    }
-
-    /// One probe. Blocking IO (only the appended bytes + changed sidecars).
-    fn run(
-        &mut self,
-    ) -> Option<(
-        Vec<turn_oracle::SubagentInfo>,
-        Option<std::time::SystemTime>,
-    )> {
-        let scan = self.tail.poll()?;
-        let subdir = self.proj.join(&self.psid).join("subagents");
-        let stamp = turn_oracle::progress_stamp(&self.main, Some(&subdir), None);
-        let subs = turn_oracle::subagents_cached(&self.proj, &self.psid, &scan, &mut self.metas);
-        Some((subs, stamp))
-    }
-}
-
-/// Parse the E2E sub-agent sentinel from a step prompt:
-/// `OTTO_E2E_SUBAGENTS: <n>` (1..=40) with an optional ` hold_ms=<ms>`
-/// (1000..=60000) on the same line; without it the hold is
-/// `OTTO_E2E_STEP_HOLD_MS` (default 4000 ms).
-fn e2e_subagents(prompt: &str) -> Option<(usize, Duration)> {
-    let line = prompt
-        .lines()
-        .find(|l| l.trim_start().starts_with("OTTO_E2E_SUBAGENTS:"))?;
-    let rest = line.trim_start().strip_prefix("OTTO_E2E_SUBAGENTS:")?;
-    let n: usize = rest.split_whitespace().next()?.parse().ok()?;
-    if !(1..=40).contains(&n) {
-        return None;
-    }
-    let hold = rest
-        .split_whitespace()
-        .find_map(|t| t.strip_prefix("hold_ms="))
-        .and_then(|v| v.parse::<u64>().ok())
-        .filter(|ms| (1000..=60_000).contains(ms))
-        .or_else(|| {
-            std::env::var("OTTO_E2E_STEP_HOLD_MS")
-                .ok()
-                .and_then(|s| s.trim().parse::<u64>().ok())
-        })
-        .unwrap_or(4000);
-    Some((n, Duration::from_millis(hold)))
-}
-
-/// The synthetic phase/activity sequence the E2E daemon emits for a step whose
-/// prompt carries the sub-agent sentinel — the real oracle never runs there (no
-/// CLI is spawned). Mirrors a real run's line order; the canned reply's own
-/// `agent turn complete` follows once `run_session_turn_with` returns.
-async fn e2e_subagent_sequence(
-    n: usize,
-    hold: Duration,
+    ws: &Workspace,
+    user: &User,
+    node: &WorkflowNode,
+    wf_name: &str,
+    run_id: &Id,
+    provider: &str,
+    // Optional model alias (e.g. "opus"/"haiku"). Empty/None = provider default.
+    model: Option<&str>,
+    prompt: &str,
+    cwd: &str,
+    // The step's handoff `.md` (named by the preamble) as a completion MARKER;
+    // `None` for steps whose reply must come from the transcript.
+    done_file: Option<std::path::PathBuf>,
+    session_tx: &tokio::sync::mpsc::UnboundedSender<AgentAssociation>,
     log_tx: &tokio::sync::mpsc::UnboundedSender<String>,
     activity_tx: &tokio::sync::mpsc::UnboundedSender<NodeActivity>,
-) {
-    let half = hold / 2;
-    let _ = log_tx.send("✉ prompt accepted".to_string());
-    let started = chrono::Utc::now();
-    let mut subs: Vec<SubagentActivity> = (1..=n)
-        .map(|i| SubagentActivity {
-            id: format!("e2e-agent-{i}"),
-            description: format!("E2E sub-agent {i}"),
-            status: "running".into(),
-            started_at: Some(started),
-            finished_at: None,
-        })
-        .collect();
-    let _ = log_tx.send(format!("🧩 sub-agents: {n} running · 0 done"));
-    let _ = activity_tx.send(bound_activity(NodeActivity {
-        phase: format!("sub-agents: {n} running · 0 done"),
-        updated_at: chrono::Utc::now(),
-        last_progress_at: Some(started),
-        pending_tasks: n as u32,
-        subagents: subs.clone(),
-        hold_reason: None,
-    }));
-    tokio::time::sleep(half).await;
-    let finished = chrono::Utc::now();
-    for s in &mut subs {
-        s.status = "done".into();
-        s.finished_at = Some(finished);
+) -> Result<(String, Id)> {
+    if step_thread::runner_for(ctx, run_id, provider).await == "pty" {
+        return step_pty::run(
+            ctx,
+            ws,
+            user,
+            node,
+            wf_name,
+            run_id,
+            provider,
+            model,
+            prompt,
+            cwd,
+            done_file,
+            session_tx,
+            log_tx,
+            activity_tx,
+        )
+        .await;
     }
-    let _ = log_tx.send(format!("🧩 sub-agents: 0 running · {n} done"));
-    let _ = activity_tx.send(bound_activity(NodeActivity {
-        phase: format!("sub-agents: 0 running · {n} done"),
-        updated_at: finished,
-        last_progress_at: Some(finished),
-        pending_tasks: 0,
-        subagents: subs,
-        hold_reason: None,
-    }));
-    tokio::time::sleep(hold.saturating_sub(half)).await;
-    let _ = log_tx.send("📄 handoff file written".to_string());
-    let _ = log_tx.send("✓ step complete (handoff + idle turn)".to_string());
+    step_thread::run(
+        ctx,
+        ws,
+        user,
+        node,
+        wf_name,
+        run_id,
+        provider,
+        model,
+        prompt,
+        cwd,
+        done_file,
+        session_tx,
+        log_tx,
+        activity_tx,
+    )
+    .await
 }
 
 /// Resolve the repo_id a repo-needing step (`review_run`, `git_pr`) should use:
@@ -3168,86 +2612,6 @@ fn merge_published_refs(files: &crate::workflow_context::RunContextFiles, out: &
             merge_one(v);
         }
     }
-}
-
-/// Seed the run input from the first VALID declared repo entry — explicit
-/// input keys always win — and expose the normalized entries as
-/// `repos: [{repo_id, worktree, base}]`, the shape `collect_pr_targets` and
-/// the loop's ref harvest already consume. Pure; unit-tested below.
-fn seed_input_from_entries(input: Value, entries: &[crate::workflow_context::RepoEntry]) -> Value {
-    let valid: Vec<&crate::workflow_context::RepoEntry> =
-        entries.iter().filter(|e| e.error.is_none()).collect();
-    if valid.is_empty() {
-        return input;
-    }
-    let mut m = match input {
-        Value::Object(m) => m,
-        Value::Null => serde_json::Map::new(),
-        other => {
-            let mut m = serde_json::Map::new();
-            m.insert("input".into(), other);
-            m
-        }
-    };
-    let missing = |m: &serde_json::Map<String, Value>, k: &str| {
-        m.get(k)
-            .and_then(Value::as_str)
-            .map(|s| s.trim().is_empty())
-            .unwrap_or(true)
-    };
-    if missing(&m, "working_directory") {
-        if let Some(w) = valid.iter().find_map(|e| e.worktree.clone()) {
-            m.insert("working_directory".into(), Value::String(w));
-        }
-    }
-    if missing(&m, "base") {
-        if let Some(b) = valid.iter().find_map(|e| e.base.clone()) {
-            m.insert("base".into(), Value::String(b));
-        }
-    }
-    if missing(&m, "repo_id") {
-        if let Some(r) = valid.iter().find_map(|e| e.repo_id.clone()) {
-            m.insert("repo_id".into(), Value::String(r));
-        }
-    }
-    // Replace the raw declarations with the normalized targets; the original
-    // user shape stays visible in repos.json.
-    m.insert(
-        "repos".into(),
-        Value::Array(
-            valid
-                .iter()
-                .map(|e| crate::workflow_context::entry_to_target(e))
-                .collect(),
-        ),
-    );
-    Value::Object(m)
-}
-
-/// Some triggers (chat) send `msg`, agent-facing steps and `prompt.md` want
-/// `prompt` — fill `prompt` from `msg` when `prompt` is absent or blank, and
-/// never the reverse (an explicit `prompt` always wins; `msg` still renders
-/// separately in the brief unless it's identical, see `render_brief`). A
-/// non-object input (or one already without either field) passes through
-/// unchanged.
-fn normalize_prompt(input: Value) -> Value {
-    let Value::Object(mut m) = input else {
-        return input;
-    };
-    let has_prompt = m
-        .get("prompt")
-        .and_then(Value::as_str)
-        .is_some_and(|s| !s.trim().is_empty());
-    if !has_prompt {
-        if let Some(msg) = m
-            .get("msg")
-            .and_then(Value::as_str)
-            .filter(|s| !s.trim().is_empty())
-        {
-            m.insert("prompt".into(), Value::String(msg.to_string()));
-        }
-    }
-    Value::Object(m)
 }
 
 /// Resolve declared repo entries against registered repos + live git state:
@@ -3752,30 +3116,6 @@ fn harvest_session_ids(output: &Value, into: &mut Vec<String>) {
     }
 }
 
-/// Extract the body of the first fenced code block (preferring the `lang` fence).
-fn extract_code_block(text: &str, lang: &str) -> Option<String> {
-    let fence = format!("```{lang}");
-    let start = text
-        .find(&fence)
-        .map(|i| i + fence.len())
-        .or_else(|| text.find("```").map(|i| i + 3))?;
-    let rest = &text[start..];
-    let end = rest.find("```")?;
-    Some(rest[..end].trim().to_string())
-}
-
-/// File extension for a `canvas` workflow node's written diagram artifact,
-/// keyed on its `mode` param. `excalidraw` writes JSON; `d2` writes `.d2`
-/// source; everything else (the default `mermaid`, and any unrecognized mode)
-/// writes `.mmd`.
-fn canvas_node_ext(mode: &str) -> &'static str {
-    match mode {
-        "excalidraw" => "json",
-        "d2" => "d2",
-        _ => "mmd",
-    }
-}
-
 /// The version id a `product_*` step with `persist: true` saved. A failed
 /// save used to be dropped silently: the step succeeded without its
 /// `version_id`, and nothing said the result was never stored.
@@ -3910,6 +3250,8 @@ mod api_request;
 mod nodes;
 
 mod run;
+mod step_pty;
+mod step_thread;
 #[cfg(test)]
 use otto_workflows::run_refs::fetchable_branch_name;
 use otto_workflows::run_refs::resolve_wf_base;
@@ -3917,3 +3259,5 @@ use otto_workflows::run_refs::resolve_wf_base;
 use run::identity::acting_user_id;
 use run::identity::run_identity;
 use run::refs::sync_run_branches;
+#[cfg(test)]
+use step_pty::{e2e_subagents, phase_text, PhaseFeed};

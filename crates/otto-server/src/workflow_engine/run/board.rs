@@ -42,6 +42,10 @@ impl RunBoard {
         f(&mut self.lock()[idx])
     }
 
+    pub(in crate::workflow_engine) fn snapshot(&self) -> Vec<NodeRunState> {
+        self.lock().clone()
+    }
+
     /// The step numbers of the given nodes (those that have one).
     pub(in crate::workflow_engine) fn step_nos_of(&self, ids: &HashSet<String>) -> HashSet<u32> {
         self.lock()

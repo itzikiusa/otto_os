@@ -8,6 +8,7 @@
 //! session stop, chat progress) on its own state, published through
 //! [`RunBoard`].
 
+use super::super::step_thread::StepNote;
 use super::super::*;
 use super::board::RunBoard;
 use super::state::RunState;
@@ -286,6 +287,11 @@ async fn run_node(
         attempts,
     )
     .await;
+    // "settled" is not a phase (§2.2).
+    st.phase = None;
+    // The step's answer is on its state: its thread may close now (§6.5).
+    let states = board.snapshot();
+    super::super::step_thread::close_settled(cx.ctx, &cx.workflow.graph, &states, &mut st).await;
     // Signal node finish so the inspector can update without waiting for the next poll.
     board.publish(cx, idx, &st).await;
     done.output = output;
@@ -396,6 +402,7 @@ async fn run_attempts(
     // cancel it aborts only the CURRENT node, which is then marked Skipped and
     // the run continues to the next node.
     let mut skip_current = false;
+    let mut park = None;
     let result = loop {
         attempt += 1;
         st.attempts = Some(attempt);
@@ -453,6 +460,18 @@ async fn run_attempts(
                     break Err(otto_core::Error::Upstream("workflow active time budget exhausted".into()));
                 }
                 Some(sid) = sess_rx.recv() => {
+                    // A step waiting on a person parks (§2.4); its answer unparks it.
+                    match &sid {
+                        AgentAssociation::Step(StepNote::NeedsYou(_)) => {
+                            park.get_or_insert_with(|| env.budget.park());
+                        }
+                        AgentAssociation::Step(StepNote::Resumed { .. }) => {
+                            if let Some(p) = park.take() {
+                                p.unpark().await;
+                            }
+                        }
+                        _ => {}
+                    }
                     if record_association(st, sid) {
                         board.publish(cx, idx, st).await;
                         // The write carried any buffered log lines too.
@@ -729,7 +748,9 @@ async fn settle(
             st.attempts = Some(attempt);
             // Also harvest a session id carried in the output (dedups with the
             // live channel report).
-            harvest_session_ids(&out, &mut st.sessions);
+            if st.thread.as_ref().is_none_or(|t| t.runner == "pty") {
+                harvest_session_ids(&out, &mut st.sessions);
+            }
             let elapsed = started.elapsed().as_millis() as u64;
             st.duration_ms = Some(elapsed);
             if progress.enabled() && is_reportable(&node.kind) && failure.is_none() {
