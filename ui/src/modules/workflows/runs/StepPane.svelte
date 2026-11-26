@@ -244,7 +244,7 @@
       {#if attachments.length}
         <h4>Files sent with the run</h4>
         <ul class="att" data-testid="wf-run-attachments">
-          {#each attachments as a (a.name)}
+          {#each attachments as a, i (a.path ?? `${a.source}:${a.name}:${i}`)}
             {@const path = !a.error ? a.path : undefined}
             <li data-testid="wf-run-attachment" data-source={a.source} data-error={a.error ? 'true' : undefined}>
               <Icon name="file" size={13} /><span class="ellipsis" dir="auto">{a.name}</span>

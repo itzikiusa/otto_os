@@ -203,6 +203,9 @@ test('files sent with the message show under Result → Input: a text one previe
     const body = { ...real, overview, attachments: [
       { name: 'trace.log', mime: 'text/plain', size_bytes: 2048, path: 'attachments/trace.log', source: 'start' },
       { name: 'screen.png', mime: 'image/png', source: 'steer', error: 'too large' },
+      // Two files of one name: the daemon keeps the name and gives each its own path (CR2-012).
+      { name: 'shot.png', mime: 'image/png', size_bytes: 1024, path: 'attachments/shot.png', source: 'start' },
+      { name: 'shot.png', mime: 'image/png', size_bytes: 1024, path: 'attachments/shot-2.png', source: 'steer' },
     ] };
     await route.fulfill({ response: res, json: body });
   });
@@ -219,7 +222,7 @@ test('files sent with the message show under Result → Input: a text one previe
   await expect(card.locator('a')).toHaveCount(1);
   await expect(card.locator('a')).toHaveAttribute('href', 'https://example.invalid/pr/1');
   await page.getByTestId('wf-step-tab-input').click();
-  await expect(page.getByTestId('wf-run-attachment')).toHaveCount(2);
+  await expect(page.getByTestId('wf-run-attachment')).toHaveCount(4);
   const failed = page.locator('[data-testid="wf-run-attachment"][data-error="true"]');
   await expect(failed).toContainText('not downloaded');
   await expect(failed.getByRole('button')).toHaveCount(0);
