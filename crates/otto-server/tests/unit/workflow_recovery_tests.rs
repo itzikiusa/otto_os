@@ -121,11 +121,15 @@ async fn completed_review_gate_failure_retains_result_and_reuses_review_on_reent
             String::from_utf8_lossy(&output.stderr)
         );
     }
+    // Otto's data folder is not the repository: files Otto writes into it
+    // (the IDE's shell-environment cache) would be untracked files there, and
+    // the diff this test needs empty would start a real review.
+    let data = tempfile::tempdir().unwrap();
     let pool = mem_pool().await;
     seed_workspace(&pool, "recovery-review-ws").await;
     sqlx::query("INSERT INTO users(id,username,password_hash,display_name,is_root,created_at) VALUES('root','root','x','Root',1,?)")
         .bind(chrono::Utc::now().to_rfc3339()).execute(&pool).await.unwrap();
-    let ctx = test_ctx(&pool, dir.path().to_path_buf()).await;
+    let ctx = test_ctx(&pool, data.path().to_path_buf()).await;
     let user = root_user();
     let ws = otto_state::WorkspacesRepo::new(pool.clone())
         .get(&"recovery-review-ws".into())
