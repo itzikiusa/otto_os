@@ -699,8 +699,10 @@ The [latest release](../../releases/latest) has `Otto_<version>_aarch64.dmg`
 The rolling `latest` build that the retired monthly workflow made is no longer
 updated.
 
-**First launch.** Releases are signed with Otto's own certificate but not
-notarized by Apple, so macOS blocks the first open.
+**First launch.** From 0.6.1 on, releases are signed with an Apple Developer ID
+and notarized by Apple: macOS asks once whether to open an app downloaded from
+the internet, and opens it. The DMGs of 0.6.0 and earlier are not notarized, so
+macOS blocks their first open.
 - **macOS 15 and later:** open Otto once, then click **Open Anyway** in
   **System Settings ▸ Privacy & Security**. Control-click ▸ Open no longer
   bypasses Gatekeeper there.

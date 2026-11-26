@@ -1,9 +1,13 @@
 #!/bin/bash
-# Sign ottod + Otto.app with the stable self-signed identity.
+# Sign ottod + Otto.app with the stable self-signed identity, or a release
+# with the Developer ID one.
 # Usage: packaging/sign.sh <path-to-Otto.app> [path-to-ottod]
+#        packaging/sign.sh <path-to.dmg>
 #
 # OTTO_SIGN_IDENTITY  signing identity (default "Otto Dev Signing", this Mac's
-#                     own cert from make-cert.sh). Releases set the release one.
+#                     own cert from make-cert.sh). Releases set
+#                     "Developer ID Application: …", which also gets Apple's
+#                     secure timestamp (notarization requires it).
 # OTTO_SIGN_KEYCHAIN  sign from this keychain file only (CI: a temporary
 #                     keychain holding the release cert). It never needs to be
 #                     in the search list, and the login keychain's trust step
@@ -12,23 +16,36 @@ set -euo pipefail
 
 CERT_NAME="${OTTO_SIGN_IDENTITY:-Otto Dev Signing}"
 KEYCHAIN="${OTTO_SIGN_KEYCHAIN:-}"
-APP="${1:?usage: sign.sh <Otto.app> [ottod]}"
+APP="${1:?usage: sign.sh <Otto.app> [ottod] | <file.dmg>}"
 OTTOD="${2:-}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-sign() {
-    if [[ -n "$KEYCHAIN" ]]; then
-        codesign --keychain "$KEYCHAIN" --force --options runtime --timestamp=none -s "$CERT_NAME" "$@"
-    else
-        codesign --force --options runtime --timestamp=none -s "$CERT_NAME" "$@"
-    fi
-}
+# Developer ID: Apple's secure timestamp, which notarization requires. The
+# self-signed dev identity signs offline.
+DEVELOPER_ID=""
+TIMESTAMP=--timestamp=none
+if [[ "$CERT_NAME" == "Developer ID Application:"* ]]; then
+    DEVELOPER_ID=1
+    TIMESTAMP=--timestamp
+fi
 
-# No -v: a self-signed identity that hasn't been trust-approved yet is still
-# usable for signing; trust only affects verification UX.
-if ! security find-identity -p codesigning ${KEYCHAIN:+"$KEYCHAIN"} | grep -qF "\"$CERT_NAME\""; then
-    echo "Signing identity '$CERT_NAME' not found. Run packaging/make-cert.sh first." >&2
+# codesign gets the certificate's SHA-1, not its name: a name is not found in
+# a keychain outside the search list (CI's temporary one).
+# Developer ID: valid identities only (-v), so a renewed certificate is picked
+# over the expired one of the same name. Dev identity, no -v: a self-signed
+# one that hasn't been trust-approved yet still signs.
+CERT_HASH="$(security find-identity ${DEVELOPER_ID:+-v} -p codesigning ${KEYCHAIN:+"$KEYCHAIN"} |
+    awk -v name="\"$CERT_NAME\"" 'index($0, name) { print $2; exit }')"
+if [[ -z "$CERT_HASH" ]]; then
+    echo "Signing identity '$CERT_NAME' not found in ${KEYCHAIN:-the keychain search list}." \
+        "Dev identity: run packaging/make-cert.sh. Release identity: docs/RELEASE.md." >&2
     exit 1
 fi
+
+sign() {
+    codesign ${KEYCHAIN:+--keychain "$KEYCHAIN"} --force --options runtime \
+        "$TIMESTAMP" -s "$CERT_HASH" "$@"
+}
 
 # Ensure the cert is TRUSTED for code signing. This is what makes a keychain
 # "Always Allow" survive a rebuild: when trusted, macOS anchors a STABLE code
@@ -60,7 +77,14 @@ ensure_codesign_trust() {
     fi
     rm -f "$pem"
 }
-[[ -n "$KEYCHAIN" ]] || ensure_codesign_trust
+# Apple's chain already trusts a Developer ID certificate.
+[[ -n "$KEYCHAIN" || -n "$DEVELOPER_ID" ]] || ensure_codesign_trust
+
+if [[ "$APP" == *.dmg ]]; then
+    sign "$APP"
+    echo "signed: $APP"
+    exit 0
+fi
 
 if [[ -n "$OTTOD" ]]; then
     sign "$OTTOD"
@@ -73,16 +97,13 @@ SIDECAR="$APP/Contents/MacOS/ottod"
 
 # Optional embedded headless Kiri sidecar: `kiri` requires
 # `com.apple.security.virtualization` on its own binary (NOT on Otto.app/ottod).
-# `codesign --deep` strips nested entitlements, so when `kiri` is bundled we
-# sign the app bundle without `--deep` after signing nested sidecars explicitly.
 KIRI_SIDECAR="$APP/Contents/MacOS/kiri"
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 if [[ -f "$KIRI_SIDECAR" ]]; then
     sign --entitlements "$SCRIPT_DIR/kiri.entitlements" "$KIRI_SIDECAR"
     echo "signed: $KIRI_SIDECAR (with virtualization entitlement)"
-    sign "$APP"
-else
-    sign --deep "$APP"
 fi
+# No --deep: it would put the app's entitlements on the sidecars and strip
+# kiri's. Every nested binary is signed above.
+sign --entitlements "$SCRIPT_DIR/otto.entitlements" "$APP"
 codesign -dv "$APP" 2>&1 | grep -E 'Identifier|Authority' || true
 echo "signed: $APP"

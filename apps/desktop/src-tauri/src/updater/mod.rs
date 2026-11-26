@@ -286,11 +286,13 @@ fn endpoint(cfg: &serde_json::Value) -> Option<reqwest::Url> {
     cfg.get("endpoints")?.get(0)?.as_str()?.parse().ok()
 }
 
-/// The accepted code-signing identities: `acceptedLeaves` (SHA-1 of each
-/// leaf certificate) of the file packaging/release-artifacts.sh signs and
-/// checks with, so the TEST identity is replaced in that one place. A later
-/// identity (a new certificate, Developer ID) is added there next to the old
-/// one for at least one release.
+/// The accepted code-signing identities of the file
+/// packaging/release-artifacts.sh signs and checks with, so the TEST identity
+/// is replaced in that one place: `acceptedTeams` (Apple Developer ID Team
+/// IDs — a renewed certificate of the same team stays accepted) and
+/// `acceptedLeaves` (SHA-1 of a leaf certificate; the self-signed TEST one).
+/// Another team or leaf is added there next to the old one for at least one
+/// release.
 const RELEASE_IDENTITY: &str = include_str!("../../release-identity.json");
 
 const TAURI_CONF: &str = include_str!("../../tauri.conf.json");
@@ -329,16 +331,32 @@ fn test_config(identity: &str, tauri_conf: &str) -> bool {
 
 fn signers(identity: &str) -> Vec<String> {
     let v: serde_json::Value = serde_json::from_str(identity).unwrap_or_default();
-    v.get("acceptedLeaves")
-        .and_then(|a| a.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|s| s.as_str())
-                .filter(|s| s.len() == 40 && s.chars().all(|c| c.is_ascii_hexdigit()))
-                .map(|leaf| format!("certificate leaf = H\"{}\"", leaf.to_ascii_lowercase()))
-                .collect()
+    let list = |key: &str| -> Vec<String> {
+        let items = v.get(key).and_then(|a| a.as_array());
+        let strs = items.into_iter().flatten().filter_map(|s| s.as_str());
+        strs.map(str::to_owned).collect()
+    };
+    let leaves = list("acceptedLeaves")
+        .into_iter()
+        .filter(|s| s.len() == 40 && s.chars().all(|c| c.is_ascii_hexdigit()))
+        .map(|leaf| format!("certificate leaf = H\"{}\"", leaf.to_ascii_lowercase()));
+    // Apple's Developer ID chain (its intermediate and leaf markers) issued
+    // to that team: what Gatekeeper itself checks.
+    let teams = list("acceptedTeams")
+        .into_iter()
+        .filter(|s| {
+            s.len() == 10
+                && s.chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
         })
-        .unwrap_or_default()
+        .map(|team| {
+            format!(
+                "(anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists \
+                 and certificate leaf[field.1.2.840.113635.100.6.1.13] exists \
+                 and certificate leaf[subject.OU] = \"{team}\")"
+            )
+        });
+    leaves.chain(teams).collect()
 }
 
 /// `https://github.com/<o>/<r>/releases/tag/v<version>` from the endpoint.
@@ -818,15 +836,10 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode(test_key)
         );
         assert!(test_config(real, &conf));
-        // The repo carries the TEST identity and key until the owner's replace them.
-        assert!(test_config(RELEASE_IDENTITY, TAURI_CONF));
-        assert!(
-            test_config(real, TAURI_CONF),
-            "the repo's TEST pubkey alone"
-        );
+        // The repo carries the owner's Developer ID team and update key.
         assert_eq!(
             release_channel(test_config(RELEASE_IDENTITY, TAURI_CONF), Some("release")),
-            Channel::Source
+            Channel::Release
         );
     }
 
@@ -893,6 +906,15 @@ mod tests {
                 format!("certificate leaf = H\"{}\"", "a".repeat(40))
             ],
             "hex leaves only — nothing else reaches the requirement"
+        );
+        assert_eq!(
+            signers(r#"{"acceptedTeams": ["ABCDE12345", "x\" or anchor apple", "abcde12345"]}"#),
+            [
+                "(anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists \
+              and certificate leaf[field.1.2.840.113635.100.6.1.13] exists \
+              and certificate leaf[subject.OU] = \"ABCDE12345\")"
+            ],
+            "Team IDs only"
         );
         assert_eq!(
             signers(RELEASE_IDENTITY).len(),
