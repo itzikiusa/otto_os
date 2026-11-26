@@ -5146,6 +5146,7 @@ dependencies = [
  "otto-core",
  "otto-git",
  "otto-issues",
+ "otto-mcp",
  "otto-state",
  "reqwest",
  "serde",
