@@ -14,6 +14,7 @@
     DEFAULT_MAX_LOAD_PER_CORE,
     DEFAULT_MAX_WAIT_SECS,
     defaultMaxLive,
+    defaultPressureFloor,
     type MachineErrors,
     type MachineForm,
   } from './machineSettings';
@@ -23,8 +24,15 @@
   $effect(() => machineStatus.watch());
   const status = $derived(machineStatus.status);
   const autoLive = $derived(
-    status ? `${defaultMaxLive(status.cores)} on this Mac` : 'three quarters of the cores, at least 2',
+    status
+      ? `${defaultMaxLive(status.cores, status.ram_bytes)} on this Mac`
+      : 'three quarters of the cores and one per 3 GB of memory, at least 2',
   );
+  const autoFloor = $derived.by(() => {
+    if (!status) return 'half the limit, at least 1';
+    const ceiling = typeof form.maxLive === 'number' && form.maxLive > 0 ? form.maxLive : defaultMaxLive(status.cores, status.ram_bytes);
+    return `${defaultPressureFloor(ceiling)} on this Mac`;
+  });
   /** The load the threshold stands for on this Mac, once the cores are known. */
   const loadLimit = $derived.by(() => {
     const per = typeof form.maxLoadPerCore === 'number' && form.maxLoadPerCore > 0 ? form.maxLoadPerCore : DEFAULT_MAX_LOAD_PER_CORE;
@@ -51,8 +59,8 @@
     onchange={(v) => { form.admission = v; }}
   >
     Code reviews, workflow steps, scheduled tasks and other agents Otto starts on its own wait
-    while the load or memory pressure is high, then start a few seconds apart. Sessions you start
-    never wait. Turning it off starts anything queued at once.
+    while the load or memory pressure is high and enough of them already run, then start a few
+    seconds apart. Sessions you start never wait. Turning it off starts anything queued at once.
   </SettingToggle>
 
   <div class="field num">
@@ -73,6 +81,28 @@
     {#if errors.maxLive}<span class="hint err" id="mr-max-live-err" use:announceShown={errors.maxLive}>{errors.maxLive}</span>{/if}
   </div>
   <p class="hint-line" id="mr-max-live-hint">Blank = automatic ({autoLive}); 0 = no limit. More wait their turn.</p>
+
+  <div class="field num">
+    <label for="mr-floor">Wait for a busy Mac from this many running</label>
+    <input
+      id="mr-floor"
+      class="input"
+      type="number"
+      min="0"
+      step="1"
+      placeholder="Automatic"
+      bind:value={form.pressureFloor}
+      disabled={!form.admission}
+      aria-invalid={!!errors.pressureFloor}
+      aria-describedby="mr-floor-hint{errors.pressureFloor ? ' mr-floor-err' : ''}"
+      data-testid="agent-admission-pressure-floor"
+    />
+    {#if errors.pressureFloor}<span class="hint err" id="mr-floor-err" use:announceShown={errors.pressureFloor}>{errors.pressureFloor}</span>{/if}
+  </div>
+  <p class="hint-line" id="mr-floor-hint">
+    Load or memory pressure holds a new background agent only while at least this many are running.
+    Blank = automatic ({autoFloor}); 0 = always.
+  </p>
 
   <SettingToggle
     label="Run background agents at lower priority"
@@ -175,7 +205,7 @@
     </div>
     <p class="hint-line" id="mr-load-hint">
       Blank = {DEFAULT_MAX_LOAD_PER_CORE}. Background agents wait while the load per core is above
-      this{loadLimit}. High memory pressure always makes them wait.
+      this{loadLimit}, or memory pressure is high, once enough of them run (above).
     </p>
     <div class="field num">
       <label for="mr-wait">Longest wait for a busy Mac (seconds)</label>
@@ -195,8 +225,9 @@
       {#if errors.maxWaitSecs}<span class="hint err" id="mr-wait-err" use:announceShown={errors.maxWaitSecs}>{errors.maxWaitSecs}</span>{/if}
     </div>
     <p class="hint-line" id="mr-wait-hint">
-      Blank = {DEFAULT_MAX_WAIT_SECS}. After this an agent starts anyway, so nothing waits forever; at
-      the running-agents limit it waits four times as long.
+      Blank = {DEFAULT_MAX_WAIT_SECS}. After this an agent starts anyway (one a minute at most); at
+      the running-agents limit it waits four times as long. Critical memory pressure never gives
+      way: an agent then starts only when no other one runs.
     </p>
   </details>
 </div>
