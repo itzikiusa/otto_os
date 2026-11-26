@@ -174,6 +174,11 @@ async fn a_fork_a_question_an_approval_and_a_continued_thread_run_on_the_thread_
         "c remembers a's conversation: {}",
         reply(c)
     );
+    assert_eq!(
+        c.brief.as_deref(),
+        Some(reply(c).as_str()),
+        "the step line's brief"
+    );
     let handoff = |n: &otto_core::workflows::NodeRunState| {
         let name = format!("{}.md", n.step_file.as_deref().expect("a step file"));
         std::fs::read_to_string(rig_ctx_dir(&ctx, &run_id).join(name)).unwrap_or_default()
