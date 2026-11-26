@@ -456,6 +456,10 @@ async fn a_deadline_names_the_wait_and_no_progress_spares_a_pending_request() {
         "{:?}",
         out.waited_on
     );
+    // A thread of its own: the deadline above only SENT the interrupt, and a
+    // prompt before the CLI has ended that turn is refused as "a turn is
+    // already running" (seen on a slow CI runner).
+    let id = rig.thread(RuntimeProvider::Claude).await;
     let mut o = opts();
     o.no_progress = Some(Duration::from_millis(400));
     let out = rig
