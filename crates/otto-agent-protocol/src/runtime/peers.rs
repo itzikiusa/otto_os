@@ -89,9 +89,13 @@ impl AgentRuntime {
     /// threads of this linked group, the root included.
     pub(super) async fn ensure_group_room(&self, c: &RuntimeSession) -> Result<()> {
         let open = self.group(c).await?.len();
-        if otto_core::agent_runtime::is_engine_thread(c.meta.as_ref())
-            && open > otto_core::agent_runtime::ENGINE_SUB_THREADS_MAX
-        {
+        let engine = otto_core::agent_runtime::is_engine_thread(c.meta.as_ref());
+        if engine && self.inner.host.memory_critical().await {
+            return Err(Error::Conflict(
+                "the machine is short of memory — do this part yourself".into(),
+            ));
+        }
+        if engine && open > otto_core::agent_runtime::ENGINE_SUB_THREADS_MAX {
             return Err(Error::Conflict(format!(
                 "a workflow step may have {} open sub-threads at once — close one \
                  (otto_thread_close) or do this part yourself",

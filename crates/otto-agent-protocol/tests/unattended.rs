@@ -37,6 +37,11 @@ struct Host {
     root: PathBuf,
     env: Vec<(String, String)>,
     events: Mutex<Vec<Arc<RuntimeEvent>>>,
+    /// Each spawn's pre-admitted key (`admit_spawn`).
+    spawns: Mutex<Vec<Option<String>>>,
+    /// Each registered process's exit watch (`register_runtime`).
+    registered: Mutex<Vec<tokio::sync::watch::Receiver<Option<i32>>>>,
+    critical: std::sync::atomic::AtomicBool,
 }
 
 #[async_trait::async_trait]
@@ -66,6 +71,21 @@ impl RuntimeHost for Host {
     }
     fn publish(&self, _s: &RuntimeSession, e: Arc<RuntimeEvent>) {
         self.events.lock().unwrap().push(e);
+    }
+    fn admit_spawn(&self, _s: &RuntimeSession, key: Option<String>) -> Box<dyn Send> {
+        self.spawns.lock().unwrap().push(key);
+        Box::new(())
+    }
+    async fn register_runtime(
+        &self,
+        _s: &RuntimeSession,
+        _pid: Option<u32>,
+        exit: tokio::sync::watch::Receiver<Option<i32>>,
+    ) {
+        self.registered.lock().unwrap().push(exit);
+    }
+    async fn memory_critical(&self) -> bool {
+        self.critical.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -117,6 +137,9 @@ impl Rig {
                 ("OTTO_FAKE_ARGV_LOG".into(), path("argv.log")),
             ],
             events: Mutex::default(),
+            spawns: Mutex::default(),
+            registered: Mutex::default(),
+            critical: Default::default(),
         });
         let drivers: Arc<dyn DriverFactory> = if binaries {
             Arc::new(|p: RuntimeProvider| -> Option<Box<dyn StructuredDriver>> {
@@ -530,11 +553,16 @@ async fn a_restart_that_cut_the_turn_ends_the_wait_as_server_restart() {
     rig.rt.shutdown().await;
     let rt = rig.again();
     rt.recover().await.unwrap();
+    // A second restart before the step resumes still knows (the mark is
+    // on the row, not in memory).
+    rt.shutdown().await;
+    let rt = rig.again();
+    rt.recover().await.unwrap();
     let started = Instant::now();
     let out = rt.await_settled(&id, 0, opts(), |_| {}).await.unwrap();
     assert_eq!(out.ended, Ended::ServerRestart);
     assert!(started.elapsed() < Duration::from_secs(2));
-    // Consumed once: the next wait is an ordinary one.
+    // The next turn is not the cut one: an ordinary wait.
     let out = rt
         .run_turn(&id, &script(&["reply back"]), opts(), |_| {})
         .await
@@ -546,7 +574,7 @@ async fn a_restart_that_cut_the_turn_ends_the_wait_as_server_restart() {
 // ---- ThreadStepRunner (runtime.md §1.5–§1.9) --------------------------------
 
 use otto_agent_protocol::step_runner::{
-    NoStepHost, StepHost, ThreadStepRunner, CONTINUE_AFTER_LIMIT,
+    NoStepHost, Place, StepHost, ThreadStepRunner, CONTINUE_AFTER_LIMIT,
 };
 use otto_agent_run::step::{StepErrorClass, StepOutcome, StepRunner, StepTurn};
 
@@ -675,12 +703,15 @@ async fn continuing_an_earlier_steps_thread() {
     let (out, _) = run(&runner, next.clone()).await;
     assert_eq!(out.error, None, "{:?}", out.error);
     assert_eq!(rig.starts(), starts + 1);
-    // Closed but retained: reopened first.
+    // Closed but retained: reopened without a spawn; the turn's own spawn is
+    // the only one (DR-115.1).
     runner
         .close(&first.thread_id, Utc::now() + chrono::TimeDelta::hours(1))
         .await;
+    let before = rig.starts();
     let (out, _) = run(&runner, next.clone()).await;
     assert_eq!(out.error, None, "{:?}", out.error);
+    assert_eq!(rig.starts(), before + 1, "exactly one spawn");
     // Another provider.
     let mut other = next.clone();
     other.provider = "codex".into();
@@ -695,7 +726,8 @@ async fn continuing_an_earlier_steps_thread() {
     rig.rt.shutdown().await;
 }
 
-struct ResetsSoon(chrono::DateTime<Utc>);
+/// Counts its admissions; a usage limit resets at `.0`.
+struct ResetsSoon(chrono::DateTime<Utc>, std::sync::atomic::AtomicUsize);
 
 #[async_trait::async_trait]
 impl StepHost for ResetsSoon {
@@ -704,14 +736,18 @@ impl StepHost for ResetsSoon {
         _: &str,
         _: &str,
         on_wait: &(dyn Fn(otto_core::agent_runtime::WaitReason) + Send + Sync),
-    ) -> Box<dyn Send> {
+    ) -> Place {
+        self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         on_wait(otto_core::agent_runtime::WaitReason {
             code: "slots".into(),
             text: "Waiting for a free agent slot — 1 ahead in line".into(),
             since: Utc::now(),
             detail: None,
         });
-        Box::new(())
+        Place {
+            key: None,
+            guard: Box::new(()),
+        }
     }
     async fn usage_resets_at(
         &self,
@@ -731,9 +767,25 @@ async fn a_usage_limit_with_a_known_reset_waits_and_continues_the_same_thread() 
     let (out, _) = run(&rig.runner(), t.clone()).await;
     assert_eq!(out.error.unwrap().class, StepErrorClass::UsageLimit);
     let at = Utc::now() + chrono::TimeDelta::seconds(2);
-    let runner = ThreadStepRunner::new(rig.rt.clone(), Arc::new(ResetsSoon(at)));
+    let host = Arc::new(ResetsSoon(at, Default::default()));
+    let runner = ThreadStepRunner::new(rig.rt.clone(), Arc::clone(&host) as Arc<dyn StepHost>);
     let started = Instant::now();
-    let (out, evs) = run(&runner, t).await;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let task = tokio::spawn(async move { runner.run(t, tx, CancelSignal::new()).await });
+    let mut evs = Vec::new();
+    let mut parked_without_process = None;
+    while let Some(e) = rx.recv().await {
+        if let StepEvent::NeedsYou(a) = &e {
+            if a.kind == AttentionKind::UsageLimit {
+                // DR-115.4: parked = no process, no machine place.
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                let id = a.thread_id.clone().unwrap();
+                parked_without_process = Some(!rig.rt.has_process(&id).await.unwrap());
+            }
+        }
+        evs.push(e);
+    }
+    let out = task.await.unwrap().unwrap();
     assert!(started.elapsed() >= Duration::from_millis(1500));
     assert!(
         matches!(&evs[0], StepEvent::Waiting(w) if w.code == "slots"),
@@ -744,6 +796,16 @@ async fn a_usage_limit_with_a_known_reset_waits_and_continues_the_same_thread() 
         _ => None,
     });
     assert_eq!(limit.unwrap().resets_at, Some(at));
+    assert_eq!(
+        parked_without_process,
+        Some(true),
+        "the process is released at park"
+    );
+    assert_eq!(
+        host.1.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "admitted for the create and again at the wake"
+    );
     assert!(evs.iter().any(|e| matches!(e, StepEvent::Resumed { .. })));
     assert_eq!(out.error, None, "{:?}", out.error);
     assert_eq!(out.turns, 2);
@@ -1030,5 +1092,79 @@ async fn a_refused_resume_fails_the_step_instead_of_starting_fresh() {
         .await
         .unwrap();
     assert!(out.answer.contains("again"), "{}", out.answer);
+    rig.rt.shutdown().await;
+}
+
+/// Every runtime spawn asks the host for its machine place with the
+/// pre-admitted key (the create's, stripped before the row; a turn's for a
+/// respawn) and is counted until its process is gone (DR-009, DR-115.4).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn spawns_claim_their_pre_admitted_place_and_stay_counted_while_they_run() {
+    let rig = Rig::new(false).await;
+    let req = CreateRuntimeSessionReq {
+        title_auto: false,
+        provider: Some(RuntimeProvider::Claude),
+        cwd: Some(rig.root.display().to_string()),
+        title: None,
+        model: None,
+        access_mode: None,
+        meta: Some(json!({"source": "workflow", "run_id": "r1", "admission_permit": "k1"})),
+    };
+    let s = rig
+        .rt
+        .create(&"u1".into(), &"w1".into(), req)
+        .await
+        .unwrap();
+    assert_eq!(*rig.host.spawns.lock().unwrap(), [Some("k1".to_string())]);
+    let stored = rig
+        .rt
+        .repo()
+        .get(&s.id)
+        .await
+        .unwrap()
+        .session
+        .meta
+        .unwrap();
+    assert!(stored.get("admission_permit").is_none(), "{stored}");
+    let mut first = rig.host.registered.lock().unwrap()[0].clone();
+    assert!(first.borrow().is_none(), "counted while it runs");
+    rig.rt.release_process(&s.id).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), first.changed())
+        .await
+        .unwrap()
+        .unwrap_err();
+    // A respawn takes the place its turn was given.
+    let mut o = opts();
+    o.permit = Some("k2".into());
+    rig.rt
+        .run_turn(&s.id, &script(&["reply again"]), o, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(
+        *rig.host.spawns.lock().unwrap(),
+        [Some("k1".to_string()), Some("k2".to_string())]
+    );
+    assert_eq!(rig.host.registered.lock().unwrap().len(), 2);
+    // Under critical memory pressure a step's agent opens no sub-thread.
+    rig.host
+        .critical
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let refused = rig
+        .rt
+        .open_peer(
+            &s.id,
+            OpenPeerReq {
+                provider: RuntimeProvider::Codex,
+                prompt: None,
+                title: None,
+                model: None,
+                effort: None,
+                cwd: None,
+                meta: None,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains("short of memory"), "{refused}");
     rig.rt.shutdown().await;
 }

@@ -549,6 +549,9 @@ pub(super) struct Live {
     pending_wakes: Mutex<Vec<String>>,
     /// Who is answering a request (`RuntimeRequest::resolved_by`), by id.
     resolvers: Mutex<HashMap<Id, Id>>,
+    /// A pre-admitted machine place for the next spawn (`TurnOpts::permit`,
+    /// or the create's `meta.admission_permit`, stripped before the row).
+    permit: Mutex<Option<String>>,
 }
 
 impl Live {
@@ -573,8 +576,6 @@ pub(super) struct Inner {
     /// The armed "Resume at reset" timer per session; its lock makes a
     /// timer's check-and-clear atomic against a re-arm or cancel.
     resume_timers: tokio::sync::Mutex<HashMap<Id, tokio::task::AbortHandle>>,
-    /// Threads whose turn the last boot's recovery cut off (`unattended`).
-    restart_cut: Mutex<std::collections::HashSet<Id>>,
 }
 
 /// Cheap to clone.
@@ -602,7 +603,6 @@ impl AgentRuntime {
                 usage: std::sync::OnceLock::new(),
                 loop_guard: Default::default(),
                 resume_timers: Default::default(),
-                restart_cut: Default::default(),
             }),
         }
     }
@@ -698,12 +698,16 @@ impl AgentRuntime {
             let is_child = rec.session.child_of().is_some();
             // The latest turn this restart cut off (ordinal, id).
             let mut cut: Option<(u32, Id)> = None;
+            let mut cut_turn: Option<(u32, Id)> = None;
             for mut r in entities {
                 let changed = match r.kind.as_str() {
                     K_TURN => serde_json::from_value::<ProviderTurn>(r.payload.clone())
                         .ok()
                         .filter(|t| !t.status.is_terminal())
                         .map(|mut t| {
+                            if cut_turn.as_ref().is_none_or(|(o, _)| t.ordinal > *o) {
+                                cut_turn = Some((t.ordinal, t.id.clone()));
+                            }
                             if is_child && cut.as_ref().is_none_or(|(o, _)| t.ordinal > *o) {
                                 cut = Some((t.ordinal, t.id.clone()));
                             }
@@ -755,12 +759,15 @@ impl AgentRuntime {
                 touched += 1;
                 self.inner.repo.upsert_entities(&sid, &rows).await?;
             }
-            if rows.iter().any(|r| r.kind == K_TURN) {
-                self.inner
-                    .restart_cut
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .insert(sid);
+            // An engine thread remembers which turn the restart cut, so its
+            // step ends as a server restart even after a second restart.
+            if let (Some((_, turn)), true) = (
+                &cut_turn,
+                otto_core::agent_runtime::is_engine_thread(rec.session.meta.as_ref()),
+            ) {
+                let mut mark = serde_json::Map::new();
+                mark.insert(unattended::RESTART_CUT_KEY.into(), turn.clone().into());
+                self.inner.repo.patch_meta(&sid, &mark.into()).await?;
             }
             if let Some((_, turn)) = cut {
                 cut_children.push((rec.session, turn));
@@ -949,6 +956,11 @@ impl AgentRuntime {
         if let Some(m) = &model {
             crate::http::drafts::validate_model_name(m)?;
         }
+        // A pre-admitted place rides the create; its key never reaches the row.
+        let mut meta = req.meta;
+        let permit = meta
+            .as_mut()
+            .and_then(otto_sessions::admission::take_permit_key);
         let rec = self
             .inner
             .repo
@@ -964,9 +976,7 @@ impl AgentRuntime {
                     .unwrap_or_else(|| self.inner.host.default_access_mode()),
                 created_by: user.clone(),
                 parent_id,
-                meta: req
-                    .meta
-                    .filter(|m| m.as_object().is_some_and(|o| !o.is_empty())),
+                meta: meta.filter(|m| m.as_object().is_some_and(|o| !o.is_empty())),
             })
             .await?;
         let id = rec.session.id.clone();
@@ -978,6 +988,7 @@ impl AgentRuntime {
         }
         // Spawn now so a refused folder / missing CLI fails the create.
         let live = self.live(&id).await?;
+        *live.permit.lock().unwrap_or_else(|e| e.into_inner()) = permit;
         if let Err(e) = self.ensure_process(&live).await {
             self.inner.live.remove(&id);
             let _ = self.inner.repo.delete(&id).await;
@@ -1116,6 +1127,7 @@ impl AgentRuntime {
                 detaching_for_restart: std::sync::atomic::AtomicBool::new(false),
                 pending_wakes: Mutex::new(Vec::new()),
                 resolvers: Mutex::default(),
+                permit: Mutex::default(),
             });
             let entry = self.inner.live.entry(id.clone()).or_insert_with(|| {
                 tokio::spawn(persister(self.inner.repo.clone(), id.clone(), rx));
@@ -1150,6 +1162,10 @@ impl AgentRuntime {
     }
 
     async fn spawn_driver_inner(&self, live: &Arc<Live>, session: RuntimeSession) -> Result<()> {
+        // The machine place: a pre-admitted one claimed, else reserved at once
+        // for a gated source — never a wait. Held until the child registered.
+        let key = live.permit.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let _place = self.inner.host.admit_spawn(&session, key);
         let mut driver = self.inner.drivers.create(session.provider).ok_or_else(|| {
             Error::Invalid(format!(
                 "no structured driver for provider '{}'",
@@ -1286,14 +1302,15 @@ impl AgentRuntime {
                 cli_pid,
             );
         }
-        tokio::spawn(pump(
+        let pumped = pump(
             Arc::clone(&self.inner),
             Arc::clone(live),
             session.id.clone(),
             epoch,
             child.messages,
             claude_login,
-        ));
+        );
+        unattended::register_and_pump(&self.inner, &session, cli_pid, pumped).await;
         // This life's sequence floor is durable before we return.
         let _ = flushed.await;
         Ok(())

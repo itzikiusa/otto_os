@@ -372,14 +372,16 @@ impl AgentRuntime {
                     child_pid,
                 );
             }
-            tokio::spawn(pump_held(
+            let pumped = pump_held(
                 Arc::clone(&self.inner),
                 Arc::clone(&live),
                 sid.clone(),
                 epoch,
                 events,
                 claude_login,
-            ));
+            );
+            let session = live.lock().session.clone();
+            super::unattended::register_and_pump(&self.inner, &session, child_pid, pumped).await;
         }
         drop(live);
         self.flush(&sid).await;
