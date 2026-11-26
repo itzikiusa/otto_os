@@ -2,12 +2,13 @@
 //! the reviewer rows a restart left unfinished are settled without re-running
 //! the ones whose threads survived in their holders.
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use otto_agent_run::agent_run::{FailReason, RunOutcome};
 use otto_agent_run::step::StepTurn;
+use otto_core::cancel::{CancelRegistry, CancelRegistryExt};
 use otto_core::domain::{ReviewAgentState, ReviewFinding, User, Workspace};
 use otto_sessions::SessionManager;
 use otto_state::ReviewsRepo;
@@ -31,6 +32,8 @@ pub struct ResumeCtx {
     pub grace: Duration,
     pub skills_dir: Option<String>,
     pub cancel: Option<Arc<AtomicBool>>,
+    /// Per-agent cancel registry (the fresh path's `review_agent_cancels`).
+    pub agent_cancels: CancelRegistry,
 }
 
 /// Settle every reviewer row a restart left unfinished: a row whose thread
@@ -54,8 +57,17 @@ pub async fn resume_reviewers(c: ResumeCtx) -> otto_core::Result<Vec<Vec<ReviewF
     let mut set = tokio::task::JoinSet::new();
     for (i, row) in rows.into_iter().enumerate().take(n) {
         if matches!(row.status.as_str(), "pending" | "running" | "waiting") {
+            let guard = c
+                .agent_cancels
+                .register(&crate::engine::review_agent_cancel_key(&c.review_id, i));
+            if c.cancel.as_ref().is_some_and(|f| f.load(Ordering::SeqCst)) {
+                guard.flag().store(true, Ordering::SeqCst);
+            }
             let (c, states) = (c.clone(), Arc::clone(&states));
-            set.spawn(async move { resume_row(&c, &states, i, &row).await });
+            set.spawn(async move {
+                resume_row(&c, &states, i, &row, guard.flag()).await;
+                drop(guard);
+            });
         }
     }
     while set.join_next().await.is_some() {}
@@ -73,7 +85,16 @@ pub async fn resume_reviewers(c: ResumeCtx) -> otto_core::Result<Vec<Vec<ReviewF
         .collect())
 }
 
-async fn resume_row(c: &ResumeCtx, states: &SharedStates, i: usize, row: &ReviewAgentState) {
+async fn resume_row(
+    c: &ResumeCtx,
+    states: &SharedStates,
+    i: usize,
+    row: &ReviewAgentState,
+    cancel: &Arc<AtomicBool>,
+) {
+    let stopped = || {
+        cancel.load(Ordering::SeqCst) || c.cancel.as_ref().is_some_and(|f| f.load(Ordering::SeqCst))
+    };
     let settle = |outcome| {
         settle_run(
             states,
@@ -113,10 +134,18 @@ async fn resume_row(c: &ResumeCtx, states: &SharedStates, i: usize, row: &Review
             states,
             &c.review_id,
             i,
-            c.cancel.as_ref(),
+            Some(cancel),
             Some(thread),
         )
         .await;
+        if stopped() {
+            settle(RunOutcome::failed(
+                resumed.map(|o| o.thread_id),
+                FailReason::Stopped,
+            ))
+            .await;
+            return;
+        }
         if let Some(o) = resumed {
             if let Some(raw) = result_text(&findings_path(&c.review_id, i), &o) {
                 settle(RunOutcome::ok(raw, o.thread_id)).await;
@@ -127,6 +156,10 @@ async fn resume_row(c: &ResumeCtx, states: &SharedStates, i: usize, row: &Review
                 return;
             }
         }
+    }
+    if stopped() {
+        settle(RunOutcome::failed(None, FailReason::Stopped)).await;
+        return;
     }
     // The thread is gone (or never was one): re-run the row.
     let prompt = c.reviews.get_agent_prompt(&c.review_id, i).await;
@@ -148,7 +181,7 @@ async fn resume_row(c: &ResumeCtx, states: &SharedStates, i: usize, row: &Review
         &prompt,
         c.grace,
         None,
-        c.cancel.as_ref(),
+        Some(cancel),
         c.skills_dir.as_deref(),
         &row.lens_slugs,
         Some(&c.threads),

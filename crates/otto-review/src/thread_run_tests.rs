@@ -587,6 +587,7 @@ async fn after_a_restart_a_held_reviewer_is_awaited_and_only_the_lost_one_re_run
         grace: Duration::from_secs(600),
         skills_dir: None,
         cancel: None,
+        agent_cancels: Default::default(),
     })
     .await
     .unwrap();
@@ -620,5 +621,257 @@ async fn after_a_restart_a_held_reviewer_is_awaited_and_only_the_lost_one_re_run
     assert!(
         r.fake.closed.lock().unwrap().contains(&Id::from("t-sum")),
         "the old summarizer thread is closed"
+    );
+}
+
+/// CR1-029: a reviewer resumed after a restart registers its per-agent cancel
+/// flag just like a fresh one, so pressing Stop on it stops only that row,
+/// keeps its status "error" / "stopped by user", and never falls through to
+/// re-run it — while sibling reviewers finish normally.
+#[tokio::test]
+async fn stopping_a_resumed_reviewer_keeps_it_stopped_and_never_re_runs_it() {
+    use otto_core::cancel::{CancelRegistry, CancelRegistryExt};
+    let r = rig(vec![
+        Act {
+            hang: true,
+            ..Default::default()
+        },
+        Act {
+            write: Some(FINDINGS.into()),
+            ..Default::default()
+        },
+    ])
+    .await;
+    let id: Id = r.review_id.clone();
+    let row = |name: &str, thread: Option<&str>| ReviewAgentState {
+        name: name.into(),
+        provider: "claude".into(),
+        status: "running".into(),
+        lens: name.into(),
+        session_id: thread.map(Into::into),
+        thread: thread.is_some(),
+        ..Default::default()
+    };
+    let rows = vec![
+        row("Stopped", Some("t-stop")),
+        row("Sibling", Some("t-sib")),
+        row("Summarizer", None),
+    ];
+    r.reviews.set_agents(&id, &rows).await.unwrap();
+    r.reviews
+        .set_agent_prompt(&id, 0, "Review the diff.")
+        .await
+        .unwrap();
+    let agent_cancels: CancelRegistry = Default::default();
+    let review_cancel = Arc::new(AtomicBool::new(false));
+    let key0 = crate::engine::review_agent_cancel_key(&id, 0);
+    let key1 = crate::engine::review_agent_cancel_key(&id, 1);
+
+    let stopper = {
+        let cancels = agent_cancels.clone();
+        let reviews = r.reviews.clone();
+        let id = id.clone();
+        let key0 = key0.clone();
+        tokio::spawn(async move {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+            while !cancels.is_live(&key0) {
+                if tokio::time::Instant::now() >= deadline {
+                    return false;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            let signalled = cancels.signal(&key0);
+            let mut stopped = reviews.get_review(&id).await.unwrap().agents[0].clone();
+            stopped.status = "error".into();
+            stopped.note = "stopped by user".into();
+            reviews.set_agent_at(&id, 0, &stopped).await.unwrap();
+            signalled
+        })
+    };
+
+    let findings = tokio::time::timeout(
+        Duration::from_secs(5),
+        crate::thread_resume::resume_reviewers(crate::thread_resume::ResumeCtx {
+            manager: r.manager.clone(),
+            threads: r.threads.clone(),
+            reviews: r.reviews.clone(),
+            ws: r.ws.clone(),
+            user: r.user.clone(),
+            cwd: r._dir.path().to_string_lossy().into_owned(),
+            review_id: r.review_id.clone(),
+            grace: Duration::from_secs(600),
+            skills_dir: None,
+            cancel: Some(review_cancel),
+            agent_cancels: agent_cancels.clone(),
+        }),
+    )
+    .await
+    .expect("stopping a resumed reviewer must end it promptly")
+    .unwrap();
+
+    assert!(
+        stopper.await.unwrap(),
+        "per-agent cancel flag must be registered while the resumed reviewer runs"
+    );
+    let after = r.reviews.get_review(&id).await.unwrap().agents;
+    assert_eq!(after[0].status, "error");
+    assert_eq!(after[0].note, "stopped by user");
+    assert!(after[0].findings.is_empty());
+    assert_eq!(after[1].status, "done");
+    assert_eq!(after[1].findings.len(), 2);
+    assert_eq!(
+        findings.iter().map(Vec::len).collect::<Vec<_>>(),
+        [0, 2],
+        "stopped row contributes no findings; sibling keeps its findings"
+    );
+    assert_eq!(
+        r.fake.turns.lock().unwrap().len(),
+        2,
+        "stopped row must not fall through and re-run on a fresh thread"
+    );
+    assert!(
+        !agent_cancels.is_live(&key0) && !agent_cancels.is_live(&key1),
+        "per-agent cancel guards unregister once resume_reviewers finishes"
+    );
+}
+
+/// CR1-029 race: when Stop closes the held thread before the 200 ms cancel poll
+/// fires (so `drive` settles with a non-Canceled error), the tripped per-agent
+/// flag must still keep the row "stopped by user" instead of falling through to
+/// re-run the reviewer and overwriting the row with "done".
+#[tokio::test]
+async fn stopping_a_resumed_reviewer_when_its_thread_closes_first_never_overwrites_stopped() {
+    use otto_core::cancel::{CancelRegistry, CancelRegistryExt};
+    // Turn 1 (resumed held thread): fails as non-Canceled (closed by Stop).
+    // Turn 2 (would-be fallback re-run): writes valid findings that would
+    // overwrite "stopped by user" with "done" if resume_row fell through.
+    let r = rig(vec![
+        Act {
+            fail: Some(StepErrorClass::Provider),
+            ..Default::default()
+        },
+        Act {
+            write: Some(FINDINGS.into()),
+            ..Default::default()
+        },
+    ])
+    .await;
+    let id: Id = r.review_id.clone();
+    let rows = vec![
+        ReviewAgentState {
+            name: "Stopped".into(),
+            provider: "claude".into(),
+            status: "running".into(),
+            lens: "Stopped".into(),
+            session_id: Some("t-stop".into()),
+            thread: true,
+            ..Default::default()
+        },
+        ReviewAgentState {
+            name: "Summarizer".into(),
+            provider: "claude".into(),
+            status: "pending".into(),
+            ..Default::default()
+        },
+    ];
+    r.reviews.set_agents(&id, &rows).await.unwrap();
+    r.reviews
+        .set_agent_prompt(&id, 0, "Review the diff.")
+        .await
+        .unwrap();
+    // Pre-trip review cancel? No — simulate per-agent Stop by tripping the
+    // review-wide flag=false while the per-agent flag is tripped. Wait until
+    // drive returns? Even tighter: wrap the fake runner so the first resume
+    // call signals the per-agent cancel flag and writes "stopped by user"
+    // right as the thread closes with Provider error.
+    struct StopOnClose {
+        inner: Arc<Fake>,
+        cancels: CancelRegistry,
+        reviews: ReviewsRepo,
+        review_id: Id,
+    }
+    #[async_trait]
+    impl StepRunner for StopOnClose {
+        async fn run(
+            &self,
+            t: StepTurn,
+            ev: tokio::sync::mpsc::UnboundedSender<StepEvent>,
+            c: CancelSignal,
+        ) -> otto_core::Result<StepOutcome> {
+            self.inner.run(t, ev, c).await
+        }
+        async fn resume(
+            &self,
+            id: &Id,
+            ord: u32,
+            t: &StepTurn,
+            ev: tokio::sync::mpsc::UnboundedSender<StepEvent>,
+            c: CancelSignal,
+        ) -> otto_core::Result<StepOutcome> {
+            let key = crate::engine::review_agent_cancel_key(&self.review_id, 0);
+            self.cancels.signal(&key);
+            let mut stopped = self
+                .reviews
+                .get_review(&self.review_id)
+                .await
+                .unwrap()
+                .agents[0]
+                .clone();
+            stopped.status = "error".into();
+            stopped.note = "stopped by user".into();
+            self.reviews
+                .set_agent_at(&self.review_id, 0, &stopped)
+                .await
+                .unwrap();
+            self.inner.resume(id, ord, t, ev, c).await
+        }
+        async fn close(&self, id: &Id, until: chrono::DateTime<Utc>) {
+            self.inner.close(id, until).await;
+        }
+        async fn set_retain_until(&self, ids: &[Id], at: chrono::DateTime<Utc>) {
+            self.inner.set_retain_until(ids, at).await;
+        }
+        async fn release_process(&self, id: &Id) {
+            self.inner.release_process(id).await;
+        }
+        async fn delete(&self, id: &Id) {
+            self.inner.delete(id).await;
+        }
+    }
+
+    let agent_cancels: CancelRegistry = Default::default();
+    let threads = Threads {
+        runner: Arc::new(StopOnClose {
+            inner: r.fake.clone(),
+            cancels: agent_cancels.clone(),
+            reviews: r.reviews.clone(),
+            review_id: id.clone(),
+        }),
+        ..r.threads.clone()
+    };
+    let findings = crate::thread_resume::resume_reviewers(crate::thread_resume::ResumeCtx {
+        manager: r.manager.clone(),
+        threads,
+        reviews: r.reviews.clone(),
+        ws: r.ws.clone(),
+        user: r.user.clone(),
+        cwd: r._dir.path().to_string_lossy().into_owned(),
+        review_id: r.review_id.clone(),
+        grace: Duration::from_secs(600),
+        skills_dir: None,
+        cancel: Some(Arc::new(AtomicBool::new(false))),
+        agent_cancels: agent_cancels.clone(),
+    })
+    .await
+    .unwrap();
+
+    let after = r.reviews.get_review(&id).await.unwrap().agents;
+    assert_eq!(after[0].status, "error");
+    assert_eq!(after[0].note, "stopped by user");
+    assert!(findings[0].is_empty());
+    assert_eq!(
+        r.fake.turns.lock().unwrap().len(),
+        1,
+        "must not fall through to re-run after per-agent Stop"
     );
 }
