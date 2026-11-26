@@ -533,7 +533,7 @@ fn spawn_progress_pump(
                     text,
                     caption,
                 } => {
-                    let text = redact(&text);
+                    let (text, caption) = (redact(&text), redact(&caption));
                     thread.step_file(&name, text.as_bytes(), &caption).await;
                 }
                 ProgressItem::Status(text) => {
