@@ -26,25 +26,38 @@
   let files = $state<FsEntry[] | null>(null);
   let error = $state<string | null>(null);
   let open = $state<{ path: string; read: FsRead | null; error: string | null } | null>(null);
+  let reload = $state(0);
 
+  // Another step's files: its open preview and folder go with it.
+  $effect(() => {
+    void [runId, stepFile];
+    open = null;
+    all = false;
+    dir = '';
+  });
   $effect(() => {
     const prefix = all ? null : stepFile;
     const path = all ? dir : '';
+    void reload;
     files = null;
     error = null;
-    browseRunContext(runId, path).then(
+    const ac = new AbortController();
+    browseRunContext(runId, path, ac.signal).then(
       (b) => (files = b.entries.filter((e) => (prefix ? !e.is_dir && e.name.startsWith(prefix) : !e.name.startsWith('.')))),
-      (e) => (error = loadErrorText(e)),
+      (e) => {
+        if (!ac.signal.aborted) error = loadErrorText(e);
+      },
     );
+    return () => ac.abort();
   });
 
-  async function show(f: FsEntry): Promise<void> {
-    open = { path: f.path, read: null, error: null };
+  async function show(path: string): Promise<void> {
+    open = { path, read: null, error: null };
     try {
-      const read = await readRunContext(runId, f.path);
-      if (open?.path === f.path) open.read = read;
+      const read = await readRunContext(runId, path);
+      if (open?.path === path) open.read = read;
     } catch (e) {
-      if (open?.path === f.path) open.error = loadErrorText(e);
+      if (open?.path === path) open.error = loadErrorText(e);
     }
   }
 
@@ -61,12 +74,12 @@
 {#if all && dir}
   <button type="button" class="btn small back" onclick={() => (dir = dir.split('/').slice(0, -1).join('/'))}><Icon name="chevronLeft" size={12} />{dir.split('/').slice(0, -1).join('/') || 'All run files'}</button>
 {/if}
-<LoadState what="the files" loading={files === null && !error} {error} empty={!files?.length}>
+<LoadState what="the files" loading={files === null && !error} {error} empty={!files?.length} onretry={() => reload++}>
   {#snippet emptyView()}<p class="none">{all ? 'This folder is empty.' : stepFile ? 'This step wrote no files.' : 'This run has no files.'}</p>{/snippet}
   <ul class="files">
     {#each files ?? [] as f (f.path)}
       <li>
-        <button type="button" class="file" class:on={open?.path === f.path} onclick={() => (f.is_dir ? (dir = f.path) : show(f))}>
+        <button type="button" class="file" class:on={open?.path === f.path} onclick={() => (f.is_dir ? (dir = f.path) : show(f.path))}>
           <Icon name={f.is_dir ? 'folder' : 'file'} size={13} /><span class="ellipsis" dir="auto">{f.name}</span>
         </button>
       </li>
@@ -75,7 +88,8 @@
 </LoadState>
 {#if open}
   {#if open.error}
-    <LoadState what="the file" variant="compact" error={open.error} empty />
+    {@const path = open.path}
+    <LoadState what="the file" variant="compact" error={open.error} empty onretry={() => void show(path)} />
   {:else if open.read && open.read.content}
     <pre class="content" dir="auto">{open.read.content}</pre>
     {#if open.read.truncated}<p class="none">Showing the first 400 KB.</p>{/if}

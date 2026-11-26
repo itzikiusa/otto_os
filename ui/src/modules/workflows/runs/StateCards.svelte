@@ -115,7 +115,7 @@
 </script>
 
 {#if kind}
-  <section class="scard {kind}" data-testid="wf-run-card" data-kind={kind} aria-label="Run runState">
+  <section class="scard {kind}" data-testid="wf-run-card" data-kind={kind} aria-label="Run status">
     {#if kind === 'error'}
       <h3 class="title danger"><Icon name="x" size={13} /><span dir="auto">{failure.title}</span></h3>
       {#if failure.body}<p class="body" dir="auto">{failure.body}</p>{/if}
