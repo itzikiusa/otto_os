@@ -1,8 +1,8 @@
 // The run ring's geometry (ux.md §6): one arc per top-level slot of the step
 // list in execution order (stepOrder.ts builds both), clockwise from 12
 // o'clock with equal angles; a parallel group as concentric lanes (4 at most,
-// the 4th standing for the rest); a fan-out as one tick per child up to 12,
-// above that one segment per state sized by count. Colour is state only (the
+// the 4th standing for the rest); a fan-out as one tick per child up to 12
+// (while a tick keeps MIN_TICK), else one segment per state sized by count. Colour is state only (the
 // component maps a state to a token). Pure; unit-tested in
 // ui/unit/workflowRunOrbit.test.ts.
 import type { ChildThread, NodeRunState, RunState } from '../../../lib/api/types';
@@ -15,6 +15,8 @@ export const STROKE = 10;
 export const SLOT_GAP = 5;
 export const TICK_GAP = 1.6;
 export const MAX_TICKS = 12;
+/** Narrower ticks (a long workflow's small slot) draw as state segments. */
+export const MIN_TICK = 1.5;
 const OUTER = 59;
 const LANE_GAP = 1.5;
 const C = VIEW / 2;
@@ -32,7 +34,7 @@ export interface Orbit {
   slots: number;
   /** Children of the largest fan-out slot (0 when none). */
   children: number;
-  /** That fan-out is drawn as state segments (more than 12 children). */
+  /** That fan-out is drawn as state segments (more than 12 children, or ticks under MIN_TICK). */
   grouped: boolean;
 }
 
@@ -65,12 +67,14 @@ const STATE_ORDER: ArcState[] = ['done', 'failed', 'needs', 'working', 'waiting'
 const URGENCY: ArcState[] = ['failed', 'needs', 'working', 'waiting', 'pending', 'canceled', 'skipped', 'done'];
 
 /** [start, end] angles (degrees from 12 o'clock) of `n` equal slots; the
- *  slots and the gaps between them make the full circle. */
+ *  slots and the gaps between them make the full circle (the gap shrinks past
+ *  36 slots so a slot never gets narrower than its gap). */
 export function slotAngles(n: number): [number, number][] {
   if (n <= 0) return [];
-  const span = (360 - n * SLOT_GAP) / n;
+  const gap = Math.min(SLOT_GAP, 180 / n);
+  const span = (360 - n * gap) / n;
   return Array.from({ length: n }, (_, i) => {
-    const a0 = i * (span + SLOT_GAP) + SLOT_GAP / 2;
+    const a0 = i * (span + gap) + gap / 2;
     return [a0, a0 + span];
   });
 }
@@ -85,14 +89,16 @@ function arcPath(r: number, a0: number, a1: number): string {
   return `M ${p(a0)} A ${r2(r)} ${r2(r)} 0 ${a1 - a0 > 180 ? 1 : 0} 1 ${p(a1)}`;
 }
 
-/** Split [a0, a1] into parts sized by `weights`, TICK_GAP apart. */
+/** Split [a0, a1] into parts sized by `weights`, TICK_GAP apart (less in a
+ *  narrow slot: the gaps never take more than half of it). */
 function split(a0: number, a1: number, weights: number[]): [number, number][] {
   const total = weights.reduce((s, w) => s + w, 0);
-  const room = a1 - a0 - (weights.length - 1) * TICK_GAP;
+  const gap = Math.min(TICK_GAP, (a1 - a0) / (2 * weights.length));
+  const room = a1 - a0 - (weights.length - 1) * gap;
   let at = a0;
   return weights.map((w) => {
     const seg: [number, number] = [at, at + (room * w) / total];
-    at = seg[1] + TICK_GAP;
+    at = seg[1] + gap;
     return seg;
   });
 }
@@ -101,6 +107,7 @@ export function buildOrbit(entries: readonly StepEntry[], run: RunState): Orbit 
   const angles = slotAngles(entries.length);
   const arcs: Arc[] = [];
   let children = 0;
+  let grouped = false;
   const mid = OUTER - STROKE / 2;
   entries.forEach((e, slot) => {
     const [a0, a1] = angles[slot];
@@ -120,9 +127,11 @@ export function buildOrbit(entries: readonly StepEntry[], run: RunState): Orbit 
       arcs.push({ d: arcPath(mid, a0, a1), state: nodeArcState(e.step.node, run), width: STROKE, slot });
       return;
     }
+    const ticks = kids.length <= MAX_TICKS && (a1 - a0 - (kids.length - 1) * TICK_GAP) / kids.length >= MIN_TICK;
+    if (kids.length >= children) grouped = !ticks;
     children = Math.max(children, kids.length);
     const states = kids.map(childArcState);
-    if (kids.length <= MAX_TICKS) {
+    if (ticks) {
       split(a0, a1, states.map(() => 1)).forEach(([b0, b1], i) => arcs.push({ d: arcPath(mid, b0, b1), state: states[i], width: STROKE, slot }));
       return;
     }
@@ -131,7 +140,7 @@ export function buildOrbit(entries: readonly StepEntry[], run: RunState): Orbit 
       arcs.push({ d: arcPath(mid, b0, b1), state: present[i], width: STROKE, slot }),
     );
   });
-  return { arcs, slots: entries.length, children, grouped: children > MAX_TICKS };
+  return { arcs, slots: entries.length, children, grouped };
 }
 
 /** The ring's accessible name: the steps done and each fan-out's progress, from
