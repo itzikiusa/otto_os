@@ -90,6 +90,17 @@
   value={paramLines(node, 'goals')}
   oninput={(e) => set('goals', linesValue(e.currentTarget.value))}
 ></textarea>
+<label for="mt-updates">Updates in the chat thread</label>
+<select id="mt-updates" data-testid="wf-chat-updates" value={paramStr(node, 'chat_updates') === 'per_step' ? 'per_step' : ''}
+  onchange={(e) => set('chat_updates', e.currentTarget.value || undefined)}>
+  <option value="">One live message, plus each step’s file</option>
+  <option value="per_step">A message and a file per step, as before</option>
+</select>
+{#if paramStr(node, 'chat_updates') !== 'per_step'}
+  <pre class="is-snip" aria-label="How the live message reads">*{workflowName ?? 'Workflow'}* · reviewing · 5 of 9 steps · 6m 40s (usually 12m)
+✅ Checkout PR branch · 14s — PR #271 feature/ABC-123 → develop</pre>
+  <p class="node-hint">Edited in place as the run moves; each step’s file is still posted to the thread.</p>
+{/if}
 <div class="insp-slack">
   <div class="is-head">
     <strong>Or trigger from Slack</strong>

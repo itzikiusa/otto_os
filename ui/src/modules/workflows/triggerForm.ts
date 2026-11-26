@@ -16,6 +16,8 @@ export function defaultTriggerForm() {
   return { kind: 'schedule' as TriggerKind, cadence: 'interval', everyMin: 60, atTime: '09:00', weekday: 0,
     timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', cron: '0 9 * * 1-5', prompt: '',
     eventKind: 'review_changed', filter: '{}', chatChannel: 'slack', chatId: '', chatThread: '', chatMentionOnly: false,
+    /** '' = one live message plus each step's file (the default); 'per_step' = as before. */
+    chatUpdates: '',
     resultChannel: '', resultChat: '', resultThread: '', resultWebhook: '' };
 }
 export type TriggerForm = ReturnType<typeof defaultTriggerForm>;
@@ -24,7 +26,7 @@ export function formFromTrigger(trigger: WorkflowTrigger): TriggerForm {
   const spec = trigger.spec as Record<string, unknown>;
   const form = defaultTriggerForm();
   const fields = { cadence: 'cadence', atTime: 'at', timezone: 'timezone', cron: 'expr', prompt: 'prompt',
-    eventKind: 'event_kind', chatChannel: 'channel', chatId: 'chat', chatThread: 'thread',
+    eventKind: 'event_kind', chatChannel: 'channel', chatId: 'chat', chatThread: 'thread', chatUpdates: 'chat_updates',
     resultChannel: 'result_channel', resultChat: 'result_chat', resultThread: 'result_thread', resultWebhook: 'result_webhook' } as const;
   for (const [field, key] of Object.entries(fields)) if (typeof spec[key] === 'string') {
     (form as unknown as Record<string, unknown>)[field] = spec[key];
@@ -53,6 +55,8 @@ export function buildTriggerSpec(form: TriggerForm, original: Record<string, unk
   } else if (form.kind === 'chat') {
     Object.assign(spec, { channel: form.chatChannel, chat: form.chatId.trim(), thread: form.chatThread.trim(),
       mention_only: form.chatChannel === 'slack' && form.chatMentionOnly });
+    if (form.chatUpdates === 'per_step') spec.chat_updates = 'per_step';
+    else delete spec.chat_updates;
   }
   Object.assign(spec, { result_channel: form.resultChannel, result_chat: form.resultChat.trim(),
     result_thread: form.resultThread.trim(), result_webhook: form.resultWebhook.trim() });

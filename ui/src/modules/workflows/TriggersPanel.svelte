@@ -409,6 +409,13 @@
           <span>Only when the bot is @mentioned{form.chatChannel === 'telegram' ? ' (Slack only)' : ''}</span>
         </label>
         <p class="hint">Any message in this channel/chat starts the workflow — no keyword needed.</p>
+        <label class="fl">
+          <span>Updates in the chat thread</span>
+          <select bind:value={form.chatUpdates} data-testid="trigger-chat-updates">
+            <option value="">One live message, plus each step’s file</option>
+            <option value="per_step">A message and a file per step, as before</option>
+          </select>
+        </label>
       {:else}
         <p class="hint">
           A unique token will be auto-generated. Call

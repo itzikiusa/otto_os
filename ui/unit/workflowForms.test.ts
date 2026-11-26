@@ -47,3 +47,13 @@ test('a chat binding says plainly which messages start it', () => {
   assert.equal(chatBindingHow({ channel: 'slack', chat: 'C1', thread: '' }), 'Any message in this chat starts a run — no keyword needed.');
   assert.equal(chatBindingHow({ channel: 'slack', chat: 'C1', thread: '17.1', mention_only: true }), 'Any message in that thread that @mentions the bot starts a run.');
 });
+
+test('a chat binding keeps the live message by default; "as before" is saved as chat_updates: per_step', () => {
+  const trigger = { id: 't', workflow_id: 'wf', kind: 'chat' as const, enabled: true, created_at: '',
+    spec: { channel: 'slack', chat: 'C1', thread: '', chat_updates: 'per_step' } };
+  const form = formFromTrigger(trigger);
+  assert.equal(form.chatUpdates, 'per_step');
+  assert.equal(buildTriggerSpec(form, trigger.spec).chat_updates, 'per_step');
+  form.chatUpdates = '';
+  assert.ok(!('chat_updates' in buildTriggerSpec(form, trigger.spec)), 'the default writes no key');
+});
