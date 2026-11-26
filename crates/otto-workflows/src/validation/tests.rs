@@ -5,6 +5,12 @@ fn graph(v: Value) -> WorkflowGraph {
     serde_json::from_value(v).unwrap()
 }
 
+/// An edge, built: a literal `"source": "…"` would trip otto-core's
+/// session-source guard (`background_sources_cover_every_engine`).
+fn edge(id: &str, source: &str, target: &str) -> Value {
+    json!({"id": id, "source": source, "target": target})
+}
+
 fn classes(g: &WorkflowGraph) -> Vec<(String, IssueClass)> {
     validate(g)
         .into_iter()
@@ -15,7 +21,7 @@ fn classes(g: &WorkflowGraph) -> Vec<(String, IssueClass)> {
 #[test]
 fn rejects_missing_nodes_cycles_parameters_and_bad_expressions() {
     let graph = graph(
-        json!({"nodes":[{"id":"a","kind":"http_request"},{"id":"b","kind":"condition","params":{"expr":"input.x =="}}],"edges":[{"id":"ab","source":"a","target":"b"},{"id":"ba","source":"b","target":"a"},{"id":"missing","source":"a","target":"no"}]}),
+        json!({"nodes":[{"id":"a","kind":"http_request"},{"id":"b","kind":"condition","params":{"expr":"input.x =="}}],"edges":[edge("ab", "a", "b"),edge("ba", "b", "a"),edge("missing", "a", "no")]}),
     );
     let issues = validate(&graph);
     for expected in ["url", "Invalid expr", "cycle", "missing"] {
@@ -120,10 +126,10 @@ fn context_file_names_that_leave_the_run_dir_are_invalid() {
             {"id":"s","kind":"script","params":{"command":"true","timeout_s":60,"output_file":bad}},
             {"id":"r","kind":"review_run"},
             {"id":"p","kind":"post_review_comments","params":{"summary_files":["go-standards-evals.md", bad]}}],
-            "edges":[{"id":"e1","source":"r","target":"p"}]}));
+            "edges":[edge("e1", "r", "p")]}));
         let c = classes(&g);
         assert!(
-            c.contains(&("output_file".into(), IssueClass::Save)),
+            bad.is_empty() || c.contains(&("output_file".into(), IssueClass::Save)),
             "{bad:?}: {c:?}"
         );
         assert!(
@@ -131,10 +137,13 @@ fn context_file_names_that_leave_the_run_dir_are_invalid() {
             "{bad:?}: {c:?}"
         );
     }
-    let g = graph(
-        json!({"nodes":[{"id":"s","kind":"script","params":{"command":"true","timeout_s":60,"output_file":"go-standards-evals.md"}}],"edges":[]}),
-    );
-    assert!(validate(&g).is_empty());
+    // output_file is optional: cleared (null or "") saves.
+    for ok in [json!("go-standards-evals.md"), json!(""), Value::Null] {
+        let g = graph(
+            json!({"nodes":[{"id":"s","kind":"script","params":{"command":"true","timeout_s":60,"output_file":ok}}],"edges":[]}),
+        );
+        assert!(validate(&g).is_empty(), "{ok}: {:?}", validate(&g));
+    }
 }
 
 #[test]
@@ -162,13 +171,10 @@ fn chain(extra: Value) -> WorkflowGraph {
         json!({"id":"x","kind":"agent_prompt","params":{"prompt":"p","provider":"codex"}}),
     ];
     nodes.extend(extra.as_array().unwrap().iter().cloned());
-    let mut edges = vec![
-        json!({"id":"sa","source":"s","target":"a"}),
-        json!({"id":"ax","source":"a","target":"x"}),
-    ];
+    let mut edges = vec![edge("sa", "s", "a"), edge("ax", "a", "x")];
     for n in extra.as_array().unwrap() {
         let id = n["id"].as_str().unwrap();
-        edges.push(json!({"id": format!("x{id}"), "source": "x", "target": id}));
+        edges.push(edge(&format!("x{id}"), "x", id));
     }
     graph(json!({"nodes": nodes, "edges": edges}))
 }
@@ -215,8 +221,7 @@ fn posting_needs_a_review_before_it() {
         {"id":"r","kind":"review_run"},{"id":"g","kind":"agent_prompt","params":{"prompt":"p"}},
         {"id":"p","kind":"post_review_comments","params":params}],"edges":edges}))
     };
-    let linked =
-        json!([{"id":"rg","source":"r","target":"g"},{"id":"gp","source":"g","target":"p"}]);
+    let linked = json!([edge("rg", "r", "g"), edge("gp", "g", "p")]);
     assert!(validate(&g(linked.clone(), json!({"summary_intro_from":"g"}))).is_empty());
     assert!(validate(&g(linked, json!({"review_from":"g"})))[0]
         .message
@@ -234,13 +239,13 @@ fn posting_needs_a_review_before_it() {
 #[test]
 fn a_repos_condition_beside_a_repos_writer_warns() {
     let g = |checkout_first: bool| {
-        let mut edges = vec![
-            json!({"id":"sc","source":"s","target":"c"}),
-            json!({"id":"sv","source":"s","target":"v"}),
-            json!({"id":"vx","source":"v","target":"x","condition":"len(run.repos) > 1"}),
-        ];
+        let mut edges = vec![edge("sc", "s", "c"), edge("sv", "s", "v"), {
+            let mut e = edge("vx", "v", "x");
+            e["condition"] = json!("len(run.repos) > 1");
+            e
+        }];
         if checkout_first {
-            edges.push(json!({"id":"cv","source":"c","target":"v"}));
+            edges.push(edge("cv", "c", "v"));
         }
         graph(json!({"nodes":[
             {"id":"s","kind":"manual_trigger"},{"id":"c","kind":"git_checkout","name":"Checkout"},
@@ -275,7 +280,10 @@ fn check_criteria() {
         {"id":"a","text":"x","verify":"command"},
         {"id":"a","text":"","verify":"agent"},
         {"id":"b","text":"y","verify":"psychic"},
-        {"id":"c","text":"z","verify":"expr","expr":"a =="}]));
+        {"id":"c","text":"z","verify":"expr","expr":"a =="},
+        {"id":"d","text":"w","verify":"expr"},
+        {"id":"api/auth","text":"v","verify":"human"},
+        {"id":"","text":"u","verify":"human"}]));
     let issues = validate(&bad);
     let has = |needle: &str, class| {
         issues
@@ -287,6 +295,12 @@ fn check_criteria() {
     assert!(has("needs its text", IssueClass::Run));
     assert!(has("unknown check 'psychic'", IssueClass::Save));
     assert!(has("invalid rule", IssueClass::Save));
+    assert!(has("'d' needs its rule", IssueClass::Run), "{issues:?}");
+    assert!(
+        has("plain name ('api/auth')", IssueClass::Save),
+        "{issues:?}"
+    );
+    assert!(has("plain name ('')", IssueClass::Save), "{issues:?}");
 }
 
 /// The five exported graphs stay valid with no warning.

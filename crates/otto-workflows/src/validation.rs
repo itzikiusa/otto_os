@@ -369,7 +369,9 @@ fn validate_node(node: &WorkflowNode, root_id: &str, depth: usize, push: &mut Pu
     // Context-file names from a definition stay inside the run dir (DR-002).
     let mut names: Vec<(&str, &Value)> = vec![];
     if node.kind == "script" {
-        names.extend(p.get("output_file").map(|v| ("output_file", v)));
+        // Optional: cleared (null or "") is no output file, as `script_run` reads it.
+        let set = |v: &&Value| !v.is_null() && v.as_str().is_none_or(|s| !s.trim().is_empty());
+        names.extend(p.get("output_file").filter(set).map(|v| ("output_file", v)));
     }
     if node.kind == "post_review_comments" {
         if let Some(files) = p.get("summary_files").and_then(Value::as_array) {
@@ -467,6 +469,17 @@ fn validate_criteria(node: &WorkflowNode, issue: &mut impl FnMut(&str, String, I
     let mut seen = HashSet::new();
     for c in criteria {
         let id = str_param(c, "id").unwrap_or("");
+        // The id names the criterion's log file (`stepN-….<id>.log`).
+        if !crate::context::is_bare_name(id) {
+            issue(
+                "criteria",
+                format!(
+                    "{}: criterion ids must be a plain name ('{id}').",
+                    node.name
+                ),
+                IssueClass::Save,
+            );
+        }
         if !seen.insert(id) {
             issue(
                 "criteria",
@@ -496,6 +509,13 @@ fn validate_criteria(node: &WorkflowNode, issue: &mut impl FnMut(&str, String, I
             issue(
                 "criteria",
                 format!("{}: criterion '{id}' needs its command.", node.name),
+                IssueClass::Run,
+            );
+        }
+        if verify == "expr" && str_param(c, "expr").is_none() {
+            issue(
+                "criteria",
+                format!("{}: criterion '{id}' needs its rule.", node.name),
                 IssueClass::Run,
             );
         }
