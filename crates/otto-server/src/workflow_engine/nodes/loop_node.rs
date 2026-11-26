@@ -7,6 +7,7 @@
 
 use super::super::*;
 use super::NodeCall;
+use otto_workflows::chat_status::step_caption;
 use otto_workflows::checkpoint::{caught_thread, continue_previous, observed, AttemptClock};
 use otto_workflows::criteria::{loop_stop, CheckOutput, LoopBudget, Stop, StopPoint};
 
@@ -87,12 +88,10 @@ pub(in crate::workflow_engine) async fn execute(
     let mut stop: Option<Stop> = None;
     let mut failed: Option<(String, String)> = None;
     for i in 1..=max_iter {
-        if WorkflowsRepo::new(ctx.pool.clone())
-            .is_canceled(run_id)
-            .await
-        {
-            logs.push("loop: canceled".into());
-            break;
+        // Canceled or paused: the loop stops as the step a pause cut, never
+        // as a finished one a held run would keep (GL11.2).
+        if repo.is_canceled(run_id).await {
+            return Err(otto_core::Error::Internal("run canceled".into()));
         }
         if progress.enabled() {
             progress.post(format!("🔁 *Iteration {i}/{max_iter}*"));
@@ -153,7 +152,9 @@ pub(in crate::workflow_engine) async fn execute(
                     .and_then(|r| serde_json::from_value(r.clone()).ok()),
             };
             let same_thread = step.get("same_thread").and_then(Value::as_bool) == Some(true);
-            inner_thread(&repo, run_id, &node.id, &mut sub, (i, k), same_thread).await;
+            // A resumed attempt began before the restart (CR1-005).
+            let sub_attempt_started =
+                inner_thread(&repo, run_id, &node.id, &mut sub, (i, k), same_thread).await;
             // Inner steps share the loop's step number and add
             // `-iter{X}` (the user's convention): step3-review-iter2.md.
             let sub_scope = StepScope {
@@ -167,7 +168,6 @@ pub(in crate::workflow_engine) async fn execute(
                 sub_scope.iter,
                 sub_scope.inner_idx,
             );
-            let sub_attempt_started = std::time::SystemTime::now();
             let checkpoint = loop_checkpoint(&sub, &node.id, i, k, step_input.clone());
             let checkpoint_repo = WorkflowsRepo::new(ctx.pool.clone());
             let clock = AttemptClock::default();
@@ -242,18 +242,7 @@ pub(in crate::workflow_engine) async fn execute(
                     // Capture any repo reference this step published —
                     // for the loop's own output AND the run registry.
                     merge_published_refs(&env.files, &out);
-                    if let Some(rid) = out.get("repo_id").and_then(Value::as_str) {
-                        if !rid.trim().is_empty() {
-                            refs_by_repo.insert(
-                                rid.to_string(),
-                                json!({
-                                    "repo_id": rid,
-                                    "base": out.get("base").cloned().unwrap_or(Value::Null),
-                                    "worktree": out.get("worktree").cloned().unwrap_or(Value::Null),
-                                }),
-                            );
-                        }
-                    }
+                    keep_repo_ref(&mut refs_by_repo, &out);
                     if let Some(error) = outcome_error(&out) {
                         failed = Some((sname.clone(), error.to_string()));
                         last_iteration_error = Some(format!(
@@ -284,9 +273,10 @@ pub(in crate::workflow_engine) async fn execute(
                             None => progress.post(format!("› ✅ {sname} done")),
                         }
                     }
-                    // Attach the iteration's handoff file too.
+                    // Attach the iteration's handoff file too, captioned (CR1-036).
                     if progress.enabled() && (is_reportable(&skind) || skind == "review_run") {
-                        progress.post_step_file(&env.files, &sub_file_base);
+                        let caption = iteration_caption(&sname, i, None);
+                        progress.post_step_file_as(&env.files, &sub_file_base, caption);
                     }
                     if stop.is_some() {
                         break;
@@ -319,7 +309,8 @@ pub(in crate::workflow_engine) async fn execute(
                     }
                     // The failed iteration's trace file rides along.
                     if progress.enabled() && (is_reportable(&skind) || skind == "review_run") {
-                        progress.post_step_file(&env.files, &sub_file_base);
+                        let caption = iteration_caption(&sname, i, Some(e.to_string()));
+                        progress.post_step_file_as(&env.files, &sub_file_base, caption);
                     }
                     failed = Some((sname.clone(), e.to_string()));
                     last_iteration_error =
@@ -411,6 +402,18 @@ pub(in crate::workflow_engine) async fn execute(
     Ok((Value::Object(out), logs))
 }
 
+/// The repo reference an inner step published, by repo_id (latest wins).
+fn keep_repo_ref(refs_by_repo: &mut serde_json::Map<String, Value>, out: &Value) {
+    let Some(rid) = out.get("repo_id").and_then(Value::as_str) else {
+        return;
+    };
+    if !rid.trim().is_empty() {
+        let field = |k: &str| out.get(k).cloned().unwrap_or(Value::Null);
+        let r = json!({"repo_id": rid, "base": field("base"), "worktree": field("worktree")});
+        refs_by_repo.insert(rid.to_string(), r);
+    }
+}
+
 /// The time budget before an inner step starts (only for a budgeted loop).
 async fn before_step(
     repo: &WorkflowsRepo,
@@ -423,7 +426,8 @@ async fn before_step(
     loop_stop(b, StopPoint::BeforeStep { active_ms })
 }
 
-/// A restart caught this attempt on a thread → resume it (DR-111);
+/// The attempt's start: now, or — a restart caught it on a thread, which it
+/// resumes (DR-111) — when its checkpoint last moved, at the latest.
 /// `same_thread` → continue the previous iteration's thread of the step.
 async fn inner_thread(
     repo: &WorkflowsRepo,
@@ -432,10 +436,12 @@ async fn inner_thread(
     sub: &mut WorkflowNode,
     (i, k): (u64, usize),
     same_thread: bool,
-) {
+) -> std::time::SystemTime {
     let cp = repo.checkpoint(run_id, &sub.id).await.ok().flatten();
-    if let Some(t) = cp.as_ref().and_then(caught_thread) {
+    let mut started = std::time::SystemTime::now();
+    if let Some((t, cp)) = cp.as_ref().and_then(|cp| Some((caught_thread(cp)?, cp))) {
         super::super::step_thread::mark_resume(run_id, &sub.id, &t);
+        started = cp.updated_at.into();
     }
     if same_thread && i > 1 {
         let prev = repo
@@ -443,6 +449,7 @@ async fn inner_thread(
             .await;
         continue_previous(&mut sub.params, prev.ok().flatten().as_ref());
     }
+    started
 }
 
 fn step_note(a: &AgentAssociation) -> Option<&otto_workflows::step_util::StepNote> {
@@ -450,4 +457,18 @@ fn step_note(a: &AgentAssociation) -> Option<&otto_workflows::step_util::StepNot
         AgentAssociation::Step(n) => Some(n),
         _ => None,
     }
+}
+
+/// The chat caption of an iteration's step file (`error`: it failed).
+fn iteration_caption(step: &str, iteration: u64, error: Option<String>) -> String {
+    let status = match error {
+        Some(_) => NodeStatus::Error,
+        None => NodeStatus::Success,
+    };
+    let st = NodeRunState {
+        status,
+        error,
+        ..Default::default()
+    };
+    step_caption(step, &st, Some(iteration as u32))
 }

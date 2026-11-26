@@ -208,6 +208,13 @@ async fn a_whole_review_runs_on_threads_scope_twelve_reviewers_and_the_summarize
         ("", "high"),
         "a lens pick reaches its row"
     );
+    // Not the PTY's 1.5 s cold-start stagger on threads (16.5 s for twelve).
+    let starts: Vec<_> = rows.iter().filter_map(|r| r.started_at).collect();
+    let spread = *starts.iter().max().unwrap() - *starts.iter().min().unwrap();
+    assert!(
+        spread < chrono::Duration::from_std(2 * otto_review::engine::REVIEW_SPAWN_STAGGER).unwrap(),
+        "the twelve reviewers started over {spread}"
+    );
     assert!(
         summarizer[0].thread && summarizer[0].session_id.is_some(),
         "{:?}",
@@ -399,4 +406,82 @@ async fn a_cancel_closes_the_reviews_threads() {
         after.status,
         otto_core::agent_runtime::RuntimeSessionStatus::Closed
     );
+}
+
+/// CR1-028: a held review that comes back after the runner was switched to
+/// the terminal one stops its held agents' threads and removes the PR
+/// checkout it ran in, as a live review's end does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_held_review_back_on_the_terminal_runner_stops_its_threads_and_checkout() {
+    let (tmp, ctx, ws, repo) = rig().await;
+    let review = ctx
+        .reviews_store
+        .create_review(&repo.id, LOCAL_REVIEW_PR_NUMBER)
+        .await
+        .unwrap();
+    let owner: String = sqlx::query_scalar("SELECT id FROM users LIMIT 1")
+        .fetch_one(&ctx.pool)
+        .await
+        .unwrap();
+    let req = otto_core::agent_runtime::CreateRuntimeSessionReq {
+        provider: Some(otto_core::agent_runtime::RuntimeProvider::Claude),
+        cwd: Some(repo.path.clone()),
+        ..Default::default()
+    };
+    let thread = ctx.agent_runtime.create(&owner, &ws.id, req).await.unwrap();
+    let agent = |name: &str, thread_id: Option<String>| otto_core::domain::ReviewAgentState {
+        name: name.into(),
+        provider: "claude".into(),
+        status: "running".into(),
+        thread: thread_id.is_some(),
+        session_id: thread_id,
+        ..Default::default()
+    };
+    let rows = [
+        agent("Lens 1", Some(thread.id.to_string())),
+        agent("Summarizer", None),
+    ];
+    ctx.reviews_store
+        .set_agents(&review.id, &rows)
+        .await
+        .unwrap();
+    let wt = tmp.path().join(format!("otto-review-wt-{}", review.id));
+    let out = otto_git::hardened_std_command()
+        .current_dir(&repo.path)
+        .args([
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            &format!("otto-review-{}", review.id),
+        ])
+        .arg(&wt)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let run = otto_state::ReviewRunContext {
+        source_branch: None,
+        cwd: Some(wt.to_string_lossy().into_owned()),
+        head_sha: None,
+    };
+    ctx.reviews_store
+        .set_run_context(&review.id, &run)
+        .await
+        .unwrap();
+    let settings = otto_state::SettingsRepo::new(ctx.pool.clone());
+    settings.put("wf_step_runner", &json!("pty")).await.unwrap();
+    let live = ctx.review_cancels.register(&review.id);
+    resume_held_review(ctx.clone(), review.id.clone(), live).await;
+    let after = ctx.agent_runtime.get(&thread.id).await.unwrap();
+    assert_eq!(
+        after.status,
+        otto_core::agent_runtime::RuntimeSessionStatus::Closed
+    );
+    assert!(!wt.exists(), "the review's checkout is removed");
+    let done = ctx.reviews_store.get_review(&review.id).await.unwrap();
+    assert_eq!(done.status, ReviewStatus::Error);
 }

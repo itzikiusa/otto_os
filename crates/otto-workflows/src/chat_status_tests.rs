@@ -720,3 +720,17 @@ async fn status_edits_collapse_to_the_newest_with_a_trailing_edit() {
     assert_eq!(log.len(), 2, "{log:?}");
     assert!(matches!(&log[1], Recorded::Edit { text, .. } if text == "v4"));
 }
+
+/// CR1-036: a post that first brings up a new status message says so, so the
+/// pump stores the message id (a restart then edits it, not posts again).
+#[tokio::test(start_paused = true)]
+async fn a_post_that_posts_the_status_message_says_it_moved() {
+    let rec = RecordingAdapter::new(Channel::Slack, "ws-post-moved", "C1", Some("t1"));
+    let mut thread = ChatThread::new(ChatUpdates::Live, rec.clone(), status_msg());
+    thread.status("*PR Reviewer* · working".into()).await;
+    thread.status("*PR Reviewer* · needs you".into()).await;
+    // The pending update finds the message gone: the post re-posts it first.
+    rec.fail_next_edit("slack chat.update: message_not_found");
+    assert!(thread.post("needs you").await, "the status message moved");
+    assert!(!thread.post("again").await, "nothing pending");
+}

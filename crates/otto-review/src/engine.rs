@@ -366,6 +366,20 @@ pub const CHECKS_REVIEWER_NAME: &str = "Required checks";
 /// second is what pushes a codex launch past two minutes.
 pub const REVIEW_SPAWN_STAGGER: Duration = Duration::from_millis(1_500);
 
+/// The same gap on the thread runner, where admission already bounds the
+/// storm: only enough to keep the start order (Codex first, DR-023.5) into
+/// admission's first-in first-out queue.
+pub const THREAD_SPAWN_STAGGER: Duration = Duration::from_millis(250);
+
+/// The gap before the next reviewer spawn on the thread runner or on PTY.
+pub fn spawn_gap(threads: bool) -> Duration {
+    if threads {
+        THREAD_SPAWN_STAGGER
+    } else {
+        REVIEW_SPAWN_STAGGER
+    }
+}
+
 /// The order `run_review_core` does its per-agent work in: `(register step,
 /// spawn step)` per reviewer. EVERY cancel flag is registered before the first
 /// session is spawned, so a Stop landing during the stagger reaches reviewers

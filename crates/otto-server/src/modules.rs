@@ -44,7 +44,7 @@ use otto_review::engine::{
     general_comment_body, inline_anchor_rejected, is_blocking_severity, mode_source,
     orchestrator_budget, parse_draft_comments, repo_review_binding_key, resolve_blocker,
     review_agent_cancel_key, review_agent_timeout, reviewer_slots, same_draft_comment,
-    severity_rank, ReviewBranches, REVIEW_SPAWN_STAGGER,
+    severity_rank, ReviewBranches,
 };
 pub(crate) use otto_review::engine::{
     resolve_skill_inline, workflow_review_config, workflow_review_config_from_json,

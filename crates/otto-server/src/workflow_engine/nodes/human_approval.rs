@@ -4,14 +4,17 @@
 use super::super::*;
 use super::NodeCall;
 
-/// The gate each run waits at, for the run's board: a sibling's publish must
-/// not compute the run as if nobody were asked (CR1-007).
-fn gates() -> &'static std::sync::Mutex<HashMap<Id, String>> {
-    static G: OnceLock<std::sync::Mutex<HashMap<Id, String>>> = OnceLock::new();
+/// The gate each run waits at and the output it exposes meanwhile (a
+/// publication preview), for the run's board: a sibling's publish must not
+/// compute the run as if nobody were asked (CR1-007), nor drop the preview
+/// the approval is checked against.
+type Gate = (String, Option<Value>);
+fn gates() -> &'static std::sync::Mutex<HashMap<Id, Gate>> {
+    static G: OnceLock<std::sync::Mutex<HashMap<Id, Gate>>> = OnceLock::new();
     G.get_or_init(Default::default)
 }
 
-pub(in crate::workflow_engine) fn waiting_gate(run_id: &Id) -> Option<String> {
+pub(in crate::workflow_engine) fn waiting_gate(run_id: &Id) -> Option<Gate> {
     gates().lock().ok()?.get(run_id).cloned()
 }
 
@@ -38,7 +41,7 @@ pub(in crate::workflow_engine) async fn execute(
     } = call;
     let run_id: &Id = &env.run_id;
     let p = &node.params;
-    product_publication::expose_pending(ctx, run_id, node, &input).await?;
+    let exposed = product_publication::expose_pending(ctx, run_id, node, &input).await?;
     let prompt = p
         .get("prompt")
         .and_then(Value::as_str)
@@ -67,7 +70,7 @@ pub(in crate::workflow_engine) async fn execute(
     .map_err(|e| otto_core::Error::Internal(format!("human_approval mark: {e}")))?
     .ok_or_else(|| otto_core::Error::Conflict("human_approval: run is no longer running".into()))?;
     if let Ok(mut g) = gates().lock() {
-        g.insert(run_id.clone(), node.id.clone());
+        g.insert(run_id.clone(), (node.id.clone(), exposed));
     }
     let _waiting = Waiting(run_id);
     // The stored overview and the event say "needs you" at once.

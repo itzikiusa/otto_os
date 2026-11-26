@@ -112,6 +112,8 @@ mod wf_goal;
 mod wf_lifecycle;
 #[path = "wf_restart.rs"]
 mod wf_restart;
+#[path = "wf_threads.rs"]
+mod wf_threads;
 #[path = "wf_timing.rs"]
 mod wf_timing;
 #[path = "workflow_run_files.rs"]

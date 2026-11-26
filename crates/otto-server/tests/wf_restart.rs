@@ -28,14 +28,14 @@ use crate::wf_lifecycle::{Restart, RESTART};
 
 const WS: &str = "ws-restart";
 
-struct Rig {
+pub(crate) struct Rig {
     _tmp: tempfile::TempDir,
     root: PathBuf,
-    rec: Arc<otto_channels::test_util::RecordingAdapter>,
+    pub(crate) rec: Arc<otto_channels::test_util::RecordingAdapter>,
 }
 
 impl Rig {
-    async fn new() -> Rig {
+    pub(crate) async fn new() -> Rig {
         let tmp = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(tmp.path()).unwrap();
         for d in ["data", "scripts", "fake-state"] {
@@ -69,7 +69,7 @@ impl Rig {
 
     /// One daemon life: the same database file and data dir, a fresh
     /// context and (unless `keep` hands over a surviving one) a fresh runtime.
-    async fn life(&self, keep: Option<AgentRuntime>) -> ServerCtx {
+    pub(crate) async fn life(&self, keep: Option<AgentRuntime>) -> ServerCtx {
         let pool = otto_state::open(&self.root.join("data/otto.db"))
             .await
             .unwrap();
@@ -160,7 +160,7 @@ fn params(kind: &str) -> Value {
     }
 }
 
-async fn create(
+pub(crate) async fn create(
     ctx: &ServerCtx,
     graph: &WorkflowGraph,
 ) -> (otto_core::workflows::Workflow, otto_core::Id) {
@@ -202,7 +202,7 @@ async fn boot(ctx: &ServerCtx) {
 }
 
 /// Wait until the run settles, or parks at an approval when `parked` says so.
-async fn settled(ctx: &ServerCtx, run_id: &otto_core::Id, parked: bool) -> WorkflowRun {
+pub(crate) async fn settled(ctx: &ServerCtx, run_id: &otto_core::Id, parked: bool) -> WorkflowRun {
     let repo = WorkflowsRepo::new(ctx.pool.clone());
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
@@ -224,7 +224,7 @@ async fn settled(ctx: &ServerCtx, run_id: &otto_core::Id, parked: bool) -> Workf
     }
 }
 
-fn node<'a>(run: &'a WorkflowRun, id: &str) -> &'a otto_core::workflows::NodeRunState {
+pub(crate) fn node<'a>(run: &'a WorkflowRun, id: &str) -> &'a otto_core::workflows::NodeRunState {
     run.nodes
         .iter()
         .find(|n| n.node_id == id)
@@ -412,25 +412,17 @@ fn on_workers<F: std::future::Future<Output = ()>>(stack: usize, f: F) {
         .block_on(f);
 }
 
-/// See `an_agent_step_whose_thread_died_continues_on_the_same_thread`.
-const BIG: usize = 16 * 1024 * 1024;
+/// Tokio's default worker stack, the daemon's: a debug build of the resumed
+/// agent step overflowed it until the deep awaits were boxed in their own
+/// frames (CR1-002, `otto_core::heap`).
+const DEFAULT_STACK: usize = 2 * 1024 * 1024;
 
 /// An agent step mid-turn whose thread died with the daemon: after the boot
 /// it continues on the SAME thread — one more turn there (the handoff nudge),
 /// no second thread — and the step and run succeed with one resume spent.
-///
-/// Runs on 16 MiB workers: on tokio's default 2 MiB (the daemon's) the
-/// resumed step overflows the worker's stack in a debug build — reported
-/// to the engine; `..._on_the_default_stack` below is that repro.
 #[test]
 fn an_agent_step_whose_thread_died_continues_on_the_same_thread() {
-    on_workers(BIG, thread_died());
-}
-
-/// CR1-002: the daemon's own worker stack (tokio's default 2 MiB, debug build).
-#[test]
-fn an_agent_step_whose_thread_died_continues_on_the_default_stack() {
-    on_workers(2 * 1024 * 1024, thread_died());
+    on_workers(DEFAULT_STACK, thread_died());
 }
 
 async fn thread_died() {
@@ -500,7 +492,7 @@ async fn thread_died() {
 /// the new life awaits it — the turn finishes once, nothing is prompted again.
 #[test]
 fn an_agent_step_whose_thread_survived_is_awaited_not_prompted_again() {
-    on_workers(BIG, thread_survived());
+    on_workers(DEFAULT_STACK, thread_survived());
 }
 
 async fn thread_survived() {
@@ -548,6 +540,53 @@ async fn thread_survived() {
     ctx.agent_runtime.shutdown().await;
 }
 
+/// CR1-005 for a loop's inner step: a held thread that finished its turn
+/// while the daemon was down keeps the handoff its agent wrote — the resumed
+/// attempt is not dated from the boot, so the engine's rendering never
+/// overwrites the agent's file.
+#[test]
+fn a_loop_step_whose_thread_survived_keeps_the_handoff_it_wrote() {
+    on_workers(DEFAULT_STACK, inner_thread_survived());
+}
+
+async fn inner_thread_survived() {
+    let rig = Rig::new().await;
+    std::fs::write(
+        rig.root.join("scripts/work.txt"),
+        "sleep 1500\nwrite $HANDOFF the agent's own handoff\nreply done\n",
+    )
+    .unwrap();
+    let work = json!({"kind": "agent_prompt", "name": "Work",
+        "params": {"provider": "claude", "prompt": "Do it.\nOTTO_FAKE: @script"}});
+    let ctx = rig.life(None).await;
+    let loop_params = json!({"max_iterations": 1, "steps": [work]});
+    let (run_id, _) = start_and_cut(&rig, &ctx, graph("loop", loop_params)).await;
+    let kept = ctx.agent_runtime.clone();
+    drop(ctx);
+    // The held turn ends and writes its handoff while no daemon runs.
+    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+    let ctx = rig.life(Some(kept)).await;
+    boot(&ctx).await;
+    let run = settled(&ctx, &run_id, false).await;
+    assert_eq!(
+        run.status,
+        RunStatus::Success,
+        "{:?} {:?}",
+        run.error,
+        run.nodes
+    );
+    let dir = ctx.data_dir.join("workflow-context").join(run_id.as_str());
+    let handoff = std::fs::read_to_string(dir.join("step2-work-iter1.md")).unwrap_or_default();
+    assert!(handoff.contains("the agent's own handoff"), "{handoff}");
+    assert_eq!(
+        turns(&rig).len(),
+        1,
+        "never prompted again: {:?}",
+        turns(&rig)
+    );
+    ctx.agent_runtime.shutdown().await;
+}
+
 /// A delay cut mid-wait re-runs after the boot and the run finishes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_delay_cut_mid_wait_runs_again_and_the_run_finishes() {
@@ -563,9 +602,6 @@ async fn a_delay_cut_mid_wait_runs_again_and_the_run_finishes() {
     assert!(node(&run, "n2").started_at.is_some_and(|t| t >= booted));
     assert_eq!(node(&run, "n3").status, NodeStatus::Success);
 }
-
-/// CR1-002: tokio's default worker stack, the one ottod runs on.
-const DEFAULT_STACK: usize = 2 * 1024 * 1024;
 
 /// Start a run through `spawn_run` (the daemon's entry: run gate, task-local
 /// permit) and wait for it to settle or park.

@@ -62,15 +62,16 @@ fn parse(value: &Value) -> Result<Preview> {
 }
 
 /// Expose the exact gate input while waiting, so the approval banner cannot
-/// accidentally show some other branch's successful preview.
+/// accidentally show some other branch's successful preview. Returns the
+/// gate output it wrote (the board keeps it there, `waiting_gate`).
 pub(super) async fn expose_pending(
     ctx: &ServerCtx,
     run_id: &Id,
     node: &WorkflowNode,
     input: &Value,
-) -> Result<()> {
+) -> Result<Option<Value>> {
     let Some(preview) = input.get("publication_preview") else {
-        return Ok(());
+        return Ok(None);
     };
     parse(preview)?;
     let repo = WorkflowsRepo::new(ctx.pool.clone());
@@ -80,9 +81,10 @@ pub(super) async fn expose_pending(
         .iter_mut()
         .find(|state| state.node_id == node.id)
         .ok_or_else(|| invalid("approval node is not in this run"))?;
-    gate.output = Some(json!({"publication_preview":preview}));
+    let out = json!({"publication_preview":preview});
+    gate.output = Some(out.clone());
     repo.update_run_progress(run_id, &run.nodes).await?;
-    Ok(())
+    Ok(Some(out))
 }
 
 pub(super) async fn execute(
