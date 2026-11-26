@@ -265,6 +265,10 @@ fn twin_cases() -> Vec<(&'static str, Value)> {
             json!({"peer_session_id": ID, "wait_secs": 5}),
         ),
         ("otto_thread_close", json!({"peer_session_id": ID})),
+        (
+            "otto_thread_close",
+            json!({"peer_session_id": ID, "remove": true}),
+        ),
         ("otto_personal_agent_list", json!({})),
         (
             "otto_personal_agent_create",

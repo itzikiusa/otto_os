@@ -36,7 +36,7 @@ Ordinary tasks need none of this. When the user asks for a subagent, another pro
 - Call otto_thread_capabilities once before the first otto_thread_open: the providers, models and efforts enabled here. A provider or model that is missing: say so; never substitute another.
 - Completion wakes you: each subagent's reply arrives here when it finishes. Do not poll it (otto_thread_read, sleep, loops). After delegating, do the rest of your own work, then end your turn.
 - A subagent that failed: tell the user why (its reply carries the error); do not retry it or open another unasked.
-- otto_thread_message sends a finished subagent follow-up work; otto_thread_close stops one you no longer need.";
+- otto_thread_message sends a finished subagent follow-up work; otto_thread_close stops one you no longer need (remove:true also deletes it once it has answered).";
 
 /// What the driver sends for `req` in `st`'s thread: a provider switch's
 /// context handoff (`fresh::with_handoff`), then [`with_rules`] on a

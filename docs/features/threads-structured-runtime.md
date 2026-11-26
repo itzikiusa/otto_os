@@ -1490,11 +1490,18 @@ Done · Failed · Stopped**. A subagent shows in four places only.
   (same thread id), and the new provider's first turn carries the delegation
   rules again.
 
+- **Removing a finished subagent** — `otto.thread_close` with `remove:true`
+  deletes a subagent the thread's own agent opened, once it has answered
+  (refused while it works or has open subagents of its own). Its answer has
+  already reached the parent; the parent keeps a compact record
+  (`meta.removed_children`: id, provider, model, title, status, usage) and its
+  card reads "Codex finished: … · removed", with no Open link.
+
 Not yet: a worktree per subagent, fork / merge and `@thread` mentions.
 
 Meta and markers: a child carries `meta.child_of {id, by: "person" |
 "agent"}` (the opener; `parent_id` stays the group's root). The parent's
-notices end in `[otto-thread:<id>[,<id>…]:started|finished|failed|stopped]`
+notices end in `[otto-thread:<id>[,<id>…]:started|finished|failed|stopped|removed]`
 (`threadNoticeOf` in `runtime/childThreads.ts`). Code:
 `crates/otto-agent-protocol/src/runtime/children.rs`;
 `crates/otto-agent-protocol/src/runtime/{delegation.rs,family.rs}`;

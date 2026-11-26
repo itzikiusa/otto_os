@@ -799,13 +799,19 @@ fn thread_route(tool: &str, args: &Value) -> Option<Result<SelfCall, Error>> {
             "thread_close" => {
                 let id = arg_str(args, "session_id")?;
                 let peer = arg_str(args, "peer_session_id")?;
+                // `remove` only when true: a plain close posts `{}` as before.
+                let remove = args.get("remove").and_then(Value::as_bool) == Some(true);
                 SelfCall::post(
                     format!(
                         "/api/v1/runtime-sessions/{}/peers/{}/close",
                         seg(&id),
                         seg(&peer)
                     ),
-                    json!({}),
+                    if remove {
+                        json!({ "remove": true })
+                    } else {
+                        json!({})
+                    },
                 )
             }
             _ => unreachable!("guarded by the prefix check"),
