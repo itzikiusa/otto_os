@@ -235,6 +235,10 @@ export class RuntimeViews {
         const { [id]: _gone, ...stale } = this.staleError;
         this.staleError = stale;
       }
+      if (this.unavailable[id]) {
+        const { [id]: _lost, ...rest } = this.unavailable;
+        this.unavailable = rest;
+      }
       if (this.loadingOlder[id]) {
         const { [id]: _old, ...older } = this.loadingOlder;
         this.loadingOlder = older;
@@ -470,6 +474,10 @@ export class RuntimeViews {
       if (this.staleError[id]) {
         const { [id]: _fresh, ...stale } = this.staleError;
         this.staleError = stale;
+      }
+      if (this.unavailable[id]) {
+        const { [id]: _back, ...rest } = this.unavailable;
+        this.unavailable = rest;
       }
       if (snapshotReload) {
         // The daemon's own snapshot is the truth: stop chasing what it never had.
