@@ -295,6 +295,15 @@ async fn download_returns_the_bytes_as_an_attachment() {
     assert_eq!(&resp.bytes().await.unwrap()[..], b"PK\x03\x04\0\0binary");
     assert_eq!(get(&d.viewer, "id_rsa").await.unwrap().status(), 403);
     assert_eq!(get(&d.viewer, "../secret.txt").await.unwrap().status(), 400);
+    // CR1-052 (3): a symlink out of the dir, and another workspace's member.
+    #[cfg(unix)]
+    {
+        let resp = get(&d.viewer, "escape.txt").await.unwrap();
+        assert_eq!(resp.status(), 400);
+        assert!(!resp.text().await.unwrap().contains("s3cret"));
+    }
+    let st = get(&d.outsider, "blob.bin").await.unwrap().status();
+    assert!(st == 403 || st == 404, "{st}");
     // A name no header can carry (a control character, non-ASCII) still downloads.
     let odd = "a\rb ü;.txt";
     std::fs::write(d.tmp.path().join("workflow-context/run1").join(odd), "odd").unwrap();
