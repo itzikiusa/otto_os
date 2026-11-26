@@ -28,14 +28,14 @@ use crate::wf_lifecycle::{Restart, RESTART};
 
 const WS: &str = "ws-restart";
 
-struct Rig {
+pub(crate) struct Rig {
     _tmp: tempfile::TempDir,
     root: PathBuf,
     rec: Arc<otto_channels::test_util::RecordingAdapter>,
 }
 
 impl Rig {
-    async fn new() -> Rig {
+    pub(crate) async fn new() -> Rig {
         let tmp = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(tmp.path()).unwrap();
         for d in ["data", "scripts", "fake-state"] {
@@ -69,7 +69,7 @@ impl Rig {
 
     /// One daemon life: the same database file and data dir, a fresh
     /// context and (unless `keep` hands over a surviving one) a fresh runtime.
-    async fn life(&self, keep: Option<AgentRuntime>) -> ServerCtx {
+    pub(crate) async fn life(&self, keep: Option<AgentRuntime>) -> ServerCtx {
         let pool = otto_state::open(&self.root.join("data/otto.db"))
             .await
             .unwrap();
@@ -160,7 +160,7 @@ fn params(kind: &str) -> Value {
     }
 }
 
-async fn create(
+pub(crate) async fn create(
     ctx: &ServerCtx,
     graph: &WorkflowGraph,
 ) -> (otto_core::workflows::Workflow, otto_core::Id) {
@@ -202,7 +202,7 @@ async fn boot(ctx: &ServerCtx) {
 }
 
 /// Wait until the run settles, or parks at an approval when `parked` says so.
-async fn settled(ctx: &ServerCtx, run_id: &otto_core::Id, parked: bool) -> WorkflowRun {
+pub(crate) async fn settled(ctx: &ServerCtx, run_id: &otto_core::Id, parked: bool) -> WorkflowRun {
     let repo = WorkflowsRepo::new(ctx.pool.clone());
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
@@ -224,7 +224,7 @@ async fn settled(ctx: &ServerCtx, run_id: &otto_core::Id, parked: bool) -> Workf
     }
 }
 
-fn node<'a>(run: &'a WorkflowRun, id: &str) -> &'a otto_core::workflows::NodeRunState {
+pub(crate) fn node<'a>(run: &'a WorkflowRun, id: &str) -> &'a otto_core::workflows::NodeRunState {
     run.nodes
         .iter()
         .find(|n| n.node_id == id)
