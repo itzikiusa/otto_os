@@ -71,6 +71,49 @@ impl StepHost for NoStepHost {
     }
 }
 
+/// The daemon's [`StepHost`]: the machine's admission gate and the provider
+/// registry through the session manager; the usage lookup is the host's
+/// (`otto_usage::limits::reset_for` over the owner's limits), when given.
+pub struct DaemonStepHost {
+    pub manager: Arc<otto_sessions::SessionManager>,
+    #[allow(clippy::type_complexity)]
+    pub resets: Option<
+        Arc<
+            dyn Fn(String, Value) -> otto_core::auth::BoxFuture<'static, Option<DateTime<Utc>>>
+                + Send
+                + Sync,
+        >,
+    >,
+}
+
+#[async_trait]
+impl StepHost for DaemonStepHost {
+    async fn admit(
+        &self,
+        source: &str,
+        _label: &str,
+        _on_wait: &(dyn Fn(WaitReason) + Send + Sync),
+    ) -> Box<dyn Send> {
+        Box::new(self.manager.admit_background(source).await)
+    }
+    async fn refuse_pick(
+        &self,
+        provider: &str,
+        model: Option<&str>,
+        effort: Option<&str>,
+    ) -> Option<String> {
+        let reg = self.manager.providers();
+        match otto_sessions::provider_models::check_pick(reg, provider, model, effort).await {
+            otto_sessions::provider_models::PickCheck::Invalid(m) => Some(m),
+            _ => None,
+        }
+    }
+    async fn usage_resets_at(&self, provider: &str, meta: &Value) -> Option<DateTime<Utc>> {
+        let f = self.resets.as_ref()?;
+        f(provider.to_string(), meta.clone()).await
+    }
+}
+
 pub const NUDGE: &str = "You did not write {path}. Write it now; nothing else.";
 pub const CONTINUE_AFTER_LIMIT: &str = "Continue the step where you stopped.";
 pub const AFTER_RESTART: &str = "Otto restarted while you were working on this step. \
