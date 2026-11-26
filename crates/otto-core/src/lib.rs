@@ -41,6 +41,20 @@ pub mod workflows;
 pub mod workref;
 
 pub use error::{Error, Result};
+
+/// Build `f`'s future on the heap from a frame of its own. A debug build's
+/// async poll frame keeps a stack slot for every future it builds inline;
+/// nested as deep as a workflow run → node → step runner → runtime turn,
+/// those slots overflowed tokio's 2 MiB worker stack (CR1-002). Built here,
+/// the future's bytes leave the stack before it is polled.
+#[inline(never)]
+pub fn heap<F, Fut>(f: F) -> std::pin::Pin<Box<Fut>>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future,
+{
+    Box::pin(f())
+}
 pub use id::{new_id, Id};
 
 pub mod network_profiles;

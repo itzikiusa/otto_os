@@ -803,6 +803,20 @@ async fn a_node_future_does_not_carry_every_kinds_frame() {
     // 19 KiB inline before the kinds were boxed, 592 bytes after.
     let node_size = std::mem::size_of_val(&fut);
     assert!(node_size < 2048, "a node future is {node_size} bytes");
+    drop(fut);
+    // The run driver: 27 792 bytes inline before, 2 360 after.
+    let run = run_workflow(
+        fx.ctx.clone(),
+        fx.ws.clone(),
+        fx.wf.clone(),
+        fx.run_id.clone(),
+        json!({}),
+        RunScope::default(),
+        None,
+    );
+    let run_size = std::mem::size_of_val(&run);
+    // Its own arguments (the ServerCtx, the workflow) are most of what is left.
+    assert!(run_size < 4096, "the run driver future is {run_size} bytes");
 }
 
 /// CR1-001: a held run keeps its worktrees through the sweep that runs at
@@ -1328,4 +1342,34 @@ async fn a_prepare_context_agent_reports_its_thread() {
     let out = state(&run, "prep").output.clone().unwrap();
     assert_eq!(out["thread_id"], "th-1", "{out}");
     assert!(out.get("session_id").is_none());
+}
+
+/// CR1-002: Resume of a held goal (loop → check → command) on tokio's
+/// default 2 MiB workers, the daemon's: Resume re-enters through spawn_run.
+#[test]
+fn a_held_goal_resumes_on_the_default_worker_stack() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .thread_stack_size(2 * 1024 * 1024)
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let steps = json!([check(
+            json!([{"id": "ok", "text": "flag set", "verify": "command",
+            "command": "test -f \"$OTTO_CONTEXT_DIR/ok\""}])
+        )]);
+        let params = json!({"max_iterations": 1, "hold_when_unmet": true});
+        let fx = setup("goal-stack", goal_graph(steps, params)).await;
+        let run = fx.run().await;
+        assert!(run.hold.is_some(), "held: {:?}", run.error);
+        fx.flag("ok");
+        let ext = otto_core::api::ExtendReq {
+            iterations: Some(2),
+            active_s: None,
+        };
+        hold::resume(&fx.ctx, &fx.run_id, Some(&ext)).await.unwrap();
+        let run = fx.settled().await;
+        assert_eq!(run.status, RunStatus::Success, "{:?}", run.error);
+    });
 }

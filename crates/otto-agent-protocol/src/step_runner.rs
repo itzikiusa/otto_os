@@ -377,8 +377,10 @@ impl ThreadStepRunner {
             _place = Some(p);
         }
         let ev2 = ev.clone();
-        let run = self.rt.run_turn(id, &req, opts, move |e| {
-            let _ = ev2.send(e);
+        let run = otto_core::heap(|| {
+            self.rt.run_turn(id, &req, opts, move |e| {
+                let _ = ev2.send(e);
+            })
         });
         self.watched(id, ev, run).await.map_err(|e| {
             let m = e.to_string();
@@ -505,10 +507,14 @@ impl ThreadStepRunner {
         let error = loop {
             let settled = match settled.take() {
                 Some(s) => s,
-                None => match self.turn(id, &prompt, t, first, &tally, ev, cancel).await {
-                    Ok(s) => s,
-                    Err(e) => break Some(e),
-                },
+                None => {
+                    match otto_core::heap(|| self.turn(id, &prompt, t, first, &tally, ev, cancel))
+                        .await
+                    {
+                        Ok(s) => s,
+                        Err(e) => break Some(e),
+                    }
+                }
             };
             first = false;
             let error = Self::fold(&settled);
@@ -566,7 +572,7 @@ impl ThreadStepRunner {
                 Some(_) => break error,
             }
         };
-        self.outcome(id, &tally, t, error).await
+        otto_core::heap(|| self.outcome(id, &tally, t, error)).await
     }
 
     async fn outcome(
@@ -689,9 +695,7 @@ impl StepRunner for ThreadStepRunner {
             started,
         };
         let prompt = t.prompt.clone();
-        Ok(self
-            .drive(&id, prompt, true, None, &t, tally, &ev, &cancel)
-            .await)
+        Ok(otto_core::heap(|| self.drive(&id, prompt, true, None, &t, tally, &ev, &cancel)).await)
     }
 
     async fn resume(
@@ -711,11 +715,12 @@ impl StepRunner for ThreadStepRunner {
         opts.no_progress = t.no_progress;
         opts.deadline = t.timeout;
         let ev2 = ev.clone();
-        let wait = self
-            .rt
-            .await_settled(thread_id, start_ordinal, opts, move |e| {
-                let _ = ev2.send(e);
-            });
+        let wait = otto_core::heap(|| {
+            self.rt
+                .await_settled(thread_id, start_ordinal, opts, move |e| {
+                    let _ = ev2.send(e);
+                })
+        });
         let settled = match self.watched(thread_id, &ev, wait).await {
             Ok(s) => s,
             Err(Error::NotFound(_)) => {
@@ -735,9 +740,10 @@ impl StepRunner for ThreadStepRunner {
             // nudge and usage limits included).
             _ => (String::new(), false, Some(settled)),
         };
-        Ok(self
-            .drive(thread_id, prompt, first, settled, t, tally, &ev, &cancel)
-            .await)
+        Ok(otto_core::heap(|| {
+            self.drive(thread_id, prompt, first, settled, t, tally, &ev, &cancel)
+        })
+        .await)
     }
 
     async fn close(&self, thread_id: &Id, retain_until: DateTime<Utc>) {

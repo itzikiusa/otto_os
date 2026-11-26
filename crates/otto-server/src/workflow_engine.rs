@@ -1235,15 +1235,9 @@ pub fn spawn_run(
         RUN_PERMIT
             .scope(
                 std::cell::RefCell::new((gate, Some(permit))),
-                Box::pin(run_workflow(
-                    ctx,
-                    ws,
-                    workflow,
-                    run_id,
-                    input,
-                    scope,
-                    prior_nodes,
-                )),
+                otto_core::heap(move || {
+                    run_workflow(ctx, ws, workflow, run_id, input, scope, prior_nodes)
+                }),
             )
             .await;
     });
@@ -1521,16 +1515,10 @@ pub async fn run_workflow(
     // `None` for every normal run.
     prior_nodes: Option<Vec<NodeRunState>>,
 ) {
-    run_workflow_with_budget(
-        ctx,
-        ws,
-        workflow,
-        run_id,
-        input,
-        scope,
-        prior_nodes,
-        RUN_WALL_CLOCK_TIMEOUT,
-    )
+    let budget = RUN_WALL_CLOCK_TIMEOUT;
+    otto_core::heap(move || {
+        run_workflow_with_budget(ctx, ws, workflow, run_id, input, scope, prior_nodes, budget)
+    })
     .await;
 }
 
@@ -1560,17 +1548,19 @@ async fn run_workflow_with_budget(
         input,
         files,
         env,
-    }) = run::admission::admit(
-        &ctx,
-        &ws,
-        &workflow,
-        &run_id,
-        input,
-        scope,
-        prior_nodes.as_deref(),
-        &repo,
-        active_budget,
-    )
+    }) = otto_core::heap(|| {
+        run::admission::admit(
+            &ctx,
+            &ws,
+            &workflow,
+            &run_id,
+            input,
+            scope,
+            prior_nodes.as_deref(),
+            &repo,
+            active_budget,
+        )
+    })
     .await
     else {
         return;
@@ -1612,21 +1602,23 @@ async fn run_workflow_with_budget(
         prior_nodes: prior_nodes.as_deref(),
         continue_unfinished,
     };
-    run::schedule::drive(cx, &mut rs, &order).await;
-
-    run::finalize::finish(
-        ctx,
-        repo,
-        workflow,
-        run_id,
-        rs.states,
-        input,
-        files,
-        progress,
-        progress_pump,
-        rs.canceled,
-        rs.timed_out,
-    )
+    otto_core::heap(|| run::schedule::drive(cx, &mut rs, &order)).await;
+    let (states, canceled, timed_out) = (rs.states, rs.canceled, rs.timed_out);
+    otto_core::heap(move || {
+        run::finalize::finish(
+            ctx,
+            repo,
+            workflow,
+            run_id,
+            states,
+            input,
+            files,
+            progress,
+            progress_pump,
+            canceled,
+            timed_out,
+        )
+    })
     .await;
 }
 
@@ -2233,7 +2225,28 @@ async fn run_node_agent(
     activity_tx: &tokio::sync::mpsc::UnboundedSender<NodeActivity>,
 ) -> Result<(String, Id)> {
     if step_thread::runner_for(ctx, run_id, provider).await == "pty" {
-        return step_pty::run(
+        return otto_core::heap(|| {
+            step_pty::run(
+                ctx,
+                ws,
+                user,
+                node,
+                wf_name,
+                run_id,
+                provider,
+                model,
+                prompt,
+                cwd,
+                done_file,
+                session_tx,
+                log_tx,
+                activity_tx,
+            )
+        })
+        .await;
+    }
+    otto_core::heap(|| {
+        step_thread::run(
             ctx,
             ws,
             user,
@@ -2249,24 +2262,7 @@ async fn run_node_agent(
             log_tx,
             activity_tx,
         )
-        .await;
-    }
-    step_thread::run(
-        ctx,
-        ws,
-        user,
-        node,
-        wf_name,
-        run_id,
-        provider,
-        model,
-        prompt,
-        cwd,
-        done_file,
-        session_tx,
-        log_tx,
-        activity_tx,
-    )
+    })
     .await
 }
 

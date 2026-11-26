@@ -262,9 +262,9 @@ impl AgentRuntime {
             }
             st.proj.next_turn_ordinal
         };
-        self.prompt_with(id, req).await?;
+        otto_core::heap(|| self.prompt_with(id, req)).await?;
         on(StepEvent::Working);
-        self.settle(id, since, opts, on, Some(true)).await
+        otto_core::heap(|| self.settle(id, since, opts, on, Some(true))).await
     }
 
     /// Wait until the thread settles; usage and turns count every turn with
