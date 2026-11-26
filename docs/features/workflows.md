@@ -842,8 +842,9 @@ Seatbelt confinement as a scheduled shell task.
   `allow_failure` is recorded and the run continues ("Record it and
   continue"). A timeout fails it: "timed out after 900 s".
 - A script caught mid-flight by a daemon restart is re-run only with
-  `idempotent: true`; otherwise its outcome is unknown and the run stops for
-  you (§7 *Restart resume*).
+  `idempotent: true` (**Safe to run again after a restart**, under the step's
+  **Advanced**, beside **Exit codes that count as success**); otherwise its
+  outcome is unknown and the run stops for you (§7 *Restart resume*).
 
 **Post review comments (`post_review_comments`).** Posts the findings of the
 nearest review step before it (or the one named in `review_from`) on the
@@ -1512,9 +1513,10 @@ instead of failing it:
   restart leaves them as they are; **Resume** works after it.
 - **Chat**: the live status message's id is stored on the run, so the
   resumed run goes on editing the same message.
-- **Opt-out & caps**: the workflow's Instructions panel has a
-  *"Resume after a daemon restart"* toggle (`on_restart: 'resume' | 'fail'`;
-  `'fail'` restores the old hard-fail). Automatic resumes are capped at 2 per
+- **Opt-out & caps**: a workflow carries `on_restart: 'resume' | 'fail'`
+  (`'fail'` restores the old hard-fail). It is set through the API
+  (`PATCH /workflows/{id}` `{"on_restart": "fail"}`); the editor has no
+  control for it. Automatic resumes are capped at 2 per
   run (`resume_attempts`) — a restart while the run waits at a human approval
   re-parks it without spending the budget, and a user retry resets it; the run
   page's facts line says *"Resumed after Otto restarted"*. A retry-node
@@ -1854,8 +1856,9 @@ step wakes on the decision, with a 30 s safety re-check); reject errors the
 node ("rejected — &lt;note&gt;"). Both decisions re-emit the event so open
 views drop the card at once. If no decision arrives within the node's
 timeout (24 hours unless `timeout_s` says otherwise), the node errors
-("timed out waiting for operator decision"). While it waits, the run holds no
-run slot and its active-time budget does not run.
+("timed out waiting for operator decision"). While it waits — and no other
+step of the run is working — the run holds no run slot and its active-time
+budget does not run.
 
 A cancel while parked is not a decision: the approval step waits for the run's
 cancel to stop it. A `skip` (chat or **Skip this step**) is refused for an
