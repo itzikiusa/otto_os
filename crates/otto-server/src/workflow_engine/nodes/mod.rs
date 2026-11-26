@@ -163,7 +163,9 @@ pub(in crate::workflow_engine) async fn dispatch(
         "condition" => {
             let expr = p.get("expr").and_then(Value::as_str).unwrap_or("true");
             let input = call.input;
-            let value = otto_core::expr::eval(expr, &input)
+            let run = super::run::state::run_data(&call.env.files, &call.env.run_input);
+            let root = otto_workflows::graph::condition_root(&input, &run);
+            let value = otto_core::expr::eval(expr, &root)
                 .map_err(|e| otto_core::Error::Invalid(format!("condition: {e}")))?;
             let result = otto_core::expr::truthy(&value);
             let mut out = match &input {

@@ -676,7 +676,8 @@ async fn settle(
                 }
             }
             // Prune outgoing edges whose condition fails on this output.
-            let (pruned, mut plogs) = eval_outgoing(&workflow.graph, node, &out, node_input, input);
+            let run = super::state::run_data(files, input);
+            let (pruned, mut plogs) = eval_outgoing(&workflow.graph, node, &out, node_input, &run);
             rs.inactive_edges.extend(pruned);
             logs.append(&mut plogs);
             cap_node_logs(&mut logs, NODE_LOG_CAP);

@@ -41,10 +41,17 @@ use crate::state::ServerCtx;
 use crate::turn_oracle::{self, cap_node_logs, CompleteVia, Phase};
 use otto_workflows::catalog::validate_node_output;
 pub use otto_workflows::catalog::{is_known_kind, node_catalog};
+pub(crate) use otto_workflows::graph::descendants_inclusive;
+use otto_workflows::graph::{
+    assemble_input, decide_node, dependency_is_relevant, eval_outgoing, incoming_edges,
+    outgoing_edges, topo_order, EdgeView, NodeDecision,
+};
 pub(crate) use otto_workflows::location::{
     ensure_path_in_workspace, git_main_worktree, looks_like_path, match_repo_path,
 };
-use otto_workflows::retry::{outcome_error, retry_backoff};
+use otto_workflows::retry::{
+    is_outer_retryable as is_retryable, outcome_error, resolve_retry, retry_backoff,
+};
 use otto_workflows::run_queue::{
     max_parallel_runs, resolve_chat_target, result_workspace, run_gate, ChatTarget,
 };
@@ -619,228 +626,7 @@ const RUN_WALL_CLOCK_TIMEOUT: Duration = Duration::from_secs(10 * 60 * 60);
 /// reconciler fails it for a human to look at.
 pub const MAX_RESUME_ATTEMPTS: i64 = 2;
 
-/// Node kinds the startup reconciler may re-execute after a restart caught
-/// them MID-FLIGHT. The allowlist is deliberately explicit: an unlisted kind
-/// interrupted mid-step has an UNKNOWN outcome (`git_pr` may have opened the
-/// PR, `channel_notify` may have posted, `api_run`/`http_request` may have
-/// fired) — replaying it silently would double its side effect, so such runs
-/// fail with a pointer at the manual retry-a-step flow instead. Listed kinds
-/// are safe to re-run: pure/deterministic nodes, read-only fetches, and
-/// agent-backed steps that start a FRESH session in the run's still-alive
-/// worktree (re-doing work costs time, not correctness).
-fn is_restart_resumable_kind(kind: &str) -> bool {
-    matches!(
-        kind,
-        "manual_trigger"
-            | "agent_prompt"
-            | "prepare_context"
-            | "transform"
-            | "delay"
-            | "log"
-            | "condition"
-            | "budget_gate"
-            | "human_approval"
-            | "review_run"
-            | "db_query"
-            | "broker_peek"
-            | "game_engine"
-            | "verifier"
-            | "canvas"
-            | "product_analyze"
-    )
-}
-
-/// What [`reconcile_interrupted_runs`] decided for one interrupted run.
-/// Produced by the pure [`classify_resume`] so the policy is unit-testable
-/// without a daemon.
-#[derive(Debug)]
-pub enum ResumeDecision {
-    /// Re-enter the run: persist `nodes` + `scope` and [`spawn_run`] it.
-    Resume {
-        scope: RunScope,
-        nodes: Vec<NodeRunState>,
-    },
-    /// The run cannot be safely resumed — fail it with `error` (nodes carry
-    /// any per-node annotation, e.g. the unknown-outcome step marked Error).
-    Fail {
-        nodes: Vec<NodeRunState>,
-        error: String,
-    },
-    /// Every node already settled (the daemon died between the last step and
-    /// the finalize write) — just stamp the terminal status.
-    Finish {
-        status: RunStatus,
-        nodes: Vec<NodeRunState>,
-        error: Option<String>,
-    },
-}
-
-/// Pure classification of one interrupted run: where to re-enter, or why not.
-///
-/// `prior_scope` is the persisted `resume_scope_json` (the scope the dead
-/// process was executing). The caller has already applied the workflow-level
-/// gates (`on_restart = 'fail'`, resume-attempt cap, missing workflow) — this
-/// only reasons about the run's node states vs the graph:
-///   * paused at `human_approval` → re-enter AT the approval node (it re-parks;
-///     side-effect free by construction);
-///   * a node mid-flight → re-enter at it when its kind is restart-safe
-///     ([`is_restart_resumable_kind`]), else fail with the step marked
-///     "outcome unknown";
-///   * no node mid-flight → resume the persisted scope (a re-queued retry that
-///     never started), else the first still-pending node, else finish the run
-///     with the status its settled nodes imply.
-pub fn classify_resume(
-    graph: &WorkflowGraph,
-    run: &WorkflowRun,
-    prior_scope: Option<RunScope>,
-) -> ResumeDecision {
-    let mut nodes = run.nodes.clone();
-    let kind_of = |id: &str| {
-        graph
-            .nodes
-            .iter()
-            .find(|n| n.id == id)
-            .map(|n| n.kind.as_str())
-    };
-    // The node(s) a dead process left mid-flight. The engine executes
-    // sequentially so there is at most one in practice; flip them ALL back to
-    // Pending defensively (a stray Running state must never survive — nothing
-    // would ever settle it).
-    let running_ids: Vec<String> = nodes
-        .iter()
-        .filter(|n| n.status == NodeStatus::Running)
-        .map(|n| n.node_id.clone())
-        .collect();
-    // Paused at an approval? That node is the re-entry point regardless of its
-    // recorded status — the pause is fully persisted and re-awaiting the
-    // operator is free of side effects. But a DIFFERENT step caught
-    // mid-flight wins: a stale pause flag (left by an older code path) must
-    // never make a side-effect step (`git_pr`, `channel_notify`) look like a
-    // resumable approval and get replayed.
-    let entry = if run.waiting_approval {
-        running_ids
-            .iter()
-            .find(|id| kind_of(id.as_str()).is_some_and(|k| k != "human_approval"))
-            .cloned()
-            .or_else(|| run.approval_node_id.clone())
-            .or_else(|| running_ids.first().cloned())
-    } else {
-        running_ids.first().cloned()
-    };
-
-    if let Some(entry_id) = entry {
-        let Some(kind) = kind_of(&entry_id) else {
-            return ResumeDecision::Fail {
-                nodes,
-                error: format!(
-                    "Interrupted by a daemon restart at unknown step '{entry_id}' — re-run the workflow."
-                ),
-            };
-        };
-        let checkpointed_loop = kind == "loop"
-            && run.checkpoints.iter().any(|cp| cp.node_id == entry_id)
-            && run
-                .checkpoints
-                .iter()
-                .filter(|cp| {
-                    cp.node_id == entry_id || cp.node_id.starts_with(&format!("{entry_id}#"))
-                })
-                .all(|cp| {
-                    cp.status != NodeStatus::Running
-                        || cp.kind == "loop"
-                        || is_restart_resumable_kind(&cp.kind)
-                });
-        if !is_restart_resumable_kind(kind) && !checkpointed_loop {
-            // Unknown outcome: mark the step itself, settle the rest.
-            for n in nodes.iter_mut() {
-                if n.node_id == entry_id {
-                    n.status = NodeStatus::Error;
-                    n.error = Some(
-                        "interrupted mid-step by a daemon restart — outcome unknown (this step has external side effects)".into(),
-                    );
-                    n.logs
-                        .push("✗ interrupted mid-step by a daemon restart".into());
-                } else if matches!(n.status, NodeStatus::Pending | NodeStatus::Running) {
-                    n.status = NodeStatus::Skipped;
-                }
-            }
-            return ResumeDecision::Fail {
-                nodes,
-                error: format!(
-                    "Interrupted by a daemon restart during '{entry_id}' ({kind}) — its outcome is unknown, so it was not replayed. Retry the step (or \"re-run from here\") once you've checked what landed."
-                ),
-            };
-        }
-        for n in nodes.iter_mut() {
-            if running_ids.contains(&n.node_id) {
-                n.status = NodeStatus::Pending;
-                n.error = None;
-            }
-        }
-        // Preserve a single-step retry scope when the restart caught exactly
-        // that step; otherwise re-enter at the step and run its downstream.
-        let mut scope = prior_scope.unwrap_or_default();
-        scope.continue_unfinished = true;
-        return ResumeDecision::Resume { scope, nodes };
-    }
-
-    // No node mid-flight. A re-queued scoped re-entry that never started
-    // (pending with progress) resumes its persisted scope verbatim.
-    if run.status == RunStatus::Pending {
-        return match prior_scope {
-            Some(scope) => ResumeDecision::Resume { scope, nodes },
-            None => ResumeDecision::Fail {
-                nodes,
-                error: "Interrupted by a daemon restart — the retry scope was lost (pre-resume run); use \"retry from this step\" again.".into(),
-            },
-        };
-    }
-
-    // Executing, but between node boundaries: resume at the first
-    // still-pending node in topo order, or finish the run if none remain.
-    if let Ok(order) = topo_order(graph) {
-        if order.iter().any(|id| {
-            nodes
-                .iter()
-                .any(|n| &n.node_id == id && n.status == NodeStatus::Pending)
-        }) {
-            let mut scope = prior_scope.unwrap_or_default();
-            scope.continue_unfinished = true;
-            return ResumeDecision::Resume { scope, nodes };
-        }
-    }
-    let any_error = nodes.iter().any(|n| n.status == NodeStatus::Error);
-    ResumeDecision::Finish {
-        status: if any_error {
-            RunStatus::Error
-        } else {
-            RunStatus::Success
-        },
-        nodes,
-        error: any_error.then(|| "one or more nodes failed".to_string()),
-    }
-}
-
-/// Settle a run's node states for a terminal FAIL after a restart: a step
-/// still `running` becomes `error` ("interrupted") — retryable, and no
-/// ever-growing timer — and never-reached `pending` steps become `skipped`.
-/// Settled states pass through untouched.
-fn settle_interrupted_nodes(mut nodes: Vec<NodeRunState>) -> Vec<NodeRunState> {
-    for n in nodes.iter_mut() {
-        match n.status {
-            NodeStatus::Running => {
-                n.status = NodeStatus::Error;
-                if n.error.is_none() {
-                    n.error = Some("interrupted by a daemon restart".into());
-                }
-                n.activity = None;
-            }
-            NodeStatus::Pending => n.status = NodeStatus::Skipped,
-            NodeStatus::Success | NodeStatus::Error | NodeStatus::Skipped => {}
-        }
-    }
-    nodes
-}
+use otto_workflows::resume::{classify_resume, settle_interrupted_nodes, ResumeDecision};
 
 /// Reconcile every run a previous daemon process left in flight: resume where
 /// the workflow's `on_restart` policy and the interrupted step's kind allow,
@@ -1826,7 +1612,7 @@ async fn run_workflow_with_budget(
         run_set.as_ref(),
         continue_unfinished,
     );
-    rs.reconstruct_branches(&order, &workflow.graph, &input);
+    rs.reconstruct_branches(&order, &workflow.graph, &files, &input);
 
     // Record which workflow version this run executed (best-effort).
     let _ = repo.set_run_version(&run_id, workflow.version).await;
@@ -2211,73 +1997,6 @@ async fn deliver_run_result(
     }
 }
 
-/// `start` plus every node reachable from it via edges.
-pub(crate) fn descendants_inclusive(
-    graph: &WorkflowGraph,
-    start: &str,
-) -> std::collections::HashSet<String> {
-    let mut adj: HashMap<String, Vec<String>> = HashMap::new();
-    for e in &graph.edges {
-        adj.entry(e.source.clone())
-            .or_default()
-            .push(e.target.clone());
-    }
-    let mut set = std::collections::HashSet::new();
-    let mut stack = vec![start.to_string()];
-    while let Some(n) = stack.pop() {
-        if set.insert(n.clone()) {
-            if let Some(succ) = adj.get(&n) {
-                stack.extend(succ.iter().cloned());
-            }
-        }
-    }
-    set
-}
-
-/// Build a node's input from its predecessors' outputs: the lone predecessor's
-/// output when there's exactly one, an object keyed by source id when several,
-/// or the run input for source nodes.
-///
-/// Only predecessors that actually produced an output count. When a node is the
-/// entry point of a start-from-here run, its predecessors were skipped (no
-/// output), so it falls back to the run `input` — this is what lets you re-run
-/// from a specific step (e.g. start at `game`) while feeding in an earlier
-/// step's product (e.g. the already-generated image) instead of rerunning it.
-fn dependency_is_relevant(
-    source: &str,
-    run_set: Option<&std::collections::HashSet<String>>,
-    prior: Option<&[NodeRunState]>,
-) -> bool {
-    run_set.is_none_or(|set| set.contains(source))
-        || prior.is_some_and(|nodes| {
-            nodes
-                .iter()
-                .any(|node| node.node_id == source && node.status != NodeStatus::Pending)
-        })
-}
-
-fn assemble_input(
-    upstream: &[String],
-    outputs: &HashMap<String, Value>,
-    run_input: &Value,
-) -> Value {
-    let present: Vec<&String> = upstream
-        .iter()
-        .filter(|p| outputs.contains_key(*p))
-        .collect();
-    match present.len() {
-        0 => run_input.clone(),
-        1 => outputs.get(present[0]).cloned().unwrap_or(Value::Null),
-        _ => {
-            let mut map = serde_json::Map::new();
-            for p in present {
-                map.insert(p.clone(), outputs.get(p).cloned().unwrap_or(Value::Null));
-            }
-            Value::Object(map)
-        }
-    }
-}
-
 /// Run-level execution environment shared by every node of one run: identity,
 /// ambient cwd, the ambient PR/review base (`None` ⇒ resolve the repo's
 /// default branch at the point of use — never a fabricated `"main"`), and the
@@ -2359,102 +2078,6 @@ async fn execute_node(
     nodes::dispatch(call).await
 }
 
-// ---------------------------------------------------------------------------
-// Graph helpers
-// ---------------------------------------------------------------------------
-
-/// Edges entering `node_id` (in graph order).
-fn incoming_edges<'a>(
-    graph: &'a WorkflowGraph,
-    node_id: &str,
-) -> Vec<&'a otto_core::workflows::WorkflowEdge> {
-    graph.edges.iter().filter(|e| e.target == node_id).collect()
-}
-
-/// Edges leaving `node_id` (in graph order).
-fn outgoing_edges<'a>(
-    graph: &'a WorkflowGraph,
-    node_id: &str,
-) -> Vec<&'a otto_core::workflows::WorkflowEdge> {
-    graph.edges.iter().filter(|e| e.source == node_id).collect()
-}
-
-/// A reduced view of one in-scope incoming edge, for the branching decision.
-struct EdgeView {
-    source: String,
-    /// The source node errored (or was poisoned).
-    errored: bool,
-    /// The source produced an output (i.e. ran successfully or hit cache).
-    has_output: bool,
-    /// This edge's condition is satisfied (true / absent).
-    edge_active: bool,
-}
-
-/// The control-flow decision for a node, derived purely from its incoming edges.
-#[derive(Debug, PartialEq)]
-enum NodeDecision {
-    /// Run, assembling input from these satisfied source ids.
-    Run(Vec<String>),
-    /// Skip + propagate failure: an active-path predecessor errored.
-    ErrorSkip,
-    /// Skip without failure: the node has in-scope predecessors but no satisfied
-    /// edge (every branch into it was pruned, or upstream was branch-skipped).
-    BranchSkip,
-}
-
-/// Decide whether a node runs. Pure + unit-tested.
-///
-/// - An errored in-scope predecessor poisons the node (ErrorSkip).
-/// - Otherwise, "satisfied" sources are those that produced output via an active
-///   edge; if there are in-scope incoming edges but none satisfied, the node is
-///   BranchSkip; else Run with the satisfied sources (empty ⇒ an entry node that
-///   falls back to the run input).
-fn decide_node(views: &[EdgeView]) -> NodeDecision {
-    if views.iter().any(|v| v.errored) {
-        return NodeDecision::ErrorSkip;
-    }
-    let satisfied: Vec<String> = views
-        .iter()
-        .filter(|v| v.has_output && v.edge_active)
-        .map(|v| v.source.clone())
-        .collect();
-    if !views.is_empty() && satisfied.is_empty() {
-        return NodeDecision::BranchSkip;
-    }
-    NodeDecision::Run(satisfied)
-}
-
-/// Evaluate the conditions on a node's outgoing edges against its output. Returns
-/// `(inactive_edge_ids, log_lines)`. An edge with no condition is always active;
-/// a condition that fails to parse/evaluate is treated as *not taken* (and logged).
-fn eval_outgoing(
-    graph: &WorkflowGraph,
-    node: &WorkflowNode,
-    output: &Value,
-    node_input: &Value,
-    run_input: &Value,
-) -> (Vec<String>, Vec<String>) {
-    let mut inactive = Vec::new();
-    let mut logs = Vec::new();
-    let ctx = json!({
-        "output": output,
-        "input": node_input,
-        "node": { "id": node.id, "kind": node.kind, "name": node.name },
-        "run": { "input": run_input },
-    });
-    for e in outgoing_edges(graph, &node.id) {
-        if let Some(cond) = &e.condition {
-            if !otto_core::expr::eval_bool(cond, &ctx) {
-                inactive.push(e.id.clone());
-                logs.push(format!("edge → {} not taken ({cond})", e.target));
-            }
-        }
-    }
-    (inactive, logs)
-}
-
-/// The effective retry policy for a node: an explicit `node.retry`, else a
-/// `params.retry` object, else the default (no retry). Clamped to sane bounds.
 /// Completion protocol appended to EVERY agent-backed workflow step prompt.
 /// R1.3: sub-agents are now ALLOWED (they are the mechanism R2 relies on) — the
 /// turn oracle waits for every one of them to report back, so the rules tell the
@@ -2614,45 +2237,6 @@ fn loop_checkpoint(
         updated_at: chrono::Utc::now(),
         ..Default::default()
     }
-}
-
-fn resolve_retry(node: &WorkflowNode) -> otto_core::workflows::RetryPolicy {
-    if let Some(p) = &node.retry {
-        return p.clamped();
-    }
-    if let Some(rp) = node.params.get("retry") {
-        if let Ok(p) = serde_json::from_value::<otto_core::workflows::RetryPolicy>(rp.clone()) {
-            return p.clamped();
-        }
-    }
-    // Default: agent steps get a small retry budget (2 retries = 3 attempts) so a
-    // transient stuck/no-op spawn — e.g. a startup screen that swallowed the prompt,
-    // surfaced as the 3-min no-progress error — is re-attempted with a FRESH session,
-    // then errors ("call it a day"). Every other kind keeps the no-retry default.
-    // `prepare_context` only reaches an agent turn when it has a non-empty
-    // `params.prompt` — treat it like `agent_prompt` exactly in that case.
-    let has_agent_phase = node.kind == "prepare_context"
-        && node
-            .params
-            .get("prompt")
-            .and_then(Value::as_str)
-            .map(|s| !s.trim().is_empty())
-            .unwrap_or(false);
-    if node.kind == "agent_prompt" || has_agent_phase {
-        return otto_core::workflows::RetryPolicy {
-            max_attempts: 2,
-            backoff_ms: 2000,
-            factor: 2.0,
-        }
-        .clamped();
-    }
-    otto_core::workflows::RetryPolicy::default()
-}
-
-/// Whether a node kind should be retried on failure. Interactive / entry kinds
-/// are never retried.
-fn is_retryable(kind: &str) -> bool {
-    otto_workflows::retry::is_outer_retryable(kind)
 }
 
 // Retry classification + backoff live in `otto_workflows::retry` (imported above).
@@ -4153,52 +3737,6 @@ fn node_cwd(node: &WorkflowNode, input: &Value, run_cwd: &str) -> String {
         Some(s) => expand_tilde(s),
         None => run_cwd.to_string(),
     }
-}
-
-/// Kahn topological sort. Errors on a cycle.
-fn topo_order(graph: &WorkflowGraph) -> std::result::Result<Vec<String>, String> {
-    let mut indeg: HashMap<String, usize> = HashMap::new();
-    let mut adj: HashMap<String, Vec<String>> = HashMap::new();
-    for n in &graph.nodes {
-        indeg.entry(n.id.clone()).or_insert(0);
-        adj.entry(n.id.clone()).or_default();
-    }
-    for e in &graph.edges {
-        if !indeg.contains_key(&e.target) || !indeg.contains_key(&e.source) {
-            continue; // dangling edge — ignore
-        }
-        *indeg.entry(e.target.clone()).or_insert(0) += 1;
-        adj.entry(e.source.clone())
-            .or_default()
-            .push(e.target.clone());
-    }
-    // Stable start order: graph node order among in-degree-0 nodes.
-    let mut queue: Vec<String> = graph
-        .nodes
-        .iter()
-        .filter(|n| indeg.get(&n.id).copied().unwrap_or(0) == 0)
-        .map(|n| n.id.clone())
-        .collect();
-    let mut order = Vec::new();
-    let mut i = 0;
-    while i < queue.len() {
-        let id = queue[i].clone();
-        i += 1;
-        order.push(id.clone());
-        if let Some(succs) = adj.get(&id).cloned() {
-            for s in succs {
-                let d = indeg.get_mut(&s).unwrap();
-                *d -= 1;
-                if *d == 0 {
-                    queue.push(s);
-                }
-            }
-        }
-    }
-    if order.len() != graph.nodes.len() {
-        return Err("workflow graph has a cycle".into());
-    }
-    Ok(order)
 }
 
 /// Collect openable session id(s) from a node's output (`session_id` string

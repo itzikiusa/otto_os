@@ -93,42 +93,37 @@ impl RunState {
         }
     }
 
-    /// Reconstruct adopted branch decisions without rerunning their nodes.
+    /// Reconstruct adopted branch decisions without rerunning their nodes
+    /// (`otto_workflows::graph::reconstruct_branches`, with today's run data).
     pub(in crate::workflow_engine) fn reconstruct_branches(
         &mut self,
         order: &[String],
         graph: &WorkflowGraph,
+        files: &crate::workflow_context::RunContextFiles,
         input: &Value,
     ) {
-        for id in order {
-            let Some(node) = graph.nodes.iter().find(|n| &n.id == id) else {
-                continue;
-            };
-            if let Some(output) = self.outputs.get(id) {
-                let sources: Vec<String> = incoming_edges(graph, id)
-                    .iter()
-                    .filter(|e| {
-                        self.outputs.contains_key(&e.source) && !self.inactive_edges.contains(&e.id)
-                    })
-                    .map(|e| e.source.clone())
-                    .collect();
-                let adopted_input = assemble_input(&sources, &self.outputs, input);
-                let (pruned, _) = eval_outgoing(graph, node, output, &adopted_input, input);
-                self.inactive_edges.extend(pruned);
-            } else if self
-                .states
-                .iter()
-                .any(|s| &s.node_id == id && s.status == NodeStatus::Skipped)
-            {
-                // Skipped below an errored source is poison; otherwise the
-                // branch simply wasn't taken.
-                if incoming_edges(graph, id)
-                    .iter()
-                    .any(|e| self.errored.contains(&e.source))
-                {
-                    self.errored.insert(id.clone());
-                }
-            }
-        }
+        otto_workflows::graph::reconstruct_branches(
+            order,
+            graph,
+            &run_data(files, input),
+            &self.states,
+            &self.outputs,
+            &mut self.inactive_edges,
+            &mut self.errored,
+        );
     }
+}
+
+/// The `run` object edge conditions and `condition` nodes see (DR-005):
+/// the run input, the current `repos.json` registry and `prs.json`. Read
+/// when the condition is evaluated (its source settles).
+pub(in crate::workflow_engine) fn run_data(
+    files: &crate::workflow_context::RunContextFiles,
+    input: &Value,
+) -> Value {
+    let prs: Vec<otto_workflows::run_refs::RunPr> = files
+        .read_named(otto_workflows::run_refs::PRS_FILE)
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    otto_workflows::graph::run_data(input, &files.repos(), &prs)
 }
