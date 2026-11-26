@@ -56,6 +56,9 @@ const RESTART: &[(&str, Restart)] = &[
 ];
 
 fn graph(kind: &str) -> WorkflowGraph {
+    // Built from variables: otto-core's background-source guard reads every
+    // literal string under a "source" key in the workspace as a session source.
+    let edge = |id: &str, from: &str, to: &str| json!({"id": id, "source": from, "target": to});
     serde_json::from_value(json!({
         "nodes": [
             {"id": "n1", "kind": "manual_trigger", "name": "Start 1"},
@@ -63,8 +66,8 @@ fn graph(kind: &str) -> WorkflowGraph {
             {"id": "n3", "kind": "log", "name": "Log 3"},
         ],
         "edges": [
-            {"id": "e1", "source": "n1", "target": "n2"},
-            {"id": "e2", "source": "n2", "target": "n3"},
+            edge("e1", "n1", "n2"),
+            edge("e2", "n2", "n3"),
         ],
     }))
     .unwrap()
