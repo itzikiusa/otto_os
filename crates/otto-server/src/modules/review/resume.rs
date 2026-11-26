@@ -20,16 +20,25 @@ pub(crate) async fn resume_held_review(
     let Ok(repo) = ctx.git_store.get_repo(&review.repo_id).await else {
         return;
     };
+    let run = ctx
+        .reviews_store
+        .get_run_context(&review_id)
+        .await
+        .ok()
+        .flatten();
+    let cwd = run.and_then(|r| r.cwd).unwrap_or_else(|| repo.path.clone());
     let result = async {
         let ws = ctx.workspaces.get(&repo.workspace_id).await?;
         let user = otto_review::restart::review_user(&otto_state::UsersRepo::new(ctx.pool.clone()))
             .await?;
         let cfg = load_review_config_for_repo(&ctx, &repo.id).await;
-        let threads = review_threads(&ctx, Some(&cfg))
-            .await
-            .ok_or_else(|| Error::Invalid(otto_review::restart::INTERRUPTED.into()))?;
-        let run = ctx.reviews_store.get_run_context(&review_id).await?;
-        let cwd = run.and_then(|r| r.cwd).unwrap_or_else(|| repo.path.clone());
+        let Some(threads) = review_threads(&ctx, Some(&cfg)).await else {
+            // Switched to the terminal runner meanwhile: the held agents stop.
+            for agent in &review.agents {
+                end_review_agent(&ctx, agent).await;
+            }
+            return Err(Error::Invalid(otto_review::restart::INTERRUPTED.into()));
+        };
         let diff = std::env::temp_dir().join(format!("otto-review-{review_id}.diff"));
         let diff_len = std::fs::metadata(&diff)
             .map(|m| m.len() as usize)
@@ -62,6 +71,20 @@ pub(crate) async fn resume_held_review(
     }
     .await;
     remove_review_temp_files(&review_id).await;
+    // The PR checkout the review ran in goes with it, as after a live review.
+    let own = format!("otto-review-wt-{review_id}");
+    if std::path::Path::new(&cwd)
+        .file_name()
+        .is_some_and(|n| *n == *own)
+    {
+        let branch = format!("otto-review-{review_id}");
+        let wt = PrWorktree {
+            path: cwd.clone(),
+            branch,
+            review_ref: None,
+        };
+        teardown_pr_worktree(&repo.path, wt).await;
+    }
     if review_is_cancelled(&ctx, &review_id).await {
         return;
     }
