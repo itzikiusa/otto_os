@@ -237,7 +237,7 @@ async fn old_rows_decode() {
     );
 }
 
-/// proves: X4 (decode half) — what today's repo writes (definition, progress,
+/// Part of X4 (the decode half of a rollback): what today's repo writes (definition, progress,
 /// resume scope, checkpoint) decodes into the 0.6 types, so a rolled-back
 /// binary still reads the rows.
 #[tokio::test]
