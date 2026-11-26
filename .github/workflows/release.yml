@@ -8,10 +8,11 @@ name: Release
 #   build    tag == the three version files → UI → ottod (embed-ui) → Otto.app
 #            (unsigned; no secrets in this job — it runs the npm/cargo build)
 #   sign     environment `release` (owner approval; the only job with secrets,
-#            read-only token): sign with the release identity from a temporary
-#            keychain, then packaging/release-artifacts.sh writes the updater
-#            archive + its minisign signature, the DMG + sha256, latest.json
-#            and the notes (README "### What's new in <version>")
+#            read-only token): sign with the Developer ID identity from a
+#            temporary keychain, have Apple notarize the app and the DMG, then
+#            packaging/release-artifacts.sh writes the updater archive + its
+#            minisign signature, the DMG + sha256, latest.json and the notes
+#            (README "### What's new in <version>")
 #   publish  the only job with a write token, and no secrets and no checkout:
 #            creates the draft from the sign job's files
 #
@@ -160,7 +161,7 @@ jobs:
     name: Sign and package
     needs: build
     runs-on: macos-latest
-    timeout-minutes: 30
+    timeout-minutes: 60 # two notary submissions; Apple usually answers in minutes
     environment: release
     permissions:
       contents: read
@@ -205,17 +206,22 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$kc_pw" "$KEYCHAIN" > /dev/null
           rm -f "$RUNNER_TEMP/release.p12"
 
-      - name: Sign the app, archive, DMG
+      - name: Sign and notarize the app, archive, DMG
+        env:
+          NOTARY_KEY_BASE64: ${{ secrets.OTTO_NOTARY_KEY_BASE64 }}
+          OTTO_NOTARY_KEY_ID: ${{ secrets.OTTO_NOTARY_KEY_ID }}
+          OTTO_NOTARY_ISSUER: ${{ secrets.OTTO_NOTARY_ISSUER }}
         run: |
-          OTTO_SIGN_KEYCHAIN="$RUNNER_TEMP/otto-release.keychain-db" \
+          (umask 077 && echo "$NOTARY_KEY_BASE64" | base64 --decode > "$RUNNER_TEMP/notary.p8")
+          OTTO_SIGN_KEYCHAIN="$RUNNER_TEMP/otto-release.keychain-db" OTTO_NOTARY_KEY="$RUNNER_TEMP/notary.p8" \
             packaging/release-artifacts.sh bundle "$RUNNER_TEMP/app/Otto.app" "$VERSION" "$RUNNER_TEMP/dist"
 
-      # Also on failure; and before the update key is used, so the two private
-      # keys are never on this runner together.
-      - name: Remove the keychain
+      # Also on failure; and before the update key is used, so it is never on
+      # this runner together with the certificate or the notary key.
+      - name: Remove the keychain and the notary key
         if: always()
         run: |
-          rm -f "$RUNNER_TEMP/release.p12"
+          rm -f "$RUNNER_TEMP/release.p12" "$RUNNER_TEMP/notary.p8"
           security delete-keychain "$RUNNER_TEMP/otto-release.keychain-db" || true
 
       - name: Sign the update, latest.json

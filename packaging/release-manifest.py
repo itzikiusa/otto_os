@@ -6,7 +6,7 @@
   latest-json <v> <sig> <url>    the updater manifest (tauri-plugin-updater format)
   check-release-config           refuse the TEST signing identity / TEST update key
   identity                       the release signing identity name
-  requirement <identifier>       codesign -R requirement: identifier + accepted leaf certs
+  requirement <identifier>       codesign -R requirement: identifier + accepted teams / leaf certs
 """
 import base64
 from datetime import datetime, timezone
@@ -75,7 +75,13 @@ def check_release_config():
     if identity().get("test") is not False:
         fail(f"{DESKTOP}/release-identity.json is the TEST identity (\"test\": true): "
              "put the release certificate there first (docs/RELEASE.md)")
-    if any(leaf.lower() in TEST_LEAVES for leaf in identity()["acceptedLeaves"]):
+    leaves, teams = identity().get("acceptedLeaves", []), identity().get("acceptedTeams", [])
+    # The installed app drops any other form (updater/mod.rs `signers`).
+    if not leaves + teams or not all(re.fullmatch(r"[0-9a-fA-F]{40}", h) for h in leaves) \
+            or not all(re.fullmatch(r"[0-9A-Z]{10}", t) for t in teams):
+        fail(f"{DESKTOP}/release-identity.json needs acceptedTeams (10-character Team IDs) "
+             "and/or acceptedLeaves (40 hex digits)")
+    if any(leaf.lower() in TEST_LEAVES for leaf in leaves):
         fail(f"{DESKTOP}/release-identity.json accepts the TEST certificate: "
              "list only the release certificate's leaf (docs/RELEASE.md)")
     pubkey = json.loads((DESKTOP / "tauri.conf.json").read_text())["plugins"]["updater"]["pubkey"]
@@ -91,8 +97,13 @@ def identity():
 
 
 def requirement(identifier):
-    leaves = " or ".join(f'certificate leaf = H"{h}"' for h in identity()["acceptedLeaves"])
-    return f'identifier "{identifier}" and ({leaves})'
+    """The same rule the installed app builds (updater/mod.rs `signers`)."""
+    ident = identity()
+    signers = [f'certificate leaf = H"{h}"' for h in ident.get("acceptedLeaves", [])]
+    signers += ["(anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists "
+                "and certificate leaf[field.1.2.840.113635.100.6.1.13] exists "
+                f'and certificate leaf[subject.OU] = "{team}")' for team in ident.get("acceptedTeams", [])]
+    return f'identifier "{identifier}" and ({" or ".join(signers)})'
 
 
 def main(argv):
