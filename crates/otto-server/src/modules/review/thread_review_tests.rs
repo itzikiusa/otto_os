@@ -93,7 +93,7 @@ async fn rig_with(extra: &[&str]) -> Rig {
         &["add", "."][..],
         &["commit", "-qm", "add"][..],
     ] {
-        let out = std::process::Command::new("git")
+        let out = otto_git::hardened_std_command()
             .current_dir(&checkout)
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")

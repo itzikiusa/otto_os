@@ -69,8 +69,7 @@ threads-required = 'num-test-threads'
 # and otto-automation is in `processes` too.
 [[profile.default.overrides]]
 filter = '''
-(package(otto-automation) & test(/^goal_loop::goal_loop_tests::until_flag_wakes_on_ring_and_backstops_a_silent_store$/))
-| (package(otto-automation) & test(/^goal_loop_commands::tests::cancellation_kills_verification_descendants$/))
+(package(otto-automation) & test(/^verify_command::tests::cancellation_kills_verification_descendants$/))
 | (package(otto-state) & test(/maintenance::tests::offline_compaction_swaps_verified_copy_and_keeps_old_until_confirmed$/))
 | (package(otto-keychain) & test(/control::tests::locked_keychain_times_out_instead_of_blocking$/))
 | (package(otto-server) & binary(snips) & test(/^raw_15mb_upload_and_annotated_save_within_budget$/))

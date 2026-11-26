@@ -1108,7 +1108,7 @@ fn the_gates_command_fails_without_a_fresh_report_and_keeps_failed_gate_rows() {
     std::fs::create_dir_all(&repo).unwrap();
     std::fs::create_dir_all(&ctx).unwrap();
     let git = |args: &[&str]| {
-        let ok = std::process::Command::new("git")
+        let ok = otto_git::hardened_std_command()
             .args([
                 "-c",
                 "user.name=t",
