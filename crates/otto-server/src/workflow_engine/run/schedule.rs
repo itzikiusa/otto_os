@@ -146,6 +146,16 @@ pub(in crate::workflow_engine) async fn drive(cx: RunCx<'_>, rs: &mut RunState, 
                 }
             }
         }
+        // Ready nodes held back by an earlier one in run order say so (§3.2).
+        if let Some((b, ready)) = sched.run_order_wait() {
+            let note = format!(
+                "waiting for {} to start (run order)",
+                node_display_name(&graph.nodes[b])
+            );
+            for i in ready {
+                board.with(i, |s| s.logs = vec![note.clone()]);
+            }
+        }
         let Some(done) = active.next().await else {
             break;
         };
@@ -170,6 +180,13 @@ pub(in crate::workflow_engine) async fn drive(cx: RunCx<'_>, rs: &mut RunState, 
     }
     drop(active);
     rs.states = board.into_states();
+    if rs.canceled {
+        let running = rs
+            .states
+            .iter_mut()
+            .filter(|s| s.status == NodeStatus::Running);
+        running.for_each(otto_workflows::step_util::mark_canceled);
+    }
 }
 
 /// The step file base name of `node` numbered `step_no`.
@@ -478,8 +495,11 @@ async fn run_attempts(
                 Some(sid) = sess_rx.recv() => {
                     // A step waiting on a person parks (§2.4); its answer unparks it.
                     match &sid {
-                        AgentAssociation::Step(StepNote::NeedsYou(_)) => {
-                            park.get_or_insert_with(|| env.budget.park());
+                        AgentAssociation::Step(StepNote::NeedsYou(a)) => {
+                            if park.is_none() {
+                                park = Some(env.budget.park());
+                                super::chat::needs_you(cx, node, a).await;
+                            }
                         }
                         AgentAssociation::Step(StepNote::Resumed { .. }) => {
                             if let Some(p) = park.take() {
@@ -586,6 +606,12 @@ async fn run_attempts(
                     sleep_ms,
                     &reason,
                 ));
+                let note = format!("attempt {} of {} — {reason}", attempt + 1, max_eff + 1);
+                otto_workflows::step_util::note_mark(
+                    st,
+                    otto_core::workflows::StepPhase::Queued,
+                    &note,
+                );
                 board.publish(cx, idx, st).await;
                 // The failed attempt's agent must not stay alive next to the
                 // retry's fresh one (5 live PTYs per step in a 529 storm; and
@@ -722,6 +748,10 @@ async fn settle(
             };
             st.error = failure.clone();
             st.output = Some(out.clone());
+            let built = otto_workflows::step_util::output_deliverables(&out);
+            if !built.is_empty() {
+                st.deliverables = built;
+            }
             // R5.5: the LIVE vector (which already starts with `start_line`
             // and carries every streamed phase line) is the base — the
             // returned lines are appended, never substituted for it.
@@ -782,7 +812,9 @@ async fn settle(
             // the thread carries the brief, the file the full detail.
             // review_run streams its own block but its file rides too.
             if progress.enabled() && (is_reportable(&node.kind) || node.kind == "review_run") {
-                progress.post_step_file(files, step_file_base);
+                let caption =
+                    otto_workflows::chat_status::step_caption(node_display_name(node), st, None);
+                progress.post_step_file_as(files, step_file_base, caption);
             }
             let outcome = Outcome {
                 errored: failure.is_some(),
@@ -829,7 +861,9 @@ async fn settle(
             }
             // The failure trace file rides along too (what broke, logs).
             if progress.enabled() && (is_reportable(&node.kind) || node.kind == "review_run") {
-                progress.post_step_file(files, step_file_base);
+                let caption =
+                    otto_workflows::chat_status::step_caption(node_display_name(node), st, None);
+                progress.post_step_file_as(files, step_file_base, caption);
             }
             let outcome = Outcome {
                 errored: true,

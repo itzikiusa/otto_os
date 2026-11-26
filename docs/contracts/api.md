@@ -6738,6 +6738,32 @@ Transcript session GETs reuse bounded immutable folds (32 retained entries / 128
   is kept in `human_log`. The thread is closed when the step settles (unless
   a later step continues it) and kept until the run's end plus the retention
   period below.
+- **Needs you, limits, deliverables.** A step entering `needs_you` (an
+  approval, a question, or a usage limit with a known reset — the step parks
+  until `attention.resets_at` and then continues on the same thread; with no
+  known reset it fails with class `usage_limit`) posts one notification
+  ("Workflow “…” needs you") per episode and, in the live chat style, one new
+  post in the run's thread. `deliverables` come from the thread digest's
+  outward actions (agent steps) or a built-in node's `output.deliverables`.
+  A retry appends a `queued` phase mark noted "attempt 2 of 3 — <reason>"; a
+  step that waits on an earlier one in run order logs "waiting for <step> to
+  start (run order)"; a step running when the run is canceled settles
+  `skipped` with `error_class: "canceled"` and a phase mark noted
+  `canceled`. The newest ≤ 50 timeline items of a step's thread are kept in
+  the run's context dir as `.threads/<node_id>-<attempt>.json`.
+  `GET /workflow-runs/{id}` fills `thread.available` (`false` once
+  retention deleted the thread). After a restart the done-file oracle checks
+  every interrupted PTY agent step, not only the first.
+- **Chat style.** A chat-started run reports in the `live` style unless its
+  input or Start node sets `chat_updates: "per_step"` (today's thread). Live:
+  one status message posted when the run starts — or while it is still queued
+  for a run slot — and edited in place (≤ 1 edit / 3 s), its id stored in
+  `chat_status_json` so a restart or retry edits the same message; a run
+  canceled while queued edits it to "canceled while queued"; per-step text
+  lines are dropped, step files are captioned; the final post is
+  `render_final` (what was delivered, in words) with the same attachment as
+  before. The offline e2e daemon (`OTTO_E2E`) keeps `per_step` unless the
+  run sets the key.
 
 ### Lightweight workflow progress and lazy details
 

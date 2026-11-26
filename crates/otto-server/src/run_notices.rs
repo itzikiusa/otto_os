@@ -288,6 +288,31 @@ async fn on_goal_loop(ctx: &ServerCtx, loop_id: &str, status: &str) {
     .await;
 }
 
+/// A workflow step started waiting on a person (an approval, a question, a
+/// usage limit until its reset): one notice per episode (engine.md §2.4).
+pub async fn on_workflow_needs_you(
+    ctx: &ServerCtx,
+    wf: &otto_core::workflows::Workflow,
+    run_id: &str,
+    step: &str,
+    a: &otto_core::agent_runtime::Attention,
+) {
+    let episode = format!("{run_id}:{step}:{}", a.since.timestamp_millis());
+    post(
+        ctx,
+        RunNotice {
+            key: streak_key("workflow_needs_you", &episode),
+            severity: NoticeSeverity::Warn,
+            title: format!("Workflow “{}” needs you", wf.name),
+            body: format!("{step}: {}", a.text),
+            route: format!("workflows/{}/runs/{run_id}", wf.id),
+            workspace_id: Some(wf.workspace_id.clone()),
+            user_id: Some(wf.created_by.clone()),
+        },
+    )
+    .await;
+}
+
 /// First `max` chars of a (possibly long, multi-line) error, on one line.
 fn clip(s: &str, max: usize) -> String {
     let one = s.split_whitespace().collect::<Vec<_>>().join(" ");

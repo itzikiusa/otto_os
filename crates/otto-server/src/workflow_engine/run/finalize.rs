@@ -85,7 +85,16 @@ pub(in crate::workflow_engine) async fn finish(
             }
         };
         store_overview(&repo, &workflow, &run_id, rev).await;
-        deliver_run_result(&ctx, &workflow, &states, RunStatus::Error, &input, None).await;
+        deliver_run_result(
+            &ctx,
+            &workflow,
+            &run_id,
+            &states,
+            RunStatus::Error,
+            &input,
+            None,
+        )
+        .await;
         emit_run_updated(
             &ctx,
             &workflow.workspace_id,
@@ -154,6 +163,7 @@ pub(in crate::workflow_engine) async fn finish(
     deliver_run_result(
         &ctx,
         &workflow,
+        &run_id,
         &states,
         final_status,
         &input,

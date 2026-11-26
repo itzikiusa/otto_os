@@ -10,6 +10,7 @@
 
 pub(super) mod admission;
 pub(super) mod board;
+pub(super) mod chat;
 pub(super) mod finalize;
 pub(super) mod identity;
 pub(super) mod refs;

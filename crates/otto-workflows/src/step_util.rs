@@ -7,8 +7,10 @@
 use otto_core::agent_runtime::{
     Attention, SubThreadUse, TranscriptDigest, TurnTokenUsage, WaitReason,
 };
+use otto_core::text::clip_bytes as truncate;
 use otto_core::workflows::{
-    ChildThread, HumanEntry, NodeRunState, PhaseMark, StepPhase, StepThread, WorkflowNode,
+    ChildThread, HumanEntry, NodeRunState, NodeStatus, PhaseMark, RunStatus, StepPhase, StepThread,
+    Workflow, WorkflowNode,
 };
 use otto_core::Id;
 use serde_json::Value;
@@ -396,6 +398,10 @@ pub fn record(st: &mut NodeRunState, n: StepNote) -> bool {
                 t.digest = o.digest.clone();
             }
             st.error_class = o.error_class.clone();
+            // What the thread put outside Otto, from its outward tool calls (§6.3).
+            if let Some(d) = &o.digest {
+                st.deliverables = crate::deliverables::from_actions(&d.actions);
+            }
             st.children
                 .extend(o.sub_threads.iter().map(|s| ChildThread {
                     id: s.id.clone(),
@@ -417,6 +423,34 @@ pub fn record(st: &mut NodeRunState, n: StepNote) -> bool {
     }
 }
 
+/// The deliverables a built-in node returned in its output (§6.3).
+pub fn output_deliverables(out: &Value) -> Vec<otto_core::workflows::Deliverable> {
+    out.get("deliverables")
+        .and_then(|d| serde_json::from_value(d.clone()).ok())
+        .unwrap_or_default()
+}
+
+/// Enter `phase` with a note on its mark ("attempt 2 of 3 — …", "canceled"),
+/// even when the node already is in it.
+pub fn note_mark(st: &mut NodeRunState, phase: StepPhase, note: &str) {
+    st.phase = Some(phase);
+    st.phases.push(PhaseMark {
+        phase,
+        at: chrono::Utc::now(),
+        note: Some(otto_core::text::clip_chars(note, 200)),
+    });
+    if st.phases.len() > 40 {
+        st.phases.remove(1);
+    }
+}
+
+/// A running step the run's cancel stopped: it settles `skipped` at
+/// finalize, and this says "Stopped" rather than "Skipped" (§2.1).
+pub fn mark_canceled(st: &mut NodeRunState) {
+    st.error_class = Some("canceled".into());
+    note_mark(st, st.phase.unwrap_or(StepPhase::Working), "canceled");
+}
+
 /// Enter `phase` (a new mark on the timeline, capped at 40: the first and
 /// the last 39); `false` when the node already is in it.
 fn mark(st: &mut NodeRunState, phase: StepPhase) -> bool {
@@ -433,4 +467,312 @@ fn mark(st: &mut NodeRunState, phase: StepPhase) -> bool {
         st.phases.remove(1);
     }
     true
+}
+
+/// Build a `(brief, full_markdown)` summary of a finished run. `brief` is the
+/// short chat message; `full_markdown` is the attached `summary.md`.
+pub fn build_run_summary(
+    workflow: &Workflow,
+    states: &[NodeRunState],
+    status: RunStatus,
+) -> (String, String) {
+    let emoji = match status {
+        RunStatus::Success => "✅",
+        RunStatus::Error => "❌",
+        RunStatus::Canceled => "⏹",
+        _ => "•",
+    };
+    let total = states.len();
+    let ok = states
+        .iter()
+        .filter(|s| s.status == NodeStatus::Success)
+        .count();
+    let failed = states
+        .iter()
+        .filter(|s| s.status == NodeStatus::Error)
+        .count();
+    let skipped = states
+        .iter()
+        .filter(|s| s.status == NodeStatus::Skipped)
+        .count();
+
+    // Pull a review score out of any node output that carries one.
+    let score = states.iter().find_map(|s| {
+        s.output
+            .as_ref()
+            .and_then(|o| o.get("score"))
+            .and_then(Value::as_i64)
+    });
+
+    let counts = format!("{ok}/{total} steps ok · {failed} failed · {skipped} skipped");
+    let score_line = score
+        .map(|sc| format!("\n*Review score:* {sc}/100"))
+        .unwrap_or_default();
+
+    let brief = format!(
+        "{emoji} *{}* — {}\n{counts}{score_line}\n_Full summary attached (summary.md)._",
+        workflow.name,
+        status.as_str(),
+    );
+
+    // Full markdown: per-step detail.
+    let mut md = String::new();
+    md.push_str(&format!("# Workflow run — {}\n\n", workflow.name));
+    md.push_str(&format!("- **Status:** {} {}\n", emoji, status.as_str()));
+    md.push_str(&format!("- **Steps:** {counts}\n"));
+    if let Some(sc) = score {
+        md.push_str(&format!("- **Review score:** {sc}/100\n"));
+    }
+    md.push_str("\n## Steps\n\n");
+    for (i, s) in states.iter().enumerate() {
+        let kind = workflow
+            .graph
+            .nodes
+            .iter()
+            .find(|n| n.id == s.node_id)
+            .map(|n| {
+                if n.name.is_empty() {
+                    n.kind.clone()
+                } else {
+                    format!("{} ({})", n.name, n.kind)
+                }
+            })
+            .unwrap_or_else(|| s.node_id.clone());
+        let dur = s
+            .duration_ms
+            .map(|d| format!(" · {d}ms"))
+            .unwrap_or_default();
+        let attempts = match s.attempts {
+            Some(a) if a > 1 => format!(" · {a} attempts"),
+            _ => String::new(),
+        };
+        md.push_str(&format!(
+            "{}. **{kind}** — {}{dur}{attempts}\n",
+            i + 1,
+            s.status.as_str()
+        ));
+        if let Some(err) = &s.error {
+            md.push_str(&format!("   - error: {}\n", truncate(err, 300)));
+        }
+        // A short peek at the work product (agent reply or compact JSON).
+        if let Some(out) = &s.output {
+            let peek = out
+                .get("reply")
+                .and_then(Value::as_str)
+                .map(|r| r.to_string())
+                .unwrap_or_else(|| out.to_string());
+            let peek = truncate(peek.trim(), 240);
+            if !peek.is_empty() && peek != "null" {
+                md.push_str(&format!("   - {}\n", peek.replace('\n', " ")));
+            }
+        }
+    }
+    (brief, md)
+}
+
+/// The run note for a repo whose in-worktree hooks Otto's own git skipped.
+pub fn skipped_hooks_note(repo: &str) -> String {
+    format!(
+        "⚠ git_pr: {repo}'s hooks live inside its work tree (core.hooksPath, e.g. husky) \
+         and did not run for Otto's own commit / push — an agent there can edit them, so \
+         unattended runs skip them; CI or your next commit still runs them"
+    )
+}
+
+/// Gather the set of PR targets a `git_pr` node should open — one per changed
+/// repo. Sources: explicit `params.repos[]`, a loop's published `input.repos[]`,
+/// the input itself as a single reference (a review/loop output carrying
+/// `repo_id`/`worktree`), and fan-in (multiple predecessor outputs keyed by node
+/// id, each a review with its own `repo_id`). Each entry is `{repo_id?,
+/// worktree?, worktree_path?, base?}`. Empty ⇒ the caller uses one implicit
+/// target from the run context. Deduplication by resolved repo_id is the
+/// caller's job.
+pub fn collect_pr_targets(p: &Value, input: &Value) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::new();
+    let has_ref = |v: &Value| {
+        ["repo_id", "worktree", "worktree_path"].iter().any(|k| {
+            v.get(*k)
+                .and_then(Value::as_str)
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false)
+        })
+    };
+    if let Some(arr) = p.get("repos").and_then(Value::as_array) {
+        out.extend(arr.iter().filter(|v| has_ref(v)).cloned());
+    }
+    if let Some(arr) = input.get("repos").and_then(Value::as_array) {
+        out.extend(arr.iter().filter(|v| has_ref(v)).cloned());
+    }
+    if has_ref(input) {
+        out.push(input.clone());
+    }
+    if let Value::Object(m) = input {
+        for v in m.values() {
+            if v.is_object() && has_ref(v) {
+                out.push(v.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Parse a `checks` value into (name, command) pairs. Accepts an array of plain
+/// command strings, or of objects `{name?, cmd}`. Drives the reviewer's
+/// user-defined verification commands (e.g. `go test -tags=component ./...`).
+pub fn parse_checks(v: Option<&Value>) -> Vec<(String, String)> {
+    let Some(arr) = v.and_then(Value::as_array) else {
+        return vec![];
+    };
+    let mut out = Vec::new();
+    for (i, item) in arr.iter().enumerate() {
+        match item {
+            Value::String(s) if !s.trim().is_empty() => {
+                out.push((format!("check {}", i + 1), s.trim().to_string()));
+            }
+            Value::Object(_) => {
+                if let Some(cmd) = item
+                    .get("cmd")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    let name = item
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or(cmd)
+                        .to_string();
+                    out.push((name, cmd.to_string()));
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Build a dedicated "Required checks" review agent: it RUNS each user-defined
+/// command in the reviewed worktree and reports any that fail (non-zero exit) as
+/// a blocking (`bug`) finding. Delegated to the review agent (which has the repo
+/// and the implementer's context) rather than executed by the engine — so it
+/// fans out through the same multi-agent review pipeline and its failures drop
+/// the score, keeping a fix→review loop iterating until the checks pass.
+pub fn checks_review_agent(
+    name: &str,
+    default_provider: &str,
+    checks: &[(String, String)],
+) -> otto_core::domain::ReviewAgentCfg {
+    let list = checks
+        .iter()
+        .map(|(n, c)| {
+            if n == c {
+                format!("- {c}")
+            } else {
+                format!("- {n}: {c}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let prompt = format!(
+        "You are a CI gate for this change. RUN EACH command below in the repository root \
+         (your current working directory) and capture its exit status and output. For any \
+         command that FAILS (non-zero exit), output one finding object \
+         {{\"path\":\".\",\"line\":0,\"severity\":\"bug\",\"body\":\"check failed: <command>\\n<the last ~40 lines of its output>\"}}. \
+         Do NOT output anything for a command that passes. Output ONLY a JSON array (no prose, \
+         no markdown fence); output [] when every command passes.\n\nCommands:\n{list}"
+    );
+    otto_core::domain::ReviewAgentCfg {
+        name: name.to_string(),
+        provider: default_provider.to_string(),
+        providers: vec![default_provider.to_string()],
+        model: String::new(),
+        prompt,
+        skill: String::new(),
+    }
+}
+
+/// Locate the interrupted step's handoff file: `step{N}-{slug(name)}.md` in
+/// `<data_dir>/workflow-context/<run_id>/`, where N (the execution-order step
+/// number) is unknown after a restart — so match on the slug, require the
+/// mtime to postdate the step's recorded start (a leftover from an earlier
+/// attempt is cleared before each submit, but stay defensive), and require
+/// non-trivial content. Returns the file's content.
+#[allow(clippy::disallowed_methods)] // sync helper: the engine runs it via offload::blocking
+pub fn find_step_handoff(
+    dir: &std::path::Path,
+    slug: &str,
+    started_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> Option<String> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        // step{N}-{slug}.md exactly (no loop-iteration/inner suffixes — those
+        // belong to inner steps the loop node itself re-drives).
+        let Some(rest) = name.strip_prefix("step") else {
+            continue;
+        };
+        let Some(tail) = rest
+            .split_once('-')
+            .and_then(|(n, tail)| n.chars().all(|c| c.is_ascii_digit()).then_some(tail))
+        else {
+            continue;
+        };
+        if tail != format!("{slug}.md") {
+            continue;
+        }
+        let meta = entry.metadata().ok()?;
+        if let (Some(start), Ok(modified)) = (started_at, meta.modified()) {
+            let modified: chrono::DateTime<chrono::Utc> = modified.into();
+            if modified < start {
+                continue;
+            }
+        }
+        let content = std::fs::read_to_string(entry.path()).ok()?;
+        if content.trim().len() > 40 {
+            return Some(content);
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use otto_core::workflows::DeliverableState;
+
+    fn st() -> NodeRunState {
+        serde_json::from_value(serde_json::json!({"node_id": "n1", "status": "running"})).unwrap()
+    }
+
+    #[test]
+    fn a_retry_and_a_cancel_leave_a_noted_mark() {
+        let mut s = st();
+        note_mark(&mut s, StepPhase::Queued, "attempt 2 of 3 — overloaded");
+        mark_canceled(&mut s);
+        let notes: Vec<_> = s
+            .phases
+            .iter()
+            .map(|m| (m.phase, m.note.as_deref()))
+            .collect();
+        assert_eq!(
+            notes,
+            [
+                (StepPhase::Queued, Some("attempt 2 of 3 — overloaded")),
+                (StepPhase::Queued, Some("canceled")),
+            ]
+        );
+        assert_eq!(s.error_class.as_deref(), Some("canceled"));
+    }
+
+    #[test]
+    fn a_built_in_node_returns_its_deliverables_in_its_output() {
+        let out = serde_json::json!({"deliverables": [{"label": "PR comments", "state": "done", "detail": "2 posted"}]});
+        let d = output_deliverables(&out);
+        assert_eq!(
+            (d[0].label.as_str(), d[0].state),
+            ("PR comments", DeliverableState::Done)
+        );
+        assert!(output_deliverables(&serde_json::json!({"reply": "x"})).is_empty());
+    }
 }

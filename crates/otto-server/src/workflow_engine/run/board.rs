@@ -101,6 +101,15 @@ impl RunBoard {
         if let Some(o) = overview.as_mut() {
             o.rev = rev;
         }
+        // The live chat card follows every change (the pump coalesces, §9.4).
+        if let Some(o) = overview.as_ref().filter(|_| cx.progress.live) {
+            let view = super::chat::view(cx.workflow);
+            let graph = &cx.workflow.graph;
+            cx.progress
+                .status(otto_workflows::chat_status::render_status(
+                    &view, o, &states, graph,
+                ));
+        }
         let run = (&cx.workflow.workspace_id, cx.run_id, "running", rev);
         emit_run_updated_with(
             cx.ctx,
