@@ -7,7 +7,8 @@ use super::*;
 use chrono::TimeZone;
 use otto_core::agent_runtime::{Attention, AttentionKind, TranscriptDigest};
 use otto_core::workflows::{
-    ChildThread, HoldKind, HumanEntry, PhaseMark, RunHold, RunState, StepPhase, StepThread,
+    ChildThread, HoldKind, HumanEntry, PhaseMark, RunHold, RunLimits, RunState, StepPhase,
+    StepThread,
 };
 use serde_json::json;
 
@@ -683,4 +684,371 @@ fn progress_projection_carries_the_bounded_run_view_fields() {
     assert!(v["children"][0].get("usage").is_none());
     assert_eq!(v["children"][0]["label"], "Security · Claude");
     assert_ne!(v["detail_version"], before["detail_version"]);
+}
+
+fn hold(kind: HoldKind) -> RunHold {
+    RunHold {
+        kind,
+        reason: "Paused by A".into(),
+        since: at(9),
+        by: Some("u".into()),
+        node_ids: vec![],
+        iteration: None,
+    }
+}
+
+/// proves (DR-105): `HOLD_SQL` and `RunHold::is_effective` are the same rule
+/// over every kind × status pair, and the run reader exposes only an
+/// effective hold — a stale one the previous build left on a row it retried
+/// reads as none, and that row is prunable.
+#[tokio::test]
+async fn the_effective_hold_rule_is_one_rule_in_rust_and_sql() {
+    let (pool, repo, wf) = fixture().await;
+    let mut cases = Vec::new();
+    for kind in [HoldKind::Paused, HoldKind::Blocked, HoldKind::Exhausted] {
+        for status in [
+            RunStatus::Pending,
+            RunStatus::Running,
+            RunStatus::Success,
+            RunStatus::Error,
+            RunStatus::Canceled,
+        ] {
+            let id = run_of(&repo, &wf).await;
+            sqlx::query("UPDATE workflow_runs SET status = ?, hold_json = ? WHERE id = ?")
+                .bind(status.as_str())
+                .bind(serde_json::to_string(&hold(kind)).unwrap())
+                .bind(&id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            cases.push((id, kind, status));
+        }
+    }
+    let plain = run_of(&repo, &wf).await;
+    let sql = format!("SELECT id FROM workflow_runs WHERE {HOLD_SQL}");
+    let held: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert!(!held.contains(&plain));
+    for (id, kind, status) in cases {
+        let want = hold(kind).is_effective(status);
+        assert_eq!(held.contains(&id), want, "{kind:?} × {status:?}");
+        assert_eq!(
+            repo.get_run(&id).await.unwrap().hold.is_some(),
+            want,
+            "{kind:?} × {status:?}"
+        );
+    }
+    let not_held = format!("SELECT COUNT(*) FROM workflow_runs WHERE NOT {HOLD_SQL}");
+    let n: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(not_held))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        n,
+        16 - 3,
+        "NOT HOLD_SQL is never NULL: a row without a hold counts"
+    );
+
+    // A stale hold on an old succeeded run does not stop retention.
+    let stale = run_of(&repo, &wf).await;
+    sqlx::query(
+        "UPDATE workflow_runs SET status = 'success', hold_json = ?, started_at = ? WHERE id = ?",
+    )
+    .bind(serde_json::to_string(&hold(HoldKind::Blocked)).unwrap())
+    .bind(fmt(Utc::now() - chrono::Duration::days(400)))
+    .bind(&stale)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let pruned = repo.prune_runs(1, 30).await.unwrap();
+    assert!(pruned.run_ids.contains(&stale));
+}
+
+/// proves (DR-105): the new build's status writers drop a hold in the same
+/// statement, so a retried or re-run row never reads as held again.
+#[tokio::test]
+async fn status_writers_clear_the_hold() {
+    let (pool, repo, wf) = fixture().await;
+    let id = run_of(&repo, &wf).await;
+    let hold_json = || async {
+        let h: Option<String> =
+            sqlx::query_scalar("SELECT hold_json FROM workflow_runs WHERE id = ?")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        h
+    };
+    let set = |status: &'static str| {
+        let (pool, id) = (pool.clone(), id.clone());
+        async move {
+            sqlx::query("UPDATE workflow_runs SET status = ?, hold_json = '{\"kind\":\"paused\"}' WHERE id = ?")
+                .bind(status)
+                .bind(&id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    };
+    set("canceled").await;
+    repo.prepare_retry(&id, &[], false, &Default::default())
+        .await
+        .unwrap();
+    assert_eq!(hold_json().await, None, "prepare_retry");
+    set("error").await;
+    repo.reopen_run(&id).await.unwrap();
+    assert_eq!(hold_json().await, None, "reopen_run");
+    set("running").await;
+    repo.update_run(&id, RunStatus::Running, &[], None, false)
+        .await
+        .unwrap();
+    assert_eq!(hold_json().await, None, "update_run");
+    set("running").await;
+    repo.update_run_if(
+        &id,
+        &[RunStatus::Running],
+        RunStatus::Success,
+        &[],
+        None,
+        true,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(hold_json().await, None, "update_run_if");
+    set("running").await;
+    repo.request_cancel(&id).await.unwrap().unwrap();
+    assert_eq!(hold_json().await, None, "cancel_in_transaction");
+    // A stale hold on a re-run row must not become effective when the
+    // startup reconciler fails or re-queues it.
+    set("running").await;
+    repo.fail_interrupted_runs("interrupted").await.unwrap();
+    assert_eq!(hold_json().await, None, "fail_interrupted_runs");
+    set("running").await;
+    repo.prepare_resume(&id, &[], "{}", true).await.unwrap();
+    assert_eq!(hold_json().await, None, "prepare_resume");
+}
+
+/// proves (DR-106): Pause writes the hold durably before the cancel is
+/// announced; a settled run is not paused; the driver's `write_hold` lands
+/// only while the hold stands, so a Cancel that cleared it wins; a blocked
+/// hold from a running run settles it as `error`.
+#[tokio::test]
+async fn pause_is_durable_and_cancel_wins_over_a_late_hold_write() {
+    let (_pool, repo, wf) = fixture().await;
+    let id = run_of(&repo, &wf).await;
+    repo.update_run(&id, RunStatus::Running, &[parked("a")], None, false)
+        .await
+        .unwrap();
+    let mut cancels = subscribe_cancels();
+    repo.request_pause(&id, &hold(HoldKind::Paused))
+        .await
+        .unwrap()
+        .unwrap();
+    let run = repo.get_run(&id).await.unwrap();
+    assert_eq!(run.status, RunStatus::Canceled);
+    assert_eq!(run.error.as_deref(), Some("Paused by A"));
+    assert_eq!(run.hold.as_ref().map(|h| h.kind), Some(HoldKind::Paused));
+    assert_eq!(cancels.try_recv().unwrap(), id, "announced after the write");
+    assert!(repo
+        .request_pause(&id, &hold(HoldKind::Paused))
+        .await
+        .unwrap()
+        .is_none());
+
+    // The driver finalizes: node ids and the pending nodes, under CAS.
+    let finalized = RunHold {
+        node_ids: vec!["a".into()],
+        ..hold(HoldKind::Paused)
+    };
+    let pending = NodeRunState {
+        node_id: "a".into(),
+        ..Default::default()
+    };
+    repo.write_hold(&id, &finalized, std::slice::from_ref(&pending))
+        .await
+        .unwrap()
+        .unwrap();
+    let run = repo.get_run(&id).await.unwrap();
+    assert_eq!(run.hold.unwrap().node_ids, ["a"]);
+    assert_eq!(run.nodes[0].status, NodeStatus::Pending);
+
+    // Cancel on the held run clears the hold; a late hold write is refused.
+    assert!(repo.clear_hold(&id).await.unwrap());
+    assert!(!repo.clear_hold(&id).await.unwrap());
+    assert!(repo
+        .write_hold(&id, &finalized, &[pending])
+        .await
+        .unwrap()
+        .is_none());
+    let run = repo.get_run(&id).await.unwrap();
+    assert_eq!((run.status, run.hold), (RunStatus::Canceled, None));
+
+    let looping = run_of(&repo, &wf).await;
+    repo.update_run(&looping, RunStatus::Running, &[], None, false)
+        .await
+        .unwrap();
+    repo.write_hold(&looping, &hold(HoldKind::Blocked), &[])
+        .await
+        .unwrap()
+        .unwrap();
+    let run = repo.get_run(&looping).await.unwrap();
+    assert_eq!(run.status, RunStatus::Error);
+    assert_eq!(run.hold.map(|h| h.kind), Some(HoldKind::Blocked));
+    assert!(run.finished_at.is_some());
+}
+
+/// proves (DR-101): an effectively held run stays in the active list and is
+/// what a chat `resume` / `note` finds, while the orphan sweep's list stays
+/// strictly in flight; the held branch uses the 0233 partial index.
+#[tokio::test]
+async fn held_runs_stay_in_the_active_and_chat_lists() {
+    let (pool, repo, wf) = fixture().await;
+    let id = repo
+        .create_run(
+            &wf.id,
+            &wf.workspace_id,
+            &json!({"channel": "slack", "chat": "C1", "thread": "1.2"}),
+            None,
+        )
+        .await
+        .unwrap()
+        .id;
+    repo.update_run(&id, RunStatus::Running, &[], None, false)
+        .await
+        .unwrap();
+    repo.request_pause(&id, &hold(HoldKind::Paused))
+        .await
+        .unwrap()
+        .unwrap();
+    let settled = run_of(&repo, &wf).await;
+    repo.update_run(&settled, RunStatus::Success, &[], None, true)
+        .await
+        .unwrap();
+
+    let active = repo.list_active_runs(&wf.workspace_id).await.unwrap();
+    assert_eq!(active.len(), 1);
+    assert_eq!(
+        (active[0].run_id.as_str(), active[0].status),
+        (id.as_str(), RunStatus::Canceled)
+    );
+    assert!(!repo
+        .list_active_run_ids_global()
+        .await
+        .unwrap()
+        .contains(&id));
+    let found = repo
+        .find_active_run_for_chat(&wf.workspace_id, "slack", "C1", Some("1.2"))
+        .await
+        .unwrap();
+    assert_eq!(found, Some(id.clone()));
+    repo.clear_hold(&id).await.unwrap();
+    assert!(repo
+        .list_active_runs(&wf.workspace_id)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        repo.find_active_run_for_chat(&wf.workspace_id, "slack", "C1", Some("1.2"))
+            .await
+            .unwrap(),
+        None
+    );
+
+    let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "EXPLAIN QUERY PLAN SELECT id FROM workflow_runs INDEXED BY idx_workflow_runs_ws_attention
+         WHERE workspace_id = ? AND (status = 'running' OR hold_json IS NOT NULL) AND {HOLD_SQL}"
+    )))
+    .bind(&wf.workspace_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(
+        plan.iter()
+            .any(|p| p.3.contains("idx_workflow_runs_ws_attention")),
+        "{plan:?}"
+    );
+}
+
+/// proves (DR-110): a save based on an older version is refused by the same
+/// statement that would write it, so two saves from one base never both land.
+#[tokio::test]
+async fn publish_checks_the_expected_version_atomically() {
+    let (_pool, repo, wf) = fixture().await;
+    let save = |text: &'static str| {
+        let (repo, id) = (repo.clone(), wf.id.clone());
+        async move {
+            repo.publish(
+                &id,
+                None,
+                None,
+                Some(text),
+                None,
+                None,
+                "edited",
+                None,
+                None,
+                Some(1),
+            )
+            .await
+        }
+    };
+    let (a, b) = tokio::join!(save("one"), save("two"));
+    let (ok, err): (Vec<_>, Vec<_>) = [a, b].into_iter().partition(Result::is_ok);
+    assert_eq!((ok.len(), err.len()), (1, 1));
+    assert!(matches!(err[0], Err(Error::Conflict(_))), "{:?}", err[0]);
+    assert_eq!(repo.get(&wf.id).await.unwrap().version, 2);
+    let missing = repo
+        .publish(
+            &"nope".into(),
+            None,
+            None,
+            Some("x"),
+            None,
+            None,
+            "e",
+            None,
+            None,
+            Some(1),
+        )
+        .await;
+    assert!(matches!(missing, Err(Error::NotFound(_))));
+}
+
+/// proves: the goal-side writers and lookups read back (origin, limits, lane,
+/// the goal a source already started, a workflow's newest run).
+#[tokio::test]
+async fn goal_writers_and_lookups_round_trip() {
+    let (_pool, repo, wf) = fixture().await;
+    repo.set_origin(&wf.id, Some("goal"), Some("review:r1"))
+        .await
+        .unwrap();
+    let found = repo
+        .find_goal_by_origin_ref(&wf.workspace_id, "review:r1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (found.id, found.origin.as_deref()),
+        (wf.id.clone(), Some("goal"))
+    );
+    assert!(repo
+        .find_goal_by_origin_ref(&"other".into(), "review:r1")
+        .await
+        .unwrap()
+        .is_none());
+    assert!(repo.latest_run_of(&wf.id).await.unwrap().is_none());
+    let first = run_of(&repo, &wf).await;
+    let limits: RunLimits =
+        serde_json::from_value(json!({"loops": {"loop": {"max_iterations": 9}}})).unwrap();
+    repo.set_run_limits(&first, &limits).await.unwrap();
+    repo.set_run_lane(&first, Some("long")).await.unwrap();
+    assert_eq!(
+        repo.run_lane(&first).await.unwrap().as_deref(),
+        Some("long")
+    );
+    let latest = repo.latest_run_of(&wf.id).await.unwrap().unwrap();
+    assert_eq!((latest.id.clone(), latest.limits), (first, Some(limits)));
 }

@@ -101,7 +101,8 @@ pub async fn search_runs(pool: &DbPool, s: &RunSearch) -> Result<RunListPage> {
         sql.push_str(
             " AND (status = 'running' OR hold_json IS NOT NULL)
               AND ((status = 'running' AND (attention > 0 OR waiting_approval = 1))
-                   OR json_extract(hold_json, '$.kind') IN ('blocked', 'exhausted'))",
+                   OR (status = 'error'
+                       AND json_extract(hold_json, '$.kind') IN ('blocked', 'exhausted')))",
         );
     }
     sql.push_str(

@@ -2967,7 +2967,7 @@ different step or settles the current one.
 `RunStatus` / `NodeStatus` and the `workflow_runs.status` CHECK are unchanged, every
 new field is omitted when empty, and a node that uses none of them serializes exactly
 as before, so the previous build reads every row. New enums end in a catch-all
-(`unknown`, `other` for attention kinds) so a later value decodes.
+(`unknown`) so a later value decodes.
 
 - `NodeRunState` gains `step_no?` (the stable N of `stepN-…`), `step_file?`
   (`step3-checkout-pr-branch`, no extension), `phase?: StepPhase` (`queued | waiting |
@@ -2975,7 +2975,7 @@ as before, so the previous build reads every row. New enums end in a catch-all
   (`{phase, at, note?}`, ≤ 40), `wait?: WaitReason` (`{code: slots|memory|load|run_slots|run_order,
   text, since, detail?: {live, max?, floor?, ahead?, holders?: string[]}}`), `attention?:
   Attention` (`{kind: approval|question|usage_limit|verify, via?: provider|mcp, text ≤ 300,
-  since, thread_id?, request_id?, resets_at?}`; answered through `POST
+  since, thread_id?, request_id?, resets_at?, criterion_id?}` — `criterion_id` for `verify`; answered through `POST
   /runtime-sessions/{id}/requests/{request_id}`), `error_class?` (runner: `usage_limit ·
   rate_limit · auth · provider · stalled · timeout · spawn · server_restart · canceled`;
   engine: `script · outcome_unknown`; `error` stays the step's own words), `thread?:
@@ -3009,19 +3009,37 @@ as before, so the previous build reads every row. New enums end in a catch-all
   number of running steps on a person).
 - `WorkflowRun` also gains `hold?: RunHold` (`{kind: paused|blocked|exhausted, reason ≤ 300,
   since, by?, node_ids, iteration?}`; a held run is settled — paused = `canceled`,
-  blocked/exhausted = `error` — and is never pruned by run retention), `limits?: RunLimits`
+  blocked/exhausted = `error`). **One effective-hold rule:** a stored hold counts only while
+  its kind matches the status (paused with `canceled`, blocked/exhausted with `error`); any
+  other pair — a hold the previous build left on a row it retried — is never sent and is
+  ignored by every query. The new build's status writers (`write_run`, retry, reopen,
+  cancel) clear `hold_json`. An effectively held run is never pruned, stays in
+  `GET /workspaces/{wid}/workflow-runs/active` (status `canceled`/`error`, with its
+  overview's `hold`) and is the run a chat `resume` / `note` in its thread finds; the
+  orphan sweep still sees only `pending`/`running`. Pausing writes the hold in the same
+  statement that settles the run, before any step unwinds. `limits?: RunLimits`
   (`{loops: {<node id>: {max_iterations?, max_active_s?, unblocked_at?}}}`, written only by
-  Resume) and `steering_queued?: string[]` (notes queued for the next agent step; filled
-  from the run's context dir, not stored). `Workflow` gains `origin?` (`goal` or absent) and
+  Resume), `steering_queued?: string[]` (notes queued for the next agent step; filled
+  from the run's context dir, not stored) and `attachments?: AttachmentRef[]` (`{name, mime,
+  size_bytes?, path? (context-relative `attachments/<name>`), error?, source: start|steer}` —
+  files sent with the starting and steering chat messages; not stored on the row). `Workflow` gains `origin?` (`goal` or absent) and
   `origin_ref?` (`review:<id>` · `insights` · `goal_loop:<id>` · `mcp`), both server-set.
   `WorkflowCheckpoint` gains `active_ms?` (the attempt's time minus its time on a person;
-  omitted at 0).
+  omitted at 0), `thread_id?` and `start_ordinal?` (the inner step's thread, resumed after a
+  restart mid-iteration). A `check` step's output is `CheckOutput {criteria: [{id, text,
+  verify, met, evidence, verified_by}], all_met, met, total, progress_pct, verdict:
+  achieved|continue|blocked, feedback, feedback_md, repeat_signature, repeated_failures,
+  review?: {approved, findings}}`.
+- `PATCH /workflows/{id}` checks `expected_version` in the same statement that saves, so two
+  saves from one base never both land (the second answers **409**).
 - Run retention: goal workflows keep no run by count (the 30-day age rule still keeps recent
   ones) and a goal workflow left with no run is deleted in the same pass.
 - Backed by migrations **0233** (`workflow_runs.overview_json`, `attention INTEGER NOT NULL
   DEFAULT 0`, `hold_json`, `chat_status_json`, partial index
-  `idx_workflow_runs_ws_attention`) and **0234** (`workflows.origin`, `origin_ref`,
-  `workflow_runs.limits_json`).
+  `idx_workflow_runs_ws_attention`), **0234** (`workflows.origin`, `origin_ref`,
+  `workflow_runs.limits_json`, `workflow_runs.lane` — `NULL` normal, `long`; the long lane's
+  cap is env `OTTO_WF_MAX_LONG_RUNS`) and **0235** (index
+  `idx_agent_runtime_sessions_parent` on `agent_runtime_sessions(parent_id)`).
 
 **Node kinds (catalog).** `GET /workflows/node-types` returns each kind's
 `NodeTypeSpec`, now including `output_schema` (declared output shape; drives UI
