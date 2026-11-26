@@ -1023,7 +1023,7 @@ pub async fn get_run(
 }
 
 /// `GET /workspaces/{wid}/workflow-runs/active` — in-flight runs (pending|running)
-/// across the workspace, for the "Running" sidebar list. Refreshed by the UI on
+/// and effectively held ones across the workspace, for the "Running" sidebar list. Refreshed by the UI on
 /// each `workflow_run_updated` WS event.
 pub async fn list_active_runs(
     Path(wid): Path<Id>,
