@@ -12,13 +12,18 @@ use std::time::Duration;
 use chrono::Utc;
 use otto_agent_protocol::claude::ClaudeDriver;
 use otto_agent_protocol::holder::HolderLauncher;
-use otto_agent_protocol::step_runner::{NoStepHost, ThreadStepRunner};
+use otto_agent_protocol::step_runner::{
+    NoStepHost, Place, StepHost, ThreadStepRunner, CONTINUE_AFTER_LIMIT,
+};
 use otto_agent_protocol::{
     AgentRuntime, DriverFactory, LaunchSpec, McpDelivery, McpServerDef, RuntimeConfig, RuntimeHost,
     StructuredDriver,
 };
 use otto_agent_run::step::{StepEvent, StepRunner, StepTurn};
-use otto_core::agent_runtime::{AttentionKind, RuntimeEvent, RuntimeProvider, RuntimeSession};
+use otto_core::agent_runtime::{
+    Attention, AttentionKind, AttentionVia, RuntimeEvent, RuntimeProvider, RuntimeSession,
+    WaitReason,
+};
 use otto_core::cancel_signal::CancelSignal;
 use otto_core::domain::Workspace;
 use otto_core::{Id, Result};
@@ -251,4 +256,95 @@ async fn a_reviewer_held_through_a_restart_names_its_review_for_recovery() {
         "review recovery resumes rv-1, not fails it"
     );
     rt2.shutdown().await;
+}
+
+/// The daemon's step host as a resumed step meets it: one MCP approval card
+/// waiting, a plan usage limit that resets at `.0`.
+struct AfterRestart(chrono::DateTime<Utc>);
+
+#[async_trait::async_trait]
+impl StepHost for AfterRestart {
+    async fn admit(&self, _: &str, _: &str, _: &(dyn Fn(WaitReason) + Send + Sync)) -> Place {
+        Place {
+            key: None,
+            guard: Box::new(()),
+        }
+    }
+    async fn watch_mcp(
+        &self,
+        _rt: &AgentRuntime,
+        thread: &Id,
+        ev: tokio::sync::mpsc::UnboundedSender<StepEvent>,
+    ) {
+        let mut a = Attention::new(AttentionKind::Approval, "Comment on PROJ-1", Utc::now());
+        a.via = Some(AttentionVia::Mcp);
+        a.thread_id = Some(thread.clone());
+        let _ = ev.send(StepEvent::NeedsYou(a));
+        std::future::pending().await
+    }
+    async fn usage_resets_at(
+        &self,
+        _: &str,
+        _: &serde_json::Value,
+    ) -> Option<chrono::DateTime<Utc>> {
+        Some(self.0)
+    }
+}
+
+/// CR1-004: a held step resumed after a restart still reports the MCP
+/// approval card its call waits on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_held_step_reports_its_mcp_approval_card_after_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let prompt = "OTTO_FAKE: sleep 1500\nOTTO_FAKE: reply commented";
+    let (rt, id, start) = start_then_restart(&root, prompt, |e| *e == StepEvent::Working).await;
+    let runner = ThreadStepRunner::new(rt.clone(), Arc::new(AfterRestart(Utc::now())));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let out = runner
+        .resume(&id, start, &turn(&root, prompt), tx, CancelSignal::new())
+        .await
+        .unwrap();
+    assert_eq!(out.error, None, "{:?}", out.error);
+    let mut cards = Vec::new();
+    while let Ok(e) = rx.try_recv() {
+        if let StepEvent::NeedsYou(a) = e {
+            cards.push(a);
+        }
+    }
+    assert!(
+        cards.iter().any(|a| a.via == Some(AttentionVia::Mcp)),
+        "{cards:?}"
+    );
+    rt.shutdown().await;
+}
+
+/// CR1-004: a held step that hits a plan usage limit after a restart parks
+/// until the reset and continues on the same thread — it does not fail.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_held_step_waits_out_a_usage_limit_after_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let prompt = "OTTO_FAKE: sleep 1500\nOTTO_FAKE: fail usage_limit";
+    let (rt, id, start) = start_then_restart(&root, prompt, |e| *e == StepEvent::Working).await;
+    let at = Utc::now() + chrono::TimeDelta::seconds(3);
+    let runner = ThreadStepRunner::new(rt.clone(), Arc::new(AfterRestart(at)));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let out = runner
+        .resume(&id, start, &turn(&root, prompt), tx, CancelSignal::new())
+        .await
+        .unwrap();
+    assert_eq!(out.error, None, "{:?}", out.error);
+    assert_eq!(out.turns, 2, "the limited turn and the one after the reset");
+    assert_eq!(out.reply, format!("echo: {CONTINUE_AFTER_LIMIT}"));
+    let mut limit = None;
+    while let Ok(e) = rx.try_recv() {
+        if let StepEvent::NeedsYou(a) = e {
+            if a.kind == AttentionKind::UsageLimit {
+                limit = Some(a);
+            }
+        }
+    }
+    assert_eq!(limit.and_then(|a| a.resets_at), Some(at));
+    rt.shutdown().await;
 }

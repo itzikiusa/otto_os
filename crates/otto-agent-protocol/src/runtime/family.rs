@@ -57,6 +57,12 @@ pub(super) fn family_ids(id: &Id, rows: &[RuntimeSession]) -> Vec<Id> {
 }
 
 impl AgentRuntime {
+    /// `id` and every open thread opened below it (a step's sub-threads).
+    pub async fn family(&self, id: &Id) -> Vec<Id> {
+        let rows = self.linked(id).await.unwrap_or_default();
+        family_ids(id, &rows)
+    }
+
     /// A linked group by its root, closed members included, live state
     /// applied — not the person's 500-row list, which leaves engine threads
     /// out and drops old members.

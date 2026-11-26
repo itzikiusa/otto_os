@@ -11,6 +11,15 @@ const ERRORS_MAX: usize = 5;
 const ACTIONS_MAX: usize = 20;
 const ITEM_TEXT_MAX: usize = 300;
 const MESSAGE_MAX: usize = 200;
+/// The serialized digest's bound, in bytes.
+const DIGEST_MAX: usize = 8 * 1024;
+/// The answer excerpt shrinks to this before anything else goes.
+const ANSWER_FLOOR: usize = 1024;
+
+/// `s` without the secrets `otto_core::redact` recognises.
+fn redact(s: &str) -> String {
+    otto_core::redact::redact_text(s).value
+}
 
 /// Otto MCP tools that reach outside Otto (both catalog spellings).
 const OUTWARD: &[&str] = &[
@@ -54,15 +63,33 @@ fn action(item: &TurnItem) -> Option<OutwardAction> {
         })
     });
     let out = output.as_deref().unwrap_or_default();
-    let outcome = if out.to_lowercase().contains("pending approval") {
+    // The gateway's verdict (`{"decision": …, "executed": false}`), also as
+    // the escaped text of an MCP content block.
+    let flat: String = out
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '\\')
+        .collect::<String>()
+        .to_lowercase();
+    let outcome = if flat.contains(r#""decision":"pending_approval""#)
+        || out.to_lowercase().contains("pending approval")
+    {
         OutwardOutcome::PendingApproval
-    } else if item.status == TurnItemStatus::Failed || item.error.is_some() {
+    } else if item.status == TurnItemStatus::Failed
+        || item.error.is_some()
+        || flat.contains(r#""decision":"denied""#)
+        || flat.contains(r#""executed":false"#)
+    {
         OutwardOutcome::Failed
     } else {
         OutwardOutcome::Ok
     };
     let message = (outcome != OutwardOutcome::Ok)
-        .then(|| clip(item.error.as_deref().unwrap_or(out).trim(), MESSAGE_MAX))
+        .then(|| {
+            clip(
+                &redact(item.error.as_deref().unwrap_or(out).trim()),
+                MESSAGE_MAX,
+            )
+        })
         .filter(|m| !m.is_empty());
     Some(OutwardAction {
         tool: tool.to_string(),
@@ -114,6 +141,11 @@ impl AgentRuntime {
         d.errors.drain(..cut);
         let cut = d.actions.len().saturating_sub(ACTIONS_MAX);
         d.actions.drain(..cut);
+        d.last_answer_excerpt = redact(&d.last_answer_excerpt);
+        for e in &mut d.errors {
+            *e = redact(e);
+        }
+        fit(&mut d);
         Ok(d)
     }
 
@@ -147,9 +179,12 @@ impl AgentRuntime {
                     TurnItemKind::Error { failure } => ("error", failure.message.clone(), None),
                     _ => return None,
                 };
+                // Clipped before the redaction (an item can be a whole
+                // log), with room for a secret that straddles the clip.
+                let text = redact(&clip(text.trim(), 4 * ITEM_TEXT_MAX));
                 Some(DigestItem {
                     role: role.to_string(),
-                    text: clip(text.trim(), ITEM_TEXT_MAX),
+                    text: clip(&text, ITEM_TEXT_MAX),
                     tool,
                 })
             })
@@ -160,9 +195,105 @@ impl AgentRuntime {
     }
 }
 
+/// Hold the digest to [`DIGEST_MAX`] serialized bytes: the answer shrinks to
+/// [`ANSWER_FLOOR`] first, then files, the oldest errors and actions go.
+fn fit(d: &mut TranscriptDigest) {
+    let size = |d: &TranscriptDigest| serde_json::to_vec(d).map_or(0, |v| v.len());
+    while size(d) > DIGEST_MAX {
+        let n = d.last_answer_excerpt.chars().count();
+        if n > ANSWER_FLOOR {
+            d.last_answer_excerpt = clip(&d.last_answer_excerpt, (n / 2).max(ANSWER_FLOOR));
+            continue;
+        }
+        if d.files_changed.pop().is_some() {
+            continue;
+        }
+        if !d.errors.is_empty() {
+            d.errors.remove(0);
+        } else if !d.actions.is_empty() {
+            d.actions.remove(0);
+        } else if n > 0 {
+            d.last_answer_excerpt = clip(&d.last_answer_excerpt, n / 2);
+        } else {
+            break;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::otto_tool;
+    use super::*;
+
+    fn tool(name: &str, output: &str) -> TurnItem {
+        TurnItem {
+            id: "i1".into(),
+            turn_id: Some("t1".into()),
+            ordinal: 1,
+            status: TurnItemStatus::Completed,
+            title: None,
+            started_at: None,
+            completed_at: None,
+            updated_at: chrono::Utc::now(),
+            error: None,
+            parent_item_id: None,
+            detail_omitted: false,
+            kind: TurnItemKind::DynamicTool {
+                image_files: Vec::new(),
+                tool_name: name.into(),
+                input: serde_json::json!({"pr_number": 12}),
+                output: Some(output.into()),
+                images: Vec::new(),
+            },
+        }
+    }
+
+    /// The governed gateway answers a call it held or refused with a JSON
+    /// verdict, as is or as the text of an MCP content block: never `ok`.
+    #[test]
+    fn a_held_or_refused_outward_call_is_not_ok() {
+        let outcome = |out: &str| {
+            action(&tool("mcp__otto__otto_merge_pr", out))
+                .unwrap()
+                .outcome
+        };
+        let pending = r#"{"decision":"pending_approval","executed":false,"approval_id":"a1"}"#;
+        assert_eq!(outcome(pending), OutwardOutcome::PendingApproval);
+        let wrapped = serde_json::json!([{"type": "text", "text": pending}]).to_string();
+        assert_eq!(outcome(&wrapped), OutwardOutcome::PendingApproval);
+        let denied = r#"{"decision": "denied", "executed": false, "reason": "human denied"}"#;
+        assert_eq!(outcome(denied), OutwardOutcome::Failed);
+        assert_eq!(
+            outcome(r#"{"decision":"dry_run","executed":false}"#),
+            OutwardOutcome::Failed
+        );
+        assert_eq!(
+            outcome(r#"{"ok":true,"url":"https://x/pr/12"}"#),
+            OutwardOutcome::Ok
+        );
+    }
+
+    /// Fifty long paths, five long errors, twenty actions and a long answer
+    /// still serialize within 8 KiB, and a token in the answer is gone.
+    #[test]
+    fn the_digest_stays_within_its_bound_and_holds_no_secret() {
+        let long = "é".repeat(4000);
+        let mut d = TranscriptDigest {
+            files_changed: (0..FILES_MAX)
+                .map(|i| format!("{i}/{}", "p".repeat(200)))
+                .collect(),
+            last_answer_excerpt: clip(&long, ANSWER_MAX),
+            errors: vec!["e".repeat(300); ERRORS_MAX],
+            actions: (0..ACTIONS_MAX)
+                .map(|_| action(&tool("otto.comment_pr", &"x".repeat(400))).unwrap())
+                .collect(),
+            ..TranscriptDigest::default()
+        };
+        fit(&mut d);
+        assert!(serde_json::to_vec(&d).unwrap().len() <= DIGEST_MAX);
+        assert!(!d.last_answer_excerpt.is_empty() && !d.actions.is_empty());
+        let token = "ghp_0123456789abcdefghijABCDEFGHIJ012345";
+        assert!(!redact(&format!("pushed with {token}")).contains(token));
+    }
 
     #[test]
     fn otto_outward_tools_are_read_in_every_spelling() {

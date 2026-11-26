@@ -92,8 +92,8 @@ pub struct SettledTurn {
 }
 
 /// `meta` key: the turn a daemon restart cut off on an engine thread that
-/// was not held (`recover_excluding`). Persisted, so a second restart before
-/// the step resumes still reads it.
+/// was not held, or whose background work it killed (`recover_excluding`).
+/// Persisted, so a second restart before the step resumes still reads it.
 pub const RESTART_CUT_KEY: &str = "restart_cut_turn";
 
 /// The latest turn above `since` is the one a restart cut off.
@@ -111,9 +111,7 @@ fn restart_cut(st: &State, since: u32) -> bool {
         .turns
         .values()
         .max_by_key(|t| t.ordinal)
-        .is_some_and(|t| {
-            t.ordinal > since && t.id == cut && t.status == ProviderTurnStatus::Interrupted
-        })
+        .is_some_and(|t| t.ordinal > since && t.id == cut)
 }
 
 /// One request waiting on a person: `(thread, request)` and what to show.
@@ -148,6 +146,7 @@ impl Look {
             && !self.pending_wakes
             && !self.pending
             && !self.descendants_busy
+            && !self.held_wake
             && self
                 .background_ended
                 .is_none_or(|t| now >= t + AUTO_TURN_GRACE)
@@ -460,9 +459,20 @@ impl AgentRuntime {
             .map(|e| (e.key().clone(), Arc::clone(e.value())))
             .collect();
         for (cid, l) in all {
-            let of = l.lock().session.child_of();
+            let (of, group) = {
+                let st = l.lock();
+                (st.session.child_of(), st.session.parent_id.clone())
+            };
             if let Some(of) = of.filter(|o| o.by == ChildOpener::Agent) {
-                by_opener.entry(of.id).or_default().push((cid, l));
+                // Its opener was closed and left memory: a member of the
+                // group `id` leads (a step's thread) still counts below it.
+                let gone = !self.inner.live.contains_key(&of.id);
+                let opener = if gone && group.as_ref() == Some(id) {
+                    id.clone()
+                } else {
+                    of.id
+                };
+                by_opener.entry(opener).or_default().push((cid, l));
             }
         }
         let mut frontier = vec![(id.clone(), Arc::clone(root))];
@@ -480,16 +490,24 @@ impl AgentRuntime {
                 }
                 {
                     let st = l.lock();
+                    // A closed sub-thread may still have open ones below it.
                     if st.session.status == RuntimeSessionStatus::Closed {
+                        drop(st);
+                        frontier.push((cid, l));
                         continue;
                     }
+                    let (ready, held) = queue_state(&st);
                     if st.turn.is_some()
                         || st.starting > 0
                         || !st.session.background_tasks.is_empty()
-                        || queue_state(&st).0
+                        || ready
+                        || has_pending(&st)
                     {
                         look.descendants_busy = true;
                     }
+                    look.held_wake |= held;
+                    look.last_activity = look.last_activity.max(Some(st.last_activity));
+                    look.background_ended = look.background_ended.max(st.background_ended_idle_at);
                     // A sub-thread's question goes to its opener's agent first:
                     // it needs a person only when that agent left it pending.
                     for r in st.proj.requests.values() {
@@ -748,3 +766,7 @@ pub(super) fn wake_done(inner: &Inner, parent: &Id, key: &str) {
         l.deadline_changed.notify_waiters();
     }
 }
+
+#[cfg(test)]
+#[path = "unattended_tests.rs"]
+mod tests;

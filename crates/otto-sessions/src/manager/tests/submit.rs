@@ -404,6 +404,11 @@ async fn a_strict_claude_spawn_writes_no_mcp_files_and_skips_nothing() {
     for (provider, meta) in [
         ("claude", serde_json::json!({ "lean_turn": true })),
         ("shell", serde_json::json!({})),
+        // An untrusted read-only structured thread (DR-001).
+        (
+            "claude",
+            serde_json::json!({ "runtime": "structured", "read_only": true, "project_settings": false }),
+        ),
     ] {
         let cwd = tempfile::tempdir().unwrap();
         let cwd_str = cwd.path().to_string_lossy().into_owned();

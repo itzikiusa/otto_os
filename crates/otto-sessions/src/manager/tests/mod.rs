@@ -3745,6 +3745,10 @@ fn review_argv_per_provider_is_locked_down() {
         .position(|a| a == "-c")
         .expect("project-doc override");
     assert_eq!(codex[at + 1], "project_doc_max_bytes=0");
+    assert!(
+        codex.windows(2).any(|w| w == ["-c", "mcp_servers={}"]),
+        "none of the user's own MCP servers: {codex:?}"
+    );
     let claude = argv("claude");
     let at = claude
         .iter()

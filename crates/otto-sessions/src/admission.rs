@@ -429,6 +429,7 @@ pub fn decide(
     live: usize,
     waited: Duration,
 ) -> Verdict {
+    let hold = policy.pressure_floor > 0 && sample.pressure == MemoryPressure::Critical;
     if let Some(max) = policy.max_live {
         if live >= max {
             let reason = AdmissionWait::LiveCeiling {
@@ -436,7 +437,9 @@ pub fn decide(
                 max,
                 holders: Vec::new(),
             };
-            return if waited >= policy.max_wait * CEILING_WAIT_FACTOR {
+            // Critical memory never gives way while one of Otto's agents runs.
+            let overdue = waited >= policy.max_wait.saturating_mul(CEILING_WAIT_FACTOR);
+            return if overdue && !(hold && live >= 1) {
                 Verdict::AdmitOverdue(reason)
             } else {
                 Verdict::Wait(reason)
@@ -446,7 +449,6 @@ pub fn decide(
     let Some(mut reason) = pressure_reason(sample, policy) else {
         return Verdict::Admit;
     };
-    let hold = policy.pressure_floor > 0 && sample.pressure == MemoryPressure::Critical;
     let floor = if hold { 1 } else { policy.pressure_floor };
     if live < floor {
         return Verdict::Admit;
@@ -1504,6 +1506,30 @@ mod tests {
             ..policy()
         };
         assert_eq!(decide(&calm(), &open, 40, Duration::ZERO), Verdict::Admit);
+    }
+
+    /// Critical memory gives no way at the ceiling either, and a huge
+    /// configured wait does not overflow.
+    #[test]
+    fn the_live_ceiling_never_gives_way_under_critical_memory() {
+        let p = policy();
+        let critical = sample(1.0, 8, MemoryPressure::Critical);
+        let late = p.max_wait * CEILING_WAIT_FACTOR * 2;
+        assert!(
+            matches!(
+                decide(&critical, &p, 6, late),
+                Verdict::Wait(AdmissionWait::LiveCeiling { live: 6, .. })
+            ),
+            "no 7th agent under critical memory"
+        );
+        let huge = AdmissionPolicy {
+            max_wait: Duration::from_secs(u64::MAX),
+            ..policy()
+        };
+        assert!(matches!(
+            decide(&calm(), &huge, 6, late),
+            Verdict::Wait(AdmissionWait::LiveCeiling { .. })
+        ));
     }
 
     #[test]

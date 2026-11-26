@@ -700,10 +700,18 @@ impl AgentRuntime {
             // The latest turn this restart cut off (ordinal, id).
             let mut cut: Option<(u32, Id)> = None;
             let mut cut_turn: Option<(u32, Id)> = None;
+            // The latest turn, and whether background work it left died.
+            let mut latest: Option<(u32, Id)> = None;
+            let mut background_cut = false;
             for mut r in entities {
                 let changed = match r.kind.as_str() {
                     K_TURN => serde_json::from_value::<ProviderTurn>(r.payload.clone())
                         .ok()
+                        .inspect(|t| {
+                            if latest.as_ref().is_none_or(|(o, _)| t.ordinal > *o) {
+                                latest = Some((t.ordinal, t.id.clone()));
+                            }
+                        })
                         .filter(|t| !t.status.is_terminal())
                         .map(|mut t| {
                             if cut_turn.as_ref().is_none_or(|(o, _)| t.ordinal > *o) {
@@ -742,6 +750,7 @@ impl AgentRuntime {
                         })
                         .map(|mut s| {
                             // The process (and its background work) is gone.
+                            background_cut |= !s.background_tasks.is_empty();
                             s.background_tasks.clear();
                             s.status = ProviderSessionStatus::Stopped;
                             s.updated_at = now;
@@ -760,8 +769,10 @@ impl AgentRuntime {
                 touched += 1;
                 self.inner.repo.upsert_entities(&sid, &rows).await?;
             }
-            // An engine thread remembers which turn the restart cut, so its
-            // step ends as a server restart even after a second restart.
+            // An engine thread remembers which turn the restart cut (or whose
+            // background work it killed), so its step ends as a server
+            // restart even after a second restart.
+            let cut_turn = cut_turn.or(latest.filter(|_| background_cut));
             if let (Some((_, turn)), true) = (
                 &cut_turn,
                 otto_core::agent_runtime::is_engine_thread(rec.session.meta.as_ref()),

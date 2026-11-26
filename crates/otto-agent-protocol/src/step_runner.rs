@@ -50,10 +50,11 @@ pub trait StepHost: Send + Sync {
     ) -> Option<String> {
         None
     }
-    /// Report the governed Otto MCP approval cards `thread`'s calls wait on
-    /// as `NeedsYou` (`via: mcp`) and their decision as `Resumed`, for as
-    /// long as the turn runs (the runner drops this future at settle).
-    async fn watch_mcp(&self, _thread: &Id, _ev: UnboundedSender<StepEvent>) {
+    /// Report the governed Otto MCP approval cards the calls of `thread` and
+    /// of the sub-threads its agents opened wait on as `NeedsYou` (`via:
+    /// mcp`) and their decision as `Resumed`, for as long as the turn runs
+    /// (the runner drops this future at settle).
+    async fn watch_mcp(&self, _rt: &AgentRuntime, _thread: &Id, _ev: UnboundedSender<StepEvent>) {
         std::future::pending::<()>().await
     }
     /// When `provider`'s plan usage limit resets, when Otto knows
@@ -138,14 +139,17 @@ impl StepHost for DaemonStepHost {
             _ => None,
         }
     }
-    async fn watch_mcp(&self, thread: &Id, ev: UnboundedSender<StepEvent>) {
+    async fn watch_mcp(&self, rt: &AgentRuntime, thread: &Id, ev: UnboundedSender<StepEvent>) {
         let Some((repo, bus)) = &self.approvals else {
             return std::future::pending().await;
         };
         let mut reported: Vec<otto_state::McpApproval> = Vec::new();
         loop {
             let mut rx = bus.subscribe();
-            let pending = repo.pending_for_session(thread).await.unwrap_or_default();
+            let mut pending = Vec::new();
+            for id in rt.family(thread).await {
+                pending.extend(repo.pending_for_session(&id).await.unwrap_or_default());
+            }
             for a in pending
                 .iter()
                 .filter(|a| !reported.iter().any(|r| r.id == a.id))
@@ -153,7 +157,7 @@ impl StepHost for DaemonStepHost {
                 let mut att = Attention::new(AttentionKind::Approval, &a.title, Utc::now());
                 att.via = Some(otto_core::agent_runtime::AttentionVia::Mcp);
                 att.request_id = Some(a.id.clone());
-                att.thread_id = Some(thread.clone());
+                att.thread_id = a.requested_by_session_id.clone();
                 let _ = ev.send(StepEvent::NeedsYou(att));
             }
             for gone in reported
@@ -376,17 +380,7 @@ impl ThreadStepRunner {
         let run = self.rt.run_turn(id, &req, opts, move |e| {
             let _ = ev2.send(e);
         });
-        tokio::pin!(run);
-        let watch = self.host.watch_mcp(id, ev.clone());
-        tokio::pin!(watch);
-        let mut watching = true;
-        let res = loop {
-            tokio::select! {
-                r = &mut run => break r,
-                _ = &mut watch, if watching => watching = false,
-            }
-        };
-        res.map_err(|e| {
+        self.watched(id, ev, run).await.map_err(|e| {
             let m = e.to_string();
             if m.contains(RESUME_REFUSED) {
                 StepError::new(
@@ -397,6 +391,25 @@ impl ThreadStepRunner {
                 StepError::new(StepErrorClass::Spawn, m)
             }
         })
+    }
+
+    /// `wait`, with the MCP approval cards it waits on reported meanwhile.
+    async fn watched<T>(
+        &self,
+        id: &Id,
+        ev: &UnboundedSender<StepEvent>,
+        wait: impl std::future::Future<Output = T>,
+    ) -> T {
+        tokio::pin!(wait);
+        let watch = self.host.watch_mcp(&self.rt, id, ev.clone());
+        tokio::pin!(watch);
+        let mut watching = true;
+        loop {
+            tokio::select! {
+                r = &mut wait => return r,
+                _ = &mut watch, if watching => watching = false,
+            }
+        }
     }
 
     /// The class a settled wait ends with, if it failed.
@@ -473,13 +486,15 @@ impl ThreadStepRunner {
         }
     }
 
-    /// Drive `id` from its first prompt to the step's end.
+    /// Drive `id` from its first prompt to the step's end; `settled`: a
+    /// turn that already settled (a resume), taken as the first one's.
     #[allow(clippy::too_many_arguments)]
     async fn drive(
         &self,
         id: &Id,
         mut prompt: String,
         mut first: bool,
+        mut settled: Option<SettledTurn>,
         t: &StepTurn,
         tally: Tally,
         ev: &UnboundedSender<StepEvent>,
@@ -488,9 +503,12 @@ impl ThreadStepRunner {
         let mut nudged = false;
         let mut last_reset: Option<DateTime<Utc>> = None;
         let error = loop {
-            let settled = match self.turn(id, &prompt, t, first, &tally, ev, cancel).await {
-                Ok(s) => s,
-                Err(e) => break Some(e),
+            let settled = match settled.take() {
+                Some(s) => s,
+                None => match self.turn(id, &prompt, t, first, &tally, ev, cancel).await {
+                    Ok(s) => s,
+                    Err(e) => break Some(e),
+                },
             };
             first = false;
             let error = Self::fold(&settled);
@@ -512,6 +530,14 @@ impl ThreadStepRunner {
                         break error;
                     };
                     last_reset = Some(at);
+                    let wait = (at - Utc::now()).to_std().unwrap_or_default();
+                    let budget = t.timeout.map(|d| d.saturating_sub(tally.started.elapsed()));
+                    if budget.is_some_and(|b| b < wait) {
+                        break Some(StepError::new(
+                            StepErrorClass::Timeout,
+                            "the step's time ran out while it waited for the usage limit to reset",
+                        ));
+                    }
                     let mut a = Attention::new(
                         AttentionKind::UsageLimit,
                         &format!(
@@ -524,14 +550,6 @@ impl ThreadStepRunner {
                     a.thread_id = Some(id.clone());
                     a.resets_at = Some(at);
                     let _ = ev.send(StepEvent::NeedsYou(a));
-                    let wait = (at - Utc::now()).to_std().unwrap_or_default();
-                    let budget = t.timeout.map(|d| d.saturating_sub(tally.started.elapsed()));
-                    if budget.is_some_and(|b| b < wait) {
-                        break Some(StepError::new(
-                            StepErrorClass::Timeout,
-                            "the step's time ran out while it waited for the usage limit to reset",
-                        ));
-                    }
                     // Parked: no process, no machine place until the reset;
                     // the next turn re-admits and resumes strictly.
                     self.rt.release_process(id).await.ok();
@@ -671,7 +689,9 @@ impl StepRunner for ThreadStepRunner {
             started,
         };
         let prompt = t.prompt.clone();
-        Ok(self.drive(&id, prompt, true, &t, tally, &ev, &cancel).await)
+        Ok(self
+            .drive(&id, prompt, true, None, &t, tally, &ev, &cancel)
+            .await)
     }
 
     async fn resume(
@@ -691,13 +711,12 @@ impl StepRunner for ThreadStepRunner {
         opts.no_progress = t.no_progress;
         opts.deadline = t.timeout;
         let ev2 = ev.clone();
-        let settled = match self
+        let wait = self
             .rt
             .await_settled(thread_id, start_ordinal, opts, move |e| {
                 let _ = ev2.send(e);
-            })
-            .await
-        {
+            });
+        let settled = match self.watched(thread_id, &ev, wait).await {
             Ok(s) => s,
             Err(Error::NotFound(_)) => {
                 return Ok(Self::failed(
@@ -707,39 +726,18 @@ impl StepRunner for ThreadStepRunner {
             }
             Err(e) => return Err(e),
         };
-        match settled.ended {
+        let (prompt, first, settled) = match settled.ended {
             // An unheld thread: tell the agent and finish on the same conversation.
-            Ended::ServerRestart => {
-                let prompt = AFTER_RESTART.to_string();
-                let mut t = t.clone();
-                t.continue_thread = None;
-                Ok(self
-                    .drive(thread_id, prompt, false, &t, tally, &ev, &cancel)
-                    .await)
-            }
-            Ended::Settled => {
-                let t = t.clone();
-                // Held through the restart and finished meanwhile: settle it as
-                // a step (handoff nudge and limits included) from here.
-                let error = Self::fold(&settled);
-                let needs_more = error.is_none() && t.handoff.as_ref().is_some_and(|h| !h.exists());
-                if needs_more {
-                    let h = t
-                        .handoff
-                        .as_ref()
-                        .map(|h| h.display().to_string())
-                        .unwrap_or_default();
-                    let prompt = NUDGE.replace("{path}", &h);
-                    return Ok(self
-                        .drive(thread_id, prompt, false, &t, tally, &ev, &cancel)
-                        .await);
-                }
-                Ok(self.outcome(thread_id, &tally, &t, error).await)
-            }
-            _ => Ok(self
-                .outcome(thread_id, &tally, t, Self::fold(&settled))
-                .await),
-        }
+            Ended::ServerRestart => (AFTER_RESTART.to_string(), false, None),
+            // The restart came before the step's prompt went out: send it now.
+            Ended::Settled if settled.turns == 0 => (t.prompt.clone(), true, None),
+            // Held through the restart: settle it as a step from here (handoff
+            // nudge and usage limits included).
+            _ => (String::new(), false, Some(settled)),
+        };
+        Ok(self
+            .drive(thread_id, prompt, first, settled, t, tally, &ev, &cancel)
+            .await)
     }
 
     async fn close(&self, thread_id: &Id, retain_until: DateTime<Utc>) {
