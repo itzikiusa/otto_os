@@ -326,6 +326,12 @@ async fn the_run_view_lists_its_attachments_and_recomputes_a_missing_overview() 
         serde_json::to_vec(&[spec]).unwrap(),
     )
     .unwrap();
+    // A chat run: its origin lives in the input the progress projection strips.
+    sqlx::query("UPDATE workflow_runs SET input_json = ? WHERE id = 'run1'")
+        .bind(r#"{"trigger": "chat", "user": "vera"}"#)
+        .execute(&d.pool)
+        .await
+        .unwrap();
     let get = |path: &str| {
         d.http
             .get(format!("{}/api/v1/workflow-runs/run1{path}", d.base))
@@ -338,10 +344,13 @@ async fn the_run_view_lists_its_attachments_and_recomputes_a_missing_overview() 
         "{run}"
     );
     assert_eq!(run["overview"]["state"], "succeeded", "{run}");
+    assert_eq!(run["overview"]["origin"]["user_name"], "vera", "{run}");
     let progress: Value = get("/progress").await.unwrap().json().await.unwrap();
+    let ov = &progress["run"]["overview"];
+    assert_eq!(ov["state"], "succeeded", "{progress}");
     assert_eq!(
-        progress["run"]["overview"]["state"], "succeeded",
-        "{progress}"
+        ov["origin"], run["overview"]["origin"],
+        "/progress recomputes from the full row (CR2-005): {progress}"
     );
 }
 

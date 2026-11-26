@@ -22,7 +22,7 @@ use crate::error::{ApiError, ApiResult};
 use crate::state::ServerCtx;
 use crate::workflow_engine;
 
-fn repo(ctx: &ServerCtx) -> WorkflowsRepo {
+pub(crate) fn repo(ctx: &ServerCtx) -> WorkflowsRepo {
     WorkflowsRepo::new(ctx.pool.clone())
 }
 

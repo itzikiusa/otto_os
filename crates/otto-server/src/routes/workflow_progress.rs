@@ -49,7 +49,8 @@ pub async fn progress(
             }
         }
         if result["run"]["overview"].is_null() {
-            if let Ok(run) = serde_json::from_value(result["run"].clone()) {
+            // The full row: the summary projection strips input, outputs and usage.
+            if let Ok(run) = super::workflows::repo(&ctx).get_run(&id).await {
                 if let Some(ov) = super::workflows::recompute_overview(&ctx, &run).await {
                     result["run"]["overview"] = serde_json::json!(ov);
                 }
