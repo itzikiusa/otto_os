@@ -105,6 +105,22 @@ test('a second failed step says its own failure in the pane; the card keeps the 
   await expect(stepPane(page).getByTestId('wf-step-error')).toContainText(other!.node_id === 'a' ? 'Not logged in' : 'API Error: 500');
 });
 
+test('a failed step under another card says its failure in the pane (CR1-047)', async ({ page }) => {
+  const wf = await createWorkflow(api, 'E2E Held failure', chain(agentStep('p', 'Provider down', ['fail provider'], { retry: { max_attempts: 0 } })));
+  const run = await startRun(api, wf);
+  await waitRun(api, run, settled);
+  // A held run (a goal out of checks, DR-101): its card is the hold, so the error card is not shown.
+  await page.route(`**/api/v1/workflow-runs/${run}`, async (route) => {
+    const res = await route.fetch();
+    const real = await res.json();
+    const hold = { kind: 'blocked', reason: 'Check failed twice', since: real.finished_at, node_ids: [] };
+    await route.fulfill({ response: res, json: { ...real, overview: { ...real.overview, state: 'blocked', hold } } });
+  });
+  await openRun(page, wf, run, 'p');
+  await expect(page.getByTestId('wf-run-card')).toHaveAttribute('data-kind', 'hold');
+  await expect(stepPane(page).getByTestId('wf-step-error')).toContainText('API Error: 500');
+});
+
 test('Stop run… asks first; Stop is never beside a primary', async ({ page }) => {
   const wf = await createWorkflow(api, 'E2E Long step', chain(agentStep('slow', 'Slow step', ['sleep 60000'])));
   const run = await startRun(api, wf);
