@@ -498,8 +498,13 @@ async fn a_missing_file_and_each_failure_class_end_the_turn_as_that_class() {
             !rig.text(&id).contains("never"),
             "{label}: the script stopped"
         );
-        for class in ["provider", "auth", "usage_limit"] {
-            let (status, _) = rig.turn(&id, &format!("OTTO_FAKE: fail {class}")).await;
+        for (verb, class) in [
+            ("provider", "provider"),
+            ("auth", "auth"),
+            ("usage_limit", "usage_limit"),
+            ("usage_limit_no_reset", "usage_limit"),
+        ] {
+            let (status, _) = rig.turn(&id, &format!("OTTO_FAKE: fail {verb}")).await;
             assert_eq!(status, TurnTerminalStatus::Failed, "{label} {class}");
             let s = rig.rt.get(&id).await.unwrap();
             assert_eq!(
@@ -1091,6 +1096,12 @@ fn the_parser_reads_every_verb_and_flags_the_rest() {
     assert_eq!(p("ask Which one?"), Act::Ask("Which one?".into()));
     assert_eq!(p("approve make"), Act::Approve("make".into()));
     assert_eq!(p("fail usage_limit"), Act::Fail(FailClass::UsageLimit));
+    assert_eq!(
+        p("fail usage_limit_no_reset"),
+        Act::Fail(FailClass::UsageLimitNoReset)
+    );
+    let no_reset = FailClass::UsageLimitNoReset.message();
+    assert!(!no_reset.contains("resets"), "{no_reset}");
     assert_eq!(p("fail hang"), Act::Fail(FailClass::Hang));
     assert_eq!(
         p("fail-attempts 2 provider"),
