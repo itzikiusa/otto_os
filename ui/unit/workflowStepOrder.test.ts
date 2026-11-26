@@ -3,7 +3,7 @@
 // selection — runs/stepOrder.ts.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { defaultSelection, doneFold, entrySteps, loopChildren, orderChildren, orderSteps, RESULT, timeBar, topoOrder } from '../src/modules/workflows/runs/stepOrder.ts';
+import { childCrumb, childNoun, defaultSelection, doneFold, entrySteps, loopChildren, orderChildren, orderSteps, RESULT, timeBar, topoOrder } from '../src/modules/workflows/runs/stepOrder.ts';
 import { at, fanoutNodes, node, PR_GRAPH, reviewers, T0 } from './workflowRunFixtures.ts';
 import type { WorkflowGraph } from '../src/lib/api/types';
 
@@ -49,6 +49,25 @@ test('children: working first, done folded with their findings, summarizer last'
   assert.equal(v.done.length, 9);
   assert.equal(v.findings, 45); // 1 + 2 + … + 9
   assert.deepEqual(v.trailing.map((c) => c.id), ['summarizer']);
+});
+
+// Seen on a goal run: the pane's crumb read "Work toward the goal › Reviewer"
+// over "Work · iteration 2", and a loop's fold would say "1 reviewer done".
+test('a child is called what it is: an iteration, a reviewer, or just its own name', () => {
+  const kid = (label: string, id = 't1') => ({ id, label });
+  assert.equal(childCrumb('loop', kid('Work · iteration 2')), 'Iteration 2');
+  assert.equal(childCrumb('loop', kid('Iteration 12 · Work, Check', 'iter-12')), 'Iteration 12');
+  assert.equal(childCrumb('review_run', kid('Correctness · Codex')), 'Reviewer');
+  // Rows their own name says: no second word.
+  assert.equal(childCrumb('review_run', kid('Summarizer')), null);
+  assert.equal(childCrumb('review_run', kid('Scope assessment')), null);
+  assert.equal(childCrumb('agent_prompt', kid('claude · earlier turn')), null);
+  assert.equal(childCrumb('agent_prompt', kid('Research the API')), null);
+  assert.equal(childCrumb(undefined, kid('Correctness')), null);
+
+  assert.equal(childNoun('loop', kid('Work · iteration 1')), 'iteration');
+  assert.equal(childNoun('review_run', kid('Security · Claude')), 'reviewer');
+  assert.equal(childNoun('agent_prompt', kid('claude · earlier turn')), 'thread');
 });
 
 test('the phone folds the done steps before the current one', () => {

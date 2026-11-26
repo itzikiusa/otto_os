@@ -65,7 +65,8 @@ pub struct NotOffered {
     pub reason: String,
 }
 
-/// From the workflow's own successful runs; no numbers under 3 runs.
+/// From the workflow's own successful runs. No numbers under 3 runs, or when
+/// the draft is not faster beyond the noise between runs; `note` says which.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Estimate {
     pub runs: usize,
@@ -1520,19 +1521,26 @@ fn node_times(
     g.nodes
         .iter()
         .map(|n| {
-            let mut t = durations(history, &n.id).unwrap_or((0, 0));
+            let measured = durations(history, &n.id);
+            let mut t = measured.unwrap_or((0, 0));
+            // A built-in step that replaces an agent step is never estimated
+            // slower than the step it replaces was measured.
+            let no_slower = |est: u64| match measured {
+                Some((m, p)) => (est.min(m), est.min(p)),
+                None => (est, est),
+            };
             for e in edits {
                 match e {
                     Edit::Replace { node, kind, .. } if *node == n.id => {
                         t = match *kind {
-                            "git_checkout" => (15_000, 15_000),
+                            "git_checkout" => no_slower(15_000),
                             _ => (
-                                t.0.saturating_sub(30_000).max(10_000),
-                                t.1.saturating_sub(30_000).max(10_000),
+                                t.0.saturating_sub(30_000).max(10_000).min(t.0),
+                                t.1.saturating_sub(30_000).max(10_000).min(t.1),
                             ),
                         }
                     }
-                    Edit::Post { node, .. } if *node == n.id => t = (15_000, 15_000),
+                    Edit::Post { node, .. } if *node == n.id => t = no_slower(15_000),
                     Edit::Post { intro: Some(i), .. } if i.id == n.id => t = (45_000, 45_000),
                     Edit::GuardEdges { node, .. } if *node == n.id => {
                         let per_run: Vec<u64> = runs
@@ -1623,6 +1631,9 @@ fn makespan(g: &WorkflowGraph, times: &HashMap<String, u64>, slots: usize) -> u6
     }
 }
 
+/// The share of the typical run a draft must save to count as faster.
+const MIN_SAVING_PCT: u64 = 5;
+
 fn estimate(
     base: &WorkflowGraph,
     built: &Built,
@@ -1650,9 +1661,33 @@ fn estimate(
             .collect();
         makespan(g, &pick, slots)
     };
-    e.typical_before_ms = Some(span(base, &[], false));
+    let before = span(base, &[], false);
+    let after = span(&built.graph, &built.edits, false);
+    let mut savings = HashMap::new();
+    for (c, edit) in built.offered.iter().zip(&built.offered_edits) {
+        let mut g = base.clone();
+        apply_edit(&mut g, edit);
+        let saving = before.saturating_sub(span(&g, std::slice::from_ref(edit), false));
+        // Under a second is not a saving anyone can measure.
+        if saving >= 1_000 {
+            savings.insert(c.id.clone(), saving);
+        }
+    }
+    // An "after" that is not faster beyond the noise between runs is never
+    // shown as the expected result: no numbers, and the note says why.
+    if before.saturating_sub(after) < (before * MIN_SAVING_PCT / 100).max(1_000) {
+        e.note = Some(format!(
+            "No clear time saving on the last {} runs",
+            runs.len()
+        ));
+        return Estimated {
+            estimate: e,
+            savings,
+        };
+    }
+    e.typical_before_ms = Some(before);
     e.slow_before_ms = Some(span(base, &[], true));
-    e.typical_after_ms = Some(span(&built.graph, &built.edits, false));
+    e.typical_after_ms = Some(after);
     e.slow_after_ms = Some(span(&built.graph, &built.edits, true));
     let older = runs.iter().any(|r| {
         r.nodes
@@ -1667,14 +1702,6 @@ fn estimate(
         );
     }
     e.note = Some(notes.join("; "));
-    let before = e.typical_before_ms.unwrap_or(0);
-    let mut savings = HashMap::new();
-    for (c, edit) in built.offered.iter().zip(&built.offered_edits) {
-        let mut g = base.clone();
-        apply_edit(&mut g, edit);
-        let saving = before.saturating_sub(span(&g, std::slice::from_ref(edit), false));
-        savings.insert(c.id.clone(), saving);
-    }
     Estimated {
         estimate: e,
         savings,

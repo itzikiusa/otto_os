@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { afterMarks, canApply, estimateLines, groupChanges, initialSelection, savingText } from '../src/modules/workflows/optimize/optimizeView.ts';
+import { afterMarks, canApply, estimateLines, groupChanges, initialSelection, listingRemovedText, savingText } from '../src/modules/workflows/optimize/optimizeView.ts';
 import type { OptimizeChange } from '../src/lib/api/types';
 
 const ch = (id: string, effect: OptimizeChange['effect'], preselected: boolean, rule: OptimizeChange['rule'] = 'parallel', nodes = ['n1']): OptimizeChange =>
@@ -33,6 +33,24 @@ test('saving and estimate words', () => {
   assert.equal(e.typical, 'about 17m → 12m (typical)');
   assert.equal(e.slow, 'slow runs 29m → 24m');
   assert.equal(e.basis, 'from 25 runs');
+});
+
+// Seen on a 3-run history of quick runs: "Expected: about 17s → 32s (typical)",
+// "−0s" on every change, and the Reads cell's entries run together.
+test('a slower "after" is never the expected result, a saving under a second is not printed, the reads entries are separated', () => {
+  const slower = estimateLines({ runs: 3, typical_before_ms: 17_000, typical_after_ms: 32_000, slow_before_ms: 56_000, slow_after_ms: 60_000, note: 'replaced steps\' times are estimates until they have run' });
+  assert.deepEqual(slower, { none: 'No clear time saving on the last 3 runs. The changes below are still checked.' });
+  // What the server sends now: no times at all.
+  assert.deepEqual(estimateLines({ runs: 3, note: 'No clear time saving on the last 3 runs' }), slower);
+  assert.equal(estimateLines({ runs: 3, typical_before_ms: 17_000, typical_after_ms: 17_000 }).typical, undefined);
+
+  assert.equal(savingText(400), '');
+  assert.equal(savingText(999), '');
+  assert.equal(savingText(1000), '−1s');
+  assert.equal(savingText(0), '');
+
+  assert.equal(listingRemovedText(['step3-gather-context.md', 'step4-run-the-pr-gates.md']), 'No longer listed: step3-gather-context.md, step4-run-the-pr-gates.md');
+  assert.equal(listingRemovedText([]), '');
 });
 
 test('the After view marks new steps and the steps a ticked change touches', () => {

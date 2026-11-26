@@ -24,6 +24,7 @@ export interface OptimizeChange {
   why: string;
   effect: OptimizeEffect;
   preselected: boolean;
+  /** Absent under a second. */
   saving_ms?: number;
 }
 
@@ -32,6 +33,8 @@ export interface OptimizeDraft {
   changes: OptimizeChange[];
   not_offered: { rule: OptimizeRule; nodes: string[]; reason: string }[];
   draft_graph: WorkflowGraph;
+  /** The four times are absent (`note` says why) under 3 runs or when the
+   *  draft is not faster beyond the noise between runs. */
   estimate: {
     runs: number;
     since?: string;

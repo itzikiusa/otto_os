@@ -29,7 +29,7 @@
   import { reviewIds } from '../reviewAgents';
   import { runReviews } from '../runReviews.svelte';
   import { childWord, errorParts, stepDuration, stepWord } from './runWords';
-  import type { StepItem } from './stepOrder';
+  import { childCrumb, type StepItem } from './stepOrder';
   import { paneTabs, phaseSegments, TAB_LABEL, type PaneTab } from './stepTabs';
 
   interface Props {
@@ -55,6 +55,7 @@
 
   const node = $derived(step?.node ?? null);
   const child = $derived<ChildThread | null>(node?.children?.find((c) => c.id === childId) ?? null);
+  const childKind = $derived(child ? childCrumb(step?.kind, child) : null);
   const tabs = $derived(paneTabs({ result: !step, goal: !!run.overview?.goal, child: !!child, kind: step?.kind, node: node ?? undefined }));
   let picked = $state<PaneTab | null>(null);
   // Another step, child or asked-for tab starts over; a live update of the
@@ -170,7 +171,7 @@
 <section class="pane" data-testid="wf-step-pane" data-node-id={step?.id ?? '_result'} aria-label={child?.label ?? step?.name ?? 'Run result'}>
   <header class="ph">
     <div class="crumb">
-      {#if child}{step?.name}<Icon name="chevronRight" size={12} />Reviewer{:else if step}Step {node?.step_no ?? '–'} of {stepCount}{:else}Run result{/if}
+      {#if child}{step?.name}{#if childKind}<Icon name="chevronRight" size={12} />{childKind}{/if}{:else if step}Step {node?.step_no ?? '–'} of {stepCount}{:else}Run result{/if}
     </div>
     <div class="prow">
       <h3 class="name ellipsis" dir="auto">{child?.label ?? step?.name ?? 'final-output.md'}</h3>

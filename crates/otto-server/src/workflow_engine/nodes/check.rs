@@ -167,6 +167,7 @@ pub(in crate::workflow_engine) async fn execute(
     let out = CheckOutput::new(&cp.criteria, &eval, progress, review);
     env.files
         .write_named(&format!("{base}.md"), &out.step_file());
+    // A running goal's overview reads these counts from this line (`otto_workflows::overview`).
     logs.push(format!("{} of {} criteria met", out.met, out.total));
     Ok((check_run::output(&out), logs))
 }

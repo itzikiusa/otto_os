@@ -132,7 +132,24 @@ export function orderSteps(nodes: readonly NodeRunState[], graph: WorkflowGraph,
   return entries.map((g) => (g.length === 1 ? { type: 'step', step: g[0] } : { type: 'group', steps: g }));
 }
 
-const isSummarizer = (c: ChildThread) => /^summar/i.test(c.label) || c.id === 'summarizer';
+const isSummarizer = (c: Pick<ChildThread, 'id' | 'label'>) => /^summar/i.test(c.label) || c.id === 'summarizer';
+
+/** What a step's child is, for the pane's crumb (ux.md §4.4, goal.md §3.5):
+ *  a loop's iteration ("Work · iteration 2" from the engine, "Iteration 2 ·
+ *  Work, Check" from the checkpoints) or a review's reviewer. Null for a row
+ *  its own name already says: the summarizer, the scope assessment, an
+ *  earlier turn, a thread the step's agent opened. */
+export function childCrumb(stepKind: string | undefined, c: Pick<ChildThread, 'id' | 'label'>): string | null {
+  const iteration = /^Iteration (\d+)\b/.exec(c.label) ?? /· iteration (\d+)$/.exec(c.label);
+  if (iteration) return `Iteration ${iteration[1]}`;
+  return stepKind === 'review_run' && !isSummarizer(c) && c.label !== 'Scope assessment' ? 'Reviewer' : null;
+}
+
+/** The noun of a fold of such children: "5 reviewers queued", "2 iterations done", "1 thread done". */
+export function childNoun(stepKind: string | undefined, c: Pick<ChildThread, 'id' | 'label'>): string {
+  const crumb = childCrumb(stepKind, c);
+  return crumb === 'Reviewer' ? 'reviewer' : crumb ? 'iteration' : 'thread';
+}
 
 export interface ChildView {
   /** Working, waiting on a person and failed — first. */

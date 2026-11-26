@@ -10,7 +10,7 @@
   import { plural } from '../../../lib/plural';
   import type { RunState } from '../../../lib/api/types';
   import { childWord, stepDuration, stepLine2, stepWord, type StepGlyph } from './runWords';
-  import { doneFold, orderChildren, RESULT, timeBar, type StepEntry, type StepItem } from './stepOrder';
+  import { childNoun, doneFold, orderChildren, RESULT, timeBar, type StepEntry, type StepItem } from './stepOrder';
 
   interface Props {
     entries: readonly StepEntry[];
@@ -78,13 +78,13 @@
       {#if queuedOpen}
         {#each v.queued as c (c.id)}{@render childRow(s.id, c)}{/each}
       {:else}
-        <li><button type="button" class="kfold" data-nav {onkeydown} aria-expanded="false" onclick={() => (openQueued[s.id] = true)}><Icon name="chevronRight" size={12} />{plural(v.queued.length, 'reviewer')} queued</button></li>
+        <li><button type="button" class="kfold" data-nav {onkeydown} aria-expanded="false" onclick={() => (openQueued[s.id] = true)}><Icon name="chevronRight" size={12} />{plural(v.queued.length, childNoun(s.kind, v.queued[0]))} queued</button></li>
       {/if}
     {/if}
     {#if v.done.length}
       <li>
         <button type="button" class="kfold" data-nav {onkeydown} aria-expanded={doneOpen} onclick={() => (openDone[s.id] = !doneOpen)}>
-          <Icon name={doneOpen ? 'chevronDown' : 'chevronRight'} size={12} />{plural(v.done.length, 'reviewer')} done{v.findings ? ` · ${plural(v.findings, 'finding')}` : ''}
+          <Icon name={doneOpen ? 'chevronDown' : 'chevronRight'} size={12} />{plural(v.done.length, childNoun(s.kind, v.done[0]))} done{v.findings ? ` · ${plural(v.findings, 'finding')}` : ''}
         </button>
       </li>
       {#if doneOpen}{#each v.done as c (c.id)}{@render childRow(s.id, c)}{/each}{/if}

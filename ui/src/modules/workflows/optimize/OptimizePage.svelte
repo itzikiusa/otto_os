@@ -26,7 +26,7 @@
   import { toastError } from '../../../lib/toastError';
   import EditorCanvas from '../editor/EditorCanvas.svelte';
   import { clockTime } from '../runs/runWords';
-  import { afterMarks, canApply, estimateLines, groupChanges, initialSelection, savingText } from './optimizeView';
+  import { afterMarks, canApply, estimateLines, groupChanges, initialSelection, listingRemovedText, savingText } from './optimizeView';
 
   let { workflowId }: { workflowId: string } = $props();
   const path = $derived(`/workflows/${encodeURIComponent(workflowId)}/optimize`);
@@ -144,7 +144,7 @@
         <section class="opt-card" data-testid="wf-opt-estimate">
           {#if est?.none}<p class="dim">{est.none}</p>
           {:else if est}<p class="big">Expected: {est.typical}</p><p class="dim">{[est.slow, est.basis].filter(Boolean).join(' · ')}</p>{/if}
-          {#if draft.estimate.note}<p class="dim">{draft.estimate.note}</p>{/if}
+          {#if !est?.none && draft.estimate.note}<p class="dim">{draft.estimate.note}</p>{/if}
         </section>
         <p class="checks" data-testid="wf-opt-checks">
           <Icon name="check" size={12} />Checked: valid · step numbers that prompts mention are unchanged · every file a step reads is still written before it · outward steps keep their order.
@@ -208,7 +208,7 @@
                 <tr>
                   <th scope="row" dir="auto">{names.get(f.node_id) ?? f.node_id}{#if rn}<span class="dim"> · {rn.from} → {rn.to}</span>{/if}</th>
                   <td>{#each f.reads as r (r)}<span class="file" class:added={f.reads_added.includes(r)}>{r}</span>{/each}
-                    {#each f.listing_removed as r (r)}<span class="dim">No longer listed: {r}</span>{/each}</td>
+                    {#if f.listing_removed.length}<span class="dim gone">{listingRemovedText(f.listing_removed)}</span>{/if}</td>
                   <td>{#each f.writes as w (w)}<span class="file">{w}</span>{/each}</td>
                 </tr>
               {/each}
@@ -393,6 +393,10 @@
   }
   .file.added {
     background: var(--warning-soft);
+  }
+  /* Its own line under the files the step reads. */
+  .gone {
+    display: block;
   }
   @media (max-width: 1024px) {
     .side {

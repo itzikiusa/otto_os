@@ -1012,7 +1012,8 @@ maps directly onto the `{channel, chat, thread?, mention_only?}` spec.
 **Optimize…** (editor ⋯, a Workflows-tab row's menu, ⌘K) drafts a faster
 version of the workflow from rules alone — no agent, no quota — and shows it
 before anything is saved: the expected saving from the workflow's own
-successful runs (no minutes under 3 runs), what was checked (validation, the
+successful runs (no minutes under 3 runs, or when the draft is not clearly
+faster on them — the card says which), what was checked (validation, the
 step numbers prompts mention, every file a step reads still written before it,
 outward steps in their order), the changes grouped as **Same result, faster** ·
 **Faster; the output may read differently** · **May change findings** (ticked as
