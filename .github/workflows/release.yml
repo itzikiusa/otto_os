@@ -161,7 +161,7 @@ jobs:
     name: Sign and package
     needs: build
     runs-on: macos-latest
-    timeout-minutes: 60 # two notary submissions; Apple usually answers in minutes
+    timeout-minutes: 120 # two notary submissions; Apple took 33 and 31 min on 2026-11-26
     environment: release
     permissions:
       contents: read
@@ -187,9 +187,11 @@ jobs:
       - name: Unpack the app
         run: mkdir -p "$RUNNER_TEMP/app" && tar -xzf "$RUNNER_TEMP/otto-unsigned.tar.gz" -C "$RUNNER_TEMP/app"
 
-      # A throwaway keychain that is never in the search list: sign.sh passes
-      # it to codesign with --keychain. The partition list lets codesign use the
-      # key without a (headless, hanging) access prompt.
+      # A throwaway keychain, on this runner's user search list: GitHub's
+      # codesign finds an identity only there, even with --keychain ("no
+      # identity found" otherwise; the updater's test kit met the same). The
+      # cleanup step deletes it. The partition list lets codesign use the key
+      # without a (headless, hanging) access prompt.
       - name: Import the release certificate
         env:
           P12_BASE64: ${{ secrets.OTTO_SIGN_P12_BASE64 }}
@@ -204,6 +206,8 @@ jobs:
           security unlock-keychain -p "$kc_pw" "$KEYCHAIN"
           security import "$RUNNER_TEMP/release.p12" -k "$KEYCHAIN" -P "$P12_PASSWORD" -f pkcs12 -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$kc_pw" "$KEYCHAIN" > /dev/null
+          # shellcheck disable=SC2046 # one path per word
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
           rm -f "$RUNNER_TEMP/release.p12"
 
       - name: Sign and notarize the app, archive, DMG
