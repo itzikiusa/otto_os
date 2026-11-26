@@ -1,0 +1,189 @@
+{
+  "scenario": "e/ticket-unreadable",
+  "run": {
+    "status": "error",
+    "error": "one or more nodes failed"
+  },
+  "step_numbers": {
+    "n1": 1,
+    "n10": null,
+    "n11": null,
+    "n2": 2,
+    "n3": null,
+    "n4": null,
+    "n5": null,
+    "n6": null,
+    "n7": null,
+    "n8": null,
+    "n9": null
+  },
+  "nodes": [
+    {
+      "id": "n1",
+      "status": "success",
+      "error": null,
+      "attempts": 1,
+      "sessions": 0,
+      "logs": [
+        "▶ manual_trigger started",
+        "Start 1 — attempt 1/1",
+        "context: wrote step1-start-1.output.json",
+        "context: wrote step1-start-1.md"
+      ],
+      "output": {
+        "trigger": "chat",
+        "origin_workspace_id": "ws-compat",
+        "channel": "slack",
+        "chat": "chat-compat",
+        "thread": "thread-compat",
+        "user": "user-compat",
+        "name": "Compat E",
+        "msg": "lorem ipsum dolor sit amet",
+        "prompt": "lorem ipsum dolor sit amet",
+        "jira_ticket": "COMPAT-1",
+        "working_directory": "<data>/workflow-runs/id-1/repo",
+        "base": "main",
+        "pr": null,
+        "pr_branch": null,
+        "relevant_info": [],
+        "goals": [
+          "consectetur adipiscing"
+        ],
+        "raw": "Action: Workflow\nName: Compat E\nMsg: lorem ipsum dolor sit amet\nWorking Directory: <repo>\nBranch: main\nGoals:\n  - consectetur adipiscing\nJira ticket: COMPAT-1\n",
+        "repo_id": "id-2",
+        "repos": [
+          {
+            "repo_id": "id-2",
+            "worktree": "<data>/workflow-runs/id-1/repo",
+            "base": "main"
+          }
+        ]
+      }
+    },
+    {
+      "id": "n2",
+      "status": "error",
+      "error": "invalid: prepare_context: required Jira fetch failed: {\"found\": Bool(true), \"key\": String(\"COMPAT-1\"), \"fetched\": Bool(false), \"error\": String(\"no Jira account configured\")}",
+      "attempts": 1,
+      "sessions": 0,
+      "logs": [
+        "▶ prepare_context started",
+        "Prepare 2 — attempt 1/1",
+        "✗ invalid: prepare_context: required Jira fetch failed: {\"found\": Bool(true), \"key\": String(\"COMPAT-1\"), \"fetched\": Bool(false), \"error\": String(\"no Jira account configured\")}",
+        "context: wrote step2-prepare-2.output.json",
+        "context: wrote step2-prepare-2.md"
+      ],
+      "output": null
+    },
+    {
+      "id": "n3",
+      "status": "skipped",
+      "error": null,
+      "attempts": null,
+      "sessions": 0,
+      "logs": [
+        "skipped (upstream did not succeed)"
+      ],
+      "output": null
+    },
+    {
+      "id": "n4",
+      "status": "skipped",
+      "error": null,
+      "attempts": null,
+      "sessions": 0,
+      "logs": [
+        "skipped (upstream did not succeed)"
+      ],
+      "output": null
+    },
+    {
+      "id": "n5",
+      "status": "skipped",
+      "error": null,
+      "attempts": null,
+      "sessions": 0,
+      "logs": [
+        "skipped (upstream did not succeed)"
+      ],
+      "output": null
+    },
+    {
+      "id": "n6",
+      "status": "skipped",
+      "error": null,
+      "attempts": null,
+      "sessions": 0,
+      "logs": [
+        "skipped (upstream did not succeed)"
+      ],
+      "output": null
+    },
+    {
+      "id": "n7",
+      "status": "skipped",
+      "error": null,
+      "attempts": null,
+      "sessions": 0,
+      "logs": [
+        "skipped (upstream did not succeed)"
+      ],
+      "output": null
+    },
+    {
+      "id": "n8",
+      "status": "skipped",
+      "error": null,
+      "attempts": null,
+      "sessions": 0,
+      "logs": [
+        "skipped (upstream did not succeed)"
+      ],
+      "output": null
+    },
+    {
+      "id": "n9",
+      "status": "skipped",
+      "error": null,
+      "attempts": null,
+      "sessions": 0,
+      "logs": [
+        "skipped (upstream did not succeed)"
+      ],
+      "output": null
+    },
+    {
+      "id": "n10",
+      "status": "skipped",
+      "error": null,
+      "attempts": null,
+      "sessions": 0,
+      "logs": [
+        "skipped (upstream did not succeed)"
+      ],
+      "output": null
+    },
+    {
+      "id": "n11",
+      "status": "skipped",
+      "error": null,
+      "attempts": null,
+      "sessions": 0,
+      "logs": [
+        "skipped (upstream did not succeed)"
+      ],
+      "output": null
+    }
+  ],
+  "context_files": {
+    "jira-COMPAT-1.md": "# ⚠ Could not fetch COMPAT-1\n\nno Jira account configured\n\nProceed from the prompt/instructions; treat ticket details as UNAVAILABLE.\n",
+    "prompt.md": "lorem ipsum dolor sit amet",
+    "repos.json": "[\n  {\n    \"repo\": \"<repo>\",\n    \"repo_id\": \"id-2\",\n    \"repo_name\": \"repo\",\n    \"type\": \"worktree\",\n    \"name\": \"<repo>\",\n    \"worktree\": \"<data>/workflow-runs/id-1/repo\",\n    \"base\": \"main\"\n  }\n]",
+    "run-brief.md": "# Workflow run: Compat E\n\nlorem elit labore minim nisi aute cillum cupidatat deserunt pretium maecenas donec senectus integer gravida odio porttitor sit eiusmod magna nostrud ea reprehenderit pariatur sunt id nunc purus pellentesque fames arcu placerat quam tellus adipiscing ut ad laboris duis esse occaecat officia curabitur viverra eleifend tristique egestas ultrices volutpat nullam dolor do dolore quis ex in nulla proident anim lacus lacinia sapien malesuada vivamus fusce mauris justo consectetur incididunt enim ullamco consequat velit sint qui laborum risus scelerisque morbi turpis bibendum eu potenti ipsum sed et veniam\n\n- Run id: `id-1`\n- Trigger: chat\n\n## Mission\n\n- **Prompt:** lorem ipsum dolor sit amet\n- **Jira ticket:** COMPAT-1\n- **Goals:**\n  - consectetur adipiscing\n\n## Repos & branches\n\n| repo | type | work | source | worktree |\n|---|---|---|---|---|\n| <repo> | worktree | <repo> | main | <data>/workflow-runs/id-1/repo |\n\nThe machine-readable version of this table is `repos.json` in this directory — it is kept up to date as the run progresses and is the authoritative list.\n\n## Planned steps\n\n1. Start 1 (manual_trigger)\n2. Prepare 2 (prepare_context)\n3. Agent step 9 (agent_prompt)\n4. Agent step 3 (agent_prompt)\n5. Agent step 4 (agent_prompt)\n6. Agent step 5 (agent_prompt)\n7. Agent step 10 (agent_prompt)\n8. Agent step 11 (agent_prompt)\n9. Agent step 6 (agent_prompt)\n10. Notify 7 (channel_notify)\n11. Log 8 (log)\n\n## How to use this directory\n\n- `prompt.md` — the ask that started this run.\n- This file (`run-brief.md`) is the run's mission brief.\n- `repos.json` — machine-readable registry of every repo/branch/worktree in play.\n- Each finished step leaves `step{N}-{name}.md` (its handoff summary) and `step{N}-{name}.output.json` (its raw output). Loop iterations add `-iter{X}`.\n- Read the prior step files you need before starting your own work — they are complete, unlike any inline excerpt in your prompt.\n- Before you finish, write YOUR step's `.md` file (the exact path is given in your prompt): what you did/found/changed, files touched, decisions, and anything the next step needs.\n",
+    "step1-start-1.md": "# Start 1 (manual_trigger)\n\n## Logs\n\n- ▶ manual_trigger started\n- Start 1 — attempt 1/1\n\n## Output\n\n```json\n{\n  \"trigger\": \"chat\",\n  \"origin_workspace_id\": \"ws-compat\",\n  \"channel\": \"slack\",\n  \"chat\": \"chat-compat\",\n  \"thread\": \"thread-compat\",\n  \"user\": \"user-compat\",\n  \"name\": \"Compat E\",\n  \"msg\": \"lorem ipsum dolor sit amet\",\n  \"prompt\": \"lorem ipsum dolor sit amet\",\n  \"jira_ticket\": \"COMPAT-1\",\n  \"working_directory\": \"<data>/workflow-runs/id-1/repo\",\n  \"base\": \"main\",\n  \"pr\": null,\n  \"pr_branch\": null,\n  \"relevant_info\": [],\n  \"goals\": [\n    \"consectetur adipiscing\"\n  ],\n  \"raw\": \"Action: Workflow\\nName: Compat E\\nMsg: lorem ipsum dolor sit amet\\nWorking Directory: <repo>\\nBranch: main\\nGoals:\\n  - consectetur adipiscing\\nJira ticket: COMPAT-1\\n\",\n  \"repo_id\": \"id-2\",\n  \"repos\": [\n    {\n      \"repo_id\": \"id-2\",\n      \"worktree\": \"<data>/workflow-runs/id-1/repo\",\n      \"base\": \"main\"\n    }\n  ]\n}\n```\n",
+    "step1-start-1.output.json": "{\n  \"trigger\": \"chat\",\n  \"origin_workspace_id\": \"ws-compat\",\n  \"channel\": \"slack\",\n  \"chat\": \"chat-compat\",\n  \"thread\": \"thread-compat\",\n  \"user\": \"user-compat\",\n  \"name\": \"Compat E\",\n  \"msg\": \"lorem ipsum dolor sit amet\",\n  \"prompt\": \"lorem ipsum dolor sit amet\",\n  \"jira_ticket\": \"COMPAT-1\",\n  \"working_directory\": \"<data>/workflow-runs/id-1/repo\",\n  \"base\": \"main\",\n  \"pr\": null,\n  \"pr_branch\": null,\n  \"relevant_info\": [],\n  \"goals\": [\n    \"consectetur adipiscing\"\n  ],\n  \"raw\": \"Action: Workflow\\nName: Compat E\\nMsg: lorem ipsum dolor sit amet\\nWorking Directory: <repo>\\nBranch: main\\nGoals:\\n  - consectetur adipiscing\\nJira ticket: COMPAT-1\\n\",\n  \"repo_id\": \"id-2\",\n  \"repos\": [\n    {\n      \"repo_id\": \"id-2\",\n      \"worktree\": \"<data>/workflow-runs/id-1/repo\",\n      \"base\": \"main\"\n    }\n  ]\n}",
+    "step2-prepare-2.md": "# Prepare 2 (prepare_context)\n\n## Error\n\ninvalid: prepare_context: required Jira fetch failed: {\"found\": Bool(true), \"key\": String(\"COMPAT-1\"), \"fetched\": Bool(false), \"error\": String(\"no Jira account configured\")}\n\n## Logs\n\n- ▶ prepare_context started\n- Prepare 2 — attempt 1/1\n- ✗ invalid: prepare_context: required Jira fetch failed: {\"found\": Bool(true), \"key\": String(\"COMPAT-1\"), \"fetched\": Bool(false), \"error\": String(\"no Jira account configured\")}\n\n",
+    "step2-prepare-2.output.json": "null"
+  },
+  "prompts": []
+}

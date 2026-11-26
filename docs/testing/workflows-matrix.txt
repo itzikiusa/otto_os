@@ -20,8 +20,8 @@ E2.10 pending
 E2.11 pending
 E2.12 pending
 E2.13 pending
-C1 pending
-C2 pending
+C1
+C2
 C3 pending
 C4 pending
 C5 pending
@@ -79,13 +79,13 @@ E8.2 pending
 E8.3 pending
 E8.4 pending
 E8.5 pending
-X1.a pending
-X1.b pending
+X1.a
+X1.b
 X1.c pending
 X1.d pending
 X1.e pending
-X1.f pending
-X1.g pending
+X1.f
+X1.g
 X1.h pending
 X1.i pending
 X2 pending

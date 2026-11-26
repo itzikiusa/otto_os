@@ -24,7 +24,6 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use otto_brokers::types::{ConsumeReq, ValueFormat};
-use otto_channels::adapter::Adapter;
 use otto_core::domain::{Channel, User, Workspace};
 use otto_core::event::Event;
 use otto_core::paths::expand_tilde;

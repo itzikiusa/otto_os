@@ -87,6 +87,11 @@ TRACE_KEYS = [
     "summarizer_ran", "edge", "taken", "branch", "error", "other", "bool", "number",
     "string", "array", "object", "null", "auth", "fd", "review_incomplete", "checkout_unresolved",
     "canceled", "provider",
+    # golden/ (crates/otto-server/tests/wf_compat.rs): its keys, scenario names and
+    # the chat transcript's record headers
+    "scenario", "step_numbers", "context_files", "prompts", "passed", "failed", "no-ticket",
+    "ticket-unreadable", "send", "edit", "upload", "formatted", "plain", "dur", "time", "sha",
+    "Bool",  # serde_json's Debug text inside an engine error the goldens record
 ]
 # Every param key the five definitions use (Otto's own names).
 PARAM_KEYS = [
@@ -111,7 +116,7 @@ PLACEHOLDERS = [re.compile(p) for p in (
     r"n\d+", r"e\d+", r"x\d+", r"step\d+(-[a-z0-9]+)*(\.md|\.output\.json)?",
     r"step\d+-\*(\.md|\.output\.json)?", r"missing-(skill|lens)-\d+",
     r"(run|session|review|repo|id)-\d+", r"\d+(\.\d+)*[a-zA-Z]{0,2}", r"202[67]-\d\d-\d\dT[0-9:.]+Z?",
-    r"[0-9a-f]{64}", r"sha256",
+    r"[0-9a-f]{64}", r"sha256", r"m\d+", r"short-\d+", r"COMPAT-\d+", r"jira-COMPAT-\d+\.md",
 )]
 ERROR_CLASSES = [
     ("auth", ("login expired", "/login", "not logged in", "unauthorized")),
@@ -138,6 +143,8 @@ def filler(n_chars: int, seed: int = 0) -> str:
 
 
 def tokens(text: str) -> list[str]:
+    # A backslash escape (\n in Rust source or in JSON-in-a-string) is a separator.
+    text = re.sub(r"\\[nrt\"\\]", " ", text)
     return [t.rstrip(".-") for t in TOKEN_RE.findall(text) if t.rstrip(".-")]
 
 
