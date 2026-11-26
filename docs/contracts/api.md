@@ -7149,7 +7149,7 @@ and false-green test gaps matter; exhaustive hypothetical branch coverage does n
 
 | Method | Access | Request | Response |
 | --- | --- | --- | --- |
-| POST /reviews/{review_id}/fix-goal | human credential + ws editor | `{ "target_score"?: number }` (default 9.5, finite 1–10) | Existing/new `GoalLoop`; new/draft loops start immediately |
+| POST /reviews/{review_id}/fix-goal | human credential + ws editor | `{ "target_score"?: number }` (default 9.5, finite 1–10) | `{workflow_id, run_id}` — a goal (`origin_ref = "review:<id>"`, goal.md §4.1): Start (`lane: long`) → loop { fix → review (the review engine, `base` = the scope plan's merge-base, `previous_review_id` = this review, `chain_iterations`, threshold = target × 10, the scope plan's lenses) → check ("the review passes" + "critical-checks") }, up to 6 iterations or 2 h of active time, held when unmet; the run worktree is cut at the reviewed head SHA. A second click returns the same goal's latest run. 400: not a completed PR review, no recorded checkout, a head that is not a full SHA or differs from the scope plan's, or a blocked budget |
 
 Fix goals require a completed PR review with a scope plan and matching durable
 full head SHA. Legacy/local/running/incomplete reviews are rejected with 400;

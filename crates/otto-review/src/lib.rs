@@ -18,7 +18,6 @@ pub mod contract;
 pub mod delta;
 pub mod engine;
 pub mod fallback;
-pub mod fix_goal;
 pub mod handoff;
 pub mod history;
 pub mod prompts;

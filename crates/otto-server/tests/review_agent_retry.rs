@@ -26,8 +26,9 @@ async fn mem_pool() -> DbPool {
 /// A fix launch must be a completed, pinned review and must reuse its existing
 /// paused goal. Exercise the HTTP boundary without starting a real provider.
 #[tokio::test]
-async fn fix_goal_checks_review_identity_and_reuses_the_existing_loop() {
-    use otto_core::domain::{GoalLoopPhase, GoalLoopStatus, ReviewScopePlan, ReviewStatus};
+async fn fix_goal_checks_review_identity_and_reuses_the_existing_goal() {
+    use otto_core::domain::{ReviewScopePlan, ReviewStatus};
+    use otto_core::workflows::WorkflowGraph;
     let tmp = tempfile::tempdir().unwrap();
     let pool = mem_pool().await;
     let ctx = ServerCtx::for_tests(&pool, tmp.path().join("data")).await;
@@ -145,12 +146,13 @@ async fn fix_goal_checks_review_identity_and_reuses_the_existing_loop() {
         .await
         .unwrap()
         .contains("scope and checkout differ"));
-    assert!(ctx
-        .goal_loops_repo
-        .list_by_workspace(&ws.id)
+    let runs = otto_state::WorkflowsRepo::new(pool.clone());
+    let link = format!("review:{}", review.id);
+    assert!(runs
+        .find_goal_by_origin_ref(&ws.id, &link)
         .await
         .unwrap()
-        .is_empty());
+        .is_none());
 
     ctx.reviews_store
         .set_status(&review.id, ReviewStatus::Running, None)
@@ -165,49 +167,36 @@ async fn fix_goal_checks_review_identity_and_reuses_the_existing_loop() {
         .set_status(&review.id, ReviewStatus::Done, None)
         .await
         .unwrap();
-    let checked = ctx.reviews_store.get_review(&review.id).await.unwrap();
-    let (definition, config) = otto_review::fix_goal::build(&checked, 9.5, "codex").unwrap();
-    let goal = ctx
-        .goal_loops_repo
-        .create(otto_state::NewGoalLoop {
-            workspace_id: ws.id.clone(),
-            name: definition.title.clone(),
-            repo_path: repo.path,
-            definition,
-            config,
-            limits: Default::default(),
-            created_by: owner.id,
-        })
+    // A goal this review already started (goal.md §4.1): the button returns
+    // its latest run instead of starting another (and no agent starts here).
+    let wf = runs
+        .create(
+            &ws.id,
+            "Goal · Fix",
+            "",
+            "",
+            &WorkflowGraph::default(),
+            &owner.id,
+        )
         .await
         .unwrap();
-    ctx.goal_loops_repo
-        .update_runtime(
-            &goal.id,
-            GoalLoopStatus::Paused,
-            GoalLoopPhase::Planning,
-            0,
-            0,
-        )
+    runs.set_origin(&wf.id, Some("goal"), Some(&link))
+        .await
+        .unwrap();
+    let run = runs
+        .create_run(&wf.id, &ws.id, &serde_json::json!({}), Some(&owner.id))
         .await
         .unwrap();
     for _ in 0..2 {
         let response = request().send().await.unwrap();
         assert_eq!(response.status(), 200);
         let body: serde_json::Value = response.json().await.unwrap();
-        assert_eq!(body["id"], goal.id);
         assert_eq!(
-            body["status"], "paused",
-            "existing work must not silently resume"
+            body,
+            serde_json::json!({"workflow_id": wf.id, "run_id": run.id})
         );
     }
-    assert_eq!(
-        ctx.goal_loops_repo
-            .list_by_workspace(&ws.id)
-            .await
-            .unwrap()
-            .len(),
-        1
-    );
+    assert_eq!(runs.list(&ws.id).await.unwrap().len(), 1, "no second goal");
     server.abort();
 }
 
