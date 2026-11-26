@@ -104,6 +104,8 @@ mod slack_as_me;
 mod transcript_long_session;
 #[path = "ui_control.rs"]
 mod ui_control;
+#[path = "wf_lifecycle.rs"]
+mod wf_lifecycle;
 #[path = "workflow_run_files.rs"]
 mod workflow_run_files;
 
