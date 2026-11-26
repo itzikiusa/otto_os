@@ -417,7 +417,8 @@ mod tests {
         engine.shutdown().await;
         pool.close().await;
         writer.close().await.unwrap();
-        tokio::fs::remove_dir_all(temp).await.unwrap();
+        // Best effort: the engine's journal can still be writing its files.
+        let _ = tokio::fs::remove_dir_all(temp).await;
     }
 
     #[tokio::test]
@@ -530,6 +531,6 @@ mod tests {
         assert_eq!(recovered.pending_events[0].cache_read_tokens, 0);
         pool.close().await;
         writer.close().await.unwrap();
-        tokio::fs::remove_dir_all(temp).await.unwrap();
+        let _ = tokio::fs::remove_dir_all(temp).await;
     }
 }

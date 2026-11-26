@@ -50,6 +50,8 @@ export interface UpdateState {
   blocked?: string | null;
   skipped?: string | null;
   auto_install?: boolean;
+  /** Release candidates are offered too. */
+  prereleases?: boolean;
   /** Unix seconds of the last finished check. */
   last_check?: number | null;
   last_result?: UpdateResult | null;
@@ -250,7 +252,16 @@ class UpdatesStore {
 
   /** "Install updates automatically": download + stage in the background. */
   async setAuto(on: boolean): Promise<void> {
-    await this.#act(() => call<UpdateState>('update_set_auto', { on }));
+    await this.#setPref('update_set_auto', on);
+  }
+
+  /** "Include release candidates": the shell then checks again. */
+  async setPrereleases(on: boolean): Promise<void> {
+    await this.#setPref('update_set_prereleases', on);
+  }
+
+  async #setPref(cmd: string, on: boolean): Promise<void> {
+    await this.#act(() => call<UpdateState>(cmd, { on }));
     if (this.actionError) toasts.error('Couldn’t save the update setting', this.actionError);
   }
 

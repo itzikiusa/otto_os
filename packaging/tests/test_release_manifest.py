@@ -2,6 +2,7 @@
 import json
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -114,6 +115,13 @@ class ReleaseManifest(unittest.TestCase):
             self.assertEqual(r.stdout.strip(),
                              'identifier "ottod" and (certificate leaf = H"aa11" or certificate leaf = H"bb22")')
             self.assertEqual(run("identity", cwd=d).stdout.strip(), "Otto Release Signing")
+            (root / "apps/desktop/src-tauri/release-identity.json").write_text(json.dumps(
+                {"signingIdentity": "Developer ID Application: A (ABCDE12345)", "acceptedTeams": ["ABCDE12345"]}))
+            self.assertEqual(run("requirement", "ottod", cwd=d).stdout.strip(),
+                             'identifier "ottod" and ((anchor apple generic'
+                             ' and certificate 1[field.1.2.840.113635.100.6.2.6] exists'
+                             ' and certificate leaf[field.1.2.840.113635.100.6.1.13] exists'
+                             ' and certificate leaf[subject.OU] = "ABCDE12345"))')
 
     def jobs(self):
         """release.yml's jobs by name (the text of each job block)."""
@@ -145,6 +153,7 @@ class ReleaseManifest(unittest.TestCase):
         self.assertIn("umask 077", sign)
         cleanup = sign.split("if: always()")[1]
         self.assertIn("release.p12", cleanup.split("- name:")[0])
+        self.assertIn("notary.p8", cleanup.split("- name:")[0])
         # The keychain is gone before the update key is used.
         self.assertLess(sign.index("delete-keychain"), sign.index("TAURI_SIGNING_PRIVATE_KEY"))
 
@@ -250,15 +259,37 @@ class ReleaseManifest(unittest.TestCase):
             self.assertNotEqual(r.returncode, 0)
             self.assertIn("TEST certificate", r.stderr)
 
-    def test_the_repo_config_today_is_refused(self):
-        # Until the owner's real identity and key replace the TEST ones.
+    def test_signers_the_installed_app_would_drop_are_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            self.tree(root)
+            self.release_config(root)
+            ident = root / "apps/desktop/src-tauri/release-identity.json"
+            for signers in ({}, {"acceptedTeams": []}, {"acceptedTeams": ["abcde12345"]},
+                            {"acceptedTeams": ["ABCDE1234"]}, {"acceptedLeaves": ["aa11"]},
+                            {"acceptedTeams": ["ABCDE12345"], "acceptedLeaves": ["zz" * 20]}):
+                ident.write_text(json.dumps({"test": False, "signingIdentity": "x", **signers}))
+                r = run("check-release-config", cwd=d)
+                self.assertNotEqual(r.returncode, 0, signers)
+                self.assertIn("acceptedTeams", r.stderr)
+            ident.write_text(json.dumps({"test": False, "signingIdentity": "x", "acceptedTeams": ["ABCDE12345"]}))
+            self.assertEqual(run("check-release-config", cwd=d).returncode, 0)
+
+    def test_the_repo_config_is_releasable(self):
         r = run("check-release-config", cwd=REPO)
-        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_release_artifacts_refuses_a_test_config_before_signing_anything(self):
-        r = subprocess.run(["bash", str(REPO / "packaging/release-artifacts.sh"), "bundle",
-                            "/nonexistent/Otto.app", "0.5.4", "/nonexistent/out"],
-                           capture_output=True, text=True)
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            self.tree(root)
+            self.release_config(root, test=True)
+            (root / "packaging").mkdir()
+            for name in ("release-artifacts.sh", "release-manifest.py"):
+                shutil.copy(REPO / "packaging" / name, root / "packaging" / name)
+            r = subprocess.run(["bash", str(root / "packaging/release-artifacts.sh"), "bundle",
+                                "/nonexistent/Otto.app", "0.5.4", "/nonexistent/out"],
+                               capture_output=True, text=True)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("release-manifest:", r.stderr)
         self.assertNotIn("codesign", r.stderr)
@@ -266,9 +297,11 @@ class ReleaseManifest(unittest.TestCase):
     def test_the_repo_identity_file_is_well_formed(self):
         ident = json.loads((REPO / "apps/desktop/src-tauri/release-identity.json").read_text())
         self.assertTrue(ident["signingIdentity"])
-        self.assertTrue(ident["acceptedLeaves"])
-        for leaf in ident["acceptedLeaves"]:
+        self.assertTrue(ident.get("acceptedLeaves") or ident.get("acceptedTeams"))
+        for leaf in ident.get("acceptedLeaves", []):
             self.assertRegex(leaf, r"^[0-9a-f]{40}$")
+        for team in ident.get("acceptedTeams", []):
+            self.assertRegex(team, r"^[0-9A-Z]{10}$")
 
 
 if __name__ == "__main__":

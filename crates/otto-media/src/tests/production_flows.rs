@@ -2274,8 +2274,13 @@ async fn pictures_come_first_then_shapes_one_gpu_job_at_a_time() {
     for p in ["man", "crate", "lamp"] {
         assert!(log.contains(&format!("picture {p} {p}")), "{log:?}");
     }
+    // Readying runs on the CPU beside the next shape, one at a time: the
+    // man's starts while the crate is built, and the lamp never waits for
+    // the crate's. (The crate's readying queues behind the man's, which
+    // takes as long as two shapes, so its start has no order with the
+    // lamp's end.)
     assert!(
-        at("start gameready crate") < at("end generate lamp"),
+        at("start gameready man") < at("end generate crate"),
         "{log:?}"
     );
     assert!(

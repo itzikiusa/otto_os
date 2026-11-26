@@ -7,11 +7,26 @@ multi-agent code review, Jira/Confluence product workflows, SSH/database
 connections, an HTTP API client, real token-usage tracking, and Slack/Telegram
 bridges so an agent can work a ticket from a chat thread.
 
-**Version 0.5.0** · macOS (Apple Silicon; Intel from source) · actively developed, so
+**Version 0.6.1** · macOS (Apple Silicon; Intel from source) · actively developed, so
 expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
 
 🎬 **[Watch the product tour](https://github.com/itzikiusa/otto_os/releases/download/walkthroughs/otto-tour-20261125.mp4)**
 (3 minutes, Otto 0.6.0; also in the app under **Help → Walkthroughs**).
+
+### What's new in 0.6.1
+
+- **Signed and notarized by Apple.** Otto is now signed with an Apple
+  Developer ID and notarized. The download opens like any other Mac app: macOS
+  asks once whether to open an app downloaded from the internet, with no
+  **Open Anyway** step in Privacy & Security.
+- **Otto updates itself.** This is the first release that installs updates:
+  *Otto ▸ Check for Updates…* (or the row at the bottom of the sidebar)
+  downloads the new version, verifies it and restarts into it. *Settings ▸
+  Updates ▸ Include release candidates* also offers early builds of the next
+  version.
+- **Coming from 0.6.0 or earlier:** install this DMG by hand once. The signer
+  changed, so macOS asks again for the permissions Otto uses (Accessibility,
+  Screen Recording, Microphone, the Keychain).
 
 ### What's new in 0.6.0
 
@@ -699,8 +714,10 @@ The [latest release](../../releases/latest) has `Otto_<version>_aarch64.dmg`
 The rolling `latest` build that the retired monthly workflow made is no longer
 updated.
 
-**First launch.** Releases are signed with Otto's own certificate but not
-notarized by Apple, so macOS blocks the first open.
+**First launch.** From 0.6.1 on, releases are signed with an Apple Developer ID
+and notarized by Apple: macOS asks once whether to open an app downloaded from
+the internet, and opens it. The DMGs of 0.6.0 and earlier are not notarized, so
+macOS blocks their first open.
 - **macOS 15 and later:** open Otto once, then click **Open Anyway** in
   **System Settings ▸ Privacy & Security**. Control-click ▸ Open no longer
   bypasses Gatekeeper there.

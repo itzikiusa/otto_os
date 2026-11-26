@@ -4,6 +4,8 @@
 //! codesign-check the bundle, then — only when the person clicks Restart —
 //! hand over to the detached finisher and quit. "Install updates
 //! automatically" only downloads and stages; nothing restarts unattended.
+//! A check reads GitHub's latest release, which is never a pre-release; with
+//! "Include release candidates" it reads the newest release of any kind.
 //!
 //! The SPA drives it through the `update_*` commands and listens to
 //! [`EVENT`] (the whole [`UpdateState`] on every change). A source build
@@ -88,6 +90,8 @@ pub struct UpdateState {
     pub blocked: Option<String>,
     pub skipped: Option<String>,
     pub auto_install: bool,
+    /// Release candidates are offered too.
+    pub prereleases: bool,
     /// Unix seconds of the last finished check.
     pub last_check: Option<i64>,
     /// The last install's outcome, until the UI calls `update_result_seen`.
@@ -99,6 +103,8 @@ pub struct UpdateState {
 struct Prefs {
     #[serde(default)]
     auto_install: bool,
+    #[serde(default)]
+    prereleases: bool,
     #[serde(default)]
     skipped: Option<String>,
     #[serde(default)]
@@ -286,11 +292,13 @@ fn endpoint(cfg: &serde_json::Value) -> Option<reqwest::Url> {
     cfg.get("endpoints")?.get(0)?.as_str()?.parse().ok()
 }
 
-/// The accepted code-signing identities: `acceptedLeaves` (SHA-1 of each
-/// leaf certificate) of the file packaging/release-artifacts.sh signs and
-/// checks with, so the TEST identity is replaced in that one place. A later
-/// identity (a new certificate, Developer ID) is added there next to the old
-/// one for at least one release.
+/// The accepted code-signing identities of the file
+/// packaging/release-artifacts.sh signs and checks with, so the TEST identity
+/// is replaced in that one place: `acceptedTeams` (Apple Developer ID Team
+/// IDs — a renewed certificate of the same team stays accepted) and
+/// `acceptedLeaves` (SHA-1 of a leaf certificate; the self-signed TEST one).
+/// Another team or leaf is added there next to the old one for at least one
+/// release.
 const RELEASE_IDENTITY: &str = include_str!("../../release-identity.json");
 
 const TAURI_CONF: &str = include_str!("../../tauri.conf.json");
@@ -329,16 +337,32 @@ fn test_config(identity: &str, tauri_conf: &str) -> bool {
 
 fn signers(identity: &str) -> Vec<String> {
     let v: serde_json::Value = serde_json::from_str(identity).unwrap_or_default();
-    v.get("acceptedLeaves")
-        .and_then(|a| a.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|s| s.as_str())
-                .filter(|s| s.len() == 40 && s.chars().all(|c| c.is_ascii_hexdigit()))
-                .map(|leaf| format!("certificate leaf = H\"{}\"", leaf.to_ascii_lowercase()))
-                .collect()
+    let list = |key: &str| -> Vec<String> {
+        let items = v.get(key).and_then(|a| a.as_array());
+        let strs = items.into_iter().flatten().filter_map(|s| s.as_str());
+        strs.map(str::to_owned).collect()
+    };
+    let leaves = list("acceptedLeaves")
+        .into_iter()
+        .filter(|s| s.len() == 40 && s.chars().all(|c| c.is_ascii_hexdigit()))
+        .map(|leaf| format!("certificate leaf = H\"{}\"", leaf.to_ascii_lowercase()));
+    // Apple's Developer ID chain (its intermediate and leaf markers) issued
+    // to that team: what Gatekeeper itself checks.
+    let teams = list("acceptedTeams")
+        .into_iter()
+        .filter(|s| {
+            s.len() == 10
+                && s.chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
         })
-        .unwrap_or_default()
+        .map(|team| {
+            format!(
+                "(anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists \
+                 and certificate leaf[field.1.2.840.113635.100.6.1.13] exists \
+                 and certificate leaf[subject.OU] = \"{team}\")"
+            )
+        });
+    leaves.chain(teams).collect()
 }
 
 /// `https://github.com/<o>/<r>/releases/tag/v<version>` from the endpoint.
@@ -347,6 +371,48 @@ fn release_url(endpoint: &reqwest::Url, version: &str) -> Option<String> {
     let (owner, repo) = (segs.next()?, segs.next()?);
     (endpoint.host_str() == Some("github.com") && segs.next() == Some("releases"))
         .then(|| format!("https://github.com/{owner}/{repo}/releases/tag/v{version}"))
+}
+
+/// GitHub's API list of the newest releases of the endpoint's repository,
+/// pre-releases included.
+fn listing_url(endpoint: &reqwest::Url) -> Option<reqwest::Url> {
+    let mut segs = endpoint.path_segments()?;
+    let (owner, repo) = (segs.next()?, segs.next()?);
+    if endpoint.host_str() != Some("github.com") {
+        return None;
+    }
+    format!("https://api.github.com/repos/{owner}/{repo}/releases?per_page=5")
+        .parse()
+        .ok()
+}
+
+/// The `latest.json` of the highest version in that list (a final version
+/// is higher than its candidates). Releases without one don't count: the
+/// rolling ones, and those made before the updater.
+fn newest_manifest(listing: &serde_json::Value) -> Option<reqwest::Url> {
+    let manifest = |release: &serde_json::Value| {
+        let tag = release["tag_name"].as_str()?.strip_prefix('v')?;
+        let assets = release["assets"].as_array()?;
+        let asset = assets.iter().find(|a| a["name"] == "latest.json")?;
+        let url = asset["browser_download_url"].as_str()?.parse().ok()?;
+        Some((semver::Version::parse(tag).ok()?, url))
+    };
+    let found = listing.as_array()?.iter().filter_map(manifest);
+    found.max_by(|a, b| a.0.cmp(&b.0)).map(|(_, url)| url)
+}
+
+/// "Include release candidates": the manifest of the newest release in
+/// `listing`. When GitHub refuses the list (its API limits anonymous
+/// requests per address) or it has no such release, the endpoint stays: the
+/// latest final release.
+async fn manifest_url(endpoint: &reqwest::Url, listing: &reqwest::Url) -> reqwest::Url {
+    let listed = fetch::get(listing, fetch::LISTING_MAX, |_, _| {})
+        .await
+        .ok();
+    listed
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .and_then(|json| newest_manifest(&json))
+        .unwrap_or_else(|| endpoint.clone())
 }
 
 struct Fail(ErrorKind, String);
@@ -484,6 +550,7 @@ pub fn init(app: &AppHandle) {
         blocked,
         skipped: prefs.skipped.clone(),
         auto_install: prefs.auto_install,
+        prereleases: prefs.prereleases,
         last_check: prefs.last_check,
         ..state
     };
@@ -545,10 +612,10 @@ async fn check(app: &AppHandle, manual: bool) {
         i.state.phase = Phase::Checking;
         i.state.error = None;
         i.state.error_kind = None;
-        Some(plugin_config(app))
+        Some((plugin_config(app), i.prefs.prereleases))
     })
     .flatten();
-    let Some(cfg) = go else { return };
+    let Some((cfg, prereleases)) = go else { return };
     publish(app);
     let Some(url) = endpoint(&cfg) else {
         return fail(
@@ -556,7 +623,11 @@ async fn check(app: &AppHandle, manual: bool) {
             Fail(ErrorKind::Failed, "no update endpoint is configured".into()),
         );
     };
-    let found = find_update(app, &url).await;
+    let manifest = match listing_url(&url).filter(|_| prereleases) {
+        Some(listing) => manifest_url(&url, &listing).await,
+        None => url.clone(),
+    };
+    let found = find_update(app, &manifest).await;
     let auto = with(|i| {
         i.prefs.last_check = Some(now_secs());
         i.state.last_check = i.prefs.last_check;
@@ -766,6 +837,21 @@ pub fn update_set_auto(app: AppHandle, on: bool) -> UpdateState {
     snapshot()
 }
 
+/// "Include release candidates", then a check with the new choice: it offers
+/// a candidate, or forgets the one on offer.
+#[tauri::command]
+pub fn update_set_prereleases(app: AppHandle, on: bool) -> UpdateState {
+    with(|i| {
+        i.prefs.prereleases = on;
+        i.state.prereleases = on;
+        save_prefs(&i.paths.prefs(), &i.prefs);
+    });
+    publish(&app);
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move { check(&handle, false).await });
+    snapshot()
+}
+
 /// Skip `version` (hidden from automatic checks), or unskip with `null`.
 #[tauri::command]
 pub fn update_skip(app: AppHandle, version: Option<String>) -> UpdateState {
@@ -818,15 +904,10 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode(test_key)
         );
         assert!(test_config(real, &conf));
-        // The repo carries the TEST identity and key until the owner's replace them.
-        assert!(test_config(RELEASE_IDENTITY, TAURI_CONF));
-        assert!(
-            test_config(real, TAURI_CONF),
-            "the repo's TEST pubkey alone"
-        );
+        // The repo carries the owner's Developer ID team and update key.
         assert_eq!(
             release_channel(test_config(RELEASE_IDENTITY, TAURI_CONF), Some("release")),
-            Channel::Source
+            Channel::Release
         );
     }
 
@@ -893,6 +974,15 @@ mod tests {
                 format!("certificate leaf = H\"{}\"", "a".repeat(40))
             ],
             "hex leaves only — nothing else reaches the requirement"
+        );
+        assert_eq!(
+            signers(r#"{"acceptedTeams": ["ABCDE12345", "x\" or anchor apple", "abcde12345"]}"#),
+            [
+                "(anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists \
+              and certificate leaf[field.1.2.840.113635.100.6.1.13] exists \
+              and certificate leaf[subject.OU] = \"ABCDE12345\")"
+            ],
+            "Team IDs only"
         );
         assert_eq!(
             signers(RELEASE_IDENTITY).len(),
@@ -1065,6 +1155,66 @@ mod tests {
         };
         assert!(msg.contains("larger"), "{msg}");
         let _ = std::fs::remove_dir_all(&updates);
+    }
+
+    #[test]
+    fn release_candidates_come_from_the_highest_listed_version_with_a_manifest() {
+        let endpoint = "https://github.com/acme/otto/releases/latest/download/latest.json";
+        assert_eq!(
+            listing_url(&endpoint.parse().unwrap()).unwrap().as_str(),
+            "https://api.github.com/repos/acme/otto/releases?per_page=5"
+        );
+        assert!(listing_url(&"https://example.com/a/b/latest.json".parse().unwrap()).is_none());
+
+        let release = |tag: &str, assets: &[&str]| {
+            let asset = |name: &&str| {
+                let url = format!("https://github.com/acme/otto/releases/download/{tag}/{name}");
+                serde_json::json!({"name": name, "browser_download_url": url})
+            };
+            serde_json::json!({"tag_name": tag, "assets": assets.iter().map(asset).collect::<Vec<_>>()})
+        };
+        let mut releases = vec![
+            release("walkthroughs", &["latest.json"]),
+            release("v0.6.1-rc.2", &["latest.json"]),
+            release("v0.6.1-rc.10", &["Otto.dmg", "latest.json"]),
+            release("v0.7.0", &["Otto.dmg"]),
+            release("v0.6.0", &["latest.json"]),
+        ];
+        let newest = |releases: &[serde_json::Value]| {
+            newest_manifest(&serde_json::json!(releases)).map(|u| u.to_string())
+        };
+        assert_eq!(
+            newest(&releases).unwrap(),
+            "https://github.com/acme/otto/releases/download/v0.6.1-rc.10/latest.json",
+            "rc.10 > rc.2; 0.7.0 has no manifest"
+        );
+        releases.push(release("v0.6.1", &["latest.json"]));
+        assert_eq!(
+            newest(&releases).unwrap(),
+            "https://github.com/acme/otto/releases/download/v0.6.1/latest.json",
+            "the final version is higher than its candidates"
+        );
+        assert_eq!(newest(&[]), None);
+        let refused = serde_json::json!({"message": "API rate limit exceeded"});
+        assert_eq!(newest_manifest(&refused), None);
+    }
+
+    #[tokio::test]
+    async fn a_refused_or_empty_listing_leaves_the_latest_final_release() {
+        let srv = Server::start(vec![("/empty", 200, b"[]".to_vec(), None)]);
+        let (endpoint, rc) = (srv.url("/latest.json"), srv.url("/rc/latest.json"));
+        srv.set("/limited", 403, b"{\"message\": \"rate limit\"}".to_vec());
+        let listing = serde_json::json!([{
+            "tag_name": "v1.2.3-rc.1",
+            "assets": [{"name": "latest.json", "browser_download_url": rc}],
+        }]);
+        srv.set("/releases", 200, serde_json::to_vec(&listing).unwrap());
+        assert_eq!(manifest_url(&endpoint, &srv.url("/releases")).await, rc);
+        assert_eq!(
+            manifest_url(&endpoint, &srv.url("/limited")).await,
+            endpoint
+        );
+        assert_eq!(manifest_url(&endpoint, &srv.url("/empty")).await, endpoint);
     }
 
     /// C1-012: a version that failed is skipped persistently the moment its

@@ -4,8 +4,13 @@
 #
 #   release-artifacts.sh bundle <Otto.app> <version> <out-dir>
 #       Env OTTO_SIGN_KEYCHAIN: keychain file holding the identity named in
-#       apps/desktop/src-tauri/release-identity.json. Signs and verifies the
-#       app, writes Otto_<v>_aarch64.app.tar.gz, the DMG + .sha256, notes.md.
+#       apps/desktop/src-tauri/release-identity.json (unset: the login
+#       keychain). Env for Apple's notary service: OTTO_NOTARY_PROFILE (a
+#       `notarytool store-credentials` profile, on the owner's Mac) or
+#       OTTO_NOTARY_KEY (an App Store Connect API key file) + OTTO_NOTARY_KEY_ID
+#       + OTTO_NOTARY_ISSUER (CI). Signs, verifies, notarizes and staples the
+#       app, writes Otto_<v>_aarch64.app.tar.gz, the DMG (signed, notarized,
+#       stapled) + .sha256, notes.md.
 #   release-artifacts.sh update <version> <out-dir> <asset-base-url>
 #       Env TAURI_SIGNING_PRIVATE_KEY (+ _PASSWORD): the updater's minisign key.
 #       Signs the archive bound to <version> and writes latest.json.
@@ -52,9 +57,11 @@ if [[ "$PHASE" == update ]]; then
 fi
 
 mkdir -p "$OUT"
-OTTO_SIGN_IDENTITY="$(manifest identity)" "$HERE/sign.sh" "$APP"
+OTTO_SIGN_IDENTITY="$(manifest identity)"
+export OTTO_SIGN_IDENTITY
+"$HERE/sign.sh" "$APP"
 
-# Each binary against its OWN identifier and the accepted leaf certs: the same
+# Each binary against its OWN identifier and the accepted team: the same
 # check the installed app runs on a staged update.
 verify() { # <bundle-or-binary> <identifier>
     codesign --verify --deep --strict -R="$(manifest requirement "$2")" "$1"
@@ -68,15 +75,43 @@ verify_bundle "$APP"
 [[ "$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$APP/Contents/Info.plist")" == "$VERSION" ]] \
     || { echo "Info.plist version is not $VERSION" >&2; exit 1; }
 
+# Apple notarizes <file>; its ticket is stapled to <target>, so the first open
+# passes Gatekeeper offline too. A rejected submission prints Apple's log.
+notarize() { # <file-to-submit> <app-or-dmg-to-staple>
+    local auth out id
+    if [[ -n "${OTTO_NOTARY_PROFILE:-}" ]]; then
+        auth=(--keychain-profile "$OTTO_NOTARY_PROFILE")
+    else
+        auth=(--key "${OTTO_NOTARY_KEY:?OTTO_NOTARY_PROFILE or OTTO_NOTARY_KEY}"
+            --key-id "${OTTO_NOTARY_KEY_ID:?}" --issuer "${OTTO_NOTARY_ISSUER:?}")
+    fi
+    out="$(xcrun notarytool submit "$1" --wait "${auth[@]}" 2>&1)" || true
+    if ! grep -q 'status: Accepted' <<<"$out"; then
+        echo "$out" >&2
+        id="$(awk '$1 == "id:" { print $2; exit }' <<<"$out")"
+        [[ -z "$id" ]] || xcrun notarytool log "$id" "${auth[@]}" >&2 || true
+        exit 1
+    fi
+    # The ticket can take some seconds to reach Apple's CDN after "Accepted".
+    xcrun stapler staple "$2" || { sleep 20 && xcrun stapler staple "$2"; }
+}
+CHECK="$(mktemp -d)"
+trap 'rm -rf "$CHECK"' EXIT
+ditto -c -k --keepParent "$APP" "$CHECK/notarize.zip"
+notarize "$CHECK/notarize.zip" "$APP"
+rm -f "$CHECK/notarize.zip"
+
+# The update archive, from the stapled app.
 # No AppleDouble (._*) entries: every fresh file carries com.apple.provenance,
 # and the updater's tar crate would extract ._ files into the bundle and break
 # its seal. `tar -t` hides them, so prove it with a literal extraction instead.
 (cd "$(dirname "$APP")" && COPYFILE_DISABLE=1 tar --no-mac-metadata --no-xattrs -czf "$TAR" "$(basename "$APP")")
-CHECK="$(mktemp -d)"
-trap 'rm -rf "$CHECK"' EXIT
 python3 -I -c 'import sys, tarfile; tarfile.open(sys.argv[1]).extractall(sys.argv[2], filter="tar")' "$TAR" "$CHECK"
 verify_bundle "$CHECK/$(basename "$APP")"
+xcrun stapler validate -q "$CHECK/$(basename "$APP")"
 
 "$HERE/dmg.sh" "$APP" "$OUT/$NAME.dmg" >/dev/null
+"$HERE/sign.sh" "$OUT/$NAME.dmg"
+notarize "$OUT/$NAME.dmg" "$OUT/$NAME.dmg"
 (cd "$OUT" && shasum -a 256 "$NAME.dmg" > "$NAME.dmg.sha256")
 manifest notes "$VERSION" > "$OUT/notes.md"

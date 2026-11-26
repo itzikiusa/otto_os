@@ -69,6 +69,7 @@ async function shell(page: Page, init: { state: Record<string, unknown>; rail?: 
             return (fx.state = s);
           }
           if (command === 'update_set_auto') return (fx.state = { ...fx.state, auto_install: !!args.on });
+          if (command === 'update_set_prereleases') return (fx.state = { ...fx.state, prereleases: !!args.on });
           if (command === 'update_download') return fx.state;
           if (command === 'update_check') return fx.state;
           return null;
@@ -213,6 +214,8 @@ test('⋯ skips the version (row hides), Settings ▸ Updates unskips it and tog
   await shot(page, 'settings-light');
   await card.getByRole('checkbox', { name: 'Install updates automatically' }).check();
   await expect.poll(async () => (await fx(page).calls('update_set_auto')).map((c) => c.args.on)).toEqual([true]);
+  await card.getByRole('checkbox', { name: 'Include release candidates' }).check();
+  await expect.poll(async () => (await fx(page).calls('update_set_prereleases')).map((c) => c.args.on)).toEqual([true]);
   expect((await fx(page).calls('update_skip')).map((c) => c.args.version)).toEqual(['0.5.4']);
   expect(await page.evaluate(() => (window as unknown as { __upd: Fx }).__upd.state.phase), 'the shell parks a skipped version at idle').toBe('idle');
   await card.getByRole('button', { name: 'Unskip' }).click();
