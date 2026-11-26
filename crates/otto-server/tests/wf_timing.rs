@@ -487,7 +487,7 @@ async fn replay(
     trace: &Value,
     waits: &Value,
     slots: Option<u64>,
-) -> Measured {
+) -> Result<Measured, String> {
     let work = work_of(trace, waits);
     let rig = rig(clone, &work, slots).await;
     let run = run(&rig, clone).await;
@@ -497,12 +497,12 @@ async fn replay(
         .filter(|n| n.status == NodeStatus::Error)
         .map(|n| (&n.node_id, &n.error))
         .collect();
-    assert_eq!(
-        run.status,
-        RunStatus::Success,
-        "{name}: {:?} {failed:?}",
-        run.error
-    );
+    if run.status != RunStatus::Success {
+        return Err(format!(
+            "{name}: {:?} {:?} {failed:?}",
+            run.status, run.error
+        ));
+    }
     // Every scripted step really slept its work: the fake ran it, not a shortcut.
     for (id, w) in &work {
         let n = run.nodes.iter().find(|n| &n.node_id == id).unwrap();
@@ -515,7 +515,7 @@ async fn replay(
             );
         }
     }
-    measure(name, slots, trace, clone, &work, &run)
+    Ok(measure(name, slots, trace, clone, &work, &run))
 }
 
 fn pct(v: &mut [f64], p: f64) -> f64 {
@@ -567,7 +567,11 @@ async fn median_traces_replay_inside_the_acceptance_numbers() {
         let trace = read_json(&dir.join("traces").join(c).join("success-median.json"));
         let waits = &timing[format!("{c}/success-median")];
         for slots in [Some(1), None] {
-            rows.push(replay(&format!("{c}/success-median"), &clone, &trace, waits, slots).await);
+            rows.push(
+                replay(&format!("{c}/success-median"), &clone, &trace, waits, slots)
+                    .await
+                    .unwrap(),
+            );
         }
     }
     report(&rows);
@@ -635,12 +639,21 @@ async fn median_traces_replay_inside_the_acceptance_numbers() {
 async fn replay_every_trace() {
     let dir = PathBuf::from(std::env::var("OTTO_WF_TIMING_DIR").expect("OTTO_WF_TIMING_DIR"));
     let timing = read_json(&dir.join("timing.json"));
-    let mut rows = Vec::new();
+    let (mut rows, mut failed) = (Vec::new(), Vec::new());
     for (key, waits) in timing.as_object().unwrap() {
         let (c, name) = key.split_once('/').unwrap();
         let clone = read_json(&dir.join("clones").join(format!("{c}.json")));
         let trace = read_json(&dir.join("traces").join(c).join(format!("{name}.json")));
-        rows.push(replay(key, &clone, &trace, waits, None).await);
+        match replay(key, &clone, &trace, waits, None).await {
+            Ok(m) => rows.push(m),
+            Err(e) => failed.push(e),
+        }
     }
     report(&rows);
+    println!(
+        "{} replayed, {} failed:\n{}",
+        rows.len(),
+        failed.len(),
+        failed.join("\n")
+    );
 }

@@ -108,6 +108,8 @@ mod ui_control;
 mod wf_compat;
 #[path = "wf_lifecycle.rs"]
 mod wf_lifecycle;
+#[path = "wf_restart.rs"]
+mod wf_restart;
 #[path = "wf_timing.rs"]
 mod wf_timing;
 #[path = "workflow_run_files.rs"]
