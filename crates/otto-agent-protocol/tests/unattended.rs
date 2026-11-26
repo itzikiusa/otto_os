@@ -726,6 +726,23 @@ async fn continuing_an_earlier_steps_thread() {
     rig.rt.shutdown().await;
 }
 
+/// CR1-008: a step cut before the engine heard of its thread — nobody
+/// listens for its `Started` any more: the engine dropped the step while the
+/// CLI spawned — leaves no thread behind, so no process idles where no run
+/// would ever close it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_step_nobody_listens_for_leaves_no_thread() {
+    let rig = Rig::new(false).await;
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    drop(rx);
+    let t = rig.turn("claude", &fake(&["reply hi"]));
+    let out = rig.runner().run(t, tx, CancelSignal::new()).await.unwrap();
+    assert_eq!(out.error.unwrap().class, StepErrorClass::Canceled);
+    let left = rig.rt.list(&"w1".into(), None).await.unwrap();
+    assert!(left.is_empty(), "{left:?}");
+    rig.rt.shutdown().await;
+}
+
 /// Counts its admissions; a usage limit resets at `.0`.
 struct ResetsSoon(chrono::DateTime<Utc>, std::sync::atomic::AtomicUsize);
 
