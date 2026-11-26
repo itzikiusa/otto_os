@@ -25,21 +25,17 @@
 //! `thread/resume` succeeds for ids this binary minted (`fake-th-*`) and
 //! fails otherwise. stdin EOF ends the process.
 
-use std::io::{BufRead, Write};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-#[path = "../fake_script.rs"]
-mod fake_script;
+use crate::{fake_io, fake_script};
 
-use fake_script::{FailClass, Turn, Wire};
+use crate::fake_script::{FailClass, Turn, Wire};
 
 fn out(v: Value) {
-    let mut o = std::io::stdout().lock();
-    let _ = writeln!(o, "{v}");
-    let _ = o.flush();
+    fake_io::out(&v.to_string());
 }
 
 fn notify(method: &str, params: Value) {
@@ -149,13 +145,11 @@ impl CodexWire<'_> {
                 {
                     Ok(m) => m,
                     Err(mpsc::RecvTimeoutError::Timeout) => return Err(false),
-                    Err(mpsc::RecvTimeoutError::Disconnected) => std::process::exit(0),
+                    Err(mpsc::RecvTimeoutError::Disconnected) => fake_io::exit(0),
                 },
                 None => self.rx.recv().unwrap_or(In::Eof),
             };
-            let In::Line(msg) = msg else {
-                std::process::exit(0)
-            };
+            let In::Line(msg) = msg else { fake_io::exit(0) };
             let id = msg.get("id").cloned().unwrap_or(Value::Null);
             match msg.get("method").and_then(Value::as_str) {
                 Some("turn/interrupt") => {
@@ -257,7 +251,7 @@ impl Wire for CodexWire<'_> {
         self.items += 1;
         let child = format!(
             "fake-bg-th-{}-{}",
-            std::process::id(),
+            fake_io::pid(),
             self.owed.len() + self.items as usize
         );
         for status in ["inProgress", "completed"] {
@@ -381,7 +375,7 @@ fn make_image_turn(thread: &str, tid: &str) {
     let png = base64::engine::general_purpose::STANDARD
             .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5V8AAAAASUVORK5CYII=")
             .unwrap_or_default();
-    let path = std::env::temp_dir().join(format!("fake-codex-{}-{tid}.png", std::process::id()));
+    let path = std::env::temp_dir().join(format!("fake-codex-{}-{tid}.png", fake_io::pid()));
     let _ = std::fs::write(&path, png);
     notify(
         "item/completed",
@@ -396,15 +390,15 @@ fn make_image_turn(thread: &str, tid: &str) {
     );
 }
 
-fn main() {
+pub fn main() {
     fake_script::log_start();
     let cfg = fake_script::Config::from_env("codex", &["child", "finish-child"]);
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = fake_io::cwd();
     let mut owed: Vec<Owed> = Vec::new();
     let (tx, rx) = mpsc::channel::<In>();
-    std::thread::spawn(move || {
-        for line in std::io::stdin().lock().lines() {
-            let Ok(line) = line else { break };
+    let lines = fake_io::stdin_lines();
+    fake_io::spawn(move || {
+        for line in lines {
             if let Ok(msg) = serde_json::from_str::<Value>(&line) {
                 let _ = tx.send(In::Line(msg));
             }
@@ -501,7 +495,7 @@ fn main() {
             ),
             "initialized" => {}
             "thread/start" => {
-                thread = format!("fake-th-{}", std::process::id());
+                thread = format!("fake-th-{}", fake_io::pid());
                 out(
                     json!({"id": id, "result": {"thread": {"id": thread}, "model": "fake-model",
                     "approvalPolicy": params["approvalPolicy"], "sandbox": params["sandbox"]}}),
@@ -581,7 +575,7 @@ fn main() {
                     }
                     "crash" => {
                         eprintln!("fake codex: crashing on purpose");
-                        std::process::exit(3);
+                        fake_io::exit(3);
                     }
                     "question form" => {
                         next_server_id += 1;

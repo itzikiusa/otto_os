@@ -1,8 +1,9 @@
 //! The `OTTO_FAKE:` script protocol every fake agent acts out (design:
 //! workflows-on-threads runtime §8, test plan §11.1). One parser and one
-//! interpreter shared by `otto-fake-claude`, `otto-fake-codex`,
-//! `otto-fake-agent` (every ACP flavour), `otto-fake-pi` (each includes this
-//! file with `#[path]`) and the in-process [`crate::scripted::ScriptedDriver`].
+//! interpreter for the fake programs (`src/fakes/`: claude, codex and the ACP
+//! agent for every ACP flavour), whether they run as the `otto-fake-*`
+//! binaries (each includes this file with `#[path]`) or in memory
+//! ([`crate::scripted`]).
 //!
 //! A prompt with `OTTO_FAKE: <verb> <args>` lines anywhere runs those verbs in
 //! order; a prompt without one keeps the fake's exact-text behaviour, so no
@@ -327,7 +328,7 @@ pub struct Config {
 
 impl Config {
     pub fn from_env(provider: &str, unsupported: &'static [&'static str]) -> Self {
-        let var = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
+        let var = |k: &str| crate::fake_io::var(k).filter(|v| !v.trim().is_empty());
         Self {
             provider: provider.into(),
             time_scale: var("OTTO_FAKE_TIME_SCALE")
@@ -365,15 +366,15 @@ pub fn append_line(path: &Path, v: &Value) {
 /// `OTTO_FAKE_ARGV_LOG`: a line about this process (its argv at start, a
 /// model or effort the protocol set later).
 pub fn argv_log(mut v: Value) {
-    if let Some(path) = std::env::var_os("OTTO_FAKE_ARGV_LOG") {
-        v["pid"] = json!(std::process::id());
+    if let Some(path) = crate::fake_io::var("OTTO_FAKE_ARGV_LOG") {
+        v["pid"] = json!(crate::fake_io::pid());
         append_line(Path::new(&path), &v);
     }
 }
 
 /// `OTTO_FAKE_ARGV_LOG` for a starting binary.
 pub fn log_start() {
-    argv_log(json!({"argv": std::env::args().collect::<Vec<_>>()}));
+    argv_log(json!({"argv": crate::fake_io::args()}));
 }
 
 fn now_ms() -> u64 {
@@ -716,7 +717,7 @@ impl Turn {
 
     /// `OTTO_FAKE_LOG`'s record of this turn (written by [`Self::log`]).
     pub fn record(&self) -> Value {
-        json!({"pid": std::process::id(), "session": self.session, "turn": self.turn,
+        json!({"pid": crate::fake_io::pid(), "session": self.session, "turn": self.turn,
                "t_start": self.t_start, "t_end": now_ms(), "verbs": self.verbs})
     }
 
@@ -865,7 +866,7 @@ pub fn drive(mut turn: Turn, wire: &mut impl Wire) {
             Step::Fail(FailClass::Crash, _) => {
                 turn.log();
                 eprintln!("fake agent: crashing on purpose");
-                std::process::exit(3);
+                crate::fake_io::exit(3);
             }
             Step::Fail(FailClass::Hang, _) => {
                 while wire.wait(Duration::from_secs(3600)) {}

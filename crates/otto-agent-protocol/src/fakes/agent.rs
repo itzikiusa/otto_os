@@ -60,16 +60,14 @@
 //! `session/load` replays one history chunk before answering (clients must
 //! not show it). stdin EOF ends the process (exit 0), like the real CLIs.
 
-use std::io::{BufRead, Write};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-#[path = "../fake_script.rs"]
-mod fake_script;
+use crate::{fake_io, fake_script};
 
-use fake_script::{FailClass, Turn, Wire};
+use crate::fake_script::{FailClass, Turn, Wire};
 
 /// stdin's lines off a reader thread, so a script's `sleep` can still see a
 /// `session/cancel`.
@@ -78,9 +76,9 @@ struct Input(mpsc::Receiver<String>);
 impl Input {
     fn spawn() -> Self {
         let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            for line in std::io::stdin().lock().lines() {
-                let Ok(line) = line else { break };
+        let lines = fake_io::stdin_lines();
+        fake_io::spawn(move || {
+            for line in lines {
                 if tx.send(line).is_err() {
                     break;
                 }
@@ -163,13 +161,9 @@ impl AcpWire<'_> {
                 {
                     Ok(l) => l,
                     Err(mpsc::RecvTimeoutError::Timeout) => return Err(false),
-                    Err(mpsc::RecvTimeoutError::Disconnected) => std::process::exit(0),
+                    Err(mpsc::RecvTimeoutError::Disconnected) => fake_io::exit(0),
                 },
-                None => self
-                    .lines
-                    .0
-                    .recv()
-                    .unwrap_or_else(|_| std::process::exit(0)),
+                None => self.lines.0.recv().unwrap_or_else(|_| fake_io::exit(0)),
             };
             let Ok(m) = serde_json::from_str::<Value>(&line) else {
                 continue;
@@ -289,9 +283,7 @@ impl Wire for AcpWire<'_> {
 }
 
 fn out(v: Value) {
-    let mut o = std::io::stdout().lock();
-    let _ = writeln!(o, "{v}");
-    let _ = o.flush();
+    fake_io::out(&v.to_string());
 }
 
 fn next(lines: &mut impl Iterator<Item = std::io::Result<String>>) -> Option<Value> {
@@ -350,18 +342,18 @@ fn reply(id: &Value, result: Value) {
     out(json!({"jsonrpc":"2.0","id":id,"result":result}));
 }
 
-fn main() {
+pub fn main() {
     fake_script::log_start();
     let cfg = fake_script::Config::from_env("acp", &["background"]);
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = fake_io::cwd();
     let mut lines = Input::spawn();
     let mut servers: Vec<McpServer> = Vec::new();
     let mut turns = 0u32;
     let mut asks = 0u32;
-    let args: Vec<String> = std::env::args().collect();
+    let args: Vec<String> = fake_io::args().into_iter().collect();
     let refuse = args.iter().any(|a| a == "--refuse-session");
     // Never answer session/new (a handshake cut by a daemon restart).
-    let hang = std::env::var_os("OTTO_FAKE_HANG_SESSION").is_some();
+    let hang = fake_io::var("OTTO_FAKE_HANG_SESSION").is_some();
     let mut mode = args
         .windows(2)
         .find(|w| w[0] == "--approval-mode")
@@ -397,7 +389,7 @@ fn main() {
             "session/new" => {
                 system = system_of(&params);
                 servers = mcp_servers(&params);
-                let sid = format!("fake-{}", std::process::id());
+                let sid = format!("fake-{}", fake_io::pid());
                 reply(
                     &id,
                     json!({"sessionId": sid, "modes": modes, "configOptions": efforts}),
@@ -467,7 +459,7 @@ fn main() {
                 match text.as_str() {
                     "crash" => {
                         eprintln!("fake agent: crashing on purpose");
-                        std::process::exit(3);
+                        fake_io::exit(3);
                     }
                     "ask" => {
                         asks += 1;
@@ -628,7 +620,7 @@ fn main() {
                         chunk(&sid, "agent_message_chunk", "scheduled");
                         done("end_turn");
                         let bg_sid = sid.clone();
-                        std::thread::spawn(move || {
+                        fake_io::spawn(move || {
                             std::thread::sleep(std::time::Duration::from_millis(40));
                             chunk(&bg_sid, "agent_thought_chunk", "timer fired");
                             chunk(&bg_sid, "agent_message_chunk", "autonomous report 1");
@@ -673,9 +665,7 @@ fn main() {
                     }
                     t if t.starts_with("edit ") => {
                         // ACP paths are absolute; the fake runs in the session cwd.
-                        let path = std::env::current_dir()
-                            .map(|d| d.join(t[5..].trim()).display().to_string())
-                            .unwrap_or_default();
+                        let path = fake_io::cwd().join(t[5..].trim()).display().to_string();
                         let path = path.as_str();
                         update(
                             &sid,
@@ -718,7 +708,7 @@ fn main() {
                     }
                     t => {
                         if t == "garbage" {
-                            println!("this is not json");
+                            fake_io::out("this is not json");
                         }
                         chunk(&sid, "agent_thought_chunk", "thinking");
                         chunk(&sid, "agent_message_chunk", "echo: ");
@@ -759,13 +749,10 @@ fn client_turn(
             done("end_turn");
         }
         t if t.starts_with("fs-read ") || t.starts_with("fs-write ") => {
-            let path = std::env::current_dir()
-                .map(|d| {
-                    d.join(t[t.find(' ').unwrap() + 1..].trim())
-                        .display()
-                        .to_string()
-                })
-                .unwrap_or_default();
+            let path = fake_io::cwd()
+                .join(t[t.find(' ').unwrap() + 1..].trim())
+                .display()
+                .to_string();
             let read = t.starts_with("fs-read ");
             let (method, params) = if read {
                 ("fs/read_text_file", json!({"sessionId":sid,"path":path}))

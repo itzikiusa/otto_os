@@ -126,6 +126,8 @@ pub struct RuntimeConfig {
     /// A spawned CLI that has not answered its handshake after this long
     /// is stopped with a clear error ([`HANDSHAKE_TIMEOUT`]). Zero disables.
     pub handshake_timeout: Duration,
+    /// Where children start; `None` = the OS (holders when configured).
+    pub transport: Option<Arc<dyn crate::process::ChildTransport>>,
 }
 
 impl Default for RuntimeConfig {
@@ -144,6 +146,7 @@ impl Default for RuntimeConfig {
             holders_dir: None,
             holder_launcher: None,
             handshake_timeout: HANDSHAKE_TIMEOUT,
+            transport: None,
         }
     }
 }
@@ -1174,7 +1177,8 @@ impl AgentRuntime {
             cwd: session.cwd.clone(),
             env: spec.env,
         };
-        if let Some(holders_dir) = self.inner.config.holders_dir.as_deref() {
+        let transport = self.inner.config.transport.as_ref();
+        if let (None, Some(holders_dir)) = (transport, self.inner.config.holders_dir.as_deref()) {
             if !self.inner.host.network_profile_active(&session)
                 && self.inner.host.session_persistence_enabled().await
             {
@@ -1209,7 +1213,8 @@ impl AgentRuntime {
                 }
             }
         }
-        let child = spawn_child(&cmd)
+        let child = transport
+            .map_or_else(|| spawn_child(&cmd), |t| t.spawn(&cmd))
             .map_err(|e| map_spawn_error(session.provider.as_str(), &spec.program, e))?;
         let cli_pid = child.pid;
         let (epoch, flushed) = {
@@ -1244,7 +1249,7 @@ impl AgentRuntime {
             apply_step_opts(&self.inner, live, &mut st, step, true, true);
             (epoch, frx)
         };
-        if claude_login.is_some() {
+        if claude_login.is_some() && cli_pid != 0 {
             // Claude Code moves some jobs out of its group (see the module).
             descendants::watch(
                 Arc::clone(&self.inner),

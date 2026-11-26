@@ -1,8 +1,7 @@
 //! RT (test plan §1, §11.1): every `OTTO_FAKE:` verb on every fake agent,
 //! through the real `AgentRuntime` and the real drivers — `otto-fake-claude`,
 //! `otto-fake-codex`, `otto-fake-agent` as each ACP flavour (gemini, agy,
-//! grok, opencode, muse), `otto-fake-pi` — and the in-process
-//! `ScriptedDriver`. A verb a fake cannot act out must answer
+//! grok, opencode, muse), and — in memory, with no process — the same fake programs behind the runtime's `ChildTransport` seam (`scripted`). A verb a fake cannot act out must answer
 //! "unsupported: <verb>"; the shared parser and the prompt finders are pinned
 //! on the engine's real prompt shapes.
 
@@ -15,8 +14,7 @@ use otto_agent_protocol::acp::AcpDriver;
 use otto_agent_protocol::claude::ClaudeDriver;
 use otto_agent_protocol::codex::CodexDriver;
 use otto_agent_protocol::fake_script::{self, Act, Config, FailClass};
-use otto_agent_protocol::pi::PiDriver;
-use otto_agent_protocol::scripted::ScriptedDriver;
+use otto_agent_protocol::scripted;
 use otto_agent_protocol::{
     AgentRuntime, DriverFactory, LaunchSpec, McpDelivery, McpServerDef, RuntimeConfig, RuntimeHost,
     StructuredDriver,
@@ -41,7 +39,7 @@ macro_rules! fake_bin {
 const WAIT: Duration = Duration::from_secs(20);
 
 /// Every runtime driver's fake (each ACP flavour through `otto-fake-agent`).
-const FAKES: [RuntimeProvider; 8] = [
+const FAKES: [RuntimeProvider; 7] = [
     RuntimeProvider::Claude,
     RuntimeProvider::Codex,
     RuntimeProvider::Gemini,
@@ -49,7 +47,6 @@ const FAKES: [RuntimeProvider; 8] = [
     RuntimeProvider::Grok,
     RuntimeProvider::Opencode,
     RuntimeProvider::Muse,
-    RuntimeProvider::Pi,
 ];
 
 const ACP: [RuntimeProvider; 5] = [
@@ -138,7 +135,6 @@ fn binaries() -> Arc<dyn DriverFactory> {
             RuntimeProvider::Codex => {
                 Box::new(CodexDriver::with_program(fake_bin!("otto-fake-codex")))
             }
-            RuntimeProvider::Pi => Box::new(PiDriver::with_program(&fake_bin!("otto-fake-pi"))),
             RuntimeProvider::Gemini => Box::new(AcpDriver::gemini(&acp)),
             RuntimeProvider::Agy => Box::new(AcpDriver::agy(&acp)),
             RuntimeProvider::Muse => Box::new(AcpDriver::muse(&acp)),
@@ -222,19 +218,11 @@ impl Rig {
             events: Mutex::default(),
             notify: tokio::sync::Notify::new(),
         });
-        let drivers = if scripted {
-            ScriptedDriver::factory(Config {
-                provider: String::new(),
-                time_scale: 1.0,
-                scripts_dir: Some(root.join("scripts")),
-                step_persona: false,
-                review_dir: None,
-                state_dir: root.join("state"),
-                unsupported: &[],
-                log: Some(root.join("turns.log")),
-            })
+        // In memory: the same fake programs and the real drivers, no process.
+        let (drivers, transport) = if scripted {
+            (scripted::drivers(), Some(scripted::transport(Vec::new())))
         } else {
-            binaries()
+            (binaries(), None)
         };
         let rt = AgentRuntime::new(
             AgentRuntimeRepo::new(pool().await),
@@ -242,6 +230,7 @@ impl Rig {
             drivers,
             RuntimeConfig {
                 attachments_dir: root.join("attachments"),
+                transport,
                 ..RuntimeConfig::default()
             },
         );
@@ -411,7 +400,13 @@ fn every_driver() -> Vec<(String, bool, RuntimeProvider)> {
         .iter()
         .map(|p| (p.as_str().to_string(), false, *p))
         .collect();
-    v.push(("scripted".into(), true, RuntimeProvider::Claude));
+    for p in [
+        RuntimeProvider::Claude,
+        RuntimeProvider::Codex,
+        RuntimeProvider::Gemini,
+    ] {
+        v.push((format!("in-memory {}", p.as_str()), true, p));
+    }
     v
 }
 
@@ -644,16 +639,7 @@ async fn questions_and_approvals_wait_for_the_person_where_the_provider_has_them
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn verbs_a_provider_cannot_act_out_answer_unsupported() {
-    let cases: [(RuntimeProvider, &[&str]); 3] = [
-        (
-            RuntimeProvider::Pi,
-            &[
-                "ask x",
-                "approve make",
-                "background 10",
-                "child codex reply hi",
-            ],
-        ),
+    let cases: [(RuntimeProvider, &[&str]); 2] = [
         (
             RuntimeProvider::Codex,
             &["child claude reply hi", "finish-child"],
@@ -695,7 +681,8 @@ async fn background_work_ends_the_turn_and_the_agents_own_turn_runs_the_rest() {
     let drivers = [
         ("claude", false, RuntimeProvider::Claude),
         ("codex", false, RuntimeProvider::Codex),
-        ("scripted", true, RuntimeProvider::Codex),
+        ("in-memory claude", true, RuntimeProvider::Claude),
+        ("in-memory codex", true, RuntimeProvider::Codex),
     ];
     for (label, scripted, p) in drivers {
         let rig = Rig::new(scripted).await;
@@ -842,6 +829,54 @@ async fn a_prompt_without_a_sentinel_keeps_each_fakes_exact_text_behaviour() {
     }
 }
 
+/// The in-memory transport runs the fake program itself: a path no OS could
+/// start still gets a working agent, and the fake sees its own in-memory pid.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn in_memory_children_run_the_fake_programs_without_a_process() {
+    let rig = Rig::new(true).await;
+    let rt = AgentRuntime::new(
+        AgentRuntimeRepo::new(pool().await),
+        Arc::clone(&rig.host) as Arc<dyn RuntimeHost>,
+        Arc::new(|_p: RuntimeProvider| -> Option<Box<dyn StructuredDriver>> {
+            Some(Box::new(CodexDriver::with_program(
+                "/nonexistent/otto-fake-codex",
+            )))
+        }),
+        RuntimeConfig {
+            attachments_dir: rig.root.join("attachments"),
+            transport: Some(scripted::transport(vec![(
+                "OTTO_FAKE_LOG".into(),
+                rig.root.join("mem.log").display().to_string(),
+            )])),
+            ..RuntimeConfig::default()
+        },
+    );
+    let req = CreateRuntimeSessionReq {
+        title_auto: false,
+        provider: Some(RuntimeProvider::Codex),
+        cwd: Some(rig.root.display().to_string()),
+        title: None,
+        model: None,
+        access_mode: None,
+        meta: None,
+    };
+    let id = rt.create(&"u1".into(), &"w1".into(), req).await.unwrap().id;
+    let n = rig.terminals(&id) + 1;
+    rt.prompt(&id, "OTTO_FAKE: reply in memory").await.unwrap();
+    let (status, why) = rig.next_terminal(&id, n).await;
+    assert_eq!(status, TurnTerminalStatus::Completed, "{why}");
+    assert!(rig.text(&id).contains("in memory"));
+    // The spawn's own env (the host's) wins over the transport's.
+    let turns = rig.log("turns.log");
+    assert_eq!(turns.len(), 1, "{turns:?}");
+    assert!(
+        turns[0]["pid"].as_u64().unwrap() >= 1_000_000,
+        "an in-memory pid: {turns:?}"
+    );
+    assert!(rig.log("mem.log").is_empty());
+    rt.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_time_scale_shrinks_every_wait_and_each_start_is_logged() {
     let dir = tempfile::tempdir().unwrap();
@@ -868,7 +903,7 @@ async fn the_time_scale_shrinks_every_wait_and_each_start_is_logged() {
     );
     // Through a fake binary: an hour's sleep at 0.0001 is 360 ms.
     let rig = Rig::with(false, &[("OTTO_FAKE_TIME_SCALE", "0.0001")]).await;
-    for p in [RuntimeProvider::Codex, RuntimeProvider::Pi] {
+    for p in [RuntimeProvider::Codex, RuntimeProvider::Gemini] {
         let id = rig.session(p).await;
         let started = std::time::Instant::now();
         let (status, _) = rig
@@ -883,7 +918,7 @@ async fn the_time_scale_shrinks_every_wait_and_each_start_is_logged() {
         assert!(rig.text(&id).contains("woke"), "{p:?}");
     }
     let starts = rig.log("argv.log");
-    for name in ["otto-fake-codex", "otto-fake-pi"] {
+    for name in ["otto-fake-codex", "otto-fake-agent"] {
         assert!(
             starts
                 .iter()

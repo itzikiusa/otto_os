@@ -48,22 +48,20 @@
 //! next resume once with a passing error (the marker is removed). stdin EOF
 //! ends the process.
 
-use std::io::{BufRead, Write};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-#[path = "../fake_script.rs"]
-mod fake_script;
+use crate::{fake_io, fake_script};
 
-use fake_script::{FailClass, Turn, Wire};
+use crate::fake_script::{FailClass, Turn, Wire};
 
 /// `<tmp>/claude-<uid>/otto-fake/<session>/tasks/<task>.output` with two
 /// lines of output, as Claude Code lays out a background command's output.
 fn task_output_file(session: &str, task: &str) -> std::path::PathBuf {
-    let tmp = std::env::var_os("CLAUDE_CODE_TMPDIR")
-        .map_or_else(|| "/tmp".into(), std::path::PathBuf::from);
+    let tmp =
+        fake_io::var("CLAUDE_CODE_TMPDIR").map_or_else(|| "/tmp".into(), std::path::PathBuf::from);
     // SAFETY: getuid has no preconditions and cannot fail.
     let uid = unsafe { libc::getuid() };
     let dir = tmp.join(format!("claude-{uid}/otto-fake/{session}/tasks"));
@@ -73,9 +71,7 @@ fn task_output_file(session: &str, task: &str) -> std::path::PathBuf {
 }
 
 fn out(v: Value) {
-    let mut o = std::io::stdout().lock();
-    let _ = writeln!(o, "{v}");
-    let _ = o.flush();
+    fake_io::out(&v.to_string());
 }
 
 fn text_message(id: &str, text: &str) {
@@ -195,7 +191,7 @@ fn expand_env(v: &str) -> String {
             break;
         };
         let name = rest[i + 2..i + end].split(":-").next().unwrap_or_default();
-        out.push_str(&std::env::var(name).unwrap_or_default());
+        out.push_str(&fake_io::var(name).unwrap_or_default());
         rest = &rest[i + end + 1..];
     }
     out.push_str(rest);
@@ -215,7 +211,7 @@ fn init_mcp_servers(config: &str) -> Value {
         .map(|(name, spec)| {
             let cmd = spec["command"].as_str().unwrap_or_default();
             let found = std::path::Path::new(cmd).is_file()
-                || std::env::var_os("PATH")
+                || fake_io::var("PATH")
                     .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(cmd).is_file()));
             json!({"name": name, "status": if found { "connected" } else { "failed" }})
         })
@@ -288,13 +284,13 @@ impl ClaudeWire<'_> {
                 {
                     Ok(m) => m,
                     Err(mpsc::RecvTimeoutError::Timeout) => return Err(false),
-                    Err(mpsc::RecvTimeoutError::Disconnected) => std::process::exit(0),
+                    Err(mpsc::RecvTimeoutError::Disconnected) => fake_io::exit(0),
                 },
                 None => self.rx.recv().unwrap_or(In::Eof),
             };
             let msg = match msg {
                 In::Line(v) => v,
-                In::Eof => std::process::exit(0),
+                In::Eof => fake_io::exit(0),
                 In::McpDone(..) => continue,
             };
             match msg.get("type").and_then(Value::as_str) {
@@ -458,7 +454,7 @@ fn stream_turn(mid: &str, count: usize, ms: u64) {
 /// `gated <dir>`: a turn that streams in steps the test releases by files in `<dir>`.
 fn gated_turn(gate_dir: &str, mid: &str) {
     let gate = std::path::Path::new(gate_dir);
-    let _ = std::fs::write(gate.join("pid_turn1"), std::process::id().to_string());
+    let _ = std::fs::write(gate.join("pid_turn1"), fake_io::pid().to_string());
     out(
         json!({"type":"stream_event","event":{"type":"message_start","message":{"id":mid}},"parent_tool_use_id":null}),
     );
@@ -468,12 +464,12 @@ fn gated_turn(gate_dir: &str, mid: &str) {
     stream_delta(0, "alpha beta ");
     let _ = std::fs::write(gate.join("phase1_ready"), b"1");
     if !wait_for_file(&gate.join("emit_gap")) {
-        std::process::exit(2);
+        fake_io::exit(2);
     }
     stream_delta(0, "gamma ");
     let _ = std::fs::write(gate.join("gap_emitted"), b"1");
     if !wait_for_file(&gate.join("finish_turn")) {
-        std::process::exit(2);
+        fake_io::exit(2);
     }
     stream_delta(0, "delta");
     out(
@@ -485,23 +481,23 @@ fn gated_turn(gate_dir: &str, mid: &str) {
     result_ok();
 }
 
-fn main() {
+pub fn main() {
     fake_script::log_start();
     let cfg = fake_script::Config::from_env("claude", &[]);
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let args: Vec<String> = std::env::args().collect();
+    let cwd = fake_io::cwd();
+    let args: Vec<String> = fake_io::args().into_iter().collect();
     let mut mode = arg_after(&args, "--permission-mode").unwrap_or_default();
     let mut cost = 0.0f64;
-    let store = std::path::Path::new(".fake-claude");
+    let store = &fake_io::cwd().join(".fake-claude");
     let session = match arg_after(&args, "--resume") {
         Some(id) => {
             if !store.join(&id).exists() {
                 eprintln!("No conversation found with session ID: {id}");
-                std::process::exit(1);
+                fake_io::exit(1);
             }
             if std::fs::remove_file(store.join(format!("{id}.flaky"))).is_ok() {
                 eprintln!("API Error: Connection error.");
-                std::process::exit(1);
+                fake_io::exit(1);
             }
             id
         }
@@ -515,9 +511,9 @@ fn main() {
     let mcp_config = arg_after(&args, "--mcp-config").unwrap_or_default();
     let (tx, rx) = mpsc::channel::<In>();
     let mcp_tx = tx.clone();
-    std::thread::spawn(move || {
-        for line in std::io::stdin().lock().lines() {
-            let Ok(line) = line else { break };
+    let lines = fake_io::stdin_lines();
+    fake_io::spawn(move || {
+        for line in lines {
             if let Ok(v) = serde_json::from_str::<Value>(&line) {
                 let _ = tx.send(In::Line(v));
             }
@@ -712,7 +708,7 @@ fn main() {
                     continue;
                 }
                 if let Some(pid_path) = text.strip_prefix("pid ").map(str::trim) {
-                    let _ = std::fs::write(pid_path, std::process::id().to_string());
+                    let _ = std::fs::write(pid_path, fake_io::pid().to_string());
                     text_message(&mid, "second-turn-ok");
                     result_ok();
                     continue;
@@ -795,7 +791,7 @@ fn main() {
                         waiting = Some((None, false));
                     }
                     "retrying" => {
-                        std::thread::spawn(move || {
+                        fake_io::spawn(move || {
                             let mut attempt = 0;
                             while Instant::now() < later {
                                 attempt += 1;
@@ -836,7 +832,7 @@ fn main() {
                             json!({"type":"assistant","message":{"id":mid,"content":[{"type":"tool_use","id":tu,"name":format!("mcp__{server}__{tool}"),"input":args}]},"parent_tool_use_id":null}),
                         );
                         let (config, done) = (mcp_config.clone(), mcp_tx.clone());
-                        std::thread::spawn(move || {
+                        fake_io::spawn(move || {
                             let res = mcp_call(&config, &server, &tool, args);
                             let _ = done.send(In::McpDone(tu, res));
                         });

@@ -37,8 +37,9 @@ libc = "0.2.191"
 sqlx = { workspace = true }
 
 [features]
-# `scripted::ScriptedDriver` + the `OTTO_FAKE:` script protocol
-# (`fake_script`) for other crates' integration suites.
+# The in-memory fake agents (`scripted`: the fake programs behind the
+# runtime's ChildTransport seam, no process) and the `OTTO_FAKE:` script
+# protocol (`fake_script`) for other crates' integration suites.
 test-util = []
 
 [dev-dependencies]
@@ -49,10 +50,9 @@ otto-agent-protocol = { path = ".", features = ["test-util"] }
 otto-workflows = { workspace = true }
 otto-review = { workspace = true }
 
-# Test doubles: an ACP agent, a Codex app-server, Claude's SDK stream-json
-# and pi's RPC mode over stdio, all acting out the `OTTO_FAKE:` scripts of
-# src/fake_script.rs. Integration tests reach them via
-# `CARGO_BIN_EXE_otto-fake-{agent,codex,claude,pi}`.
+# Test doubles: an ACP agent, a Codex app-server and Claude's SDK stream-json
+# over stdio, all acting out the `OTTO_FAKE:` scripts of src/fake_script.rs.
+# Integration tests reach them via `CARGO_BIN_EXE_otto-fake-{agent,codex,claude}`.
 [[bin]]
 name = "otto-fake-agent"
 path = "src/bin/otto-fake-agent.rs"
@@ -68,12 +68,6 @@ doc = false
 [[bin]]
 name = "otto-fake-claude"
 path = "src/bin/otto-fake-claude.rs"
-test = false
-doc = false
-
-[[bin]]
-name = "otto-fake-pi"
-path = "src/bin/otto-fake-pi.rs"
 test = false
 doc = false
 
