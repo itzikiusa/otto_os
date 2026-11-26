@@ -117,20 +117,18 @@ pub fn spawn_listener(ctx: ServerCtx) {
                     return;
                 }
             };
-            match ev {
-                Event::WorkflowRunUpdated {
-                    run_id,
-                    status,
-                    node_id,
-                    waiting_approval,
-                    overview,
-                    ..
-                } => {
-                    let hold = overview.and_then(|o| o.hold);
-                    let ev = (status.as_str(), node_id.as_deref(), waiting_approval);
-                    on_workflow_run(&ctx, &run_id, ev, hold).await
-                }
-                _ => {}
+            if let Event::WorkflowRunUpdated {
+                run_id,
+                status,
+                node_id,
+                waiting_approval,
+                overview,
+                ..
+            } = ev
+            {
+                let hold = overview.and_then(|o| o.hold);
+                let ev = (status.as_str(), node_id.as_deref(), waiting_approval);
+                on_workflow_run(&ctx, &run_id, ev, hold).await
             }
         }
     });

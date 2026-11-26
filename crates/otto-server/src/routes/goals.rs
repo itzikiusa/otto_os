@@ -74,7 +74,7 @@ async fn list(
         .map_err(ApiError)?;
     let mut goals: Vec<_> = repo(&ctx).list(&wid).await.map_err(ApiError)?;
     goals.retain(|wf| wf.origin.as_deref() == Some("goal"));
-    goals.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    goals.sort_by_key(|wf| std::cmp::Reverse(wf.created_at));
     let mut items: Vec<Value> = goals
         .iter()
         .filter_map(|wf| {
