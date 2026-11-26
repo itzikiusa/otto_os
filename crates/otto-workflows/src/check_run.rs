@@ -9,8 +9,11 @@
 use crate::criteria::{self, Assessed, Evaluation};
 use crate::script_run::{ScriptHost, ScriptRun};
 use otto_automation::verify_command::{self, End, Spec};
-use otto_core::workflows::{Criterion, VerifyKind};
+use otto_core::agent_runtime::{Attention, AttentionKind};
+use otto_core::workflows::{Criterion, HumanEntry, VerifyKind};
 use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 /// A `check` node's params.
@@ -122,7 +125,7 @@ async fn run_command(
         ..Spec::new(at.run_cwd, command, Duration::from_secs(timeout))
     };
     // Cancel drops this future, which kills the process group.
-    let done = verify_command::execute(&spec, std::future::pending()).await;
+    let done = Box::pin(verify_command::execute(&spec, std::future::pending())).await;
     match done.end {
         End::Exited(code) => Ok(criteria::command_evidence(code, &done.output)),
         End::TimedOut => Ok((
@@ -186,6 +189,113 @@ pub fn previous_iteration_id(node_id: &str) -> Option<String> {
     let (i, k) = rest.split_once('.')?;
     let i: u64 = i.parse().ok()?;
     (i > 1).then(|| format!("{loop_id}#{}.{k}", i - 1))
+}
+
+/// The previous check's repeat signature and count (its output).
+pub fn previous_progress(output: Option<&Value>) -> Option<(String, u32)> {
+    let o = output?;
+    let sig = o.get("repeat_signature")?.as_str()?.to_string();
+    Some((sig, o.get("repeated_failures")?.as_u64()? as u32))
+}
+
+/// The step's output: [`CheckOutput`](criteria::CheckOutput) plus a `summary` line.
+pub fn output(out: &criteria::CheckOutput) -> Value {
+    let mut v = serde_json::to_value(out).unwrap_or_default();
+    v["summary"] = Value::String(format!("{} of {} criteria met", out.met, out.total));
+    v
+}
+
+/// A check waiting for a person, keyed `(run, top-level node)` (DR-107).
+struct Parked {
+    criterion: Criterion,
+    iteration: Option<u32>,
+    tx: tokio::sync::mpsc::UnboundedSender<HumanEntry>,
+}
+
+type Key = (String, String);
+
+fn waiting() -> &'static Mutex<HashMap<Key, Parked>> {
+    static W: OnceLock<Mutex<HashMap<Key, Parked>>> = OnceLock::new();
+    W.get_or_init(Default::default)
+}
+
+/// Forgets a parked check when its wait ends (a record, or a cancel).
+pub struct Unpark(Key);
+impl Drop for Unpark {
+    fn drop(&mut self) {
+        waiting()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.0);
+    }
+}
+
+/// Park the check of `node_id` (the check, or the loop around it) on `c`:
+/// the attention to raise, where the person's record arrives, and the guard.
+pub fn park(
+    run_id: &str,
+    node_id: &str,
+    c: &Criterion,
+    iteration: Option<u32>,
+) -> (
+    Attention,
+    tokio::sync::mpsc::UnboundedReceiver<HumanEntry>,
+    Unpark,
+) {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let key = (run_id.to_string(), node_id.to_string());
+    let p = Parked {
+        criterion: c.clone(),
+        iteration,
+        tx,
+    };
+    waiting()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(key.clone(), p);
+    let text = format!("Check that {} — record what you verified", c.text);
+    let mut a = Attention::new(AttentionKind::Verify, &text, chrono::Utc::now());
+    a.criterion_id = Some(c.id.clone());
+    (a, rx, Unpark(key))
+}
+
+/// A person's record for the criterion a check is parked on, bound to the
+/// criterion's revision and the iteration. Conflict when that node's check
+/// is not parked on that criterion.
+pub fn deliver(
+    run_id: &str,
+    node_id: &str,
+    criterion_id: &str,
+    met: bool,
+    evidence: &str,
+    by: &str,
+) -> otto_core::Result<()> {
+    let evidence = evidence.trim();
+    if evidence.is_empty() || evidence.chars().count() > 2_000 {
+        return Err(otto_core::Error::Invalid(
+            "evidence must be 1 to 2,000 characters".into(),
+        ));
+    }
+    let key = (run_id.to_string(), node_id.to_string());
+    let parked = {
+        let mut w = waiting().lock().unwrap_or_else(|e| e.into_inner());
+        let ours = w.get(&key).is_some_and(|p| p.criterion.id == criterion_id);
+        ours.then(|| w.remove(&key)).flatten()
+    };
+    let not_parked =
+        || otto_core::Error::Conflict("that step is not waiting for this criterion".into());
+    let p = parked.ok_or_else(not_parked)?;
+    let entry = HumanEntry {
+        kind: "verify".into(),
+        ask: Some(criterion_id.to_string()),
+        text: evidence.to_string(),
+        met: Some(met),
+        revision: Some(criteria::revision(&p.criterion)),
+        iteration: p.iteration,
+        by: by.to_string(),
+        at: chrono::Utc::now(),
+    };
+    p.tx.send(entry).map_err(|_| not_parked())
 }
 
 #[cfg(test)]

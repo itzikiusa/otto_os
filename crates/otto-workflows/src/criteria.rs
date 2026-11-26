@@ -649,6 +649,59 @@ pub fn loop_stop(b: &LoopBudget, at: StopPoint<'_>) -> Option<Stop> {
     }
 }
 
+/// How a loop's stop shows: `(satisfied, log line, _workflow_hold)`.
+pub fn stop_outcome(stop: Option<Stop>, iteration: u64) -> (bool, Option<String>, Option<Value>) {
+    match stop {
+        Some(Stop::Satisfied) => (
+            true,
+            Some(format!(
+                "loop: every criterion met at iteration {iteration}"
+            )),
+            None,
+        ),
+        Some(Stop::Unmet(reason)) => (false, Some(format!("loop: {reason}")), None),
+        Some(Stop::Hold { kind, reason }) => (
+            false,
+            Some(format!("loop: holds the run — {reason}")),
+            Some(serde_json::json!({"kind": kind, "reason": reason, "iteration": iteration})),
+        ),
+        None => (false, None, None),
+    }
+}
+
+/// Resume's limits for the loop a hold stopped (goal.md §2.3): the person's
+/// new totals over the run's earlier ones; a Blocked hold records the
+/// iteration it resumes at (`unblocked_at`). An Exhausted hold resumes only
+/// with room left above what is used — else the refusal the person reads.
+pub fn resume_limits(
+    params: &Value,
+    prev: Option<&LoopLimits>,
+    hold: &otto_core::workflows::RunHold,
+    (used_iterations, used_ms): (u32, u64),
+    (iterations, active_s): (Option<u32>, Option<u64>),
+) -> Result<LoopLimits, String> {
+    let mut limits = prev.cloned().unwrap_or_default();
+    limits.max_iterations = iterations.or(limits.max_iterations);
+    limits.max_active_s = active_s.or(limits.max_active_s);
+    let b = LoopBudget::new(params, Some(&limits));
+    match hold.kind {
+        HoldKind::Exhausted if used_iterations >= b.max_iterations => Err(format!(
+            "Raise the iteration limit to resume: {used_iterations} of {} iterations are used.",
+            b.max_iterations
+        )),
+        HoldKind::Exhausted if b.max_active_s.is_some_and(|s| used_ms >= s * 1000) => Err(format!(
+            "Raise the time limit to resume: {} of {} active time is used.",
+            span(used_ms / 1000),
+            span(b.max_active_s.unwrap_or_default())
+        )),
+        HoldKind::Blocked => {
+            limits.unblocked_at = hold.iteration;
+            Ok(limits)
+        }
+        _ => Ok(limits),
+    }
+}
+
 fn clip_bytes(s: &str, max: usize) -> &str {
     let mut end = s.len().min(max);
     while !s.is_char_boundary(end) {

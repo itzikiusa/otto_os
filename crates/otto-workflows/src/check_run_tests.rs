@@ -112,3 +112,30 @@ fn the_previous_iterations_check_and_the_evaluators_answer() {
     assert!(evaluation(None, &format!("done:\n```json\n{json}\n```")).is_some());
     assert!(evaluation(Some("not json"), "nothing").is_none());
 }
+
+/// DR-107: the record goes to the check parked on that criterion only, is
+/// bound to the criterion's revision and the iteration, and a second record
+/// (or one after the wait ended) is refused.
+#[tokio::test]
+async fn a_person_records_only_the_criterion_the_check_waits_for() {
+    let c = crit("look", "human", json!({}));
+    let (a, mut rx, guard) = park("r1", "goal", &c, Some(2));
+    assert_eq!(a.criterion_id.as_deref(), Some("look"));
+    assert!(deliver("r1", "goal", "other", true, "x", "Ann").is_err());
+    assert!(deliver("r1", "goal", "look", true, "  ", "Ann").is_err());
+    deliver("r1", "goal", "look", true, "Saw it", "Ann").unwrap();
+    let e = rx.recv().await.unwrap();
+    assert_eq!(
+        (e.met, e.iteration, e.by.as_str()),
+        (Some(true), Some(2), "Ann")
+    );
+    assert_eq!(e.revision.as_deref(), Some(criteria::revision(&c).as_str()));
+    assert!(deliver("r1", "goal", "look", true, "again", "Ann").is_err());
+    let (_a, _rx, guard2) = park("r1", "goal", &c, Some(2));
+    drop(guard2);
+    assert!(
+        deliver("r1", "goal", "look", true, "late", "Ann").is_err(),
+        "the wait ended"
+    );
+    drop(guard);
+}

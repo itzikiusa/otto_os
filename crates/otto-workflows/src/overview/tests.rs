@@ -503,3 +503,40 @@ fn the_overview_stays_small() {
     assert!(o.headline.ends_with('…'));
     assert!(serde_json::to_string(&o).unwrap().len() < 4096);
 }
+
+/// goal.md §2.7: a goal run's overview carries its progress from the loop
+/// around the check, and the success headline says the goal was reached.
+#[test]
+fn a_goal_run_carries_its_progress_and_says_it_reached_the_goal() {
+    let mut g = graph();
+    g.nodes.push(WorkflowNode {
+        id: "goal".into(),
+        kind: "loop".into(),
+        name: "Work toward the goal".into(),
+        x: 0.0,
+        y: 0.0,
+        params: json!({"steps": [{"kind": "agent_prompt"}, {"kind": "check"}]}),
+        retry: None,
+    });
+    let check = json!({"all_met": true, "met": 2, "total": 2});
+    let r: WorkflowRun = serde_json::from_value(json!({
+        "id": "r1", "workflow_id": "wf", "workspace_id": "ws", "status": "success",
+        "input": {}, "started_at": t(0), "finished_at": t(90), "rev": 3,
+        "nodes": [{"node_id": "goal", "status": "success", "started_at": t(0), "step_no": 1,
+            "output": {"iterations": 3, "max_iterations": 6, "active_ms": 81000, "max_active_s": 7200,
+                "satisfied": true, "history": [{"steps": {"Work": {}, "Check criteria": check}}]}}],
+    }))
+    .unwrap();
+    let o = run_overview(&r, &g, None, None, t(100));
+    let goal = o.goal.clone().expect("goal progress");
+    assert_eq!((goal.iteration, goal.max_iterations), (3, 6));
+    assert_eq!((goal.criteria_met, goal.criteria_total), (2, 2));
+    assert_eq!(
+        (goal.active_ms, goal.max_active_ms),
+        (81_000, Some(7_200_000))
+    );
+    assert_eq!(
+        o.headline,
+        "Goal reached — 2 of 2 criteria met in 3 iterations"
+    );
+}

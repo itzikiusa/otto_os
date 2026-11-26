@@ -85,6 +85,56 @@ pub fn take(dir: &Path) -> Vec<Note> {
     notes
 }
 
+/// Queue a note on a run that is going or held (`POST /workflow-runs/{id}/steer`);
+/// returns the waiting notes' texts.
+pub async fn queue_for_run(
+    repo: &otto_state::WorkflowsRepo,
+    data_dir: &Path,
+    run_id: &otto_core::Id,
+    raw: &str,
+    by: &str,
+) -> Result<Vec<String>> {
+    let run = repo.get_run(run_id).await?;
+    let live = matches!(
+        run.status,
+        otto_core::workflows::RunStatus::Pending | otto_core::workflows::RunStatus::Running
+    );
+    if !live
+        && !run
+            .hold
+            .as_ref()
+            .is_some_and(|h| h.is_effective(run.status))
+    {
+        return Err(Error::Conflict("the run has finished".into()));
+    }
+    let dir = crate::context::RunContextFiles::create(data_dir, run_id).dir_str();
+    let dir = dir.ok_or_else(|| Error::Internal("no context directory".into()))?;
+    Ok(queue(Path::new(&dir), raw, by)?
+        .into_iter()
+        .map(|n| n.text)
+        .collect())
+}
+
+/// The starting step's take: its `[steering]` section and one `steer`
+/// entry per note for the node's `human_log`.
+pub fn take_entries(dir: &Path) -> (String, Vec<otto_core::workflows::HumanEntry>) {
+    let notes = take(dir);
+    let entries = notes
+        .iter()
+        .map(|n| otto_core::workflows::HumanEntry {
+            kind: "steer".into(),
+            ask: None,
+            text: otto_core::text::clip_bytes(&n.text, 2048).to_string(),
+            met: None,
+            revision: None,
+            iteration: None,
+            by: n.by.clone(),
+            at: chrono::Utc::now(),
+        })
+        .collect();
+    (section(&notes), entries)
+}
+
 /// The `[steering]` prompt section ("" for no notes).
 pub fn section(notes: &[Note]) -> String {
     if notes.is_empty() {

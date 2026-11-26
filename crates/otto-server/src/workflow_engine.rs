@@ -57,6 +57,8 @@ use otto_workflows::step_util::{
     merge_published_refs, node_display_name, node_label, node_skill_names, normalize_prompt,
     param_str_list, seed_input_from_entries, short_id,
 };
+#[allow(unused_imports)] // the goal routes call it (wf-goal-src)
+pub(crate) use run::hold;
 
 /// Session and review associations share the ordered progress stream. Reviews
 /// are recorded as soon as they exist, even when the step does not await them.

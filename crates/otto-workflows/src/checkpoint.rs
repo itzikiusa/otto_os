@@ -175,6 +175,38 @@ where
     .await
 }
 
+/// The thread of an inner attempt a restart caught on it (DR-111): the
+/// re-entered step resumes it instead of a fresh prompt.
+pub fn caught_thread(cp: &WorkflowCheckpoint) -> Option<otto_core::workflows::StepThread> {
+    (cp.status == NodeStatus::Running).then_some(())?;
+    Some(otto_core::workflows::StepThread {
+        thread_id: cp.thread_id.clone()?,
+        runner: "threads".into(),
+        provider: String::new(),
+        model: None,
+        effort: None,
+        continued_from: None,
+        start_ordinal: cp.start_ordinal,
+        turns: 0,
+        usage: Default::default(),
+        digest: None,
+        closed_at: None,
+        available: None,
+    })
+}
+
+/// `steps[].same_thread`: continue the previous iteration's thread of this
+/// step (its `continue_thread` param).
+pub fn continue_previous(params: &mut Value, prev: Option<&WorkflowCheckpoint>) {
+    let Some(t) = prev.and_then(|c| c.thread_id.clone()) else {
+        return;
+    };
+    if !params.is_object() {
+        *params = serde_json::json!({});
+    }
+    params["continue_thread"] = Value::String(t);
+}
+
 /// How often a running inner attempt banks its active time (DR-111): a crash
 /// loses at most this much of one attempt, and only ever undercounts.
 pub const HEARTBEAT: Duration = Duration::from_secs(60);
@@ -223,6 +255,48 @@ impl AttemptClock {
         let s = self.lock();
         s.parked_ms + s.parked_since.map_or(0, |t| t.elapsed().as_millis() as u64)
     }
+}
+
+/// Run `attempt` on its own association channel, telling `clock` what each
+/// step note says (parked on a person, answered, a thread started) before it
+/// reaches `tx` — the engine's associations, `note` picks the step notes.
+pub async fn observed<A, F, Fut, T>(
+    clock: &AttemptClock,
+    tx: &tokio::sync::mpsc::UnboundedSender<A>,
+    note: impl Fn(&A) -> Option<&crate::step_util::StepNote>,
+    attempt: F,
+) -> T
+where
+    F: FnOnce(tokio::sync::mpsc::UnboundedSender<A>) -> Fut,
+    Fut: Future<Output = T>,
+{
+    use crate::step_util::StepNote;
+    let (inner, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let fwd = |a: A| {
+        match note(&a) {
+            Some(StepNote::NeedsYou(_)) => clock.park(),
+            Some(StepNote::Resumed { .. }) => clock.unpark(),
+            Some(StepNote::Thread {
+                thread_id,
+                start_ordinal,
+                ..
+            }) => clock.thread_started(thread_id.clone(), u64::from(*start_ordinal)),
+            _ => {}
+        }
+        let _ = tx.send(a);
+    };
+    let mut fut = Box::pin(attempt(inner));
+    let out = loop {
+        tokio::select! {
+            biased;
+            Some(a) = rx.recv() => fwd(a),
+            r = &mut fut => break r,
+        }
+    };
+    while let Ok(a) = rx.try_recv() {
+        fwd(a);
+    }
+    out
 }
 
 /// The running attempt's banked time and thread, as of now.
@@ -332,7 +406,15 @@ where
             () = clock.changed.notified() => {}
         }
         guard.bank.apply(cp);
-        let _ = repo.save_checkpoint(run_id, cp).await;
+        // Keep polling the attempt while the bank is written: it may hold
+        // the transaction (or the connection) that write waits for.
+        let save = repo.save_checkpoint(run_id, cp);
+        tokio::pin!(save);
+        tokio::select! {
+            biased;
+            _ = &mut save => {}
+            r = &mut fut => break r,
+        }
         guard.cp = Some(cp.clone());
     };
     guard.cp = None;

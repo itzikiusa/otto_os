@@ -6739,6 +6739,53 @@ Transcript session GETs reuse bounded immutable folds (32 retained entries / 128
   a later step continues it) and kept until the run's end plus the retention
   period below.
 
+### Goals inside the engine: check, loop budgets, holds
+
+- **`check` step:** command criteria run one after another in the run's
+  working directory through `verify_command` (env `OTTO_RUN_ID`,
+  `OTTO_CONTEXT_DIR`, `OTTO_WORKTREE`; exit 0 = met, the evaluator cannot
+  change it; evidence keeps the exit status and an 8 KiB output tail, every
+  byte in `<step base>.<criterion id>.log`); rule criteria (`verify: expr`)
+  read `{iteration, steps, last, input}`; agent criteria get one evaluator
+  turn on a fresh thread (`evaluator.{provider, model, effort}`) that writes
+  `<step base>.output.json` — a "met" without evidence counts as not met, no
+  valid answer leaves every agent criterion unmet. When every other criterion
+  is met and a human one has no record for this iteration, the step waits
+  (`phase: needs_you`, `attention {kind: verify, criterion_id}`) for
+  `POST /workflow-runs/{id}/nodes/{node_id}/criteria/{criterion_id}/verify`
+  (`node_id` = the check, or the loop around it); the record lands in that
+  node's `human_log`. `final_review: true` adds one review turn on a fresh
+  thread after an `achieved` verdict (passes only approved with no
+  findings). The output is `CheckOutput` (above) plus `summary`, and the
+  step file is its table.
+- **`loop`:** `max_iterations` 1..=10, or 1..=50 with `max_active_s`
+  (300..=28,800; banked as the sum of the inner checkpoints' `active_ms`,
+  never counting time on a person, a pause or downtime). An inner `check`
+  whose verdict is `achieved` ends the loop satisfied at once; `blocked`,
+  or two identical unmet signatures with `stop_on_repeat_failure`, stops
+  it. With `hold_when_unmet` a stop without the check passing (out of
+  iterations or time, blocked, a failed inner step) **holds the run**
+  (output `_workflow_hold = {kind, reason, iteration}`) instead of ending
+  `satisfied: false`. `steps[].same_thread` continues the step's thread
+  from the previous iteration; an inner agent step a restart caught resumes
+  its thread. The run's `limits.loops[<node id>]` (Resume) wins over the
+  params.
+- **Holds:** Pause writes the hold before anything unwinds; the driver then
+  stores the in-flight steps (and a held loop's skipped branch) as
+  `pending` with a `queued` phase mark noting the kind, no delivery and no
+  worktree reaping. Resume re-enters with every unsettled step (finished
+  steps and iterations are adopted); after Exhausted it needs new totals
+  above what is used ("Raise the iteration limit to resume: 6 of 6
+  iterations are used."), after Blocked it goes on with the next iteration.
+  Cancel of a held run drops the hold (the status stays) and reaps.
+- **Steering:** `POST /workflow-runs/{id}/steer` queues a note (≤ 4,000
+  chars, ≤ 20 waiting) in `<context>/steering.json`; the next agent step
+  that starts takes them all as a `[steering]` section and records each in
+  its node's `human_log`.
+- **Run lanes:** a run whose Start node has `lane: "long"` waits on its own
+  gate (env `OTTO_WF_MAX_LONG_RUNS`, default 2, 1..=4), not the ordinary
+  slots; queue places count within the lane.
+
 ### Lightweight workflow progress and lazy details
 
 `GET /api/v1/workflow-runs/{id}/progress?after_rev=N` requires workspace Viewer before reading/returning either branch. It returns 200 `{"changed":false,"rev":N}` if current, or `{"changed":true,"rev":N,"run":WorkflowRun}` with `run.summary=true`, lightweight nodes and `checkpoint_rev`, `checkpoint_generation`, `checkpoint_count`, `checkpoint_done`. Input/output/log bodies are omitted (`input`/`output` null, `logs` empty); node summaries add `detail_version`, `log_count`, `has_output`, bounded error/phase previews and session references, and copy the run-view fields `step_no`, `step_file`, `phase`, `wait`, `attention`, `error_class`, `deliverables`, `brief`, the newest 12 `phases` and 5 `human_log` entries, `thread` without `digest` and `children` without `usage` (the full node from `…/nodes/{node_id}` has both). The run adds `overview` (null when stale) and `hold` beside the unchanged `summary: true`. Context directory/approval/proof/version metadata remain available. Missing imported projections repair from authoritative JSON before the conditional comparison; busy admission returns 409, never a fabricated empty run.
