@@ -6708,8 +6708,9 @@ Transcript session GETs reuse bounded immutable folds (32 retained entries / 128
   period below.
 - **Needs you, limits, deliverables.** A step entering `needs_you` (an
   approval, a question, or a usage limit with a known reset — the step parks
-  until `attention.resets_at` and then continues on the same thread; with no
-  known reset it fails with class `usage_limit`) posts one notification
+  until `attention.resets_at` (read from the CLI's own words, else the usage
+  meter) and then continues on the same thread; with no known reset it fails
+  at once with class `usage_limit`, never retried by backoff) posts one notification
   ("Workflow “…” needs you") per episode and, in the live chat style, one new
   post in the run's thread. `deliverables` come from the thread digest's
   outward actions (agent steps) or a built-in node's `output.deliverables`.
