@@ -26,6 +26,7 @@
   // them (and their issues API) off the Workflows page's first load.
   const ProductPublish = lazyComponent(() => import('./ProductPublish.svelte'));
   import { KINDS_WITH_OWN_PROVIDER, type SetParam } from './util';
+  import type { Snippet } from 'svelte';
 
   interface Props {
     node: WorkflowNode;
@@ -38,15 +39,21 @@
     workflowName: string | undefined;
     /** Open the page's big JSON editor for `field`. */
     onzoom: (field: string, label: string) => void;
+    /** The editor's own form for this kind (in place of the one below). */
+    body?: Snippet;
+    /** false: no Provider + Model on kinds that run no agent (the editor). */
+    universalModel?: boolean;
   }
-  let { node, set, setParams, wsId, pickers, workflowName, onzoom }: Props = $props();
+  let { node, set, setParams, wsId, pickers, workflowName, onzoom, body, universalModel = true }: Props = $props();
   const UTILITY_KINDS = ['delay', 'transform', 'game_engine', 'channel_notify', 'budget_gate', 'human_approval', 'condition'];
   const PRODUCT_STEP_KINDS = ['product_analyze', 'product_rewrite', 'product_plan'];
 </script>
 
 <!-- `display: contents`: the fields stay flex items of the inspector column. -->
 <div class="np-form">
-  {#if node.kind === 'manual_trigger'}
+  {#if body}
+    {@render body()}
+  {:else if node.kind === 'manual_trigger'}
     <ManualTrigger {node} {set} {wsId} {pickers} {workflowName} />
   {:else if node.kind === 'agent_prompt'}
     <AgentPrompt {node} {set} />
@@ -83,7 +90,7 @@
        agent-running kinds (git_pr drafts the PR message, …) it
        drives the agent; for pure utility nodes it's simply present and unused.
        Kinds with their own control are excluded to avoid a duplicate. -->
-  {#if !KINDS_WITH_OWN_PROVIDER.includes(node.kind) && node.kind !== 'manual_trigger'}
+  {#if universalModel && !KINDS_WITH_OWN_PROVIDER.includes(node.kind) && node.kind !== 'manual_trigger'}
     <ProviderModel {node} {set} />
   {/if}
 </div>

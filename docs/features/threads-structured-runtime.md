@@ -1638,6 +1638,8 @@ bound by the shell at boot) and renders it with these props:
 | `draft` | — | With `sessionId: null`: no thread yet. The embed renders the Threads start composer (`RuntimeStartComposer`, the same one the new-thread stage uses: agent · model · effort through the model picker, the access chip, attach, `@`, `/`) under the host's `lead` and suggestion chips, and starts the thread through the Threads store (see below). |
 | `onhandle(handle)` | — | The embed's send for the host's own asks (a menu, a file, a line pick): `handle.send(text, { accessMode })`. Before a thread it starts one with the composer's picks; after, it reopens a closed thread and queues behind a running turn, through the store, so the access chip, the closed state and the working dot stay true. |
 | `contextOnFresh()` | — | Text put before the first message after `/clear` (fresh context), so the agent knows again what it is looking at (a PR's context block). |
+| `readOnly` | `false` | A thread another feature drives (a workflow step's): no composer and no **Open in Threads**; its approval and question cards stay answerable, and editing or reviving a turn is off. The runtime adds no guard of its own. |
+| `onunavailable(reason)` | — | Called once when the thread is gone or not readable: `'deleted'` (the row or its conversation answers 404, or the thread was removed while shown) or `'forbidden'` (403). The embed then renders nothing of its own (no error, no Retry), so the host shows its own fallback — a workflow step shows the step's digest. |
 
 `hostCommands` handlers (all optional): `openDiff(id)` for `/diff`,
 `openFiles(id)` for `/files`, `openTerminal(id)` for `/terminal`,

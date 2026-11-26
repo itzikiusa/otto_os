@@ -10,7 +10,7 @@
   <div class="section-title">Mobile &amp; tablet</div>
   <SettingToggle
     label="Light version"
-    hint="Only Threads, Connections, Git, API and Usage, opening on Threads. Remembered on this device."
+    hint="Only Threads, Workflows, Connections, Git, API and Usage, opening on Threads. Remembered on this device."
     checked={lightMode.chosen}
     onchange={(v) => void lightMode.set(v)}
     testid="appearance-light-version"

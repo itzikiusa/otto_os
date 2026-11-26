@@ -10,7 +10,8 @@
   // adds nothing to the desktop layout.
   //
   // The light version (lib/lightMode.svelte.ts, opt-in from the top of the
-  // More sheet) shows exactly its five modules as tabs, in a fixed order, and
+  // More sheet) shows its first five modules as tabs, in a fixed order (the
+  // sixth, Usage, in the ⋯ sheet), and
   // shrinks "More" to a small ⋯ that holds the way back to the full app,
   // notifications, Commands, Settings, sign out and the machine row.
   import Icon from '../lib/components/Icon.svelte';
@@ -19,7 +20,7 @@
   import NotificationBell from './NotificationBell.svelte';
   import { notifications } from '../lib/stores/notifications.svelte';
   import { plural } from '../lib/plural';
-  import { LIGHT_MODULES, lightMode } from '../lib/lightMode.svelte';
+  import { LIGHT_BAR_TABS, LIGHT_MODULES, lightMode } from '../lib/lightMode.svelte';
   import { router } from '../lib/router.svelte';
   import { navPending } from '../lib/navPending.svelte';
   import { ui } from '../lib/stores/ui.svelte';
@@ -61,8 +62,8 @@
   });
   // The entry the current route highlights (plugin slug, '' → Agents, …).
   const current = $derived(activeNavId(router.parts));
-  const primary = $derived(light ? modules : modules.slice(0, PRIMARY_COUNT));
-  const overflow = $derived(light ? [] : modules.slice(PRIMARY_COUNT));
+  const primary = $derived(modules.slice(0, light ? LIGHT_BAR_TABS : PRIMARY_COUNT));
+  const overflow = $derived(modules.slice(light ? LIGHT_BAR_TABS : PRIMARY_COUNT));
   // Light: the ⋯ carries the unread notifications (the bell lives in its sheet).
   const unread = $derived(light ? notifications.unreadRows : 0);
 
@@ -143,7 +144,7 @@
         <Icon name={light ? 'maximize' : 'minimize'} size={20} />
         <span class="sr-text">
           <span class="sr-title">{light ? 'Full app' : 'Light version'}</span>
-          <span class="sr-hint">{light ? 'Show every module again' : 'Threads, Connections, Git, API and Usage only'}</span>
+          <span class="sr-hint">{light ? 'Show every module again' : 'Threads, Workflows, Connections, Git, API and Usage only'}</span>
         </span>
       </button>
       {#if light}

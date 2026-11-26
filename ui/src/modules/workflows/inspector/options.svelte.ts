@@ -9,7 +9,7 @@
 import { api } from '../../../lib/api/client';
 import { listIssueAccounts } from '../../../lib/api/issues';
 import { loadErrorText } from '../../../lib/loadError';
-import type { BrokerCluster, Connection, IssueAccount, Repo, TopicSummary } from '../../../lib/api/types';
+import type { BrokerCluster, Connection, IssueAccount, ProviderSkillInfo, Repo, TopicSummary } from '../../../lib/api/types';
 import type { ProductStory } from '../../../lib/api/types/product';
 
 export interface Named {
@@ -81,6 +81,10 @@ export class InspectorOptions {
   );
   /** Issue accounts are per user, not per workspace: one key. */
   readonly accounts = new OptionCache<IssueAccount>(() => listIssueAccounts());
+  /** Skills installed for each provider (~/.claude/skills, $CODEX_HOME/skills…), per provider. */
+  readonly skills = new OptionCache<ProviderSkillInfo>((provider) =>
+    api.get<ProviderSkillInfo[]>('/library/provider-skills').then((all) => all.filter((s) => s.provider === provider)),
+  );
 }
 
 /** A full ULID — a free-text id complete enough to look up. */

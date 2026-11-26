@@ -6,13 +6,35 @@
   import Icon from '../../../lib/components/Icon.svelte';
   import { agentProviders, defaultAgentProvider } from '../../../lib/providers';
   import RepoPicker from './RepoPicker.svelte';
+  import StepModel from './StepModel.svelte';
+  import { providerName } from '../editor/nodeSummary';
+  import { reviewerPick, withNodePick, withReviewerPick, type ModelPick, type ReviewerParams } from '../editor/stepRules';
   import type { InspectorOptions } from './options.svelte';
   import {
     linesValue, paramBool, paramLines, paramNum, paramStr, reviewers as reviewersOf, scoringField as scoringOf,
     summarizerField as summarizerOf, toggled, withScoring, withSummarizer, type ReviewerRow, type SetParam,
   } from './util';
 
-  let { node, set, wsId, pickers }: { node: WorkflowNode; set: SetParam; wsId: string; pickers: InspectorOptions } = $props();
+  let { node, set, wsId, pickers, pickModels = false }: {
+    node: WorkflowNode; set: SetParam; wsId: string; pickers: InspectorOptions;
+    /** The editor's form: per-reviewer model and effort, the summarizer's pick, speed (ux.md §9.3). */
+    pickModels?: boolean;
+  } = $props();
+  const p = $derived((node.params ?? {}) as { picks?: Record<string, ModelPick>; summarizer?: Record<string, string>; reviewer_time_box_secs?: number; scope_assessment?: string });
+  /** Providers any reviewer runs on: one review-wide default each. */
+  const usedProviders = $derived([...new Set(reviewers().flatMap((r) => r.providers ?? []))]);
+  const pickOf = (v: ModelPick): { provider: string; model: string; effort: string } => ({ provider: '', model: v.model ?? '', effort: v.effort ?? '' });
+  function setRowPick(i: number, prov: string, v: { model: string; effort: string }): void {
+    setReviewers(reviewers().map((r, k) => (k === i ? (withReviewerPick(r as ReviewerParams, prov, v) as ReviewerRow) : r)));
+  }
+  function setSummarizer(v: { provider: string; model: string; effort: string }): void {
+    const next = { ...(p.summarizer ?? {}) };
+    for (const k of ['provider', 'model', 'effort'] as const) {
+      if (v[k]) next[k] = v[k];
+      else delete next[k];
+    }
+    set('summarizer', Object.keys(next).length ? next : undefined);
+  }
   // Reviewer providers come from the live registry (built-ins + custom).
   const REVIEW_PROVIDERS = $derived(agentProviders());
   function reviewers(): ReviewerRow[] {
@@ -121,6 +143,15 @@
         </label>
       {/each}
     </div>
+    {#if pickModels}
+      {#each r.providers ?? [] as prov (prov)}
+        <div class="rv-pick">
+          <span class="node-hint">{providerName(prov)}</span>
+          <StepModel compact lockProvider label="{r.lens || 'Reviewer'} · {providerName(prov)}" value={pickOf(reviewerPick(r as ReviewerParams, prov))} defaultProvider={prov}
+            onchange={(v) => setRowPick(i, prov, v)} />
+        </div>
+      {/each}
+    {/if}
     <textarea dir="auto" aria-label="Reviewer instructions"
       class="rv-instr np-prompt"
       rows="5"
@@ -132,6 +163,23 @@
 {/each}
 </div>
 
+{#if pickModels && usedProviders.length}
+  <details class="np-sec">
+    <summary class="node-hint">Default for every reviewer of a provider</summary>
+    {#each usedProviders as prov (prov)}
+      <div class="rv-pick">
+        <span class="node-hint">Every {providerName(prov)} reviewer</span>
+        <StepModel compact lockProvider label="Every {providerName(prov)} reviewer" value={pickOf(p.picks?.[prov] ?? {})} defaultProvider={prov}
+          onchange={(v) => set('picks', withNodePick(p.picks, prov, v))} />
+      </div>
+    {/each}
+  </details>
+{/if}
+{#if pickModels}
+  <span class="np-label np-sec">Summarizer (consolidates + scores; the scope check runs on its pick)</span>
+  <StepModel label="Summarizer" value={{ provider: p.summarizer?.provider ?? '', model: p.summarizer?.model ?? '', effort: p.summarizer?.effort ?? '' }}
+    defaultProvider={defaultAgentProvider()} onchange={setSummarizer} />
+{:else}
 <label class="np-sec" for="np-sum-prov">Summarizer (consolidates + scores)</label>
 <input dir="auto"
   id="np-sum-prov"
@@ -140,6 +188,7 @@
   value={summarizerField('provider')}
   oninput={(e) => updateSummarizer('provider', e.currentTarget.value)}
 />
+{/if}
 <textarea dir="auto" aria-label="Summarizer instructions"
   class="np-prompt np-prompt-lg"
   rows="14"
@@ -188,6 +237,18 @@
   The reviewer agent runs these in the repo and reports any failure as a blocking
   finding — a safety net for a check the implementer may have skipped.
 </p>
+{#if pickModels}
+  <span class="np-label np-sec">Speed</span>
+  <label for="np-timebox">Time-box each reviewer (minutes)</label>
+  <input id="np-timebox" type="number" min="1" max="240" placeholder="Off" value={p.reviewer_time_box_secs ? Math.round(p.reviewer_time_box_secs / 60) : ''}
+    oninput={(e) => { const m = Number(e.currentTarget.value); set('reviewer_time_box_secs', m > 0 ? Math.round(m * 60) : undefined); }} />
+  <p class="insp-note">A reviewer that runs out keeps the findings it wrote; its lens counts as missing otherwise. Empty: off.</p>
+  <label for="np-scope">Which reviewers run</label>
+  <select id="np-scope" value={p.scope_assessment === 'configured' ? 'configured' : ''} onchange={(e) => set('scope_assessment', e.currentTarget.value || undefined)}>
+    <option value="">Chosen by the scope check</option>
+    <option value="configured">Only the reviewers above (the scope check may drop one, never add one)</option>
+  </select>
+{/if}
 <label class="np-chk">
   <input
     type="checkbox"
@@ -202,3 +263,12 @@
     onchange={(e) => set('require_pass', e.currentTarget.checked)}
   /> Require pass (fail this step if below threshold)
 </label>
+
+<style>
+  .rv-pick {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--sp-2);
+  }
+</style>

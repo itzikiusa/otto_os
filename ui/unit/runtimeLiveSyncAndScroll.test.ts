@@ -169,6 +169,7 @@ function makeRuntimeHarness(extraGlobals: Record<string, unknown> = {}) {
         }
       >;
       loadError: Record<string, string>;
+      unavailable: Record<string, string>;
       staleError: Record<string, string>;
       olderError: Record<string, string>;
       itemError: Record<string, string>;
@@ -1213,6 +1214,7 @@ test('RuntimeViews: a gone thread (404) stops reading; a failed read keeps its b
   h.gets[0].gate.reject(Object.assign(new Error('not found'), { status: 404 }));
   await flush();
   assert.ok(h.views.loadError['s-gone']);
+  assert.equal(h.views.unavailable['s-gone'], 'deleted', 'an embed swaps to its fallback (onunavailable)');
   assert.ok(![...h.timers.values()].some((t) => t.ms === 1_500), 'no retry for a thread that is gone');
   const liveness = [...h.timers.values()].find((t) => t.ms === 4_000);
   assert.ok(liveness);
@@ -1228,6 +1230,7 @@ test('RuntimeViews: a gone thread (404) stops reading; a failed read keeps its b
   await flush();
   const retry = [...h2.timers.values()].find((t) => t.ms === 1_500);
   assert.ok(retry, 'a server error retries on its backoff');
+  assert.equal(h2.views.unavailable['s-500'], undefined, 'a server error is not "gone"');
   [...h2.timers.values()].find((t) => t.ms === 4_000)!.fn();
   await flush();
   assert.equal(h2.gets.length, 1, 'the liveness tick leaves a failed read to its backoff');
@@ -1235,6 +1238,13 @@ test('RuntimeViews: a gone thread (404) stops reading; a failed read keeps its b
   await flush();
   assert.equal(h2.gets.length, 2);
   close2();
+
+  const h3 = makeRuntimeHarness();
+  const close3 = h3.views.open('s-403');
+  h3.gets[0].gate.reject(Object.assign(new Error('forbidden'), { status: 403 }));
+  await flush();
+  assert.equal(h3.views.unavailable['s-403'], 'forbidden');
+  close3();
 });
 
 test('RuntimeViews: a row read during the first replay does not fetch /events a second time', async () => {

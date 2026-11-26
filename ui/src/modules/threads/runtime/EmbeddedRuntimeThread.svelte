@@ -12,7 +12,7 @@
   import Icon from '../../../lib/components/Icon.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../../lib/loadError';
-  import { EMBED_DEFAULTS, openInThreads, type RuntimeEmbedHandle, type RuntimeThreadViewProps } from '../../../lib/runtimeThreadPort';
+  import { EMBED_DEFAULTS, openInThreads, type RuntimeEmbedHandle, type RuntimeEmbedUnavailable, type RuntimeThreadViewProps } from '../../../lib/runtimeThreadPort';
   import type { RuntimeAccessMode } from '../../../lib/api/types';
   import { runtimeDrafts } from '../../../lib/stores/runtimeDrafts.svelte';
   import EmbeddedRuntimeDraft from './EmbeddedRuntimeDraft.svelte';
@@ -37,6 +37,8 @@
     accessModeOverride = null,
     onaccessmodechange,
     hideEmbedBarWhenUnlinked = false,
+    readOnly = false,
+    onunavailable,
     fallbackCwd = null,
     hasExternalContext = false,
     transformOutgoingText,
@@ -61,6 +63,21 @@
   const current = $derived(runtimeThreads.get(shown));
   let rowError = $state<string | null>(null);
   let attempt = $state(0);
+  // Gone (404, or removed while shown) or not readable (403): a host with
+  // `onunavailable` shows its own fallback, told once per thread.
+  let gone = $state<RuntimeEmbedUnavailable | null>(null);
+  let told: RuntimeEmbedUnavailable | null = null;
+  const lost = $derived.by((): RuntimeEmbedUnavailable | null => {
+    if (!onunavailable || !sessionId) return null;
+    if (!runtimeThreads.get(sessionId) && runtimeThreads.removed(sessionId)) return 'deleted';
+    return gone ?? runtimeViews.unavailable[sessionId] ?? null;
+  });
+  $effect(() => {
+    const r = lost;
+    if (!r || told === r) return;
+    told = r;
+    untrack(() => onunavailable?.(r));
+  });
   const linked = $derived(shown !== sessionId);
   const chrome = $derived(!!sessionId && (linked || (!hideEmbedBarWhenUnlinked && (compact || !!onmaximize || !!ondetach))));
   const detach = (): void => {
@@ -142,13 +159,20 @@
       if (!fresh) rowError = null;
       (fresh ? Promise.resolve() : runtimeThreads.loadOne(id)).then(
         () => runtimeThreads.loadLinked(id, 2000).catch((e: unknown) => console.warn('linked threads unavailable', e)),
-        (e: unknown) => { if (id === sessionId) rowError = loadErrorText(e); },
+        (e: unknown) => {
+          if (id !== sessionId) return;
+          const s = (e as { status?: unknown } | null)?.status;
+          if (onunavailable && (s === 403 || s === 404)) gone = s === 404 ? 'deleted' : 'forbidden';
+          else rowError = loadErrorText(e);
+        },
       );
     });
   });
   $effect(() => {
     void sid;
     picked = null;
+    gone = null;
+    told = null;
   });
 </script>
 
@@ -174,7 +198,7 @@
         <button type="button" class="icon-btn" aria-label="Detach the thread" title="Detach" data-testid="embedded-thread-detach" onclick={detach}>
           <Icon name="external" size={13} />
         </button>
-      {:else}
+      {:else if !readOnly}
         <button type="button" class="btn small" aria-label="Open in Threads" title="Open this thread in Threads" data-testid="embedded-thread-open" onclick={detach}>
           <Icon name="external" size={12} />{#if !compact} Open in Threads{/if}
         </button>
@@ -188,6 +212,8 @@
           <EmbeddedRuntimeDraft bind:this={draftEl} {draft} />
         {/key}
       {/if}
+    {:else if lost}
+      <!-- the host shows its own fallback (onunavailable) -->
     {:else if rowError && !runtimeThreads.get(sessionId)}
       <LoadState what="the thread" error={rowError} empty onretry={() => (attempt += 1)} />
     {:else}
@@ -196,6 +222,7 @@
           sessionId={shown}
           focused={focusOnMount}
           {compact}
+          {readOnly}
           {hostCommands}
           {accessModeOverride}
           {onaccessmodechange}
