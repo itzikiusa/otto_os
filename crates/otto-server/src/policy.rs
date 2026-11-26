@@ -938,10 +938,9 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     }
 
     // ---- Goal Loops -----------------------------------------------------------
-    // Workspace-axis feature: every handler enforces ws Viewer/Editor via the
-    // role check (`require_ws_role`), so the feature-capability axis is not gated
-    // here. (A dedicated GoalLoops capability is a possible future enhancement.)
-    if p.starts_with("/goal-loops/")
+    // Workspace-axis: handlers enforce ws Viewer/Editor (`require_ws_role`), so no
+    // feature gate — except Continue, which starts a goal (Workflows, below).
+    if (p.starts_with("/goal-loops/") && !p.ends_with("/continue"))
         || p == "/goal-loops"
         || p.starts_with("/workspaces/{id}/goal-loops")
     {
@@ -973,6 +972,7 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         || p.starts_with("/workflow-triggers/")
         || p.starts_with("/workspaces/{wid}/workflow")
         || p.starts_with("/workspaces/{wid}/goals")
+        || p == "/goal-loops/{id}/continue"
     {
         return Require(Workflows, workflows_tier(method, p));
     }
@@ -3319,6 +3319,13 @@ mod tests {
             pol(Method::GET, "/api/v1/workflows/templates"),
             Require(Workflows, View)
         );
+        // Continuing an older loop starts a goal workflow (CR2-002); the
+        // loop's read-only history stays on the workspace-role check.
+        assert_eq!(
+            pol(Method::POST, "/api/v1/goal-loops/{id}/continue"),
+            Require(Workflows, Edit)
+        );
+        assert_eq!(pol(Method::GET, "/api/v1/goal-loops/{id}"), Exempt);
         // Run-scoped context files (PC-1) are reads at Workflows:View, NOT the
         // `/fs/*` Agents:Edit tier — a workspace Viewer opens their runs' files.
         for p in [
