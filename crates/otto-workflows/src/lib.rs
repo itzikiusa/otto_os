@@ -16,6 +16,7 @@ pub mod criteria;
 pub mod deliverables;
 pub mod http;
 pub mod location;
+pub mod optimize;
 pub mod prepare;
 pub mod rereview;
 pub mod retry;
