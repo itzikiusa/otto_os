@@ -127,12 +127,12 @@ export interface ReviewerParams {
 }
 
 /** One reviewer row's own pick for `provider`: its `picks[provider]`, else
- *  the row's model/effort when its lens runs only on that provider. */
+ *  the row's model/effort when `provider` is the lens's primary (first)
+ *  provider — the review engine's `resolve_pick` (agreed-names §4). */
 export function reviewerPick(row: ReviewerParams, provider: string): ModelPick {
   const own = row.picks?.[provider];
   if (own) return own;
-  const only = (row.providers ?? []).length === 1 && row.providers![0] === provider;
-  return only ? { model: row.model, effort: row.effort } : {};
+  return (row.providers ?? [])[0] === provider ? { model: row.model, effort: row.effort } : {};
 }
 
 /** What a reviewer of `provider` runs on: its own pick, else the review-wide
