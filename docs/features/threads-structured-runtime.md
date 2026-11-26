@@ -1199,6 +1199,28 @@ full-access settings. Remaining permission requests still require a person.
 Typed question answers use a separate payload and never grant a permission;
 secret question forms are refused instead of being collected into history.
 
+### 7.1 Unattended turns (workflow steps, reviews, personal agents)
+
+Engines that run an agent with nobody watching wait with
+`AgentRuntime::run_turn` / `await_settled` (`runtime/unattended.rs`): the
+call returns when the thread has *settled* — no turn, no background work,
+nothing queued or announced for the queue (a sub-thread's answer is noted on
+its parent before the child looks idle), no pending request, no busy
+agent-opened sub-thread at any depth, and at most 10 s after background work
+ends for the agent's own follow-up turn. It is event-driven (every `emit`
+wakes it); deadline, no progress, the 45-minute background limit, cancel, the
+loop guard and a restart that cut the turn end it with their own reason.
+Requests waiting on a person come out as `NeedsYou` / `Resumed` events
+(a sub-thread's question only once its opener's agent left it pending).
+
+`ThreadStepRunner` (`src/step_runner.rs`) is the workflow engine's
+`StepRunner` on top: it waits for a machine place, opens or continues a
+thread, nudges once for a missing handoff file, waits out a plan usage limit
+whose reset is known and continues the same thread, and keeps the digest
+(`runtime/digest.rs`) the run view needs after retention
+(`runtime/retention.rs`) deletes the thread. Engine threads stay out of the
+person's lists; see `docs/contracts/api.md` "Engine threads".
+
 ## 8. Code map
 
 | Path | What |
