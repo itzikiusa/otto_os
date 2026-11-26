@@ -216,10 +216,13 @@
     {#if tab === 'runs' && error && !workflows.length}
       <!-- Without its workflows the inbox would claim "No workflows yet". -->
       <div class="read-col"><LoadState what="workflows" variant="page" {error} onretry={() => void load()} /></div>
-    {:else if tab === 'runs'}
-      <RunsInbox workspaceId={ws.currentId ?? ''} active={ws.activeWorkflowRuns} workflows={workflows} bind:workflowFilter={workflowsUi.runsFilter}
+    {:else if tab === 'runs' && ws.currentId}
+      <!-- Mounted once a workspace is selected: a cold load would otherwise ask for `/workspaces//workflow-runs`, then load Recent a second time. -->
+      <RunsInbox workspaceId={ws.currentId} active={ws.activeWorkflowRuns} workflows={workflows} bind:workflowFilter={workflowsUi.runsFilter}
         onopen={(wf, run) => router.go(runRoutePath(wf, run))} menu={runMenu} onrun={() => startRun()} onnewworkflow={viewport.isPhone ? undefined : () => (creating = true)} />
-      {#if ws.currentId}<div class="read-col wf-older"><OlderLoopsLink workspaceId={ws.currentId} /></div>{/if}
+      <div class="read-col wf-older"><OlderLoopsLink workspaceId={ws.currentId} /></div>
+    {:else if tab === 'runs'}
+      <!-- No workspace selected yet. -->
     {:else}
       <WorkflowList {workflows} {loading} {error} onretry={() => void load()} onopen={(wf) => router.go(`workflows/${wf.id}`)} menu={workflowMenu} onnew={viewport.isPhone ? undefined : () => (creating = true)} />
     {/if}
