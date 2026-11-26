@@ -449,7 +449,7 @@ Coverage by category (✅ = read tools, ⚠ = mutating tools, approval-gated):
 
 | Category | Read tools | Mutating tools (DANGEROUS) |
 |---|---|---|
-| **Workflows** | ✅ list (every workspace) / get / list_runs (summary rows) / get_run | ⚠ run, cancel_run |
+| **Workflows** | ✅ list (every workspace) / get / list_runs (summary rows) / get_run (with the run's `overview`: state, headline, who it waits on, a goal's progress and hold) | ⚠ run, cancel_run, control_workflow_run (pause / resume any run; `extend` sets a goal's new budget totals on resume) |
 | **Message Brokers** | ✅ list_clusters (every workspace) / list_topics / get_topic / list_consumer_groups / *consume*¹ | ⚠ produce |
 | **Git** | ✅ list_repos / status / list_prs (paged) / get_pr / get_pr_checks / *get_pr_diff*¹ / *open_pr_draft*¹ | ⚠ create_pr, comment_pr, merge_pr, start_pr_review |
 | **Database** | ✅ list_connections (every workspace) / *query_db_readonly*¹ | ⚠ query_db (a statement that may write, through the Explorer's own query path; the connection's read-only / production setting still refuses it) |
@@ -459,7 +459,7 @@ Coverage by category (✅ = read tools, ⚠ = mutating tools, approval-gated):
 | **Vault (docs home)** | ✅ vault_list / vault_dir / vault_read / vault_search / vault_backlinks / vault_tags / vault_graph / vault_okf_validate | ⚠ vault_write, vault_write_file, vault_rename, vault_delete (delete = soft move to `.trash/`) — `workspace_id` optional on all vault tools (vaults are global; omitted → token pin, else first accessible workspace); `vault_id` may be the vault's name |
 | **Design Hall** | ✅ design_list / list_design_projects / design_get / design_links / design_search / design_comments (review comments with their 2D / 3D pins; version_id, resolved narrow) | ⚠ design_assist, design_link, design_comment (optional pin_3d, or a reply with parent_id), design_resolve_comment (resolved false reopens) — the comment tools are hidden from narrow (review) sessions |
 | **3D, voice & Smart mode** | ✅ list_3d_providers / get_3d_job (status, progress_pct, stage message, result artifact + version) / list_3d_jobs / list_tts_providers / list_tts_voices / list_voice_clips / get_production / list_productions | ⚠ start_3d_job (generate / gameready / rig / animate, default generator otto-forge), cancel_3d_job, export_3d_artifact, synthesize_voice (returns the clip: id, duration_ms, visemes), delete_voice_clip (irreversible), create_production (project_id: a new scene of that project), start_production, cancel_production, steer_production (comment + pins), redraw_production_item, revert_production, rebuild_production_scene, start_sound / start_music (a sound or music clip; get_audio_job ✅ / list_audio_jobs ✅ to follow), cancel_audio_job — no provider admin, no keys; hidden from narrow (review) sessions |
-| **Sessions** | ✅ list / get / wait_session | ⚠ broadcast_message, open_session (spawns an agent session + opening prompt), send_message (one session by id) |
+| **Sessions** | ✅ list / get / wait_session; linked threads of the caller's own group: thread_open / thread_capabilities / thread_answer / thread_list / thread_message / thread_read / thread_close (`remove: true` also deletes a sub-thread the caller's agent opened, once it has answered) | ⚠ broadcast_message, open_session (spawns an agent session + opening prompt), send_message (one session by id) |
 | **Code Review** | ✅ list_pr_reviews / list_findings / get_finding | ⚠ start_pr_review |
 | **Product** | ✅ list_stories (global library) / get_story (id or Jira key) | — |
 | **Channels** | ✅ list_integrations | ⚠ test_integration |
@@ -470,7 +470,7 @@ Coverage by category (✅ = read tools, ⚠ = mutating tools, approval-gated):
 | **AWS** | ✅ aws_list_accounts / aws_s3_list_buckets / aws_s3_list_objects / aws_sqs_list_queues / aws_ec2_list_instances / aws_athena_list_tables / aws_athena_get_query / aws_eks_list_clusters / aws_logs_list_groups / aws_logs_get_insights — opt-in (off by default, content): aws_s3_preview / aws_logs_filter | ⚠ aws_athena_query (starts a billed Athena scan; poll `aws_athena_get_query`), aws_logs_insights (billed per GB scanned; poll `aws_logs_get_insights`), aws_sqs_send (produces one message), aws_sqs_peek³ — no S3 write, no EC2 start/stop |
 | **Kubernetes** | ✅ k8s_list_clusters / k8s_get_resources / k8s_describe / k8s_top — opt-in (off by default, content): k8s_logs (text tail, never `follow`) | ⚠ k8s_action (restart / scale / delete_pod / rollout_* / Argo Rollouts promote-abort-retry / argocd_sync-refresh-terminate_op-app_restart / cronjob_*; destructive ones — every mutating one on a prod cluster — need `params.confirm_name == name`, and such a call is always a person's approval: it runs as the approving person) |
 | **Simulators** | ✅ sim_list (iOS simulators and Android emulators: state, screen, capabilities, host readiness) — opt-in (off by default, content): sim_logs (recent logcat / the last 2 minutes of the iOS unified log) | ⚠ sim_action (boot — embedded unless `open_gui` — / shutdown / open_url / orientation / appearance / launch_app / terminate_app), sim_input (tap / swipe / text / key_event) — no screenshot tool (a frame is megabytes of base64 text); host-global; hidden from narrow (review) sessions |
-| **Code & Context / Agents / Approvals** | ✅ list_workspaces / list_goal_loops / *search_codebase*¹ / get_context_packet / get_proof_pack / ask_human_approval | ⚠ run_goal_loop |
+| **Code & Context / Agents / Approvals** | ✅ list_workspaces / list_goal_loops (goal runs, then the older loops) / *search_codebase*¹ / get_context_packet / get_proof_pack / ask_human_approval | ⚠ run_goal_loop (starts a goal — a workflow run) |
 
 ¹ Off by default (opt-in): non-mutating tools that stream large/sensitive *content*
 (messages, recalled knowledge, code, rows) are defined but not in `DEFAULT_ENABLED`.
@@ -743,7 +743,8 @@ complete list and `otto_tool_specs()` / `route_for` for the authoritative source
 |---|---|---|---|
 | `otto.search_codebase` | no | no | Literal code search confined to the workspace root (`code-search`). |
 | `otto.get_context_packet` | no | **yes** | Workspace metadata + the most-relevant code excerpts for a query. |
-| `otto.run_goal_loop` | **yes (dangerous)** | no | Create **and start** a bounded goal loop. |
+| `otto.run_goal_loop` | **yes (dangerous)** | no | Start a **goal**: a workflow run that works and checks the criteria within a budget ([Goals](./goal-loops.md)). The name and input schema are the Goal Loops ones; it answers `{workflow_id, run_id}` and lists the roles a goal does not have (`planner`, `digester`, `definer`) as `ignored`. An engineering graph or a cost cap is refused. |
+| `otto.control_workflow_run` | **yes (dangerous)** | no | `{run_id, action: pause\|resume, extend?: {iterations?, active_s?}}` — pause a running workflow run or resume a held one; `extend` gives a goal new totals. The approval card reads "Pause workflow run '<id>'" / "Resume workflow run '<id>' with up to N iterations, up to M min of active time". Governed only: sessions reach it through the governed bridge, never as a native tool. |
 | `otto.create_work_item` | **yes (dangerous)** | no | Create a Swarm task under a project. |
 | `otto.query_db_readonly` | no | no | A **read-only** SQL query against a connection (statement-classified; writes/DDL/multi-statement rejected). |
 | `otto.query_db` | **yes (dangerous, irreversible)** | no | A statement that **may write** (INSERT/UPDATE/DELETE/DDL) against a connection, through the Database Explorer's `/db/query` path — refused on a read-only or production connection. |
@@ -761,6 +762,31 @@ brokers, git/PRs, issues, swarm, vault, sessions, code-review, product, usage,
 channels, skills, self-improvement) and the **eight Scheduled-Tasks tools** — the full
 category table is in **§3.3**, and see the
 [Scheduled Tasks guide](./scheduled-tasks.md#9-mcp-surface-the-8-otto-tools).
+
+**Workflows on threads (what changes for MCP).** A workflow's agent steps run
+as threads on the structured runtime ([Workflows](./workflows.md)), which
+changes three things here:
+
+- **A governed call from a step waits for you.** A governed `otto.*` call
+  made by a workflow step's thread holds for a person's approval as long as a
+  person's own session would, instead of the 15 s headless wait; the step
+  shows **Approval** on its run page and under **Needs you**, and the call
+  goes on when you answer. (A step on the terminal runner, a scheduled task
+  and a personal agent's routine keep the short wait.)
+- **No secrets, and reviewers get no servers.** `otto.request_secret` from an
+  engine thread is refused at once ("an unattended workflow step cannot ask
+  for a secret"). An untrusted read-only reviewer thread gets no MCP servers
+  at all — not `otto`, not the workspace's.
+- **Sub-threads are bounded and removable.** A step's agent may open at most 4
+  sub-threads at a time with `otto.thread_open`. `otto.thread_close` closes a
+  linked thread (it stays in History); with `remove: true` it also deletes a
+  sub-thread that the calling thread's own agent opened, once it has answered
+  — refused while it still works (409), while it has open sub-threads of its
+  own (409), or when the caller did not open it (403). The parent keeps a
+  compact record of a removed sub-thread.
+
+`otto.run_goal_loop` and `otto.control_workflow_run` are not listed to narrow
+(review) sessions.
 
 `otto.query_db_readonly` is enforced read-only **server-side**, in two layers,
 **regardless** of the connection's write-guard flag: the tool classifies the

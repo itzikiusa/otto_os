@@ -3031,7 +3031,8 @@ as before, so the previous build reads every row. New enums end in a catch-all
   ignored by every query. The new build's status writers (`write_run`, retry, reopen,
   cancel) clear `hold_json`. An effectively held run is never pruned, stays in
   `GET /workspaces/{wid}/workflow-runs/active` (status `canceled`/`error`, with its
-  overview's `hold`) and is the run a chat `resume` / `note` in its thread finds; the
+  overview's `hold`) and is the run a chat control reply in its thread finds (`status`,
+  `skip`, `abort`, `re-review`, `help` — there is no chat `pause`, `resume` or `note` op); the
   orphan sweep still sees only `pending`/`running`. Pausing writes the hold in the same
   statement that settles the run, before any step unwinds. `limits?: RunLimits`
   (`{loops: {<node id>: {max_iterations?, max_active_s?, unblocked_at?}}}`, written only by
@@ -6774,8 +6775,10 @@ Transcript session GETs reuse bounded immutable folds (32 retained entries / 128
   params.
 - **Holds:** Pause writes the hold before anything unwinds; the driver then
   stores the in-flight steps (and a held loop's skipped branch) as
-  `pending` with a `queued` phase mark noting the kind, no delivery and no
-  worktree reaping. Resume re-enters with every unsettled step (finished
+  `pending` with a `queued` phase mark noting the kind, reports the hold where
+  the run reports its result (the chat thread — in the live style "⏸ … paused —
+  …" / "⚠️ … is blocked — …" / "⚠️ … is out of budget — …" — and a result
+  webhook), and reaps no worktree. Resume re-enters with every unsettled step (finished
   steps and iterations are adopted); after Exhausted it needs new totals
   above what is used ("Raise the iteration limit to resume: 6 of 6
   iterations are used."), after Blocked it goes on with the next iteration.

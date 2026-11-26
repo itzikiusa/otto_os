@@ -103,7 +103,7 @@ Every command has a fixed `risk` in the catalog:
 |------|----------|--------------|
 | `read` | list clusters, table rows, pod logs, topic peek, note text | Runs once granted. |
 | `navigate` | open a workspace, select a row, switch a tab | Runs once granted. |
-| `local_write` | k8s restart / scale, Kafka produce, save a vault note, pause a scheduled task, run a swarm task, start a goal loop, add a Home box, git commit | An **attributed confirm** every time. It has an **"Allow writes on ‹target› for this session"** checkbox, and once you tick it, later writes to the same target in the same session don't ask again. |
+| `local_write` | k8s restart / scale, Kafka produce, save a vault note, pause a scheduled task, run a swarm task, add a Home box, git commit | An **attributed confirm** every time. It has an **"Allow writes on ‹target› for this session"** checkbox, and once you tick it, later writes to the same target in the same session don't ask again. |
 | `outward` | SQS send, run a workflow, API send, git push | **Always** confirms (where it goes, what is sent, who sees it). It is **never remembered**. |
 | `execute` | start a debug session, evaluate an expression in the debugger | It runs code on your Mac, as you, outside the agent's sandbox. **Always** confirms, showing exactly what runs (the command line, folder, build tags, extra environment, or the expression). It is **never remembered**. |
 
@@ -118,7 +118,6 @@ On top of the tiers, some targets always ask regardless of the checkbox:
   refuses them without it.
 - **A scheduled task that delivers** to Slack, Telegram, email or a webhook is
   outward when run now, so it always asks.
-- **Stopping a goal loop** can't be undone, so it always asks.
 - **Vault edits stay drafts.** The new text is put into the note's editor with
   autosave held, and nothing is written until you confirm. If you decline, the
   original text comes back. An agent never overwrites a note while it has your
@@ -217,9 +216,9 @@ confirmations still apply.
 | `wf_list` | read | none | The workflow list, plus the runs in progress. |
 | `wf_open` | navigate | `workflow` | The workflow on the canvas. If the open one has unsaved edits, you're asked whether to discard them. |
 | `wf_list_runs` | read | `workflow` | Returns its recent runs. |
-| `wf_open_run` | navigate | `workflow`, `run_id` | The run in the inspector. Returns per-step status and last logs (call again to follow). |
+| `wf_open_run` | navigate | `workflow`, `run_id` | The run's page. Returns its status and per-step state: status, error and last log lines (call again to follow). |
 | `wf_run` | **outward** | `workflow`, `input?`, `prompt?` | Where / what / who confirm, then the same validate → save → run as the Run button. |
-| `wf_cancel_run` | local_write | `run_id` | Confirm, then the run halts after its current step. |
+| `wf_cancel_run` | local_write | `run_id` | Confirm, then the run stops: its running steps stop now. |
 
 ### Scheduled Tasks: `scheduled-tasks` (route `#/scheduled-tasks`)
 
@@ -257,7 +256,7 @@ The Personal Agents page belongs to the Scheduled Tasks pane, so these commands 
 | `home_add_box` | local_write | `kind`, `view?`, `config?` | Confirm, then the new box appears (only kinds you may view). |
 | `home_remove_box` | local_write | `box_id` | Confirm, then the box is removed. |
 
-### Agent Swarm: `swarm` (route `#/swarm`) · Goal Loops: `loops` (route `#/loops`)
+### Agent Swarm: `swarm` (route `#/swarm`) · Older goal loops: `loops` (route `#/loops`)
 
 | Command | Risk | Args | What you see |
 |---------|------|------|--------------|
@@ -267,9 +266,13 @@ The Personal Agents page belongs to the Scheduled Tasks pane, so these commands 
 | `swarm_list_runs` | read | `swarm?`, `status?` | The Runs view. |
 | `swarm_run_task` | local_write | `swarm?`, `task_id` | Confirm, then the task's agent starts. |
 | `swarm_stop_run` | local_write | `swarm?`, `run_id` | Confirm, then the run stops. |
-| `loops_list` | read | none | The Goal Loops list. |
+| `loops_list` | read | none | The older goal loops' history (read-only). |
 | `loops_open` | navigate | `loop` | The loop's detail. Returns the definition and the last 10 iterations. |
-| `loops_control` | local_write | `loop`, `action` (`start`/`pause`/`resume`/`stop`) | Confirm (Stop always asks), then the loop changes state. |
+
+Goal Loops are goals in Workflows now ([Goals](./goal-loops.md)): a goal's run
+is a workflow run, opened with `wf_open_run` and stopped with `wf_cancel_run`.
+There is no UI command that starts, pauses or resumes one — `loops_control` is
+gone; from MCP an agent uses `otto.run_goal_loop` and `otto.control_workflow_run`.
 
 ### IDE debugging: `ide` (route `#/ide`)
 
@@ -345,7 +348,7 @@ yours.
   `ui/src/lib/uiCommands/<module>.ts`. The unit test
   `ui/unit/uiCommands.test.ts` and the daemon's catalog test keep the two in
   step. Modules whose view state lives in a component (Workflows, the Brokers
-  sub-tabs, Scheduled Tasks, Swarm, Goal Loops) expose it through a small
+  sub-tabs, Scheduled Tasks, Swarm, the older goal loops) expose it through a small
   **page port** (`uiCommands/pagePort.ts`) that the page binds while it's
   mounted. Modules whose state lives in a module store bind that store to a
   typed port (`uiCommands/vaultPort.ts`, bound by the Vault page;

@@ -1219,7 +1219,11 @@ thread, nudges once for a missing handoff file, waits out a plan usage limit
 whose reset is known and continues the same thread, and keeps the digest
 (`runtime/digest.rs`) the run view needs after retention
 (`runtime/retention.rs`) deletes the thread. Engine threads stay out of the
-person's lists; see `docs/contracts/api.md` "Engine threads".
+person's lists; see `docs/contracts/api.md` "Engine threads". The user-facing
+side — the runner switch (`wf_step_runner`), how long a step's thread is kept
+(24 h after a successful run, 7 days after a failed one), `continue_from`, the
+4-sub-thread cap and what a restart does to a running step — is in
+[Workflows § How an agent step runs](./workflows.md#how-an-agent-step-runs).
 
 ## 8. Code map
 
