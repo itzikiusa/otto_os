@@ -12,13 +12,20 @@ pub(in crate::workflow_engine) struct RunBoard {
     /// Held across persist + emit: two nodes publishing at once must not
     /// leave an older `nodes_json` in the row under a newer `rev`.
     write: tokio::sync::Mutex<()>,
+    /// The run row as the run started; every publish computes its overview
+    /// from it and the current node states (engine.md §2.3).
+    base: Option<WorkflowRun>,
 }
 
 impl RunBoard {
-    pub(in crate::workflow_engine) fn new(states: Vec<NodeRunState>) -> Self {
+    pub(in crate::workflow_engine) fn new(
+        states: Vec<NodeRunState>,
+        base: Option<WorkflowRun>,
+    ) -> Self {
         Self {
             states: std::sync::Mutex::new(states),
             write: tokio::sync::Mutex::new(()),
+            base,
         }
     }
 
@@ -73,21 +80,36 @@ impl RunBoard {
             all[idx] = st.clone();
             all.clone()
         };
+        let mut overview = self.base.as_ref().map(|base| {
+            let run = WorkflowRun {
+                nodes: states.clone(),
+                ..base.clone()
+            };
+            otto_workflows::overview::run_overview(
+                &run,
+                &cx.workflow.graph,
+                None,
+                None,
+                chrono::Utc::now(),
+            )
+        });
         let rev = cx
             .repo
-            .update_run_progress(cx.run_id, &states)
+            .update_run_progress_with(cx.run_id, &states, overview.as_ref())
             .await
             .unwrap_or(0);
-        emit_run_updated(
+        if let Some(o) = overview.as_mut() {
+            o.rev = rev;
+        }
+        let run = (&cx.workflow.workspace_id, cx.run_id, "running", rev);
+        emit_run_updated_with(
             cx.ctx,
-            &cx.workflow.workspace_id,
-            cx.run_id,
-            "running",
+            run,
             Some(&states[idx].node_id),
-            rev,
             Some(&states[idx]),
             &states,
             false,
+            overview.as_ref(),
         );
     }
 

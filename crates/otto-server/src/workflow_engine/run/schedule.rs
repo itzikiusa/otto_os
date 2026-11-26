@@ -80,7 +80,8 @@ pub(in crate::workflow_engine) async fn drive(cx: RunCx<'_>, rs: &mut RunState, 
         continue_unfinished: cx.continue_unfinished,
     };
     let mut sched = Scheduler::new(graph, order, init, max_parallel_steps(cx.ctx).await);
-    let board = RunBoard::new(std::mem::take(&mut rs.states));
+    let base = cx.repo.get_run(cx.run_id).await.ok();
+    let board = RunBoard::new(std::mem::take(&mut rs.states), base);
     let mut active: FuturesUnordered<BoxFuture<'_, Option<NodeDone>>> = FuturesUnordered::new();
     loop {
         for start in sched.startable() {

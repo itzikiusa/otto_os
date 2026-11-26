@@ -314,6 +314,20 @@ fn emit_run_updated(
     states: &[NodeRunState],
     waiting_approval: bool,
 ) {
+    let run = (workspace_id, run_id, status, rev);
+    emit_run_updated_with(ctx, run, node_id, node, states, waiting_approval, None);
+}
+
+/// [`emit_run_updated`] carrying the run's overview (the engine's publishes).
+fn emit_run_updated_with(
+    ctx: &ServerCtx,
+    (workspace_id, run_id, status, rev): (&Id, &Id, &str, i64),
+    node_id: Option<&str>,
+    node: Option<&NodeRunState>,
+    states: &[NodeRunState],
+    waiting_approval: bool,
+    overview: Option<&otto_core::workflows::RunOverview>,
+) {
     // The node's SUMMARY (perf W5): what `/progress` serves for it — logs and
     // output stripped, `detail_version` set — so the run view applies it in
     // place instead of refetching, and the WS frame carries a few hundred
@@ -344,7 +358,7 @@ fn emit_run_updated(
             .count() as u32,
         nodes_total: states.len() as u32,
         waiting_approval,
-        overview: None,
+        overview: overview.map(|o| Box::new(o.clone())),
     };
     if ctx.events.send(ev).is_err() {
         tracing::debug!(%run_id, "no WS subscribers for WorkflowRunUpdated");

@@ -84,6 +84,7 @@ pub(in crate::workflow_engine) async fn finish(
                 return;
             }
         };
+        store_overview(&repo, &workflow, &run_id, rev).await;
         deliver_run_result(&ctx, &workflow, &states, RunStatus::Error, &input, None).await;
         emit_run_updated(
             &ctx,
@@ -140,6 +141,7 @@ pub(in crate::workflow_engine) async fn finish(
     // The run's deliverable: a copy of the last content-bearing step's handoff
     // file, only on outright success — an errored run has no coherent "answer"
     // to hand back, so delivery falls back to the per-step summary.md instead.
+    store_overview(&repo, &workflow, &run_id, rev).await;
     step_thread::retain_run(&ctx, &states, final_status == RunStatus::Success).await;
     let final_output = if final_status == RunStatus::Success {
         files.write_final_output()
@@ -177,4 +179,21 @@ pub(in crate::workflow_engine) async fn finish(
     // Reap earlier runs whose worktrees were kept for a reopenable session
     // that has since gone (or aged past the reopen TTL).
     sweep_stale_run_worktrees(&ctx).await;
+}
+
+/// A terminal write cleared the overview: store the settled run's (CAS on
+/// `rev`, engine.md §2.3).
+async fn store_overview(repo: &WorkflowsRepo, workflow: &Workflow, run_id: &Id, rev: i64) {
+    let Ok(run) = repo.get_run(run_id).await else {
+        return;
+    };
+    let mut ov = otto_workflows::overview::run_overview(
+        &run,
+        &workflow.graph,
+        None,
+        None,
+        chrono::Utc::now(),
+    );
+    ov.rev = rev;
+    let _ = repo.set_overview(run_id, rev, &ov).await;
 }

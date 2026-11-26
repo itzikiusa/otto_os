@@ -318,6 +318,12 @@ async fn an_agent_step_runs_on_a_thread_and_leaves_its_record_on_the_run() {
     .expect("the run settles");
     let run = repo.get_run(&run_id).await.unwrap();
     assert_eq!(run.status, RunStatus::Success, "{:?}", run.error);
+    let ov = run
+        .overview
+        .as_ref()
+        .expect("the settled run carries its overview");
+    assert_eq!(ov.state, otto_core::workflows::RunState::Succeeded);
+    assert_eq!((ov.steps_done, ov.usage.input_tokens), (2, 7));
     let st = state(&run, "agent");
     let t = st.thread.as_ref().expect("the thread is on the node");
     assert_eq!(
