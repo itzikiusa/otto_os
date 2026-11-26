@@ -78,6 +78,17 @@ test('skills not installed for the provider are named (nothing known yet: none)'
   assert.deepEqual(missingSkills(['x'], null), []);
 });
 
+test('Default on a legacy reviewer row clears its primary provider\'s model and effort (CR1-059)', () => {
+  const legacy = { lens: 'correctness', providers: ['codex', 'claude'], model: 'gpt-5', effort: 'high' };
+  const reset = withReviewerPick(legacy, 'codex', {});
+  const pick = reviewerPick(reset, 'codex');
+  assert.equal(pick.model ?? pick.effort, undefined, 'the legacy fields no longer win');
+  assert.equal('model' in reset || 'effort' in reset, false);
+  // Another provider's pick leaves the primary's legacy fields alone.
+  const other = withReviewerPick(legacy, 'claude', {});
+  assert.deepEqual(reviewerPick(other, 'codex'), { model: 'gpt-5', effort: 'high' });
+});
+
 test('save is blocked only by a save issue; a run by save and run issues; a warning never (DR-028, CR1-019/064)', () => {
   const at = (cls: 'save' | 'run' | 'warning') => ({ node_id: 'a', edge_id: null, field: 'prompt', message: cls, class: cls });
   assert.deepEqual(['save', 'run', 'warning'].map((c) => issueBlocks(at(c as 'save'), 'save')), [true, false, false]);

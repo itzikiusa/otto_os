@@ -157,6 +157,11 @@ export function withReviewerPick(row: ReviewerParams, provider: string, pick: Mo
   if (clean) picks[provider] = clean;
   else delete picks[provider];
   const { picks: _old, ...rest } = row;
+  // The primary provider's legacy model/effort would win over an empty pick.
+  if ((row.providers ?? [])[0] === provider) {
+    delete rest.model;
+    delete rest.effort;
+  }
   return Object.keys(picks).length ? { ...rest, picks } : rest;
 }
 
