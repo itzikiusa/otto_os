@@ -30,14 +30,17 @@ class WorkflowRunsStore {
   private workspaceId: Id | null = null;
   /** The newest list read: an older one answering later is dropped. */
   private seq = 0;
-  /** Runs an event settled: a list read that started before it never brings them back. */
-  private settled = new Set<Id>();
+  /** Runs an event settled, with the `seq` it landed at: a list read started
+   *  at or before that never brings them back; a later one (a retry in place,
+   *  a reconnect's resync) is newer than the event and does. */
+  private settled = new Map<Id, number>();
 
   /** Forget the list (identity change, workspace switch, zero-workspace mode). */
   clear(workspaceId: Id | null = null): void {
     this.workspaceId = workspaceId;
     this.list = [];
     this.settled.clear();
+    this.seq++;
   }
 
   /** Reload the runs of `workspaceId`. Cheap query; called on workspace switch
@@ -56,6 +59,7 @@ class WorkflowRunsStore {
       if (seq !== this.seq || this.workspaceId !== workspaceId) return;
       // Events that landed while it was in flight are newer than it.
       const known = new Map(this.list.map((r) => [r.run_id, r]));
+      for (const [id, at] of this.settled) if (at < seq) this.settled.delete(id);
       this.list = runs
         .filter((r) => !this.settled.has(r.run_id))
         .map((r) => {
@@ -77,7 +81,7 @@ class WorkflowRunsStore {
     if (ev.workspace_id !== currentWorkspaceId) return;
     const idx = this.list.findIndex((r) => r.run_id === ev.run_id);
     if (TERMINAL.has(ev.status) && !ev.overview?.hold) {
-      this.settled.add(ev.run_id);
+      this.settled.set(ev.run_id, this.seq);
       if (idx >= 0) this.list.splice(idx, 1);
       return;
     }
