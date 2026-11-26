@@ -92,8 +92,8 @@ pub struct SettledTurn {
 }
 
 /// `meta` key: the turn a daemon restart cut off on an engine thread that
-/// was not held (`recover_excluding`). Persisted, so a second restart before
-/// the step resumes still reads it.
+/// was not held, or whose background work it killed (`recover_excluding`).
+/// Persisted, so a second restart before the step resumes still reads it.
 pub const RESTART_CUT_KEY: &str = "restart_cut_turn";
 
 /// The latest turn above `since` is the one a restart cut off.
@@ -111,9 +111,7 @@ fn restart_cut(st: &State, since: u32) -> bool {
         .turns
         .values()
         .max_by_key(|t| t.ordinal)
-        .is_some_and(|t| {
-            t.ordinal > since && t.id == cut && t.status == ProviderTurnStatus::Interrupted
-        })
+        .is_some_and(|t| t.ordinal > since && t.id == cut)
 }
 
 /// One request waiting on a person: `(thread, request)` and what to show.

@@ -1016,8 +1016,8 @@ async fn a_pending_mcp_approval_card_needs_you_until_it_is_decided() {
         resets: None,
     });
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let h = Arc::clone(&host);
-    let watch = tokio::spawn(async move { h.watch_mcp(&"t1".into(), tx).await });
+    let (h, rt) = (Arc::clone(&host), rig.rt.clone());
+    let watch = tokio::spawn(async move { h.watch_mcp(&rt, &"t1".into(), tx).await });
     let a = need(&mut rx).await;
     assert_eq!(a.via, Some(otto_core::agent_runtime::AttentionVia::Mcp));
     assert_eq!(a.request_id.as_ref(), Some(&card.id));
@@ -1166,5 +1166,182 @@ async fn spawns_claim_their_pre_admitted_place_and_stay_counted_while_they_run()
         .await
         .unwrap_err();
     assert!(refused.to_string().contains("short of memory"), "{refused}");
+    rig.rt.shutdown().await;
+}
+
+/// A sub-thread the step's agent opened waits on an approval card: the
+/// step's run hears "Needs you" for it too, naming the sub-thread.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sub_threads_pending_mcp_approval_card_needs_you_too() {
+    use otto_agent_protocol::step_runner::DaemonStepHost;
+    let rig = Rig::new(false).await;
+    let step = rig.thread(RuntimeProvider::Claude).await;
+    let open = OpenPeerReq {
+        provider: RuntimeProvider::Codex,
+        prompt: None,
+        title: None,
+        model: None,
+        effort: None,
+        cwd: None,
+        meta: None,
+    };
+    let sub = rig.rt.open_peer(&step, open).await.unwrap();
+    let (bus, _keep) = tokio::sync::broadcast::channel(16);
+    let repo = otto_state::McpApprovalRepo::new(rig.pool.clone());
+    let card = repo
+        .create(otto_state::NewApproval {
+            workspace_id: Some("w1".into()),
+            kind: "tool_call".into(),
+            server_id: None,
+            server_name: Some("otto".into()),
+            tool: Some("otto.comment_issue".into()),
+            title: "Comment on PROJ-1".into(),
+            detail: None,
+            args_redacted_json: "{}".into(),
+            args_hash: None,
+            risk_label: None,
+            requested_by: Some("agent".into()),
+            requested_by_kind: Some("session".into()),
+            requested_by_session_id: Some(sub.id.clone()),
+            expires_at: None,
+        })
+        .await
+        .unwrap();
+    let manager = otto_sessions::SessionManager::new(
+        otto_state::SessionsRepo::new(rig.pool.clone()),
+        bus.clone(),
+        otto_sessions::ProviderRegistry::new(None),
+    );
+    let host = DaemonStepHost {
+        manager: Arc::new(manager),
+        approvals: Some((repo, bus)),
+        resets: None,
+    };
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let rt = rig.rt.clone();
+    let watch = tokio::spawn(async move { host.watch_mcp(&rt, &step, tx).await });
+    let a = need(&mut rx).await;
+    assert_eq!(a.request_id.as_ref(), Some(&card.id));
+    assert_eq!(a.thread_id.as_ref(), Some(&sub.id));
+    watch.abort();
+    rig.rt.shutdown().await;
+}
+
+/// Never admits: the step waits for its machine place until the restart.
+struct NeverAdmits(tokio::sync::Notify);
+
+#[async_trait::async_trait]
+impl StepHost for NeverAdmits {
+    async fn admit(
+        &self,
+        _: &str,
+        _: &str,
+        _: &(dyn Fn(otto_core::agent_runtime::WaitReason) + Send + Sync),
+    ) -> Place {
+        self.0.notify_one();
+        std::future::pending().await
+    }
+}
+
+/// CR1-003: the daemon restarts while a continued step waits for its
+/// machine place — after `Started`, before its prompt went out. `resume`
+/// sends the step's prompt; it never ends "done" with no turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn resume_after_a_restart_before_the_prompt_went_out_sends_it() {
+    let rig = Rig::new(false).await;
+    let (first, _) = run(&rig.runner(), rig.turn("claude", &fake(&["reply one"]))).await;
+    assert_eq!(first.error, None);
+    rig.runner().release_process(&first.thread_id).await;
+    let mut t = rig.turn("claude", &fake(&["usage 4 2", "reply two"]));
+    t.continue_thread = Some(first.thread_id.clone());
+    let host = Arc::new(NeverAdmits(tokio::sync::Notify::new()));
+    let runner = ThreadStepRunner::new(rig.rt.clone(), Arc::clone(&host) as Arc<dyn StepHost>);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let t2 = t.clone();
+    let task = tokio::spawn(async move { runner.run(t2, tx, CancelSignal::new()).await });
+    host.0.notified().await;
+    let start = loop {
+        match rx.try_recv() {
+            Ok(StepEvent::Started { start_ordinal, .. }) => break start_ordinal,
+            Ok(_) => continue,
+            Err(e) => panic!("no start before the wait: {e:?}"),
+        }
+    };
+    rig.rt.shutdown().await;
+    task.abort();
+    let rt = rig.again();
+    rt.recover().await.unwrap();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let out = ThreadStepRunner::new(rt.clone(), Arc::new(NoStepHost))
+        .resume(&first.thread_id, start, &t, tx, CancelSignal::new())
+        .await
+        .unwrap();
+    assert_eq!(out.error, None, "{:?}", out.error);
+    assert_eq!(out.turns, 1, "the step's own prompt went out");
+    assert_eq!(out.reply, "two");
+    assert_eq!((out.usage.input_tokens, out.usage.output_tokens), (4, 2));
+    rt.shutdown().await;
+}
+
+/// CR1-003: an unheld restart kills the background work a step's finished
+/// turn left running: `resume` tells the agent, never "completed".
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn resume_after_a_restart_killed_background_work_tells_the_agent() {
+    let rig = Rig::new(false).await;
+    let t = rig.turn("claude", &fake(&["background 20000", "reply after it"]));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let runner = rig.runner();
+    let t2 = t.clone();
+    let task = tokio::spawn(async move { runner.run(t2, tx, CancelSignal::new()).await });
+    let mut started = None;
+    loop {
+        match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await {
+            Ok(Some(StepEvent::Started {
+                thread_id,
+                start_ordinal,
+            })) => started = Some((thread_id, start_ordinal)),
+            // The turn ended; its background work still runs.
+            Ok(Some(StepEvent::Finishing)) => break,
+            Ok(Some(_)) => continue,
+            other => panic!("no Finishing: {other:?}"),
+        }
+    }
+    let (id, start) = started.unwrap();
+    rig.rt.shutdown().await;
+    task.abort();
+    let rt = rig.again();
+    rt.recover().await.unwrap();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let out = ThreadStepRunner::new(rt.clone(), Arc::new(NoStepHost))
+        .resume(&id, start, &t, tx, CancelSignal::new())
+        .await
+        .unwrap();
+    assert_eq!(out.error, None, "{:?}", out.error);
+    assert_eq!(out.turns, 2, "the turn and the restart turn");
+    assert!(
+        out.reply.starts_with("echo: Otto restarted"),
+        "{}",
+        out.reply
+    );
+    rt.shutdown().await;
+}
+
+/// CR1-053: a usage limit that resets after the step's time runs out ends
+/// the step as `timeout` at once, with no "Needs you" for a wait it will
+/// never do.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_usage_limit_past_the_steps_time_fails_it_without_needs_you() {
+    let rig = Rig::new(false).await;
+    let at = Utc::now() + chrono::TimeDelta::hours(3);
+    let host = Arc::new(ResetsSoon(at, Default::default()));
+    let runner = ThreadStepRunner::new(rig.rt.clone(), host as Arc<dyn StepHost>);
+    let mut t = rig.turn("claude", &fake(&["fail usage_limit"]));
+    t.timeout = Some(Duration::from_secs(20 * 60));
+    let (out, evs) = run(&runner, t).await;
+    assert_eq!(out.error.unwrap().class, StepErrorClass::Timeout);
+    assert!(
+        !evs.iter().any(|e| matches!(e, StepEvent::NeedsYou(_))),
+        "{evs:?}"
+    );
     rig.rt.shutdown().await;
 }
