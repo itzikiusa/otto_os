@@ -821,6 +821,14 @@ async fn status_writers_clear_the_hold() {
     set("running").await;
     repo.request_cancel(&id).await.unwrap().unwrap();
     assert_eq!(hold_json().await, None, "cancel_in_transaction");
+    // A stale hold on a re-run row must not become effective when the
+    // startup reconciler fails or re-queues it.
+    set("running").await;
+    repo.fail_interrupted_runs("interrupted").await.unwrap();
+    assert_eq!(hold_json().await, None, "fail_interrupted_runs");
+    set("running").await;
+    repo.prepare_resume(&id, &[], "{}", true).await.unwrap();
+    assert_eq!(hold_json().await, None, "prepare_resume");
 }
 
 /// proves (DR-106): Pause writes the hold durably before the cancel is

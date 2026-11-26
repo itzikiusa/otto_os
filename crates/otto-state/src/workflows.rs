@@ -816,7 +816,7 @@ impl WorkflowsRepo {
             "UPDATE workflow_runs
              SET status = 'error', error = ?, finished_at = COALESCE(finished_at, ?),
                  resume_scope_json = NULL, attention = 0, overview_json = NULL,
-                 rev = rev + 1
+                 hold_json = NULL, rev = rev + 1
              WHERE status = 'running' OR (status = 'pending' AND nodes_json != '[]')",
         )
         .bind(error)
@@ -904,7 +904,7 @@ impl WorkflowsRepo {
                  interrupted_at = ?, resume_attempts = resume_attempts + ?,
                  error = NULL, finished_at = NULL,
                  waiting_approval = 0, approval_node_id = NULL,
-                 attention = 0, overview_json = NULL,
+                 attention = 0, overview_json = NULL, hold_json = NULL,
                  rev = rev + 1
              WHERE id = ?
              RETURNING rev",
