@@ -219,6 +219,60 @@ mod disk {
     }
 }
 
+/// Test hook for the e2e daemon and the local harnesses: `busy`, `calm` or
+/// `<load1>,<normal|warn|critical>` replaces the OS reading — honoured only
+/// inside the isolated harness ([`otto_core::e2e::isolated`]), so the "lone
+/// run on a busy machine" state can be shown in a browser.
+pub const TEST_SAMPLE_ENV: &str = "OTTO_TEST_MACHINE_SAMPLE";
+
+/// A machine that always reads the same (the [`TEST_SAMPLE_ENV`] hook).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FixedSampler {
+    pub load1: f64,
+    pub pressure: MemoryPressure,
+}
+
+impl Sampler for FixedSampler {
+    fn sample(&self) -> MachineSample {
+        MachineSample {
+            load1: Some(self.load1),
+            cores: logical_cores(),
+            pressure: self.pressure,
+            swap_used_bytes: None,
+            taken: Instant::now(),
+        }
+    }
+}
+
+/// The [`TEST_SAMPLE_ENV`] value as a sampler; `None` outside the isolated
+/// harness or for a value it does not understand (the OS is read then).
+pub fn test_sampler(isolated: bool, value: Option<&str>) -> Option<FixedSampler> {
+    if !isolated {
+        return None;
+    }
+    let (load1, pressure) = match value?.trim() {
+        // Four times the default per-core ceiling, memory under pressure.
+        "busy" => (logical_cores() as f64 * 6.0, MemoryPressure::Warn),
+        "calm" => (0.0, MemoryPressure::Normal),
+        v => {
+            let (load, pressure) = v.split_once(',')?;
+            let load: f64 = load
+                .trim()
+                .parse()
+                .ok()
+                .filter(|l: &f64| l.is_finite() && *l >= 0.0)?;
+            let pressure = match pressure.trim() {
+                "normal" => MemoryPressure::Normal,
+                "warn" => MemoryPressure::Warn,
+                "critical" => MemoryPressure::Critical,
+                _ => return None,
+            };
+            (load, pressure)
+        }
+    };
+    Some(FixedSampler { load1, pressure })
+}
+
 /// A [`Sampler`] behind a [`SAMPLE_TTL`] cache.
 pub struct MachineMonitor {
     sampler: Arc<dyn Sampler>,
@@ -235,9 +289,14 @@ impl MachineMonitor {
         }
     }
 
-    /// The OS-backed monitor the daemon uses.
+    /// The OS-backed monitor the daemon uses (the [`TEST_SAMPLE_ENV`] hook
+    /// in the isolated harness).
     pub fn os() -> Self {
-        Self::new(Arc::new(OsSampler))
+        let value = std::env::var(TEST_SAMPLE_ENV).ok();
+        match test_sampler(otto_core::e2e::isolated(), value.as_deref()) {
+            Some(fixed) => Self::new(Arc::new(fixed)),
+            None => Self::new(Arc::new(OsSampler)),
+        }
     }
 
     /// The cached sample when it is younger than the TTL at `now`.
@@ -361,6 +420,30 @@ mod tests {
             serde_json::json!(null),
         ] {
             assert_eq!(low_disk_gb(Some(&bad)), DEFAULT_LOW_DISK_GB, "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_test_sample_hook_reads_only_inside_the_isolated_harness() {
+        assert_eq!(test_sampler(false, Some("busy")), None, "never outside e2e");
+        assert_eq!(test_sampler(true, None), None);
+        let busy = test_sampler(true, Some("busy")).unwrap().sample();
+        assert!(busy.load_per_core() > 2.0 * crate::admission::DEFAULT_MAX_LOAD_PER_CORE);
+        assert!(busy.pressure.is_elevated());
+        let calm = test_sampler(true, Some(" calm ")).unwrap().sample();
+        assert_eq!(
+            (calm.load1, calm.pressure),
+            (Some(0.0), MemoryPressure::Normal)
+        );
+        assert_eq!(
+            test_sampler(true, Some("24.5,critical")),
+            Some(FixedSampler {
+                load1: 24.5,
+                pressure: MemoryPressure::Critical
+            })
+        );
+        for bad in ["loud", "3,hot", "-1,warn", "x,warn", "7"] {
+            assert_eq!(test_sampler(true, Some(bad)), None, "{bad}");
         }
     }
 
