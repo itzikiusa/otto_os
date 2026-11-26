@@ -38,6 +38,17 @@ pub trait StepHost: Send + Sync {
         label: &str,
         on_wait: &(dyn Fn(WaitReason) + Send + Sync),
     ) -> Box<dyn Send>;
+    /// Why the step's provider / model / effort cannot run now (a model
+    /// dropped from the catalog since the workflow was saved), checked
+    /// before anything starts — `otto_sessions::provider_models::check_pick`.
+    async fn refuse_pick(
+        &self,
+        _provider: &str,
+        _model: Option<&str>,
+        _effort: Option<&str>,
+    ) -> Option<String> {
+        None
+    }
     /// When `provider`'s plan usage limit resets, when Otto knows
     /// (`otto_usage::limits`); `meta` names the account.
     async fn usage_resets_at(&self, _provider: &str, _meta: &Value) -> Option<DateTime<Utc>> {
@@ -432,6 +443,14 @@ impl StepRunner for ThreadStepRunner {
         cancel: CancelSignal,
     ) -> Result<StepOutcome> {
         let started = Instant::now();
+        let refused = self
+            .host
+            .refuse_pick(&t.provider, t.model.as_deref(), t.effort.as_deref())
+            .await;
+        if let Some(m) = refused {
+            let id = t.continue_thread.clone().unwrap_or_default();
+            return Ok(Self::failed(id, StepError::new(StepErrorClass::Spawn, m)));
+        }
         let Some(_place) = self.admit(&t, &ev, &cancel).await else {
             return Ok(Self::failed(
                 String::new(),
