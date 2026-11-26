@@ -3,17 +3,17 @@
 //! [`RecordingAdapter`] stands at the [`Adapter`] boundary: it records every
 //! send, edit (with the message id it targets) and upload (name and bytes) in
 //! order, and builds the [`Inbound`] a named user would send in its thread.
-//! [`install`] makes [`crate::improve_notify::build_adapter`] — what the
-//! workflow engine's progress pump, final delivery and queue announcements
-//! post through — return it for one workspace, so parallel tests that each use
-//! their own workspace never see each other's messages.
+//! [`RecordingAdapter::factory`] is the [`OutboundAdapterFactory`] a test
+//! daemon posts its workflow chat through (progress lines, final result,
+//! `channel_notify`, queue announcements); inbound goes through the real
+//! `Bridge` with this adapter as the channel.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
-use otto_core::domain::Channel;
+use otto_core::domain::{Channel, Integration};
 
 use crate::adapter::{Adapter, Inbound};
+use crate::improve_notify::OutboundAdapterFactory;
 
 /// One thing the engine did on the channel, in order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,40 +154,46 @@ impl Adapter for RecordingAdapter {
     }
 }
 
-fn registry() -> &'static Mutex<HashMap<String, Arc<RecordingAdapter>>> {
-    static REG: OnceLock<Mutex<HashMap<String, Arc<RecordingAdapter>>>> = OnceLock::new();
-    REG.get_or_init(Default::default)
+/// Hands `adapter` out for every integration (see [`RecordingAdapter::factory`]).
+struct RecordingFactory(Arc<RecordingAdapter>);
+
+#[async_trait::async_trait]
+impl OutboundAdapterFactory for RecordingFactory {
+    async fn adapter(&self, _integ: &Integration) -> Option<Arc<dyn Adapter>> {
+        Some(self.0.clone())
+    }
 }
 
-/// Route every outbound adapter built for `adapter`'s workspace to it.
-pub fn install(adapter: &Arc<RecordingAdapter>) {
-    registry()
-        .lock()
-        .unwrap()
-        .insert(adapter.workspace_id.clone(), adapter.clone());
+impl RecordingAdapter {
+    /// An [`OutboundAdapterFactory`] that returns this adapter: set it as a
+    /// test daemon's `ServerCtx::outbound` and every outbound workflow
+    /// message lands here.
+    pub fn factory(self: &Arc<Self>) -> Arc<dyn OutboundAdapterFactory> {
+        Arc::new(RecordingFactory(self.clone()))
+    }
 }
 
-/// The recording adapter installed for `workspace_id`, if any.
-pub fn installed(workspace_id: &str) -> Option<Arc<dyn Adapter>> {
-    registry()
-        .lock()
-        .unwrap()
-        .get(workspace_id)
-        .map(|a| a.clone() as Arc<dyn Adapter>)
+/// A Slack message event as the listener hands it to the bridge: the
+/// [`Inbound`] it builds, with its attachments downloaded through the real
+/// path (a `saved to:` line per file). `None` when there is nothing to act on.
+pub async fn slack_inbound(
+    event: &serde_json::Value,
+    integ: &Integration,
+    bot_token: &str,
+) -> Option<Inbound> {
+    let inbound = crate::slack::slack_inbound(event, integ);
+    crate::slack::with_attachments(event, inbound, bot_token).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::improve_notify::build_adapter;
-    use otto_core::domain::Integration;
 
     #[tokio::test]
-    async fn records_in_order_and_routes_only_its_workspace() {
+    async fn records_in_order_and_is_what_the_factory_hands_out() {
         let rec = RecordingAdapter::new(Channel::Slack, "ws-rec", "chat-1", Some("t-1"));
-        install(&rec);
-        let integ = |ws: &str| Integration {
-            workspace_id: ws.into(),
+        let integ = Integration {
+            workspace_id: "ws-rec".into(),
             channel: Channel::Slack,
             enabled: true,
             allowed_users: String::new(),
@@ -200,26 +206,7 @@ mod tests {
             has_app_token: false,
             updated_at: chrono::Utc::now(),
         };
-        struct NoSecrets;
-        impl otto_core::secrets::SecretStore for NoSecrets {
-            fn put(&self, _: &str, _: &str) -> otto_core::Result<()> {
-                Ok(())
-            }
-            fn get(&self, _: &str) -> otto_core::Result<Option<String>> {
-                Ok(None)
-            }
-            fn delete(&self, _: &str) -> otto_core::Result<()> {
-                Ok(())
-            }
-        }
-        let secrets: Arc<dyn otto_core::secrets::SecretStore> = Arc::new(NoSecrets);
-        let a = build_adapter(&secrets, &integ("ws-rec"))
-            .await
-            .expect("installed adapter");
-        assert!(
-            build_adapter(&secrets, &integ("ws-other")).await.is_none(),
-            "no token, no recorder"
-        );
+        let a = rec.factory().adapter(&integ).await.expect("the recorder");
         let id = a
             .send_formatted("chat-1", Some("t-1"), "hello")
             .await

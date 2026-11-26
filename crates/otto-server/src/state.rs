@@ -25,6 +25,8 @@ use tokio::sync::broadcast;
 pub struct ServerCtx {
     pub pool: DbPool,
     pub secrets: Arc<dyn SecretStore>,
+    /// Where outbound workflow chat goes; a test sets a recording adapter's.
+    pub outbound: Arc<dyn otto_channels::improve_notify::OutboundAdapterFactory>,
     pub events: broadcast::Sender<Event>,
     pub authenticator: Arc<dyn TokenAuthenticator>,
     pub roles: Arc<dyn RoleChecker>,

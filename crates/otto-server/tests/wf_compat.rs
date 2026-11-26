@@ -21,8 +21,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use otto_channels::test_util::{install, Recorded, RecordingAdapter};
-use otto_channels::workflow_trigger::WorkflowChatTrigger;
+use otto_channels::admission::Admission;
+use otto_channels::test_util::{Recorded, RecordingAdapter};
+use otto_channels::Inbound;
 use otto_core::domain::Channel;
 use otto_core::workflows::{RunStatus, Workflow, WorkflowGraph};
 use otto_server::workflow_chat::WorkflowChatTriggerImpl;
@@ -47,76 +48,48 @@ fn read_json(path: &Path) -> Value {
     .unwrap()
 }
 
-/// One recorded scenario: a clone, and the golden trace whose review output
-/// stands in for the review (None: the clone has no review step).
+/// One recorded scenario: a clone, the golden trace whose review output
+/// stands in for the review (None: the clone has no review step), whether
+/// the message names a ticket, and whether it carries Slack file attachments
+/// (downloaded from a wiremock Slack through the listener's real path).
 struct Scenario {
     clone: &'static str,
     name: &'static str,
     review_from: Option<&'static str>,
     jira_ticket: bool,
+    slack_files: bool,
+}
+
+const fn sc(
+    clone: &'static str,
+    name: &'static str,
+    review_from: Option<&'static str>,
+    jira_ticket: bool,
+) -> Scenario {
+    Scenario {
+        clone,
+        name,
+        review_from,
+        jira_ticket,
+        slack_files: false,
+    }
 }
 
 const SCENARIOS: &[Scenario] = &[
+    sc("a", "passed", Some("success-median"), true),
+    sc("a", "failed", Some("verdict-failed"), true),
+    sc("b", "passed", Some("success-median"), true),
+    sc("b", "failed", Some("verdict-failed"), true),
+    sc("c", "passed", Some("success-median"), true),
+    sc("c", "failed", Some("verdict-failed"), true),
     Scenario {
-        clone: "a",
-        name: "passed",
-        review_from: Some("success-median"),
-        jira_ticket: true,
+        slack_files: true,
+        ..sc("c", "passed-with-files", Some("success-median"), true)
     },
-    Scenario {
-        clone: "a",
-        name: "failed",
-        review_from: Some("verdict-failed"),
-        jira_ticket: true,
-    },
-    Scenario {
-        clone: "b",
-        name: "passed",
-        review_from: Some("success-median"),
-        jira_ticket: true,
-    },
-    Scenario {
-        clone: "b",
-        name: "failed",
-        review_from: Some("verdict-failed"),
-        jira_ticket: true,
-    },
-    Scenario {
-        clone: "c",
-        name: "passed",
-        review_from: Some("success-median"),
-        jira_ticket: true,
-    },
-    Scenario {
-        clone: "c",
-        name: "failed",
-        review_from: Some("verdict-failed"),
-        jira_ticket: true,
-    },
-    Scenario {
-        clone: "d",
-        name: "passed",
-        review_from: Some("success-median"),
-        jira_ticket: true,
-    },
-    Scenario {
-        clone: "d",
-        name: "failed",
-        review_from: Some("verdict-failed"),
-        jira_ticket: true,
-    },
-    Scenario {
-        clone: "e",
-        name: "no-ticket",
-        review_from: None,
-        jira_ticket: false,
-    },
-    Scenario {
-        clone: "e",
-        name: "ticket-unreadable",
-        review_from: None,
-        jira_ticket: true,
-    },
+    sc("d", "passed", Some("success-median"), true),
+    sc("d", "failed", Some("verdict-failed"), true),
+    sc("e", "no-ticket", None, false),
+    sc("e", "ticket-unreadable", None, true),
 ];
 
 /// Run \`test\` again in a child of this test binary with the offline e2e agent
@@ -127,6 +100,9 @@ fn in_offline_child(test: &str) -> bool {
         return true;
     }
     let home = tempfile::tempdir().unwrap();
+    // Attachments the Slack listener downloads land here, not in the real temp dir.
+    let tmpdir = home.path().join("tmp");
+    std::fs::create_dir_all(&tmpdir).unwrap();
     #[allow(clippy::disallowed_methods)] // a sync re-exec of this binary, like workflow_node_driver
     let out = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
@@ -138,6 +114,7 @@ fn in_offline_child(test: &str) -> bool {
         .env(CHILD, "1")
         .env("OTTO_E2E", "1")
         .env("HOME", home.path())
+        .env("TMPDIR", &tmpdir)
         .env("PATH", "/usr/bin:/bin")
         .output()
         .unwrap();
@@ -200,6 +177,7 @@ struct Harness {
     repo: PathBuf,
     ctx: ServerCtx,
     pool: DbPool,
+    rec: Arc<RecordingAdapter>,
 }
 
 async fn harness() -> Harness {
@@ -225,7 +203,10 @@ async fn harness() -> Harness {
     .execute(&pool)
     .await
     .unwrap();
-    let ctx = ServerCtx::for_tests(&pool, data.clone()).await;
+    // Every outbound workflow message lands on the recording adapter.
+    let rec = RecordingAdapter::new(Channel::Slack, WS, CHAT, Some(THREAD));
+    let mut ctx = ServerCtx::for_tests(&pool, data.clone()).await;
+    ctx.outbound = rec.factory();
     let key = format!("chan-bot-{WS}-slack");
     ctx.secrets.put(&key, "compat-token").unwrap();
     ctx.integrations_store
@@ -235,7 +216,7 @@ async fn harness() -> Harness {
             true,
             Some(key),
             None,
-            "",
+            USER,
             false,
             "",
             CHAT,
@@ -260,6 +241,7 @@ async fn harness() -> Harness {
         repo,
         ctx,
         pool,
+        rec,
     }
 }
 
@@ -267,24 +249,60 @@ async fn harness() -> Harness {
 struct Outcome {
     golden: Value,
     chat: Vec<Recorded>,
+    /// The wiremock Slack's base URL, when the message carried files.
+    slack: Option<String>,
+}
+
+/// The person's message as the Slack listener hands it to the bridge: plain,
+/// or with two attachments (one downloads, one is gone) fetched from a
+/// wiremock Slack through the listener's real download path.
+async fn inbound(h: &Harness, text: &str, files: bool) -> (Inbound, Option<wiremock::MockServer>) {
+    if !files {
+        return (h.rec.inbound(USER, text), None);
+    }
+    use wiremock::matchers::{method, path};
+    let slack = wiremock::MockServer::start().await;
+    wiremock::Mock::given(method("GET"))
+        .and(path("/files/lorem.txt"))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_string("lorem ipsum\n"))
+        .mount(&slack)
+        .await;
+    let event = json!({
+        "type": "message", "channel": CHAT, "user": USER, "ts": "1700000000.000200", "thread_ts": THREAD,
+        "text": text,
+        "files": [
+            {"id": "F1", "name": "lorem.txt", "mimetype": "text/plain",
+             "url_private_download": format!("{}/files/lorem.txt", slack.uri())},
+            {"id": "F2", "name": "ipsum.pdf", "mimetype": "application/pdf",
+             "url_private_download": format!("{}/files/ipsum.pdf", slack.uri())},
+        ],
+    });
+    let integ = h
+        .ctx
+        .integrations_store
+        .get(&WS.into(), Channel::Slack)
+        .await
+        .unwrap()
+        .unwrap();
+    let msg = otto_channels::test_util::slack_inbound(&event, &integ, "compat-token")
+        .await
+        .expect("a message with text");
+    let saved = std::fs::read(std::env::temp_dir().join("otto-slack-F1-lorem.txt")).unwrap();
+    assert_eq!(
+        saved, b"lorem ipsum\n",
+        "the listener saved the file's bytes"
+    );
+    (msg, Some(slack))
 }
 
 async fn run_scenario(s: &Scenario) -> (Harness, Outcome) {
     let h = harness().await;
-    let rec = RecordingAdapter::new(Channel::Slack, WS, CHAT, Some(THREAD));
-    install(&rec);
     let dir = compat_dir();
     let clone = read_json(&dir.join("clones").join(format!("{}.json", s.clone)));
     let review = s.review_from.map(|t| {
         let trace = read_json(&dir.join("traces").join(s.clone).join(format!("{t}.json")));
-        let node = trace["nodes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|n| n["kind"] == "review_run")
-            .cloned()
-            .unwrap();
-        node["review"].clone()
+        let nodes = trace["nodes"].as_array().unwrap();
+        nodes.iter().find(|n| n["kind"] == "review_run").unwrap()["review"].clone()
     });
     let wf = stubbed(&clone, review.as_ref());
     let graph: WorkflowGraph = serde_json::from_value(wf["graph"].clone()).unwrap();
@@ -301,7 +319,8 @@ async fn run_scenario(s: &Scenario) -> (Harness, Outcome) {
         .await
         .unwrap();
 
-    // The message a person posts in the thread; the bridge replies with the ack.
+    // The message a person posts in the thread, through the real bridge
+    // (which replies with the ack on the same adapter).
     let mut text = format!(
         "Action: Workflow\nName: {}\nMsg: lorem ipsum dolor sit amet\nWorking Directory: {}\nBranch: main\nGoals:\n  - consectetur adipiscing\n",
         created.name,
@@ -310,30 +329,36 @@ async fn run_scenario(s: &Scenario) -> (Harness, Outcome) {
     if s.jira_ticket {
         text.push_str("Jira ticket: COMPAT-1\n");
     }
-    let msg = rec.inbound(USER, &text);
-    let trigger = WorkflowChatTriggerImpl { ctx: h.ctx.clone() };
-    let ack = trigger
-        .try_start(
-            &msg.workspace_id,
-            "slack",
-            &msg.chat,
-            msg.thread.as_deref(),
-            &msg.user,
-            &msg.text,
-        )
+    let (msg, slack) = inbound(&h, &text, s.slack_files).await;
+    let bridge = otto_channels::Bridge::new_with_workflow_trigger(
+        h.ctx.manager.clone(),
+        h.ctx.workspaces.clone(),
+        otto_state::SettingsRepo::new(h.pool.clone()),
+        otto_channels::Mirror::new(h.ctx.manager.clone()),
+        "root".into(),
+        Some(Arc::new(WorkflowChatTriggerImpl { ctx: h.ctx.clone() })),
+        Default::default(),
+    );
+    let integ = h
+        .ctx
+        .integrations_store
+        .get(&WS.into(), Channel::Slack)
         .await
-        .expect("an Action: Workflow block starts a run");
-    let adapter: Arc<dyn otto_channels::adapter::Adapter> = rec.clone();
-    adapter
-        .send_formatted(&msg.chat, msg.thread.as_deref(), &ack.reply)
-        .await
+        .unwrap()
         .unwrap();
+    let Admission::Work(permit) = bridge
+        .admission
+        .admit("slack", &msg.chat, msg.thread.as_deref())
+    else {
+        panic!("the bridge admits one message");
+    };
+    bridge.handle(&integ, h.rec.clone(), msg, permit).await;
 
     let (run_id,): (String,) = sqlx::query_as("SELECT id FROM workflow_runs WHERE workflow_id = ?")
         .bind(&created.id)
         .fetch_one(&h.pool)
         .await
-        .unwrap();
+        .expect("the bridge started a run");
     let run_id: otto_core::Id = run_id;
     let deadline = Instant::now() + Duration::from_secs(120);
     let run = loop {
@@ -355,11 +380,14 @@ async fn run_scenario(s: &Scenario) -> (Harness, Outcome) {
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
     let golden = describe(&h, &created, &run, s);
+    let chat = h.rec.recorded();
+    let slack = slack.map(|m| m.uri());
     (
         h,
         Outcome {
             golden,
-            chat: rec.recorded(),
+            chat,
+            slack,
         },
     )
 }
@@ -453,14 +481,16 @@ struct Normalizer {
 }
 
 impl Normalizer {
-    fn new(h: &Harness) -> Self {
+    fn new(h: &Harness, slack: Option<&str>) -> Self {
         let mut paths = vec![];
-        for (p, to) in [(&h.repo, "<repo>"), (&h.data, "<data>")] {
-            paths.push((p.to_string_lossy().into_owned(), to));
-            if let Some(raw) = p.to_str().and_then(|s| s.strip_prefix("/private")) {
-                paths.push((raw.to_string(), to));
-            }
+        let tmp = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        for (p, to) in [(&h.repo, "<repo>"), (&h.data, "<data>"), (&tmp, "<tmp>")] {
+            let p = p.to_string_lossy().trim_end_matches('/').to_string();
+            let raw = p.strip_prefix("/private").map(str::to_string);
+            paths.push((p, to));
+            paths.extend(raw.map(|raw| (raw, to)));
         }
+        paths.extend(slack.map(|s| (s.to_string(), "<slack>")));
         Self { paths, ids: vec![] }
     }
 
@@ -584,9 +614,9 @@ fn check_golden(path: &Path, got: &str, diffs: &mut Vec<String>) {
     }
 }
 
-/// proves: X1.a — the five clones load as definitions with every field and
+/// Test plan X1.a: the five clones load as definitions with every field and
 /// pass today's validation unchanged.
-/// proves: X1.b — they use exactly the seven kinds the exported workflows use.
+/// X1.b: they use exactly the seven kinds the exported workflows use.
 #[test]
 fn clones_import_and_validate() {
     let mut kinds = std::collections::BTreeSet::new();
@@ -643,7 +673,7 @@ fn goldens_of(clone: &str) {
         // The offline child is its own process running only this test.
         std::env::set_var("OTTO_E2E_PROMPT_LOG", &log);
         let (h, out) = rt.block_on(run_scenario(s));
-        let mut norm = Normalizer::new(&h);
+        let mut norm = Normalizer::new(&h, out.slack.as_deref());
         let golden = norm.value(&out.golden);
         let chat = norm.chat(&out.chat);
         let dir = compat_dir().join("golden");
@@ -665,7 +695,7 @@ fn goldens_of(clone: &str) {
     );
 }
 
-/// proves: C1, C2, X1.f, X1.g — and part of X1.h and X7 (the bundled
+/// Test plan C1, C2, X1.f, X1.g, and part of X1.h and X7 (the bundled
 /// templates, MCP tool names and chat control words are not covered here):
 /// clone A (12-node review), passed and failed verdicts.
 #[test]

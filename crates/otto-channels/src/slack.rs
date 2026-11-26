@@ -1326,7 +1326,7 @@ fn drop_reason(event: &serde_json::Value) -> Option<&'static str> {
 /// everything downstream, workflow triggers included, reads plain text) with
 /// the leading bot mention stripped. Attachments are not part of it: only an
 /// admitted sender's files are downloaded ([`handle_event`]).
-fn slack_inbound(event: &serde_json::Value, integ: &Integration) -> Inbound {
+pub(crate) fn slack_inbound(event: &serde_json::Value, integ: &Integration) -> Inbound {
     let edited = event["subtype"].as_str() == Some("message_changed");
     let content = if edited { &event["message"] } else { event };
     let field = |k: &str| content[k].as_str().or_else(|| event[k].as_str());
@@ -1395,7 +1395,7 @@ async fn handle_event(
         return;
     }
     debug!(event_type, "slack: message-like event received");
-    let mut inbound = slack_inbound(event, integ);
+    let inbound = slack_inbound(event, integ);
 
     // The allowed-users gate runs HERE as well as in the bridge: before it,
     // anyone who could message the bot made the daemon download up to 50 MB
@@ -1417,29 +1417,9 @@ async fn handle_event(
         return;
     }
 
-    // Download any attached files to local paths so the agent can read them
-    // (Slack `url_private` needs the bot token, so the agent can't fetch them
-    // itself). Returns a note listing the saved paths, appended to the message.
-    let content = if inbound.edited {
-        &event["message"]
-    } else {
-        event
-    };
-    let files_note = collect_attachments(content, bot_token).await;
-
-    // Only skip when there is genuinely nothing to act on (no text AND no
-    // attachments). Everything else is forwarded.
-    let text = std::mem::take(&mut inbound.text);
-    inbound.text = match (text.is_empty(), files_note.is_empty()) {
-        (true, true) => {
-            info!(event_type, user = %inbound.user, "slack: no text or attachments, skipping");
-            return;
-        }
-        (false, true) => text,
-        (true, false) => format!(
-            "[The user sent attachment(s) with no message text — read them and act:]\n{files_note}"
-        ),
-        (false, false) => format!("{text}\n\n{files_note}"),
+    let Some(inbound) = with_attachments(event, inbound, bot_token).await else {
+        info!(event_type, "slack: no text or attachments, skipping");
+        return;
     };
     info!(
         workspace = %inbound.workspace_id,
@@ -1450,6 +1430,34 @@ async fn handle_event(
         "slack: forwarding inbound event to bridge"
     );
     bridge.handle(integ, adapter, inbound, permit).await;
+}
+
+/// The message text with a note on its attached files appended. Downloads
+/// any attached files to local paths so the agent can read them (Slack
+/// `url_private` needs the bot token, so the agent can't fetch them itself).
+/// `None` only when there is genuinely nothing to act on (no text AND no
+/// attachments); everything else is forwarded.
+pub(crate) async fn with_attachments(
+    event: &serde_json::Value,
+    mut inbound: Inbound,
+    bot_token: &str,
+) -> Option<Inbound> {
+    let content = if inbound.edited {
+        &event["message"]
+    } else {
+        event
+    };
+    let files_note = collect_attachments(content, bot_token).await;
+    let text = std::mem::take(&mut inbound.text);
+    inbound.text = match (text.is_empty(), files_note.is_empty()) {
+        (true, true) => return None,
+        (false, true) => text,
+        (true, false) => format!(
+            "[The user sent attachment(s) with no message text — read them and act:]\n{files_note}"
+        ),
+        (false, false) => format!("{text}\n\n{files_note}"),
+    };
+    Some(inbound)
 }
 
 /// Download every file attached to a message to a local temp path and return a
