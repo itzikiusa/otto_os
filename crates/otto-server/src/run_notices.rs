@@ -98,7 +98,7 @@ pub async fn post(ctx: &ServerCtx, n: RunNotice) {
     }
 }
 
-/// Workflow runs and goal loops report through the event bus; this listener
+/// Workflow runs (goals included) report through the event bus; this listener
 /// turns their terminal / attention states into notices (scheduled tasks and
 /// personal agents notify inline from their engines). Parks on the bus, so it
 /// costs no idle wakeups.
@@ -130,9 +130,6 @@ pub fn spawn_listener(ctx: ServerCtx) {
                     let ev = (status.as_str(), node_id.as_deref(), waiting_approval);
                     on_workflow_run(&ctx, &run_id, ev, hold).await
                 }
-                Event::GoalLoopUpdated {
-                    loop_id, status, ..
-                } => on_goal_loop(&ctx, &loop_id, &status).await,
                 _ => {}
             }
         }
@@ -296,47 +293,6 @@ async fn on_workflow_run(
     .await;
 }
 
-/// Goal-loop status → (severity, title suffix) for statuses worth a notice;
-/// `None` for the rest. A running loop ends the streak.
-fn loop_notice(status: &str) -> Option<(NoticeSeverity, &'static str)> {
-    match status {
-        "exhausted" => Some((NoticeSeverity::Warn, "ran out of budget")),
-        "blocked" => Some((NoticeSeverity::Warn, "is blocked and needs you")),
-        "failed" => Some((NoticeSeverity::Error, "failed")),
-        "succeeded" => Some((NoticeSeverity::Info, "reached its goal")),
-        _ => None,
-    }
-}
-
-async fn on_goal_loop(ctx: &ServerCtx, loop_id: &str, status: &str) {
-    let key = streak_key("goal_loop", loop_id);
-    let Some((severity, what)) = loop_notice(status) else {
-        if status == "running" {
-            clear_streak(&key);
-        }
-        return;
-    };
-    if !begin_streak(&key) {
-        return;
-    }
-    let Ok(l) = ctx.goal_loops_repo.get(&loop_id.to_string()).await else {
-        return;
-    };
-    post(
-        ctx,
-        RunNotice {
-            key,
-            severity,
-            title: format!("Goal loop “{}” {what}", l.name),
-            body: l.error.clone().or(l.summary.clone()).unwrap_or_default(),
-            route: format!("loops/{}", l.id),
-            workspace_id: Some(l.workspace_id.clone()),
-            user_id: Some(l.created_by.clone()),
-        },
-    )
-    .await;
-}
-
 /// First `max` chars of a (possibly long, multi-line) error, on one line.
 fn clip(s: &str, max: usize) -> String {
     let one = s.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -410,17 +366,6 @@ mod tests {
         assert!(!begin_streak(&other), "other runs' gates untouched");
         clear_approval_gates("run-gate-test");
         clear_approval_gates("run-gate-other");
-    }
-
-    #[test]
-    fn goal_loop_statuses_worth_a_notice() {
-        assert!(loop_notice("exhausted").is_some());
-        assert!(loop_notice("blocked").is_some());
-        assert!(loop_notice("failed").is_some());
-        assert!(loop_notice("succeeded").is_some());
-        assert!(loop_notice("running").is_none());
-        assert!(loop_notice("paused").is_none());
-        assert!(loop_notice("stopped").is_none());
     }
 
     #[test]

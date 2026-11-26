@@ -18,9 +18,6 @@ import type {
   DesignAssistMode, DesignAssistStatus,
 } from './design-assist';
 import type {
-  GoalLoopPhase, GoalLoopStatus,
-} from './goal-loops';
-import type {
   ApiAutomationRun,
 } from './k8s-monitor';
 import type {
@@ -139,17 +136,6 @@ export type OttoEvent =
       session_id?: Id | null;
       review_id: Id;
       status: string;
-    }
-  /** A goal loop advanced (status/phase/iteration change, after each evaluation,
-   *  or when an executor's live state flips). Drives the Loops UI re-fetch. */
-  | {
-      type: 'goal_loop_updated';
-      workspace_id: Id;
-      loop_id: Id;
-      status: GoalLoopStatus;
-      phase: GoalLoopPhase;
-      current_iteration: number;
-      progress_pct: number;
     }
   /** A product story AI run (analysis/rewrite/plan/testcases) completed or
    *  changed. `section` ∈ "analysis" | "rewrite" | "plan" | "testcases".

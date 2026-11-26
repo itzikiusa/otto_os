@@ -373,8 +373,7 @@ async fn run_cmd_signal(
 ) -> Result<SignalScore> {
     match cmd {
         Some(c) if !c.trim().is_empty() => {
-            let run =
-                otto_automation::goal_loop_commands::run(cwd, c, CMD_TIMEOUT_SECS, cancel).await;
+            let run = otto_automation::verify_command::run(cwd, c, CMD_TIMEOUT_SECS, cancel).await;
             let ok = run.success;
             Ok(signal_from_cmd(
                 true,

@@ -1,5 +1,5 @@
-//! Glue: [`ServerCtx`] as the [`AutomationCtx`] the scheduled-task and goal-loop
-//! engines (crate `otto-automation`) run against.
+//! Glue: [`ServerCtx`] as the [`AutomationCtx`] the scheduled-task
+//! engine (crate `otto-automation`) run against.
 //!
 //! Handles are plain field borrows; services forward to the otto-server modules
 //! that still own them. `otto_automation::agent` re-exports the shared
@@ -11,8 +11,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 
-use otto_automation::agent::{self as au, RoleTurn};
-use otto_automation::goal_loop::GoalLoopRegistry;
+use otto_automation::agent as au;
 use otto_automation::AutomationCtx;
 use otto_core::domain::{NoticeSeverity, Workspace};
 use otto_core::event::Event;
@@ -20,7 +19,7 @@ use otto_core::secrets::SecretStore;
 use otto_core::workflows::{NodeRunState, RunScope, Workflow};
 use otto_core::{Id, Result};
 use otto_sessions::SessionManager;
-use otto_state::{DbPool, GoalLoopsRepo, ScheduledTasksRepo, WorkspacesRepo};
+use otto_state::{DbPool, ScheduledTasksRepo, WorkspacesRepo};
 use serde_json::Value;
 use tokio::sync::broadcast;
 
@@ -52,35 +51,6 @@ impl AutomationCtx for ServerCtx {
     fn scheduled_tasks(&self) -> &ScheduledTasksRepo {
         &self.scheduled_tasks
     }
-    fn goal_loops_repo(&self) -> &GoalLoopsRepo {
-        &self.goal_loops_repo
-    }
-    fn goal_loops(&self) -> &GoalLoopRegistry {
-        &self.goal_loops
-    }
-
-    async fn goal_loop_spent_usd(&self, ws_id: &Id, loop_id: &Id) -> Option<f64> {
-        let scope = otto_state::SessionScope {
-            workspace_id: ws_id.clone(),
-            owner: None,
-        };
-        let filter = otto_state::SessionListFilter {
-            source: Some("goal_loop".into()),
-            ..Default::default()
-        };
-        let sessions = self.manager.list_filtered(&[scope], &filter).await.ok()?;
-        let ids: Vec<String> = sessions
-            .into_iter()
-            .filter(|s| s.meta.get("loop_id").and_then(|v| v.as_str()) == Some(loop_id.as_str()))
-            .map(|s| s.id)
-            .collect();
-        if ids.is_empty() {
-            return Some(0.0);
-        }
-        let totals = self.usage.session_totals_for_ids(&ids).await?;
-        Some(totals.into_iter().map(|t| t.cost_usd).sum())
-    }
-
     async fn resolve_provider(
         &self,
         ws: Option<&Workspace>,
@@ -142,58 +112,6 @@ impl AutomationCtx for ServerCtx {
             },
             on_status,
             |_| async {},
-        )
-        .await
-    }
-
-    async fn run_role_turn<C, P, PF>(
-        &self,
-        turn: RoleTurn<'_>,
-        cancelled: C,
-        publish: P,
-    ) -> std::result::Result<String, String>
-    where
-        C: Future<Output = ()> + Send,
-        P: FnOnce(String) -> PF + Send,
-        PF: Future<Output = std::result::Result<(), String>> + Send,
-    {
-        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-        let opts = crate::agent_session::TurnOpts {
-            done_file: Some(turn.done_file),
-            done_file_validator: Some(turn.done_file_validator),
-            ..Default::default()
-        };
-        let budget = turn.budget;
-        let run = async {
-            crate::agent_session::run_session_turn_with(
-                self,
-                turn.workspace,
-                turn.user,
-                None,
-                turn.title,
-                turn.cwd,
-                turn.provider,
-                turn.meta,
-                turn.prompt,
-                budget,
-                opts,
-                |id| {
-                    let _ = ready_tx.send(id.clone());
-                },
-            )
-            .await
-            .map(|(text, _)| text)
-            .map_err(|e| format!("{e:?}"))
-        };
-        crate::review_summarizer::drive(
-            run,
-            ready_rx,
-            budget,
-            cancelled,
-            publish,
-            |id| async move {
-                otto_review::session::stop_review_sessions(&self.manager, &[id]).await;
-            },
         )
         .await
     }
@@ -260,180 +178,6 @@ mod handoff_tests {
     use otto_core::workflows::{RunStatus, WorkflowGraph};
     use otto_state::{NewScheduledTask, WorkflowsRepo};
     use serde_json::json;
-
-    /// test-quality-4-06: the goal loop's final status write retries through
-    /// a transient failure (a `BEFORE UPDATE OF status` trigger raising ABORT,
-    /// dropped after 300 ms) and lands; a persistent failure returns `Err`
-    /// and raises exactly one error Notice, leaving the stored status alone.
-    #[tokio::test]
-    async fn goal_loop_settle_status_retries_then_reports_a_persistent_failure() {
-        use otto_core::domain::GoalLoopStatus;
-        use otto_core::event::Event;
-        let tmp = tempfile::TempDir::new().unwrap();
-        let pool = mem_pool().await;
-        seed_workspace(&pool, "gl-ws").await;
-        sqlx::query("INSERT INTO users(id,username,password_hash,display_name,is_root,created_at) VALUES('u','u','x','U',0,?)")
-            .bind(chrono::Utc::now().to_rfc3339())
-            .execute(&pool)
-            .await
-            .unwrap();
-        let ctx = test_ctx(&pool, tmp.path().to_path_buf()).await;
-        let repo = ctx.goal_loops_repo();
-        let lp = repo
-            .create(otto_state::NewGoalLoop {
-                workspace_id: "gl-ws".into(),
-                name: "L".into(),
-                repo_path: tmp.path().to_string_lossy().into_owned(),
-                definition: serde_json::from_value(
-                    json!({"title": "t", "acceptance_criteria": []}),
-                )
-                .unwrap(),
-                limits: Default::default(),
-                config: Default::default(),
-                created_by: "u".into(),
-            })
-            .await
-            .unwrap();
-        const BUSY: &str = "CREATE TRIGGER gl_busy BEFORE UPDATE OF status ON goal_loops \
-                            BEGIN SELECT RAISE(ABORT, 'busy'); END";
-        sqlx::query(BUSY).execute(&pool).await.unwrap();
-        let release = tokio::spawn({
-            let pool = pool.clone();
-            async move {
-                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                sqlx::query("DROP TRIGGER gl_busy")
-                    .execute(&pool)
-                    .await
-                    .unwrap();
-            }
-        });
-        otto_automation::goal_loop::settle_status(
-            &ctx,
-            &lp.id,
-            GoalLoopStatus::Succeeded,
-            Some("done"),
-            None,
-        )
-        .await
-        .expect("a transient failure is retried");
-        release.await.unwrap();
-        assert_eq!(
-            repo.get(&lp.id).await.unwrap().status,
-            GoalLoopStatus::Succeeded
-        );
-
-        // Persistent: every attempt fails.
-        sqlx::query(BUSY).execute(&pool).await.unwrap();
-        let mut events = ctx.events().subscribe();
-        let res = otto_automation::goal_loop::settle_status(
-            &ctx,
-            &lp.id,
-            GoalLoopStatus::Failed,
-            None,
-            Some("boom"),
-        )
-        .await;
-        assert!(res.is_err());
-        let mut notices = 0;
-        while let Ok(ev) = events.try_recv() {
-            if let Event::Notice { level, title, .. } = ev {
-                if level == "error" && title.contains("goal loop") {
-                    notices += 1;
-                }
-            }
-        }
-        assert_eq!(notices, 1, "one error Notice for the lost result");
-        assert_eq!(
-            repo.get(&lp.id).await.unwrap().status,
-            GoalLoopStatus::Succeeded
-        );
-    }
-
-    /// Unattended loops: every block announces the Blocked status (the bell
-    /// notice hangs off that event), and a loop the restart sweep paused
-    /// emits Paused plus a persisted notice that opens it.
-    #[tokio::test]
-    async fn goal_loop_block_and_restart_pause_are_announced() {
-        use otto_core::domain::GoalLoopStatus;
-        use otto_core::event::Event;
-        let tmp = tempfile::TempDir::new().unwrap();
-        let pool = mem_pool().await;
-        seed_workspace(&pool, "gl-ws").await;
-        sqlx::query("INSERT INTO users(id,username,password_hash,display_name,is_root,created_at) VALUES('u','u','x','U',0,?)")
-            .bind(chrono::Utc::now().to_rfc3339())
-            .execute(&pool)
-            .await
-            .unwrap();
-        let ctx = test_ctx(&pool, tmp.path().to_path_buf()).await;
-        let repo = ctx.goal_loops_repo();
-        let new_loop = || otto_state::NewGoalLoop {
-            workspace_id: "gl-ws".into(),
-            name: "L".into(),
-            repo_path: tmp.path().to_string_lossy().into_owned(),
-            definition: serde_json::from_value(json!({"title": "t", "acceptance_criteria": []}))
-                .unwrap(),
-            limits: Default::default(),
-            config: Default::default(),
-            created_by: "u".into(),
-        };
-        let blocked = repo.create(new_loop()).await.unwrap();
-        repo.mark_running(&blocked.id, chrono::Utc::now())
-            .await
-            .unwrap();
-        let mut events = ctx.events().subscribe();
-        otto_automation::goal_loop::block(&ctx, &blocked.id, "Completion review has findings")
-            .await
-            .unwrap();
-        let mut saw_blocked = false;
-        while let Ok(ev) = events.try_recv() {
-            if let Event::GoalLoopUpdated {
-                loop_id, status, ..
-            } = ev
-            {
-                saw_blocked |= loop_id == blocked.id && status == "blocked";
-            }
-        }
-        assert!(saw_blocked, "a block must announce itself");
-        assert_eq!(
-            repo.get(&blocked.id).await.unwrap().status,
-            GoalLoopStatus::Blocked
-        );
-
-        let running = repo.create(new_loop()).await.unwrap();
-        repo.mark_running(&running.id, chrono::Utc::now())
-            .await
-            .unwrap();
-        let swept = repo
-            .fail_running(otto_automation::goal_loop::RESTART_PAUSE_NOTE)
-            .await
-            .unwrap();
-        assert_eq!(swept.len(), 2, "the running loop and the blocked one");
-        let mut events = ctx.events().subscribe();
-        otto_automation::goal_loop::announce_restart_pause(&ctx, &swept).await;
-        let (mut paused, mut notices) = (Vec::new(), Vec::new());
-        while let Ok(ev) = events.try_recv() {
-            match ev {
-                Event::GoalLoopUpdated {
-                    loop_id, status, ..
-                } if status == "paused" => paused.push(loop_id),
-                Event::Notification { notice, .. } => notices.push(notice),
-                _ => {}
-            }
-        }
-        assert_eq!(paused, vec![running.id.clone()], "blocked stays blocked");
-        assert_eq!(notices.len(), 1, "{notices:?}");
-        assert!(notices[0].title.contains("paused by a restart"));
-        assert_eq!(
-            notices[0].source_key.as_deref(),
-            Some(format!("automation:goal_loop_restart:{}", running.id).as_str())
-        );
-        let after = repo.get(&running.id).await.unwrap();
-        assert_eq!(after.status, GoalLoopStatus::Paused);
-        assert_eq!(
-            after.error.as_deref(),
-            Some(otto_automation::goal_loop::RESTART_PAUSE_NOTE)
-        );
-    }
 
     /// S3-303: a daemon restart while a workflow-kind scheduled run waits on
     /// its workflow must not record a false "interrupted" failure — boot

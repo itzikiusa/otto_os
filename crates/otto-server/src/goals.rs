@@ -176,7 +176,7 @@ pub async fn continue_loop(
         ));
     }
     goal::validate_spec(&spec).map_err(Error::Invalid)?;
-    otto_automation::goal_loop::cleanup_executor_sessions(ctx, ws_id, &loop_.id).await;
+    otto_automation::goal_loop_history::cleanup_executor_sessions(ctx, ws_id, &loop_.id).await;
     goal::carry_loop_context(&mut spec, loop_);
     let kept = loop_.worktree_path.clone();
     let built = if loop_.config.mode == "research" {

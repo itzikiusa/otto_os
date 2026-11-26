@@ -650,3 +650,23 @@ async fn older_loops_are_read_only_history_and_continue_as_a_goal_once() {
         .await;
     assert_eq!(list, json!([]));
 }
+
+/// proves: G-20, GL18.3 / GL24.7 — a loop still running when this build boots
+/// is paused with its work kept, and one notice offers Continue as a goal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_loop_running_at_upgrade_is_paused_with_one_notice() {
+    if !in_offline_child("a_loop_running_at_upgrade_is_paused_with_one_notice") {
+        return;
+    }
+    let d = boot().await;
+    let l = d.seed_loop("build").await;
+    exec(&d.pool, "UPDATE goal_loops SET status = 'running' WHERE id = ?", &[&l.id]).await;
+    let ctx = otto_server::ServerCtx::for_tests(&d.pool, d.tmp.path()).await;
+    otto_server::boot::recover_goal_loops(&ctx).await;
+    let after = GoalLoopsRepo::new(d.pool.clone()).get(&l.id).await.unwrap();
+    assert_eq!(after.status.as_str(), "paused");
+    assert_eq!(after.error.as_deref(), Some(otto_automation::goal_loop_history::RESTART_PAUSE_NOTE));
+    let key = format!("automation:goal_loop_restart:{}", l.id);
+    let title = d.scalar("SELECT title FROM notifications WHERE source_key = ?", &key).await;
+    assert!(title.as_deref().is_some_and(|t| t.contains("paused by the update")), "{title:?}");
+}

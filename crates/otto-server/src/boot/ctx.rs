@@ -193,7 +193,6 @@ impl ServerCtx {
             vault_docs_runs: crate::vault_docs_agent::new_run_registry(),
             vault_docs_refine: crate::vault_docs_agent::new_refine_registry(),
             goal_loops_repo: otto_state::GoalLoopsRepo::new(pool.clone()),
-            goal_loops: crate::goal_loop::new_registry(),
             scheduled_tasks: otto_state::ScheduledTasksRepo::new(pool.clone()),
             browser_tabs: otto_state::BrowserTabsRepo::new(pool.clone()),
             browser_annotations: otto_state::BrowserAnnotationsRepo::new(pool.clone()),

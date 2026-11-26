@@ -246,8 +246,11 @@ pub async fn run_with_sandbox(
         cache_tag,
         ..Spec::new(cwd, command, timeout)
     };
-    // Parks on the loop flag bell (perf W8) instead of a 25 ms poll.
-    let cancel = crate::goal_loop::until_flag(|| cancelled.load(Ordering::Relaxed));
+    let cancel = async {
+        while !cancelled.load(Ordering::Relaxed) {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    };
     execute(&spec, cancel).await.into_cmd_run(timeout)
 }
 
@@ -406,7 +409,6 @@ mod tests {
         let stop = async {
             tokio::time::sleep(Duration::from_millis(50)).await;
             cancelled.store(true, Ordering::Relaxed);
-            crate::goal_loop::ring_flags();
         };
         let start = Instant::now();
         let (result, ()) = tokio::join!(work, stop);

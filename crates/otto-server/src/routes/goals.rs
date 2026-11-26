@@ -327,7 +327,7 @@ async fn loop_detail(
         repo.get_detail(&loop_.id).await
     };
     let steering_notes =
-        otto_automation::goal_loop_steering::peek_notes(&ctx.data_dir, &loop_.id).await;
+        otto_automation::goal_loop_history::peek_notes(&ctx.data_dir, &loop_.id).await;
     Ok(Json(LoopDetail {
         detail: detail.map_err(ApiError)?,
         spent_usd: None,
@@ -352,10 +352,10 @@ async fn loop_diff(
     Path(id): Path<Id>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
-) -> ApiResult<Json<otto_automation::goal_loop_steering::GoalLoopDiff>> {
+) -> ApiResult<Json<otto_automation::goal_loop_history::GoalLoopDiff>> {
     let loop_ = loop_for(&ctx, &user, &id, WorkspaceRole::Viewer).await?;
-    let cap = otto_automation::goal_loop_steering::DEFAULT_DIFF_PATCH_CAP;
-    let diff = otto_automation::goal_loop_workspace::worktree_diff(&loop_, cap).await;
+    let cap = otto_automation::goal_loop_history::DEFAULT_DIFF_PATCH_CAP;
+    let diff = otto_automation::goal_loop_history::worktree_diff(&loop_, cap).await;
     diff.map(Json).map_err(ApiError)
 }
 

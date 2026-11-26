@@ -24,12 +24,11 @@ use otto_core::secrets::SecretStore;
 use otto_core::workflows::{NodeRunState, RunScope, Workflow};
 use otto_core::{Id, Result};
 use otto_sessions::SessionManager;
-use otto_state::{DbPool, GoalLoopsRepo, ScheduledTasksRepo, WorkspacesRepo};
+use otto_state::{DbPool, ScheduledTasksRepo, WorkspacesRepo};
 use serde_json::Value;
 use tokio::sync::broadcast;
 
-use crate::agent::{RoleTurn, RunOutcome, WatchStatus};
-use crate::goal_loop::GoalLoopRegistry;
+use crate::agent::{RunOutcome, WatchStatus};
 
 /// The daemon surface the automation engines run against. Cheap to clone (the
 /// engines clone it into spawned controllers / run tasks).
@@ -46,19 +45,6 @@ pub trait AutomationCtx: Clone + Send + Sync + 'static {
     /// The headless runner (owner-less scheduled tasks).
     fn orchestrator(&self) -> &Arc<otto_orchestrator::Orchestrator>;
     fn scheduled_tasks(&self) -> &ScheduledTasksRepo;
-    fn goal_loops_repo(&self) -> &GoalLoopsRepo;
-    /// Live goal-loop controllers (owned by the daemon state, run by this crate).
-    fn goal_loops(&self) -> &GoalLoopRegistry;
-
-    /// Live USD spend accumulated across sessions belonging to `loop_id`.
-    /// Defaults to `None` when usage telemetry is unavailable (graceful degradation).
-    fn goal_loop_spent_usd(
-        &self,
-        _ws_id: &Id,
-        _loop_id: &Id,
-    ) -> impl Future<Output = Option<f64>> + Send {
-        async { None }
-    }
 
     // ---- provider resolution ----------------------------------------------
 
@@ -114,21 +100,6 @@ pub trait AutomationCtx: Clone + Send + Sync + 'static {
     where
         F: FnMut(WatchStatus) -> Fut + Send,
         Fut: Future<Output = ()> + Send;
-
-    /// One managed role turn (goal-loop planner / evaluator / digester /
-    /// definer): spawn the session, publish its id through `publish` as soon as
-    /// it is ready, end on a validated `done_file`, stop the session on
-    /// `cancelled` / deadline. Returns the done-file text or an error string.
-    fn run_role_turn<C, P, PF>(
-        &self,
-        turn: RoleTurn<'_>,
-        cancelled: C,
-        publish: P,
-    ) -> impl Future<Output = std::result::Result<String, String>> + Send
-    where
-        C: Future<Output = ()> + Send,
-        P: FnOnce(String) -> PF + Send,
-        PF: Future<Output = std::result::Result<(), String>> + Send;
 
     // ---- other server services --------------------------------------------
 

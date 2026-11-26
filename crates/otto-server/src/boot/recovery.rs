@@ -219,13 +219,14 @@ where
     });
 }
 
-/// Goal loops: each loop's controller dies with the process, so a row left
-/// running/paused/blocked is orphaned. Pause active loops, preserve blocked
-/// decisions and all working files, and reap only execution resources.
+/// Older goal loops (goal.md §5.4): a loop still running when this build
+/// boots has no controller any more. Pause it (its time banked), keep every
+/// working file, kill its surviving executor sessions and post one notice
+/// offering Continue as a goal. Nothing is started.
 pub async fn recover_goal_loops(ctx: &ServerCtx) {
     match ctx
         .goal_loops_repo
-        .fail_running(crate::goal_loop::RESTART_PAUSE_NOTE)
+        .fail_running(otto_automation::goal_loop_history::RESTART_PAUSE_NOTE)
         .await
     {
         Ok(loops) => {
@@ -235,7 +236,7 @@ pub async fn recover_goal_loops(ctx: &ServerCtx) {
                     loops.len()
                 );
             }
-            crate::goal_loop::announce_restart_pause(ctx, &loops).await;
+            otto_automation::goal_loop_history::announce_restart_pause(ctx, &loops).await;
         }
         Err(e) => tracing::warn!("goal-loop recovery: {e}"),
     }

@@ -785,10 +785,11 @@ Notices & notifications:
   report delivery), personal agent (`personal_agent`) or workflow (`workflow`) posts one
   `error` notice; further failures stay silent until a clean run ends the streak (the
   streak set is in-memory, so after a daemon restart the next failure refreshes the same
-  row). A goal loop that becomes `exhausted`/`blocked`/`failed`/`succeeded` posts one per
-  episode (`goal_loop`; a running loop resets it; every block emits `goal_loop_updated`
-  `blocked`), a loop a daemon restart paused posts one `error` notice per restart
-  (`goal_loop_restart`), and a workflow run parked at a
+  row). A workflow run held `blocked` or out of budget posts one `warn` notice per hold
+  (`wf_hold`; a resumed run resets it; a pause posts none), a goal run that succeeds posts
+  one `info` notice ("Goal “…” reached its goal", `goal_done:<run>`), an older goal loop
+  that was running when this build booted posts one notice (`goal_loop_restart`: paused by
+  the update, continue it as a goal), and a workflow run parked at a
   human-approval step posts a `warn` notice once per gate
   (`automation:workflow_approval:<run>:<node>`). Notices are scoped to the
   task/agent/workflow/loop creator (`user_id`) and carry an `open_route` action
@@ -912,38 +913,11 @@ regression-test) spawned a live, openable session:
 - TypeScript types: added to the `OttoEvent` discriminated union in
   `ui/src/lib/api/types.ts`.
 
-## Goal-loop progress (Goal Loops)
+## Goal-loop progress (removed)
 
-Workspace-scoped. Emitted by `crates/otto-automation/src/goal_loop.rs` on every loop
-transition: status change, phase change (Plan → Execute → Evaluate → Digest), a new
-iteration, after each evaluation, and when an executor's live state flips (e.g.
-→ `waiting`). The Loops UI updates the list row directly from these fields and
-re-fetches `GET /goal-loops/{id}` (it also runs a low-frequency fallback poll while
-a loop is active, covering any missed event).
-
-```json
-{
-  "type": "goal_loop_updated",
-  "workspace_id": "<Id>",
-  "loop_id": "<loop_id>",
-  "status": "draft|running|paused|blocked|succeeded|exhausted|failed|stopped",
-  "phase": "planning|executing|evaluating|digesting|waiting|done",
-  "current_iteration": 0,
-  "progress_pct": 0
-}
-```
-
-- `status` / `phase` — mirror the `goal_loops` row (snake_case enums).
-- Managed planner/evaluator/digester/reviewer sessions are persisted in iteration `agents` after executor slots. Detail polling retrieves role status/session IDs; the existing event shape is unchanged.
-- Human verification and answers are returned by their HTTP actions. Clients re-fetch detail; no new WS event is introduced.
-
-- `current_iteration` — the iteration index in flight or last completed.
-- `progress_pct` — the latest evaluator score (0–100).
-- Executor sessions are real agent sessions and also emit the normal
-  `session_status` events, so their live status dots work without extra plumbing.
-- TypeScript type: added to the `OttoEvent` union in `ui/src/lib/api/types.ts` as
-  `{ type: 'goal_loop_updated'; workspace_id: Id; loop_id: Id; status: GoalLoopStatus;
-  phase: GoalLoopPhase; current_iteration: number; progress_pct: number }`.
+`goal_loop_updated` is no longer emitted: goals are workflow runs (`workflow_run_updated`,
+whose `overview` carries `goal` and `hold`, goal.md §7.3). The older loops' history page
+reads `GET /goal-loops/{id}` when it opens.
 
 ## Product AI-run completion (A3)
 

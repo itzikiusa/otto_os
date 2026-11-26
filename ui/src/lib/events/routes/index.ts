@@ -37,8 +37,6 @@ export const featureRoutes: EventRoutes = {
  *  decision, not a default — `unit/eventRoutes.test.ts` fails on a type that
  *  is neither routed nor listed. */
 export const LIVE_ONLY_EVENTS: readonly EventType[] = [
-  // No longer emitted: goals run in Workflows (goal.md §7.3); goes with its type.
-  'goal_loop_updated',
   'design_source_changed',
   'improvement_run_started',
   'improvement_run_finished',

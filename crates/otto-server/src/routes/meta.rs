@@ -55,7 +55,6 @@ pub async fn restart_impact(
     });
     let renders = crate::design_blender::running_jobs(&ctx.design_jobs);
     items.push(otto_core::restart::ImpactItem::jobs(&[
-        ("Goal Loop", ctx.goal_loops.lock().map_or(0, |h| h.len())),
         ("Blender render", renders),
         ("docs run", docs),
     ]));
