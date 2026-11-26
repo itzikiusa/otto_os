@@ -413,7 +413,12 @@ export function buildRuntimeBanners(opts: {
   switchTo?: string | null;
   /** The last turn hit the provider's usage limit (RuntimeUsageLimit). */
   limited?: boolean;
+  /** Another feature drives the thread (a workflow step): none of the lines
+   *  that act on it — Revive / Stop, the next message's switch, the limit's
+   *  Switch provider / Retry. */
+  readOnly?: boolean;
 }): BannerBlock[] {
+  if (opts.readOnly) return buildRuntimeBanners({ ...opts, readOnly: false, queueShown: false, switchTo: null, limited: false, freshContext: false });
   return [
     ...(opts.sessionError ? [{ key: 'error', label: 'error', urgent: true }] : []),
     ...(opts.uiAsk ? [{ key: 'ui', label: 'UI control request', urgent: true }] : []),

@@ -180,6 +180,10 @@ test('the thread’s next action (Revive / Reopen) is never folded behind "N mor
   // A live queue is a quiet notice; "Next message starts fresh" says what the next message does.
   assert.deepEqual(keys(splitBanners(buildRuntimeBanners(base))), [['fresh'], ['plan', 'queue']]);
   assert.deepEqual(keys(splitBanners(buildRuntimeBanners({ ...base, freshContext: false }))), [['plan'], ['queue']]);
+  // A read-only thread (a workflow step's conversation, DR-021): nothing that
+  // acts on it — no Revive / Stop line, no limit's Switch provider, no next-message line (CR1-038).
+  const ro = buildRuntimeBanners({ ...base, sessionError: 'Agent stopped.', needsRevive: true, limited: true, switchTo: 'codex', readOnly: true });
+  assert.deepEqual([...ro.map((b) => b.key)].sort(), ['error', 'plan']);
 });
 
 test('incremental WS deltas keep a Thinking row under one id, so the person\u2019s open/closed choice (ROW_CHOICES) holds', async () => {

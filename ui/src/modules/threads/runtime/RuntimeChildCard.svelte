@@ -13,7 +13,7 @@
   it answered, "Send the answer to <agent>" passes it on in one click.
 -->
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { getContext, untrack } from 'svelte';
   import Markdown from '../../agents/conversation/Markdown.svelte'; // ui-guards: allow — shared chat markdown
   import { formatEffortShort, formatModelLabel } from '../../../lib/providerModels';
   import { harnessLabel } from '../../../lib/providers';
@@ -25,7 +25,7 @@
   import { activityOf, answerOf, childOf, childState, elapsedMs, firstLine, removedLine, removedState, rowTone, type RemovedKid } from './childThreads';
   import { answerHandoff } from './askAgents';
   import { stopThreadWork } from './taskStops.svelte';
-  import { mainViewKey, openChildThread } from './childNav';
+  import { mainViewKey, openChildThread, READ_ONLY_CTX } from './childNav';
   import RuntimeAgentRow from './RuntimeAgentRow.svelte';
   import { runtimeThreads } from './runtimeThreads.svelte';
   import { runtimeViews } from './runtimeView.svelte';
@@ -39,6 +39,8 @@
     removed?: RemovedKid;
   }
   let { id, hint = {}, removed }: Props = $props();
+  /** In a read-only host (a workflow step) the card only shows: no Open, Stop or hand-over. */
+  const readOnly = getContext<(() => boolean) | undefined>(READ_ONLY_CTX);
 
   let gone = $state(false);
   let open = $state(false);
@@ -124,11 +126,11 @@
     result={line}
     expanded={open}
     ontoggle={answer ? () => { open = !open; if (open) threadMeta.markSeen(id); } : undefined}
-    onstop={live && !gone && s?.status !== 'closed' && !stopping ? () => void stop() : undefined}
-    onrow={gone ? undefined : (e) => openChildThread(id, mainViewKey(e))}
+    onstop={live && !gone && s?.status !== 'closed' && !stopping && !readOnly?.() ? () => void stop() : undefined}
+    onrow={gone || readOnly?.() ? undefined : (e) => openChildThread(id, mainViewKey(e))}
     testid="runtime-child-row-{id}"
   />
-  {#if parentRow && parentRow.status !== 'closed' && answer && !live && !gone}
+  {#if parentRow && parentRow.status !== 'closed' && answer && !live && !gone && !readOnly?.()}
     <button
       type="button"
       class="btn small ghost rc-hand"
