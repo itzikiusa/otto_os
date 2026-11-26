@@ -12,6 +12,7 @@ pub mod chat_resolve;
 pub mod checkout;
 pub mod checkpoint;
 pub mod context;
+pub mod deliverables;
 pub mod http;
 pub mod location;
 pub mod prepare;
