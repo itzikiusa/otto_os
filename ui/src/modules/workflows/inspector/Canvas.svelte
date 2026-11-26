@@ -1,7 +1,6 @@
 <script lang="ts">
   // canvas: a diagram prompt, the mode (Mermaid / Excalidraw) and the agent.
   import type { WorkflowNode } from '../../../lib/api/types';
-  import ProviderModel from './ProviderModel.svelte';
   import { paramStr, type SetParam } from './util';
 
   let { node, set }: { node: WorkflowNode; set: SetParam } = $props();
@@ -25,4 +24,3 @@
   <option value="mermaid">Mermaid</option>
   <option value="excalidraw">Excalidraw</option>
 </select>
-<ProviderModel {node} {set} />

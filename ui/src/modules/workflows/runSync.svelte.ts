@@ -2,9 +2,8 @@
 // everything that keeps it live — the WS fast path, the single-flight
 // rev-guarded refetch, the safety poll — plus the human-approval gate (its
 // publication preview and the approve/deny write) and the run's final output.
-// Lifted out of WorkflowsPage, which keeps the canvas and the editor and
-// assigns `run` when it opens or starts one. RunMonitor.svelte (the inspector's
-// run view), RunApprovals.svelte and RunContextSidebar.svelte render from it.
+// The run page (runs/RunPage.svelte) owns one and assigns `run` when it
+// loads; its overview, state cards and step pane render from it.
 //
 // `track()` wires the effects to the page: call it once while the page
 // initialises (a `$effect` needs the component's context).

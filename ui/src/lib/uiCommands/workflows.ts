@@ -1,8 +1,7 @@
 // Agent UI control — Workflows handlers (`otto.ui_wf_*`). The Workflows page
-// keeps the open workflow, its canvas and the run inspector in component
-// state, so it binds a page port (pagePort.ts) and the handlers open
-// workflows / runs and start runs THROUGH the editor — the user watches the
-// canvas and the run's steps light up next to the agent's session.
+// binds a page port (pagePort.ts) and the handlers open workflows (the
+// editor) and runs (the run page) and start runs THROUGH those routes — the
+// user watches the same screens their own clicks would show.
 //
 // Running a workflow is OUTWARD: its steps can open PRs, post to Slack/Jira,
 // push branches. It always asks with the where/what/who confirm (never
@@ -48,7 +47,7 @@ async function openWf(p: Awaited<ReturnType<typeof page>>, wf: Workflow, ctx: Ui
   if (!(await p.open(wf.id))) {
     throw new UiCommandError('cancelled_by_user', 'The user kept their unsaved edits to the open workflow.');
   }
-  void highlightWhenReady(ctx, `[data-testid="wf-row-${CSS.escape(wf.id)}"]`);
+  void highlightWhenReady(ctx, '[data-testid="wf-editor-canvas"], [data-testid="wf-phone-outline"]');
 }
 
 function runSummary(r: WorkflowRun) {
@@ -110,7 +109,7 @@ registerUiCommands('workflows', {
     await openWf(p, wf, ctx);
     await p.openRun(wf.id, args.run_id);
     const shown = await waitFor(() => (p.currentRun()?.id === args.run_id ? p.currentRun() : null), ctx.signal, 10_000, 'the run');
-    void highlightWhenReady(ctx, '[data-testid="run-item"].active');
+    void highlightWhenReady(ctx, `[data-testid="wf-run-page"][data-run-id="${CSS.escape(args.run_id)}"]`);
     return { workflow: wf.name, run: runSummary(shown) };
   },
 

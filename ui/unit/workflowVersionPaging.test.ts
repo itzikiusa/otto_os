@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {deferred,loadSource} from './sourceHarness.ts';
+import {loadSource} from './sourceHarness.ts';
 import {componentFunctions} from './componentFunctions.ts';
 
 function history() {
@@ -25,41 +25,19 @@ test('workflow version wrapper requests bounded summaries and an exclusive curso
   assert.equal(h.wrapper.getWorkflowVersion,undefined,'the unused single-version getter is gone; restore reads the version server-side');
 });
 
-test('workflow version drawer keeps one bounded window and can page to the oldest version across a new save',async()=>{
+test('the Versions panel pages to the oldest version, a save made meanwhile never shifts the cursor',async()=>{
   const h=history();
-  const ctx=componentFunctions(new URL('../src/modules/workflows/WorkflowsPage.svelte',import.meta.url),['loadVersions'],{
-    current:{id:'wf'},destroyed:false,viewGeneration:0,versionsGeneration:0,versions:[],versionsLoading:false,versionsError:null,
-    versionsBefore:undefined,versionsHasMore:false,VERSION_PAGE_SIZE:50,
+  const ctx=componentFunctions(new URL('../src/modules/workflows/editor/EditorPage.svelte',import.meta.url),['openVersions'],{
+    workflowId:'wf',panel:null,versions:null,versionsError:null,versionsMore:false,VERSION_PAGE:30,
     listWorkflowVersions:h.wrapper.listWorkflowVersions,loadErrorText:String,
   });
-  await ctx.loadVersions();
-  assert.ok(ctx.versions.length<=50,'drawer handler must request one 50-row window');
-  assert.equal(ctx.versions[0].version,123);
-  const seen:number[]=ctx.versions.map((v:any)=>v.version);h.addVersion();
-  for(let n=0;n<4&&ctx.versions.length===50;n++) {
-    const before=ctx.versions.at(-1).version;
-    await ctx.loadVersions(before);
-    assert.ok(ctx.versions.length<=50,'older pages replace the handler’s current window rather than accumulating rows');
-    assert.ok(ctx.versions.every((v:any)=>v.version<before),'older page is exclusive');
-    seen.push(...ctx.versions.map((v:any)=>v.version));
-  }
+  await ctx.openVersions();
+  assert.equal(ctx.panel,'versions');assert.equal(ctx.versions.length,30);assert.equal(ctx.versions[0].version,123);
+  h.addVersion();
+  for(let n=0;n<10&&ctx.versionsMore;n++) await ctx.openVersions(ctx.versions.at(-1).version);
+  const seen=ctx.versions.map((v:any)=>v.version);
   assert.equal(seen.length,123);assert.equal(new Set(seen).size,123);assert.equal(seen.at(-1),1);
-  assert.ok(!seen.includes(124),'an intervening newest save does not shift the older cursor');
-});
-
-
-test('version drawer rejects stale failure/finally and retries the exact failed older page',async()=>{
-  const requests:{id:string;options:any;result:ReturnType<typeof deferred<any>>}[]=[];
-  const ctx=componentFunctions(new URL('../src/modules/workflows/WorkflowsPage.svelte',import.meta.url),['loadVersions'],{
-    current:{id:'A'},destroyed:false,viewGeneration:0,versionsGeneration:0,versions:[],versionsLoading:false,versionsError:null,
-    versionsBefore:undefined,versionsHasMore:false,VERSION_PAGE_SIZE:50,loadErrorText:String,
-    listWorkflowVersions:(id:string,options:any)=>{const result=deferred<any>();requests.push({id,options,result});return result.promise;},
-  });
-  const old=ctx.loadVersions(80);ctx.current={id:'B'};ctx.viewGeneration++;
-  const current=ctx.loadVersions(30);requests[0].result.reject(Error('stale A'));await old;
-  assert.equal(ctx.versionsLoading,true);assert.equal(ctx.versionsError,null);assert.equal(ctx.versionsBefore,30);
-  requests[1].result.reject(Error('B offline'));await current;assert.match(String(ctx.versionsError),/B offline/);
-  const retry=ctx.loadVersions(ctx.versionsBefore);assert.equal(requests[2].id,'B');assert.equal(requests[2].options.beforeVersion,30);
-  requests[2].result.resolve([{id:'b29',workflow_id:'B',version:29}]);await retry;
-  assert.equal(ctx.versions[0].version,29);assert.equal(ctx.versionsError,null);assert.equal(ctx.versionsLoading,false);
+  assert.ok(!seen.includes(124),'a save made meanwhile does not shift the older cursor');
+  assert.equal(ctx.versionsMore,false);
+  for(const p of h.paths.filter((x)=>x.includes('/versions'))) assert.ok(new URL(p,'http://f').searchParams.get('limit')==='30');
 });
