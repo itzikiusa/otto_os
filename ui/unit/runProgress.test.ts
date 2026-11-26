@@ -74,7 +74,7 @@ test('a shared read is aborted only when every consumer that joined it aborted',
 test('a contiguous live node summary applies in place; anything else refetches (perf W5)',()=>{
   const {applyLiveNode}=helpers();
   const mk=()=>({id:'run',rev:5,status:'running',summary:true,checkpoint_rev:0,waiting_approval:false,nodes:[{node_id:'a',status:'running',detail_version:'v1',log_count:1,logs:[]}]});
-  const ev=(over:any={})=>({rev:6,status:'running',waitingApproval:false,node:{node_id:'a',status:'running',detail_version:'v2',log_count:4,logs:[]},...over});
+  const ev=(over:any={})=>({rev:6,status:'running',waitingApproval:false,overview:{rev:6,state:'running'},node:{node_id:'a',status:'running',detail_version:'v2',log_count:4,logs:[]},...over});
   const run=mk(); const first=run.nodes[0];
   assert.equal(applyLiveNode(run,ev()),true);
   assert.equal(run.rev,6); assert.equal(run.nodes[0],first,'node object kept'); assert.equal(first.log_count,4); assert.equal(first.detail_version,'v2');
@@ -111,4 +111,27 @@ test('shared completed body eviction uses last access rather than insertion orde
   assert.equal(cache.peek('r','a','v'),'a');
   await cache.fetch('r','c',async()=>({detail_version:'v',body:'c'}));
   assert.equal(cache.peek('r','a','v'),'a');assert.equal(cache.peek('r','b','v'),null);
+});
+
+test('a live event carries the run overview into the view; one without it refetches (CR1-016)',()=>{
+  const {applyLiveNode}=helpers();
+  const mk=()=>({id:'run',rev:5,status:'running',summary:true,checkpoint_rev:0,waiting_approval:false,overview:{rev:5,state:'running',headline:'Working'},nodes:[{node_id:'a',status:'running',detail_version:'v1',logs:[]}]});
+  const overview={rev:6,state:'needs_you',headline:'Approve posting 6 comments'};
+  const run=mk();
+  assert.equal(applyLiveNode(run,{rev:6,status:'running',waitingApproval:true,node:{node_id:'a',status:'running',detail_version:'v2',logs:[]},overview}),true);
+  assert.equal(run.overview.state,'needs_you','the headline and state follow the event');
+  assert.equal(run.overview.headline,'Approve posting 6 comments');
+  const bare=mk();
+  assert.equal(applyLiveNode(bare,{rev:6,status:'running',waitingApproval:false,node:{node_id:'a',status:'running',detail_version:'v2',logs:[]},overview:null}),false,'no overview: refetch rather than advance rev past it');
+  assert.equal(bare.rev,5,'rev not advanced');
+});
+test('a summary merge keeps the run read\'s input and attachments (CR1-018)',()=>{
+  const {mergeRunProgress}=helpers();
+  const attachments=[{name:'spec.md',mime:'text/markdown',path:'attachments/spec.md',source:'start'}];
+  const current={id:'r',rev:1,input:{repo_id:'repo-1',msg:'review it'},attachments,nodes:[]};
+  // `/progress` serves `input: null` and no attachments (crates/otto-state workflow_progress.rs).
+  mergeRunProgress(current,{id:'r',rev:2,status:'running',input:null,nodes:[],summary:true,checkpoint_generation:0});
+  assert.deepEqual(current.input,{repo_id:'repo-1',msg:'review it'});
+  assert.equal(current.attachments,attachments);
+  assert.equal(current.rev,2);
 });

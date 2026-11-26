@@ -1,4 +1,4 @@
-import type {NodeRunState, WorkflowRun} from '../../lib/api/types';
+import type {NodeRunState, RunOverview, WorkflowRun} from '../../lib/api/types';
 
 /** Summary freshness is independent of lazily loaded checkpoint pages/bodies. */
 export function mergeRunProgress(current: WorkflowRun, next: WorkflowRun): boolean {
@@ -7,8 +7,14 @@ export function mergeRunProgress(current: WorkflowRun, next: WorkflowRun): boole
   const generation = current.checkpoint_generation;
   const nodes = new Map(current.nodes.map(node => [node.node_id, node]));
   const context = next.context_dir ?? current.context_dir;
+  // `/progress` serves `input: null` and no attachments: keep the run read's.
+  const {input, attachments} = current;
   Object.assign(current, next);
   current.context_dir = context;
+  if (next.summary) {
+    current.input = next.input ?? input;
+    current.attachments = next.attachments ?? attachments;
+  }
   current.nodes = next.nodes.map(node => {
     const old = nodes.get(node.node_id);
     if (!old) return node;
@@ -30,16 +36,20 @@ export interface LiveRunEvent {
   status: string;
   node: NodeRunState | null;
   waitingApproval: boolean;
+  /** The run's overview after this change; an event without one refetches. */
+  overview: RunOverview | null;
 }
 
 /** Apply a live event's node SUMMARY in place (perf W5) — the event carries
  *  exactly the node shape `/progress` serves, so a contiguous event needs no
  *  refetch. Returns false (→ refetch) unless it is safe: a summary view of a
- *  running run, the very next `rev`, a node the view already lists, and no
- *  checkpointed (loop) pages, whose freshness an event cannot describe. */
+ *  running run, the very next `rev`, a node the view already lists, the
+ *  run's overview (headline, state, attention — else it would freeze at the
+ *  first snapshot), and no checkpointed (loop) pages, whose freshness an
+ *  event cannot describe. */
 export function applyLiveNode(run: WorkflowRun, ev: LiveRunEvent): boolean {
   const node = ev.node;
-  if (!run.summary || !node || ev.rev <= 0 || ev.rev !== (run.rev ?? 0) + 1) return false;
+  if (!run.summary || !node || !ev.overview || ev.rev <= 0 || ev.rev !== (run.rev ?? 0) + 1) return false;
   if (run.status !== 'running' || ev.status !== 'running') return false;
   if (run.checkpoint_rev) return false;
   const old = run.nodes.find((n) => n.node_id === node.node_id);
@@ -50,6 +60,7 @@ export function applyLiveNode(run: WorkflowRun, ev: LiveRunEvent): boolean {
   }
   run.rev = ev.rev;
   run.waiting_approval = ev.waitingApproval;
+  run.overview = ev.overview;
   return true;
 }
 

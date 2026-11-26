@@ -227,6 +227,7 @@ export class RunSync {
       status: workflowRunBus.status,
       node: workflowRunBus.node,
       waitingApproval: workflowRunBus.waitingApproval,
+      overview: workflowRunBus.overview,
     })) return;
     void this.refetchRun(cur.id);
   }
