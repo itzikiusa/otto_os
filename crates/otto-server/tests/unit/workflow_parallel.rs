@@ -674,3 +674,69 @@ async fn a_usage_limit_parks_the_step_until_its_reset_and_notifies_once() {
     assert_eq!(d.label, "PR comments");
     assert_eq!(d.state, otto_core::workflows::DeliverableState::Partial);
 }
+
+/// Test plan §2.6 skip with siblings (engine.md §3.6): `skip <name>` with
+/// several steps running skips only that one; its sibling runs to its end
+/// and the run goes on.
+#[tokio::test]
+async fn skipping_one_of_two_running_steps_leaves_the_other_running() {
+    let graph = WorkflowGraph {
+        nodes: vec![
+            node("start", "log", json!({})),
+            node("long", "delay", json!({"ms": 15000})),
+            node("short", "delay", json!({"ms": 2500})),
+            node("after", "log", json!({})),
+        ],
+        edges: vec![
+            edge("start", "long"),
+            edge("start", "short"),
+            edge("long", "after"),
+        ],
+    };
+    let (ctx, ws, wf, run_id, repo, _tmp) = setup("skip-ws", graph).await;
+    let marks = ctx.wf_skip_current.clone();
+    let driver = tokio::spawn(run_workflow(
+        ctx,
+        ws,
+        wf,
+        run_id.clone(),
+        json!({}),
+        RunScope::default(),
+        None,
+    ));
+    let started = Instant::now();
+    while repo
+        .get_run(&run_id)
+        .await
+        .unwrap()
+        .nodes
+        .iter()
+        .filter(|n| n.status == NodeStatus::Running)
+        .count()
+        < 2
+    {
+        assert!(started.elapsed() < Duration::from_secs(5), "both run");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    marks
+        .lock()
+        .unwrap()
+        .insert(skip_marker_key(&run_id, "long"));
+    tokio::time::timeout(Duration::from_secs(10), driver)
+        .await
+        .expect("the skip ends the long step early")
+        .unwrap();
+    let run = repo.get_run(&run_id).await.unwrap();
+    assert_eq!(run.status, RunStatus::Success, "{:?}", run.error);
+    assert_eq!(state(&run, "long").status, NodeStatus::Skipped);
+    assert_eq!(
+        state(&run, "short").status,
+        NodeStatus::Success,
+        "the sibling ran to its end"
+    );
+    assert_eq!(
+        state(&run, "after").status,
+        NodeStatus::Success,
+        "the marker output satisfies it"
+    );
+}
