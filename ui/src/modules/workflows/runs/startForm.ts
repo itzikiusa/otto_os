@@ -44,6 +44,8 @@ export function startFields(trigger: unknown): StartField[] {
       label: typeof f.label === 'string' && f.label.trim() ? f.label.trim() : (f.key as string),
       ...(f.required === true ? { required: true } : {}),
       ...(f.multiline === true ? { multiline: true } : {}),
+      // Goals are a list everywhere (the chat message sends one).
+      ...(f.key === 'goals' ? { lines: true } : {}),
       ...(typeof f.hint === 'string' && f.hint.trim() ? { hint: f.hint.trim() } : {}),
     }));
   }

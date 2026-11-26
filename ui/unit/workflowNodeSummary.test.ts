@@ -52,7 +52,9 @@ test('flow and I/O steps', () => {
   assert.equal(nodeSummary(n('human_approval', { message: 'Publish to Confluence?' })), 'Asks: Publish to Confluence?');
   assert.equal(nodeSummary(n('http_request', { method: 'post', url: 'https://api.example.com/x' })), 'POST api.example.com');
   assert.equal(nodeSummary(n('db_query', { statement: 'SELECT  id\nFROM orders' })), 'SELECT id FROM orders');
-  assert.equal(nodeSummary(n('channel_notify', { channel: 'slack', message: 'Score {score}' })), 'slack · Score {score}');
+  assert.equal(nodeSummary(n('channel_notify', { channel: 'slack', message: 'Score {score}' })), 'Slack · Score {score}');
+  assert.equal(nodeSummary(n('prepare_context', {})), 'Fetches the Jira ticket', 'no prompt: no agent, no model chip');
+  assert.equal(nodeSummary(n('prepare_context', { prompt: 'Summarise', provider: 'codex' })), 'Codex · Default · Default');
   assert.equal(nodeIcon('budget_gate'), 'gauge');
   assert.equal(nodeIcon('some_future_kind'), 'box');
 });

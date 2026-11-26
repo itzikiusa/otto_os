@@ -5,6 +5,9 @@
 // Longest-path layering from the trigger, then one barycentre pass inside each
 // layer; ties keep the stored order — (y, x), then graph index — because
 // legacy graphs were drawn left to right, so y carries their branch order.
+// A card sits under the middle of its parents (a lone child under its parent,
+// a join under the span it joins, a fan centred under its source), pushed
+// apart only as far as the cards need.
 // A step no trigger reaches (its incoming edge was deleted, or a cycle) goes
 // to a bottom "Not connected" row instead of jumping beside the trigger.
 import type { WorkflowGraph, WorkflowNode } from '../../../lib/api/types';
@@ -80,17 +83,29 @@ export function autoLayout(graph: WorkflowGraph, isTrigger: (kind: string) => bo
     layers.push(here.map((x) => x.n.id));
   }
   const loose = items.filter((x) => !slot.has(x.n.id)).sort(byStored).map((x) => x.n.id);
-  const widest = Math.max(1, loose.length, ...layers.map((l) => l.length));
-  const width = widest * CARD_W + (widest - 1) * COL_GAP;
+  const PITCH = CARD_W + COL_GAP;
   const pos: Layout['pos'] = {};
-  const row = (list: string[], y: number): void => {
-    const left = (width - (list.length * CARD_W + (list.length - 1) * COL_GAP)) / 2;
-    list.forEach((id, i) => (pos[id] = { x: left + i * (CARD_W + COL_GAP), y }));
-  };
-  layers.forEach((l, k) => row(l, k * LAYER_PITCH));
+  layers.forEach((l, k) => {
+    // Where each card wants to be: the middle of its parents' span.
+    const want = l.map((id, i) => {
+      const xs = (parents.get(id) ?? []).filter((p) => pos[p]).map((p) => pos[p].x);
+      return xs.length ? (Math.min(...xs) + Math.max(...xs)) / 2 : i * PITCH;
+    });
+    // In order, at least a pitch apart; then the layer moves back by its mean push.
+    const x: number[] = [];
+    want.forEach((w, i) => x.push(i ? Math.max(w, x[i - 1] + PITCH) : w));
+    const push = x.reduce((s, v, i) => s + v - want[i], 0) / x.length;
+    l.forEach((id, i) => (pos[id] = { x: x[i] - push, y: k * LAYER_PITCH }));
+  });
+  const xs = Object.values(pos).map((p) => p.x);
+  const minX = xs.length ? Math.min(...xs) : 0;
+  for (const p of Object.values(pos)) p.x -= minX;
+  const placedW = xs.length ? Math.max(...xs) - minX + CARD_W : 0;
+  const looseW = loose.length * PITCH - COL_GAP;
+  const width = Math.max(CARD_W, placedW, looseW);
   const bottom = layers.length ? (layers.length - 1) * LAYER_PITCH + CARD_H : 0;
   const looseY = loose.length ? bottom + LOOSE_GAP : null;
-  if (looseY !== null) row(loose, looseY);
+  loose.forEach((id, i) => (pos[id] = { x: (width - looseW) / 2 + i * PITCH, y: looseY! }));
   const height = looseY !== null ? looseY + CARD_H : bottom;
   return { pos, layers, loose, looseY, width, height };
 }

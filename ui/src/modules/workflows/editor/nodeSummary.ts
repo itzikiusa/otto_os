@@ -140,8 +140,14 @@ export function nodeSummary(node: WorkflowNode, ctx: SummaryContext = {}): strin
       return str(p.statement) ? cut(str(p.statement).replace(/\s+/g, ' '), 40) : 'No query yet';
     case 'broker_peek':
       return str(p.topic) || 'No topic yet';
-    case 'channel_notify':
-      return [str(p.channel) || 'Chat', str(p.message) ? cut(str(p.message), 40) : ''].filter(Boolean).join(' · ');
+    case 'channel_notify': {
+      const ch = str(p.channel);
+      return [ch === 'slack' ? 'Slack' : ch === 'telegram' ? 'Telegram' : ch || 'Chat', str(p.message) ? cut(str(p.message), 40) : ''].filter(Boolean).join(' · ');
+    }
+    case 'prepare_context':
+      // An agent runs only when the step has a prompt.
+      if (!str(p.prompt)) return 'Fetches the Jira ticket';
+      break;
     case 'log':
       return 'Records the data in the run log';
     case 'transform':

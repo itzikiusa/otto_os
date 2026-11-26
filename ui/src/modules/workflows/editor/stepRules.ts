@@ -24,6 +24,13 @@ export function ancestors(graph: WorkflowGraph, id: string): Set<string> {
   return seen;
 }
 
+/** An agent's pick; empty strings = Default. */
+export interface StepModelValue {
+  provider: string;
+  model: string;
+  effort: string;
+}
+
 export interface ContinueChoice {
   node: WorkflowNode;
   /** Why it can't be picked (another provider), else null. */
@@ -72,6 +79,36 @@ export function wireAfter(edges: readonly WorkflowEdge[], after: string | null, 
   if (!after) return [...edges];
   const moved = edges.map((e) => (e.source === after && !e.condition ? { ...e, source: added, id: newId(added, e.target) } : e));
   return [...moved, { id: newId(after, added), source: after, target: added }];
+}
+
+/** The engine's step-file slug (otto_workflows::context::slug): lowercase,
+ *  [a-z0-9-], ≤ 40 characters, "step" when nothing is left. */
+export function slug(name: string): string {
+  const s = name.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40).replace(/^-+|-+$/g, '');
+  return s || 'step';
+}
+
+/** The file a step writes when every step before it runs: `step{N}-{slug}.md`,
+ *  N its place in the engine's order (Kahn, sources in graph order, successors
+ *  in edge order — workflow_engine `topo_order`), the trigger being step 1. */
+export function stepFile(graph: WorkflowGraph, id: string): string | null {
+  const indeg = new Map(graph.nodes.map((n) => [n.id, 0]));
+  for (const e of graph.edges) if (indeg.has(e.source) && indeg.has(e.target)) indeg.set(e.target, indeg.get(e.target)! + 1);
+  const queue = graph.nodes.filter((n) => indeg.get(n.id) === 0).map((n) => n.id);
+  const order: string[] = [];
+  while (queue.length) {
+    const cur = queue.shift()!;
+    order.push(cur);
+    for (const e of graph.edges) {
+      if (e.source !== cur || !indeg.has(e.target)) continue;
+      const left = indeg.get(e.target)! - 1;
+      indeg.set(e.target, left);
+      if (left === 0) queue.push(e.target);
+    }
+  }
+  const at = order.indexOf(id);
+  const node = graph.nodes.find((n) => n.id === id);
+  return at < 0 || !node ? null : `step${at + 1}-${slug(node.name || node.kind)}.md`;
 }
 
 // --- review_run: reviewer picks -------------------------------------------

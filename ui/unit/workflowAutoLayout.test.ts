@@ -42,7 +42,11 @@ test('the optimized PR reviewer shape: forks side by side, joins below, fits the
   const l = autoLayout(g);
   assert.deepEqual(l.layers, [['start'], ['jira'], ['checkout'], ['gather', 'gates', 'multi'], ['cross'], ['review'], ['post'], ['notify']]);
   assert.equal(l.pos.review.y, 5 * LAYER_PITCH);
-  assert.equal(l.pos.start.x, l.pos.gates.x, 'a single card sits centred over the widest layer');
+  assert.equal(l.pos.start.x, l.pos.gates.x, 'a fan is centred under its source');
+  assert.equal(l.pos.cross.x, l.pos.multi.x, 'a lone child sits under its parent');
+  assert.equal(l.pos.review.x, l.pos.gates.x, 'a join sits under the middle of what it joins');
+  assert.equal(l.pos.gather.x, 0);
+  assert.equal(l.width, l.pos.multi.x + CARD_W);
   assert.deepEqual(l.loose, []);
   assert.equal(l.looseY, null);
   assertSound(g, l);

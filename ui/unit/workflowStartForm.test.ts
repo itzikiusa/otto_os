@@ -19,6 +19,8 @@ test('fields: the declared inputs, else the chat keys in the chat message’s or
   assert.deepEqual(startFields({ working_directory: '~/src/app' }).at(-1), { key: 'working_directory', label: 'Working folder', placeholder: '~/src/app' });
   const declared = startFields({ inputs: [{ key: 'ticket', label: 'Ticket', required: true }, { key: 'notes', multiline: true }, { key: 'Bad Key' }] });
   assert.deepEqual(declared, [{ key: 'ticket', label: 'Ticket', required: true }, { key: 'notes', label: 'notes', multiline: true }]);
+  const goals = startFields({ inputs: [{ key: 'goals', label: 'Goals', multiline: true }] });
+  assert.deepEqual(buildInput(goals, { values: { goals: 'a\nb' }, extra: {} }), { goals: ['a', 'b'] }, 'a declared goals input is a list too');
 });
 
 test('payload: empty optionals left out, goals one per line → a list, the message is also the prompt', () => {

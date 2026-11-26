@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  continueChoices, continueClashes, missingSkills, resolvedReviewerPick, reviewerPick, wireAfter, withNodePick, withReviewerPick,
+  continueChoices, continueClashes, missingSkills, slug, stepFile, resolvedReviewerPick, reviewerPick, wireAfter, withNodePick, withReviewerPick,
 } from '../src/modules/workflows/editor/stepRules.ts';
 
 const n = (id: string, params: Record<string, unknown> = {}, kind = 'agent_prompt', name = id) => ({ id, kind, name, x: 0, y: 0, params });
@@ -55,6 +55,19 @@ test('reviewer picks: a row writes picks[provider]; resolution falls back to the
   assert.deepEqual(resolvedReviewerPick(set, 'codex', { codex: { effort: 'max' } }), { model: 'gpt-5.1-codex', effort: 'high' });
   assert.deepEqual(withNodePick(undefined, 'codex', { effort: 'low' }), { codex: { effort: 'low' } });
   assert.equal(withNodePick({ codex: { effort: 'low' } }, 'codex', {}), undefined);
+});
+
+test('the step file a step writes: the engine’s order and slug, the trigger is step 1', () => {
+  const g = {
+    nodes: [n('t', {}, 'manual_trigger', 'Start'), n('c', {}, 'agent_prompt', 'Check out PR'), n('j', {}, 'agent_prompt', 'Fetch Jira ticket'), n('g', {}, 'agent_prompt', 'Gather context from the Vault')],
+    edges: [e('t', 'j'), e('j', 'c'), e('c', 'g')],
+  };
+  assert.equal(stepFile(g, 'g'), 'step4-gather-context-from-the-vault.md');
+  assert.equal(stepFile(g, 'c'), 'step3-check-out-pr.md');
+  assert.equal(stepFile({ nodes: g.nodes, edges: [...g.edges, e('g', 't')] }, 'g'), null, 'a cycle has no number');
+  assert.equal(slug('  Ünïcode — Only!! '), 'n-code-only');
+  assert.equal(slug('***'), 'step');
+  assert.equal(slug('x'.repeat(39) + ' y'), 'x'.repeat(39));
 });
 
 test('skills not installed for the provider are named (nothing known yet: none)', () => {
