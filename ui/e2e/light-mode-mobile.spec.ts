@@ -2,19 +2,21 @@ import { test, expect, type Page } from '@playwright/test';
 import { openPage, expectNoHorizontalOverflow, expectContentHasHeight } from './helpers';
 
 // The phone's light version (lib/lightMode.svelte.ts): opt-in per device; the
-// full app stays the default. On: exactly five tabs (Threads, Connections,
-// Git, API, Usage) and a compact ⋯, Threads is the landing page, any other
+// full app stays the default. On: exactly five tabs (Threads, Workflows,
+// Connections, Git, API; Usage in the ⋯ sheet) and a compact ⋯, Threads is the landing page, any other
 // module is a calm "not in the light version" page whose chunk never loads,
 // and one tap goes back to the full app. A phone on its side keeps the tablet
-// layout with the same five modules.
+// layout with the same six modules.
 
 // Every chunk must reach the network listener: a service worker answering
 // from its cache would hide a hidden page's chunk from `page.on('request')`.
 test.use({ serviceWorkers: 'block' });
 
-const LIGHT = ['threads', 'connections', 'git', 'api', 'usage'];
+const LIGHT = ['threads', 'workflows', 'connections', 'git', 'api', 'usage'];
+/** The bottom nav's tabs: the first five; Usage sits in the ⋯ sheet. */
+const LIGHT_TABS = LIGHT.slice(0, 5);
 /** Page chunks of modules the light version hides (dev: source path; build: hashed name). */
-const HIDDEN_CHUNK = /\/(AgentsPage|HomePage|VaultPage|WorkflowsPage|KubernetesPage|AwsPage|McpPage|ProductPage|InsightsPage|LoopsPage)[.-]/;
+const HIDDEN_CHUNK = /\/(AgentsPage|HomePage|VaultPage|KubernetesPage|AwsPage|McpPage|ProductPage|InsightsPage|LoopsPage)[.-]/;
 
 async function phoneSized(page: Page): Promise<boolean> {
   return page.evaluate(
@@ -54,7 +56,7 @@ test('full app by default; one tap to the light version and one tap back', async
   await toggle.click();
   await expect.poll(() => page.evaluate(() => location.hash)).toBe('#/threads');
   await expect(page.getByTestId('threads-page')).toBeVisible();
-  await expect.poll(() => navIds(page)).toEqual(LIGHT);
+  await expect.poll(() => navIds(page)).toEqual(LIGHT_TABS);
   await expect(more(page)).not.toContainText('More');
   // Compact, still a 44 px target.
   expect(Math.round((await more(page).boundingBox())!.width)).toBeGreaterThanOrEqual(44);
@@ -64,10 +66,11 @@ test('full app by default; one tap to the light version and one tap back', async
   // The bare route lands on Threads after a reload (remembered per device).
   await page.goto('/#/');
   await expect.poll(() => page.evaluate(() => location.hash)).toBe('#/threads');
-  await expect.poll(() => navIds(page)).toEqual(LIGHT);
+  await expect.poll(() => navIds(page)).toEqual(LIGHT_TABS);
 
-  // The ⋯ sheet: back to the full app, notifications, Commands, Settings, sign out.
+  // The ⋯ sheet: back to the full app, notifications, Commands, Usage, Settings, sign out.
   await more(page).click();
+  await expect(sheet(page).locator('[data-nav-id="usage"]')).toBeVisible();
   await expect(sheet(page).getByTestId('light-toggle')).toContainText('Full app');
   await expect(sheet(page).getByTestId('more-notifications').getByRole('button', { name: /^Notifications/ })).toBeVisible();
   for (const name of ['Commands', 'Settings', 'Sign out']) {
@@ -100,8 +103,8 @@ test('a hidden module is a calm page, its code never loads, and "Open the full a
   expect(await page.evaluate(() => localStorage.getItem('otto_phone_light'))).toBe('0');
 });
 
-test('the five pages open, fit the width and never pull in a hidden page', async ({ page }) => {
-  // Five cold page loads: on its side (the tablet layout) it ran past the default 45 s.
+test('the six pages open, fit the width and never pull in a hidden page', async ({ page }) => {
+  // Six cold page loads: on its side (the tablet layout) it ran past the default 45 s.
   test.setTimeout(120_000);
   const hidden: string[] = [];
   await bootLight(page, '', hidden);
@@ -109,10 +112,10 @@ test('the five pages open, fit the width and never pull in a hidden page', async
   await expect.poll(() => page.evaluate(() => location.hash)).toBe('#/threads');
 
   if (await portrait(page)) {
-    await expect.poll(() => navIds(page)).toEqual(LIGHT);
+    await expect.poll(() => navIds(page)).toEqual(LIGHT_TABS);
   } else {
     // On its side: no bottom nav; the Navigator lives in a closable left drawer
-    // (ShortNavDrawer on touch) or the tablet sidebar, carrying the same five.
+    // (ShortNavDrawer on touch) or the tablet sidebar, carrying the same six.
     await expect(bottomNav(page)).toHaveCount(0);
     const sidebar = page.locator('.sidebar');
     const drawer = page.locator('.drawer[aria-label="Navigator"]');
@@ -120,7 +123,7 @@ test('the five pages open, fit the width and never pull in a hidden page', async
     if (inDrawer) await page.getByRole('button', { name: 'Open navigator' }).first().click();
     const navHost = inDrawer ? drawer : sidebar;
     await expect(navHost.locator('[data-nav-id="git"]').first()).toBeVisible();
-    for (const id of ['agents', 'home', 'kubernetes', 'vault', 'workflows']) {
+    for (const id of ['agents', 'home', 'kubernetes', 'vault']) {
       await expect(navHost.locator(`[data-nav-id="${id}"]`)).toHaveCount(0);
     }
     if (inDrawer) await page.keyboard.press('Escape');
@@ -136,7 +139,7 @@ test('the five pages open, fit the width and never pull in a hidden page', async
   expect(hidden, 'no hidden page chunk is requested').toEqual([]);
 });
 
-test('⌘K "Go to" lists only the five modules', async ({ page }) => {
+test('⌘K "Go to" lists only the six modules', async ({ page }) => {
   await bootLight(page, 'git');
   test.skip(!(await portrait(page)), 'opened from the bottom nav’s ⋯');
   await more(page).click();
@@ -147,11 +150,11 @@ test('⌘K "Go to" lists only the five modules', async ({ page }) => {
   // `Ask Otto: "Go to …"` row, a search hit, or a "Go to <x> settings" section.
   const goTo = (label: string) =>
     palette.locator('.pal-item-title').filter({ hasText: new RegExp(`^Go to ${label}$`) });
-  for (const label of ['Threads', 'Connections', 'Git', 'API', 'Usage']) {
+  for (const label of ['Threads', 'Workflows', 'Connections', 'Git', 'API', 'Usage']) {
     await search.fill(`Go to ${label}`);
     await expect(goTo(label).first()).toBeVisible();
   }
-  for (const label of ['Agents', 'Home', 'Kubernetes', 'Vault', 'Workflows', 'Help']) {
+  for (const label of ['Agents', 'Home', 'Kubernetes', 'Vault', 'Help']) {
     await search.fill(`Go to ${label}`);
     // The palette has re-ranked for this query once the Ask Otto row echoes it.
     await expect(palette.getByRole('option', { name: `Ask Otto: "Go to ${label}"` })).toBeVisible();
