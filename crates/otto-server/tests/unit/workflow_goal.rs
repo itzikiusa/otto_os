@@ -1595,7 +1595,6 @@ async fn a_siblings_publish_keeps_the_gates_preview() {
 /// step has a successful checkpoint (a step the pause cut runs again).
 /// 50 runs, the pause landing at a different point each time.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "GL11.2 finding: some pause/resume races end the run as 'one or more nodes failed' — engine fix pending"]
 async fn pause_racing_completion_never_runs_a_step_twice() {
     for rep in 0..50u64 {
         let steps = json!([

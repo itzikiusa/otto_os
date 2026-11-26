@@ -88,12 +88,10 @@ pub(in crate::workflow_engine) async fn execute(
     let mut stop: Option<Stop> = None;
     let mut failed: Option<(String, String)> = None;
     for i in 1..=max_iter {
-        if WorkflowsRepo::new(ctx.pool.clone())
-            .is_canceled(run_id)
-            .await
-        {
-            logs.push("loop: canceled".into());
-            break;
+        // Canceled or paused: the loop stops as the step a pause cut, never
+        // as a finished one a held run would keep (GL11.2).
+        if repo.is_canceled(run_id).await {
+            return Err(otto_core::Error::Internal("run canceled".into()));
         }
         if progress.enabled() {
             progress.post(format!("🔁 *Iteration {i}/{max_iter}*"));

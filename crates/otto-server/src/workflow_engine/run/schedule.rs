@@ -290,6 +290,12 @@ async fn run_node(
     if let Some(t) = resumed_since.filter(|_| attempts.attempt == 1) {
         attempts.attempt_started = t;
     }
+    // A node that failed as the run was paused or canceled (a loop's inner
+    // step saw it before the watch did) stops with the run: a hold puts it
+    // back to pending, not failed (GL11.2).
+    if attempts.result.is_err() && !attempts.skip_current && !attempts.timed_out {
+        attempts.canceled |= cx.repo.is_canceled(cx.run_id).await;
+    }
     // Drain any session ids reported right as the node finished.
     while let Ok(sid) = ch.sess_rx.try_recv() {
         record_association(&mut st, sid);
