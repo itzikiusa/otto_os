@@ -7,6 +7,7 @@ use super::*;
 mod fix;
 mod lifecycle;
 pub(crate) mod post;
+mod resume;
 mod retry;
 mod routes;
 mod run;
@@ -14,6 +15,7 @@ mod scope;
 mod summarize;
 
 pub(crate) use self::lifecycle::*;
+pub(crate) use self::resume::resume_held_review;
 pub(crate) use self::retry::*;
 pub(crate) use self::routes::*;
 pub(crate) use self::run::*;

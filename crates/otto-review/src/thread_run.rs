@@ -207,7 +207,7 @@ impl Threads {
         }
     }
 
-    fn meta_into(&self, meta: &mut Value) {
+    pub(crate) fn meta_into(&self, meta: &mut Value) {
         if let (Some(m), Some(extra)) = (meta.as_object_mut(), self.meta.as_object()) {
             for (k, v) in extra {
                 m.insert(k.clone(), v.clone());
@@ -419,6 +419,7 @@ pub async fn run_agent_thread(
         review_id,
         agent_index,
         cancel,
+        None,
     )
     .await;
     let Some(o) = outcome else {
@@ -433,6 +434,7 @@ pub async fn run_agent_thread(
 /// Run `turn` to settle with the row following its events, then close the
 /// thread (kept for the failed period; [`Threads::keep_success`] later).
 /// `None` = Otto's own fault (the store), logged.
+#[allow(clippy::too_many_arguments)]
 pub async fn drive(
     threads: &Threads,
     turn: StepTurn,
@@ -441,11 +443,16 @@ pub async fn drive(
     review_id: &str,
     agent_index: usize,
     cancel: Option<&Arc<AtomicBool>>,
+    // After a restart: the thread to await instead of a fresh one.
+    resume: Option<otto_core::Id>,
 ) -> Option<StepOutcome> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let runner = Arc::clone(&threads.runner);
     let run = with_cancel(cancel, |signal| async move {
-        runner.run(turn, tx, signal).await
+        match resume {
+            Some(id) => runner.resume(&id, 0, &turn, tx, signal).await,
+            None => runner.run(turn, tx, signal).await,
+        }
     });
     tokio::pin!(run);
     let result = loop {

@@ -27,15 +27,16 @@ struct Fake {
     turns: StdMutex<Vec<StepTurn>>,
     closed: StdMutex<Vec<Id>>,
     kept: StdMutex<Vec<(Vec<Id>, chrono::DateTime<Utc>)>>,
+    resumed: StdMutex<Vec<Id>>,
 }
 
-#[async_trait]
-impl StepRunner for Fake {
-    async fn run(
+impl Fake {
+    async fn play(
         &self,
         t: StepTurn,
         ev: tokio::sync::mpsc::UnboundedSender<StepEvent>,
         cancel: CancelSignal,
+        resume: Option<Id>,
     ) -> otto_core::Result<StepOutcome> {
         let n = {
             let mut turns = self.turns.lock().unwrap();
@@ -46,7 +47,7 @@ impl StepRunner for Fake {
             let acts = self.acts.lock().unwrap();
             acts.get(n - 1).or(acts.last()).cloned().unwrap_or_default()
         };
-        let thread_id: Id = format!("thread-{n}").into();
+        let thread_id: Id = resume.unwrap_or_else(|| format!("thread-{n}").into());
         let _ = ev.send(StepEvent::Started {
             thread_id: thread_id.clone(),
             start_ordinal: 0,
@@ -82,16 +83,30 @@ impl StepRunner for Fake {
             digest: None,
         })
     }
+}
+
+#[async_trait]
+impl StepRunner for Fake {
+    async fn run(
+        &self,
+        t: StepTurn,
+        ev: tokio::sync::mpsc::UnboundedSender<StepEvent>,
+        cancel: CancelSignal,
+    ) -> otto_core::Result<StepOutcome> {
+        self.play(t, ev, cancel, None).await
+    }
     async fn resume(
         &self,
-        _: &Id,
+        id: &Id,
         _: u32,
         t: &StepTurn,
         ev: tokio::sync::mpsc::UnboundedSender<StepEvent>,
         c: CancelSignal,
     ) -> otto_core::Result<StepOutcome> {
-        self.run(t.clone(), ev, c).await
+        self.resumed.lock().unwrap().push(id.clone());
+        self.play(t.clone(), ev, c, Some(id.clone())).await
     }
+
     async fn close(&self, id: &Id, _: chrono::DateTime<Utc>) {
         self.closed.lock().unwrap().push(id.clone());
     }
@@ -529,4 +544,81 @@ async fn a_finished_review_keeps_its_threads_for_the_success_period() {
     assert_eq!(kept[0].0, vec![Id::from("t-1")], "only thread rows");
     let hours = (kept[0].1 - Utc::now()).num_minutes();
     assert!((23 * 60..=24 * 60).contains(&hours), "{hours} min");
+}
+
+#[tokio::test]
+async fn after_a_restart_a_held_reviewer_is_awaited_and_only_the_lost_one_re_runs() {
+    let r = rig(vec![Act {
+        write: Some(FINDINGS.into()),
+        ..Default::default()
+    }])
+    .await;
+    let id: Id = r.review_id.clone().into();
+    let row = |name: &str, status: &str, thread: Option<&str>| ReviewAgentState {
+        name: name.into(),
+        provider: "claude".into(),
+        status: status.into(),
+        lens: name.into(),
+        session_id: thread.map(Into::into),
+        thread: thread.is_some(),
+        ..Default::default()
+    };
+    let mut done = row("Done", "done", Some("t-old"));
+    done.findings = crate::session::parse_findings(FINDINGS);
+    let rows = vec![
+        done,
+        row("Held", "running", Some("t-held")),
+        row("Lost", "running", None),
+        row("Summarizer", "running", Some("t-sum")),
+    ];
+    r.reviews.set_agents(&id, &rows).await.unwrap();
+    r.reviews
+        .set_agent_prompt(&id, 2, "Review the diff.")
+        .await
+        .unwrap();
+    let findings = crate::thread_resume::resume_reviewers(crate::thread_resume::ResumeCtx {
+        manager: r.manager.clone(),
+        threads: r.threads.clone(),
+        reviews: r.reviews.clone(),
+        ws: r.ws.clone(),
+        user: r.user.clone(),
+        cwd: r._dir.path().to_string_lossy().into_owned(),
+        review_id: r.review_id.clone(),
+        grace: Duration::from_secs(600),
+        skills_dir: None,
+        cancel: None,
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        *r.fake.resumed.lock().unwrap(),
+        vec![Id::from("t-held")],
+        "the held thread is awaited, not re-run"
+    );
+    let turns = r.fake.turns.lock().unwrap().clone();
+    assert_eq!(
+        turns.len(),
+        2,
+        "one resume + one fresh run for the lost row"
+    );
+    assert_eq!(turns[1].title, "Lost");
+    assert!(
+        turns[1].prompt.contains("Review the diff."),
+        "re-run from its persisted prompt"
+    );
+    let after = r.reviews.get_review(&id).await.unwrap().agents;
+    assert_eq!(
+        after.iter().map(|a| a.status.as_str()).collect::<Vec<_>>(),
+        ["done", "done", "done", "running"]
+    );
+    assert_eq!(after[1].session_id.as_deref(), Some("t-held"));
+    assert_eq!(
+        findings.iter().map(Vec::len).collect::<Vec<_>>(),
+        [2, 2, 2],
+        "every reviewer's findings for the summarizer"
+    );
+    assert!(
+        r.fake.closed.lock().unwrap().contains(&Id::from("t-sum")),
+        "the old summarizer thread is closed"
+    );
 }

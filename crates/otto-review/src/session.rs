@@ -965,7 +965,31 @@ pub async fn run_agent_session_with_recovery(
     )
     .await;
     drop(prompt_file);
+    let refused = prompt_refused.load(std::sync::atomic::Ordering::Relaxed);
+    settle_run(
+        states,
+        reviews,
+        review_id,
+        agent_index,
+        lens_slugs,
+        outcome,
+        refused,
+    )
+    .await
+}
 
+/// Persist an agent row's terminal state ONCE from its final attempt
+/// (findings, note, score; `skipped` for a covered lens; `error` with the
+/// reason). `refused`: the last attempt's prompt never reached the agent.
+pub async fn settle_run(
+    states: &SharedStates,
+    reviews: &ReviewsRepo,
+    review_id: &str,
+    agent_index: usize,
+    lens_slugs: &[String],
+    outcome: RunOutcome,
+    refused: bool,
+) -> AgentRunResult {
     // Persist terminal state ONCE (parse findings from the final raw result).
     if let Some(raw) = outcome.raw.as_deref() {
         let (mut findings, unreadable) = read_findings(raw).unwrap_or_default();
@@ -1026,7 +1050,6 @@ pub async fn run_agent_session_with_recovery(
             reason,
         }
     } else {
-        let refused = prompt_refused.load(std::sync::atomic::Ordering::Relaxed);
         let note = if refused && outcome.reason == Some(FailReason::Exited) {
             PROMPT_REFUSED_NOTE.to_string()
         } else {

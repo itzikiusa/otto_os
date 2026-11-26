@@ -31,6 +31,7 @@ pub mod scope;
 pub mod session;
 pub mod skill_bundle;
 pub mod summarizer;
+pub mod thread_resume;
 pub mod thread_run;
 pub mod triage;
 pub mod verification;

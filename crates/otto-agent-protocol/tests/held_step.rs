@@ -151,7 +151,7 @@ async fn start_then_restart(
     drop(rt1);
     let rt2 = held_runtime(&open_db(&db).await, dir);
     let adopted = rt2.recover_and_adopt().await.unwrap();
-    assert!(adopted.contains(&id), "the step thread was held");
+    assert!(adopted.live_ids.contains(&id), "the step thread was held");
     (rt2, id, start)
 }
 
@@ -213,4 +213,42 @@ async fn a_held_step_waiting_on_approval_needs_you_at_once_after_a_restart() {
     assert!(out.reply.ends_with("released"), "{}", out.reply);
     drop(runner);
     rt.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reviewer_held_through_a_restart_names_its_review_for_recovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let db = root.join("state.db");
+    let rt1 = held_runtime(&open_db(&db).await, &root);
+    let mut t = turn(&root, "OTTO_FAKE: sleep 1500\nOTTO_FAKE: reply [] ");
+    t.meta = serde_json::json!({"source": "review", "review_id": "rv-1", "agent_index": 0});
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let runner = ThreadStepRunner::new(rt1.clone(), Arc::new(NoStepHost));
+    let task = tokio::spawn(async move { runner.run(t, tx, CancelSignal::new()).await });
+    let mut id = None;
+    while let Some(e) = tokio::time::timeout(Duration::from_secs(15), rx.recv())
+        .await
+        .unwrap()
+    {
+        if let StepEvent::Started { thread_id, .. } = &e {
+            id = Some(thread_id.clone());
+        }
+        if e == StepEvent::Working {
+            break;
+        }
+    }
+    rt1.shutdown_for_restart().await;
+    task.abort();
+    drop(rt1);
+    let rt2 = held_runtime(&open_db(&db).await, &root);
+    let adopted = rt2.recover_and_adopt().await.unwrap();
+    assert!(adopted.handled_ids.contains(&id.unwrap()));
+    let reviews = rt2.held_reviews(&adopted).await;
+    assert_eq!(
+        reviews,
+        [Id::from("rv-1")].into(),
+        "review recovery resumes rv-1, not fails it"
+    );
+    rt2.shutdown().await;
 }
