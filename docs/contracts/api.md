@@ -6980,6 +6980,13 @@ watching:
   workflow step cannot ask for a secret …").
 - A respawn whose provider cannot resume the conversation fails (the step
   fails as `provider`) instead of starting a fresh conversation.
+- A daemon restart that cuts an unheld engine thread's turn records the turn
+  as `meta.restart_cut_turn` (server-owned), so the step ends as
+  `server_restart` even after a second restart.
+- Every runtime agent process — a person's thread too — is counted by the
+  machine's admission gate while it runs (`GET /api/v1/machine/status`
+  `agents_live`); a pre-admitted place rides the create as
+  `meta.admission_permit`, which is never stored.
 - A governed Otto MCP call from a `workflow` runtime thread with a `run_id`
   holds as long as a person's session would (300 s for claude, codex, gemini,
   grok); other runs keep the 15 s headless hold.
