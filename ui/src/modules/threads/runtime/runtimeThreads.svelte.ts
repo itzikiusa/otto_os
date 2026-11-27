@@ -303,26 +303,40 @@ class RuntimeThreads {
     return !!this.byId[id] && at !== undefined && Date.now() - at < ms;
   }
 
-  /** Fetch the rows of `id`'s linked group not held yet (its chips); none when
-   *  succeeded in the last `ms`. With `refresh`, re-reads held engine peers too
-   *  (used on socket reconnect to catch status transitions missed while offline). */
+  /** Fetch the rows of `id`'s linked group not held yet; none when succeeded in
+   *  the last `ms`. With `refresh`, re-reads held engine peers AND cached family
+   *  members omitted from open `/peers` (preserving closed rows, pruning 404s). */
   loadLinked(id: string, ms = 0, refresh = false): Promise<void> {
     if (!refresh && ms > 0 && Date.now() - (this.linkedAt.get(id) ?? -Infinity) < ms) return Promise.resolve();
     const busy = !refresh ? this.linking.get(id) : undefined;
     if (busy) return busy;
+    const refreshOne = (cid: string): Promise<unknown> =>
+      this.loadOne(cid).catch((e: unknown) => {
+        if ((e as { status?: unknown } | null)?.status !== 404 || !this.byId[cid]) return;
+        const { [cid]: _gone, ...rest } = this.byId;
+        this.byId = rest;
+      });
     const read = api
       .get<PeerInfo[]>(`/runtime-sessions/${id}/peers`)
-      .then((peers) => {
+      .then(async (peers) => {
         this.linkedAt.set(id, Date.now());
+        const seen = new Set(peers.map((p) => p.id));
+        const pending: Promise<unknown>[] = [];
         for (const peer of peers) {
           const held = this.byId[peer.id];
           if (!held) this.adopt(peer.id);
-          else if (refresh && isEngineThread(held.meta)) void this.loadOne(peer.id).catch(() => {});
+          else if (refresh && isEngineThread(held.meta)) pending.push(refreshOne(peer.id));
+        }
+        if (refresh) {
+          const root = new Set([id]);
+          const snap = this.byId;
+          for (const cur of Object.values(snap)) {
+            if (cur.id !== id && !seen.has(cur.id) && isEngineThread(cur.meta) && inWatchedFamily(cur, snap, root)) pending.push(refreshOne(cur.id));
+          }
+          if (pending.length) await Promise.allSettled(pending);
         }
       })
-      .finally(() => {
-        if (this.linking.get(id) === read) this.linking.delete(id);
-      });
+      .finally(() => { if (this.linking.get(id) === read) this.linking.delete(id); });
     this.linking.set(id, read);
     return read;
   }

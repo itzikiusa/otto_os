@@ -148,13 +148,25 @@
     if (!port || !key) return;
     const ids = key.split(',').filter(Boolean);
     const releases = untrack(() => ids.map((tid) => port.runtimeThreads.watchGroup(tid)));
+    let stopped = false;
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    const loadFamily = (tid: string, attempt: number): void => {
+      if (stopped) return;
+      const ready = port.runtimeThreads.get(tid) ? Promise.resolve() : port.runtimeThreads.loadOne(tid).then(() => undefined);
+      void ready
+        .then(() => port.runtimeThreads.loadLinked(tid, attempt === 0 ? 2000 : 0))
+        .catch((e: unknown) => {
+          const status = (e as { status?: unknown } | null)?.status;
+          if (stopped || status === 403 || status === 404 || attempt >= 3) return;
+          timers.push(setTimeout(() => loadFamily(tid, attempt + 1), 1500 * 2 ** attempt));
+        });
+    };
     untrack(() => {
-      for (const tid of ids) {
-        const ready = port.runtimeThreads.get(tid) ? Promise.resolve() : port.runtimeThreads.loadOne(tid).then(() => undefined, () => undefined);
-        void ready.then(() => port.runtimeThreads.loadLinked(tid, 2000).catch(() => {}));
-      }
+      for (const tid of ids) loadFamily(tid, 0);
     });
     return () => {
+      stopped = true;
+      for (const t of timers) clearTimeout(t);
       for (const off of releases) off();
     };
   });

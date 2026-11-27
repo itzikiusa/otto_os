@@ -286,3 +286,29 @@ test('a failed loadLinked does not cache completion and retries cleanly', async 
   await runtimeThreads.loadLinked('wf-root', 60_000);
   assert.equal(calls, 2, 'successful read respects ms throttle');
 });
+
+test('resync refreshes cached workflow children omitted from open peers (keeps closed, clears 404)', async () => {
+  const root = { id: 'wf-root', workspace_id: 'ws', status: 'working', title: 'Step', meta: { source: 'workflow' }, last_active_at: '2026-11-26T10:00:00Z' };
+  const closedKid = { id: 'wf-closed', workspace_id: 'ws', parent_id: 'wf-root', status: 'working', title: 'Closed sub', meta: { source: 'workflow', child_of: { id: 'wf-root', by: 'agent' } }, last_active_at: '2026-11-26T10:01:00Z' };
+  const deletedKid = { id: 'wf-gone', workspace_id: 'ws', parent_id: 'wf-root', status: 'working', title: 'Deleted sub', meta: { source: 'workflow', child_of: { id: 'wf-root', by: 'agent' } }, last_active_at: '2026-11-26T10:02:00Z' };
+  const notFound = Object.assign(new Error('not found'), { status: 404 });
+  const { runtimeThreads } = loadSource(
+    new URL('../src/modules/threads/runtime/runtimeThreads.svelte.ts', import.meta.url),
+    harness(async (p) => {
+      if (p === '/workspaces/ws/runtime-sessions' || p === '/runtime-sessions') return [];
+      if (p === '/runtime-sessions/wf-root') return root;
+      // Daemon omits closed/deleted children from open `/peers`.
+      if (p === '/runtime-sessions/wf-root/peers') return [];
+      if (p === '/runtime-sessions/wf-closed') return { ...closedKid, status: 'closed', last_turn_status: 'completed' };
+      if (p === '/runtime-sessions/wf-gone') throw notFound;
+      return [];
+    }),
+  );
+  runtimeThreads.byId = { 'wf-root': root, 'wf-closed': closedKid, 'wf-gone': deletedKid };
+  runtimeThreads.loaded = { ws: true };
+  const stop = runtimeThreads.watchGroup('wf-root');
+  await runtimeThreads.resync();
+  assert.equal(runtimeThreads.byId['wf-closed']?.status, 'closed', 'closed child omitted from peers is refreshed by ID and kept');
+  assert.equal(runtimeThreads.byId['wf-gone'], undefined, 'confirmed 404 deletion is pruned from cache');
+  stop();
+});
