@@ -262,6 +262,10 @@ pub(super) async fn execute_run_task(
                 && !cfg.args.iter().any(|a| a == "-bench")
         });
         apply_runtime_profile_and_module_venv(&cfg, &target, &cwd, &mut env_map);
+        // The SSH Maven / Gradle launchers look for the build wrapper up to the target root.
+        if target.kind == IdeTargetKind::Ssh {
+            env_map.insert("OTTO_TARGET_ROOT".into(), target.root.clone());
+        }
         if let Some(ref nb) = netbridge {
             nb.apply_to_env(&mut env_map);
         }

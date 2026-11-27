@@ -150,7 +150,7 @@ fn streaming_10k_lines_ssh_runner_commands_and_maven_flags_work() {
         &BTreeMap::new(),
     );
     assert_eq!(ssh_mvn_prog, "sh");
-    assert!(ssh_mvn_args[1].contains("./mvnw"));
+    assert!(ssh_mvn_args[1].contains("mvnw"));
     assert!(ssh_mvn_args.contains(&"-Pdev,aws".to_string()));
 
     let gradle_cfg = IdeRunConfig {
@@ -165,7 +165,7 @@ fn streaming_10k_lines_ssh_runner_commands_and_maven_flags_work() {
         &BTreeMap::new(),
     );
     assert_eq!(ssh_gr_prog, "sh");
-    assert!(ssh_gr_args[1].contains("./gradlew"));
+    assert!(ssh_gr_args[1].contains("gradlew"));
     assert!(ssh_gr_args.contains(&"OrderServiceTest".to_string()));
 
     let pytest_cfg = IdeRunConfig {
@@ -184,6 +184,89 @@ fn streaming_10k_lines_ssh_runner_commands_and_maven_flags_work() {
         ssh_py_args,
         vec!["-m", "pytest", "-v", "-k", "test_checkout"]
     );
+}
+
+/// The SSH Maven / Gradle / JUnit launchers find the build wrapper the way the local runner
+/// does: in the module or any folder above it up to the target root, never above the root.
+#[test]
+#[cfg(unix)]
+fn ssh_jvm_launchers_find_the_wrapper_up_to_the_target_root() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let outer = tmp.path().canonicalize().unwrap();
+    let root = outer.join("proj");
+    let module = root.join("services/backend");
+    let maven_module = root.join("apps/api");
+    std::fs::create_dir_all(&module).unwrap();
+    std::fs::create_dir_all(&maven_module).unwrap();
+    std::fs::write(root.join("settings.gradle.kts"), "include(\":api\")\n").unwrap();
+    std::fs::write(module.join("build.gradle.kts"), "").unwrap();
+    std::fs::write(maven_module.join("pom.xml"), "<project/>").unwrap();
+    let seen = outer.join("seen");
+    let exe = |p: PathBuf, tag: &str| {
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(
+            &p,
+            format!("#!/bin/sh\necho \"{tag} $*\" > {}\n", seen.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    exe(root.join("gradlew"), "root-gradlew");
+    exe(root.join("mvnw"), "root-mvnw");
+    exe(outer.join("gradlew"), "outer-gradlew");
+    exe(outer.join("bin/gradle"), "path-gradle");
+    let run = |cfg: &IdeRunConfig, cwd: &PathBuf| {
+        let (prog, args) = build_runner_command(
+            cfg,
+            IdeTargetKind::Ssh,
+            &cwd.to_string_lossy(),
+            &BTreeMap::new(),
+        );
+        assert_eq!(prog, "sh");
+        let st = std::process::Command::new(prog)
+            .args(&args)
+            .current_dir(cwd)
+            .env("OTTO_TARGET_ROOT", &root)
+            .env(
+                "PATH",
+                format!("{}:/usr/bin:/bin", outer.join("bin").display()),
+            )
+            .status()
+            .unwrap();
+        assert!(st.success());
+        std::fs::read_to_string(&seen).unwrap()
+    };
+    let cfg = |runner| IdeRunConfig {
+        runner,
+        test_filter: Some("com.acme.CalcTest".into()),
+        ..Default::default()
+    };
+    let gradle = run(&cfg(IdeRunnerKind::Gradle), &module);
+    assert!(
+        gradle.starts_with("root-gradlew test --tests com.acme.CalcTest"),
+        "{gradle}"
+    );
+    let junit = run(&cfg(IdeRunnerKind::JavaJunit), &module);
+    assert!(
+        junit.starts_with("root-gradlew test --tests com.acme.CalcTest"),
+        "{junit}"
+    );
+    let maven = run(&cfg(IdeRunnerKind::Maven), &maven_module);
+    assert!(
+        maven.starts_with("root-mvnw test -Dtest=com.acme.CalcTest"),
+        "{maven}"
+    );
+    // A wrapper above the target root is not the project's: PATH's gradle runs instead.
+    std::fs::remove_file(root.join("gradlew")).unwrap();
+    let above = run(&cfg(IdeRunnerKind::Gradle), &module);
+    assert!(above.starts_with("path-gradle test"), "{above}");
+    // A home-relative root reaches the remote shell expanded, as the `cd` into its cwd is.
+    let exports = crate::target::ssh_exec::format_remote_env_exports(&BTreeMap::from([(
+        "OTTO_TARGET_ROOT".to_string(),
+        "~/proj".to_string(),
+    )]));
+    assert_eq!(exports, "export OTTO_TARGET_ROOT=\"$HOME\"/proj\n");
 }
 
 #[tokio::test]

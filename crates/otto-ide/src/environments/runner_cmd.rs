@@ -13,6 +13,7 @@ use self::runner_cmd_langs::{
     build_custom_cmd, build_flutter_cmd, build_gradle_cmd, build_java_main_cmd, build_jest_cmd,
     build_karma_cmd, build_maven_cmd, build_npm_cmd, build_playwright_cmd, build_pytest_cmd,
     build_react_native_cmd, build_script_cmd, build_shell_cmd, build_vitest_cmd, build_xcode_cmd,
+    ssh_wrapper_exec,
 };
 pub(crate) use self::runner_java::pytest_rootdir;
 pub(super) use self::runner_java::{
@@ -1439,10 +1440,12 @@ pub(crate) fn build_runner_command(
                     .join(" ");
                 let script = format!(
                     "if [ ! -f pom.xml ] && {{ [ -f build.gradle.kts ] || [ -f build.gradle ] || [ -f gradlew ] || [ -f ../gradlew ] || [ -f settings.gradle.kts ] || [ -f settings.gradle ]; }}; then \
-                       if [ -x ./gradlew ]; then exec ./gradlew {gq}; elif [ -x ../gradlew ]; then exec ../gradlew {gq}; else exec gradle {gq}; fi; \
+                       set -- {gq}; {}; \
                      else \
-                       if [ -x ./mvnw ]; then exec ./mvnw {mq}; else exec mvn {mq}; fi; \
-                     fi"
+                       set -- {mq}; {}; \
+                     fi",
+                    ssh_wrapper_exec("gradlew", "gradle"),
+                    ssh_wrapper_exec("mvnw", "mvn"),
                 );
                 return ("sh".into(), vec!["-c".into(), script]);
             }

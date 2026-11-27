@@ -409,7 +409,7 @@ pub(super) fn build_maven_cmd(
     if target_kind == IdeTargetKind::Ssh {
         let mut sh_args = vec![
             "-c".into(),
-            "if [ -x ./mvnw ]; then exec ./mvnw \"$@\"; else exec mvn \"$@\"; fi".into(),
+            ssh_wrapper_exec("mvnw", "mvn"),
             "otto-mvn".into(),
         ];
         sh_args.extend(args);
@@ -471,7 +471,7 @@ pub(super) fn build_gradle_cmd(
     if target_kind == IdeTargetKind::Ssh {
         let mut sh_args = vec![
             "-c".into(),
-            "if [ -x ./gradlew ]; then exec ./gradlew \"$@\"; else exec gradle \"$@\"; fi".into(),
+            ssh_wrapper_exec("gradlew", "gradle"),
             "otto-gradle".into(),
         ];
         sh_args.extend(args);
@@ -480,6 +480,15 @@ pub(super) fn build_gradle_cmd(
     let prog =
         find_build_wrapper(cwd, "gradlew", &GRADLE_BUILD_FILES).unwrap_or_else(|| "gradle".into());
     (prog, args)
+}
+
+/// The remote twin of [`find_build_wrapper`]: a `sh` script that runs `wrapper "$@"` from
+/// the nearest folder holding it between the working directory and the target root
+/// (`OTTO_TARGET_ROOT`, set by the runner), never above the root; else `fallback` from PATH.
+pub(super) fn ssh_wrapper_exec(wrapper: &str, fallback: &str) -> String {
+    format!(
+        r#"r=${{OTTO_TARGET_ROOT:-$PWD}}; r=${{r%/}}; d=$PWD; while [ ! -x "$d/{wrapper}" ] && [ "$d" != "$r" ] && [ "$d" != / ]; do d=$(dirname "$d"); done; if [ -x "$d/{wrapper}" ]; then exec "$d/{wrapper}" "$@"; fi; exec {fallback} "$@""#
+    )
 }
 
 /// The build wrapper lives at the top of a multi-module build, above the module the build

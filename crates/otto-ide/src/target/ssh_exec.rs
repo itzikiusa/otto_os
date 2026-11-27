@@ -515,6 +515,7 @@ pub(crate) fn format_remote_env_exports(env: &BTreeMap<String, String>) -> Strin
                 | "VIRTUAL_ENV"
                 | "CARGO_HOME"
                 | "RUSTUP_HOME"
+                | "OTTO_TARGET_ROOT"
         ) {
             quote_remote_home_expr(v)
         } else {
