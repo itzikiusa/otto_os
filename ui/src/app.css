@@ -548,6 +548,11 @@ button.chip:focus-visible {
   padding-block: 0 8px;
   padding-inline: 8px;
 }
+/* A phone list page: the header is the page's, so the first row needs its own top edge. */
+.side-pane-search:first-child,
+.side-pane-filters:first-child {
+  padding-block-start: 8px;
+}
 .side-pane-body {
   flex: 1;
   min-height: 0;

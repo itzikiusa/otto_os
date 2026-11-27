@@ -1,11 +1,12 @@
 <script lang="ts">
-  // The Threads sidebar as an inbox (T3 Code): one search row (filter · add
-  // project · new thread), Pinned when there are pins, then ONE list across
-  // projects — needs you, failed, finished unread, then the most recent
-  // (threadInbox.ts) — with workers nested under their lead; "Group by
-  // project" (filter menu) brings back the per-project folders. Below: the
-  // other modules' groups, "Working N" (open) and "History N" (folded), and a
-  // quiet footer (Settings · Git · Usage · Sync).
+  // The Threads list pane (a ListPane, design.md §3): "Threads N" with New
+  // thread and ⋯ (Hide · Add project · Pull requests · Settings · Refresh),
+  // one search row (search · project filter), Pinned when there are pins,
+  // then ONE list across projects — needs you, failed, finished unread, then
+  // the most recent (threadInbox.ts) — with workers nested under their lead;
+  // "Group by project" (filter menu) brings back the per-project folders.
+  // Below: the other modules' groups, "Working N" (open) and "History N"
+  // (folded), and the footer (usage meter; Back while a stage view is open).
   import Icon from '../../lib/components/Icon.svelte';
   import { worktreeProjects } from './worktreeProjects.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
@@ -20,9 +21,14 @@
   import ThreadSidebarRow from './ThreadSidebarRow.svelte';
   import InboxFold from '../../lib/components/InboxFold.svelte';
   import ThreadSidebarFooter from './ThreadSidebarFooter.svelte';
+  import ListPane from '../../lib/components/side/ListPane.svelte';
+  import type { MenuItem } from '../../lib/contextmenu.svelte';
+  import { toastError } from '../../lib/toastError';
+  import { PullRequestsView, SettingsView } from './threadLazy.svelte';
+  import { threadRepos } from './threadRepos.svelte';
   import { registry } from '../../lib/commands.svelte';
   import { openAdjacentThread, openNextNeedsYou, THREAD_KEYS, threadNav } from './threadNav.svelte';
-  import { listKeys, sidebarOrder } from './threadSidebarNav';
+  import { sidebarOrder } from './threadSidebarNav';
   import { originGroups, threadOrigin } from './threadOrigins';
   import { inboxOrder } from './threadFamilies';
   import { inboxClass, inboxScore, inboxSections } from './threadInbox';
@@ -402,6 +408,37 @@
     return out;
   });
 
+  // ⋯: what used to be the top row's and the footer's icon buttons.
+  let syncing = $state(false);
+  async function sync(): Promise<void> {
+    if (syncing) return;
+    syncing = true;
+    try {
+      threadRepos.reset();
+      await ws.refreshSessions();
+      await ws.refreshOtherSessions();
+      if (ws.currentId) await runtimeThreads.load(ws.currentId);
+      await runtimeThreads.loadAll();
+      if (ws.currentId) await git.loadRepos(ws.currentId, true);
+      for (const id of Object.keys(git.statusById)) void git.refreshStatus(id);
+    } catch (e) {
+      toastError('Couldn’t refresh threads', e);
+    } finally {
+      syncing = false;
+    }
+  }
+  function paneMenu(): MenuItem[] {
+    SettingsView.prefetch();
+    PullRequestsView.prefetch();
+    return [
+      { label: 'Add project…', icon: 'folder', action: () => (addingProject = true) },
+      { label: 'Pull requests', icon: 'branch', action: () => { threadsChrome.stageView = 'prs'; onselect?.(); } },
+      { label: 'Threads settings…', icon: 'gear', action: () => (threadsChrome.sheet = 'settings') },
+      { separator: true },
+      { label: 'Refresh threads and git status', icon: 'refresh', disabled: syncing, action: () => void sync() },
+    ];
+  }
+
   let searchInputEl = $state<HTMLInputElement | null>(null);
   function clearSearch(): void {
     search = '';
@@ -424,8 +461,15 @@
   {/each}
 {/snippet}
 
-<aside class="th-sidebar" aria-label="Threads" data-testid="threads-sidebar">
-  <div class="th-top">
+<ListPane
+  name="Threads"
+  count={allLiveThreads.length}
+  primary={{ icon: 'plus', label: 'New thread', onclick: () => newThreadIn(null), testid: 'threads-new-btn' }}
+  menu={paneMenu}
+  rows=".tr-main"
+  testid="threads-sidebar"
+>
+  {#snippet searchRow()}
     <div class="th-search">
       <Icon name="search" size={14} />
       <input
@@ -433,7 +477,7 @@
         type="search"
         dir="auto"
         bind:value={search}
-        placeholder="Search"
+        placeholder="Filter threads…"
         aria-label="Search threads, branches, projects"
         data-testid="threads-search"
       />
@@ -446,42 +490,23 @@
           onclick={clearSearch}
         ><Icon name="x" size={12} /></button>
       {/if}
+      <button
+        type="button"
+        class="icon-btn"
+        class:th-on={threads.projectFilters.length > 0}
+        aria-haspopup="menu"
+        aria-label="Filter by project: {activeFilterLabel}"
+        title="Filter by project ({activeFilterLabel})"
+        data-testid="threads-project-filter"
+        aria-expanded={!!filterAnchor}
+        onpointerenter={() => FilterPopover.prefetch()}
+        onclick={(e) => (filterAnchor = filterAnchor ? null : e.currentTarget)}
+      >
+        <Icon name="filter" size={14} />
+      </button>
     </div>
-    <button
-      type="button"
-      class="icon-btn"
-      class:th-on={threads.projectFilters.length > 0}
-      aria-haspopup="menu"
-      aria-label="Filter by project: {activeFilterLabel}"
-      title="Filter by project ({activeFilterLabel})"
-      data-testid="threads-project-filter"
-      aria-expanded={!!filterAnchor}
-      onpointerenter={() => FilterPopover.prefetch()}
-      onclick={(e) => (filterAnchor = filterAnchor ? null : e.currentTarget)}
-    >
-      <Icon name="filter" size={14} />
-    </button>
-    <button
-      type="button"
-      class="icon-btn"
-      aria-label="Add project"
-      title="Add project"
-      data-testid="threads-add-project"
-      onclick={() => (addingProject = true)}
-    >
-      <Icon name="folder" size={14} />
-    </button>
-    <button
-      type="button"
-      class="icon-btn"
-      aria-label="New thread"
-      title="New thread"
-      data-testid="threads-new-btn"
-      onclick={() => newThreadIn(null)}
-    >
-      <Icon name="edit" size={14} />
-    </button>
-  </div>
+  {/snippet}
+  {#snippet footer()}<ThreadSidebarFooter />{/snippet}
 
   {#if threads.projectFilters.length > 0}
     <div class="th-filter-note">
@@ -493,7 +518,7 @@
   {/if}
 
   <!-- The list scrolls; Working and History stay pinned above the footer. -->
-  <div class="th-body" use:listKeys>
+  <div class="th-body">
   <div class="th-scroll">
     {#if pinnedThreads.length > 0}
       <InboxFold label="Pinned" ariaLabel="Pinned threads">
@@ -605,9 +630,7 @@
     </InboxFold>
   </div>
   </div>
-
-  <ThreadSidebarFooter {onselect} />
-</aside>
+</ListPane>
 
 {#if filterAnchor && FilterPopover.component}
   <FilterPopover.component
@@ -633,48 +656,38 @@
 {/if}
 
 <style>
-  .th-sidebar {
-    display: flex;
-    flex-direction: column;
-    height: 100%;
-    min-width: 0;
-    background: var(--bg-sidebar);
-    border-inline-end: 1px solid var(--border);
-  }
-  .th-top {
-    display: flex;
-    align-items: center;
-    gap: 2px;
-    padding-block: var(--sp-5) var(--sp-3);
-    padding-inline: var(--sp-6) var(--sp-4);
-    flex-shrink: 0;
-  }
+  /* The pane's one search row: a field with the project filter at its end. */
   .th-search {
-    flex: 1;
-    min-width: 0;
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
+    block-size: 28px;
+    padding-inline: 8px 2px;
+    border: 1px solid var(--control-border);
+    border-radius: var(--radius-s);
+    background: var(--surface);
     color: var(--text-dim);
+  }
+  .th-search:focus-within {
+    color: var(--text);
+    border-color: var(--accent-text);
   }
   .th-search input {
     flex: 1;
     min-width: 0;
-    block-size: 28px;
+    block-size: 100%;
     border: 0;
-    border-radius: var(--radius-s);
     padding: 0;
     background: transparent;
     color: var(--text);
     font: inherit;
-    font-size: var(--fs-l);
+    font-size: var(--fs-m);
     outline: none;
   }
-  .th-search:focus-within {
-    color: var(--text);
-  }
-  .th-search input:focus-visible {
-    box-shadow: 0 2px 0 -1px var(--accent-text);
+  @media (pointer: coarse) {
+    .th-search {
+      block-size: 36px;
+    }
   }
   .th-on {
     color: var(--accent-text);
@@ -689,9 +702,10 @@
     color: var(--text-dim);
     flex-shrink: 0;
   }
-  .th-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  /* The pane body scrolls nothing itself: the inbox scrolls, Working and History stay pinned. */
+  .th-body { block-size: 100%; min-height: 0; display: flex; flex-direction: column; }
   /* At most ~40 % of the sidebar; an open fold scrolls inside, its header stays. */
-  .th-folds { flex-shrink: 0; max-block-size: 40%; display: flex; flex-direction: column; padding: var(--sp-2) var(--sp-4); border-block-start: 1px solid var(--separator); }
+  .th-folds { flex-shrink: 0; max-block-size: 40%; display: flex; flex-direction: column; padding-block: var(--sp-2); border-block-start: 1px solid var(--separator); }
   .th-folds.fill { flex: 1 1 auto; max-block-size: none; }
   .th-body:has(.th-folds.fill) .th-scroll { flex: 0 1 auto; }
   .th-folds :global(.if-group) { flex: 0 1 auto; min-height: 0; }
@@ -700,7 +714,7 @@
     flex: 1;
     min-height: 0;
     overflow-y: auto;
-    padding: var(--sp-2) var(--sp-4) var(--sp-4);
+    padding-block: var(--sp-2) var(--sp-4);
     display: flex;
     flex-direction: column;
     gap: var(--sp-5);

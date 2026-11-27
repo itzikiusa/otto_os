@@ -13,7 +13,9 @@
   // with Retry, both inside the pane; an EMPTY list is not a ListPane state —
   // ListDetail `empty` drops the pane and the page's EmptyState owns the page.
   // Inside a ListDetail the name comes from it; on its own (a pane that is not
-  // a list/detail page) pass `name`.
+  // a list/detail page) pass `name`. On a phone, where the list is the page,
+  // its header moves into PageHeader (☰ · name count · primary · ⋯); a pane
+  // with `views` keeps its segmented control in the pane.
   import { getContext, type Snippet } from 'svelte';
   import Icon, { type IconName } from '../Icon.svelte';
   import LoadState from '../LoadState.svelte';
@@ -33,9 +35,10 @@
     views?: Snippet;
     /** Multi-select: replaces the header (count · Clear · one action · ⋯). */
     selection?: Snippet;
-    search?: Snippet;
+    /** One search row (`searchRow`, not `search`: a page's own `search` state would shadow it). */
+    searchRow?: Snippet;
     /** One row of Tabs or chips — never two. */
-    filters?: Snippet;
+    filterRow?: Snippet;
     footer?: Snippet;
     loading?: boolean;
     error?: string | null;
@@ -47,11 +50,13 @@
     testid?: string;
     children: Snippet;
   }
-  let { name, count = null, primary, menu, views, selection, search, filters, footer, loading = false, error = null, onretry, as = 'aside', rows, testid, children }: Props = $props();
+  let { name, count = null, primary, menu, views, selection, searchRow, filterRow, footer, loading = false, error = null, onretry, as = 'aside', rows, testid, children }: Props = $props();
 
   const ld = getContext<ListDetailCtx | undefined>(LIST_DETAIL);
   const label = $derived(name ?? ld?.name ?? '');
   const canHide = $derived(!!ld?.canHide);
+  // A phone showing the list as the page: PageHeader draws this header.
+  $effect(() => ld?.setHeader({ name: label, count, primary, menu }));
 
   function openMenu(e: MouseEvent): void {
     const items: MenuItem[] = [];
@@ -66,6 +71,8 @@
 <svelte:element this={as} class="side-list" aria-label={label} data-testid={testid}>
   {#if selection}
     <header class="side-pane-head selecting">{@render selection()}</header>
+  {:else if ld?.phoneList && !views}
+    <!-- The page header carries name · count · primary · ⋯ (one row on a phone). -->
   {:else}
     <header class="side-pane-head" class:views={!!views}>
       {#if views}
@@ -87,8 +94,8 @@
       {/if}
     </header>
   {/if}
-  {#if search}<div class="side-pane-search">{@render search()}</div>{/if}
-  {#if filters}<div class="side-pane-filters">{@render filters()}</div>{/if}
+  {#if searchRow}<div class="side-pane-search">{@render searchRow()}</div>{/if}
+  {#if filterRow}<div class="side-pane-filters">{@render filterRow()}</div>{/if}
   <div class="side-pane-body" use:listNav={{ rows }}>
     {#if loading || error}
       <LoadState what={label.toLowerCase()} {loading} {error} {onretry} empty variant="compact" rows={6} />

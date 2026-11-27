@@ -107,19 +107,13 @@ test('next that needs you: the next flagged thread after the current one, wrappi
   assert.equal(ta.nextNeedsYou([], null, needs), null);
 });
 
-test('next / previous thread and the list keys', () => {
+test('next / previous thread and the thread chords', () => {
   const order = ['a', 'b', 'c'];
   assert.equal(ta.stepThread(order, 'b', 1), 'c');
   assert.equal(ta.stepThread(order, 'c', 1), 'c');
   assert.equal(ta.stepThread(order, 'a', -1), 'a');
   assert.equal(ta.stepThread(order, 'zz', 1), 'a');
   assert.equal(ta.stepThread(order, null, -1), 'c');
-  assert.equal(ta.rovingIndex('ArrowDown', 0, 3), 1);
-  assert.equal(ta.rovingIndex('ArrowDown', 2, 3), 2);
-  assert.equal(ta.rovingIndex('ArrowUp', 0, 3), 0);
-  assert.equal(ta.rovingIndex('Home', 2, 3), 0);
-  assert.equal(ta.rovingIndex('End', 0, 3), 2);
-  assert.equal(ta.rovingIndex('Enter', 0, 3), null);
   const k = (key: string, extra: Record<string, unknown> = {}) => ({ key, code: '', metaKey: true, ctrlKey: false, altKey: true, shiftKey: false, ...extra });
   assert.equal(ta.threadChord(k('ArrowDown')), 'next');
   assert.equal(ta.threadChord(k('ArrowUp')), 'previous');

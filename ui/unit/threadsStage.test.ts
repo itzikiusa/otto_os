@@ -17,7 +17,8 @@ import {
 } from '../src/modules/threads/newThreadDefaults.ts';
 import { closeWithChildrenDialog, openDescendants } from '../src/modules/threads/threadClosePlan.ts';
 import { threadsPageMenu, RELATED_LABEL, TERMINAL_LABEL } from '../src/modules/threads/threadsPageMenu.ts';
-import { fitRightPanel } from '../src/modules/threads/threadsLayout.ts';
+import { MIN_CONVERSATION_BESIDE_SURFACE_W, MIN_CONVERSATION_W, SURFACE_W } from '../src/modules/threads/threadsLayout.ts';
+import { DETAIL_PANE, detailFit } from '../src/lib/components/side/paneKeys.ts';
 
 const HOME = '/Users/me';
 const billing = { name: 'billing-service', path: '/Users/me/code/billing' };
@@ -161,14 +162,13 @@ test('toolbar ⋯ on a phone: no Split / Grid, no hand-off to the phone, New thr
   assert.ok(!labels(ipad).includes('View'));
 });
 
-test('right panel at 1280 gives way to keep the conversation, and the saved width returns', () => {
-  // 1236 px stage (1280 minus the rail), 272 sidebar: 380 would leave 576.
-  assert.equal(fitRightPanel(380, 1236, 272), 316);
-  assert.equal(fitRightPanel(380, 1236, 0), 380);
-  assert.equal(fitRightPanel(380, 1000, 272), 300);
-  assert.equal(fitRightPanel(420, 1680, 272), 420);
-  // Beside an open surface at 1440 with the list open (stage 1396): ≥ 480 for Changes.
-  assert.ok(fitRightPanel(520, 1396, 272, 600) >= 480);
+test('the inspector (a DetailPane) gives way to keep the conversation, else becomes a sheet', () => {
+  // 1236 px stage (1280 minus the rail), 280 list: the content row is 956.
+  assert.deepEqual(detailFit(956, 380, DETAIL_PANE, MIN_CONVERSATION_W), { sheet: false, shown: 316 });
+  assert.deepEqual(detailFit(1236, 380, DETAIL_PANE, MIN_CONVERSATION_W), { sheet: false, shown: 380 }, 'list hidden');
+  assert.equal(detailFit(720, 380, DETAIL_PANE, MIN_CONVERSATION_W).sheet, true, 'no room for 640 + 300: a sheet, never an overlap');
+  // Beside an open surface at 1440 with the list open (row 1116): ≥ 480 for Changes.
+  assert.ok(detailFit(1116, SURFACE_W, { default: SURFACE_W, min: 300, max: 1200 }, MIN_CONVERSATION_BESIDE_SURFACE_W).shown >= 480);
   // "Wide": everything but the conversation's floor.
-  assert.equal(fitRightPanel(1396, 1396, 272), 1396 - 272 - 640 - 8);
+  assert.equal(detailFit(1116, 380, DETAIL_PANE, MIN_CONVERSATION_W, true).shown, 1116 - 640);
 });

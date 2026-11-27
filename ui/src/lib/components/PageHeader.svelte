@@ -50,7 +50,7 @@
   import { uiControl } from '../stores/uiControl.svelte';
   import { ctxMenu, type MenuItem } from '../contextmenu.svelte';
   import { FitGate, StyleWriter, WidthCache, nodeSig } from './headerFit';
-  import PhoneBack from './side/PhoneBack.svelte';
+  import PageLead from './side/PageLead.svelte';
   import { pageNav } from './side/pageNav.svelte';
   import { SIDE_PANEL } from '../rightTabs';
 
@@ -136,6 +136,10 @@
   });
   const phoneRow = $derived(pageTop && inCenter && viewport.navDrawer && !isTauri);
   const back = $derived(phoneRow ? pageNav.back : null);
+  // …and while a list IS the page (ListDetail on a phone), the row is that
+  // list's header: ☰ · name count · its one primary · its ⋯ · Side panel.
+  const listPage = $derived(phoneRow ? pageNav.listPage : null);
+  const moreItems = $derived(listPage ? listPage.menu : more);
   // Desktop / tablet: a hidden list pane's "Show <name>" (design.md §7.3).
   const showPane = $derived(pageTop && !viewport.isPhone ? pageNav.show : null);
   // A pop-out window's traffic lights live in its own title strip (shell).
@@ -222,7 +226,7 @@
       let keepW = keep.reduce((s, k) => s + (widthOf.get(k) ?? 0), 0) + GAP * Math.max(0, keep.length - 1);
       // The ⋯ as drawn (44 px on touch), else its desktop width.
       const moreW = moreEl?.offsetWidth || MORE_W;
-      if (more || keep.length < visible.length) keepW += moreW + (keep.length ? GAP : 0);
+      if (moreItems || keep.length < visible.length) keepW += moreW + (keep.length ? GAP : 0);
       // …but the title block never gives up its title line (h1 + badges).
       // Every layout READ happens before the first style WRITE below.
       let titleMin = 0;
@@ -264,7 +268,7 @@
       // row below, so its header has no actions at all).
       if (row && rootEl) {
         // (+ the page's ⋯, which sits in the same wrap.)
-        const reserved = chrome + titleMin + leadW + paneW + (visible.length ? need + RING * 2 + gap : 0) + (more ? moreW + GAP : 0);
+        const reserved = chrome + titleMin + leadW + paneW + (visible.length ? need + RING * 2 + gap : 0) + (moreItems ? moreW + GAP : 0);
         const tabsCap = Math.max(rowW * tabsMin, rowW - reserved);
         styles.set(rootEl, rootEl.style, '--ph-tabs-max', `${Math.floor(tabsCap)}px`);
       }
@@ -281,9 +285,9 @@
       // the wrap's width is flex-basis 0, independent of what it contains.)
       let avail = wrapEl.clientWidth - RING * 2;
       const hidden: HTMLElement[] = [];
-      if (more) avail -= moreW + GAP;
+      if (moreItems) avail -= moreW + GAP;
       if (need > avail + 0.5) {
-        if (!more) avail -= moreW + GAP;
+        if (!moreItems) avail -= moreW + GAP;
         const order = visible
           .map((el, i) => ({ el, i, p: Number(el.dataset.overflow ?? 0) || 0 }))
           .filter((o) => canCollapse(o.el))
@@ -296,7 +300,7 @@
       }
       const focused = document.activeElement;
       const hidingFocus = focused instanceof HTMLElement && hidden.some((el) => el.contains(focused));
-      const removingFocusedMore = !more && focused === moreEl && hidden.length === 0;
+      const removingFocusedMore = !moreItems && focused === moreEl && hidden.length === 0;
       const expandedFocus = removingFocusedMore ? overflowFocus ?? collapsed
         .flatMap((el) => el.matches('button, a, [role="button"]') ? [el] : Array.from(el.querySelectorAll<HTMLElement>('button, a, [role="button"]')))
         .find((el) => !el.matches(':disabled') && el.getAttribute('aria-disabled') !== 'true') : null;
@@ -403,7 +407,7 @@
         for (const b of inner) items.push(rowFor(b));
       }
     }
-    const extra = more?.() ?? [];
+    const extra = moreItems?.() ?? [];
     if (items.length && extra.length) items.push({ separator: true });
     items.push(...extra);
     // Directly under the button, end edges aligned (mirrored in RTL);
@@ -423,58 +427,47 @@
   data-testid="page-header"
 >
   <div class="ph-row">
-    {#if leading || phoneRow || showPane}
+    {#if (leading && !listPage) || phoneRow || showPane}
       <div class="ph-leading">
-        {#if back}
-          <PhoneBack label={back.label} onclick={back.onclick} />
-        {:else if phoneRow}
-          <button
-            type="button"
-            class="icon-btn ph-phone-btn"
-            onclick={() => (ui.navDrawerOpen = !ui.navDrawerOpen)}
-            title="Open navigator"
-            aria-label="Open navigator"
-            aria-haspopup="dialog"
-            aria-expanded={ui.navDrawerOpen}
-            data-testid="open-navigator"
-          >
-            <Icon name="sidebar" size={20} />
-          </button>
-        {/if}
-        {#if showPane}
-          <button type="button" class="icon-btn" onclick={showPane.onclick} title="Show {showPane.label} (⌘B)" aria-label="Show {showPane.label}" aria-keyshortcuts="Meta+B" data-testid="show-list-pane">
-            <Icon name="sidebar" size={14} />
-          </button>
-        {/if}
-        {@render leading?.()}
+        <PageLead {phoneRow} {back} show={showPane} />
+        {#if !listPage}{@render leading?.()}{/if}
       </div>
     {/if}
-    {#if tabs && !tabsBelow && tabsPlacement === 'start'}
+    {#if tabs && !listPage && !tabsBelow && tabsPlacement === 'start'}
       <div class="ph-tabs-inline">{@render tabs()}</div>
     {/if}
     <div class="ph-title-block">
       {#if icon}<span class="ph-icon" bind:this={iconEl}><Icon name={icon} size={16} /></span>{/if}
       <div class="ph-titles">
         <div class="ph-title-line">
-          <h1 class="ph-title" title={title} bind:this={titleEl}>
-            {#each crumbs as c (c.label)}
+          <h1 class="ph-title" title={listPage?.name ?? title} bind:this={titleEl}>
+            {#each listPage ? [] : crumbs as c (c.label)}
               <button class="ph-crumb" onclick={c.onclick}>{c.label}</button><span class="ph-sep" aria-hidden="true">/</span>
             {/each}
-            <span class="ph-title-text">{#if titleContent}{@render titleContent()}{:else}{title}{/if}</span>
+            <span class="ph-title-text">{#if listPage}{listPage.name}{:else if titleContent}{@render titleContent()}{:else}{title}{/if}</span>
           </h1>
-          {#if badge}<span class="ph-badge" bind:this={badgeEl}>{@render badge()}</span>{/if}
+          {#if listPage}
+            {#if listPage.count !== null}<span class="ph-badge" bind:this={badgeEl}>{listPage.count}</span>{/if}
+          {:else if badge}<span class="ph-badge" bind:this={badgeEl}>{@render badge()}</span>{/if}
         </div>
-        {#if subtitle}<div class="ph-sub" title={subtitle}>{subtitle}</div>{/if}
+        {#if subtitle && !listPage}<div class="ph-sub" title={subtitle}>{subtitle}</div>{/if}
       </div>
     </div>
-    {#if tabs && !tabsBelow && tabsPlacement === 'inline'}
+    {#if tabs && !listPage && !tabsBelow && tabsPlacement === 'inline'}
       <div class="ph-tabs-inline">{@render tabs()}</div>
     {/if}
     <div class="ph-actions-wrap" bind:this={wrapEl}>
       <div class="ph-actions" bind:this={actionsEl}>
-        {#if actions}{@render actions()}{/if}
+        {#if listPage}
+          {#if listPage.primary}
+            {@const p = listPage.primary}
+            <button type="button" class="icon-btn ph-phone-btn" data-keep onclick={p.onclick} title={p.label} aria-label={p.label} data-testid={p.testid}>
+              <Icon name={p.icon} size={20} />
+            </button>
+          {/if}
+        {:else if actions}{@render actions()}{/if}
       </div>
-      {#if collapsed.length || more}
+      {#if collapsed.length || moreItems}
         <button
           bind:this={moreEl}
           class="icon-btn ph-more"
@@ -503,7 +496,7 @@
       </button>
     {/if}
   </div>
-  {#if tabs && tabsBelow}
+  {#if tabs && !listPage && tabsBelow}
     <div class="ph-tabs-below">{@render tabs()}</div>
   {/if}
   {#if hostsBar}<AgentDrivingBar />{/if}
@@ -743,7 +736,7 @@
     flex: 1 1 auto;
     padding-inline-start: 4px;
   }
-  .ph-phone-btn {
+  .ph-row :global(.ph-phone-btn) {
     flex: none;
     inline-size: 38px;
     block-size: 44px;

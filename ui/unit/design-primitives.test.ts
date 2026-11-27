@@ -66,7 +66,6 @@ test('BottomNav "Menu" opens the ONE phone drawer, a real dialog', () => {
   assert.match(src, /aria-expanded=\{ui\.navDrawerOpen\}/);
   assert.doesNotMatch(src, /<Drawer\b/, 'no second module drawer');
   assert.doesNotMatch(src, /svelte-ignore/);
-  assert.match(read('src/shell/App.svelte'), /<Drawer bind:open=\{ui\.navDrawerOpen\}[^>]*label="Navigator"[^>]*>\s*<PhoneNavDrawer \/>/);
   const drawer = read('src/shell/Drawer.svelte');
   assert.match(drawer, /dialogFocus/);
   assert.match(drawer, /ui\.pushModal\(\)/);

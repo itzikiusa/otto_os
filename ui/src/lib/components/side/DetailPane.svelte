@@ -24,7 +24,7 @@
   import { dialogReturnTarget } from '../../dialogFocus';
   import { viewport } from '../../stores/viewport.svelte';
   import { pageNav } from './pageNav.svelte';
-  import { DETAIL_PANE, MIN_CONTENT, detailFit, fitPaneMax, loadPaneW, paneKey, paneStorage, type PaneRange } from './paneKeys';
+  import { DETAIL_PANE, MIN_CONTENT, detailFit, fitPaneMax, loadPaneW, paneKey, paneStorage, type PaneLegacy, type PaneRange } from './paneKeys';
 
   interface Props {
     open: boolean;
@@ -37,6 +37,8 @@
     pane?: string;
     /** Inside the shared range; a pane that must grow further (a Threads surface) passes its own. */
     range?: PaneRange;
+    /** The old width key, read once. */
+    legacy?: PaneLegacy;
     /** What the content keeps before this pane becomes a sheet. */
     minContent?: number;
     /** Take all the room the content leaves. */
@@ -60,6 +62,7 @@
     module,
     pane = 'detail',
     range = DETAIL_PANE,
+    legacy,
     minContent = MIN_CONTENT,
     maximized = false,
     sheet = $bindable(false),
@@ -73,7 +76,7 @@
 
   const store = paneStorage();
   // svelte-ignore state_referenced_locally
-  let width = $state(loadPaneW(store, module, pane, range));
+  let width = $state(loadPaneW(store, module, pane, range, legacy));
   // A pane that changes key (another surface) reads that key's width.
   // svelte-ignore state_referenced_locally
   let loadedKey = paneKey(module, pane, 'w');
@@ -81,7 +84,7 @@
     const key = paneKey(module, pane, 'w');
     if (key === loadedKey) return;
     loadedKey = key;
-    width = loadPaneW(store, module, pane, range);
+    width = loadPaneW(store, module, pane, range, legacy);
   });
 
   let anchor = $state<HTMLElement | null>(null);

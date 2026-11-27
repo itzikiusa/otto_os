@@ -106,23 +106,6 @@ export function stepThread(order: readonly string[], current: string | null | un
   return order[Math.min(order.length - 1, Math.max(0, at + dir))];
 }
 
-/** Roving focus in a list: the index a key moves to, or null for a key the
- *  list does not handle. */
-export function rovingIndex(key: string, index: number, count: number): number | null {
-  if (count <= 0) return null;
-  switch (key) {
-    case 'ArrowDown':
-      return Math.min(count - 1, index + 1);
-    case 'ArrowUp':
-      return Math.max(0, index - 1);
-    case 'Home':
-      return 0;
-    case 'End':
-      return count - 1;
-    default:
-      return null;
-  }
-}
 
 /** The thread a phone opens on: the most recent one that needs you (in
  *  `waitingNewestFirst`, kept only while it is still a live thread), else

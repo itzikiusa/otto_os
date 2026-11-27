@@ -7,8 +7,10 @@
   //                     so the content keeps 480 px (the divider's range says
   //                     so), and can be hidden: ⋯ › "Hide <name>" or ⌘B; while
   //                     hidden PageHeader shows "Show <name>" in its leading slot.
-  //   phone             push: the list IS the page until `open`; then the
-  //                     content is, with "‹ <name>" in PageHeader (onback).
+  //   phone             push: the list IS the page until `open` — PageHeader
+  //                     then shows the pane's header (☰ · name count · primary
+  //                     · ⋯) — and after it the content is, with "‹ <name>"
+  //                     in PageHeader (onback).
   //                     Both stay mounted, so going back and forth keeps the
   //                     list's scroll and the content's state.
   //   empty             no pane at all: the content (the page's EmptyState)
@@ -27,7 +29,7 @@
   import { viewport } from '../../stores/viewport.svelte';
   import { pageNav } from './pageNav.svelte';
   import { LIST_PANE, WIDE_LIST_PANE, fitPaneMax, loadPaneHidden, loadPaneW, paneKey, paneStorage, savePaneHidden, type PaneLegacy } from './paneKeys';
-  import { LIST_DETAIL, type ListDetailCtx } from './context';
+  import { LIST_DETAIL, type ListDetailCtx, type PaneHeader } from './context';
 
   interface Props {
     /** Key scheme: otto.pane.<module>.<pane>.{w,hidden}. */
@@ -71,6 +73,9 @@
   const listShown = $derived(!empty && (phone ? !open : !hidden));
   const contentShown = $derived(empty || !phone || open);
 
+  let header = $state.raw<PaneHeader | null>(null);
+  const phoneList = $derived(phone && listShown);
+
   function setHidden(h: boolean): void {
     hidden = h;
     savePaneHidden(store, module, pane, h);
@@ -85,8 +90,17 @@
     get canHide() {
       return !phone && !empty;
     },
+    get phoneList() {
+      return phoneList;
+    },
     hide: () => setHidden(true),
     contentVisible: () => visible() && contentShown,
+    setHeader: (h) => {
+      header = h;
+      return () => {
+        if (header === h) header = null;
+      };
+    },
   });
 
   $effect(() =>
@@ -95,6 +109,7 @@
       back: () => (phone && open && !empty ? { label: name, onclick: onback } : null),
       show: () => (!phone && hidden && !empty ? { label: name, onclick: () => setHidden(false) } : null),
       toggle: () => (!phone && !empty ? () => setHidden(!hidden) : null),
+      listPage: () => (phoneList ? header : null),
     }),
   );
 </script>
