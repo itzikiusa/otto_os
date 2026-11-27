@@ -54,11 +54,10 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
   runs: use Run). `zls`, `kotlin-language-server`, `vue-language-server` and
   the .NET servers (`csharp-ls`, `fsautocomplete`) run code from the project
   (its build, the plugins its `tsconfig.json` names, or its MSBuild targets),
-  so they do not start until the project is trusted: add
-  `OTTO_IDE_TRUST_ZIG_BUILD=1`, `OTTO_IDE_TRUST_KOTLIN_LSP=1`,
-  `OTTO_IDE_TRUST_VUE_LSP=1` or `OTTO_IDE_TRUST_DOTNET_LSP=1` (or
-  `OTTO_IDE_TRUST_PROJECT_EXECUTION=1` for all of them) as a non-secret
-  variable under *Edit run configurations… ▸ Project environment*.
+  so they do not start until you trust the project: **Trust project…** in the
+  notice above the editor (or the status strip's "needs trust" item) asks,
+  then starts the server; *Edit run configurations… ▸ Project environment ▸
+  Trust this project* turns it off again.
 - **Jupyter notebooks & ML workflow in the IDE.** Open, edit, run and save
   `.ipynb` notebooks directly in Otto with a built-in persistent Python kernel
   (standard Python execution on the selected interpreter; IPython `%magic` and
