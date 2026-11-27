@@ -608,7 +608,10 @@ async fn resolve_dotnet_test_debug(
     test_args.push(proj_path.clone());
     let label = test_name.map(str::to_string).unwrap_or_else(|| {
         let proj = Path::new(&proj_path);
-        let name = proj.file_name().unwrap_or(proj.as_os_str()).to_string_lossy();
+        let name = proj
+            .file_name()
+            .unwrap_or(proj.as_os_str())
+            .to_string_lossy();
         format!("all tests in {name}")
     });
 
@@ -1402,7 +1405,10 @@ public class MathTests
             &sln_root.to_string_lossy(),
         )
         .expect_err("BUG-25: a solution with two test projects must be refused");
-        assert!(sln_err.to_string().contains("PropsXunit.Tests.csproj"), "{sln_err}");
+        assert!(
+            sln_err.to_string().contains("PropsXunit.Tests.csproj"),
+            "{sln_err}"
+        );
         let one_slnx = sln_root.join("One.slnx");
         std::fs::write(
             &one_slnx,

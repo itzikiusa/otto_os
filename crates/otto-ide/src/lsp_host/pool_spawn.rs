@@ -580,33 +580,37 @@ pub(crate) fn resolve_local_csharp_ls_for_dotnet_root(
     }
     // `dotnet --version` run in the project resolves its `global.json` (and rollForward)
     // exactly as the SDK itself will for this project.
-    let active_ver = crate::toolchains::discovery::dotnet_bin_in_root(dotnet_root).and_then(|bin| {
-        let out = std::process::Command::new(&bin)
-            .arg("--version")
-            .current_dir(project_root)
-            .env("DOTNET_ROOT", dotnet_root)
-            .env("DOTNET_CLI_TELEMETRY_OPTOUT", "1")
-            .env("DOTNET_NOLOGO", "1")
-            .stdin(std::process::Stdio::null())
-            .output()
-            .ok()?;
-        if !out.status.success() {
-            return None;
-        }
-        let first = String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .next()
-            .map(str::trim)
-            .unwrap_or("")
-            .to_string();
-        first
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_digit())
-            .then_some(first)
-    });
+    let active_ver =
+        crate::toolchains::discovery::dotnet_bin_in_root(dotnet_root).and_then(|bin| {
+            let out = std::process::Command::new(&bin)
+                .arg("--version")
+                .current_dir(project_root)
+                .env("DOTNET_ROOT", dotnet_root)
+                .env("DOTNET_CLI_TELEMETRY_OPTOUT", "1")
+                .env("DOTNET_NOLOGO", "1")
+                .stdin(std::process::Stdio::null())
+                .output()
+                .ok()?;
+            if !out.status.success() {
+                return None;
+            }
+            let first = String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .next()
+                .map(str::trim)
+                .unwrap_or("")
+                .to_string();
+            first
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_digit())
+                .then_some(first)
+        });
     let ver_opt = active_ver.or_else(|| {
-        Some(crate::toolchains::discovery::dotnet_dir_version(dotnet_root)).filter(|v| v != "system")
+        Some(crate::toolchains::discovery::dotnet_dir_version(
+            dotnet_root,
+        ))
+        .filter(|v| v != "system")
     });
     let slot = crate::toolchains_catalog::dotnet_sdk_major_slot(ver_opt.as_deref());
     let cand = data_dir
