@@ -1,13 +1,17 @@
 <script lang="ts">
-  // The chat's side panel (t3code's right-hand Diff panel): a file, a code
-  // block or a turn's diff next to the conversation, with Preview | Source |
-  // Diff tabs where they apply, Wrap, Reload, Open in Files, Copy path and a
-  // full view (Modal). The host (ConversationView) owns placement: beside the
-  // chat when the pane is wide, over it when narrow. Esc closes.
+  // The chat's Detail pane (t3code's right-hand Diff panel; design.md §3): a
+  // file, a code block or a turn's diff next to the conversation. Its views
+  // (Preview | Source | Diff, where they apply) ARE its header; Full view
+  // (Modal) is its one action; Wrap, Reload, Copy path and Open in Files are
+  // under ⋯. DetailPane places it: beside the chat while the chat keeps its
+  // floor, else a right sheet (backdrop, focus trap, Esc, focus return).
+  // Rendered at the end of ConversationView's `.conv-main` row.
   import { copyWithToast } from '../../../lib/clipboard';
   import { getContext, untrack } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import Modal from '../../../lib/components/Modal.svelte';
+  import DetailPane from '../../../lib/components/side/DetailPane.svelte';
+  import type { MenuItem } from '../../../lib/contextmenu.svelte';
   import { openFile } from '../../../lib/stores/openfile.svelte';
   import PreviewBody, { forgetRead, type PreviewMode } from './PreviewBody.svelte';
   import { previewKind, previewKindForLang, requestKind, splitName } from './preview';
@@ -73,103 +77,53 @@
     if (!path) return;
     await copyWithToast(path, 'path');
   }
-  function onKey(e: KeyboardEvent): void {
-    if (e.key === 'Escape' && !full) {
-      e.stopPropagation();
-      onclose();
-    }
-  }
-
-  // Narrow pane: the host lays the panel OVER the chat. Then the covered chat
-  // (and its composer) must not stay reachable by Tab / screen readers: mark it
-  // inert, move focus into the panel, and hand focus back when it closes.
-  let panelEl = $state<HTMLElement | null>(null);
-  let covering = $state(false);
-  $effect(() => {
-    const slot = panelEl?.parentElement;
-    const host = slot?.parentElement;
-    if (!slot || !host || typeof ResizeObserver === 'undefined') return;
-    const measure = (): void => {
-      const pos = getComputedStyle(slot).position;
-      covering = pos === 'absolute' || pos === 'fixed';
-    };
-    measure();
-    const ro = new ResizeObserver(measure);
-    ro.observe(host);
-    return () => ro.disconnect();
-  });
-  $effect(() => {
-    if (!covering || !panelEl) return;
-    const slot = panelEl.parentElement;
-    const host = slot?.parentElement;
-    if (!slot || !host) return;
-    const covered = Array.from(host.children).filter((c): c is HTMLElement => c !== slot && c instanceof HTMLElement && !c.inert);
-    const returnTo = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    for (const el of covered) el.inert = true;
-    untrack(() => panelEl?.querySelector<HTMLElement>('button, [href], [tabindex]:not([tabindex="-1"])')?.focus());
-    return () => {
-      for (const el of covered) el.inert = false;
-      if (returnTo?.isConnected) returnTo.focus();
-    };
-  });
   const canFiles = $derived(!!path && !!ctx.sessionId && !ctx.readonly);
   const fullWidth = $derived(typeof window === 'undefined' ? 1100 : Math.max(480, Math.min(1400, window.innerWidth - 80)));
-  function bindEscClose(node: HTMLElement): { destroy(): void } {
-    node.addEventListener('keydown', onKey);
-    return { destroy: () => node.removeEventListener('keydown', onKey) };
+  function menu(): MenuItem[] {
+    return [
+      { label: 'Wrap long lines', checked: wrap, action: () => (wrap = !wrap) },
+      ...(req.kind === 'file' && req.content == null ? [{ label: 'Reload from disk', icon: 'refresh' as const, action: reload }] : []),
+      ...(path ? [{ label: 'Copy path', icon: 'copy' as const, action: () => void copyPath() }] : []),
+      ...(canFiles ? [{ label: 'Open in Files', icon: 'folder' as const, action: openInFiles }] : []),
+    ];
   }
 </script>
 
-<aside class="pv" bind:this={panelEl} aria-label="Preview: {title.base}" data-preview={req.kind} use:bindEscClose>
-  <header class="pv-head">
-    <span class="pv-icon" aria-hidden="true"><Icon name={req.kind === 'diff' ? 'split' : req.kind === 'code' ? 'format' : 'file'} size={13} /></span>
-    <span class="pv-title" title={path ?? title.base}>
-      <span class="pv-base">{title.base}</span>
-      {#if title.dir}<span class="pv-dir mono">{title.dir}</span>{/if}
-    </span>
-    <button class="icon-btn" onclick={() => (full = true)} aria-label="Full view" title="Full view"><Icon name="maximize" size={13} /></button>
-    <button class="icon-btn" onclick={onclose} aria-label="Close preview" title="Close preview" aria-keyshortcuts="Escape"><Icon name="x" size={13} /></button>
-  </header>
-  <div class="pv-bar">
-    {#if modes.length > 1}
-      <div class="segmented pv-seg" role="tablist" aria-label="View">
-        {#each modes as m (m)}
-          <button role="tab" aria-selected={mode === m} tabindex={mode === m ? 0 : -1} class:on={mode === m} onclick={() => (mode = m)} onkeydown={onTabKey} data-mode={m}>{LABEL[m]}</button>
-        {/each}
+{#snippet modeTabs()}
+  <div class="segmented pv-seg" role="tablist" aria-label="View">
+    {#each modes as m (m)}
+      <button role="tab" aria-selected={mode === m} tabindex={mode === m ? 0 : -1} class:on={mode === m} onclick={() => (mode = m)} onkeydown={onTabKey} data-mode={m}>{LABEL[m]}</button>
+    {/each}
+  </div>
+{/snippet}
+
+<DetailPane open module="agents" pane="preview" title={title.base} {onclose} {menu} views={modes.length > 1 ? modeTabs : undefined} legacy={{ w: 'otto_chat_panel_w' }} testid="chat-preview">
+  {#snippet action()}
+    <button type="button" class="icon-btn" onclick={() => (full = true)} aria-label="Full view" title="Full view"><Icon name="maximize" size={14} /></button>
+  {/snippet}
+  <div class="pv" data-preview={req.kind}>
+    {#if modes.length > 1 || title.dir}
+      <!-- The views took the header: the file's name and folder lead the body. -->
+      <div class="pv-path" title={path ?? title.base}>
+        <Icon name={req.kind === 'diff' ? 'split' : req.kind === 'code' ? 'format' : 'file'} size={13} />
+        {#if modes.length > 1}<span class="pv-base">{title.base}</span>{/if}
+        {#if title.dir}<span class="pv-dir mono">{title.dir}</span>{/if}
+        {#if modes.length === 1}<span class="pv-only">{LABEL[modes[0]]}</span>{/if}
       </div>
-    {:else}
-      <span class="pv-only">{LABEL[modes[0]]}</span>
     {/if}
-    <span class="pv-grow"></span>
-    <button class="pv-tool" class:on={wrap} aria-pressed={wrap} onclick={() => (wrap = !wrap)} title="Wrap long lines">Wrap</button>
-    {#if req.kind === 'file' && req.content == null}
-      <button class="icon-btn" onclick={reload} aria-label="Reload from disk" title="Reload from disk"><Icon name="refresh" size={12} /></button>
+    {#if req.kind === 'file' && req.content != null}
+      <div class="pv-src-note">As written by the agent in this conversation — Reload shows the file on disk now.</div>
     {/if}
-    {#if path}
-      <button class="icon-btn" onclick={() => void copyPath()} aria-label="Copy path" title="Copy path"><Icon name="copy" size={12} /></button>
-    {/if}
-    {#if canFiles}
-      <button class="icon-btn" onclick={openInFiles} aria-label="Open in Files" title="Open in Files"><Icon name="folder" size={12} /></button>
-    {/if}
+    <div class="pv-body">
+      <PreviewBody {req} {mode} {wrap} {reloadKey} />
+    </div>
   </div>
-  {#if req.kind === 'file' && req.content != null}
-    <div class="pv-src-note">As written by the agent in this conversation — Reload shows the file on disk now.</div>
-  {/if}
-  <div class="pv-body">
-    <PreviewBody {req} {mode} {wrap} {reloadKey} />
-  </div>
-</aside>
+</DetailPane>
 
 {#if full}
   <Modal title={title.dir ? `${title.base} — ${title.dir}` : title.base} width={fullWidth} onclose={() => (full = false)}>
     <div class="pv-full">
-      {#if modes.length > 1}
-        <div class="segmented pv-seg" role="tablist" aria-label="View">
-          {#each modes as m (m)}
-            <button role="tab" aria-selected={mode === m} tabindex={mode === m ? 0 : -1} class:on={mode === m} onclick={() => (mode = m)} onkeydown={onTabKey}>{LABEL[m]}</button>
-          {/each}
-        </div>
-      {/if}
+      {#if modes.length > 1}{@render modeTabs()}{/if}
       <div class="pv-full-body"><PreviewBody {req} {mode} {wrap} {reloadKey} /></div>
     </div>
   </Modal>
@@ -177,41 +131,32 @@
 
 <style>
   .pv {
+    flex: 1;
     display: flex;
     flex-direction: column;
     min-width: 0;
     min-height: 0;
-    height: 100%;
-    background: var(--bg);
-    border-inline-start: 1px solid var(--border);
   }
-  .pv-head {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    height: 34px;
-    padding-inline: 12px 6px;
-    border-bottom: 1px solid var(--border);
-    background: var(--surface);
-    flex-shrink: 0;
-    min-width: 0;
-  }
-  .pv-icon {
-    display: inline-flex;
-    color: var(--text-dim);
-  }
-  .pv-title {
-    flex: 1;
-    min-width: 0;
+  .pv-path {
+    flex: none;
     display: flex;
     align-items: baseline;
     gap: 8px;
-    overflow: hidden;
-    white-space: nowrap;
+    min-width: 0;
+    padding: 6px 16px;
+    border-block-end: 1px solid var(--separator);
+    color: var(--text-dim);
     font-size: var(--fs-s);
+    white-space: nowrap;
+    overflow: hidden;
+  }
+  .pv-path :global(svg) {
+    flex: none;
+    align-self: center;
   }
   .pv-base {
     font-weight: 600;
+    color: var(--text);
     overflow: hidden;
     text-overflow: ellipsis;
     flex-shrink: 0;
@@ -219,21 +164,16 @@
   }
   .pv-dir {
     font-size: var(--fs-xs);
-    color: var(--text-dim);
     overflow: hidden;
     text-overflow: ellipsis;
     direction: rtl;
     text-align: start;
     min-width: 0;
   }
-  .pv-bar {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    padding: 4px 8px;
-    border-bottom: 1px solid var(--border);
-    flex-shrink: 0;
-    min-width: 0;
+  .pv-only {
+    margin-inline-start: auto;
+    font-size: var(--fs-xs);
+    font-weight: 600;
   }
   .pv-seg {
     display: inline-flex;
@@ -247,7 +187,7 @@
     background: none;
     color: var(--text-dim);
     font: inherit;
-    font-size: var(--fs-xs);
+    font-size: var(--fs-s);
     padding: 2px 10px;
     border-radius: var(--radius-s);
     cursor: pointer;
@@ -258,42 +198,15 @@
     font-weight: 600;
     box-shadow: var(--shadow-card);
   }
-  .pv-seg button:focus-visible,
-  .pv-tool:focus-visible {
+  .pv-seg button:focus-visible {
     outline: 2px solid var(--accent-text);
     outline-offset: 1px;
-  }
-  .pv-only {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    color: var(--text-dim);
-    padding-inline: 4px;
-  }
-  .pv-grow {
-    flex: 1;
-  }
-  .pv-tool {
-    border: 0;
-    background: none;
-    color: var(--text-dim);
-    font: inherit;
-    font-size: var(--fs-xs);
-    padding: 2px 8px;
-    border-radius: var(--radius-s);
-    cursor: pointer;
-  }
-  .pv-tool:hover {
-    background: var(--hover);
-    color: var(--text);
-  }
-  .pv-tool.on {
-    color: var(--accent-text);
   }
   .pv-src-note {
     font-size: var(--fs-xs);
     color: var(--text-dim);
-    padding: 4px 12px;
-    border-bottom: 1px solid var(--border);
+    padding: 4px 16px;
+    border-bottom: 1px solid var(--separator);
     background: var(--info-soft);
   }
   .pv-body {

@@ -290,6 +290,42 @@ test('Terminal ⇄ Chat: an agent pane shows its conversation and remembers the 
   await expect(page.locator(`[data-pane-key][data-session="${ids.Pirlo}"]`).first().getByTestId('pane-view')).toHaveCount(0);
 });
 
+test('the chat Preview is a Detail pane: one action, ⋯, Esc closes, a sheet without room (AG-3)', async ({ page }) => {
+  const r = await ctx.post(`${base}/api/v1/workspaces/${wsId}/sessions`, {
+    data: {
+      kind: 'agent', provider: 'shell', title: 'Ancelotti', cwd: '/tmp',
+      meta: { origin: 'e2e', nested_provider: 'claude', e2e_transcript_path: `${process.cwd()}/../crates/otto-transcript/fixtures/claude/01-basic-tools.jsonl` },
+    },
+  });
+  const id = (await r.json()).id as string;
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto(`/#/agents/${id}`);
+  const pane = page.locator(`[data-pane-key][data-session="${id}"]`).first();
+  await expect(pane.locator('.term-host')).toBeVisible({ timeout: 30_000 });
+  await pane.getByTestId('pane-view').getByRole('button', { name: 'Chat' }).click();
+  await expect(pane.locator('.conv[data-loaded="true"]')).toBeVisible({ timeout: 15_000 });
+  await pane.locator('.cf-diff').first().click();
+  // Inline beside the chat (the shared DetailPane): its title, Full view, ⋯, Close.
+  const preview = page.locator('aside[data-testid="chat-preview"]');
+  await expect(preview).toBeVisible({ timeout: 15_000 });
+  await expect(preview.locator('.dp-title')).toHaveText(/changed files?/);
+  await expect(preview.getByRole('button', { name: 'Full view' })).toBeVisible();
+  await preview.getByRole('button', { name: /actions$/ }).click();
+  await expect(page.getByRole('menuitemcheckbox', { name: 'Wrap long lines' })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(pane.locator('.conv-main > .pane-divider, .conv-main [role="separator"]').first()).toBeVisible();
+  if (SHOTS) for (const s of ['light', 'dark'] as const) { await scheme(page, s); await page.screenshot({ path: `${SHOTS}/agents-preview-1440-${s}.png`, animations: 'disabled' }); }
+  await preview.getByTestId('chat-preview-close').click();
+  await expect(preview).toHaveCount(0);
+  // Not enough room beside the chat (a narrow window): a right sheet over it.
+  await page.setViewportSize({ width: 1100, height: 800 });
+  await pane.locator('.cf-diff').first().click();
+  const sheet = page.getByRole('dialog', { name: /changed files?/ });
+  await expect(sheet).toBeVisible({ timeout: 15_000 });
+  await page.keyboard.press('Escape');
+  await expect(sheet).toHaveCount(0);
+});
+
 test('New session is a stage: tiles, Terminal | Chat, a first message, Start; the rest behind Options (A4)', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('/#/agents');
