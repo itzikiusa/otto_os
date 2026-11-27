@@ -384,10 +384,7 @@ pub fn parse_pom_module_scoped(
             dir: dir.to_path_buf(),
             main_src_dirs: vec![dir.join("src/main/java"), dir.join("src/main/kotlin")],
             test_src_dirs: vec![dir.join("src/test/java"), dir.join("src/test/kotlin")],
-            resource_dirs: vec![
-                dir.join("src/main/resources"),
-                dir.join("src/test/resources"),
-            ],
+            resource_dirs: vec![dir.join("src/main/resources")],
             dependencies,
         },
         submodules,
@@ -497,10 +494,7 @@ fn parse_gradle_module(dir: &Path, raw: &str) -> WorkspaceJavaModule {
         dir: dir.to_path_buf(),
         main_src_dirs: vec![dir.join("src/main/java"), dir.join("src/main/kotlin")],
         test_src_dirs: vec![dir.join("src/test/java"), dir.join("src/test/kotlin")],
-        resource_dirs: vec![
-            dir.join("src/main/resources"),
-            dir.join("src/test/resources"),
-        ],
+        resource_dirs: vec![dir.join("src/main/resources")],
         dependencies,
     }
 }

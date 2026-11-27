@@ -100,9 +100,9 @@ pub fn prepare_java_execution(
 
     if let Some(owner) = graph.owning_module(target_file_or_dir) {
         let build_cp_res =
-            maven_module_classpath(owner, &graph, env_map, out_base_dir).or_else(|| {
-                gradle_module_classpath(owner, &graph, env_map, out_base_dir, include_tests)
-            });
+            maven_module_classpath(owner, &graph, env_map, out_base_dir, include_tests).or_else(
+                || gradle_module_classpath(owner, &graph, env_map, out_base_dir, include_tests),
+            );
         // A module whose deps Maven/Gradle can't resolve (an attached repo that was never
         // installed) still gets the javac/kotlinc build below; if that fails too, the build
         // tool's error is the one to show.
@@ -234,7 +234,8 @@ pub fn prepare_java_execution(
             }
 
             let mut final_cp = vec![owner_out.to_string_lossy().into_owned()];
-            for rdir in &owner.resource_dirs {
+            let test_resources = include_tests.then(|| owner.dir.join("src/test/resources"));
+            for rdir in test_resources.iter().chain(&owner.resource_dirs) {
                 if rdir.is_dir() {
                     final_cp.push(rdir.to_string_lossy().into_owned());
                 }
@@ -257,7 +258,7 @@ pub fn prepare_java_execution(
                 "build/resources/main",
             ] {
                 let ex = owner.dir.join(existing_rel);
-                if ex.is_dir() {
+                if ex.is_dir() && (include_tests || !existing_rel.contains("test")) {
                     let s = ex.to_string_lossy().into_owned();
                     if !final_cp.contains(&s) {
                         final_cp.push(s);
@@ -378,9 +379,10 @@ fn first_lines(text: &str) -> String {
     out
 }
 
-/// Maven's own classpath for a module with a `pom.xml`:
-/// `target/test-classes:target/classes:<dependency:build-classpath>`, after
-/// `test-compile`. Maven resolves parents, BOMs and transitive deps, which a
+/// Maven's own classpath for a module with a `pom.xml`: `target/classes:<runtime deps>`
+/// after `compile` for an app launch (BUG2-6), or
+/// `target/test-classes:target/classes:<test deps>` after `test-compile` for a test.
+/// Maven resolves parents, BOMs and transitive deps, which a
 /// hand-built javac classpath gets wrong. `None` when the module has no pom, no
 /// `mvnw` / `mvn` is available, or it depends on an attached module outside its
 /// reactor (the caller falls back to javac).
@@ -389,6 +391,7 @@ fn maven_module_classpath(
     graph: &JavaWorkspaceGraph,
     env_map: &BTreeMap<String, String>,
     out_base_dir: &Path,
+    include_tests: bool,
 ) -> Option<Result<Vec<String>>> {
     let module_dir = owner.dir.as_path();
     if !module_dir.join("pom.xml").is_file() {
@@ -428,13 +431,13 @@ fn maven_module_classpath(
             cmd.arg("-pl").arg(rel).arg("-am");
         }
     }
-    cmd.args([
-        "-q",
-        "-B",
-        "test-compile",
-        "dependency:build-classpath",
-        "-Dmdep.includeScope=test",
-    ]);
+    let (phase, scope) = if include_tests {
+        ("test-compile", "test")
+    } else {
+        ("compile", "runtime")
+    };
+    cmd.args(["-q", "-B", phase, "dependency:build-classpath"]);
+    cmd.arg(format!("-Dmdep.includeScope={scope}"));
     cmd.arg(format!("-Dmdep.outputFile={}", cp_file.display()));
     // The javac fallback reads the same repo, so both resolve the same JARs.
     if let Some(repo) = super::explicit_m2_repo(env_map) {
@@ -444,12 +447,17 @@ fn maven_module_classpath(
         let (status, output) = run_build_tool(cmd, env_map, "mvn")?;
         if !status.success() {
             return Err(Error::Invalid(format!(
-                "Maven could not build the module (mvn test-compile dependency:build-classpath):\n{}",
+                "Maven could not build the module (mvn {phase} dependency:build-classpath):\n{}",
                 first_lines(&output)
             )));
         }
         let deps = fs::read_to_string(&cp_file).unwrap_or_default();
-        let mut cp: Vec<String> = ["target/test-classes", "target/classes"]
+        let outputs: &[&str] = if include_tests {
+            &["target/test-classes", "target/classes"]
+        } else {
+            &["target/classes"]
+        };
+        let mut cp: Vec<String> = outputs
             .iter()
             .map(|d| module_dir.join(d).to_string_lossy().into_owned())
             .collect();
@@ -1625,13 +1633,10 @@ mod javac_process_tests {
         .unwrap();
         assert_eq!(plan.main_class, "com.acme.App");
         let t = |d: &str| module.join(d).to_string_lossy().into_owned();
+        // An app launch builds and runs main sources only: no test classes or resources.
         assert_eq!(
             plan.classpath,
-            format!(
-                "{}:{}:/m2/a.jar:/m2/b.jar",
-                t("target/test-classes"),
-                t("target/classes")
-            )
+            format!("{}:/m2/a.jar:/m2/b.jar", t("target/classes"))
         );
         assert!(
             !javac_hit.exists(),
@@ -1640,12 +1645,41 @@ mod javac_process_tests {
         let call = fs::read_to_string(&seen).unwrap();
         assert!(
             call.starts_with(&format!(
-                "{} -pl svc -am -q -B test-compile dependency:build-classpath",
+                "{} -pl svc -am -q -B compile dependency:build-classpath -Dmdep.includeScope=runtime",
                 root.display()
             )),
             "built from the reactor root: {call}"
         );
         assert!(!call.contains("-Dmaven.repo.local"), "{call}");
+
+        // A test target runs on the test classpath, test classes first.
+        let test_dir = module.join("src/test/java/com/acme");
+        fs::create_dir_all(&test_dir).unwrap();
+        let test_src = test_dir.join("AppTest.java");
+        fs::write(&test_src, "package com.acme;\npublic class AppTest {}\n").unwrap();
+        let test_plan = prepare_java_execution(
+            &test_src,
+            None,
+            false,
+            std::slice::from_ref(&module),
+            &path_env(&bin),
+            &javac,
+            &root.join("out"),
+        )
+        .unwrap();
+        assert_eq!(
+            test_plan.classpath,
+            format!(
+                "{}:{}:/m2/a.jar:/m2/b.jar",
+                t("target/test-classes"),
+                t("target/classes")
+            )
+        );
+        let call = fs::read_to_string(&seen).unwrap();
+        assert!(
+            call.contains(" test-compile dependency:build-classpath -Dmdep.includeScope=test"),
+            "{call}"
+        );
 
         // A run env that names the local repo hands it to Maven too.
         let mut env = path_env(&bin);
@@ -1709,6 +1743,75 @@ mod javac_process_tests {
             "tk's local sources are on the build: {:?}",
             plan.source_roots
         );
+    }
+
+    #[test]
+    fn the_javac_fallback_keeps_test_outputs_off_an_app_launch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let (module, app) = maven_module(&root);
+        fs::write(
+            module.join("pom.xml"),
+            "<project><groupId>com.acme</groupId><artifactId>svc</artifactId><version>1</version>\
+             <dependencies><dependency><groupId>com.acme</groupId><artifactId>tk</artifactId>\
+             <version>1</version></dependency></dependencies></project>",
+        )
+        .unwrap();
+        let tk = root.join("tk");
+        fs::create_dir_all(tk.join("src/main/java/com/acme/tk")).unwrap();
+        fs::write(
+            tk.join("pom.xml"),
+            "<project><groupId>com.acme</groupId><artifactId>tk</artifactId><version>1</version></project>",
+        )
+        .unwrap();
+        fs::write(
+            tk.join("src/main/java/com/acme/tk/G.java"),
+            "package com.acme.tk;\npublic class G {}\n",
+        )
+        .unwrap();
+        for d in [
+            module.join("src/main/resources"),
+            module.join("src/test/resources"),
+            module.join("target/test-classes"),
+            module.join("src/test/java/com/acme"),
+            tk.join("src/test/resources"),
+        ] {
+            fs::create_dir_all(d).unwrap();
+        }
+        let test_src = module.join("src/test/java/com/acme/AppTest.java");
+        fs::write(&test_src, "package com.acme;\npublic class AppTest {}\n").unwrap();
+        // No mvn on PATH: Otto's own javac builds the module.
+        let bin = root.join("bin");
+        let javac = fake_bin(&bin, "javac", "exit 0");
+        let plan = |target: &Path| {
+            prepare_java_execution(
+                target,
+                None,
+                false,
+                &[module.clone(), tk.clone()],
+                &path_env(&bin),
+                &javac,
+                &root.join("out"),
+            )
+            .unwrap()
+            .classpath
+        };
+        let app_cp = plan(&app);
+        assert!(app_cp.contains("svc/src/main/resources"), "{app_cp}");
+        for test_out in [
+            "svc/src/test/resources",
+            "svc/target/test-classes",
+            "tk/src/test/resources",
+        ] {
+            assert!(!app_cp.contains(test_out), "{test_out} on {app_cp}");
+        }
+        let test_cp = plan(&test_src);
+        assert!(
+            test_cp.contains("svc/src/test/resources")
+                && test_cp.contains("svc/target/test-classes"),
+            "{test_cp}"
+        );
+        assert!(!test_cp.contains("tk/src/test/resources"), "{test_cp}");
     }
 
     #[test]
