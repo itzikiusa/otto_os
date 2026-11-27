@@ -8,9 +8,9 @@
   import Icon from '../../../lib/components/Icon.svelte';
   import { ide, type IdeOpenTab } from '../ideStore.svelte';
   import { ideTargetKey } from '../store/ideTypes';
-  import { dismissIdeTrustNotice, ideLspTrustNotice, ideProjectTrusted, ideTrustNoticeDismissed } from './ideLspTrust';
+  import { dismissIdeTrustNotice, ideLspTrustNotice, ideTrustNoticeDismissed } from './ideLspTrust';
   import { ideLspTrust } from './ideLspTrustAction.svelte';
-  import { applyIdeLspLink, ideLspLangFor, ideLspRecordFor, type IdeLspRecord } from './ideStatusModel';
+  import { applyIdeLspLink, ideLspLangFor, ideLspRecordFor, ideLspTrustedAt, type IdeLspRecord } from './ideStatusModel';
 
   let { tab }: { tab: IdeOpenTab } = $props();
 
@@ -30,7 +30,7 @@
   const text = $derived.by(() => {
     void ideLspTrust.rev;
     if (!lang || ideTrustNoticeDismissed(project)) return null;
-    return ideLspTrustNotice(lang, rec, ideProjectTrusted(ide.projectEnv?.env_vars, lang));
+    return ideLspTrustNotice(lang, rec, ideLspTrustedAt(ide.projectEnv?.env_vars, lang, rec, ide.target.root));
   });
   const error = $derived(ideLspTrust.error?.project === project ? ideLspTrust.error.text : null);
 

@@ -180,6 +180,14 @@ export function ideProjectTrusted(vars: readonly IdeEnvVar[] | null | undefined,
   return vars.some((v) => !v.secret && keys.includes(v.key) && (v.value ?? '').trim() === '1');
 }
 
+/** `ideProjectTrusted` for the server at `rec`: the gate reads the environment of the root the
+ *  socket asked for, which is the project's saved environment only for the opened root itself
+ *  (an attached folder has its own); null for any other root (unknown: no trust prompt). */
+export function ideLspTrustedAt(vars: readonly IdeEnvVar[] | null | undefined, lang: string, rec: IdeLspRecord | null, projectRoot: string): boolean | null {
+  const norm = (p: string): string => p.replace(/\/+$/, '') || '/';
+  return rec && norm(rec.rootPath) === norm(projectRoot) ? ideProjectTrusted(vars, lang) : null;
+}
+
 export interface IdeLspItem { label: string; tone: 'ok' | 'busy' | 'bad'; title: string; action: 'settings' | 'retry' | 'trust' }
 
 /** The status-strip item, or null before any server was asked for (no attach: nothing to say).

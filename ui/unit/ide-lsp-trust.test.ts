@@ -12,7 +12,7 @@ import {
   showIdeTrustNotice,
   withProjectTrust,
 } from '../src/modules/ide/editor/ideLspTrust.ts';
-import { ideLspItem, type IdeLspRecord } from '../src/modules/ide/editor/ideStatusModel.ts';
+import { ideLspItem, ideLspTrustedAt, type IdeLspRecord } from '../src/modules/ide/editor/ideStatusModel.ts';
 import type { IdeEnvVar } from '../src/modules/ide/store/ideTypes.ts';
 
 const refused = (lang: string): IdeLspRecord => ({ lang, rootPath: '/p', phase: 'unavailable', reason: 'trust_or_unavailable' });
@@ -55,6 +55,13 @@ test('trust is read from non-secret "1" values of the project key or the languag
   assert.equal(ideProjectTrusted([v('OTTO_IDE_TRUST_DOTNET_LSP', '1')], 'fsharp'), true);
   assert.equal(ideProjectTrusted([v(IDE_TRUST_PROJECT_ENV, '1', true)], 'zig'), false);
   assert.equal(ideProjectTrusted([v(IDE_TRUST_PROJECT_ENV, 'true')], 'zig'), false);
+  // The gate reads the root the socket asked for: the project's saved environment answers only
+  // for the opened root itself (an attached folder has its own environment: unknown, no prompt).
+  assert.equal(ideLspTrustedAt([], 'zig', refused('zig'), '/p/'), false);
+  assert.equal(ideLspTrustedAt([v(IDE_TRUST_PROJECT_ENV, '1')], 'zig', refused('zig'), '/p'), true);
+  assert.equal(ideLspTrustedAt([], 'zig', { ...refused('zig'), rootPath: '/other' }, '/p'), null);
+  assert.equal(ideLspTrustedAt([], 'zig', { ...refused('zig'), rootPath: '/p/sub' }, '/p'), null);
+  assert.equal(ideLspTrustedAt(null, 'zig', refused('zig'), '/p'), null);
   assert.equal(ideProjectTrustOn([v('OTTO_IDE_TRUST_ZIG_BUILD', '1')]), false);
   assert.equal(ideProjectTrustOn([v(IDE_TRUST_PROJECT_ENV, '1')]), true);
 });

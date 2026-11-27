@@ -20,7 +20,7 @@
   import { openGoToLine } from '../search/ideQuickOpen.svelte';
   import {
     applyIdeLspLink, ideEolLabel, ideLanguageLabel, ideLanguageSettingsSection, ideLspItem, ideLspLangFor,
-    ideLspRecordFor, ideProblemCounts, ideProjectTrusted, type IdeLspRecord,
+    ideLspRecordFor, ideLspTrustedAt, ideProblemCounts, type IdeLspRecord,
   } from './ideStatusModel';
 
   let lspRecords = $state<IdeLspRecord[]>(recentLspLinks().reduce(applyIdeLspLink, [] as IdeLspRecord[]));
@@ -52,7 +52,8 @@
   const lsp = $derived.by(() => {
     if (!tab) return null;
     const lang = ideLspLangFor(tab.path, tab.language);
-    return lang ? ideLspItem(lang, ideLspRecordFor(lspRecords, lang, tab.path), ideProjectTrusted(ide.projectEnv?.env_vars, lang)) : null;
+    const rec = lang ? ideLspRecordFor(lspRecords, lang, tab.path) : null;
+    return lang ? ideLspItem(lang, rec, ideLspTrustedAt(ide.projectEnv?.env_vars, lang, rec, ide.target.root)) : null;
   });
 
   function openBranches(e: MouseEvent): void {
