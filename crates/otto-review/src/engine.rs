@@ -1800,28 +1800,6 @@ pub fn goals_provider(
         .to_string()
 }
 
-/// Build the `review_run` node's `ReviewConfig` override when reviewers are
-/// explicitly declared; returns `None` when reviewers are implicit (so each
-/// target overlays onto its inherited repository config).
-pub fn build_workflow_review_config(
-    default_provider: &str,
-    p: &Value,
-    reviewers: &[Value],
-    providers: &[String],
-    lenses: &[String],
-    check_specs: &[(String, String)],
-) -> Option<ReviewConfig> {
-    let mut cfg = workflow_review_base_config(default_provider, p, reviewers, providers, lenses)?;
-    apply_workflow_review_overlays(
-        &mut cfg,
-        default_provider,
-        p,
-        check_specs,
-        !reviewers.is_empty(),
-    );
-    Some(cfg)
-}
-
 /// Rich workflow-review config (PR-review parity): each reviewer carries its OWN
 /// provider set + optional custom instructions, plus a configurable summarizer —
 /// the same model the PR-review pipeline uses. Built from the `review_run` node's

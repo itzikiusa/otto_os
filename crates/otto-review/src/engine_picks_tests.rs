@@ -282,15 +282,16 @@ fn workflow_review_configs_never_introduce_claude_when_step_names_other_provider
     );
 
     let checks = vec![("unit".into(), "cargo test".into())];
-    let with_checks = build_workflow_review_config(
+    let params = json!({"summarizer": {"provider": "agy"}});
+    let mut with_checks = workflow_review_base_config(
         "claude",
-        &json!({"summarizer": {"provider": "agy"}}),
+        &params,
         &[],
         &["codex".into()],
         &["correctness".into()],
-        &checks,
     )
     .unwrap();
+    apply_workflow_review_overlays(&mut with_checks, "claude", &params, &checks, false);
     assert_eq!(with_checks.summarizer.provider, "agy");
     assert!(
         with_checks.agents.iter().all(|a| a.provider == "codex"),
@@ -307,10 +308,9 @@ fn workflow_review_configs_never_introduce_claude_when_step_names_other_provider
 fn summarizer_only_and_checks_only_do_not_replace_repo_reviewers_or_force_claude() {
     // BUG-13: setting only summarizer instructions/provider with no explicit reviewers
     // must NOT build a generic override that wipes the repo's configured reviewers.
-    let sum_only = build_workflow_review_config(
+    let sum_only = workflow_review_base_config(
         "codex",
         &json!({"summarizer": {"provider": "agy", "instructions": "scope gate"}}),
-        &[],
         &[],
         &[],
         &[],

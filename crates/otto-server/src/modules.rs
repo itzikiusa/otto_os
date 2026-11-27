@@ -70,8 +70,8 @@ pub(crate) use self::pr_draft::{
     pr_draft_prompt, resolve_provider_remote,
 };
 pub(crate) use self::review::service::{
-    cancel_running_review, default_review_provider, effective_review_mode, review_finding_briefs,
-    review_findings_counts, review_open_counts_by_severity,
+    cancel_running_review, effective_review_mode, review_finding_briefs, review_findings_counts,
+    review_open_counts_by_severity,
 };
 pub(crate) use self::skill_staging::{stage_skill_packages_at, StagedSkillPackages};
 

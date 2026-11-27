@@ -244,7 +244,7 @@ async fn plan_review<'a>(
     // to goals. A safety net for what the implementer's skill may have
     // skipped. From the node's `checks` or the run input's `checks`.
     let check_specs = parse_checks(p.get("checks").or_else(|| input.get("checks")));
-    let cfg_override = review_config(ctx, p, &reviewers, &providers, &lenses, &check_specs).await;
+    let cfg_override = review_config(&env.default_provider, p, &reviewers, &providers, &lenses);
     let label_tail = label_tail(&reviewers, &lenses, &providers, &check_specs);
     // Optional goals — assessed by an agent per target and blended in.
     let goals: Vec<String> = p
@@ -291,20 +291,18 @@ async fn plan_review<'a>(
 }
 
 /// Explicit reviewer override only (`None` leaves repo config inherited per target).
-async fn review_config(
-    ctx: &ServerCtx,
+fn review_config(
+    default_provider: &str,
     p: &Value,
     reviewers: &[Value],
     providers: &[String],
     lenses: &[String],
-    _check_specs: &[(String, String)],
 ) -> Option<otto_core::api::ReviewConfig> {
     if reviewers.is_empty() && providers.is_empty() && lenses.is_empty() {
         return None;
     }
-    let default_provider = crate::modules::default_review_provider(ctx).await;
     otto_review::engine::workflow_review_base_config(
-        &default_provider,
+        default_provider,
         p,
         reviewers,
         providers,
@@ -430,10 +428,9 @@ async fn launch(
             None => crate::modules::review::load_review_config_for_repo(ctx, repo_id).await,
         };
         if has_overlays {
-            let dp = crate::modules::default_review_provider(ctx).await;
             otto_review::engine::apply_workflow_review_overlays(
                 &mut cfg,
-                &dp,
+                &plan.env.default_provider,
                 &node.params,
                 &plan.check_specs,
                 from_reviewers,
@@ -524,12 +521,11 @@ async fn grade_goals(
         return (None, json!([]));
     }
     let p = &plan.node.params;
-    let default_provider = crate::modules::default_review_provider(plan.ctx).await;
     let goals_provider = otto_review::engine::goals_provider(
         p,
         plan.cfg_override.as_ref(),
         &plan.providers,
-        &default_provider,
+        &plan.env.default_provider,
     );
     let gprompt = format!(
         "Assess whether each goal below is met for the repository at `{}` \
