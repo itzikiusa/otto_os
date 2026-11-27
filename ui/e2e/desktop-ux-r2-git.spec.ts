@@ -100,7 +100,7 @@ test('Focus quick view ignores a late issue and closes when account changes', as
   await page.waitForTimeout(150);
   await expect(page.locator('.fx-quick-summary')).toContainText('AUDIT-2');
   await page.getByTitle('Issue-tracker account', { exact: true }).selectOption('account-b');
-  await expect(page.locator('.fx-quick')).toHaveCount(0);
+  await expect(page.getByTestId('fx-quick')).toHaveCount(0);
 });
 test('phone Focus quick view traps focus, closes with Escape and restores its trigger', async ({ page }) => {
   await focusFixtures(page);
@@ -108,12 +108,13 @@ test('phone Focus quick view traps focus, closes with Escape and restores its tr
   await openRepo(page, 'focus');
   const trigger = page.getByTitle('Quick view AUDIT-1', { exact: true });
   await trigger.click();
-  const panel = page.locator('.fx-quick');
+  // A phone shows the Detail pane as a full-width sheet (a modal dialog).
+  const panel = page.getByRole('dialog', { name: 'AUDIT-1' });
   await expect.poll(() => panel.evaluate(el => el.contains(document.activeElement))).toBe(true);
   await expect(panel).toHaveAttribute('aria-modal', 'true');
   await page.keyboard.press('?');
   await expect(page.getByRole('dialog')).toHaveCount(1);
-  await panel.getByRole('button', { name: 'Close issue quick view' }).focus();
+  await panel.getByRole('button', { name: 'Close AUDIT-1' }).focus();
   await page.keyboard.press('Tab');
   await expect.poll(() => panel.evaluate(el => el.contains(document.activeElement))).toBe(true);
   await page.keyboard.press('Escape');
@@ -309,9 +310,9 @@ for (const scenario of [
     await page.getByTitle('Quick view AUDIT-1', { exact: true }).click();
     await expect(page.locator('.fx-quick-summary')).toContainText('AUDIT-1');
     await expectNoHorizontalOverflow(page);
-    await expectFullyInViewport(page, page.locator('.fx-quick'));
+    await expectFullyInViewport(page, page.getByTestId('fx-quick'));
     await page.screenshot({ path: testInfo.outputPath('focus.png'), fullPage: true });
-    await page.getByRole('button', { name: 'Close issue quick view' }).click();
+    await page.getByRole('button', { name: 'Close AUDIT-1' }).click();
     await page.evaluate(id => { location.hash = `#/git/${id}/pr/1`; }, repoId);
     await expect(page.locator('.prd-title')).toContainText('PR 1:');
     await expectNoHorizontalOverflow(page);
@@ -481,8 +482,8 @@ test('Focus quick-view failure explains the error and retries in place', async (
     : route.fulfill({ json: issue('AUDIT-1') }));
   await openRepo(page, 'focus');
   await page.getByTitle('Quick view AUDIT-1', { exact: true }).click();
-  await expect(page.locator('.fx-quick')).toContainText('Jira temporarily unavailable');
+  await expect(page.getByTestId('fx-quick')).toContainText('Jira temporarily unavailable');
   fail = false;
-  await page.locator('.fx-quick').getByRole('button', { name: 'Retry', exact: true }).click();
+  await page.getByTestId('fx-quick').getByRole('button', { name: 'Retry', exact: true }).click();
   await expect(page.locator('.fx-quick-summary')).toContainText('AUDIT-1');
 });

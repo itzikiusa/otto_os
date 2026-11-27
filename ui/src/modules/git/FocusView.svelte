@@ -8,12 +8,10 @@
   // into project → epic → story → subtask hierarchy). Rows deep-link both ways:
   // into the Otto repo tab and out to the provider.
   import { untrack } from 'svelte';
-  import { dialogFocus } from '../../lib/dialogFocus';
   import { api } from '../../lib/api/client';
   import { getIssue, listIssueAccounts, myWork } from '../../lib/api/issues';
   import { mapLimit } from '../../lib/poll';
   import type { GitAccount, IssueAccount, IssueDetail, MyWorkIssue, PrListResp, PrSummary, Repo } from '../../lib/api/types';
-  import { ui } from '../../lib/stores/ui.svelte';
   import { git } from '../../lib/stores/git.svelte';
   import { router } from '../../lib/router.svelte';
   import { openExternal } from '../../lib/external';
@@ -21,6 +19,7 @@
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import DetailPane from '../../lib/components/side/DetailPane.svelte';
   import { freshPrs, groupPrRowsByForge, prCandidateRepos, savePrs, type FocusPrRow as PrRow } from './focusPrHelpers';
 
   let prRows = $state<PrRow[]>([]);
@@ -199,35 +198,21 @@
     return [...projs.values()];
   });
 
-  // ── Issue quick-view (right side panel) ─────────────────────────────────────
+  // ── Issue quick view: the page's Detail pane (inline while the lists keep
+  // their room, else a right sheet; ⌥⌘B reopens the last issue) ─────────────
   let quickKey = $state<string | null>(null);
+  let lastQuick: string | null = null;
   let quickIssue = $state<IssueDetail | null>(null);
   let quickLoading = $state(false);
   let quickError = $state<string | null>(null);
 
   let quickRevision = 0;
-  let narrow = $state(false);
-  $effect(() => {
-    const media = window.matchMedia('(max-width: 1024px)');
-    const sync = () => { narrow = media.matches; };
-    sync();
-    media.addEventListener('change', sync);
-    return () => media.removeEventListener('change', sync);
-  });
-  $effect(() => {
-    if (!narrow || quickKey === null) return;
-    untrack(() => ui.pushModal());
-    return () => untrack(() => ui.popModal());
-  });
-  function quickFocus(node: HTMLElement) {
-    if (narrow) return dialogFocus(node, closeQuick);
-  }
 
   async function openQuick(key: string): Promise<void> {
     const revision = ++quickRevision;
     const accountId = issueAccountId;
     quickError = null;
-    quickKey = key;
+    quickKey = lastQuick = key;
     quickIssue = null;
     quickLoading = true;
     try {
@@ -303,8 +288,8 @@
   {/each}
 {/snippet}
 
-<div class="focus" class:quick={quickKey !== null}>
-  <div class="focus-main" inert={narrow && quickKey !== null}>
+<div class="focus">
+  <div class="focus-main">
     <!-- ── MY PULL REQUESTS ── -->
     <section class="fx-section">
       <header class="fx-head">
@@ -436,47 +421,36 @@
     </section>
   </div>
 
-  <!-- ── Issue quick-view side panel ── -->
-  {#if quickKey !== null}
-    {#key narrow}
-    <aside class="fx-quick" role={narrow ? 'dialog' : 'complementary'} aria-modal={narrow ? 'true' : undefined} aria-label={`Issue ${quickKey}`} use:quickFocus>
-      <header class="fx-quick-head">
-        <span class="mono fx-key">{quickKey}</span>
-        <span class="grow"></span>
-        <button
-          class="btn small ghost"
-          onclick={() => quickIssue && openExternal(quickIssue.url)}
-          disabled={!quickIssue}
-          title="Open in {tracker}"
-        >
-          <Icon name="external" size={12} /> Open in {tracker}
-        </button>
-        <button class="fx-quick-close" onclick={closeQuick} title="Close issue quick view" aria-label="Close issue quick view"><Icon name="x" size={14} /></button>
-      </header>
-      {#if quickLoading}
-        <div style="padding: 12px"><Skeleton rows={6} height={20} /></div>
-      {:else if quickIssue}
-        <div class="fx-quick-body">
-          <div class="fx-quick-summary">{quickIssue.summary}</div>
-          <div class="fx-quick-meta">
-            <span class="fx-type">{quickIssue.issue_type}</span>
-            <span class="fx-status">{quickIssue.status}</span>
-            {#if quickIssue.assignee}<span class="dim">→ {quickIssue.assignee}</span>{/if}
-          </div>
-          {#if quickIssue.description}
-            <pre class="fx-quick-desc">{quickIssue.description}</pre>
-          {:else}
-            <div class="dim" style="font-size: var(--fs-s)">No description.</div>
-          {/if}
+  <!-- ── Issue quick view ── -->
+  <DetailPane module="git" pane="issue" open={quickKey !== null} title={quickKey ?? 'Issue'} onclose={closeQuick}
+    ontoggle={() => (quickKey !== null ? closeQuick() : lastQuick && void openQuick(lastQuick))} testid="fx-quick">
+    {#snippet action()}
+      <button class="icon-btn" onclick={() => quickIssue && openExternal(quickIssue.url)} disabled={!quickIssue} aria-label="Open in {tracker}" title="Open in {tracker}">
+        <Icon name="external" size={14} />
+      </button>
+    {/snippet}
+    {#if quickLoading}
+      <div style="padding: 12px"><Skeleton rows={6} height={20} /></div>
+    {:else if quickIssue}
+      <div class="fx-quick-body">
+        <div class="fx-quick-summary">{quickIssue.summary}</div>
+        <div class="fx-quick-meta">
+          <span class="fx-type">{quickIssue.issue_type}</span>
+          <span class="fx-status">{quickIssue.status}</span>
+          {#if quickIssue.assignee}<span class="dim">→ {quickIssue.assignee}</span>{/if}
         </div>
-      {:else}
-        <div class="fx-empty">
-          <LoadState variant="compact" what={quickKey ?? 'the issue'} error={quickError || 'Try again.'} empty onretry={() => quickKey && void openQuick(quickKey)} />
-        </div>
-      {/if}
-    </aside>
-    {/key}
-  {/if}
+        {#if quickIssue.description}
+          <pre class="fx-quick-desc">{quickIssue.description}</pre>
+        {:else}
+          <div class="dim" style="font-size: var(--fs-s)">No description.</div>
+        {/if}
+      </div>
+    {:else}
+      <div class="fx-empty">
+        <LoadState variant="compact" what={quickKey ?? 'the issue'} error={quickError || 'Try again.'} empty onretry={() => quickKey && void openQuick(quickKey)} />
+      </div>
+    {/if}
+  </DetailPane>
 </div>
 
 <style>
@@ -807,38 +781,7 @@
     max-width: 180px;
   }
 
-  /* ── Quick-view side panel ── */
-  .fx-quick {
-    width: 380px;
-    flex-shrink: 0;
-    border-inline-start: 1px solid var(--border);
-    background: var(--surface);
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-  }
-  .fx-quick-head {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 10px 12px;
-    border-bottom: 1px solid var(--border);
-    flex-shrink: 0;
-  }
-  .fx-quick-close {
-    display: inline-flex;
-    align-items: center;
-    border: none;
-    background: transparent;
-    color: var(--text-dim);
-    cursor: pointer;
-    padding: 4px 6px;
-    border-radius: var(--radius-s);
-  }
-  .fx-quick-close:hover {
-    color: var(--text);
-    background: var(--hover);
-  }
+  /* ── Quick view (DetailPane body) ── */
   .fx-quick-body {
     flex: 1;
     min-height: 0;
@@ -876,20 +819,8 @@
     font-family: var(--font-mono);
   }
 
-  /* ── ≤1024px: quick view becomes an overlay; PR rows wrap. ── */
+  /* ── ≤1024px: PR rows wrap. ── */
   @media (max-width: 1024px) {
-    .fx-quick {
-      position: absolute;
-      inset-inline-end: 0;
-      top: 0;
-      bottom: 0;
-      width: min(92vw, 380px);
-      z-index: 5;
-      box-shadow: var(--shadow-card);
-    }
-    .focus {
-      position: relative;
-    }
     .fx-pr { flex-wrap: wrap; row-gap: 2px; }
     .fx-pr-title { flex: 1 1 calc(100% - 40px); min-height: 44px; } /* the title owns its line: never "#42 Di…" */
     .fx-pr-text { white-space: normal; overflow-wrap: anywhere; }
