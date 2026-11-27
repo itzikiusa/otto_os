@@ -150,3 +150,13 @@ test('BUG-17: buildDedupedBulkRepos preserves dotnet badge on Unreal repos with 
   assert.deepEqual(techByPath['/ws/UnrealWithSln'], ['cpp', 'dotnet']);
   assert.deepEqual(techByPath['/ws/UnrealFresh'], ['cpp']);
 });
+
+test('C# and F# LSP trust refusal surfaces the .NET trust opt-in in the status strip', async () => {
+  const { lspHandshakeFailureReason } = await import('../src/lib/components/cm-ide-lsp-reconnect.ts');
+  const { ideLspItem } = await import('../src/modules/ide/editor/ideStatusModel.ts');
+  for (const lang of ['csharp', 'fsharp']) {
+    assert.equal(lspHandshakeFailureReason(lang), 'trust_or_unavailable');
+    const item = ideLspItem(lang, { lang, rootPath: '/app', phase: 'unavailable', reason: 'trust_or_unavailable' });
+    assert.ok(item?.title.includes('OTTO_IDE_TRUST_DOTNET_LSP=1'), lang);
+  }
+});

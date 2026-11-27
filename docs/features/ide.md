@@ -85,18 +85,22 @@ zero-rebuild **runtime IDE plugins**.
     (system, Xcode/CLT, python.org, Homebrew, pyenv/uv/mise/asdf/rye/conda,
     Otto toolchains).
   - **Language servers that run project code.** `zls` (runs `build.zig`),
-    `kotlin-language-server` (imports the Gradle / Maven build) and the
+    `kotlin-language-server` (imports the Gradle / Maven build), the
     standalone `vue-language-server` (loads the plugins the project's
-    `tsconfig.json` names) start only for a project that opted in with a
-    non-secret `OTTO_IDE_TRUST_ZIG_BUILD=1`, `OTTO_IDE_TRUST_KOTLIN_LSP=1` or
-    `OTTO_IDE_TRUST_VUE_LSP=1` (`OTTO_IDE_TRUST_PROJECT_EXECUTION=1` covers all
-    three) in its project environment (**Edit run configurations…** →
+    `tsconfig.json` names) and the .NET servers `csharp-ls` / `fsautocomplete`
+    (load the MSBuild project, whose design-time build runs its targets) start
+    only for a project that opted in with a non-secret
+    `OTTO_IDE_TRUST_ZIG_BUILD=1`, `OTTO_IDE_TRUST_KOTLIN_LSP=1`,
+    `OTTO_IDE_TRUST_VUE_LSP=1` or `OTTO_IDE_TRUST_DOTNET_LSP=1`
+    (`OTTO_IDE_TRUST_PROJECT_EXECUTION=1` covers all of them) in its project
+    environment (**Edit run configurations…** →
     **Project environment** → *Environment variables & Keychain secrets*).
     Local and SSH targets are gated alike. The opt-in is read from the opened
     root or a module inside it, never from a parent folder, and a module
     entry (`module_sdks`) does not copy it to a child checkout. Until then
     `/ws/lsp` answers `403` (`zig_lsp_requires_trust`,
-    `kotlin_lsp_requires_trust`, `vue_lsp_requires_trust`) and the status
+    `kotlin_lsp_requires_trust`, `vue_lsp_requires_trust`,
+    `dotnet_lsp_requires_trust`) and the status
     strip shows "<server> untrusted / unavailable".
   - **Network bridge host mappings** bind `127.0.0.1:<from_port>` without
     authentication, like `kubectl port-forward`: any local process (including

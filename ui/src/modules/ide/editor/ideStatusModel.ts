@@ -194,6 +194,14 @@ export function ideLspItem(lang: string, rec: IdeLspRecord | null): IdeLspItem |
           action: 'settings',
         };
       }
+      if (rec.reason === 'trust_or_unavailable' && (lang === 'csharp' || lang === 'fsharp')) {
+        return {
+          label: `${name} untrusted / unavailable`,
+          tone: 'bad',
+          title: `${name} did not start for this project — set OTTO_IDE_TRUST_DOTNET_LSP=1 (or OTTO_IDE_TRUST_PROJECT_EXECUTION=1) in Project Environment to trust the MSBuild project load, or install it via Toolchains & SDKs.`,
+          action: 'settings',
+        };
+      }
       if (rec.reason === 'trust_or_unavailable' && lang === 'vue') {
         return {
           label: `${name} untrusted / unavailable`,

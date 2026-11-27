@@ -44,9 +44,10 @@ export function lspCooldownKey(
 }
 
 /** Short failure reason surfaced in the status bar when an initial LSP handshake closes
- *  before ready: trust-gated languages (`zig`, `kotlin`, `vue`) highlight project trust opt-in. */
+ *  before ready: trust-gated languages (`zig`, `kotlin`, `vue`, `csharp`, `fsharp`) highlight
+ *  project trust opt-in. */
 export function lspHandshakeFailureReason(serverLang: string): string {
-  return serverLang === 'zig' || serverLang === 'kotlin' || serverLang === 'vue'
+  return ['zig', 'kotlin', 'vue', 'csharp', 'fsharp'].includes(serverLang)
     ? 'trust_or_unavailable'
     : 'no_session';
 }
