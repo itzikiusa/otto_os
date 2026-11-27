@@ -7,13 +7,27 @@ const MANIFEST_NAMES = new Set([
   'package.json',
   'cargo.toml',
   'build.zig.zon',
+  'cmakelists.txt',
+  'vcpkg.json',
+  'conanfile.txt',
+  'directory.packages.props',
+  'packages.config',
   'requirements.txt',
   'pyproject.toml',
   'build.gradle',
   'build.gradle.kts',
+  'libs.versions.toml',
 ]);
 
 export function isIdeManifestPath(filePath: string): boolean {
   const base = filePath.split('?')[0].split('/').pop()?.toLowerCase() ?? '';
-  return MANIFEST_NAMES.has(base) || /^requirements(?:[-_.][\w-]+)?\.txt$/.test(base);
+  return (
+    MANIFEST_NAMES.has(base) ||
+    base.endsWith('.uproject') ||
+    base.endsWith('.uplugin') ||
+    base.endsWith('.csproj') ||
+    base.endsWith('.fsproj') ||
+    base.endsWith('.vbproj') ||
+    /^requirements(?:[-_.][\w-]+)?\.txt$/.test(base)
+  );
 }

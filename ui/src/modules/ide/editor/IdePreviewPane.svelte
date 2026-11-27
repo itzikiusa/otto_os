@@ -71,9 +71,8 @@
 
   // ── Large files: render on demand ──────────────────────────────────────
   const large = $derived(previewNeedsManualRender(kind, text.length));
-  /** The text last rendered on request (large files only), per path. */
-  let rendered = $state<{ path: string; text: string } | null>(null);
-  const previewText = $derived(large ? (rendered?.path === tab.path ? rendered.text : null) : text);
+  /** The text last rendered on request (large files only), retained in store across mode switches (BUG3-12). */
+  const previewText = $derived(large ? idePreviewMode.getRendered(tab.path) : text);
   const stale = $derived(large && previewText !== null && previewText !== text);
 
   // ── Split width ────────────────────────────────────────────────────────
@@ -116,7 +115,7 @@
             ? `This file is large (${formatBytes(text.length)}): the preview renders when you ask.`
             : 'The preview is out of date with your edits.'}
         </span>
-        <button type="button" class="btn small" onclick={() => (rendered = { path: tab.path, text })} data-testid="ide-preview-render">
+        <button type="button" class="btn small" onclick={() => idePreviewMode.setRendered(tab.path, text)} data-testid="ide-preview-render">
           {previewText === null ? 'Render preview' : 'Render again'}
         </button>
       </div>

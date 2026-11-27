@@ -49,6 +49,7 @@ pub(super) async fn run_actor(
     last_active: Arc<AtomicU64>,
     owner_is_root: bool,
     go_build_tags: Vec<String>,
+    vue_tsdk: Option<String>,
 ) {
     let ServerIo {
         reader,
@@ -119,6 +120,7 @@ pub(super) async fn run_actor(
         Arc::clone(&pool.activity_seq),
         owner_is_root,
         go_build_tags,
+        vue_tsdk,
     );
     let write_cap = pool.write_cap;
     let mut idle_at: Option<Instant> = None;
@@ -280,6 +282,7 @@ struct Mux {
     activity_seq: Arc<AtomicU64>,
     owner_is_root: bool,
     go_build_tags: Vec<String>,
+    vue_tsdk: Option<String>,
     clients: BTreeMap<u64, Client>,
     pending: HashMap<u64, (u64, Value)>,
     server_reqs: HashMap<String, (u64, Value)>,
@@ -300,6 +303,7 @@ impl Mux {
         activity_seq: Arc<AtomicU64>,
         owner_is_root: bool,
         go_build_tags: Vec<String>,
+        vue_tsdk: Option<String>,
     ) -> Self {
         #[allow(clippy::disallowed_methods)]
         let canon_root = key
@@ -323,6 +327,7 @@ impl Mux {
             activity_seq,
             owner_is_root,
             go_build_tags,
+            vue_tsdk,
             clients: BTreeMap::new(),
             pending: HashMap::new(),
             server_reqs: HashMap::new(),

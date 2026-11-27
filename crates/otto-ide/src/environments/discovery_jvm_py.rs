@@ -47,6 +47,78 @@ pub(super) fn discover_python(
         }
     }
 
+    // ML training & evaluation scripts (stream unbuffered live logs via PYTHONUNBUFFERED).
+    for train_rel in [
+        "train.py",
+        "finetune.py",
+        "evaluate.py",
+        "eval.py",
+        "scripts/train.py",
+        "src/train.py",
+    ] {
+        if root.join(train_rel).is_file() {
+            let mut cfg = make_auto_config(
+                root_badge,
+                IdeRunnerKind::Python,
+                &format!("ml-{}", train_rel.replace('/', "-")),
+                format!("ML Train ({train_rel})"),
+                Some("python3"),
+                Vec::new(),
+                cwd.clone(),
+                Some(train_rel.into()),
+            );
+            cfg.env_overrides
+                .insert("PYTHONUNBUFFERED".into(), "1".into());
+            out.push(cfg);
+        }
+    }
+
+    // TensorBoard run config when ML logging dirs or ML dependencies are present.
+    let deps_text = read_head(&root.join("requirements.txt")).unwrap_or_default()
+        + "\n"
+        + &read_head(&root.join("pyproject.toml")).unwrap_or_default();
+    let deps_low = deps_text.to_ascii_lowercase();
+    let tb_logdir = ["runs", "tb_logs", "lightning_logs", "logs"]
+        .into_iter()
+        .find(|d| root.join(d).is_dir());
+    let has_ml_deps = deps_low.contains("tensorboard")
+        || deps_low.contains("torch")
+        || deps_low.contains("tensorflow");
+    if tb_logdir.is_some() || has_ml_deps {
+        let logdir = tb_logdir.unwrap_or("runs");
+        out.push(make_auto_config(
+            root_badge,
+            IdeRunnerKind::Python,
+            "tensorboard",
+            format!("TensorBoard (--logdir {logdir})"),
+            Some("python3"),
+            vec![
+                "-m".into(),
+                "tensorboard.main".into(),
+                "--logdir".into(),
+                logdir.into(),
+            ],
+            cwd.clone(),
+            None,
+        ));
+    }
+
+    // Jupyter Lab server config when notebooks exist in root or `notebooks/`.
+    let has_notebooks = !list_files_with_suffix(root, ".ipynb").is_empty()
+        || !list_files_with_suffix(&root.join("notebooks"), ".ipynb").is_empty();
+    if has_notebooks {
+        out.push(make_auto_config(
+            root_badge,
+            IdeRunnerKind::Python,
+            "jupyter-lab",
+            "Jupyter Lab".into(),
+            Some("python3"),
+            vec!["-m".into(), "jupyterlab".into()],
+            cwd.clone(),
+            None,
+        ));
+    }
+
     // A `tests/` folder alone is no Python sign (Go and JS repos have one too).
     let has_py_tests_dir = ["tests", "test"]
         .iter()
@@ -159,35 +231,42 @@ pub(super) fn discover_java(
         ));
     }
 
-    let java_src = root.join("src/main/java");
-    if java_src.is_dir() {
-        let mut scanned = 0usize;
-        let mut mains = Vec::new();
-        scan_java_mains(&java_src, root, 0, &mut scanned, &mut mains);
-        for (fqcn, rel_path) in mains.into_iter().take(4) {
-            let short = fqcn.rsplit('.').next().unwrap_or(&fqcn);
-            let mut cfg = make_auto_config(
-                root_badge,
-                IdeRunnerKind::JavaMain,
-                &format!("main-{fqcn}"),
-                format!("Run {short}.main()"),
-                None,
-                Vec::new(),
-                cwd.clone(),
-                Some(rel_path),
-            );
-            cfg.test_filter = Some(fqcn);
-            out.push(cfg);
+    for src_sub in ["src/main/java", "src/main/kotlin"] {
+        let src_dir = root.join(src_sub);
+        if src_dir.is_dir() {
+            let mut scanned = 0usize;
+            let mut mains = Vec::new();
+            scan_jvm_mains(&src_dir, root, 0, &mut scanned, &mut mains);
+            for (fqcn, rel_path, is_spring_boot) in mains.into_iter().take(4) {
+                let short = fqcn.rsplit('.').next().unwrap_or(&fqcn);
+                let label = if is_spring_boot {
+                    format!("Spring Boot: {short}")
+                } else {
+                    format!("Run {short}.main()")
+                };
+                let mut cfg = make_auto_config(
+                    root_badge,
+                    IdeRunnerKind::JavaMain,
+                    &format!("main-{fqcn}"),
+                    label,
+                    None,
+                    Vec::new(),
+                    cwd.clone(),
+                    Some(rel_path),
+                );
+                cfg.test_filter = Some(fqcn);
+                out.push(cfg);
+            }
         }
     }
 }
 
-fn scan_java_mains(
+fn scan_jvm_mains(
     dir: &Path,
     workspace_root: &Path,
     depth: usize,
     scanned: &mut usize,
-    out: &mut Vec<(String, String)>,
+    out: &mut Vec<(String, String, bool)>,
 ) {
     if depth > 6 || *scanned >= 48 || out.len() >= 4 {
         return;
@@ -197,35 +276,44 @@ fn scan_java_mains(
             break;
         }
         if entry_path.is_dir() {
-            scan_java_mains(&entry_path, workspace_root, depth + 1, scanned, out);
-        } else if entry_path
-            .extension()
-            .and_then(|s| s.to_str())
-            .is_some_and(|e| e == "java")
-        {
+            scan_jvm_mains(&entry_path, workspace_root, depth + 1, scanned, out);
+        } else if let Some(ext) = entry_path.extension().and_then(|s| s.to_str()) {
+            if ext != "java" && ext != "kt" {
+                continue;
+            }
             *scanned += 1;
             if let Some(head) = read_head(&entry_path) {
-                if head.contains("static void main(") {
-                    let cls = entry_path
+                let is_java_main = ext == "java" && head.contains("static void main(");
+                let is_kt_main =
+                    ext == "kt" && (head.contains("fun main(") || head.contains("fun main ()"));
+                if is_java_main || is_kt_main {
+                    let is_spring_boot = head.contains("@SpringBootApplication")
+                        || head.contains("SpringApplication.run(")
+                        || head.contains("runApplication<");
+                    let stem = entry_path
                         .file_stem()
                         .and_then(|s| s.to_str())
                         .unwrap_or("Main");
+                    let cls = if ext == "kt" {
+                        crate::dap::java_bridge::infer_kotlin_class_stem(stem, &head)
+                    } else {
+                        stem.to_string()
+                    };
                     let pkg = head.lines().find_map(|l| {
                         let t = l.trim();
                         t.strip_prefix("package ")
-                            .and_then(|r| r.strip_suffix(';'))
-                            .map(|p| p.trim().to_string())
+                            .map(|r| r.trim_end_matches(';').trim().to_string())
                     });
                     let fqcn = match pkg {
                         Some(p) if !p.is_empty() => format!("{p}.{cls}"),
-                        _ => cls.to_string(),
+                        _ => cls,
                     };
                     let rel = entry_path
                         .strip_prefix(workspace_root)
                         .unwrap_or(&entry_path)
                         .to_string_lossy()
                         .into_owned();
-                    out.push((fqcn, rel));
+                    out.push((fqcn, rel, is_spring_boot));
                 }
             }
         }

@@ -181,6 +181,7 @@ fn mock_conn(client_io: tokio::io::DuplexStream) -> Arc<ActiveConnection> {
         wire: DapWireClient::spawn(Box::new(cr), Box::new(cw), event_tx),
         guard: BridgeGuard::new(),
         supports_terminate: false,
+        supports_set_variable: false,
         exception_filters: Vec::new(),
     })
 }

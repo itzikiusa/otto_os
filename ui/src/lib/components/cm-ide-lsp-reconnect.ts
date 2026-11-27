@@ -32,6 +32,26 @@ function normRoot(p: string): string {
   return p.replace(/\\/g, '/').replace(/\/+$/, '') || '/';
 }
 
+/** Scope failed-attach LSP cooldown entries to `(lang, connection, projectRoot)` so
+ *  a trust refusal (HTTP 403) in one untrusted project never suppresses language
+ *  servers in a different trusted project of the same language (OBS2-1). */
+export function lspCooldownKey(
+  serverLang: string,
+  connId: string | null | undefined,
+  rootPath: string,
+): string {
+  return `${serverLang}::${connId ?? 'local'}::${normRoot(rootPath)}`;
+}
+
+/** Short failure reason surfaced in the status bar when an initial LSP handshake closes
+ *  before ready: trust-gated languages (`zig`, `kotlin`, `vue`, `csharp`, `fsharp`) highlight
+ *  project trust opt-in. */
+export function lspHandshakeFailureReason(serverLang: string): string {
+  return ['zig', 'kotlin', 'vue', 'csharp', 'fsharp'].includes(serverLang)
+    ? 'trust_or_unavailable'
+    : 'no_session';
+}
+
 /** The sequence covering `root`: the same root, or a module root inside / around it (the
  *  daemon reports a canonical module root that can differ from the one first asked for). */
 function findSeq(root: string): ReconnectSeq | null {

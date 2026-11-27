@@ -70,8 +70,16 @@ pub struct IdeDebugLaunchSpec {
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test_name: Option<String>,
+    #[serde(default)]
+    pub is_test: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attach_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attach_pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attach_process_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub core_file: Option<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -230,6 +238,8 @@ pub struct IdeDebugSessionSnapshot {
     /// re-attach only to its own project's sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_root: Option<String>,
+    #[serde(default)]
+    pub supports_set_variable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

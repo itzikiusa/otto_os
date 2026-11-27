@@ -285,6 +285,8 @@ pub struct IdeScannedRepo {
     pub has_go_mod: bool,
     pub has_pom_or_gradle: bool,
     pub has_git: bool,
+    #[serde(default)]
+    pub has_dotnet: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

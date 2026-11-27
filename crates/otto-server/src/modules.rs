@@ -40,16 +40,12 @@ use otto_core::cancel::{CancelGuard, CancelRegistryExt};
 // engines reach through `crate::modules::…` are re-exported by name; the rest
 // are the review code's own imports (children see them through `use super::*`).
 use otto_review::engine::{
-    append_to_review_file, compose_orchestrator_prompt, default_review_config, expand_agent_runs,
-    general_comment_body, inline_anchor_rejected, is_blocking_severity, mode_source,
-    orchestrator_budget, parse_draft_comments, repo_review_binding_key, resolve_blocker,
-    review_agent_cancel_key, review_agent_timeout, reviewer_slots, same_draft_comment,
-    severity_rank, ReviewBranches,
+    append_to_review_file, default_review_config, expand_agent_runs, general_comment_body,
+    inline_anchor_rejected, is_blocking_severity, mode_source, orchestrator_budget,
+    repo_review_binding_key, resolve_blocker, review_agent_cancel_key, review_agent_timeout,
+    reviewer_slots, same_draft_comment, severity_rank, ReviewBranches,
 };
-pub(crate) use otto_review::engine::{
-    resolve_skill_inline, workflow_review_config, workflow_review_config_from_json,
-    CHECKS_REVIEWER_NAME,
-};
+pub(crate) use otto_review::engine::{resolve_skill_inline, CHECKS_REVIEWER_NAME};
 use otto_review::worktree::{teardown_pr_worktree, PrWorktree};
 
 // The split-out concerns. Each child sees this module's imports and items
@@ -74,8 +70,8 @@ pub(crate) use self::pr_draft::{
     pr_draft_prompt, resolve_provider_remote,
 };
 pub(crate) use self::review::service::{
-    cancel_running_review, default_review_provider, effective_review_mode, review_finding_briefs,
-    review_findings_counts, review_open_counts_by_severity,
+    cancel_running_review, effective_review_mode, review_finding_briefs, review_findings_counts,
+    review_open_counts_by_severity,
 };
 pub(crate) use self::skill_staging::{stage_skill_packages_at, StagedSkillPackages};
 

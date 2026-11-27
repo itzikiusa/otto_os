@@ -16,9 +16,22 @@ use super::{default_true, IdeRunnerKind, IdeTargetKind, IdeTargetSpec};
 #[serde(rename_all = "snake_case")]
 pub enum IdeEcosystemKind {
     Java,
+    #[serde(alias = "kt", alias = "kts")]
+    Kotlin,
     Go,
     Rust,
     Zig,
+    #[serde(
+        alias = "c",
+        alias = "c++",
+        alias = "cxx",
+        alias = "clang",
+        alias = "gcc",
+        alias = "llvm"
+    )]
+    Cpp,
+    #[serde(alias = "csharp", alias = "fsharp", alias = "cs", alias = "fs")]
+    Dotnet,
     #[serde(alias = "javascript", alias = "typescript", alias = "js", alias = "ts")]
     Node,
     Python,
@@ -37,9 +50,12 @@ impl IdeEcosystemKind {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Java => "java",
+            Self::Kotlin => "kotlin",
             Self::Go => "go",
             Self::Rust => "rust",
             Self::Zig => "zig",
+            Self::Cpp => "cpp",
+            Self::Dotnet => "dotnet",
             Self::Node => "node",
             Self::Python => "python",
             Self::Shell => "shell",
@@ -53,9 +69,12 @@ impl IdeEcosystemKind {
     pub fn display_name(&self) -> &'static str {
         match self {
             Self::Java => "Java (Temurin JDK)",
+            Self::Kotlin => "Kotlin (kotlinc / JVM)",
             Self::Go => "Go SDK",
             Self::Rust => "Rust (rustup)",
             Self::Zig => "Zig",
+            Self::Cpp => "C / C++ (Clang / GCC)",
+            Self::Dotnet => ".NET SDK (C# / F#)",
             Self::Node => "Node.js / TypeScript",
             Self::Python => "Python (uv)",
             Self::Shell => "Shell (Bash / Zsh)",
@@ -191,6 +210,9 @@ pub struct IdeInstallToolchainReq {
     /// Zig LSP only: install `zls` matching this Zig installation (or active Zig).
     #[serde(default)]
     pub zig_home: Option<String>,
+    /// .NET LSP only: install `csharp-ls` using this .NET SDK root (or active dotnet).
+    #[serde(default)]
+    pub dotnet_root: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -368,6 +390,12 @@ pub struct IdeProjectEnvironment {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub zig_home: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpp_toolchain: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kotlin_home: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dotnet_root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_home: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub python_interpreter: Option<String>,
@@ -404,6 +432,9 @@ impl Default for IdeProjectEnvironment {
             go_root: None,
             rust_toolchain: None,
             zig_home: None,
+            cpp_toolchain: None,
+            kotlin_home: None,
+            dotnet_root: None,
             node_home: None,
             python_interpreter: None,
             android_home: None,
@@ -433,6 +464,12 @@ pub struct IdeUpdateEnvironmentReq {
     pub rust_toolchain: Option<String>,
     #[serde(default)]
     pub zig_home: Option<String>,
+    #[serde(default)]
+    pub cpp_toolchain: Option<String>,
+    #[serde(default)]
+    pub kotlin_home: Option<String>,
+    #[serde(default)]
+    pub dotnet_root: Option<String>,
     #[serde(default)]
     pub node_home: Option<String>,
     #[serde(default)]
@@ -633,6 +670,17 @@ pub struct IdeRunConfigsResp {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdeMlAcceleratorInfo {
+    /// `"mps"` | `"cuda"` | `"rocm"` | `"cpu"`.
+    pub kind: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_mb: Option<u64>,
+    #[serde(default)]
+    pub available: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdeEnvironmentsResp {
     pub env: IdeProjectEnvironment,
     pub python_venvs: Vec<IdePythonVenvInfo>,
@@ -642,6 +690,8 @@ pub struct IdeEnvironmentsResp {
     pub detected_configs: Vec<IdeRunConfig>,
     #[serde(default)]
     pub effective_env: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accelerators: Vec<IdeMlAcceleratorInfo>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -10,8 +10,8 @@
 
 import { untrack } from 'svelte';
 import { api, ApiError } from '../../lib/api/client';
-import { browseRunContext, readRunContext, workflowNodeDetail, workflowProgress } from '../../lib/api/workflows';
-import type { NodeRunState, WorkflowRun } from '../../lib/api/types';
+import { browseRunContext, readRunContext, workflowCheckpointDetail, workflowCheckpointPage, workflowNodeDetail, workflowProgress } from '../../lib/api/workflows';
+import type { NodeRunState, WorkflowCheckpoint, WorkflowRun } from '../../lib/api/types';
 import { workflowRunBus } from '../../lib/events.svelte';
 import { liveQuery } from '../../lib/live';
 import { loadErrorText } from '../../lib/loadError';
@@ -20,6 +20,7 @@ import { toasts } from '../../lib/toast.svelte';
 import { toastError } from '../../lib/toastError';
 import type { ProductPublicationPreview } from '../product/types';
 import { runContextPath } from './runContext';
+import { checkpointStamp, mergeCheckpointDetails, needsCheckpointDetail, needsCheckpointRefresh, type CheckpointStamp } from './runCheckpoints';
 import { applyLiveNode, mergeRunProgress } from './runProgress';
 
 // ── final-output panel ──────────────────────────────────────────────────
@@ -77,6 +78,15 @@ export class RunSync {
   /** The run on screen. The page assigns it when it opens or starts a run;
    *  live updates merge INTO it (see `applyRunSnapshot`). */
   run = $state<WorkflowRun | null>(null);
+  /** Revision- and generation-aware loop checkpoints shared by StepList and GoalCard (ARCH-1). */
+  checkpoints = $state.raw<WorkflowCheckpoint[]>([]);
+  private cpStamp: CheckpointStamp | null = null;
+  private cpObservedGen: string | null = null;
+  private cpCache = new Map<string, WorkflowCheckpoint>();
+  private cpPendingDetails = new Set<string>();
+  private cpHydrating = false;
+  private cpLoadSeq = 0;
+  private cpLoadingKey = '';
 
   // ── live run sync ──────────────────────────────────────────────────────────
   // ONE path keeps the viewed run live, whatever started it. Updates are
@@ -194,6 +204,18 @@ export class RunSync {
 
     $effect(() => {
       const cur = this.run;
+      if (!cur) {
+        untrack(() => this.resetCheckpoints());
+        return;
+      }
+      // Track run identity, revision, checkpoint revision/generation, and summary
+      // flag (never `cur.checkpoints` itself, so syncing never loops back into this effect).
+      void [cur.id, cur.rev, cur.checkpoint_rev, cur.checkpoint_generation, cur.summary];
+      untrack(() => this.syncCheckpoints(cur));
+    });
+
+    $effect(() => {
+      const cur = this.run;
       if (!cur || cur.status !== 'success' || !cur.context_dir) return;
       const runId = cur.id;
       untrack(() => {
@@ -207,8 +229,158 @@ export class RunSync {
    *  mergeRunProgress). Object fields (output/logs/sessions) are only
    *  reassigned when they change, so unchanged step subtrees don't re-render. */
   applyRunSnapshot = (nr: WorkflowRun): void => {
-    if (this.run) mergeRunProgress(this.run, nr);
+    if (!this.run) return;
+    mergeRunProgress(this.run, nr);
+    if (this.cpPendingDetails.size > 0 && !this.cpHydrating && this.cpStamp?.runId === nr.id) {
+      void this.retryPendingCheckpointDetails(nr.id, this.cpStamp);
+    }
   };
+
+  /** Retry any checkpoint detail bodies that previously failed transiently (OBS-2). */
+  retryCheckpoints(): void {
+    const cur = this.run;
+    if (!cur || !this.cpStamp || this.cpStamp.runId !== cur.id) return;
+    if (this.cpPendingDetails.size > 0 && !this.cpHydrating) {
+      void this.retryPendingCheckpointDetails(cur.id, this.cpStamp);
+    }
+  }
+
+  private resetCheckpoints(): void {
+    this.cpLoadSeq++;
+    this.cpStamp = null;
+    this.cpObservedGen = null;
+    this.cpCache.clear();
+    this.cpPendingDetails.clear();
+    this.cpHydrating = false;
+    this.cpLoadingKey = '';
+    this.checkpoints = [];
+  }
+
+  private syncCheckpoints(cur: WorkflowRun): void {
+    const stamp = checkpointStamp(cur);
+    const sameRun = this.cpStamp?.runId === stamp.runId;
+    const genChanged = sameRun && this.cpStamp!.generation !== stamp.generation;
+    const genKey = `${stamp.runId}:${stamp.generation}`;
+    // Clear cache and stale rows at most ONCE per observed (runId, generation)
+    // without mutating `cur.checkpoints` (mergeRunProgress already clears that once).
+    if (this.cpObservedGen !== genKey) {
+      const prevRunId = this.cpObservedGen?.split(':')[0] ?? null;
+      this.cpObservedGen = genKey;
+      this.cpCache.clear();
+      this.cpPendingDetails.clear();
+      this.cpHydrating = false;
+      this.cpLoadingKey = '';
+      if (prevRunId === stamp.runId || genChanged) {
+        this.checkpoints = [];
+      }
+    }
+    if (!cur.summary && (!sameRun || this.cpStamp!.rev !== stamp.rev || genChanged)) {
+      const initial = cur.checkpoints ?? [];
+      for (const cp of initial) {
+        if (cp.output != null) this.cpCache.set(cp.node_id, cp);
+      }
+      this.checkpoints = initial;
+      if (initial.length > 0 || stamp.rev === 0) {
+        this.cpStamp = stamp;
+        const missing = initial.filter(needsCheckpointDetail);
+        if (missing.length > 0) void this.hydrateCheckpointDetails(cur.id, stamp, initial, missing);
+        return;
+      }
+    }
+    if (!needsCheckpointRefresh(cur, this.cpStamp)) {
+      if (this.cpPendingDetails.size > 0 && !this.cpHydrating && this.cpStamp) {
+        void this.retryPendingCheckpointDetails(cur.id, this.cpStamp);
+      }
+      return;
+    }
+    const key = `${stamp.runId}:${stamp.generation}:${stamp.rev}`;
+    if (this.cpLoadingKey === key) return;
+    this.cpLoadingKey = key;
+    const seq = ++this.cpLoadSeq;
+    void (async () => {
+      try {
+        const all: WorkflowCheckpoint[] = [];
+        let cursor: string | undefined;
+        let pageRev = stamp.rev;
+        let pageGen = stamp.generation;
+        do {
+          const page = await workflowCheckpointPage(cur.id, cursor);
+          if (this.destroyed || seq !== this.cpLoadSeq || this.run?.id !== cur.id) return;
+          if (typeof page.checkpoint_rev === 'number') pageRev = page.checkpoint_rev;
+          if (typeof page.generation === 'number') pageGen = page.generation;
+          all.push(...page.items);
+          cursor = page.next_cursor ?? undefined;
+        } while (cursor);
+        if (pageGen !== stamp.generation) {
+          this.cpCache.clear();
+          this.cpPendingDetails.clear();
+        }
+        const { merged, toFetch } = mergeCheckpointDetails(all, this.cpCache);
+        for (const cp of merged) {
+          if (cp.output != null) {
+            this.cpCache.set(cp.node_id, cp);
+            this.cpPendingDetails.delete(cp.node_id);
+          }
+        }
+        const finalStamp: CheckpointStamp = { runId: cur.id, rev: pageRev, generation: pageGen };
+        this.cpStamp = finalStamp;
+        this.cpObservedGen = `${cur.id}:${pageGen}`;
+        this.checkpoints = merged;
+        if (toFetch.length > 0) await this.hydrateCheckpointDetails(cur.id, finalStamp, merged, toFetch, seq);
+      } catch {
+        /* transient read error — next progress tick retries */
+      } finally {
+        if (this.cpLoadingKey === key) this.cpLoadingKey = '';
+      }
+    })();
+  }
+
+  private async retryPendingCheckpointDetails(runId: string, stamp: CheckpointStamp): Promise<void> {
+    if (this.cpHydrating || this.cpPendingDetails.size === 0) return;
+    const base = this.checkpoints;
+    const toFetch = base.filter((cp) => this.cpPendingDetails.has(cp.node_id) && needsCheckpointDetail(cp));
+    if (toFetch.length === 0) {
+      this.cpPendingDetails.clear();
+      return;
+    }
+    await this.hydrateCheckpointDetails(runId, stamp, base, toFetch, this.cpLoadSeq);
+  }
+
+  private async hydrateCheckpointDetails(
+    runId: string,
+    stamp: CheckpointStamp,
+    base: WorkflowCheckpoint[],
+    toFetch: WorkflowCheckpoint[],
+    seq = ++this.cpLoadSeq,
+  ): Promise<void> {
+    this.cpHydrating = true;
+    const updated = base.slice();
+    let changed = false;
+    try {
+      for (const target of toFetch) {
+        if (this.destroyed || seq !== this.cpLoadSeq || this.run?.id !== runId) return;
+        try {
+          const detail = (await workflowCheckpointDetail(runId, target.node_id)).body;
+          if (this.destroyed || seq !== this.cpLoadSeq || this.run?.id !== runId) return;
+          this.cpCache.set(detail.node_id, detail);
+          this.cpPendingDetails.delete(detail.node_id);
+          const idx = updated.findIndex((c) => c.node_id === detail.node_id);
+          if (idx >= 0) {
+            updated[idx] = detail;
+            changed = true;
+          }
+        } catch {
+          // Keep the summary row and mark this detail for retry on the next refresh (OBS-2).
+          this.cpPendingDetails.add(target.node_id);
+        }
+      }
+      if (changed && this.cpStamp?.runId === stamp.runId && this.cpStamp?.generation === stamp.generation) {
+        this.checkpoints = updated;
+      }
+    } finally {
+      this.cpHydrating = false;
+    }
+  }
 
   /** One workflow_run_updated event for the viewed run: applied in place
    *  when it is the contiguous next rev, else one refetch. */

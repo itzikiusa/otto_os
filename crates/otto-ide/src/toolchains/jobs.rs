@@ -14,7 +14,7 @@ use crate::types::{
 };
 
 use super::installer::install_local_sdk;
-use super::installer_remote::{build_remote_install_script, run_ssh_streaming};
+use super::installer_remote::run_ssh_streaming;
 use super::installer_tools::{install_local_dap, install_local_lsp};
 use super::{ToolchainManager, MAX_FINISHED_JOBS, MAX_JOB_LOGS};
 
@@ -114,13 +114,23 @@ impl ToolchainManager {
                         sdk_entry,
                         req.go_root.as_deref(),
                         req.zig_home.as_deref(),
+                        req.dotnet_root.as_deref(),
                     )
                     .await
                 }
                 IdeTargetKind::Ssh => match ssh {
                     Some(spec) => {
-                        mgr.run_ssh_install(&job_id, &spec, eco, req.component, platform, sdk_entry)
-                            .await
+                        mgr.run_ssh_install(
+                            &job_id,
+                            &spec,
+                            eco,
+                            req.component,
+                            platform,
+                            sdk_entry,
+                            req.version.as_deref(),
+                            req.zig_home.as_deref(),
+                        )
+                        .await
                     }
                     None => Err("missing SSH connection specification".to_string()),
                 },
@@ -190,10 +200,13 @@ impl ToolchainManager {
         sdk_entry: Option<CatalogSdkEntry>,
         go_root: Option<&str>,
         zig_home: Option<&str>,
+        dotnet_root: Option<&str>,
     ) -> std::result::Result<String, String> {
         let root = self.toolchains_dir();
         let go_root = go_root.map(Path::new);
-        let zig_home = zig_home.map(Path::new);
+        let mut effective_zig_home: Option<std::path::PathBuf> =
+            zig_home.map(std::path::PathBuf::from);
+        let dotnet_root = dotnet_root.map(Path::new);
         tokio::fs::create_dir_all(&root)
             .await
             .map_err(|e| format!("create toolchains dir: {e}"))?;
@@ -205,6 +218,9 @@ impl ToolchainManager {
             let entry = sdk_entry.ok_or_else(|| "missing SDK catalog entry".to_string())?;
             self.log_progress(job_id, 15, format!("Downloading {}...", entry.label));
             final_path = install_local_sdk(self, job_id, &root, eco, &entry).await?;
+            if eco == EcosystemKind::Zig {
+                effective_zig_home = resolve_lsp_zig_home(Some(&final_path), zig_home);
+            }
         }
         if matches!(
             component,
@@ -215,8 +231,17 @@ impl ToolchainManager {
                 65,
                 format!("Installing LSP ({})...", eco.lsp_name()),
             );
-            let p =
-                install_local_lsp(self, job_id, &root, eco, platform, go_root, zig_home).await?;
+            let p = install_local_lsp(
+                self,
+                job_id,
+                &root,
+                eco,
+                platform,
+                go_root,
+                effective_zig_home.as_deref(),
+                dotnet_root,
+            )
+            .await?;
             if component == IdeInstallComponent::Lsp {
                 final_path = p;
             }
@@ -239,6 +264,7 @@ impl ToolchainManager {
         Ok(final_path)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn run_ssh_install(
         &self,
         job_id: &str,
@@ -247,8 +273,53 @@ impl ToolchainManager {
         component: IdeInstallComponent,
         platform: TargetPlatform,
         sdk_entry: Option<CatalogSdkEntry>,
+        requested_version: Option<&str>,
+        zig_home: Option<&str>,
     ) -> std::result::Result<String, String> {
-        let script = build_remote_install_script(eco, component, platform, sdk_entry.as_ref())?;
+        let zls_release = if eco == EcosystemKind::Zig
+            && matches!(
+                component,
+                IdeInstallComponent::Lsp | IdeInstallComponent::All
+            ) {
+            let remote_zig_ver = match (
+                sdk_entry.as_ref().map(|e| e.version.as_str()),
+                requested_version.map(str::trim).filter(|s| !s.is_empty()),
+            ) {
+                (Some(v), _) | (None, Some(v)) => Some(v.to_string()),
+                (None, None) => {
+                    // Probe the selected/active Zig version on the SSH host so ZLS matches it.
+                    let probe_cmd = build_remote_zig_version_probe_cmd(zig_home);
+                    run_ssh_streaming(ssh, &probe_cmd, |_| {})
+                        .await
+                        .ok()
+                        .map(|v| v.trim().to_string())
+                        .filter(|v| super::discovery::zig_major_minor(v).is_some())
+                }
+            };
+            let lookup_ver = remote_zig_ver
+                .as_deref()
+                .unwrap_or_else(|| EcosystemKind::Zig.default_sdk_version());
+            let rel = self
+                .catalog
+                .fetch_zls_release(lookup_ver, platform)
+                .await
+                .ok_or_else(|| {
+                    format!(
+                        "Could not fetch verified ZLS release checksum for Zig {lookup_ver} ({}); retry when releases.zigtools.org is reachable",
+                        platform.zig_index_key()
+                    )
+                })?;
+            Some(rel)
+        } else {
+            None
+        };
+        let script = super::installer_remote::build_remote_install_script_with_zls(
+            eco,
+            component,
+            platform,
+            sdk_entry.as_ref(),
+            zls_release.as_ref(),
+        )?;
         self.log_progress(
             job_id,
             20,
@@ -256,4 +327,38 @@ impl ToolchainManager {
         );
         run_ssh_streaming(ssh, &script, |line| self.log_progress(job_id, 60, line)).await
     }
+}
+
+/// Build the remote shell probe that resolves the selected Zig SDK version across
+/// both supported layouts (`<home>/zig` and `<home>/bin/zig`) before falling back
+/// to managed `current` or `PATH` (BUG-2).
+pub(super) fn build_remote_zig_version_probe_cmd(zig_home: Option<&str>) -> String {
+    let mut candidates: Vec<String> = Vec::new();
+    if let Some(h) = zig_home
+        .map(str::trim)
+        .map(|s| s.trim_end_matches('/'))
+        .filter(|s| !s.is_empty())
+    {
+        candidates.push(shell_words::quote(&format!("{h}/zig")).into_owned());
+        candidates.push(shell_words::quote(&format!("{h}/bin/zig")).into_owned());
+    }
+    candidates.push("\"$HOME/.otto/toolchains/zig/current/zig\"".into());
+    candidates.push("\"$HOME/.otto/toolchains/zig/current/bin/zig\"".into());
+    candidates.push("zig".into());
+    format!(
+        "for z in {}; do if [ -x \"$z\" ] || command -v \"$z\" >/dev/null 2>&1; then v=$(\"$z\" version 2>/dev/null | head -n 1); [ -n \"$v\" ] && echo \"INSTALLED_PATH:$v\" && break; fi; done",
+        candidates.join(" ")
+    )
+}
+
+/// Prefer the Zig SDK path just installed in `All` mode over any stale request `zig_home` (BUG-3).
+pub(super) fn resolve_lsp_zig_home(
+    installed_sdk_path: Option<&str>,
+    req_zig_home: Option<&str>,
+) -> Option<std::path::PathBuf> {
+    installed_sdk_path
+        .or(req_zig_home)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
 }

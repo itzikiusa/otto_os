@@ -190,6 +190,171 @@ pub async fn plan_lsp_install_compound(
     Ok(unique.join("; echo; "))
 }
 
+/// Project environment key opting a Zig project into automatic ZLS startup
+/// (ZLS evaluates `build.zig` during source discovery).
+pub const TRUST_ZIG_LSP_ENV: &str = "OTTO_IDE_TRUST_ZIG_BUILD";
+/// Project environment key opting a Kotlin project into automatic `kotlin-language-server`
+/// startup (KLS invokes Gradle/Maven build scripts during workspace import).
+pub const TRUST_KOTLIN_LSP_ENV: &str = "OTTO_IDE_TRUST_KOTLIN_LSP";
+/// Project environment key opting a Vue project into automatic standalone `vue-language-server`
+/// startup (Vue 2.2.10 loads project-selected plugins from `tsconfig.json` / `jsconfig.json`).
+pub const TRUST_VUE_LSP_ENV: &str = "OTTO_IDE_TRUST_VUE_LSP";
+/// Project environment key opting a .NET project into automatic `csharp-ls` / `fsautocomplete`
+/// startup (they load the MSBuild project, whose design-time build runs the project's targets).
+pub const TRUST_DOTNET_LSP_ENV: &str = "OTTO_IDE_TRUST_DOTNET_LSP";
+/// Shared project environment key opting a project into trusted build-tool execution.
+pub const TRUST_PROJECT_EXECUTION_ENV: &str = "OTTO_IDE_TRUST_PROJECT_EXECUTION";
+
+fn dotnet_lsp_untrusted() -> LspWsError {
+    LspWsError {
+        status: StatusCode::FORBIDDEN,
+        code: "dotnet_lsp_requires_trust",
+        message: format!(
+            "the .NET language server loads the MSBuild project, whose design-time build runs the project's targets; set {TRUST_DOTNET_LSP_ENV}=1 (or {TRUST_PROJECT_EXECUTION_ENV}=1) in project environment settings to start it"
+        ),
+    }
+}
+
+fn lsp_execution_trusted_for_key(
+    envs: &crate::environments::EnvironmentManager,
+    root: &str,
+    boundary_root: Option<&str>,
+    ssh_conn_id: Option<&str>,
+    lang_key: &str,
+) -> bool {
+    let trimmed = root.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return false;
+    }
+    let boundary = boundary_root
+        .map(|b| b.trim().trim_end_matches('/'))
+        .filter(|b| !b.is_empty())
+        .map(Path::new);
+    let has_opt_in = |env: &crate::types::IdeProjectEnvironment| {
+        env.env_vars.iter().any(|v| {
+            !v.secret
+                && (v.key == lang_key || v.key == TRUST_PROJECT_EXECUTION_ENV)
+                && v.value.as_deref().is_some_and(|val| val.trim() == "1")
+        })
+    };
+    let mut cur = Path::new(trimmed);
+    for _ in 0..8 {
+        if let Some(b) = boundary {
+            if !cur.starts_with(b) {
+                break;
+            }
+        }
+        let cur_s = cur.to_string_lossy();
+        let lookup_key = match ssh_conn_id {
+            Some(cid) => format!("ssh:{cid}:{cur_s}"),
+            None => cur_s.into_owned(),
+        };
+        if envs
+            .cached_explicit_project_env(&lookup_key)
+            .is_some_and(|env| has_opt_in(&env))
+        {
+            return true;
+        }
+        if boundary.is_some_and(|b| cur == b) {
+            break;
+        }
+        let Some(parent) = cur.parent() else {
+            break;
+        };
+        if parent == cur || parent == Path::new("/") {
+            break;
+        }
+        cur = parent;
+    }
+    false
+}
+
+/// Returns `true` only when the opened project root (or a sub-module inside it, NEVER
+/// an ancestor directory outside `opened_project_root`) explicitly opted in to Zig build
+/// execution via a non-secret `OTTO_IDE_TRUST_ZIG_BUILD=1` or
+/// `OTTO_IDE_TRUST_PROJECT_EXECUTION=1` entry in `IdeProjectEnvironment::env_vars`.
+pub fn zig_lsp_execution_trusted_for_project(
+    envs: &crate::environments::EnvironmentManager,
+    resolved_root: &str,
+    opened_project_root: &str,
+    ssh_conn_id: Option<&str>,
+) -> bool {
+    lsp_execution_trusted_for_key(
+        envs,
+        resolved_root,
+        Some(opened_project_root),
+        ssh_conn_id,
+        TRUST_ZIG_LSP_ENV,
+    )
+}
+
+/// Convenience wrapper checking exact project trust on `root` (does not inherit from
+/// filesystem ancestors above `root`).
+pub fn zig_lsp_execution_trusted(
+    envs: &crate::environments::EnvironmentManager,
+    root: &str,
+    ssh_conn_id: Option<&str>,
+) -> bool {
+    zig_lsp_execution_trusted_for_project(envs, root, root, ssh_conn_id)
+}
+
+/// Returns `true` only when the opened project root (or a sub-module inside it, NEVER
+/// an ancestor directory outside `opened_project_root`) explicitly opted in to Kotlin
+/// LSP build execution via a non-secret `OTTO_IDE_TRUST_KOTLIN_LSP=1` or
+/// `OTTO_IDE_TRUST_PROJECT_EXECUTION=1` entry in `IdeProjectEnvironment::env_vars`.
+pub fn kotlin_lsp_execution_trusted_for_project(
+    envs: &crate::environments::EnvironmentManager,
+    resolved_root: &str,
+    opened_project_root: &str,
+    ssh_conn_id: Option<&str>,
+) -> bool {
+    lsp_execution_trusted_for_key(
+        envs,
+        resolved_root,
+        Some(opened_project_root),
+        ssh_conn_id,
+        TRUST_KOTLIN_LSP_ENV,
+    )
+}
+
+/// Convenience wrapper checking exact project trust on `root` (does not inherit from
+/// filesystem ancestors above `root`).
+pub fn kotlin_lsp_execution_trusted(
+    envs: &crate::environments::EnvironmentManager,
+    root: &str,
+    ssh_conn_id: Option<&str>,
+) -> bool {
+    kotlin_lsp_execution_trusted_for_project(envs, root, root, ssh_conn_id)
+}
+
+/// Returns `true` only when the opened project root (or a sub-module inside it, NEVER
+/// an ancestor directory outside `opened_project_root` or a synthetic child snapshot
+/// cloned from another parent) explicitly opted in to Vue standalone LSP plugin loading
+/// via `OTTO_IDE_TRUST_VUE_LSP=1` or `OTTO_IDE_TRUST_PROJECT_EXECUTION=1` (`SEC3-2`).
+pub fn vue_lsp_execution_trusted_for_project(
+    envs: &crate::environments::EnvironmentManager,
+    resolved_root: &str,
+    opened_project_root: &str,
+    ssh_conn_id: Option<&str>,
+) -> bool {
+    lsp_execution_trusted_for_key(
+        envs,
+        resolved_root,
+        Some(opened_project_root),
+        ssh_conn_id,
+        TRUST_VUE_LSP_ENV,
+    )
+}
+
+/// Convenience wrapper checking exact project trust on `root` for Vue LSP.
+pub fn vue_lsp_execution_trusted(
+    envs: &crate::environments::EnvironmentManager,
+    root: &str,
+    ssh_conn_id: Option<&str>,
+) -> bool {
+    vue_lsp_execution_trusted_for_project(envs, root, root, ssh_conn_id)
+}
+
 /// Validate query parameters, authorize SSH or local workspace roots, sync
 /// effective Go build tags for `go`, and prepare the [`PoolKey`] + [`SpawnLaunch`].
 pub async fn prepare_lsp_ws_session<C: IdeCtx>(
@@ -265,11 +430,104 @@ pub async fn prepare_lsp_ws_session<C: IdeCtx>(
         };
         let trimmed = root.trim_end_matches('/');
         let norm_root = if trimmed.is_empty() { "/" } else { trimmed }.to_string();
+        if remote.lang == "zig"
+            && !zig_lsp_execution_trusted_for_project(
+                &ide.environments,
+                &norm_root,
+                &norm_root,
+                Some(&conn_id),
+            )
+        {
+            return Err(LspWsError {
+                status: StatusCode::FORBIDDEN,
+                code: "zig_lsp_requires_trust",
+                message: format!(
+                    "ZLS evaluates build.zig during discovery; set {TRUST_ZIG_LSP_ENV}=1 in project environment settings to start ZLS"
+                ),
+            });
+        }
+        if remote.lang == "kotlin"
+            && !kotlin_lsp_execution_trusted(&ide.environments, &norm_root, Some(&conn_id))
+        {
+            return Err(LspWsError {
+                status: StatusCode::FORBIDDEN,
+                code: "kotlin_lsp_requires_trust",
+                message: format!(
+                    "kotlin-language-server runs Gradle/Maven build scripts during workspace import; set {TRUST_KOTLIN_LSP_ENV}=1 (or {TRUST_PROJECT_EXECUTION_ENV}=1) in project environment settings to start it"
+                ),
+            });
+        }
+        if remote.lang == "vue"
+            && !vue_lsp_execution_trusted(&ide.environments, &norm_root, Some(&conn_id))
+        {
+            return Err(LspWsError {
+                status: StatusCode::FORBIDDEN,
+                code: "vue_lsp_requires_trust",
+                message: format!(
+                    "vue-language-server loads project-configured Vue/TypeScript plugins from tsconfig.json; set {TRUST_VUE_LSP_ENV}=1 (or {TRUST_PROJECT_EXECUTION_ENV}=1) in project environment settings to start it"
+                ),
+            });
+        }
+        if matches!(remote.lang.as_str(), "csharp" | "fsharp")
+            && !lsp_execution_trusted_for_key(
+                &ide.environments,
+                &norm_root,
+                Some(&norm_root),
+                Some(&conn_id),
+                TRUST_DOTNET_LSP_ENV,
+            )
+        {
+            return Err(dotnet_lsp_untrusted());
+        }
+        let remote_vue_tsdk = if remote.lang == "vue" {
+            let ssh_target = crate::target::ResolvedTarget::Ssh {
+                spec: ssh_spec.clone(),
+                root: norm_root.clone(),
+                additional_roots: Vec::new(),
+                actor_id: user.id.to_string(),
+            };
+            let probe = ide
+                .targets
+                .exec_shell(
+                    &ssh_target,
+                    super::pool_spawn::build_remote_vue_tsdk_probe_script(),
+                    None,
+                    &std::collections::BTreeMap::new(),
+                    std::time::Duration::from_secs(5),
+                )
+                .await
+                .ok()
+                .filter(|o| o.success())
+                .and_then(|o| {
+                    o.stdout
+                        .lines()
+                        .map(str::trim)
+                        .find(|l| l.starts_with('/'))
+                        .map(str::to_owned)
+                });
+            let Some(tsdk) = probe else {
+                return Err(LspWsError::unavailable(
+                    "vue-language-server on SSH host requires TypeScript (typescript/lib); install remote Node LSP via Toolchains & SDKs",
+                ));
+            };
+            Some(tsdk)
+        } else {
+            None
+        };
+        let remote_zig_home = if remote.lang == "zig" {
+            ide.environments
+                .cached_project_env(&format!("ssh:{conn_id}:{norm_root}"))
+                .and_then(|e| e.zig_home)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        } else {
+            None
+        };
         return Ok(PreparedLspSession {
             key: PoolKey {
                 owner: user.id.to_string(),
                 lang: remote.lang,
-                root: norm_root,
+                root: norm_root.clone(),
                 ssh: Some(ssh_spec),
                 go_build_tags: Vec::new(),
             },
@@ -278,6 +536,9 @@ pub async fn prepare_lsp_ws_session<C: IdeCtx>(
                 args: remote.primary_args,
                 fallback_cmd: remote.fallback_cmd,
                 fallback_args: remote.fallback_args,
+                project_root: Some(norm_root),
+                zig_home: remote_zig_home,
+                vue_tsdk: remote_vue_tsdk,
             },
             file_hint,
         });
@@ -336,6 +597,119 @@ pub async fn prepare_lsp_ws_session<C: IdeCtx>(
             resolved.command
         )));
     }
+    #[allow(clippy::disallowed_methods)]
+    let opened_root = std::fs::canonicalize(&expanded_root)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| expanded_root.clone());
+    if resolved.lang == "zig"
+        && !zig_lsp_execution_trusted_for_project(
+            &ide.environments,
+            &resolved_root,
+            &opened_root,
+            None,
+        )
+    {
+        return Err(LspWsError {
+            status: StatusCode::FORBIDDEN,
+            code: "zig_lsp_requires_trust",
+            message: format!(
+                "ZLS evaluates build.zig during discovery; set {TRUST_ZIG_LSP_ENV}=1 in project environment settings to start ZLS"
+            ),
+        });
+    }
+    if resolved.lang == "kotlin"
+        && !kotlin_lsp_execution_trusted_for_project(
+            &ide.environments,
+            &resolved_root,
+            &opened_root,
+            None,
+        )
+    {
+        return Err(LspWsError {
+            status: StatusCode::FORBIDDEN,
+            code: "kotlin_lsp_requires_trust",
+            message: format!(
+                "kotlin-language-server runs Gradle/Maven build scripts during workspace import; set {TRUST_KOTLIN_LSP_ENV}=1 (or {TRUST_PROJECT_EXECUTION_ENV}=1) in project environment settings to start it"
+            ),
+        });
+    }
+    if resolved.lang == "vue"
+        && !vue_lsp_execution_trusted_for_project(
+            &ide.environments,
+            &resolved_root,
+            &opened_root,
+            None,
+        )
+    {
+        return Err(LspWsError {
+            status: StatusCode::FORBIDDEN,
+            code: "vue_lsp_requires_trust",
+            message: format!(
+                "vue-language-server loads project-configured Vue/TypeScript plugins from tsconfig.json; set {TRUST_VUE_LSP_ENV}=1 (or {TRUST_PROJECT_EXECUTION_ENV}=1) in project environment settings to start it"
+            ),
+        });
+    }
+    if matches!(resolved.lang.as_str(), "csharp" | "fsharp")
+        && !lsp_execution_trusted_for_key(
+            &ide.environments,
+            &resolved_root,
+            Some(&opened_root),
+            None,
+            TRUST_DOTNET_LSP_ENV,
+        )
+    {
+        return Err(dotnet_lsp_untrusted());
+    }
+
+    let mut launch_cmd = resolved.command;
+    let local_vue_tsdk = if resolved.lang == "vue" {
+        let data_dir = ide.data_dir.clone();
+        let cmd_cl = launch_cmd.clone();
+        let found = tokio::task::spawn_blocking(move || {
+            servers::detect_local_typescript_tsdk(&data_dir, Some(&cmd_cl))
+        })
+        .await
+        .map_err(|_| LspWsError::internal("local TypeScript SDK lookup failed"))?;
+        let Some(tsdk) = found else {
+            return Err(LspWsError::unavailable(
+                "vue-language-server requires TypeScript (typescript/lib); install Node LSP via Toolchains & SDKs or install typescript globally",
+            ));
+        };
+        Some(tsdk)
+    } else {
+        None
+    };
+    if resolved.lang == "zig" {
+        if let Some(zig_home) = ide
+            .environments
+            .cached_project_env_for_module(&resolved_root, Some(&opened_root))
+            .and_then(|e| e.zig_home)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
+            let data_dir = ide.data_dir.clone();
+            if let Ok(Some(matched_zls)) = tokio::task::spawn_blocking(move || {
+                let zig_ver = crate::toolchains::discovery::zig_bin_in_home(Path::new(&zig_home))
+                    .and_then(|b| crate::toolchains::discovery::read_zig_bin_version(&b));
+                let mut tc_roots = vec![data_dir.join("toolchains")];
+                if !otto_core::e2e::isolated() {
+                    if let Some(dot_otto) = dirs::home_dir().map(|h| h.join(".otto/toolchains")) {
+                        if !tc_roots.contains(&dot_otto) {
+                            tc_roots.push(dot_otto);
+                        }
+                    }
+                }
+                crate::toolchains::discovery::resolve_managed_zls_for_zig_version(
+                    &tc_roots,
+                    zig_ver.as_deref(),
+                )
+            })
+            .await
+            {
+                launch_cmd = matched_zls.to_string_lossy().into_owned();
+            }
+        }
+    }
 
     let canon_go_tags = if resolved.lang == "go" {
         let eff_tags = ide
@@ -348,6 +722,9 @@ pub async fn prepare_lsp_ws_session<C: IdeCtx>(
         Vec::new()
     };
 
+    let mut launch = SpawnLaunch::primary(launch_cmd, resolved.args);
+    launch.project_root = Some(opened_root);
+    launch.vue_tsdk = local_vue_tsdk;
     Ok(PreparedLspSession {
         key: PoolKey {
             owner: user.id.to_string(),
@@ -356,7 +733,7 @@ pub async fn prepare_lsp_ws_session<C: IdeCtx>(
             ssh: None,
             go_build_tags: canon_go_tags,
         },
-        launch: SpawnLaunch::primary(resolved.command, resolved.args),
+        launch,
         file_hint,
     })
 }
@@ -555,5 +932,866 @@ mod root_tests {
         let d = tempfile::tempdir().unwrap();
         let plain = std::fs::canonicalize(d.path()).unwrap();
         assert!(secret_root_denial(&plain).is_none());
+    }
+
+    #[test]
+    fn zig_lsp_requires_explicit_project_execution_trust() {
+        let tmp = tempfile::tempdir().unwrap();
+        let envs = crate::environments::EnvironmentManager::new(tmp.path().to_path_buf());
+        let root = tmp.path().join("zig-repo");
+        let nested = root.join("sub-pkg");
+        let root_s = root.to_string_lossy().into_owned();
+        let nested_s = nested.to_string_lossy().into_owned();
+
+        // Untrusted by default (neither root nor nested sub-package may auto-start ZLS).
+        assert!(!zig_lsp_execution_trusted(&envs, &root_s, None));
+        assert!(!zig_lsp_execution_trusted(&envs, &nested_s, None));
+
+        // Secret or value != "1" must not enable execution trust.
+        envs.seed_snapshot(
+            &root_s,
+            crate::types::IdeProjectEnvironment {
+                env_vars: vec![
+                    crate::types::IdeEnvVarEntry {
+                        key: TRUST_ZIG_LSP_ENV.into(),
+                        value: Some("1".into()),
+                        secret: true,
+                        has_secret: true,
+                    },
+                    crate::types::IdeEnvVarEntry {
+                        key: TRUST_PROJECT_EXECUTION_ENV.into(),
+                        value: Some("0".into()),
+                        secret: false,
+                        has_secret: false,
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+        assert!(!zig_lsp_execution_trusted(&envs, &root_s, None));
+
+        // Explicit non-secret OTTO_IDE_TRUST_ZIG_BUILD=1 approves the opened project and its
+        // own sub-modules, but opening the nested directory as an independent project must NOT
+        // inherit trust from an ancestor directory outside the opened project (SEC-2).
+        envs.seed_snapshot(
+            &root_s,
+            crate::types::IdeProjectEnvironment {
+                env_vars: vec![crate::types::IdeEnvVarEntry {
+                    key: TRUST_ZIG_LSP_ENV.into(),
+                    value: Some("1".into()),
+                    secret: false,
+                    has_secret: false,
+                }],
+                ..Default::default()
+            },
+        );
+        assert!(zig_lsp_execution_trusted(&envs, &root_s, None));
+        assert!(zig_lsp_execution_trusted_for_project(
+            &envs, &nested_s, &root_s, None
+        ));
+        assert!(!zig_lsp_execution_trusted(&envs, &nested_s, None));
+        assert!(!zig_lsp_execution_trusted(&envs, &root_s, Some("ssh-1")));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prepare_lsp_ws_session_enforces_kotlin_and_dotnet_trust_locally_over_ssh_and_blocks_ancestor_inheritance(
+    ) {
+        use std::os::unix::fs::PermissionsExt;
+
+        use otto_core::auth::{BoxFuture, RoleChecker};
+        use otto_core::domain::{User, WorkspaceRole};
+        use otto_core::secrets::SecretStore;
+        use otto_core::{Id, Result};
+
+        #[derive(Default)]
+        struct NoopSecrets;
+        impl SecretStore for NoopSecrets {
+            fn put(&self, _k: &str, _v: &str) -> Result<()> {
+                Ok(())
+            }
+            fn get(&self, _k: &str) -> Result<Option<String>> {
+                Ok(None)
+            }
+            fn delete(&self, _k: &str) -> Result<()> {
+                Ok(())
+            }
+        }
+        struct AllowRoles;
+        impl RoleChecker for AllowRoles {
+            fn check<'a>(
+                &'a self,
+                _user: &'a User,
+                _ws: &'a Id,
+                _min: WorkspaceRole,
+            ) -> BoxFuture<'a, Result<()>> {
+                Box::pin(async { Ok(()) })
+            }
+        }
+        #[derive(Clone)]
+        struct TestIdeCtx {
+            ide: Arc<IdeEngine>,
+            pool: otto_state::DbPool,
+            secrets: Arc<dyn SecretStore>,
+            roles: Arc<dyn RoleChecker>,
+            data_dir: PathBuf,
+        }
+        impl IdeCtx for TestIdeCtx {
+            fn ide(&self) -> &Arc<IdeEngine> {
+                &self.ide
+            }
+            fn pool(&self) -> otto_state::DbPool {
+                self.pool.clone()
+            }
+            fn secrets(&self) -> &Arc<dyn SecretStore> {
+                &self.secrets
+            }
+            fn data_dir(&self) -> &Path {
+                &self.data_dir
+            }
+            fn roles(&self) -> &Arc<dyn RoleChecker> {
+                &self.roles
+            }
+            fn resolve_ssh_connection<'a>(
+                &'a self,
+                _user: &'a User,
+                connection_id: &'a Id,
+            ) -> BoxFuture<'a, Result<crate::IdeSshSpec>> {
+                let cid = connection_id.to_string();
+                Box::pin(async move {
+                    Ok(crate::IdeSshSpec {
+                        connection_id: cid,
+                        name: "remote".into(),
+                        host: "remote.example".into(),
+                        port: Some(22),
+                        user: "dev".into(),
+                        identity_file: None,
+                        proxy_jump: None,
+                        environment: None,
+                    })
+                })
+            }
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        // Provision a fake managed kotlin-language-server so `resolve_lang_with_ide` reports available=true.
+        let fake_kls = data_dir.join("toolchains/kotlin/bin/kotlin-language-server");
+        std::fs::create_dir_all(fake_kls.parent().unwrap()).unwrap();
+        std::fs::write(&fake_kls, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&fake_kls, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for dotnet_ls in ["csharp-ls", "fsautocomplete"] {
+            let bin = data_dir.join("toolchains/dotnet/bin").join(dotnet_ls);
+            std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+            std::fs::write(&bin, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let parent_repo = tmp.path().join("trusted-parent");
+        let sub_mod = parent_repo.join("sub-mod");
+        let untrusted_child = parent_repo.join("untrusted-checkout");
+        std::fs::create_dir_all(sub_mod.join("src/main/kotlin")).unwrap();
+        std::fs::create_dir_all(untrusted_child.join("src/main/kotlin")).unwrap();
+        std::fs::write(
+            parent_repo.join("settings.gradle.kts"),
+            "include(\":sub-mod\")\n",
+        )
+        .unwrap();
+        std::fs::write(
+            sub_mod.join("build.gradle.kts"),
+            "plugins { kotlin(\"jvm\") }\n",
+        )
+        .unwrap();
+        let sub_kt = sub_mod.join("src/main/kotlin/App.kt");
+        std::fs::write(&sub_kt, "fun main() {}\n").unwrap();
+        std::fs::write(
+            untrusted_child.join("build.gradle.kts"),
+            "plugins { kotlin(\"jvm\") }\n",
+        )
+        .unwrap();
+
+        let canon_parent = std::fs::canonicalize(&parent_repo).unwrap();
+        let canon_child = std::fs::canonicalize(&untrusted_child).unwrap();
+        let canon_sub_kt = std::fs::canonicalize(&sub_kt).unwrap();
+
+        let pool = otto_state::db::open(&tmp.path().join("ide.db"))
+            .await
+            .unwrap();
+        let ide = Arc::new(IdeEngine::new(data_dir.clone()));
+        let ctx = TestIdeCtx {
+            ide: Arc::clone(&ide),
+            pool,
+            secrets: Arc::new(NoopSecrets),
+            roles: Arc::new(AllowRoles),
+            data_dir,
+        };
+        let root_user = User {
+            id: "u-root".into(),
+            username: "root".into(),
+            display_name: "Root".into(),
+            is_root: true,
+            disabled: false,
+            created_at: chrono::Utc::now(),
+        };
+
+        // 1. Untrusted local Kotlin project is denied with 403 kotlin_lsp_requires_trust.
+        let err = prepare_lsp_ws_session(
+            &ctx,
+            &root_user,
+            LspWsQuery {
+                lang: Some("kotlin".into()),
+                root: Some(canon_parent.to_string_lossy().into_owned()),
+                file: None,
+                connection_id: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status, StatusCode::FORBIDDEN);
+        assert_eq!(err.code, "kotlin_lsp_requires_trust");
+
+        // 2. Trusting `canon_parent` — EVEN WHEN `canon_parent` configures `module_sdks`
+        //    and `module_go_build_tags` targeting `canon_child` (which synthesizes a child
+        //    snapshot in `EnvironmentManager`) — allows opening `canon_parent` (including its
+        //    own `sub-mod`), but MUST NOT trust an independent checkout opened at `canon_child`.
+        ide.environments.seed_snapshot(
+            &format!("local:{}", canon_parent.to_string_lossy()),
+            crate::types::IdeProjectEnvironment {
+                env_vars: vec![crate::types::IdeEnvVarEntry {
+                    key: TRUST_KOTLIN_LSP_ENV.into(),
+                    value: Some("1".into()),
+                    secret: false,
+                    has_secret: false,
+                }],
+                module_sdks: std::collections::BTreeMap::from([(
+                    canon_child.to_string_lossy().into_owned(),
+                    "/opt/jdk-21".into(),
+                )]),
+                module_go_build_tags: std::collections::BTreeMap::from([(
+                    canon_child.to_string_lossy().into_owned(),
+                    vec!["e2e".into()],
+                )]),
+                ..Default::default()
+            },
+        );
+        let ok_parent = prepare_lsp_ws_session(
+            &ctx,
+            &root_user,
+            LspWsQuery {
+                lang: Some("kotlin".into()),
+                root: Some(canon_parent.to_string_lossy().into_owned()),
+                file: Some(canon_sub_kt.to_string_lossy().into_owned()),
+                connection_id: None,
+            },
+        )
+        .await;
+        assert!(
+            ok_parent.is_ok(),
+            "trusted project sub-module should be allowed: {ok_parent:?}"
+        );
+
+        let err_nested = prepare_lsp_ws_session(
+            &ctx,
+            &root_user,
+            LspWsQuery {
+                lang: Some("kotlin".into()),
+                root: Some(canon_child.to_string_lossy().into_owned()),
+                file: None,
+                connection_id: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err_nested.status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            err_nested.code, "kotlin_lsp_requires_trust",
+            "independent nested checkout must never inherit trust from ancestor directory"
+        );
+
+        // 3. Remote SSH Kotlin workspace also requires explicit trust on its ssh key.
+        let err_ssh = prepare_lsp_ws_session(
+            &ctx,
+            &root_user,
+            LspWsQuery {
+                lang: Some("kotlin".into()),
+                root: Some("/srv/kt-remote".into()),
+                file: None,
+                connection_id: Some("ssh-1".into()),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err_ssh.status, StatusCode::FORBIDDEN);
+        assert_eq!(err_ssh.code, "kotlin_lsp_requires_trust");
+
+        // Trust is stored under the SSH target's own project key (trailing slash trimmed).
+        let ssh_target = crate::types::IdeTargetSpec {
+            kind: crate::types::IdeTargetKind::Ssh,
+            connection_id: Some("ssh-1".into()),
+            ..crate::types::IdeTargetSpec::local("/srv/kt-remote/")
+        };
+        ide.environments.seed_snapshot(
+            &ssh_target.project_key(),
+            crate::types::IdeProjectEnvironment {
+                env_vars: vec![crate::types::IdeEnvVarEntry {
+                    key: TRUST_PROJECT_EXECUTION_ENV.into(),
+                    value: Some("1".into()),
+                    secret: false,
+                    has_secret: false,
+                }],
+                ..Default::default()
+            },
+        );
+        let ok_ssh = prepare_lsp_ws_session(
+            &ctx,
+            &root_user,
+            LspWsQuery {
+                lang: Some("kotlin".into()),
+                root: Some("/srv/kt-remote".into()),
+                file: None,
+                connection_id: Some("ssh-1".into()),
+            },
+        )
+        .await;
+        assert!(
+            ok_ssh.is_ok(),
+            "trusted SSH Kotlin root should succeed: {ok_ssh:?}"
+        );
+
+        // 4. .NET servers load MSBuild projects on open (design-time builds run the
+        //    project's targets): untrusted locally and on another connection's same path.
+        let dotnet_proj = tmp.path().join("dotnet-app");
+        std::fs::create_dir_all(&dotnet_proj).unwrap();
+        std::fs::write(
+            dotnet_proj.join("App.csproj"),
+            "<Project Sdk=\"Microsoft.NET.Sdk\" />\n",
+        )
+        .unwrap();
+        let canon_dotnet = std::fs::canonicalize(&dotnet_proj).unwrap();
+        for lang in ["csharp", "fsharp"] {
+            let q = |root: &str, conn: Option<&str>| LspWsQuery {
+                lang: Some(lang.into()),
+                root: Some(root.into()),
+                file: None,
+                connection_id: conn.map(String::from),
+            };
+            for (root, conn) in [
+                (canon_dotnet.to_string_lossy().into_owned(), None),
+                ("/srv/kt-remote".to_string(), Some("ssh-2")),
+            ] {
+                let err = prepare_lsp_ws_session(&ctx, &root_user, q(&root, conn))
+                    .await
+                    .unwrap_err();
+                assert_eq!(err.status, StatusCode::FORBIDDEN, "{lang} {root} {conn:?}");
+                assert_eq!(err.code, "dotnet_lsp_requires_trust", "{lang} {conn:?}");
+            }
+            let ok =
+                prepare_lsp_ws_session(&ctx, &root_user, q("/srv/kt-remote", Some("ssh-1"))).await;
+            assert!(ok.is_ok(), "trusted SSH {lang} root should succeed: {ok:?}");
+        }
+        // A trusted lone project (no .sln above it) is served at its own directory.
+        ide.environments.seed_snapshot(
+            &format!("local:{}", canon_dotnet.to_string_lossy()),
+            crate::types::IdeProjectEnvironment {
+                env_vars: vec![crate::types::IdeEnvVarEntry {
+                    key: TRUST_DOTNET_LSP_ENV.into(),
+                    value: Some("1".into()),
+                    secret: false,
+                    has_secret: false,
+                }],
+                ..Default::default()
+            },
+        );
+        let ok_local = prepare_lsp_ws_session(
+            &ctx,
+            &root_user,
+            LspWsQuery {
+                lang: Some("csharp".into()),
+                root: Some(canon_dotnet.to_string_lossy().into_owned()),
+                file: None,
+                connection_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(ok_local.key.root, canon_dotnet.to_string_lossy());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prepare_lsp_ws_session_enforces_zig_trust_and_wires_umbrella_and_ssh_zig_slots() {
+        use std::os::unix::fs::PermissionsExt;
+
+        use otto_core::auth::{BoxFuture, RoleChecker};
+        use otto_core::domain::{User, WorkspaceRole};
+        use otto_core::secrets::SecretStore;
+        use otto_core::{Id, Result};
+
+        #[derive(Default)]
+        struct NoopSecrets;
+        impl SecretStore for NoopSecrets {
+            fn put(&self, _k: &str, _v: &str) -> Result<()> {
+                Ok(())
+            }
+            fn get(&self, _k: &str) -> Result<Option<String>> {
+                Ok(None)
+            }
+            fn delete(&self, _k: &str) -> Result<()> {
+                Ok(())
+            }
+        }
+        struct AllowRoles;
+        impl RoleChecker for AllowRoles {
+            fn check<'a>(
+                &'a self,
+                _user: &'a User,
+                _ws: &'a Id,
+                _min: WorkspaceRole,
+            ) -> BoxFuture<'a, Result<()>> {
+                Box::pin(async { Ok(()) })
+            }
+        }
+        #[derive(Clone)]
+        struct TestIdeCtx {
+            ide: Arc<IdeEngine>,
+            pool: otto_state::DbPool,
+            secrets: Arc<dyn SecretStore>,
+            roles: Arc<dyn RoleChecker>,
+            data_dir: PathBuf,
+        }
+        impl IdeCtx for TestIdeCtx {
+            fn ide(&self) -> &Arc<IdeEngine> {
+                &self.ide
+            }
+            fn pool(&self) -> otto_state::DbPool {
+                self.pool.clone()
+            }
+            fn secrets(&self) -> &Arc<dyn SecretStore> {
+                &self.secrets
+            }
+            fn data_dir(&self) -> &Path {
+                &self.data_dir
+            }
+            fn roles(&self) -> &Arc<dyn RoleChecker> {
+                &self.roles
+            }
+            fn resolve_ssh_connection<'a>(
+                &'a self,
+                _user: &'a User,
+                connection_id: &'a Id,
+            ) -> BoxFuture<'a, Result<crate::IdeSshSpec>> {
+                let cid = connection_id.to_string();
+                Box::pin(async move {
+                    Ok(crate::IdeSshSpec {
+                        connection_id: cid,
+                        name: "remote".into(),
+                        host: "remote.example".into(),
+                        port: Some(22),
+                        user: "dev".into(),
+                        identity_file: None,
+                        proxy_jump: None,
+                        environment: None,
+                    })
+                })
+            }
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        // Provision fake managed ZLS + versioned 0.13 slot and a pinned Zig 0.13 SDK.
+        let fake_zls = data_dir.join("toolchains/zig/bin/zls");
+        let zls_13 = data_dir.join("toolchains/zig/zls/0.13/zls");
+        let pinned_zig_13 = tmp.path().join("sdks/zig-0.13.0");
+        for p in [&fake_zls, &zls_13, &pinned_zig_13.join("zig")] {
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, "#!/bin/sh\necho 0.13.0\n").unwrap();
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let parent_repo = tmp.path().join("trusted-zig-umbrella");
+        let sub_mod = parent_repo.join("sub-pkg");
+        let independent_nested = parent_repo.join("independent-checkout");
+        std::fs::create_dir_all(sub_mod.join("src")).unwrap();
+        std::fs::create_dir_all(independent_nested.join("src")).unwrap();
+        std::fs::write(parent_repo.join("build.zig"), "").unwrap();
+        std::fs::write(sub_mod.join("build.zig"), "").unwrap();
+        let sub_main = sub_mod.join("src/main.zig");
+        std::fs::write(&sub_main, "pub fn main() void {}\n").unwrap();
+        std::fs::write(independent_nested.join("build.zig"), "").unwrap();
+        let ind_main = independent_nested.join("src/main.zig");
+        std::fs::write(&ind_main, "pub fn main() void {}\n").unwrap();
+
+        let canon_parent = std::fs::canonicalize(&parent_repo).unwrap();
+        let canon_ind = std::fs::canonicalize(&independent_nested).unwrap();
+        let canon_sub_main = std::fs::canonicalize(&sub_main).unwrap();
+
+        let pool = otto_state::db::open(&tmp.path().join("ide-zig.db"))
+            .await
+            .unwrap();
+        let ide = Arc::new(IdeEngine::new(data_dir.clone()));
+        let ctx = TestIdeCtx {
+            ide: Arc::clone(&ide),
+            pool,
+            secrets: Arc::new(NoopSecrets),
+            roles: Arc::new(AllowRoles),
+            data_dir,
+        };
+        let root_user = User {
+            id: "u-root".into(),
+            username: "root".into(),
+            display_name: "Root".into(),
+            is_root: true,
+            disabled: false,
+            created_at: chrono::Utc::now(),
+        };
+
+        // 1. SEC-2: Untrusted local Zig project is refused BEFORE attach with 403.
+        let err_local = prepare_lsp_ws_session(
+            &ctx,
+            &root_user,
+            LspWsQuery {
+                lang: Some("zig".into()),
+                root: Some(canon_parent.to_string_lossy().into_owned()),
+                file: Some(canon_sub_main.to_string_lossy().into_owned()),
+                connection_id: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err_local.status, StatusCode::FORBIDDEN);
+        assert_eq!(err_local.code, "zig_lsp_requires_trust");
+
+        // 2. SEC-2: Trusting parent + pinning Zig 0.13 + configuring a `module_sdks` entry
+        //    for `independent_nested` on parent creates a synthetic child snapshot for
+        //    `local:<canon_ind>`. Opening `sub_pkg` AS A MODULE OF `parent` succeeds (and
+        //    inherits 0.13 ZLS + project_root), while opening `independent_nested` AS ITS OWN
+        //    PROJECT must STILL be denied with 403 (ignoring the synthetic child snapshot)!
+        let mut module_sdks = std::collections::BTreeMap::new();
+        module_sdks.insert(
+            canon_ind.to_string_lossy().into_owned(),
+            pinned_zig_13.to_string_lossy().into_owned(),
+        );
+        ide.environments.seed_snapshot(
+            &format!("local:{}", canon_parent.to_string_lossy()),
+            crate::types::IdeProjectEnvironment {
+                zig_home: Some(pinned_zig_13.to_string_lossy().into_owned()),
+                module_sdks,
+                env_vars: vec![crate::types::IdeEnvVarEntry {
+                    key: TRUST_ZIG_LSP_ENV.into(),
+                    value: Some("1".into()),
+                    secret: false,
+                    has_secret: false,
+                }],
+                ..Default::default()
+            },
+        );
+
+        let err_nested = prepare_lsp_ws_session(
+            &ctx,
+            &root_user,
+            LspWsQuery {
+                lang: Some("zig".into()),
+                root: Some(canon_ind.to_string_lossy().into_owned()),
+                file: None,
+                connection_id: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err_nested.status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            err_nested.code, "zig_lsp_requires_trust",
+            "independent nested checkout must not inherit trust from parent directory"
+        );
+
+        let ok_mod = prepare_lsp_ws_session(
+            &ctx,
+            &root_user,
+            LspWsQuery {
+                lang: Some("zig".into()),
+                root: Some(canon_parent.to_string_lossy().into_owned()),
+                file: Some(canon_sub_main.to_string_lossy().into_owned()),
+                connection_id: None,
+            },
+        )
+        .await
+        .expect("sub-module inside trusted umbrella must attach");
+        assert_eq!(
+            ok_mod.launch.project_root.as_deref(),
+            Some(canon_parent.to_string_lossy().as_ref())
+        );
+        assert_eq!(ok_mod.launch.cmd, zls_13.to_string_lossy());
+
+        // 3. SEC-2 + BUG-4: Untrusted SSH Zig workspace is denied with 403; once trusted,
+        //    `prepare_lsp_ws_session` forwards the pinned remote `zig_home` to SpawnLaunch.
+        let err_ssh = prepare_lsp_ws_session(
+            &ctx,
+            &root_user,
+            LspWsQuery {
+                lang: Some("zig".into()),
+                root: Some("/srv/zig-remote".into()),
+                file: None,
+                connection_id: Some("ssh-1".into()),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err_ssh.status, StatusCode::FORBIDDEN);
+        assert_eq!(err_ssh.code, "zig_lsp_requires_trust");
+
+        ide.environments.seed_snapshot(
+            "ssh:ssh-1:/srv/zig-remote",
+            crate::types::IdeProjectEnvironment {
+                zig_home: Some("/home/dev/.otto/toolchains/zig/sdks/0.13.0".into()),
+                env_vars: vec![crate::types::IdeEnvVarEntry {
+                    key: TRUST_ZIG_LSP_ENV.into(),
+                    value: Some("1".into()),
+                    secret: false,
+                    has_secret: false,
+                }],
+                ..Default::default()
+            },
+        );
+        let ok_ssh = prepare_lsp_ws_session(
+            &ctx,
+            &root_user,
+            LspWsQuery {
+                lang: Some("zig".into()),
+                root: Some("/srv/zig-remote".into()),
+                file: None,
+                connection_id: Some("ssh-1".into()),
+            },
+        )
+        .await
+        .expect("trusted SSH Zig workspace should succeed");
+        assert_eq!(
+            ok_ssh.launch.zig_home.as_deref(),
+            Some("/home/dev/.otto/toolchains/zig/sdks/0.13.0")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn vue_lsp_requires_explicit_project_trust_local_and_ssh_and_resolves_tsdk() {
+        use std::os::unix::fs::PermissionsExt;
+
+        use otto_core::auth::{BoxFuture, RoleChecker};
+        use otto_core::domain::{User, WorkspaceRole};
+        use otto_core::secrets::SecretStore;
+        use otto_core::{Id, Result};
+
+        #[derive(Default)]
+        struct NoopSecrets;
+        impl SecretStore for NoopSecrets {
+            fn put(&self, _k: &str, _v: &str) -> Result<()> {
+                Ok(())
+            }
+            fn get(&self, _k: &str) -> Result<Option<String>> {
+                Ok(None)
+            }
+            fn delete(&self, _k: &str) -> Result<()> {
+                Ok(())
+            }
+        }
+        struct AllowRoles;
+        impl RoleChecker for AllowRoles {
+            fn check<'a>(
+                &'a self,
+                _user: &'a User,
+                _ws: &'a Id,
+                _min: WorkspaceRole,
+            ) -> BoxFuture<'a, Result<()>> {
+                Box::pin(async { Ok(()) })
+            }
+        }
+        #[derive(Clone)]
+        struct TestVueCtx {
+            ide: Arc<IdeEngine>,
+            pool: otto_state::DbPool,
+            secrets: Arc<dyn SecretStore>,
+            roles: Arc<dyn RoleChecker>,
+            data_dir: PathBuf,
+        }
+        impl IdeCtx for TestVueCtx {
+            fn ide(&self) -> &Arc<IdeEngine> {
+                &self.ide
+            }
+            fn pool(&self) -> otto_state::DbPool {
+                self.pool.clone()
+            }
+            fn secrets(&self) -> &Arc<dyn SecretStore> {
+                &self.secrets
+            }
+            fn data_dir(&self) -> &Path {
+                &self.data_dir
+            }
+            fn roles(&self) -> &Arc<dyn RoleChecker> {
+                &self.roles
+            }
+            fn resolve_ssh_connection<'a>(
+                &'a self,
+                _user: &'a User,
+                connection_id: &'a Id,
+            ) -> BoxFuture<'a, Result<crate::IdeSshSpec>> {
+                let cid = connection_id.to_string();
+                Box::pin(async move {
+                    Ok(crate::IdeSshSpec {
+                        connection_id: cid,
+                        name: "remote".into(),
+                        host: "remote.example".into(),
+                        port: Some(22),
+                        user: "dev".into(),
+                        identity_file: None,
+                        proxy_jump: None,
+                        environment: None,
+                    })
+                })
+            }
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        let node_bin = data_dir.join("toolchains/node/lsp/node_modules/.bin");
+        let managed_tsdk = data_dir.join("toolchains/node/lsp/node_modules/typescript/lib");
+        let parent = tmp.path().join("vue-parent");
+        let sub_mod = parent.join("packages/web");
+        let child = parent.join("untrusted-child");
+        for d in [&node_bin, &managed_tsdk, &sub_mod, &child] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let fake_vue = node_bin.join("vue-language-server");
+        std::fs::write(&fake_vue, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&fake_vue, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(managed_tsdk.join("tsserverlibrary.js"), "// managed").unwrap();
+        std::fs::write(
+            parent.join("package.json"),
+            r#"{"dependencies":{"vue":"^3.4.0"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            sub_mod.join("package.json"),
+            r#"{"dependencies":{"vue":"^3.4.0"}}"#,
+        )
+        .unwrap();
+        std::fs::write(sub_mod.join("App.vue"), "<template><div/></template>").unwrap();
+        std::fs::write(
+            child.join("package.json"),
+            r#"{"dependencies":{"vue":"^3.4.0"}}"#,
+        )
+        .unwrap();
+
+        let canon_parent = std::fs::canonicalize(&parent).unwrap();
+        let canon_sub_vue = std::fs::canonicalize(sub_mod.join("App.vue")).unwrap();
+        let canon_child = std::fs::canonicalize(&child).unwrap();
+        let canon_tsdk = std::fs::canonicalize(&managed_tsdk).unwrap();
+
+        let pool = otto_state::db::open(&tmp.path().join("ide.db"))
+            .await
+            .unwrap();
+        let ide = Arc::new(IdeEngine::new(data_dir.clone()));
+        let ctx = TestVueCtx {
+            ide: Arc::clone(&ide),
+            pool,
+            secrets: Arc::new(NoopSecrets),
+            roles: Arc::new(AllowRoles),
+            data_dir: data_dir.clone(),
+        };
+        let root_user = User {
+            id: "u-root".into(),
+            username: "root".into(),
+            display_name: "Root".into(),
+            is_root: true,
+            disabled: false,
+            created_at: chrono::Utc::now(),
+        };
+
+        // 1. SEC3-2: Untrusted local Vue project is denied with 403 vue_lsp_requires_trust.
+        let err = prepare_lsp_ws_session(
+            &ctx,
+            &root_user,
+            LspWsQuery {
+                lang: Some("vue".into()),
+                root: Some(canon_parent.to_string_lossy().into_owned()),
+                file: None,
+                connection_id: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status, StatusCode::FORBIDDEN);
+        assert_eq!(err.code, "vue_lsp_requires_trust");
+
+        // 2. Trusting `canon_parent` (even with a module_sdks entry pointing at `canon_child`)
+        //    allows `canon_parent` + its `sub_mod` AND resolves `launch.vue_tsdk`, while
+        //    opening `canon_child` independently MUST remain denied with 403!
+        let mut module_sdks = std::collections::BTreeMap::new();
+        module_sdks.insert(
+            canon_child.to_string_lossy().into_owned(),
+            "/fake/node".to_string(),
+        );
+        ide.environments.seed_snapshot(
+            &canon_parent.to_string_lossy(),
+            crate::types::IdeProjectEnvironment {
+                module_sdks,
+                env_vars: vec![crate::types::IdeEnvVarEntry {
+                    key: TRUST_VUE_LSP_ENV.into(),
+                    value: Some("1".into()),
+                    secret: false,
+                    has_secret: false,
+                }],
+                ..Default::default()
+            },
+        );
+        let ok_parent = prepare_lsp_ws_session(
+            &ctx,
+            &root_user,
+            LspWsQuery {
+                lang: Some("vue".into()),
+                root: Some(canon_parent.to_string_lossy().into_owned()),
+                file: Some(canon_sub_vue.to_string_lossy().into_owned()),
+                connection_id: None,
+            },
+        )
+        .await
+        .expect("trusted Vue project should prepare cleanly");
+        assert_eq!(
+            ok_parent.launch.vue_tsdk.as_deref(),
+            Some(canon_tsdk.to_string_lossy().as_ref()),
+            "RED-2: local trusted Vue session must resolve managed typescript/lib"
+        );
+
+        let err_child = prepare_lsp_ws_session(
+            &ctx,
+            &root_user,
+            LspWsQuery {
+                lang: Some("vue".into()),
+                root: Some(canon_child.to_string_lossy().into_owned()),
+                file: None,
+                connection_id: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err_child.status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            err_child.code, "vue_lsp_requires_trust",
+            "SEC3-2: independently opened child must not inherit parent trust even via module_sdks"
+        );
+
+        // 3. SEC3-2 (SSH): Untrusted SSH Vue project is denied with 403 vue_lsp_requires_trust.
+        let err_ssh = prepare_lsp_ws_session(
+            &ctx,
+            &root_user,
+            LspWsQuery {
+                lang: Some("vue".into()),
+                root: Some("/srv/vue-remote".into()),
+                file: None,
+                connection_id: Some("ssh-1".into()),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err_ssh.status, StatusCode::FORBIDDEN);
+        assert_eq!(err_ssh.code, "vue_lsp_requires_trust");
     }
 }

@@ -155,17 +155,72 @@ pub struct Settled {
     pub resume_held: Vec<Id>,
 }
 
+/// True when the review's summarizer row is a thread whose id survived in a
+/// holder (`held_threads`: `None` trusts `held` for the review itself).
+fn summarizer_is_held_thread(
+    review: &Review,
+    held_threads: Option<&std::collections::HashSet<Id>>,
+) -> bool {
+    let Some(sum) = review.agents.last().filter(|_| review.agents.len() >= 2) else {
+        return false;
+    };
+    if !sum.thread {
+        return false;
+    }
+    let Some(sid) = sum.session_id.as_ref() else {
+        return false;
+    };
+    held_threads.is_none_or(|threads| threads.contains(sid))
+}
+
+/// True when unfinished reviewers can all be resumed or started from persisted
+/// prompts (e.g. finished reviewers closed their threads and the remaining ones
+/// were still queued behind the admission ceiling with no live holder sockets).
+async fn has_persisted_prompts_for_unfinished(
+    reviews: &otto_state::ReviewsRepo,
+    review: &Review,
+) -> bool {
+    let n = review.agents.len().saturating_sub(1);
+    if n == 0 {
+        return false;
+    }
+    let mut any_unfinished = false;
+    for (i, a) in review.agents.iter().take(n).enumerate() {
+        if matches!(a.status.as_str(), "pending" | "running" | "waiting") {
+            any_unfinished = true;
+            if !(a.thread && a.session_id.is_some()) {
+                match reviews.get_agent_prompt(&review.id, i).await {
+                    Ok(Some(_)) => {}
+                    _ => return false,
+                }
+            }
+        }
+    }
+    any_unfinished
+}
+
 /// Settle what a dead daemon left `running`: a review with an agent in
-/// `held` (its holder survived the restart) whose reviewers had not all
-/// finished stays running for a driver ([`Settled::resume_held`], DR-006);
-/// any other either gets its summarizer resumed or fails with the reason.
-/// Both resumes count against [`MAX_RESTART_RESUMES`]. Live agent rows of
-/// settled reviews are failed too. One review's failed write is logged and
-/// skipped; the closing sweep still fails it, so nothing else is left
-/// `running`.
+/// `held` (its holder survived the restart — reviewer or summarizer) or with
+/// persisted reviewer prompts for every unfinished reviewer stays running for a
+/// driver ([`Settled::resume_held`], DR-006); any other either gets its
+/// summarizer resumed or fails with the reason. Both resumes count against
+/// [`MAX_RESTART_RESUMES`]. Live agent rows of settled reviews are failed too.
+/// One review's failed write is logged and skipped; the closing sweep still
+/// fails it, so nothing else is left `running`.
 pub async fn settle_after_restart(
     reviews: &otto_state::ReviewsRepo,
     held: &std::collections::HashSet<Id>,
+) -> Result<Settled> {
+    settle_after_restart_with_threads(reviews, held, None).await
+}
+
+/// [`settle_after_restart`] with the exact set of adopted runtime thread ids
+/// (`adopted.handled_ids`), so a held summarizer is recognized only when its
+/// own thread survived.
+pub async fn settle_after_restart_with_threads(
+    reviews: &otto_state::ReviewsRepo,
+    held: &std::collections::HashSet<Id>,
+    held_threads: Option<&std::collections::HashSet<Id>>,
 ) -> Result<Settled> {
     let mut resume = Vec::new();
     let mut resume_held = Vec::new();
@@ -182,15 +237,25 @@ pub async fn settle_after_restart(
                 }
             }
         }
-        let awaitable = held.contains(&id) && !summarizer_only_left(&review);
+        let sum_only = summarizer_only_left(&review);
+        let held_sum =
+            held.contains(&id) && sum_only && summarizer_is_held_thread(&review, held_threads);
+        let resumable_reviewers = !sum_only
+            && (held.contains(&id) || has_persisted_prompts_for_unfinished(reviews, &review).await);
+        let awaitable = held_sum || resumable_reviewers;
         if let Some(mut plan) = review
             .scope_plan
             .clone()
             .filter(|p| awaitable && restart_resumes(p) < MAX_RESTART_RESUMES)
         {
             let n = restart_resumes(&plan) + 1;
+            let what = if held_sum {
+                "its summarizer was awaited in its holder."
+            } else {
+                "its reviewers were awaited in their holders."
+            };
             plan.verification_notes.push(format!(
-                "{RESUME_NOTE} ({n} of {MAX_RESTART_RESUMES}); its reviewers were awaited in their holders."
+                "{RESUME_NOTE} ({n} of {MAX_RESTART_RESUMES}); {what}"
             ));
             match reviews.set_scope_plan(&id, &plan).await {
                 Ok(()) => {
@@ -291,6 +356,84 @@ pub fn with_failure_reasons(rows: &[ReviewAgentState]) -> Vec<ReviewAgentState> 
             row
         })
         .collect()
+}
+
+/// The review's error note when its diff file can't be written for the
+/// reviewers (a new run settles with it; a retry refuses with it).
+pub fn diff_write_failure(cause: &dyn std::fmt::Display) -> String {
+    format!("Couldn't write the diff for the reviewers: {cause}")
+}
+
+/// Write the diff to `$TMPDIR/otto-review-<id>.diff` and persist its durable copy.
+pub async fn materialize_review_diff(
+    reviews: &otto_state::ReviewsRepo,
+    review_id: &Id,
+    diff_text: &str,
+) -> Result<std::path::PathBuf> {
+    let diff_path = std::env::temp_dir().join(format!("otto-review-{review_id}.diff"));
+    if let Err(e) = tokio::fs::write(&diff_path, diff_text).await {
+        tracing::warn!(review = %review_id, "could not write review diff file: {e}");
+        return Err(Error::Internal(diff_write_failure(&e)));
+    }
+    if let Err(e) = reviews.set_diff(review_id, diff_text).await {
+        tracing::warn!(review = %review_id, "could not persist review diff: {e}");
+    }
+    Ok(diff_path)
+}
+
+/// Remove matching `$TMPDIR/otto-review-<id>*` files (FILES only, never worktrees).
+#[allow(clippy::disallowed_methods)]
+pub fn remove_review_temp_files_in(dir: &std::path::Path, prefix: &str) {
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for entry in rd.flatten() {
+            if entry.file_name().to_string_lossy().starts_with(prefix)
+                && entry.file_type().is_ok_and(|t| t.is_file())
+            {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
+/// Ensure `$TMPDIR/otto-review-<review_id>.diff` exists on disk (restoring it
+/// from the durable `reviews` diff column if a reboot or temp sweep removed it)
+/// and return its text. Fails loudly if no durable diff exists so queued
+/// reviewers never start against a missing file (DATA-2).
+pub async fn ensure_review_diff(
+    reviews: &otto_state::ReviewsRepo,
+    review_id: &Id,
+) -> Result<String> {
+    let diff_file = std::env::temp_dir().join(format!("otto-review-{review_id}.diff"));
+    if let Ok(existing) = tokio::fs::read_to_string(&diff_file).await {
+        if !existing.is_empty() {
+            return Ok(existing);
+        }
+    }
+    match reviews.get_diff(review_id).await {
+        Ok(Some(diff)) if !diff.is_empty() => {
+            tokio::fs::write(&diff_file, &diff).await.map_err(|e| {
+                Error::Internal(format!("Couldn't write the diff for the reviewers: {e}"))
+            })?;
+            Ok(diff)
+        }
+        Ok(_) => Err(Error::Conflict(
+            "this review has no stored diff to retry against; start a new review".into(),
+        )),
+        Err(e) => Err(Error::Internal(format!(
+            "Couldn't write the diff for the reviewers: {e}"
+        ))),
+    }
+}
+
+/// Blocker passed to `summarize_and_persist` when resuming a review after a
+/// restart: preserves the fresh path's partial-diff incompleteness check so a
+/// resumed review whose persisted diff omitted files can never pass clean
+/// (BUG-11), otherwise uses `SUMMARIZER_RETRY_BLOCKER`.
+pub fn resumed_resolve_blocker(diff_text: Option<&str>) -> Option<&'static str> {
+    if diff_text.is_some_and(crate::engine::diff_is_partial) {
+        return Some("partial diff (files omitted)");
+    }
+    Some(crate::verification::SUMMARIZER_RETRY_BLOCKER)
 }
 
 #[cfg(test)]

@@ -91,7 +91,15 @@ async fn run_if_waiting_dispatched_before_node_waits_still_releases_the_debuggee
     let (client_io, server_io) = tokio::io::duplex(65536);
     let (_out_tx, mut out_rx) = mpsc::unbounded_channel();
     let bridge = tokio::spawn(async move {
-        let _ = run_node_bridge_loop(server_io, ws, &mut out_rx, BridgeGuard::new()).await;
+        let _ = run_node_bridge_loop(
+            server_io,
+            ws,
+            &mut out_rx,
+            BridgeGuard::new(),
+            String::new(),
+            false,
+        )
+        .await;
     });
     let (r, w) = tokio::io::split(client_io);
     let mut dap_r = DapReader::new(r);
@@ -113,4 +121,339 @@ async fn run_if_waiting_dispatched_before_node_waits_still_releases_the_debuggee
     assert_eq!(stopped.body.unwrap()["reason"], "breakpoint");
     bridge.abort();
     inspector.abort();
+}
+
+/// Live end-to-end verification against host `node` (skipped only if `node` is absent):
+/// spawns `node --inspect-brk --enable-source-maps --experimental-strip-types`, hits a
+/// breakpoint in a `.ts` file, verifies stackTrace + local variable inspection, and finishes.
+#[tokio::test]
+async fn live_node_typescript_debugger_hits_breakpoint_and_reads_locals() {
+    use super::{spawn_node_inspector_bridge, NodeInspectorBridgeSpec};
+    use crate::types::IdeTargetSpec;
+    use std::collections::BTreeMap;
+
+    let node_path = std::env::var("PATH")
+        .unwrap_or_default()
+        .split(':')
+        .map(|d| std::path::Path::new(d).join("node"))
+        .find(|p| p.is_file());
+    let Some(node_bin) = node_path else {
+        return;
+    };
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let script = root.join("calc.ts");
+    std::fs::write(
+        &script,
+        "function total(a: number, b: number): number {\n  const sum = a + b;\n  return sum;\n}\nconsole.log('LIVE_NODE_RES=' + total(19, 23));\n",
+    )
+    .unwrap();
+
+    let target = IdeTargetSpec::local(root.to_string_lossy().into_owned());
+    let spec = NodeInspectorBridgeSpec {
+        node_bin: node_bin.to_string_lossy().into_owned(),
+        node_flags: vec![
+            "--enable-source-maps".into(),
+            "--experimental-strip-types".into(),
+        ],
+        program: script.to_string_lossy().into_owned(),
+        args: Vec::new(),
+        cwd: root.to_string_lossy().into_owned(),
+        env: BTreeMap::new(),
+        attach_port: None,
+        is_browser_attach: false,
+    };
+    let (client_io, guard) = spawn_node_inspector_bridge(&target, None, spec)
+        .await
+        .expect("spawn node inspector bridge");
+    let (r, w) = tokio::io::split(client_io);
+    let mut dap_r = DapReader::new(r);
+    let mut dap_w = DapWriter::new(w);
+
+    dap_w
+        .send_request("initialize", Some(json!({})))
+        .await
+        .unwrap();
+    dap_w.send_request("launch", Some(json!({}))).await.unwrap();
+    dap_w
+        .send_request(
+            "setBreakpoints",
+            Some(json!({
+                "source": { "path": script.to_string_lossy() },
+                "breakpoints": [{ "line": 3 }]
+            })),
+        )
+        .await
+        .unwrap();
+    dap_w
+        .send_request("configurationDone", Some(json!({})))
+        .await
+        .unwrap();
+
+    // Wait for breakpoint hit at line 3 (`return sum;`).
+    let stopped = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match dap_r.next_message().await.unwrap() {
+                Some(DapMessage::Event(ev)) if ev.event == "stopped" => return ev,
+                Some(_) => {}
+                None => panic!("node bridge closed before hitting breakpoint"),
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for Node breakpoint");
+    assert_eq!(stopped.body.unwrap()["reason"], "breakpoint");
+
+    let st_seq = dap_w
+        .send_request("stackTrace", Some(json!({ "threadId": 1 })))
+        .await
+        .unwrap();
+    let frames = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(DapMessage::Response(resp)) = dap_r.next_message().await.unwrap() {
+                if resp.request_seq == st_seq {
+                    return resp.body.unwrap()["stackFrames"].clone();
+                }
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for stackTrace");
+    let top = &frames[0];
+    assert_eq!(top["name"], "total");
+    assert_eq!(top["line"], 3);
+
+    // Evaluate `sum` in the paused frame.
+    let eval_seq = dap_w
+        .send_request(
+            "evaluate",
+            Some(json!({ "expression": "sum", "frameId": 1, "context": "watch" })),
+        )
+        .await
+        .unwrap();
+    let eval_res = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(DapMessage::Response(resp)) = dap_r.next_message().await.unwrap() {
+                if resp.request_seq == eval_seq {
+                    return resp.body.unwrap()["result"].as_str().unwrap().to_string();
+                }
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for evaluate");
+    assert_eq!(eval_res, "42");
+
+    dap_w
+        .send_request("continue", Some(json!({ "threadId": 1 })))
+        .await
+        .unwrap();
+    let mut saw_output = false;
+    let _ = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match dap_r.next_message().await.unwrap() {
+                Some(DapMessage::Event(ev)) if ev.event == "output" => {
+                    if ev
+                        .body
+                        .as_ref()
+                        .and_then(|b| b.get("output"))
+                        .and_then(Value::as_str)
+                        .is_some_and(|s| s.contains("LIVE_NODE_RES=42"))
+                    {
+                        saw_output = true;
+                    }
+                }
+                Some(DapMessage::Event(ev)) if ev.event == "terminated" => break,
+                Some(_) => {}
+                None => break,
+            }
+        }
+    })
+    .await;
+    assert!(saw_output, "expected LIVE_NODE_RES=42 on stdout");
+    guard.kill_all();
+}
+
+#[tokio::test]
+async fn browser_cdp_attach_verifies_breakpoints_from_cdp_locations_only() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut req = BufReader::new(&mut sock);
+        let mut line = String::new();
+        while req.read_line(&mut line).await.unwrap() > 0 && line != "\r\n" {
+            line.clear();
+        }
+        sock.write_all(b"HTTP/1.1 101 Switching Protocols\r\n\r\n")
+            .await
+            .unwrap();
+        let mut pending_ts_bp_id: Option<String> = None;
+        loop {
+            let Some(msg) = read_client_json(&mut sock).await else {
+                break;
+            };
+            let id = msg["id"].as_i64().unwrap_or(0);
+            let method = msg["method"].as_str().unwrap_or("");
+            match method {
+                "Debugger.setBreakpointByUrl" => {
+                    let url_re = msg["params"]["urlRegex"].as_str().unwrap_or("");
+                    // Unmapped TypeScript source returns empty `locations` from browser CDP;
+                    // a loaded JS script returns a bound location.
+                    let is_ts = url_re.contains("app\\.ts");
+                    let locations = if is_ts {
+                        pending_ts_bp_id = Some(format!("bp-{id}"));
+                        json!([])
+                    } else {
+                        json!([{ "scriptId": "s2", "lineNumber": 4, "columnNumber": 0 }])
+                    };
+                    write_server_json(
+                        &mut sock,
+                        json!({
+                            "id": id,
+                            "result": {
+                                "breakpointId": format!("bp-{id}"),
+                                "locations": locations
+                            }
+                        }),
+                    )
+                    .await;
+                    if !is_ts {
+                        if let Some(ts_bid) = pending_ts_bp_id.take() {
+                            // BUG3-10: Simulate CDP resolving the earlier unbound breakpoint
+                            // to a nearby executable line (0-based 14 -> 1-based 15).
+                            write_server_json(
+                                &mut sock,
+                                json!({
+                                    "method": "Debugger.breakpointResolved",
+                                    "params": {
+                                        "breakpointId": ts_bid,
+                                        "location": { "scriptId": "s1", "lineNumber": 14, "columnNumber": 0 }
+                                    }
+                                }),
+                            )
+                            .await;
+                        }
+                    }
+                }
+                _ => {
+                    write_server_json(&mut sock, json!({ "id": id, "result": {} })).await;
+                }
+            }
+        }
+    });
+
+    let ws = InspectorWs::connect(port, "/x").await.unwrap();
+    let (client_io, server_io) = tokio::io::duplex(65536);
+    let (_out_tx, mut out_rx) = mpsc::unbounded_channel();
+    let bridge = tokio::spawn(async move {
+        let _ = run_node_bridge_loop(
+            server_io,
+            ws,
+            &mut out_rx,
+            BridgeGuard::new(),
+            "/ws".into(),
+            true,
+        )
+        .await;
+    });
+    let (r, w) = tokio::io::split(client_io);
+    let mut dap_r = DapReader::new(r);
+    let mut dap_w = DapWriter::new(w);
+
+    let init_seq = dap_w
+        .send_request("initialize", Some(json!({})))
+        .await
+        .unwrap();
+    loop {
+        if let Some(DapMessage::Response(r)) = dap_r.next_message().await.unwrap() {
+            if r.request_seq == init_seq {
+                break;
+            }
+        }
+    }
+
+    // BUG-31: Unmapped .ts breakpoint in browser attach mode returns verified=false from CDP reply.
+    let ts_seq = dap_w
+        .send_request(
+            "setBreakpoints",
+            Some(json!({
+                "source": { "path": "/ws/src/app.ts" },
+                "breakpoints": [{ "line": 10 }]
+            })),
+        )
+        .await
+        .unwrap();
+    let ts_resp = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(DapMessage::Response(resp)) = dap_r.next_message().await.unwrap() {
+                if resp.request_seq == ts_seq {
+                    return resp;
+                }
+            }
+        }
+    })
+    .await
+    .expect("setBreakpoints response for unmapped .ts");
+    let ts_bps = ts_resp.body.unwrap()["breakpoints"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(ts_bps.len(), 1);
+    assert_eq!(ts_bps[0]["verified"], json!(false));
+    let ts_bp_id = ts_bps[0]["id"].as_i64().expect("DAP breakpoint id");
+
+    // Bound JS breakpoint returns verified=true with CDP's 1-based line (4 + 1 = 5).
+    let js_seq = dap_w
+        .send_request(
+            "setBreakpoints",
+            Some(json!({
+                "source": { "path": "/ws/dist/main.js" },
+                "breakpoints": [{ "line": 5 }]
+            })),
+        )
+        .await
+        .unwrap();
+    let js_resp = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(DapMessage::Response(resp)) = dap_r.next_message().await.unwrap() {
+                if resp.request_seq == js_seq {
+                    return resp;
+                }
+            }
+        }
+    })
+    .await
+    .expect("setBreakpoints response for bound .js");
+    let js_bps = js_resp.body.unwrap()["breakpoints"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(js_bps.len(), 1);
+    assert_eq!(js_bps[0]["verified"], json!(true));
+    assert_eq!(js_bps[0]["line"], json!(5));
+
+    // BUG3-10: When CDP later resolves the initially unbound breakpoint to a relocated
+    // executable line (0-based 14 -> 1-based 15), the bridge emits a `breakpoint` changed
+    // event carrying both the correlated `id` and `originalLine` (10) plus resolved `line` (15).
+    let resolved_ev = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(DapMessage::Event(ev)) = dap_r.next_message().await.unwrap() {
+                if ev.event == "breakpoint" {
+                    return ev;
+                }
+            }
+        }
+    })
+    .await
+    .expect("deferred breakpoint resolved event");
+    let bp_body = &resolved_ev.body.unwrap()["breakpoint"];
+    assert_eq!(bp_body["id"], json!(ts_bp_id));
+    assert_eq!(bp_body["verified"], json!(true));
+    assert_eq!(bp_body["line"], json!(15));
+    assert_eq!(bp_body["originalLine"], json!(10));
+
+    bridge.abort();
+    server.abort();
 }

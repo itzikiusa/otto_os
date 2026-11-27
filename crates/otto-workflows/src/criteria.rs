@@ -12,9 +12,12 @@
 //! person's record bound to the criterion's exact text and the current
 //! iteration. [`loop_stop`] is every stop rule of a loop.
 
-use otto_core::workflows::{Criterion, HoldKind, HumanEntry, LoopLimits, VerifyKind};
+use otto_core::workflows::{
+    Criterion, CriterionProgress, HoldKind, HumanEntry, LoopLimits, VerifyKind,
+};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
+use std::collections::BTreeMap;
 
 /// Separates a criterion's evidence headline from the verify command's
 /// output tail stored after it; signatures keep only the headline.
@@ -77,6 +80,49 @@ pub fn command_evidence(exit_code: i32, output: &str) -> (bool, String) {
     (met, with_output(&headline, output))
 }
 
+/// The last non-blank, non-decoration line of a command's output, clipped.
+pub fn last_meaningful_line(output: &str) -> Option<String> {
+    output.lines().rev().find_map(|raw| {
+        let line = raw.trim();
+        if line.is_empty() {
+            return None;
+        }
+        let only_decor = line.chars().all(|c| {
+            c.is_whitespace()
+                || matches!(c, '-' | '=' | '_' | '*' | '~' | '#' | '|' | '+' | '.' | ':')
+        });
+        if only_decor {
+            return None;
+        }
+        Some(otto_core::agent_runtime::clip(line, 160))
+    })
+}
+
+/// A command criterion's structured progress: exit code and last meaningful line.
+pub fn command_progress(exit_code: i32, output: &str) -> CriterionProgress {
+    let mut values = BTreeMap::new();
+    values.insert("exit_code".into(), json!(exit_code));
+    let last_line = last_meaningful_line(output);
+    if let Some(ref line) = last_line {
+        values.insert("last_line".into(), json!(line));
+    }
+    let label = if exit_code == 0 {
+        None
+    } else {
+        Some(match last_line {
+            Some(line) => format!("exit {exit_code} — {line}"),
+            None => format!("exit {exit_code}"),
+        })
+    };
+    CriterionProgress {
+        value: None,
+        target: None,
+        unit: None,
+        label,
+        values,
+    }
+}
+
 /// A command criterion's timeout: default 600 s, 10..=3,600.
 pub fn command_timeout_s(c: &Criterion) -> u64 {
     c.timeout_s.unwrap_or(600).clamp(10, 3_600)
@@ -102,6 +148,9 @@ pub struct Assessed {
     /// `command` | `rule` | `agent` | the person's name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verified_by: Option<String>,
+    /// Numeric progress, blocker label, and values inspected by the check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<CriterionProgress>,
 }
 
 /// The evaluator's answer, and the decided result after a pass.
@@ -275,6 +324,7 @@ pub fn reconcile(
         met: false,
         evidence: why.to_string(),
         verified_by: None,
+        progress: None,
     };
     eval.criteria = criteria
         .iter()
@@ -298,12 +348,14 @@ pub fn reconcile(
                     met: true,
                     evidence: format!("Verified by {}: {}", r.by, r.text.trim()),
                     verified_by: Some(r.by.clone()),
+                    progress: None,
                 },
                 Some(r) => Assessed {
                     id: c.id.clone(),
                     met: false,
                     evidence: format!("Not met, says {}: {}", r.by, r.text.trim()),
                     verified_by: Some(r.by.clone()),
+                    progress: None,
                 },
                 None => unmet(&c.id, AWAITING_HUMAN),
             },
@@ -417,6 +469,8 @@ pub struct CriterionRow {
     pub evidence: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verified_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<CriterionProgress>,
 }
 
 /// The `check` node's output (goal.md §2.1).
@@ -456,6 +510,7 @@ impl CheckOutput {
                 met: a.met,
                 evidence: a.evidence.clone(),
                 verified_by: a.verified_by.clone(),
+                progress: a.progress.clone(),
             })
             .collect();
         let (met, total) = (rows.iter().filter(|r| r.met).count(), rows.len());

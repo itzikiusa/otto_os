@@ -394,6 +394,11 @@ impl DapManager {
         }
         let entry = self.get_entry(id)?;
         let conn = entry.active_conn()?;
+        if !conn.supports_set_variable {
+            return Err(Error::Invalid(
+                "debug adapter does not support setVariable".into(),
+            ));
+        }
         let resp = conn
             .wire
             .request(
@@ -406,12 +411,17 @@ impl DapManager {
             )
             .await?;
         let body = resp.body.unwrap_or_else(|| json!({}));
+        let updated_value = body
+            .get("value")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                Error::Upstream(
+                    "debug adapter did not return an updated value for setVariable".into(),
+                )
+            })?
+            .to_string();
         let out = IdeDebugSetVariableResp {
-            value: body
-                .get("value")
-                .and_then(Value::as_str)
-                .unwrap_or(&req.value)
-                .to_string(),
+            value: updated_value,
             var_type: body.get("type").and_then(Value::as_str).map(String::from),
             variables_reference: body
                 .get("variablesReference")

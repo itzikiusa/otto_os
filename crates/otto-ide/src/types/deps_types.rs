@@ -156,6 +156,127 @@ pub struct IdeMobileProject {
     pub tasks: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdeSpringBootApp {
+    pub name: String,
+    pub main_class: String,
+    pub file_path: String,
+    pub language: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdeSpringBootInfo {
+    pub detected: bool,
+    #[serde(default)]
+    pub apps: Vec<IdeSpringBootApp>,
+    #[serde(default)]
+    pub profiles: Vec<String>,
+    #[serde(default)]
+    pub config_files: Vec<String>,
+    pub server_port: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub management_port: Option<u16>,
+    pub actuator_base_path: String,
+    pub actuator_url: String,
+    #[serde(default)]
+    pub has_actuator: bool,
+    #[serde(default)]
+    pub has_devtools: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module_root: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdeSpringActuatorReq {
+    #[serde(default)]
+    pub target: Option<IdeTargetSpec>,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub port: Option<u16>,
+    #[serde(default)]
+    pub base_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdeSpringHealthComponent {
+    pub name: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdeSpringEndpoint {
+    pub method: String,
+    pub path: String,
+    pub handler: String,
+    #[serde(default)]
+    pub produces: Vec<String>,
+    #[serde(default)]
+    pub consumes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdeSpringBean {
+    pub name: String,
+    pub bean_type: String,
+    pub scope: String,
+    pub context: String,
+    #[serde(default)]
+    pub dependencies: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdeSpringEnvProp {
+    pub key: String,
+    pub value: String,
+    pub source: String,
+    #[serde(default)]
+    pub redacted: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdeSpringActuatorResp {
+    pub base_url: String,
+    pub reachable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub active_profiles: Vec<String>,
+    #[serde(default)]
+    pub available_links: Vec<String>,
+    #[serde(default)]
+    pub health_components: Vec<IdeSpringHealthComponent>,
+    #[serde(default)]
+    pub endpoints: Vec<IdeSpringEndpoint>,
+    #[serde(default)]
+    pub beans: Vec<IdeSpringBean>,
+    #[serde(default)]
+    pub env_properties: Vec<IdeSpringEnvProp>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdeSpringDevtoolsRestartReq {
+    pub target: IdeTargetSpec,
+    #[serde(default)]
+    pub trigger_file: Option<String>,
+    #[serde(default)]
+    pub module_root: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdeSpringDevtoolsRestartResp {
+    pub ok: bool,
+    pub trigger_path: String,
+    pub requested_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restarted_at: Option<String>,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdeBuildToolsModelResp {
     pub has_maven: bool,
@@ -174,4 +295,6 @@ pub struct IdeBuildToolsModelResp {
     pub projects: Vec<IdeBuildToolProject>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mobile_projects: Vec<IdeMobileProject>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spring_boot: Option<IdeSpringBootInfo>,
 }

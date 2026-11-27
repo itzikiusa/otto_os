@@ -39,11 +39,18 @@ pub fn normalize_lsp_lang(lang: &str) -> &str {
         "yml" => "yaml",
         "tsx" | "typescriptreact" => "typescript",
         "jsx" | "javascriptreact" => "javascript",
+        "svelte" => "svelte",
+        "vue" => "vue",
+        "angular" | "ng-template" => "angular",
         "proto" => "protobuf",
         "gql" => "graphql",
         "containerfile" => "dockerfile",
         "kt" | "kts" => "kotlin",
         "zon" => "zig",
+        "c" | "h" | "cc" | "cxx" | "c++" | "hpp" | "hxx" | "hh" | "h++" | "inl" | "ipp" | "tpp"
+        | "ixx" | "cppm" | "c_cpp" | "cu" | "cuh" => "cpp",
+        "cs" | "csx" | "c#" | "razor" | "cshtml" => "csharp",
+        "fs" | "fsx" | "fsi" | "f#" => "fsharp",
         other => other,
     }
 }
@@ -87,6 +94,33 @@ pub static REGISTRY: &[ServerDef] = &[
         install_command: Some("npm install -g typescript-language-server typescript"),
     },
     ServerDef {
+        lang: "svelte",
+        cmd: "svelteserver",
+        args: &["--stdio"],
+        fallback_cmd: None,
+        fallback_args: &[],
+        extensions: &[".svelte"],
+        install_command: Some("npm install -g svelte-language-server"),
+    },
+    ServerDef {
+        lang: "vue",
+        cmd: "vue-language-server",
+        args: &["--stdio"],
+        fallback_cmd: None,
+        fallback_args: &[],
+        extensions: &[".vue"],
+        install_command: Some("npm install -g @vue/language-server@2.2.10 typescript"),
+    },
+    ServerDef {
+        lang: "angular",
+        cmd: "ngserver",
+        args: &["--stdio"],
+        fallback_cmd: Some("vscode-html-language-server"),
+        fallback_args: &["--stdio"],
+        extensions: &[".component.html"],
+        install_command: Some("npm install -g @angular/language-server"),
+    },
+    ServerDef {
         lang: "java",
         cmd: "jdtls",
         args: &[],
@@ -94,6 +128,15 @@ pub static REGISTRY: &[ServerDef] = &[
         fallback_args: &[],
         extensions: &[".java"],
         install_command: Some("brew install jdtls"),
+    },
+    ServerDef {
+        lang: "kotlin",
+        cmd: "kotlin-language-server",
+        args: &[],
+        fallback_cmd: None,
+        fallback_args: &[],
+        extensions: &[".kt", ".kts"],
+        install_command: Some("brew install kotlin-language-server"),
     },
     ServerDef {
         lang: "rust",
@@ -156,7 +199,44 @@ pub static REGISTRY: &[ServerDef] = &[
         fallback_cmd: None,
         fallback_args: &[],
         extensions: &[".zig", ".zon"],
-        install_command: Some("brew install zls"),
+        // Homebrew ships the latest ZLS (e.g. 0.17.x) which breaks Zig 0.14.x projects;
+        // install ZLS via IDE → Toolchains & SDKs so it matches the selected Zig SDK.
+        install_command: None,
+    },
+    ServerDef {
+        lang: "cpp",
+        cmd: "clangd",
+        args: &[
+            "--background-index",
+            "--clang-tidy",
+            "--header-insertion=iwyu",
+            "--completion-style=detailed",
+        ],
+        fallback_cmd: None,
+        fallback_args: &[],
+        extensions: &[
+            ".c", ".h", ".cc", ".cpp", ".cxx", ".c++", ".hpp", ".hxx", ".hh", ".h++", ".inl",
+            ".ipp", ".tpp", ".ixx", ".cppm",
+        ],
+        install_command: Some("xcode-select --install"),
+    },
+    ServerDef {
+        lang: "csharp",
+        cmd: "csharp-ls",
+        args: &[],
+        fallback_cmd: Some("OmniSharp"),
+        fallback_args: &["-lsp"],
+        extensions: &[".cs", ".csx", ".razor"],
+        install_command: Some("dotnet tool install --global csharp-ls"),
+    },
+    ServerDef {
+        lang: "fsharp",
+        cmd: "fsautocomplete",
+        args: &["--adaptive-lsp-server-enabled"],
+        fallback_cmd: None,
+        fallback_args: &[],
+        extensions: &[".fs", ".fsx", ".fsi"],
+        install_command: Some("dotnet tool install --global fsautocomplete"),
     },
 ];
 
@@ -222,6 +302,8 @@ fn collect_developer_bin_dirs(
                     ".npm-global/bin",
                     ".volta/bin",
                     ".zvm/bin",
+                    ".dotnet",
+                    ".dotnet/tools",
                 ] {
                     dirs.push(home.join(rel));
                 }
@@ -229,10 +311,16 @@ fn collect_developer_bin_dirs(
         }
     }
     for sys in [
+        "/opt/homebrew/opt/llvm/bin",
         "/opt/homebrew/bin",
         "/opt/homebrew/sbin",
+        "/usr/local/opt/llvm/bin",
         "/usr/local/go/bin",
+        "/usr/local/share/dotnet",
+        "/opt/homebrew/opt/dotnet/libexec",
         "/usr/local/bin",
+        "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin",
+        "/Library/Developer/CommandLineTools/usr/bin",
         "/usr/bin",
         "/bin",
     ] {
@@ -355,6 +443,132 @@ pub fn detect_toolchain_java_home(data_dir: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Discover a validated `DOTNET_ROOT` candidate inside `<data_dir>/toolchains`
+/// or well-known system .NET SDK locations (BUG-23).
+pub fn detect_toolchain_dotnet_root(data_dir: &Path) -> Option<PathBuf> {
+    let tc_dotnet = data_dir.join("toolchains/dotnet");
+    let current = tc_dotnet.join("current");
+    if let Some(dr) = crate::toolchains::discovery::resolve_dotnet_root_dir(&current) {
+        return Some(dr);
+    }
+    for bin in collect_toolchain_bin_dirs(data_dir) {
+        if bin.join("dotnet").is_file() {
+            if let Some(dr) =
+                crate::toolchains::discovery::dotnet_root_from_bin(&bin.join("dotnet"))
+            {
+                return Some(dr);
+            }
+        }
+    }
+    for fixed in [
+        "/usr/local/share/dotnet",
+        "/opt/homebrew/opt/dotnet/libexec",
+        "/usr/local/opt/dotnet/libexec",
+        "/usr/share/dotnet",
+    ] {
+        let p = PathBuf::from(fixed);
+        if let Some(dr) = crate::toolchains::discovery::resolve_dotnet_root_dir(&p) {
+            return Some(dr);
+        }
+    }
+    None
+}
+
+/// Resolve trusted probe directories (`node_modules`) for Angular's `ngserver`
+/// `--tsProbeLocations` and `--ngProbeLocations` flags (SEC2-1, BUG-32).
+///
+/// Security boundary (SEC2-1): NEVER include `<workspace>/node_modules` automatically,
+/// because `ngserver` loads and executes JavaScript plugins from probe locations on file
+/// open without an explicit project execution trust decision.
+///
+/// Trusted probe order:
+/// 1. Managed `<data_dir>/toolchains/node/lsp/node_modules`.
+/// 2. Canonicalized installation `node_modules` directories derived from `ngserver`'s
+///    real binary target (handles global `npm install -g` symlinks such as
+///    `/usr/local/bin/ngserver -> ../lib/node_modules/@angular/language-server/bin/ngserver`).
+#[allow(clippy::disallowed_methods)]
+pub fn resolve_angular_probe_locations(data_dir: &Path, ngserver_cmd: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push_dir = |p: PathBuf| {
+        if p.is_dir() {
+            let canon = std::fs::canonicalize(&p).unwrap_or(p);
+            let s = canon.to_string_lossy().into_owned();
+            if !out.contains(&s) {
+                out.push(s);
+            }
+        }
+    };
+    push_dir(data_dir.join("toolchains/node/lsp/node_modules"));
+    let cmd_path = Path::new(ngserver_cmd);
+    let resolved_cmd = if cmd_path.is_absolute() {
+        std::fs::canonicalize(cmd_path).ok()
+    } else {
+        None
+    };
+    if let Some(real) = resolved_cmd {
+        // Walk canonical ancestors to capture both package-private `node_modules`
+        // (e.g. `.../@angular/language-server/node_modules`) and the parent global
+        // `node_modules` containing `typescript` (e.g. `/usr/local/lib/node_modules`).
+        for anc in real.ancestors().skip(1) {
+            if anc.file_name().and_then(|n| n.to_str()) == Some("node_modules") {
+                push_dir(anc.to_path_buf());
+                break;
+            } else {
+                let nested = anc.join("node_modules");
+                if nested.is_dir()
+                    && (nested.join("typescript").is_dir()
+                        || nested.join("@angular/language-service").is_dir())
+                {
+                    push_dir(nested);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Locate a trusted local TypeScript `tsdk` (`typescript/lib`) directory for standalone
+/// `@vue/language-server@2.2.10` (`RED-2`) without ever touching workspace `node_modules`.
+#[allow(clippy::disallowed_methods)]
+pub fn detect_local_typescript_tsdk(data_dir: &Path, server_cmd: Option<&str>) -> Option<String> {
+    let is_tsdk =
+        |p: &Path| p.join("tsserverlibrary.js").is_file() || p.join("typescript.js").is_file();
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    candidates.push(data_dir.join("toolchains/node/lsp/node_modules/typescript/lib"));
+    for data in otto_core::secret_paths::otto_data_dirs() {
+        let p = data.join("toolchains/node/lsp/node_modules/typescript/lib");
+        if !candidates.contains(&p) {
+            candidates.push(p);
+        }
+    }
+    if let Some(cmd) = server_cmd {
+        let cmd_path = Path::new(cmd);
+        if cmd_path.is_absolute() {
+            if let Ok(real) = std::fs::canonicalize(cmd_path) {
+                for anc in real.ancestors().skip(1) {
+                    if anc.file_name().and_then(|n| n.to_str()) == Some("node_modules") {
+                        candidates.push(anc.join("typescript/lib"));
+                        break;
+                    }
+                    candidates.push(anc.join("node_modules/typescript/lib"));
+                }
+            }
+        }
+    }
+    for sys in [
+        "/opt/homebrew/lib/node_modules/typescript/lib",
+        "/usr/local/lib/node_modules/typescript/lib",
+        "/usr/lib/node_modules/typescript/lib",
+    ] {
+        candidates.push(PathBuf::from(sys));
+    }
+    candidates
+        .into_iter()
+        .find(|p| is_tsdk(p))
+        .map(|p| std::fs::canonicalize(&p).unwrap_or(p))
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
 fn which_in(executable: &str, extra_dirs: &[PathBuf]) -> Option<String> {
     let exec_path = Path::new(executable);
     if exec_path.is_absolute() {
@@ -441,6 +655,26 @@ fn resolve_def(def: &ServerDef, extra_dirs: &[PathBuf]) -> Resolved {
     }
     if def.lang == "python" {
         if let Some(resolved) = which_in("basedpyright-langserver", extra_dirs) {
+            return Resolved {
+                lang: def.lang.to_string(),
+                available: true,
+                command: resolved,
+                args: vec!["--stdio".into()],
+                install_command: def.install_command.map(str::to_string),
+            };
+        }
+    }
+    if def.lang == "csharp" {
+        if let Some(resolved) = which_in("omnisharp", extra_dirs) {
+            return Resolved {
+                lang: def.lang.to_string(),
+                available: true,
+                command: resolved,
+                args: vec!["-lsp".into()],
+                install_command: def.install_command.map(str::to_string),
+            };
+        }
+        if let Some(resolved) = which_in("Microsoft.CodeAnalysis.LanguageServer", extra_dirs) {
             return Resolved {
                 lang: def.lang.to_string(),
                 available: true,

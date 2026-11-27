@@ -6,7 +6,7 @@
 use super::*;
 use otto_agent_protocol::step_runner::{DaemonStepHost, ThreadStepRunner};
 use otto_agent_run::step::{StepErrorClass, StepEvent, StepRunner, StepTurn};
-use otto_core::workflows::{StepPhase, StepThread};
+use otto_core::workflows::StepPhase;
 use otto_workflows::step_util::Settled;
 pub(super) use otto_workflows::step_util::{record, StepNote};
 
@@ -53,33 +53,16 @@ fn latched() -> &'static std::sync::Mutex<HashMap<Id, &'static str>> {
     L.get_or_init(Default::default)
 }
 
-/// Steps a restart caught on an open thread: `(run, node)` → `(thread, start ordinal)`.
-type Resumes = std::sync::Mutex<HashMap<(Id, String), (Id, u32)>>;
-
-fn resumes() -> &'static Resumes {
-    static R: OnceLock<Resumes> = OnceLock::new();
-    R.get_or_init(Default::default)
-}
-
-/// The re-entered step awaits its recorded thread instead of a fresh one.
-pub(super) fn mark_resume(run_id: &Id, node_id: &str, t: &StepThread) {
-    let ordinal = t.start_ordinal.unwrap_or(0) as u32;
-    if let Ok(mut m) = resumes().lock() {
-        m.insert(
-            (run_id.clone(), node_id.to_string()),
-            (t.thread_id.clone(), ordinal),
-        );
-    }
-}
+pub(super) use otto_workflows::check_resume::{
+    mark_resume, peek_resume, restore_resume, take_resume,
+};
 
 /// The run ended: its next execution latches the runner again.
 pub(super) fn forget(run_id: &Id) {
     if let Ok(mut m) = latched().lock() {
         m.remove(run_id);
     }
-    if let Ok(mut m) = resumes().lock() {
-        m.retain(|(id, _), _| id != run_id);
-    }
+    otto_workflows::check_resume::forget_run(run_id);
 }
 
 #[cfg(test)]
@@ -194,10 +177,7 @@ pub(super) async fn run(
             let _ = log_tx.send(format!("thread of {src} was removed — started a fresh one"));
         }
     }
-    let resume = resumes()
-        .lock()
-        .ok()
-        .and_then(|mut m| m.remove(&(run_id.clone(), node.id.clone())));
+    let resume = take_resume(run_id, &node.id);
     // A resumed thread may have written its handoff while the daemon was down.
     if let Some(df) = done_file.as_ref().filter(|_| resume.is_none()) {
         let _ = std::fs::remove_file(df);
@@ -209,6 +189,14 @@ pub(super) async fn run(
         .flatten()
         .map(|h| h.workflow_id);
     let label = node_display_name(node);
+    let mut meta = json!({
+        "source": "workflow", "run_id": run_id, "wf_name": wf_name,
+        "node_id": node.id, "node_kind": node.kind, "cwd": cwd,
+        "work": {"kind": "workflow_run", "id": run_id, "workflow_id": workflow_id},
+    });
+    if let Some(phase) = text(otto_workflows::check_resume::CHECK_PHASE_META_KEY) {
+        meta[otto_workflows::check_resume::CHECK_PHASE_META_KEY] = Value::String(phase);
+    }
     let t = StepTurn {
         user_id: user.id.clone(),
         workspace_id: ws.id.clone(),
@@ -220,11 +208,7 @@ pub(super) async fn run(
         effort: text("effort"),
         cwd: cwd.into(),
         title: format!("WF {wf_name} · {label} · run {}", short_id(run_id)),
-        meta: json!({
-            "source": "workflow", "run_id": run_id, "wf_name": wf_name,
-            "node_id": node.id, "node_kind": node.kind, "cwd": cwd,
-            "work": {"kind": "workflow_run", "id": run_id, "workflow_id": workflow_id},
-        }),
+        meta,
         prompt: format!("{prompt}{WF_STEP_RULES}"),
         continue_thread,
         handoff: done_file,

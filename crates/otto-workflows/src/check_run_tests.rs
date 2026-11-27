@@ -139,3 +139,156 @@ async fn a_person_records_only_the_criterion_the_check_waits_for() {
     );
     drop(guard);
 }
+
+#[tokio::test]
+async fn rule_over_review_and_command_record_structured_progress() {
+    let dir = tempfile::tempdir().unwrap();
+    let files = RunContextFiles::create(dir.path(), "run-prog");
+    let cwd = dir.path().to_str().unwrap().to_string();
+    let at = ScriptRun {
+        files: &files,
+        run_id: "run-prog",
+        run_cwd: &cwd,
+        step_base: "step2-check-iter3",
+    };
+    let criteria = vec![
+        crit(
+            "review-passes",
+            "expr",
+            json!({"expr": "steps.review.passed == true"}),
+        ),
+        crit(
+            "coverage",
+            "expr",
+            json!({"expr": "steps.bench.coverage >= 80"}),
+        ),
+        crit(
+            "tests",
+            "command",
+            json!({"command": "printf 'running tests\\n---\\nFAIL: TestCart\\n\\n' && exit 1"}),
+        ),
+    ];
+    let ictx = json!({
+        "iteration": 3,
+        "steps": {
+            "review": {
+                "passed": false,
+                "score": 72,
+                "threshold": 95,
+                "blocking": 3,
+                "advisory": 2,
+                "severity": {"bug": 3, "warn": 2, "info": 1},
+                "complete": true,
+                "outcome": "failed",
+                "reason": "3 must-fix finding(s) remain open"
+            },
+            "bench": {
+                "coverage": 64
+            }
+        }
+    });
+    let d = decide_commands_and_rules(&Host, &at, &criteria, &ictx)
+        .await
+        .unwrap();
+    assert_eq!(d.len(), 3);
+
+    // 1. Rule over a review step captures score, threshold, must-fix, should-fix, and blocker label.
+    let rp = d[0].progress.as_ref().expect("review progress");
+    assert_eq!((rp.value, rp.target), (Some(72.0), Some(95.0)));
+    assert_eq!(
+        rp.label.as_deref(),
+        Some("3 must-fix, 2 should-fix findings left")
+    );
+    assert_eq!(rp.values.get("steps.review.passed"), Some(&json!(false)));
+    assert_eq!(rp.values.get("score"), Some(&json!(72)));
+    assert_eq!(rp.values.get("threshold"), Some(&json!(95)));
+    assert_eq!(rp.values.get("must_fix"), Some(&json!(3)));
+    assert_eq!(rp.values.get("should_fix"), Some(&json!(2)));
+    assert!(
+        d[0].evidence.contains("72 / 95"),
+        "evidence carries score/target: {}",
+        d[0].evidence
+    );
+
+    // 2. Generic numeric rule captures value and target without review-specific fields.
+    let bp = d[1].progress.as_ref().expect("bench progress");
+    assert_eq!((bp.value, bp.target), (Some(64.0), Some(80.0)));
+    assert_eq!(bp.values.get("steps.bench.coverage"), Some(&json!(64)));
+
+    // 3. Command criterion captures exit code and last meaningful line (skipping blank/decor lines).
+    let cp = d[2].progress.as_ref().expect("command progress");
+    assert_eq!(cp.values.get("exit_code"), Some(&json!(1)));
+    assert_eq!(cp.values.get("last_line"), Some(&json!("FAIL: TestCart")));
+    assert_eq!(cp.label.as_deref(), Some("exit 1 — FAIL: TestCart"));
+}
+
+#[tokio::test]
+async fn bracketed_review_step_compound_rule_and_ceiling_rule() {
+    let dir = tempfile::tempdir().unwrap();
+    let files = RunContextFiles::create(dir.path(), "run-bug3");
+    let cwd = dir.path().to_str().unwrap().to_string();
+    let at = ScriptRun {
+        files: &files,
+        run_id: "run-bug3",
+        run_cwd: &cwd,
+        step_base: "step2-check-iter1",
+    };
+    let criteria = vec![
+        crit(
+            "named-review",
+            "expr",
+            json!({"expr": "steps[\"Review code\"].passed == true"}),
+        ),
+        crit(
+            "compound-review",
+            "expr",
+            json!({"expr": "steps.build.ok == true && steps[\"Review code\"].passed == true"}),
+        ),
+        crit(
+            "latency-cap",
+            "expr",
+            json!({"expr": "steps.bench.latency <= 200"}),
+        ),
+    ];
+    let ictx = json!({
+        "iteration": 1,
+        "steps": {
+            "build": {"ok": true},
+            "Review code": {
+                "passed": false,
+                "score": 81,
+                "threshold": 95,
+                "severity": {"bug": 2, "warn": 1},
+                "complete": true,
+                "outcome": "failed"
+            },
+            "bench": {"latency": 300}
+        }
+    });
+    let d = decide_commands_and_rules(&Host, &at, &criteria, &ictx)
+        .await
+        .unwrap();
+    assert_eq!(d.len(), 3);
+
+    // BUG-3 (a): bracketed step name resolves review output.
+    let p0 = d[0].progress.as_ref().expect("bracketed review progress");
+    assert_eq!((p0.value, p0.target), (Some(81.0), Some(95.0)));
+    assert_eq!(
+        p0.label.as_deref(),
+        Some("2 must-fix, 1 should-fix findings left")
+    );
+    assert_eq!(p0.values.get("score"), Some(&json!(81)));
+
+    // BUG-3 (b): compound rule whose first step is non-review still extracts review score.
+    let p1 = d[1].progress.as_ref().expect("compound review progress");
+    assert_eq!((p1.value, p1.target), (Some(81.0), Some(95.0)));
+    assert_eq!(p1.values.get("steps.build.ok"), Some(&json!(true)));
+    assert_eq!(p1.values.get("score"), Some(&json!(81)));
+
+    // INPUT-1: ceiling rule (latency <= 200 at 300) keeps numeric evidence without a floor ratio.
+    assert!(!d[2].met);
+    let p2 = d[2].progress.as_ref().expect("ceiling rule evidence");
+    assert_eq!((p2.value, p2.target), (None, None));
+    assert_eq!(p2.values.get("steps.bench.latency"), Some(&json!(300)));
+    assert!(p2.label.as_deref().unwrap_or("").contains("300"));
+}

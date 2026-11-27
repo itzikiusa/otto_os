@@ -7,7 +7,7 @@
 //! conditional/hit-count/logpoint breakpoints, `callFrames`, `Runtime.getProperties`,
 //! `Debugger.evaluateOnCallFrame`, stepping, stdout/stderr streaming, and clean teardown.
 
-mod cdp;
+pub(crate) mod cdp;
 mod events;
 #[cfg(test)]
 mod tests;
@@ -39,6 +39,8 @@ pub struct NodeInspectorBridgeSpec {
     pub cwd: String,
     pub env: BTreeMap<String, String>,
     pub attach_port: Option<u16>,
+    /// True when attaching to a browser CDP target (URL or `browser`/`chrome` language alias).
+    pub is_browser_attach: bool,
 }
 
 /// Spawn the built-in Node/V8 Inspector-to-DAP bridge, returning an in-memory
@@ -51,9 +53,18 @@ pub(crate) async fn spawn_node_inspector_bridge(
     let guard = BridgeGuard::new();
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<(String, String)>();
 
+    let requested_url = (spec.program.starts_with("http://")
+        || spec.program.starts_with("https://"))
+    .then_some(spec.program.as_str());
+    let is_browser_attach = spec.is_browser_attach
+        || (spec.attach_port.is_some()
+            && (requested_url.is_some()
+                || spec.program.starts_with("chrome://")
+                || spec.program.starts_with("browser://")));
+
     let (local_port, ws_path) = if let Some(attach_port) = spec.attach_port {
         let port = maybe_tunnel_port(target, ssh, &guard, attach_port).await?;
-        let path = discover_attach_ws_path(port).await?;
+        let path = discover_attach_ws_path(port, requested_url).await?;
         (port, path)
     } else {
         let (remote_port, path) = spawn_inspected_node(target, ssh, &spec, &guard, &out_tx).await?;
@@ -64,17 +75,41 @@ pub(crate) async fn spawn_node_inspector_bridge(
     let ws = InspectorWs::connect(local_port, &ws_path).await?;
     let (client_io, server_io) = tokio::io::duplex(65536);
     let guard_for_task = guard.clone();
+    let workspace_cwd = spec.cwd.clone();
     tokio::spawn(async move {
-        let _ = run_node_bridge_loop(server_io, ws, &mut out_rx, guard_for_task).await;
+        let _ = run_node_bridge_loop(
+            server_io,
+            ws,
+            &mut out_rx,
+            guard_for_task,
+            workspace_cwd,
+            is_browser_attach,
+        )
+        .await;
     });
     Ok((client_io, guard))
 }
 
+pub(super) struct PendingBrowserBpBatch {
+    pub(super) req_seq: i64,
+    pub(super) path: String,
+    pub(super) requested_lines: Vec<u32>,
+    pub(super) results: Vec<Option<Value>>,
+    pub(super) remaining: usize,
+}
+
 pub(super) struct NodeBridgeState {
+    pub(super) workspace_cwd: String,
+    pub(super) is_browser_attach: bool,
     pub(super) cdp_id: i64,
     pub(super) pending_cdp: HashMap<i64, (i64, String, String)>,
     pub(super) script_urls: HashMap<String, String>,
     pub(super) bp_ids_by_file: HashMap<String, Vec<String>>,
+    /// Maps CDP `breakpointId` -> `(dap_bp_id, orig_path, current_1based_line)`.
+    pub(super) bp_meta_by_id: HashMap<String, (i64, String, u32)>,
+    pub(super) next_dap_bp_id: i64,
+    pub(super) pending_browser_bp_batches: HashMap<i64, PendingBrowserBpBatch>,
+    pub(super) next_bp_batch_id: i64,
     pub(super) user_bp_lines: HashMap<String, Vec<u32>>,
     pub(super) initial_brk_skipped: bool,
     /// `configurationDone` arrived, so the debuggee may run.
@@ -85,12 +120,18 @@ pub(super) struct NodeBridgeState {
 }
 
 impl NodeBridgeState {
-    fn new() -> Self {
+    fn new(workspace_cwd: String, is_browser_attach: bool) -> Self {
         Self {
+            workspace_cwd,
+            is_browser_attach,
             cdp_id: 1,
             pending_cdp: HashMap::new(),
             script_urls: HashMap::new(),
             bp_ids_by_file: HashMap::new(),
+            bp_meta_by_id: HashMap::new(),
+            next_dap_bp_id: 1,
+            pending_browser_bp_batches: HashMap::new(),
+            next_bp_batch_id: 1,
             user_bp_lines: HashMap::new(),
             initial_brk_skipped: false,
             config_done: false,
@@ -115,18 +156,61 @@ impl NodeBridgeState {
 }
 
 pub(super) fn file_url_to_path(url: &str) -> Option<String> {
-    if url.is_empty() || url.starts_with("node:") {
+    file_url_to_path_in_cwd(url, "")
+}
+
+/// Resolve a CDP script URL (`file:///...`, absolute path, or browser dev-server URL
+/// such as `http://localhost:5173/src/App.svelte?t=123` or `webpack:///./src/app.ts`)
+/// to a local filesystem path when it maps into `workspace_cwd`.
+#[allow(clippy::disallowed_methods)]
+pub(crate) fn file_url_to_path_in_cwd(url: &str, workspace_cwd: &str) -> Option<String> {
+    if url.is_empty() || url.starts_with("node:") || url.starts_with("chrome-extension:") {
         return None;
     }
-    let path = if url
+    let without_qf = url.split(['?', '#']).next().unwrap_or(url);
+    let path = if without_qf
         .get(..7)
         .is_some_and(|p| p.eq_ignore_ascii_case("file://"))
     {
-        let without_qf = url.split(['?', '#']).next().unwrap_or(url);
         let normalized = format!("file://{}", &without_qf[7..]);
         otto_core::paths::file_uri_to_path(&normalized)?
-    } else if url.starts_with('/') {
-        std::path::PathBuf::from(url)
+    } else if without_qf.starts_with('/') {
+        std::path::PathBuf::from(without_qf)
+    } else if !workspace_cwd.is_empty() {
+        let rel = if let Some(rest) = without_qf
+            .strip_prefix("http://")
+            .or_else(|| without_qf.strip_prefix("https://"))
+        {
+            let (_, path_part) = rest.split_once('/')?;
+            path_part
+                .strip_prefix("@fs/")
+                .map(|abs| format!("/{abs}"))
+                .unwrap_or_else(|| path_part.trim_start_matches('/').to_string())
+        } else {
+            let rest = without_qf
+                .strip_prefix("webpack:///")
+                .or_else(|| without_qf.strip_prefix("webpack://"))
+                .or_else(|| without_qf.strip_prefix("vite://"))?;
+            let trimmed = rest.trim_start_matches('/');
+            trimmed
+                .strip_prefix("./")
+                .or_else(|| trimmed.split_once("/./").map(|(_, r)| r))
+                .unwrap_or(trimmed)
+                .to_string()
+        };
+        if rel.is_empty() || rel.contains("..") {
+            return None;
+        }
+        let cand = if rel.starts_with('/') {
+            std::path::PathBuf::from(&rel)
+        } else {
+            Path::new(workspace_cwd).join(&rel)
+        };
+        if cand.is_file() {
+            cand
+        } else {
+            return None;
+        }
     } else {
         return None;
     };
@@ -194,8 +278,9 @@ fn push_url_alts_for_abs_path(alts: &mut Vec<String>, abs_path: &str) {
     }
 }
 
-fn path_to_url_regex(path: &str) -> String {
-    let normalized = file_url_to_path(path).unwrap_or_else(|| path.to_string());
+pub(crate) fn path_to_url_regex_in_cwd(path: &str, workspace_cwd: &str) -> String {
+    let normalized =
+        file_url_to_path_in_cwd(path, workspace_cwd).unwrap_or_else(|| path.to_string());
     let canon = std::fs::canonicalize(&normalized)
         .ok()
         .map(|p| p.to_string_lossy().into_owned())
@@ -209,6 +294,23 @@ fn path_to_url_regex(path: &str) -> String {
         push_url_alts_for_abs_path(&mut alts, &canon);
         if canon != normalized && (normalized.starts_with('/') || is_win_drive) {
             push_url_alts_for_abs_path(&mut alts, &normalized);
+        }
+        // Match browser dev-server URLs (`http://localhost:5173/src/App.svelte?t=...`,
+        // `webpack:///./src/app.component.ts`, Vite `/@fs/...`) when path is inside `workspace_cwd`.
+        if !workspace_cwd.is_empty() {
+            let cwd_canon = std::fs::canonicalize(workspace_cwd)
+                .ok()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|| workspace_cwd.to_string());
+            if let Ok(rel) = Path::new(&canon).strip_prefix(Path::new(&cwd_canon)) {
+                let rel_str = rel.to_string_lossy().replace('\\', "/");
+                if !rel_str.is_empty() {
+                    let esc = escape_js_regex(&rel_str);
+                    alts.push(format!(
+                        "(?:https?://[^/]+|webpack://[^/]*/\\.?)/{esc}(?:[?#].*)?$"
+                    ));
+                }
+            }
         }
     } else if let Some(name) = Path::new(&canon).file_name().and_then(|n| n.to_str()) {
         alts.push(format!("[\\\\/]{}(?:[?#].*)?$", escape_js_regex(name)));
@@ -257,16 +359,47 @@ fn escape_js_template(s: &str) -> String {
         .replace("${", "\\${")
 }
 
+/// Return whether a breakpoint can honestly be marked verified immediately (BUG-31).
+/// In browser attach mode, compiled source files (`.ts`/`.tsx`/`.svelte`/`.vue`) are
+/// bundled under different URLs without source-map resolution here, so keep them
+/// unverified unless a loaded script URL directly maps to `path`.
+#[cfg(test)]
+pub(crate) fn is_initial_bp_verified(
+    path: &str,
+    is_browser_attach: bool,
+    script_urls: &HashMap<String, String>,
+    workspace_cwd: &str,
+) -> bool {
+    if !is_browser_attach {
+        return true;
+    }
+    let low = path.to_ascii_lowercase();
+    let is_compiled_src = low.ends_with(".ts")
+        || low.ends_with(".tsx")
+        || low.ends_with(".mts")
+        || low.ends_with(".cts")
+        || low.ends_with(".svelte")
+        || low.ends_with(".vue");
+    if !is_compiled_src {
+        return true;
+    }
+    script_urls
+        .values()
+        .any(|u| file_url_to_path_in_cwd(u, workspace_cwd).is_some_and(|mapped| mapped == path))
+}
+
 async fn run_node_bridge_loop(
     server_io: DuplexStream,
     mut ws: InspectorWs,
     out_rx: &mut mpsc::UnboundedReceiver<(String, String)>,
     guard: Arc<BridgeGuard>,
+    workspace_cwd: String,
+    is_browser_attach: bool,
 ) -> io::Result<()> {
     let (r, w) = tokio::io::split(server_io);
     let mut dap_rx = DapReader::new(r).into_channel();
     let mut dap_w = DapWriter::new(w);
-    let mut st = NodeBridgeState::new();
+    let mut st = NodeBridgeState::new(workspace_cwd, is_browser_attach);
 
     loop {
         tokio::select! {
@@ -447,6 +580,15 @@ async fn handle_node_dap_req<W: AsyncWrite + Unpin>(
             let _ = dap_w.send_event("terminated", Some(json!({}))).await;
             return Ok(true);
         }
+        "setVariable" => {
+            dap_w
+                .send_response(
+                    req.seq,
+                    "setVariable",
+                    Err("setVariable is not supported by the bundled Node CDP adapter".into()),
+                )
+                .await?;
+        }
         other => {
             dap_w
                 .send_response(req.seq, other, Ok(Some(json!({}))))
@@ -490,8 +632,50 @@ async fn handle_node_set_bps<W: AsyncWrite + Unpin>(
         .cloned()
         .unwrap_or_default();
     let mut lines = Vec::new();
+    let url_re = path_to_url_regex_in_cwd(&path, &st.workspace_cwd);
+    if st.is_browser_attach && !bps.is_empty() {
+        // BUG-31: In browser CDP attach mode, wait for CDP `Debugger.setBreakpointByUrl`
+        // replies before responding so `verified` reflects actual CDP bound `locations`
+        // rather than optimistic path heuristics.
+        let batch_id = st.next_bp_batch_id;
+        st.next_bp_batch_id += 1;
+        for bp in &bps {
+            lines.push(bp.get("line").and_then(Value::as_u64).unwrap_or(1) as u32);
+        }
+        st.pending_browser_bp_batches.insert(
+            batch_id,
+            PendingBrowserBpBatch {
+                req_seq,
+                path: path.clone(),
+                requested_lines: lines.clone(),
+                results: vec![None; bps.len()],
+                remaining: bps.len(),
+            },
+        );
+        for (idx, bp) in bps.iter().enumerate() {
+            let line = lines[idx];
+            let cond = build_cdp_bp_condition(bp);
+            let cid = st.alloc_cdp();
+            st.pending_cdp.insert(
+                cid,
+                (batch_id, "setBpBrowser".into(), format!("{idx}:{path}")),
+            );
+            ws.send_json(&json!({
+                "id": cid,
+                "method": "Debugger.setBreakpointByUrl",
+                "params": {
+                    "lineNumber": line.saturating_sub(1),
+                    "urlRegex": url_re,
+                    "condition": cond
+                }
+            }))
+            .await?;
+        }
+        st.user_bp_lines.insert(path, lines);
+        return Ok(());
+    }
+
     let mut verified = Vec::new();
-    let url_re = path_to_url_regex(&path);
     for bp in bps {
         let line = bp.get("line").and_then(Value::as_u64).unwrap_or(1) as u32;
         let cond = build_cdp_bp_condition(&bp);
@@ -543,7 +727,8 @@ fn build_node_stack_frames(st: &NodeBridgeState) -> Vec<Value> {
             } else {
                 st.script_urls.get(script_id).cloned().unwrap_or_default()
             };
-            let source = file_url_to_path(&resolved_url).map(|p| json!({ "path": p }));
+            let source = file_url_to_path_in_cwd(&resolved_url, &st.workspace_cwd)
+                .map(|p| json!({ "path": p }));
             let line = cf
                 .get("location")
                 .and_then(|l| l.get("lineNumber"))

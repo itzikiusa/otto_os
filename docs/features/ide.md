@@ -27,8 +27,8 @@ zero-rebuild **runtime IDE plugins**.
     (`GET/PUT /ide/environments`) and minting a collab share room
     (`POST /ide/collab/rooms`) carry `RouteClass::Secret` (human credentials only);
     and subprocess-spawning workspace mutations (`python-venv`, `deps/action`,
-    `POST /ide/runs`, `POST /ide/debug/sessions`) carry `RouteClass::Admin`
-    (human credentials only).
+    `POST /ide/runs`, `POST /ide/debug/sessions`, `POST /ide/notebooks/{execute,interrupt,restart,shutdown}`) carry `RouteClass::Admin`
+    (human credentials only; local execution/restart also requires root authority).
   - Public guest routes (`/api/v1/ide/collab/guest/*`) sit outside the bearer
     chokepoint and authenticate each request with the room's capability share
     token (`viewer` vs `editor`).
@@ -84,6 +84,28 @@ zero-rebuild **runtime IDE plugins**.
     (`pyvenv.cfg` present) that resolves under a known interpreter home
     (system, Xcode/CLT, python.org, Homebrew, pyenv/uv/mise/asdf/rye/conda,
     Otto toolchains).
+  - **Language servers that run project code.** `zls` (runs `build.zig`),
+    `kotlin-language-server` (imports the Gradle / Maven build), the
+    standalone `vue-language-server` (loads the plugins the project's
+    `tsconfig.json` names) and the .NET servers `csharp-ls` / `fsautocomplete`
+    (load the MSBuild project, whose design-time build runs its targets) start
+    only for a project you trust. When one is refused, a one-line notice
+    above the editor says so with **Trust project…** (it confirms what may
+    run, on this Mac or the SSH host, then starts the server); the status
+    strip's "<server> needs trust" item does the same. **Edit run
+    configurations…** → **Project environment** → *Trust this project* turns
+    it off again. (For scripts: the switch is the non-secret
+    `OTTO_IDE_TRUST_PROJECT_EXECUTION=1`; the per-language
+    `OTTO_IDE_TRUST_ZIG_BUILD`, `OTTO_IDE_TRUST_KOTLIN_LSP`,
+    `OTTO_IDE_TRUST_VUE_LSP` and `OTTO_IDE_TRUST_DOTNET_LSP` set to `1` still
+    work as ordinary variables.)
+    Local and SSH targets are gated alike. The opt-in is read from the opened
+    root or a module inside it, never from a parent folder, and a module
+    entry (`module_sdks`) does not copy it to a child checkout. Until then
+    `/ws/lsp` answers `403` (`zig_lsp_requires_trust`,
+    `kotlin_lsp_requires_trust`, `vue_lsp_requires_trust`,
+    `dotnet_lsp_requires_trust`). Trusting a local project needs the
+    root account; an agent session's credential can't.
   - **Network bridge host mappings** bind `127.0.0.1:<from_port>` without
     authentication, like `kubectl port-forward`: any local process (including
     a sandboxed agent session with loopback access) can reach the mapped
@@ -92,7 +114,7 @@ zero-rebuild **runtime IDE plugins**.
 - Code:
   - Engine & routers: `crates/otto-ide/` (`target.rs`, `target/fs_ops.rs`,
     `toolchains_catalog.rs`, `toolchains.rs`, `environments.rs`,
-    `environments/runner.rs`, `gutter.rs`, `dap/`, `lsp_service.rs`,
+    `environments/runner.rs`, `notebooks.rs`, `http/notebooks.rs`, `gutter.rs`, `dap/`, `lsp_service.rs`,
     `lsp_host/`, `collab.rs`, `plugins.rs`, `http.rs`).
   - Host wiring & `/ws/lsp` bridge: `crates/otto-server/src/lsp/mod.rs`,
     `crates/otto-server/src/modules/ctx_impls.rs`, `crates/otto-server/src/policy.rs`.
@@ -241,11 +263,15 @@ global system directories:
 | Ecosystem | Components |
 |-----------|------------|
 | **Java / JVM** | Adoptium Temurin JDK (17, 21 LTS), Maven, Gradle, Eclipse `jdtls`, `java-debug-adapter` |
+| **Kotlin** | Kotlin Compiler (`kotlinc` / `KOTLIN_HOME`, SDKMAN / Homebrew / official archive), `kotlin-language-server`, `ktfmt` / `ktlint`, Gradle Kotlin DSL (`build.gradle.kts`) & Version Catalog (`gradle/libs.versions.toml`), mixed Java/Kotlin Maven & Gradle modules, JUnit 5 (incl. backtick names) gutter runs & Kotest spec-class gutter runs (one Suite item per spec; leaf DSL tests have no gutter item), JVM JDWP debugging via `java-debug` |
+| **Spring Boot** | Auto-detected from `@SpringBootApplication`, `pom.xml`, and `build.gradle*` (including multi-module sub-projects); Spring Boot run/debug configs & gutter icons with profile activation (`SPRING_PROFILES_ACTIVE` / `-Dspring-boot.run.profiles`), `application*.{properties,yml}` completion, hover, diagnostics (with deprecated-property Quick Fixes in `.properties`), bidirectional `@Value` / `@ConfigurationProperties` ↔ config navigation, loopback-only Actuator inspector (Health incl. 503 DOWN/OUT_OF_SERVICE, Endpoints/Mappings, Beans, redacted Env), and DevTools classpath trigger touch |
 | **Python** | `uv`, standalone CPython (3.11 / 3.12 / 3.13), `pyright`, `ruff`, `debugpy` |
 | **Rust** | `rustup` (`rustc` + `cargo`), `rust-analyzer`, `CodeLLDB` (`codelldb`) |
 | **Zig** | Official Zig SDK tarball (`ziglang.org/download/index.json`, SHA-256 verified), local SDK registration, `zls` (Zig-version-matched), `CodeLLDB` (`codelldb`) / `lldb-dap` / built-in `otto-lldb-dap` with Zig LLDB type formatters |
+| **C / C++ & Unreal Engine** | Clang / GCC / LLVM toolchain discovery & local registration (Otto does not download compilers: install them with Xcode Command Line Tools, Homebrew or `apt` / `dnf`), `clangd` (auto `--compile-commands-dir` including CMake/Meson/Unreal `Intermediate/ProjectFiles` + `textDocument/switchSourceHeader` `⌥O`), `clang-format`, CMake (Presets & CTest), Meson, Make, `vcpkg.json` / `conanfile.txt` / `.uproject` deps, `CodeLLDB` / `lldb-dap` / built-in `otto-lldb-dap` with C++ STL & Unreal pretty-printers, PID/process-name attach, and core-dump debugging |
+| **.NET (C# / F# / Unity / Unreal)** | Official .NET SDK tarball (`dotnetcli.azureedge.net` / `builds.dotnet.microsoft.com`, LTS 8.0 / 9.0), local SDK registration (`DOTNET_ROOT`), SDK-matched `csharp-ls` + `fsautocomplete` (with OmniSharp / Roslyn fallback), NuGet inspector & OSV vulnerabilities, `netcoredbg` (and `vsdbg` fallback) with `VSTEST_HOST_DEBUG` test debugging (one test project per session) & explicit PID attach (Unity Editor attach is not supported) |
 | **Go** | Official Go SDK tarball, local SDK registration (`POST /ide/toolchains/local`), `gopls`, Delve (`dlv`), `gofumpt` |
-| **Node / TypeScript** | Node LTS (22), `pnpm`, `typescript-language-server`, `vscode-langservers-extracted`, `prettier`, `js-debug` |
+| **Node / TypeScript & Web Frameworks** | Node LTS (22), `pnpm`, `typescript-language-server`, `svelteserver` (Svelte/SvelteKit, untrusted mode), `vue-language-server` (Vue/Nuxt standalone mode), `ngserver` (Angular with `--tsProbeLocations`/`--ngProbeLocations`), `vscode-langservers-extracted`, `prettier`, `js-debug` & built-in `otto-node-cdp` (Node + Browser CDP attach with Vite/webpack URL mapping) |
 | **Shell (Bash / Zsh)** | `bash-language-server`, `shellcheck`, `shfmt`, built-in `otto-sh-dap` (`DEBUG` trap DAP debugger) |
 | **JSON & CSV / TSV** | `vscode-json-language-server`, live JSONPath breadcrumb (JSONC files — `.jsonc`, `tsconfig*.json`, `jsconfig*.json`, `.vscode/*.json`, `devcontainer.json`, `.eslintrc.json` — allow comments and trailing commas in the built-in syntax check), Pretty / Minify / Sort Keys, `$ref` navigation, virtualized `IdeCsvView` (`Table ↔ Text` toggle, rainbow columns, sort/filter, inline cell edit + undo, column stats) |
 
@@ -274,7 +300,7 @@ never spawned per request) and merges:
 `daemon base env → cached login shell env → selected SDK env → project .env file → Run/Debug config overrides`
 
 into **all** Run executions, DAP Debug sessions, IDE Terminals, and local LSP
-servers (`gopls`, `jdtls`, `rust-analyzer`, `zls`, `pyright`, `tsserver`).
+servers (`gopls`, `jdtls`, `kotlin-language-server`, `rust-analyzer`, `zls`, `clangd`, `csharp-ls`, `pyright`, `tsserver`).
 When that PATH has no `mvn` / `gradle` (a slow capture falls back to `-lc`, which
 skips `~/.zshrc` and so sdkman's init), a local run looks in
 `~/.sdkman/candidates/{maven,gradle}/current/bin`, then `/opt/homebrew/bin` and
@@ -285,8 +311,8 @@ Per-project configuration is persisted in SQLite (`0214_ide_configs.sql`), with
 secret environment variable values stored in the macOS Keychain via
 `otto-keychain` (`ide-env:<project_hash>:<key>`):
 
-- Select SDK/toolchain overrides per project (`java_home`, `go_root`,
-  `rust_toolchain`, `zig_home`, `node_home`, `python_interpreter`, `dotenv_path`,
+- Select SDK/toolchain overrides per project (`java_home`, `kotlin_home`, `go_root`,
+  `rust_toolchain`, `zig_home`, `cpp_toolchain`, `dotnet_root`, `node_home`, `python_interpreter`, `dotenv_path`,
   `extra_path`, `inherit_shell_env`, `additional_roots`).
 - Create project-local Python virtual environments (`POST /ide/environments/python-venv`
   via `uv venv` or `python3 -m venv`), discover `.env*` files, and configure
@@ -294,15 +320,15 @@ secret environment variable values stored in the macOS Keychain via
 - Instant (`< 25ms`, pure file-stat/manifest scan with zero subprocess spawns)
   runner discovery across primary and attached folders plus reusable **Run
   Configurations** (`go_test`, `go_run`, `java_junit`, `java_main`, `maven`,
-  `gradle`, `cargo_test`, `cargo_run`, `zig_build`, `zig_run`, `zig_test`, `node`, `npm`, `vitest`, `pytest`,
+  `gradle`, `cargo_test`, `cargo_run`, `zig_build`, `zig_run`, `zig_test`, `cmake`, `ctest`, `cpp_run`, `make`, `meson`, `unreal`, `dotnet_build`, `dotnet_run`, `dotnet_test`, `node`, `npm`, `vitest`, `jest`, `playwright`, `karma`, `pytest`,
   `python`, `shell`, `compound`, `custom`), launched in the **Run** bottom dock
   (`POST /ide/runs`) with live output and structured test-result trees, or
   stopped via `POST /ide/runs/{run_id}/stop`.
 - Maven / Gradle runs read the JUnit XML reports the run wrote (`TEST-*.xml`
   under `**/target/surefire-reports` and `**/build/test-results/**`) for one row
   per test with its time and failure message, instead of the console's one row
-  per class. A test run with a filter (`go_test`, `cargo_test`, `zig_test`, `pytest`,
-  `vitest`, `java_junit`, `maven`, `gradle`) that exits 0 with no tests fails
+  per class. A test run with a filter (`go_test`, `cargo_test`, `zig_test`, `ctest`, `cpp_run`, `meson`, `dotnet_test`, `pytest`,
+  `vitest`, `jest`, `playwright`, `karma`, `java_junit`, `maven`, `gradle`) that exits 0 with no tests fails
   with `No tests matched '<filter>'` instead of showing green.
 - A config's `before_launch` hook runs before the program, in its own process
   group, with its stdout/stderr streamed into the Run console. A non-zero exit
@@ -323,6 +349,8 @@ items directly into the editor gutter:
 
 - **Rust:** `fn main()`, `#[test]`, `#[tokio::test]`, `mod tests`
 - **Zig:** `pub fn main()`, `test "name" { ... }`, `test Decl { ... }`
+- **C / C++:** `int main(...)`, GoogleTest `TEST(...)` / `TEST_F(...)` / `TEST_P(...)` / `TYPED_TEST(...)` (plus suite gutter), Catch2 `TEST_CASE("...")` / `SCENARIO("...")`.
+  Run and Debug of a file in a CMake project build the executable target that compiles it (by exact source path, or the configured build's `compile_commands.json`). A source inside a CMake or Meson project that maps to no executable (a library file, a never-configured project's variable or glob sources, any Meson source, any project source over SSH) fails with the reason and what to run instead; only a file outside any build project compiles on its own.
 - **Go:** `func main()`, `func TestXxx(t *testing.T)`, `func BenchmarkXxx(b *testing.B)`
 - **Python:** `if __name__ == "__main__":`, `def test_*`, `class Test*`
 - **Java:** `public static void main`, `@Test`, `@ParameterizedTest`
@@ -384,13 +412,28 @@ plus zero-install built-in bridges across every major ecosystem: `dlv dap` (Go),
 `java-debug-adapter` or built-in `otto-jdi-jdwp` (`jdb`/JDWP for Java),
 `debugpy.adapter` or built-in `otto-py-bdb` (Python stdlib `bdb`), `js-debug`
 or built-in `otto-node-cdp` (`node --inspect-brk=0` CDP), `codelldb` /
-`lldb-dap` or built-in `otto-lldb-dap` (`/usr/bin/lldb` for Rust & Zig, with Zig LLDB pretty-printers for slices, strings, optionals, and error unions, plus `POST /ide/debug/sessions/{id}/set-variable` and Zig panic function breakpoints), and
+`lldb-dap` or built-in `otto-lldb-dap` (`/usr/bin/lldb` for Rust, Zig, and C/C++ / Unreal, with Zig, C++ STL, and Unreal LLDB pretty-printers, PID/process-name attach, post-mortem core-dump loading, `POST /ide/debug/sessions/{id}/set-variable`, and Zig panic / C++ `__cxa_throw` exception breakpoints), and
 `otto-sh-dap` (`DEBUG` trap for Bash/Zsh), plus a deterministic mock adapter.
 
+Some starts are refused with a message instead of opening a session: Debug of
+a Playwright or Karma / Angular test run (Playwright runs tests in a separate
+worker process, Karma in a browser; use Run, `PWDEBUG=1` or a Chrome CDP
+attach), a .NET Debug of all tests (local or SSH) in a folder or solution with
+more than one test project (a session attaches to one test host; debug one test
+from the gutter, or a ".NET Test" configuration that targets one project; add it
+in Launch settings when discovery lists none, as for solutions of more than 6
+projects), and
+`unity://attach`. Debug All Tests on a Zig project with several test suites
+debugs one suite and names the others.
+
 A Java Debug (or `java_main` Run) of a file in a Maven module takes the classpath
-from Maven itself: `mvn -q test-compile dependency:build-classpath` (run from the
-reactor root with `-pl <module> -am`, using `mvnw` when the build has one), then
-`target/test-classes:target/classes:<deps>`. Without a `pom.xml` or Maven, or
+from Maven itself (run from the reactor root with `-pl <module> -am`, using
+`mvnw` when the build has one). An app launch (a `main` under `src/main`) runs
+`mvn -q compile dependency:build-classpath dependency:list` and gets
+`target/classes:<deps>` with every scope but test (`provided` included, as
+`spring-boot:run` does), so no test classes, test resources or test-scoped JARs;
+a test, or a `main` under `src/test`, runs `test-compile` with the test
+scope and gets `target/test-classes:target/classes:<deps>`. Without a `pom.xml` or Maven, or
 when Maven can't resolve the module (an attached repo that was never installed),
 Otto compiles with its own `javac -g` instead; a failure shows the first 20 lines
 of the build output.
@@ -824,6 +867,7 @@ Full schemas and route tables live in [`docs/contracts/api.md`](../contracts/api
   `GET /ide/toolchains/jobs/{job_id}`, `POST /ide/toolchains/python-venv`,
   `GET /ide/shell-env`, `POST /ide/shell-env/reload`, `POST /ide/deps/inspect`,
   `POST /ide/deps/action`, `POST /ide/build-tools/model`,
+  `POST /ide/spring/actuator`, `POST /ide/spring/devtools-restart`,
   `GET /ide/environments`, `PUT /ide/environments`,
   `POST /ide/environments/python-venv`, `POST /ide/run-configs`,
   `DELETE /ide/run-configs/{id}`.
@@ -860,11 +904,16 @@ Full schemas and route tables live in [`docs/contracts/api.md`](../contracts/api
 
 - **"Language server unavailable" banner:** Click **Toolchains** in the IDE
   toolbar and install the matching language server (for example `rust-analyzer`,
-  `zls`, `gopls`, `pyright`, `jdtls`, or `typescript-language-server`, or install/enable
-  a runtime IDE plugin for additional languages such as Kotlin or C/C++). The
+  `zls`, `clangd`, `csharp-ls`, `kotlin-language-server`, `gopls`, `pyright`, `jdtls`, or `typescript-language-server`, or install/enable
+  a runtime IDE plugin for additional languages). The
   editor reconnects automatically once the install job finishes. A rustup
   `rust-analyzer` proxy only counts as installed once `rust-analyzer --version`
   succeeds (`rustup component add rust-analyzer`).
+- **"<server> needs trust" for `zls`, `kotlin-language-server`,
+  `vue-language-server` or a .NET language server:** the project has not
+  been trusted to run its build or plugins; click **Trust project…** (see
+  *Language servers that run project code* above). If it then reads
+  "<server> unavailable", install the server.
 - **One language server per build:** `jdtls` is rooted at the Maven reactor
   (the parent `pom.xml` that lists the module in `<modules>`) or the Gradle
   `settings.gradle*` dir, and `rust-analyzer` at the Cargo `[workspace]`, so
@@ -874,6 +923,10 @@ Full schemas and route tables live in [`docs/contracts/api.md`](../contracts/api
   `-javaagent:<newest lombok jar in ~/.m2>` when one is there, so Lombok
   members resolve, and with `java.import.generatesMetadataFilesAtProjectRoot=false`,
   so `.project`, `.classpath` and `.settings` go to its `-data` dir, not the repo.
+  It also runs with `java.autobuild.enabled=false`: Otto builds with Maven,
+  Gradle or javac itself, so jdtls never deletes and rewrites a module's
+  `target/classes` under a program that Run or Debug started (open files still
+  get jdtls's errors).
 - **Remote SSH target fails to connect:** Verify the SSH connection succeeds in
   **Connections** first (`BatchMode=yes` key auth is used for non-interactive
   LSP/DAP/command execution) and confirm your role grants `discover` and `shell`

@@ -793,6 +793,100 @@ impl SandboxPolicy {
         }
     }
 
+    /// Offline source-analysis process with explicitly bounded read and write roots.
+    /// Neither the user's home nor the engine's own installation is writable.
+    pub fn for_offline_scan(project: &Path, tool_dir: &Path, cache: &Path, output: &Path) -> Self {
+        let mut rules = scan_base_rules(&[tool_dir, cache, output]);
+        // The IDE authorizes this canonical root before dispatch. Do not
+        // follow a replacement symlink and silently grant a different tree.
+        rules.push(format!(
+            "(allow file-read-data (subpath \"{}\"))",
+            escape(project)
+        ));
+        Self {
+            writable_roots: [cache, output]
+                .into_iter()
+                .map(canonicalize_lenient)
+                .collect(),
+            deny_read: Vec::new(),
+            network: NetworkPolicy::None,
+            mach_services: Some(Vec::new()),
+            trailing_rules: rules,
+        }
+    }
+
+    /// Confined active DAST scanner process (Nuclei). No access to user home or
+    /// project source trees; writes are limited to `output` (templates are
+    /// read-only); outbound network is restricted to Otto's ephemeral loopback
+    /// pinning proxy on `proxy_port`.
+    pub fn for_dast_scan(
+        tool_dir: &Path,
+        templates: &Path,
+        output: &Path,
+        proxy_port: u16,
+    ) -> Self {
+        let mut rules = scan_base_rules(&[
+            Path::new("/private/etc/ssl"),
+            Path::new("/Library/Keychains/System.keychain"),
+            Path::new("/System/Library/Keychains"),
+            tool_dir,
+            templates,
+            output,
+        ]);
+        rules.push(format!(
+            "(allow network-outbound (remote tcp \"localhost:{proxy_port}\"))"
+        ));
+        Self {
+            writable_roots: vec![canonicalize_lenient(output)],
+            deny_read: Vec::new(),
+            network: NetworkPolicy::None,
+            mach_services: Some(vec![
+                "com.apple.trustd".into(),
+                "com.apple.trustd.agent".into(),
+                "com.apple.SecurityServer".into(),
+            ]),
+            trailing_rules: rules,
+        }
+    }
+
+    /// Confined template-update process for Nuclei (`-ut -ud <templates>`).
+    /// No access to user home or project trees; writes are confined to
+    /// `templates` and `output`; outbound network is limited to HTTPS (443) and
+    /// system DNS resolution.
+    pub fn for_template_update(tool_dir: &Path, templates: &Path, output: &Path) -> Self {
+        let mut rules = scan_base_rules(&[
+            Path::new("/private/etc"),
+            Path::new("/Library/Keychains/System.keychain"),
+            Path::new("/System/Library/Keychains"),
+            tool_dir,
+            templates,
+            output,
+        ]);
+        rules.push(
+            "(allow network-outbound (remote unix-socket (path-literal \"/private/var/run/mDNSResponder\")))"
+                .into(),
+        );
+        rules.push("(allow network-outbound (remote tcp \"*:443\"))".into());
+        rules.push("(allow network-outbound (remote udp \"*:53\"))".into());
+        rules.push("(allow network-outbound (remote tcp \"*:53\"))".into());
+        Self {
+            writable_roots: [templates, output]
+                .into_iter()
+                .map(canonicalize_lenient)
+                .collect(),
+            deny_read: Vec::new(),
+            network: NetworkPolicy::None,
+            mach_services: Some(vec![
+                "com.apple.trustd".into(),
+                "com.apple.trustd.agent".into(),
+                "com.apple.SecurityServer".into(),
+                "com.apple.SystemConfiguration.configd".into(),
+                "com.apple.SystemConfiguration.DNSConfiguration".into(),
+            ]),
+            trailing_rules: rules,
+        }
+    }
+
     /// Render the macOS Seatbelt (SBPL) profile for this policy.
     pub fn to_sbpl(&self) -> String {
         let mut p = String::new();
@@ -1067,6 +1161,34 @@ fn provider_root_filters(root: &Path) -> Vec<String> {
 /// Escape a path for inclusion in an SBPL string literal.
 fn escape(p: &Path) -> String {
     escape_str(&p.to_string_lossy())
+}
+
+fn scan_base_rules(extra: &[&Path]) -> Vec<String> {
+    let mut rules = vec![
+        "(deny file-read*)".into(),
+        "(import \"dyld-support.sb\")".into(),
+        "(allow file-read-metadata)".into(),
+        "(deny file-write* (subpath \"/dev\"))".into(),
+        "(allow file-read-data (literal \"/dev/null\" \"/dev/random\" \"/dev/urandom\"))".into(),
+        "(allow file-write-data (literal \"/dev/null\"))".into(),
+    ];
+    for p in [
+        Path::new("/System/Library"),
+        Path::new("/usr/lib"),
+        Path::new("/usr/bin"),
+        Path::new("/bin"),
+        Path::new("/usr/share/zoneinfo"),
+    ]
+    .into_iter()
+    .chain(extra.iter().copied())
+    {
+        let p = canonicalize_lenient(p);
+        rules.push(format!(
+            "(allow file-read-data (subpath \"{}\"))",
+            escape(&p)
+        ));
+    }
+    rules
 }
 
 fn escape_str(s: &str) -> String {

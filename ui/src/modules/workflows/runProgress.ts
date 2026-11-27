@@ -60,6 +60,17 @@ export function applyLiveNode(run: WorkflowRun, ev: LiveRunEvent): boolean {
   if (!run.summary || !node || !ev.overview || ev.rev <= 0 || ev.rev !== (run.rev ?? 0) + 1) return false;
   if (run.status !== 'running' || ev.status !== 'running') return false;
   if (run.checkpoint_rev) return false;
+  // Before the first checkpoint lands (`checkpoint_rev === 0`), a goal update
+  // signals a loop iteration or check completed: refetch `/progress` so the new
+  // `checkpoint_rev` triggers the shared checkpoint refresh immediately.
+  if (
+    ev.overview.goal &&
+    (ev.overview.goal.iteration !== run.overview?.goal?.iteration ||
+      ev.overview.goal.criteria_met !== run.overview?.goal?.criteria_met ||
+      ev.overview.goal.criteria_total !== run.overview?.goal?.criteria_total)
+  ) {
+    return false;
+  }
   const old = run.nodes.find((n) => n.node_id === node.node_id);
   if (!old) return false;
   // Same `detail_version` + status ⇒ nothing to rewrite (see mergeRunProgress).

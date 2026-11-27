@@ -12,6 +12,8 @@
 //!   inspection, IntelliJ-style inline ghost variable values, and SSE broadcasts.
 
 pub mod adapters;
+pub(crate) mod adapters_cpp;
+pub(crate) mod adapters_dotnet;
 pub(crate) mod adapters_env;
 pub(crate) mod adapters_go_py;
 pub(crate) mod adapters_jvm_js;
@@ -59,16 +61,23 @@ pub use wire::{DapEvent, DapMessage, DapReader, DapRequest, DapResponse, DapWrit
 
 /// Owns background child processes, Unix process-group IDs, temp IPC dirs, and SSH tunnels.
 #[derive(Default)]
-pub(crate) struct BridgeGuard {
+pub struct BridgeGuard {
     children: Mutex<Vec<Child>>,
     pgids: Mutex<Vec<u32>>,
     tunnels: Mutex<Vec<SshTunnel>>,
     temp_dirs: Mutex<Vec<PathBuf>>,
+    companions: Mutex<Vec<Arc<BridgeGuard>>>,
 }
 
 impl BridgeGuard {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self::default())
+    }
+
+    pub(crate) fn push_companion(&self, other: Arc<BridgeGuard>) {
+        if let Ok(mut guard) = self.companions.lock() {
+            guard.push(other);
+        }
     }
 
     pub(crate) fn push_child(&self, child: Child) {
@@ -119,6 +128,15 @@ impl BridgeGuard {
             .lock()
             .map(|mut d| d.drain(..).collect())
             .unwrap_or_default();
+
+        let companions_to_kill: Vec<Arc<BridgeGuard>> = self
+            .companions
+            .lock()
+            .map(|mut c| c.drain(..).collect())
+            .unwrap_or_default();
+        for comp in companions_to_kill {
+            comp.kill_all();
+        }
 
         #[cfg(unix)]
         for pgid in pgids_to_kill {
@@ -300,6 +318,61 @@ pub(crate) async fn run_target_command(
         ))),
         Err(e) => Err(Error::Upstream(format!("'{command}' failed: {e}"))),
     }
+}
+
+/// POSIX shell lines that create (or verify) `$HOME/.otto/cache/<sub>` as `DIR`: every
+/// level owned by the SSH user, `0700`, never a symlink — never the shared `/tmp` (SEC3-1).
+pub(crate) fn ssh_private_cache_dir_script(sub: &str) -> String {
+    format!(
+        "set -eu\n\
+         umask 077\n\
+         BASE=\"$HOME/.otto\"\n\
+         CACHE=\"$BASE/cache\"\n\
+         DIR=\"$CACHE/{sub}\"\n\
+         for d in \"$BASE\" \"$CACHE\" \"$DIR\"; do\n\
+           if [ -L \"$d\" ]; then echo 'otto: refusing symlink cache dir' >&2; exit 1; fi\n\
+           if [ ! -d \"$d\" ]; then mkdir -m 700 \"$d\"; fi\n\
+           if [ ! -O \"$d\" ]; then echo 'otto: cache dir not owned by SSH user' >&2; exit 1; fi\n\
+           chmod 700 \"$d\"\n\
+         done\n"
+    )
+}
+
+/// The SSH user's private `$HOME/.otto/cache/<sub>` directory (absolute path) for the
+/// executables a debug start builds, so another host user can't swap the binary the
+/// debugger launches (SEC3-1).
+pub(crate) async fn ssh_private_cache_dir(
+    target: &IdeTargetSpec,
+    ssh: Option<&IdeSshSpec>,
+    sub: &str,
+    cwd: &str,
+    env: &BTreeMap<String, String>,
+) -> Result<String> {
+    let script = format!(
+        "{}printf 'DIR:%s\\n' \"$DIR\"\n",
+        ssh_private_cache_dir_script(sub)
+    );
+    let out = run_target_command(
+        target,
+        ssh,
+        "sh",
+        &["-c".into(), script],
+        cwd,
+        env,
+        crate::proc_group::BUILD_STEP_TIMEOUT,
+    )
+    .await?;
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("DIR:"))
+        .filter(|d| out.status.success() && d.starts_with('/'))
+        .map(String::from)
+        .ok_or_else(|| {
+            Error::Upstream(format!(
+                "cannot prepare private debug directory on the SSH host: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ))
+        })
 }
 
 /// Read source file text safely (local disk confined to workspace roots + `secret_paths` guard,

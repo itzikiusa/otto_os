@@ -65,6 +65,31 @@ pub async fn hover<S: IdeCtx>(ctx: &S, user: &User, req: IdeHoverReq) -> Result<
 
     let lang = resolve_language(ctx, &req.path, None);
     let line = req.effective_line();
+
+    // Spring Boot `application*.{properties,yml}` & Java/Kotlin `@Value` / `@ConfigurationProperties` hover.
+    {
+        let project_roots = resolved_opt
+            .as_ref()
+            .map(|r| r.local_project_roots())
+            .unwrap_or_default();
+        let is_root_user = otto_core::auth::root_authority(user);
+        let path_c = req.path.clone();
+        let content_c = content.clone();
+        if let Ok(Some(spring_hover)) = tokio::task::spawn_blocking(move || {
+            crate::spring_boot::props::hover_spring_config(
+                &path_c,
+                &content_c,
+                line,
+                &project_roots,
+                is_root_user,
+            )
+        })
+        .await
+        {
+            return Ok(spring_hover);
+        }
+    }
+
     let col_1based = resolve_hover_col_1based(&content, line, &req);
     let Some((symbol, qualifier)) =
         extract_symbol_and_qualifier(None, &lang, &content, line, col_1based)

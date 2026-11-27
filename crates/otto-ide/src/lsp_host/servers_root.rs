@@ -49,7 +49,40 @@ fn manifest_names_for_lang(norm_lang: &str) -> &'static [&'static str] {
         ],
         "rust" => &["Cargo.toml"],
         "zig" => &["build.zig", "build.zig.zon"],
-        "typescript" | "javascript" => &["tsconfig.json", "jsconfig.json", "package.json"],
+        "cpp" | "c" => &[
+            "compile_commands.json",
+            "CMakePresets.json",
+            "CMakeLists.txt",
+            "meson.build",
+            ".clangd",
+            "Makefile",
+            "GNUmakefile",
+        ],
+        "csharp" | "fsharp" => &[
+            "*.sln",
+            "*.slnx",
+            "*.csproj",
+            "*.fsproj",
+            "global.json",
+            "Directory.Build.props",
+            "Directory.Packages.props",
+        ],
+        "typescript" | "javascript" | "svelte" | "vue" | "angular" => &[
+            "angular.json",
+            "svelte.config.js",
+            "svelte.config.ts",
+            "svelte.config.mjs",
+            "next.config.ts",
+            "next.config.mjs",
+            "next.config.js",
+            "nuxt.config.ts",
+            "nuxt.config.js",
+            "vite.config.ts",
+            "vite.config.js",
+            "tsconfig.json",
+            "jsconfig.json",
+            "package.json",
+        ],
         "python" => &[
             "pyproject.toml",
             "setup.py",
@@ -74,10 +107,34 @@ fn manifest_names_for_lang(norm_lang: &str) -> &'static [&'static str] {
     }
 }
 
+fn dir_has_unreal_descriptor(dir: &Path) -> bool {
+    #[allow(clippy::disallowed_methods)]
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    rd.flatten().take(64).any(|e| {
+        e.file_name()
+            .to_str()
+            .is_some_and(|n| n.ends_with(".uproject") || n.ends_with(".uplugin"))
+    })
+}
+
+#[allow(clippy::disallowed_methods)] // shallow 1-level dir check executed during LSP root resolution
+fn dir_has_suffix(dir: &Path, suffix: &str) -> bool {
+    std::fs::read_dir(dir).ok().is_some_and(|rd| {
+        rd.flatten()
+            .any(|e| e.file_name().to_str().is_some_and(|n| n.ends_with(suffix)))
+    })
+}
+
 fn dir_has_any_manifest(dir: &Path, names: &[&str], extra_markers: &[String]) -> bool {
-    names
-        .iter()
-        .any(|m| dir.join(m).is_file() || dir.join(m).is_dir())
+    names.iter().any(|m| {
+        if let Some(suffix) = m.strip_prefix('*') {
+            dir_has_suffix(dir, suffix)
+        } else {
+            dir.join(m).is_file() || dir.join(m).is_dir()
+        }
+    }) || (names.contains(&"CMakeLists.txt") && dir_has_unreal_descriptor(dir))
         || extra_markers
             .iter()
             .map(|s| s.trim())
@@ -96,11 +153,14 @@ fn dir_looks_like_child_repo(dir: &Path) -> bool {
         "build.gradle.kts",
         "Cargo.toml",
         "build.zig",
+        "CMakeLists.txt",
+        "meson.build",
         "package.json",
         "pyproject.toml",
     ]
     .iter()
     .any(|m| dir.join(m).is_file())
+        || dir_has_unreal_descriptor(dir)
 }
 
 /// Detect whether `dir` is a multi-repository parent umbrella folder (no own
@@ -139,6 +199,15 @@ fn is_dependency_dir(dir: &Path) -> bool {
         || parts.windows(2).any(|w| w == [".cache", "zig"])
         || parts.windows(3).any(|w| w == ["lib", "zig", "std"])
         || parts.windows(2).any(|w| w == ["lib", "std"])
+        // C/C++ system SDK headers (macOS CLT/Xcode, Homebrew, Linux /usr/include) and Conan/vcpkg caches.
+        || parts.windows(2).any(|w| w == ["CommandLineTools", "SDKs"])
+        || parts.windows(2).any(|w| w == ["Xcode.app", "Contents"])
+        || parts.windows(2).any(|w| w == ["usr", "include"])
+        || parts.windows(2).any(|w| w == ["homebrew", "include"])
+        || parts.iter().any(|c| matches!(*c, ".conan2" | "vcpkg_installed"))
+        // NuGet package cache (`~/.nuget/packages/...`) and .NET shared reference packs.
+        || parts.windows(2).any(|w| w == [".nuget", "packages"])
+        || parts.windows(2).any(|w| w == ["dotnet", "packs"])
 }
 
 #[allow(clippy::disallowed_methods)]
@@ -206,12 +275,33 @@ pub(crate) fn climb_to_build_root(
             // Cargo binds a member to its nearest `[workspace]` ancestor.
             "rust" if is_cargo_workspace(&parent) => return parent,
             "rust" => true,
+            // CMake sub-directories (`src/CMakeLists.txt`) and Unreal modules (`Source/MyGame`)
+            // belong to the top-most ancestor holding `CMakeLists.txt`, `CMakePresets.json`,
+            // `compile_commands.json`, `meson.build`, or `*.uproject`.
+            "cpp" | "c" => {
+                parent.join("CMakeLists.txt").is_file()
+                    || parent.join("CMakePresets.json").is_file()
+                    || parent.join("compile_commands.json").is_file()
+                    || parent.join("meson.build").is_file()
+                    || dir_has_unreal_descriptor(&parent)
+            }
+            // .NET binds a `.csproj`/`.fsproj` member to its nearest `.sln`/`.slnx` ancestor.
+            "csharp" | "fsharp"
+                if dir_has_suffix(&parent, ".sln") || dir_has_suffix(&parent, ".slnx") =>
+            {
+                return parent;
+            }
+            "csharp" | "fsharp" => {
+                !dir_has_suffix(module, ".sln") && !dir_has_suffix(module, ".slnx")
+            }
             _ => false,
         };
         if !climb {
             break;
         }
-        if norm_lang != "rust" {
+        // Rust and .NET climb only to find their workspace / `.sln` ancestor (returned
+        // above): a lone member is its own root, never the highest allowed ancestor.
+        if !matches!(norm_lang, "rust" | "csharp" | "fsharp") {
             top = parent.clone();
         }
         cur = parent;
@@ -453,26 +543,26 @@ mod tests {
     #[test]
     fn includes_custom_lsp_from_enabled_ide_plugin() {
         let tmp = tempfile::tempdir().unwrap();
-        let plugin_dir = tmp.path().join("ide-plugins/kotlin-ide");
+        let plugin_dir = tmp.path().join("ide-plugins/elixir-ide");
         std::fs::create_dir_all(&plugin_dir).unwrap();
-        let fake_bin_dir = tmp.path().join("toolchains/kotlin/bin");
+        let fake_bin_dir = tmp.path().join("toolchains/elixir/bin");
         std::fs::create_dir_all(&fake_bin_dir).unwrap();
-        let fake_kls = fake_bin_dir.join("kotlin-language-server");
-        std::fs::write(&fake_kls, "#!/bin/sh\nexit 0\n").unwrap();
+        let fake_els = fake_bin_dir.join("elixir-ls");
+        std::fs::write(&fake_els, "#!/bin/sh\nexit 0\n").unwrap();
 
         std::fs::write(
             plugin_dir.join("otto-ide-plugin.json"),
             r#"{
-                "slug": "kotlin-ide",
-                "name": "Kotlin IDE",
+                "slug": "elixir-ide",
+                "name": "Elixir IDE",
                 "version": "1.0.0",
                 "contributions": {
                     "lsp_servers": [{
-                        "language": "kotlin",
-                        "command": "kotlin-language-server",
+                        "language": "elixir",
+                        "command": "elixir-ls",
                         "args": [],
-                        "extensions": [".kt", ".kts"],
-                        "install_hint": "brew install kotlin-language-server"
+                        "extensions": [".ex", ".exs"],
+                        "install_hint": "brew install elixir-ls"
                     }]
                 }
             }"#,
@@ -481,13 +571,13 @@ mod tests {
 
         let reg = IdePluginRegistry::with_dirs(tmp.path().to_path_buf(), None);
         assert!(
-            resolve_lang_with_ide("kotlin", tmp.path(), &reg).is_none(),
+            resolve_lang_with_ide("elixir", tmp.path(), &reg).is_none(),
             "unrecorded on-disk plugin directory must remain disabled until explicitly toggled"
         );
-        reg.toggle("kotlin-ide", true).unwrap();
-        let resolved = resolve_lang_with_ide("kotlin", tmp.path(), &reg).unwrap();
+        reg.toggle("elixir-ide", true).unwrap();
+        let resolved = resolve_lang_with_ide("elixir", tmp.path(), &reg).unwrap();
         assert!(resolved.available);
-        assert_eq!(resolved.command, fake_kls.to_string_lossy());
+        assert_eq!(resolved.command, fake_els.to_string_lossy());
     }
 
     #[test]

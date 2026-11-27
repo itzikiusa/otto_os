@@ -8,8 +8,10 @@ import { isMakefilePath } from './makefilePath.ts';
 /** Every key cm-langs.ts has a pack for (a unit test keeps the two lists equal). */
 export const LANG_KEYS: ReadonlySet<string> = new Set([
   'sql', 'redis', 'js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs', 'mts', 'cts', 'py', 'pyi', 'go', 'rs', 'zig',
+  'c', 'cpp', 'cmake', 'meson',
+  'cs', 'csx', 'fs', 'fsx', 'fsi',
   'json', 'jsonc', 'jsonl', 'ndjson', 'html', 'htm', 'xml', 'svelte', 'vue', 'css', 'scss', 'less',
-  'md', 'mdx', 'markdown', 'java', 'class', 'gradle', 'kts', 'groovy', 'sh', 'bash', 'zsh', 'bats',
+  'md', 'mdx', 'markdown', 'java', 'class', 'gradle', 'kt', 'kts', 'groovy', 'sh', 'bash', 'zsh', 'bats',
   'shell', 'shellscript', 'mod', 'sum', 'work', 'toml', 'makefile', 'properties', 'yaml', 'conf',
   'dotenv', 'ignore', 'requirements', 'dockerfile', 'nginx', 'proto', 'hcl', 'diff', 'powershell', 'batch', 'vtt',
 ]);
@@ -18,6 +20,11 @@ export const LANG_KEYS: ReadonlySet<string> = new Set([
 export const EXT_ALIAS: Readonly<Record<string, string>> = {
   yml: 'yaml', yaml: 'yaml',
   zon: 'zig',
+  h: 'cpp', hh: 'cpp', hpp: 'cpp', hxx: 'cpp', 'h++': 'cpp', inl: 'cpp', ipp: 'cpp', tpp: 'cpp',
+  cc: 'cpp', cxx: 'cpp', 'c++': 'cpp', ixx: 'cpp', cppm: 'cpp', mm: 'cpp', m: 'c',
+  uproject: 'json', uplugin: 'json',
+  razor: 'cs', cshtml: 'cs',
+  sln: 'conf', slnx: 'xml',
   ini: 'conf', cfg: 'conf', cnf: 'conf', conf: 'conf', inf: 'conf', prefs: 'conf', desktop: 'conf',
   service: 'conf', socket: 'conf', timer: 'conf', mount: 'conf', editorconfig: 'conf', gitconfig: 'conf',
   npmrc: 'conf', xcconfig: 'conf', env: 'dotenv',
@@ -28,7 +35,7 @@ export const EXT_ALIAS: Readonly<Record<string, string>> = {
   xsd: 'xml', xsl: 'xml', xslt: 'xml', plist: 'xml', pom: 'xml', svg: 'xml', csproj: 'xml', fsproj: 'xml',
   vbproj: 'xml', props: 'xml', targets: 'xml', iml: 'xml', storyboard: 'xml', xib: 'xml', wsdl: 'xml',
   xaml: 'xml', resx: 'xml', nuspec: 'xml', xhtml: 'html',
-  json5: 'json', geojson: 'json', webmanifest: 'json', har: 'json',
+  json5: 'json', geojson: 'json', webmanifest: 'json', har: 'json', ipynb: 'json',
   ddl: 'sql', pgsql: 'sql', psql: 'sql', plsql: 'sql', mysql: 'sql',
 };
 
@@ -46,6 +53,7 @@ export const NAMES: Readonly<Record<string, string>> = {
   'composer.lock': 'json', 'pipfile.lock': 'json', 'flake.lock': 'json', 'deno.lock': 'json', 'bun.lock': 'json',
   '.babelrc': 'json', '.eslintrc': 'json',
   jenkinsfile: 'groovy', 'nginx.conf': 'nginx',
+  'cmakelists.txt': 'cmake', 'meson.build': 'meson', 'meson_options.txt': 'meson', 'meson.options': 'meson',
 };
 
 /** File-name patterns, then folders that decide (nginx sites, ~/.ssh/config…). */
@@ -65,7 +73,7 @@ const DIRS: [RegExp, string][] = [
 /** What a language the IDE read off a file (server ids, sniffed keys) is called here. */
 const HINT_ALIAS: Record<string, string> = {
   protobuf: 'proto', ini: 'conf', shell: 'sh', markdown: 'md', javascript: 'js', typescript: 'ts', python: 'py',
-  rust: 'rs', golang: 'go', zon: 'zig',
+  rust: 'rs', golang: 'go', zon: 'zig', 'c++': 'cpp', cxx: 'cpp', objc: 'c', objcpp: 'cpp', kotlin: 'kt', csharp: 'cs', fsharp: 'fs',
 };
 
 function extOf(base: string): string {
@@ -100,7 +108,7 @@ export function langKeyFor(filePath: string, hint?: string): string {
  *  ▶ column and the lint gutter. Every other language drops what it cannot use. */
 const CODE_KEYS = new Set([
   'graphql', 'gql', 'go', 'rs', 'java', 'class', 'kt', 'kts', 'scala', 'groovy', 'gradle', 'ts', 'tsx', 'mts', 'cts', 'js', 'jsx',
-  'mjs', 'cjs', 'py', 'pyi', 'rb', 'php', 'c', 'h', 'cc', 'cpp', 'cxx', 'hpp', 'cs', 'swift', 'dart', 'lua',
+  'mjs', 'cjs', 'py', 'pyi', 'rb', 'php', 'c', 'h', 'cc', 'cpp', 'cxx', 'hpp', 'cs', 'csx', 'fs', 'fsx', 'fsi', 'swift', 'dart', 'lua',
   'sh', 'bash', 'zsh', 'bats', 'svelte', 'vue', 'm', 'mm', 'ex', 'exs', 'zig', 'jl', 'clj', 'hs', 'ml', 'erl', 'nim',
 ]);
 /** Languages whose editor folds (a fold column is worth its 14 px). */

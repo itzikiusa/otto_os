@@ -254,3 +254,123 @@ async fn a_review_whose_agents_survived_in_their_holders_keeps_running() {
     );
     assert_eq!(get(unheld).await.error.as_deref(), Some(INTERRUPTED));
 }
+
+#[tokio::test]
+async fn a_review_whose_held_summarizer_survived_stays_in_resume_held() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = otto_state::db::open(&dir.path().join("state.sqlite"))
+        .await
+        .unwrap();
+    let reviews = otto_state::ReviewsRepo::new(pool);
+    let mut tmpl = review("running", &["done"], true, Some(0));
+    tmpl.agents[0].thread = true;
+    tmpl.agents[0].session_id = Some("t-rev-0".into());
+    tmpl.agents[1].thread = true;
+    tmpl.agents[1].session_id = Some("t-sum".into());
+    let row = reviews.create_review(&"repo".into(), 0).await.unwrap();
+    reviews.set_agents(&row.id, &tmpl.agents).await.unwrap();
+    reviews
+        .set_scope_plan(&row.id, tmpl.scope_plan.as_ref().unwrap())
+        .await
+        .unwrap();
+
+    let holders: std::collections::HashSet<Id> = [row.id.clone()].into();
+    let s = settle_after_restart(&reviews, &holders).await.unwrap();
+    assert_eq!(
+        s.resume_held,
+        vec![row.id.clone()],
+        "held summarizer stays in resume_held so boot does not kill it and re-run from scratch"
+    );
+    assert!(s.summarizer_resume.is_empty());
+    let after = reviews.get_review(&row.id).await.unwrap();
+    assert_eq!(after.status, ReviewStatus::Running);
+    assert_eq!(after.agents[1].status, "running");
+}
+
+#[tokio::test]
+async fn a_review_with_completed_reviewers_and_persisted_prompts_resumes_even_with_no_live_holders()
+{
+    let dir = tempfile::tempdir().unwrap();
+    let pool = otto_state::db::open(&dir.path().join("state.sqlite"))
+        .await
+        .unwrap();
+    let reviews = otto_state::ReviewsRepo::new(pool);
+    // Reviewer 0 finished (its thread closed, so no holder socket); reviewer 1 was queued behind admission.
+    let mut tmpl = review("running", &["done", "pending"], true, Some(0));
+    tmpl.agents[0].thread = true;
+    tmpl.agents[0].session_id = Some("t-rev-0".into());
+    let row = reviews.create_review(&"repo".into(), 0).await.unwrap();
+    reviews.set_agents(&row.id, &tmpl.agents).await.unwrap();
+    reviews
+        .set_scope_plan(&row.id, tmpl.scope_plan.as_ref().unwrap())
+        .await
+        .unwrap();
+    reviews
+        .set_agent_prompt(&row.id, 1, "Review lens 1")
+        .await
+        .unwrap();
+
+    let s = settle_after_restart(&reviews, &Default::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        s.resume_held,
+        vec![row.id.clone()],
+        "review with completed reviewers and persisted prompts for pending ones must not discard finished work"
+    );
+    let after = reviews.get_review(&row.id).await.unwrap();
+    assert_eq!(after.status, ReviewStatus::Running);
+    assert_eq!(after.agents[0].status, "done");
+    assert_eq!(after.agents[1].status, "pending");
+}
+
+#[tokio::test]
+async fn ensure_review_diff_restores_missing_temp_file_and_errors_when_absent() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = otto_state::db::open(&dir.path().join("state.sqlite"))
+        .await
+        .unwrap();
+    let reviews = otto_state::ReviewsRepo::new(pool);
+
+    // DATA-2: missing temp diff is restored from durable DB diff.
+    let row = reviews.create_review(&"repo".into(), 0).await.unwrap();
+    let diff_path = std::env::temp_dir().join(format!("otto-review-{}.diff", row.id));
+    let _ = tokio::fs::remove_file(&diff_path).await;
+    let body = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n(diff omitted: review size cap reached)\n";
+    reviews.set_diff(&row.id, body).await.unwrap();
+    let restored = ensure_review_diff(&reviews, &row.id).await.unwrap();
+    assert_eq!(restored, body);
+    assert_eq!(tokio::fs::read_to_string(&diff_path).await.unwrap(), body);
+    let _ = tokio::fs::remove_file(&diff_path).await;
+
+    // BUG-11: partial diff produces the real partial-diff blocker (not SUMMARIZER_RETRY_BLOCKER)
+    // so verification::incomplete_reason marks the resumed review incomplete.
+    let blocker = resumed_resolve_blocker(Some(&restored));
+    assert_eq!(blocker, Some("partial diff (files omitted)"));
+    let settled = crate::verification::Settled {
+        comments: vec![],
+        notes: vec![],
+        total: 0,
+        accounted: 0,
+        unverified: 0,
+        incomplete: false,
+    };
+    let why = crate::verification::incomplete_reason(&settled, None, blocker, &[]);
+    assert!(
+        why.as_deref()
+            .is_some_and(|m| m.contains("partial diff (files omitted)")),
+        "resumed partial diff must be marked incomplete: {why:?}"
+    );
+    assert_eq!(
+        resumed_resolve_blocker(Some("diff --git a/a.rs b/a.rs\n+ok\n")),
+        Some(crate::verification::SUMMARIZER_RETRY_BLOCKER)
+    );
+
+    // DATA-2: when no durable diff exists either, surface Conflict error instead of zero-byte diff.
+    let empty = reviews.create_review(&"repo".into(), 0).await.unwrap();
+    let err = ensure_review_diff(&reviews, &empty.id).await.unwrap_err();
+    assert!(
+        err.to_string().contains("no stored diff"),
+        "expected missing stored diff error, got: {err}"
+    );
+}

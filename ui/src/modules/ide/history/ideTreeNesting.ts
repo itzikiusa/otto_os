@@ -11,7 +11,15 @@ const PARENT_BY_NAME: Readonly<Record<string, string>> = {
   'pnpm-lock.yaml': 'package.json',
   'npm-shrinkwrap.json': 'package.json',
   'Cargo.lock': 'Cargo.toml',
+  'gradle.properties': 'build.gradle.kts',
+  'gradlew.bat': 'gradlew',
   'build.zig.zon': 'build.zig',
+  'CMakePresets.json': 'CMakeLists.txt',
+  'CMakeUserPresets.json': 'CMakeLists.txt',
+  'compile_commands.json': 'CMakeLists.txt',
+  'meson_options.txt': 'meson.build',
+  'meson.options': 'meson.build',
+  'vcpkg-configuration.json': 'vcpkg.json',
   'poetry.lock': 'pyproject.toml',
   'uv.lock': 'pyproject.toml',
   'pdm.lock': 'pyproject.toml',
@@ -25,6 +33,15 @@ export function nestParentName(name: string): string | null {
   if (exact) return exact;
   if (/^tsconfig\..+\.json$/.test(name)) return 'tsconfig.json';
   if (/^\.env\..+/.test(name)) return '.env';
+  if (/^appsettings\..+\.json$/i.test(name)) return 'appsettings.json';
+  const razorCs = /^(.+\.razor)\.cs$/i.exec(name);
+  if (razorCs) return razorCs[1];
+  const designerCs = /^(.+)\.Designer\.cs$/i.exec(name);
+  if (designerCs) return `${designerCs[1]}.cs`;
+  const ngComp = /^(.+\.component)\.(?:html|scss|sass|css|less|spec\.ts)$/.exec(name);
+  if (ngComp) return `${ngComp[1]}.ts`;
+  if (/^\+page(?:\.server)?\.[jt]s$/.test(name)) return '+page.svelte';
+  if (/^\+layout(?:\.server)?\.[jt]s$/.test(name)) return '+layout.svelte';
   const compiled = /^(.+)\.(?:js|js\.map|d\.ts)$/.exec(name);
   return compiled ? `${compiled[1]}.ts` : null;
 }

@@ -162,18 +162,19 @@ pub(super) fn detect_js_ts(
 
     let re_suite = RE_SUITE.get_or_init(|| {
         Regex::new(
-            r#"^\s*(?:(?:test\.)?describe|suite)(?:\.(?:only|skip|concurrent|sequential))?\s*\(\s*(?:'([^']+)'|"([^"]+)"|`([^`]+)`)"#,
+            r#"^\s*(?:(?:test\.)?(?:describe|fdescribe|xdescribe)|suite)(?:\.(?:only|skip|fixme|serial|parallel|concurrent|sequential))?\s*\(\s*(?:'([^']+)'|"([^"]+)"|`([^`]+)`)"#,
         )
         .unwrap()
     });
     let re_test = RE_TEST.get_or_init(|| {
         Regex::new(
-            r#"^\s*(?:it|test)(?:\.(?:only|skip|concurrent|todo))?\s*\(\s*(?:'([^']+)'|"([^"]+)"|`([^`]+)`)"#,
+            r#"^\s*(?:it|fit|xit|test)(?:\.(?:only|skip|fixme|concurrent|todo))?\s*\(\s*(?:'([^']+)'|"([^"]+)"|`([^`]+)`)"#,
         )
         .unwrap()
     });
 
     let uses_node_test = content.contains("node:test");
+    let uses_playwright = content.contains("@playwright/test");
     let extract_title = |cap: &regex::Captures<'_>| -> Option<String> {
         cap.get(1)
             .or_else(|| cap.get(2))
@@ -192,6 +193,7 @@ pub(super) fn detect_js_ts(
                 IdeGutterKind::Suite,
                 &title,
                 uses_node_test,
+                uses_playwright,
             ));
         } else if let Some(title) = re_test.captures(line).and_then(|c| extract_title(&c)) {
             out.push(build_js_test_item(
@@ -202,16 +204,27 @@ pub(super) fn detect_js_ts(
                 IdeGutterKind::Test,
                 &title,
                 uses_node_test,
+                uses_playwright,
             ));
         }
     }
 }
 
-/// The JS test runner that owns a test file: its nearest `package.json` folder and whether
-/// that package uses Jest (a `jest` dependency and no `vitest`) rather than Vitest.
+/// Which JS/TS test runner owns a package/file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum JsTestRunnerKind {
+    Vitest,
+    Jest,
+    Playwright,
+    Karma,
+}
+
+/// The JS test runner that owns a test file: its nearest `package.json` folder and which
+/// runner (`Vitest`, `Jest`, `Playwright`, `Karma`) handles it.
 pub(crate) struct JsTestPackage {
     pub dir: std::path::PathBuf,
-    pub jest: bool,
+    pub runner: JsTestRunnerKind,
+    pub is_angular: bool,
 }
 
 pub(crate) fn js_test_package(file: &str) -> Option<JsTestPackage> {
@@ -220,12 +233,57 @@ pub(crate) fn js_test_package(file: &str) -> Option<JsTestPackage> {
         .skip(1)
         .find(|d| d.join("package.json").is_file())?;
     let manifest = std::fs::read_to_string(dir.join("package.json")).unwrap_or_default();
+    let is_angular = dir.join("angular.json").is_file() || manifest.contains("\"@angular/core\"");
+    let has_playwright_cfg = [
+        "playwright.config.ts",
+        "playwright.config.js",
+        "playwright.config.mjs",
+    ]
+    .iter()
+    .any(|f| dir.join(f).is_file())
+        || manifest.contains("\"@playwright/test\"");
+    let file_low = file.to_ascii_lowercase();
+    let looks_like_e2e = file_low.contains("/e2e/")
+        || file_low.contains("/playwright/")
+        || file_low.ends_with(".e2e.ts")
+        || file_low.ends_with(".e2e.js")
+        || file_low.ends_with(".e2e-spec.ts");
+    let has_vitest = manifest.contains("\"vitest\"")
+        || ["vitest.config.ts", "vitest.config.js", "vitest.config.mts"]
+            .iter()
+            .any(|f| dir.join(f).is_file());
+    let has_jest = manifest.contains("\"jest\"")
+        || [
+            "jest.config.ts",
+            "jest.config.js",
+            "jest.config.cjs",
+            "jest.config.mjs",
+        ]
+        .iter()
+        .any(|f| dir.join(f).is_file());
+    let has_karma = manifest.contains("\"karma\"")
+        || dir.join("karma.conf.js").is_file()
+        || dir.join("karma.conf.ts").is_file()
+        || (is_angular && !has_jest && !has_vitest);
+
+    let runner =
+        if has_playwright_cfg && (looks_like_e2e || (!has_vitest && !has_jest && !has_karma)) {
+            JsTestRunnerKind::Playwright
+        } else if has_karma && !has_vitest && !has_jest {
+            JsTestRunnerKind::Karma
+        } else if has_jest && !has_vitest {
+            JsTestRunnerKind::Jest
+        } else {
+            JsTestRunnerKind::Vitest
+        };
     Some(JsTestPackage {
         dir: dir.to_path_buf(),
-        jest: manifest.contains("\"jest\"") && !manifest.contains("vitest"),
+        runner,
+        is_angular,
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_js_test_item(
     path: &str,
     dir: &str,
@@ -234,6 +292,7 @@ fn build_js_test_item(
     kind: IdeGutterKind,
     title: &str,
     uses_node_test: bool,
+    uses_playwright: bool,
 ) -> IdeGutterItem {
     // Runners take the name as a regex: "returns 5xx (retry)" must match literally.
     let pattern = regex::escape(title);
@@ -259,9 +318,51 @@ fn build_js_test_item(
                 file,
             ],
         )
-    } else if package.as_ref().is_some_and(|p| p.jest) {
+    } else if uses_playwright
+        || package
+            .as_ref()
+            .is_some_and(|p| p.runner == JsTestRunnerKind::Playwright)
+    {
         (
-            IdeRunnerKind::Node,
+            IdeRunnerKind::Playwright,
+            "npx",
+            vec![
+                "--no-install".into(),
+                "playwright".into(),
+                "test".into(),
+                file,
+                "-g".into(),
+                pattern,
+            ],
+        )
+    } else if package
+        .as_ref()
+        .is_some_and(|p| p.runner == JsTestRunnerKind::Karma)
+    {
+        let is_ng = package.as_ref().is_some_and(|p| p.is_angular);
+        let karma_args = if is_ng {
+            vec![
+                "--no-install".into(),
+                "ng".into(),
+                "test".into(),
+                "--watch=false".into(),
+                format!("--include={file}"),
+            ]
+        } else {
+            vec![
+                "--no-install".into(),
+                "karma".into(),
+                "start".into(),
+                "--single-run".into(),
+            ]
+        };
+        (IdeRunnerKind::Karma, "npx", karma_args)
+    } else if package
+        .as_ref()
+        .is_some_and(|p| p.runner == JsTestRunnerKind::Jest)
+    {
+        (
+            IdeRunnerKind::Jest,
             "npx",
             vec![
                 "--no-install".into(),
@@ -285,6 +386,7 @@ fn build_js_test_item(
             ],
         )
     };
+    let supports_node_debug = !matches!(runner, IdeRunnerKind::Playwright | IdeRunnerKind::Karma);
     IdeGutterItem {
         line: line_no,
         kind,
@@ -297,8 +399,8 @@ fn build_js_test_item(
             cwd: Some(cwd),
             target_path: Some(path.to_string()),
             test_filter: Some(title.to_string()),
-            debug_program: Some(path.to_string()),
-            debug_test_name: Some(title.to_string()),
+            debug_program: supports_node_debug.then(|| path.to_string()),
+            debug_test_name: supports_node_debug.then(|| title.to_string()),
         },
     }
 }

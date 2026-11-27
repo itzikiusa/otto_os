@@ -105,6 +105,7 @@ function setupDirectLsp() {
         dedupeLspDiagnostics: (d: unknown[]) => d,
         DEFAULT_LSP_TOKEN_MODIFIERS: [],
         DEFAULT_LSP_TOKEN_TYPES: [],
+        lspDocumentLanguageIdFor: (languageId: string) => languageId,
         lspToPos: () => 0,
         rewriteGoBuildTagDiagnostic: (message: string) => ({
           isBuildTagDiag: false,

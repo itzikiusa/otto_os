@@ -18,7 +18,7 @@
   let { section, onnavigate }: Props = $props();
 
   const ALL_ECOS: readonly { id: string; label: string }[] = [
-    { id: 'go', label: 'Go' }, { id: 'java', label: 'Java' }, { id: 'rust', label: 'Rust' }, { id: 'zig', label: 'Zig' }, { id: 'node', label: 'Node / TS' },
+    { id: 'go', label: 'Go' }, { id: 'java', label: 'Java' }, { id: 'kotlin', label: 'Kotlin' }, { id: 'rust', label: 'Rust' }, { id: 'zig', label: 'Zig' }, { id: 'cpp', label: 'C / C++' }, { id: 'dotnet', label: '.NET' }, { id: 'node', label: 'Node / TS' },
     { id: 'python', label: 'Python' }, { id: 'ios', label: 'iOS / Xcode' }, { id: 'android', label: 'Android' },
     { id: 'flutter', label: 'Flutter' }, { id: 'shell', label: 'Shell' }, { id: 'json', label: 'JSON' }, { id: 'csv', label: 'CSV' },
   ];
@@ -48,7 +48,7 @@
     ide.toolchains.flatMap((eco) => eco.installed.map((sdk) => ({ eco: eco.ecosystem, ecoName: eco.display_name || eco.ecosystem, sdk }))),
   );
   const activePrimarySdkPath = $derived(
-    ideSettings.envDraft.go_root || ideSettings.envDraft.java_home || ideSettings.envDraft.python_interpreter || ideSettings.envDraft.node_home || ideSettings.envDraft.rust_toolchain || ideSettings.envDraft.zig_home || '',
+    ideSettings.envDraft.go_root || ideSettings.envDraft.java_home || ideSettings.envDraft.kotlin_home || ideSettings.envDraft.python_interpreter || ideSettings.envDraft.node_home || ideSettings.envDraft.rust_toolchain || ideSettings.envDraft.zig_home || ideSettings.envDraft.cpp_toolchain || ideSettings.envDraft.dotnet_root || '',
   );
   const activePrimarySdkLabel = $derived.by(() => {
     if (!activePrimarySdkPath) return '';
@@ -76,11 +76,14 @@
 
   function assignSdkToDraft(ecosystem: string, pathOrVer: string): void {
     if (ecosystem === 'java') ideSettings.patchEnv({ java_home: pathOrVer });
+    else if (ecosystem === 'kotlin') ideSettings.patchEnv({ kotlin_home: pathOrVer });
     else if (ecosystem === 'go') ideSettings.patchEnv({ go_root: pathOrVer });
     else if (ecosystem === 'python') ideSettings.patchEnv({ python_interpreter: pathOrVer });
     else if (ecosystem === 'node') ideSettings.patchEnv({ node_home: pathOrVer });
     else if (ecosystem === 'rust') ideSettings.patchEnv({ rust_toolchain: pathOrVer });
     else if (ecosystem === 'zig') ideSettings.patchEnv({ zig_home: pathOrVer });
+    else if (ecosystem === 'cpp') ideSettings.patchEnv({ cpp_toolchain: pathOrVer });
+    else if (ecosystem === 'dotnet') ideSettings.patchEnv({ dotnet_root: pathOrVer });
     else if (ecosystem === 'ios') ideSettings.patchEnv({ xcode_developer_dir: pathOrVer });
     else if (ecosystem === 'android') ideSettings.patchEnv({ android_home: pathOrVer });
     else if (ecosystem === 'flutter') ideSettings.patchEnv({ flutter_root: pathOrVer });
@@ -100,7 +103,7 @@
       {
         label: 'No SDK',
         checked: !activePrimarySdkPath,
-        action: () => ideSettings.patchEnv({ go_root: '', java_home: '', python_interpreter: '', node_home: '', rust_toolchain: '', zig_home: '' }),
+        action: () => ideSettings.patchEnv({ go_root: '', java_home: '', kotlin_home: '', python_interpreter: '', node_home: '', rust_toolchain: '', zig_home: '', cpp_toolchain: '', dotnet_root: '' }),
       },
     ];
     if (allInstalledSdks.length > 0) {
@@ -147,6 +150,14 @@
     if (names.has('pom.xml') || names.has('build.gradle') || names.has('build.gradle.kts')) return 'Java';
     if (names.has('Cargo.toml')) return 'Rust';
     if (names.has('build.zig') || names.has('build.zig.zon')) return 'Zig';
+    if (names.has('CMakeLists.txt') || names.has('meson.build') || names.has('compile_commands.json') || [...names].some((n) => n.endsWith('.uproject'))) return 'C / C++';
+    if (names.has('Assets') && names.has('ProjectSettings')) return 'Unity';
+    if (names.has('global.json') || [...names].some((n) => n.endsWith('.sln') || n.endsWith('.slnx') || n.endsWith('.csproj') || n.endsWith('.fsproj'))) return '.NET';
+    if (names.has('angular.json') || names.has('.angular-cli.json')) return 'Angular';
+    if (names.has('next.config.ts') || names.has('next.config.mjs') || names.has('next.config.js')) return 'Next.js';
+    if (names.has('svelte.config.js') || names.has('svelte.config.ts')) return 'Svelte';
+    if (names.has('nuxt.config.ts') || names.has('nuxt.config.js')) return 'Nuxt';
+    if (names.has('vite.config.ts') || names.has('vite.config.js')) return 'Vite';
     if (names.has('package.json')) return 'TS / Node';
     if (names.has('pyproject.toml') || names.has('requirements.txt')) return 'Python';
     return 'Polyglot';

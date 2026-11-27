@@ -211,6 +211,7 @@ fn remote_script_escapes_paths_and_applies_memory_budgets() {
         args: vec!["--stdio".into()],
         fallback_cmd: Some("pylsp".into()),
         fallback_args: vec![],
+        ..Default::default()
     };
     let script = build_remote_lsp_script("/srv/my 'app'", &launch);
     assert!(script.contains("cd '/srv/my '\\''app'\\'''"));

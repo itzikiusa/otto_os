@@ -28,11 +28,21 @@ pub const GOPLS_PKG: &str = "golang.org/x/tools/gopls@latest";
 pub const DLV_PKG: &str = "github.com/go-delve/delve/cmd/dlv@latest";
 pub const JS_DEBUG_TARBALL_URL: &str =
     "https://github.com/microsoft/vscode-js-debug/releases/download/v1.97.1/js-debug-dap-v1.97.1.tar.gz";
-pub const TS_LSP_NPM_PACKAGES: &[&str] = &["typescript", "typescript-language-server"];
+pub const TS_LSP_NPM_PACKAGES: &[&str] = &[
+    "typescript",
+    "typescript-language-server",
+    "svelte-language-server",
+    "@vue/language-server@2.2.10",
+    "@angular/language-server",
+];
 pub const BASH_LSP_NPM_PACKAGES: &[&str] = &["bash-language-server"];
 pub const JSON_LSP_NPM_PACKAGES: &[&str] = &["vscode-langservers-extracted"];
 pub const PYRIGHT_PKG: &str = "pyright";
 pub const DEBUGPY_PKG: &str = "debugpy";
+pub const CSHARP_LS_TOOL: &str = "csharp-ls";
+pub const FSAUTOCOMPLETE_TOOL: &str = "fsautocomplete";
+pub const FSAUTOCOMPLETE_VERSION: &str = "0.85.4";
+pub const NETCOREDBG_RELEASE_VERSION: &str = "3.2.0-1092";
 
 /// Normalized target operating system (`macos` or `linux`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -189,6 +199,24 @@ impl TargetPlatform {
             (TargetOs::Linux, TargetArch::X86_64) => "x86_64-linux",
         }
     }
+
+    pub const fn dotnet_rid(self) -> &'static str {
+        match (self.os, self.arch) {
+            (TargetOs::Macos, TargetArch::Aarch64) => "osx-arm64",
+            (TargetOs::Macos, TargetArch::X86_64) => "osx-x64",
+            (TargetOs::Linux, TargetArch::Aarch64) => "linux-arm64",
+            (TargetOs::Linux, TargetArch::X86_64) => "linux-x64",
+        }
+    }
+
+    pub const fn netcoredbg_slug(self) -> Option<&'static str> {
+        match (self.os, self.arch) {
+            (TargetOs::Macos, TargetArch::Aarch64) => Some("osx-arm64"),
+            (TargetOs::Macos, TargetArch::X86_64) => None,
+            (TargetOs::Linux, TargetArch::Aarch64) => Some("linux-arm64"),
+            (TargetOs::Linux, TargetArch::X86_64) => Some("linux-amd64"),
+        }
+    }
 }
 
 /// First-class supported language toolchain ecosystems.
@@ -196,9 +224,12 @@ impl TargetPlatform {
 #[serde(rename_all = "lowercase")]
 pub enum EcosystemKind {
     Java,
+    Kotlin,
     Go,
     Rust,
     Zig,
+    Cpp,
+    Dotnet,
     Node,
     Python,
     Shell,
@@ -209,11 +240,14 @@ pub enum EcosystemKind {
 }
 
 impl EcosystemKind {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 14] = [
         Self::Java,
+        Self::Kotlin,
         Self::Go,
         Self::Rust,
         Self::Zig,
+        Self::Cpp,
+        Self::Dotnet,
         Self::Node,
         Self::Python,
         Self::Shell,
@@ -226,9 +260,12 @@ impl EcosystemKind {
     pub fn parse(raw: &str) -> Option<Self> {
         match raw.trim().to_ascii_lowercase().as_str() {
             "java" | "jdk" => Some(Self::Java),
+            "kotlin" | "kt" | "kts" | "kotlinc" => Some(Self::Kotlin),
             "go" | "golang" => Some(Self::Go),
             "rust" | "cargo" => Some(Self::Rust),
             "zig" | "zls" => Some(Self::Zig),
+            "cpp" | "c" | "c++" | "cxx" | "clang" | "clangd" | "gcc" | "llvm" => Some(Self::Cpp),
+            "dotnet" | "csharp" | "fsharp" | "cs" | "fs" | "c#" | "f#" => Some(Self::Dotnet),
             "node" | "nodejs" | "javascript" | "typescript" | "js" | "ts" => Some(Self::Node),
             "python" | "py" | "uv" => Some(Self::Python),
             "shell" | "bash" | "sh" | "zsh" => Some(Self::Shell),
@@ -243,9 +280,12 @@ impl EcosystemKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Java => "java",
+            Self::Kotlin => "kotlin",
             Self::Go => "go",
             Self::Rust => "rust",
             Self::Zig => "zig",
+            Self::Cpp => "cpp",
+            Self::Dotnet => "dotnet",
             Self::Node => "node",
             Self::Python => "python",
             Self::Shell => "shell",
@@ -259,9 +299,12 @@ impl EcosystemKind {
     pub const fn display_name(self) -> &'static str {
         match self {
             Self::Java => "Java (Temurin JDK)",
+            Self::Kotlin => "Kotlin (kotlinc / JVM)",
             Self::Go => "Go",
             Self::Rust => "Rust",
             Self::Zig => "Zig",
+            Self::Cpp => "C / C++ (Clang / GCC)",
+            Self::Dotnet => ".NET SDK (C# / F#)",
             Self::Node => "Node.js (JS / TS)",
             Self::Python => "Python (uv)",
             Self::Shell => "Shell (Bash / Zsh)",
@@ -275,9 +318,12 @@ impl EcosystemKind {
     pub const fn lsp_name(self) -> &'static str {
         match self {
             Self::Java => "jdtls",
+            Self::Kotlin => "kotlin-language-server",
             Self::Go => "gopls",
             Self::Rust => "rust-analyzer",
             Self::Zig => "zls",
+            Self::Cpp => "clangd",
+            Self::Dotnet => "csharp-ls",
             Self::Node => "typescript-language-server",
             Self::Python => "pyright",
             Self::Shell => "bash-language-server",
@@ -291,9 +337,12 @@ impl EcosystemKind {
     pub const fn dap_name(self) -> &'static str {
         match self {
             Self::Java => "java-debug",
+            Self::Kotlin => "java-debug",
             Self::Go => "dlv",
             Self::Rust => "codelldb",
             Self::Zig => "codelldb",
+            Self::Cpp => "codelldb",
+            Self::Dotnet => "netcoredbg",
             Self::Node => "js-debug",
             Self::Python => "debugpy",
             Self::Shell => "bashdb",
@@ -307,9 +356,12 @@ impl EcosystemKind {
     pub const fn default_sdk_version(self) -> &'static str {
         match self {
             Self::Java => "21",
+            Self::Kotlin => "2.1.20",
             Self::Go => "1.24.2",
             Self::Rust => "stable",
             Self::Zig => "0.14.0",
+            Self::Cpp => "19.1.7",
+            Self::Dotnet => "9.0.203",
             Self::Node => "22.14.0",
             Self::Python => "3.13",
             Self::Shell => "3.10.0",
@@ -340,9 +392,12 @@ impl From<crate::types::IdeEcosystemKind> for EcosystemKind {
     fn from(k: crate::types::IdeEcosystemKind) -> Self {
         match k {
             crate::types::IdeEcosystemKind::Java => Self::Java,
+            crate::types::IdeEcosystemKind::Kotlin => Self::Kotlin,
             crate::types::IdeEcosystemKind::Go => Self::Go,
             crate::types::IdeEcosystemKind::Rust => Self::Rust,
             crate::types::IdeEcosystemKind::Zig => Self::Zig,
+            crate::types::IdeEcosystemKind::Cpp => Self::Cpp,
+            crate::types::IdeEcosystemKind::Dotnet => Self::Dotnet,
             crate::types::IdeEcosystemKind::Node => Self::Node,
             crate::types::IdeEcosystemKind::Python => Self::Python,
             crate::types::IdeEcosystemKind::Shell => Self::Shell,
@@ -358,9 +413,12 @@ impl From<EcosystemKind> for crate::types::IdeEcosystemKind {
     fn from(k: EcosystemKind) -> Self {
         match k {
             EcosystemKind::Java => Self::Java,
+            EcosystemKind::Kotlin => Self::Kotlin,
             EcosystemKind::Go => Self::Go,
             EcosystemKind::Rust => Self::Rust,
             EcosystemKind::Zig => Self::Zig,
+            EcosystemKind::Cpp => Self::Cpp,
+            EcosystemKind::Dotnet => Self::Dotnet,
             EcosystemKind::Node => Self::Node,
             EcosystemKind::Python => Self::Python,
             EcosystemKind::Shell => Self::Shell,
@@ -453,6 +511,114 @@ pub fn zls_tarball_url(version: &str, platform: TargetPlatform) -> String {
         platform.arch.as_str(),
         platform.os.as_str()
     )
+}
+
+/// Pinned upstream `clangd/clangd` GitHub release tag (decoupled from LLVM SDK
+/// versions because `clangd/clangd` only publishes specific release tags).
+pub const CLANGD_RELEASE_VERSION: &str = "19.1.2";
+
+pub fn clangd_zip_url(version: &str, platform: TargetPlatform) -> String {
+    let clean = version.trim().trim_start_matches('v');
+    let slug = match platform.os {
+        TargetOs::Macos => "mac",
+        TargetOs::Linux => "linux",
+    };
+    format!("https://github.com/clangd/clangd/releases/download/{clean}/clangd-{slug}-{clean}.zip")
+}
+
+/// Resolve the official `clangd/clangd` release zip URL for `platform`.
+/// Upstream `clangd/clangd` publishes macOS universal and Linux x86_64 zips (no Linux ARM64).
+pub fn clangd_download_url(platform: TargetPlatform) -> Result<String, String> {
+    if platform.os == TargetOs::Linux && platform.arch == TargetArch::Aarch64 {
+        return Err(
+            "Prebuilt clangd archives are not published for Linux arm64; install clangd via your system package manager (`apt install clangd` / `dnf install clang-tools-extra`).".into(),
+        );
+    }
+    Ok(clangd_zip_url(CLANGD_RELEASE_VERSION, platform))
+}
+
+pub fn kotlin_compiler_zip_url(version: &str) -> String {
+    let clean = version.trim().trim_start_matches('v');
+    format!("https://github.com/JetBrains/kotlin/releases/download/v{clean}/kotlin-compiler-{clean}.zip")
+}
+
+pub fn kotlin_lsp_zip_url() -> String {
+    "https://github.com/fwcd/kotlin-language-server/releases/latest/download/server.zip".to_string()
+}
+
+pub fn dotnet_sdk_tarball_url(version: &str, platform: TargetPlatform) -> String {
+    let clean = version.trim().trim_start_matches('v');
+    format!(
+        "https://builds.dotnet.microsoft.com/dotnet/Sdk/{clean}/dotnet-sdk-{clean}-{}.tar.gz",
+        platform.dotnet_rid()
+    )
+}
+
+/// Verified upstream `Samsung/netcoredbg` release archive descriptor (BUG-20).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetcoredbgReleaseAsset {
+    pub url: String,
+    pub is_zip: bool,
+}
+
+/// Resolve the official `Samsung/netcoredbg` release archive for `platform` (BUG-20).
+/// Upstream `3.2.0-1092` publishes `netcoredbg-osx-arm64.zip`,
+/// `netcoredbg-linux-amd64.tar.gz`, and `netcoredbg-linux-arm64.tar.gz` (no macOS x86_64).
+pub fn netcoredbg_download_asset(
+    platform: TargetPlatform,
+) -> Result<NetcoredbgReleaseAsset, String> {
+    let Some(slug) = platform.netcoredbg_slug() else {
+        return Err(format!(
+            "Prebuilt Samsung/netcoredbg {NETCOREDBG_RELEASE_VERSION} archives are not published for macOS x86_64; build netcoredbg from source or install via Homebrew."
+        ));
+    };
+    let is_zip = platform.os == TargetOs::Macos;
+    let ext = if is_zip { "zip" } else { "tar.gz" };
+    Ok(NetcoredbgReleaseAsset {
+        url: format!(
+            "https://github.com/Samsung/netcoredbg/releases/download/{NETCOREDBG_RELEASE_VERSION}/netcoredbg-{slug}.{ext}"
+        ),
+        is_zip,
+    })
+}
+
+/// Pick the latest `csharp-ls` NuGet version compatible with the active `.NET` SDK major
+/// version so `dotnet tool install` never pulls a tool requiring a newer runtime (BUG-22).
+///
+/// Verified NuGet target frameworks:
+/// - `0.16.0` -> `net8.0`
+/// - `0.20.0` -> `net9.0`
+/// - `0.26.0` -> `net10.0`
+/// - `0.29.0` -> `net11.0`
+pub fn csharp_ls_version_for_dotnet_sdk(sdk_version: Option<&str>) -> &'static str {
+    let major = sdk_version
+        .map(str::trim)
+        .and_then(|s| s.trim_start_matches('v').split(['.', '-', '+']).next())
+        .and_then(|m| m.parse::<u32>().ok());
+    match major {
+        Some(0..=8) => "0.16.0",
+        Some(9) => "0.20.0",
+        Some(10) => "0.26.0",
+        Some(11..) => "0.29.0",
+        None => "0.20.0",
+    }
+}
+
+/// Version slot folder name under `toolchains/dotnet/tools/` matching the active
+/// `.NET` SDK major version (`net8`, `net9`, `net10`, `net11`) so installing for a
+/// newer SDK never overwrites an older project's compatible `csharp-ls` (BUG-22).
+pub fn dotnet_sdk_major_slot(sdk_version: Option<&str>) -> &'static str {
+    let major = sdk_version
+        .map(str::trim)
+        .and_then(|s| s.trim_start_matches('v').split(['.', '-', '+']).next())
+        .and_then(|m| m.parse::<u32>().ok());
+    match major {
+        Some(0..=8) => "net8",
+        Some(9) => "net9",
+        Some(10) => "net10",
+        Some(11..) => "net11",
+        None => "net9",
+    }
 }
 
 pub fn node_tarball_url(version: &str, platform: TargetPlatform) -> String {
@@ -579,6 +745,39 @@ pub fn curated_catalog(ecosystem: EcosystemKind, platform: TargetPlatform) -> Ve
             os: os.clone(),
             arch: arch.clone(),
             url: zig_tarball_url(ver, platform),
+            size_hint: Some(sz.to_string()),
+            sha256: None,
+        })
+        .collect(),
+        // Upstream LLVM release archives exceed the 1 GiB download cap (1.1-1.6 GiB) and
+        // vary per platform/version; install Clang/GCC via Xcode CLT, Homebrew, or apt/dnf
+        // and use 1-click installs for `clangd` (LSP) and `CodeLLDB` (DAP).
+        EcosystemKind::Cpp => Vec::new(),
+        EcosystemKind::Kotlin => [("2.1.20", true, "76 MB"), ("2.0.21", false, "74 MB")]
+            .into_iter()
+            .map(|(ver, lts, sz)| CatalogSdkEntry {
+                version: ver.to_string(),
+                label: format!("Kotlin Compiler {ver}"),
+                lts,
+                os: os.clone(),
+                arch: arch.clone(),
+                url: kotlin_compiler_zip_url(ver),
+                size_hint: Some(sz.to_string()),
+                sha256: None,
+            })
+            .collect(),
+        EcosystemKind::Dotnet => [
+            ("9.0.203", ".NET SDK 9.0.203 (STS)", false, "215 MB"),
+            ("8.0.408", ".NET SDK 8.0.408 (LTS)", true, "205 MB"),
+        ]
+        .into_iter()
+        .map(|(ver, label, lts, sz)| CatalogSdkEntry {
+            version: ver.to_string(),
+            label: label.to_string(),
+            lts,
+            os: os.clone(),
+            arch: arch.clone(),
+            url: dotnet_sdk_tarball_url(ver, platform),
             size_hint: Some(sz.to_string()),
             sha256: None,
         })
@@ -727,6 +926,35 @@ pub fn resolve_sdk_download(
                 arch,
                 url: zig_tarball_url(&clean, platform),
                 size_hint: None,
+                sha256: None,
+            })
+        }
+        EcosystemKind::Cpp => Err(
+            "C/C++ compiler toolchains (Clang / GCC / LLVM) are installed via Xcode Command Line Tools (`xcode-select --install`), Homebrew (`brew install llvm`), or your Linux package manager (`apt install clang` / `dnf install clang`), then auto-detected or added via 'Add Local SDK'.".into(),
+        ),
+        EcosystemKind::Kotlin => {
+            let clean = ver.trim_start_matches('v').to_string();
+            Ok(CatalogSdkEntry {
+                version: clean.clone(),
+                label: format!("Kotlin Compiler {clean}"),
+                lts: true,
+                os,
+                arch,
+                url: kotlin_compiler_zip_url(&clean),
+                size_hint: None,
+                sha256: None,
+            })
+        }
+        EcosystemKind::Dotnet => {
+            let clean = ver.trim_start_matches('v').to_string();
+            Ok(CatalogSdkEntry {
+                version: clean.clone(),
+                label: format!(".NET SDK {clean}"),
+                lts: clean.starts_with("8.") || clean.starts_with("10."),
+                os,
+                arch,
+                url: dotnet_sdk_tarball_url(&clean, platform),
+                size_hint: Some("210 MB".to_string()),
                 sha256: None,
             })
         }
@@ -1079,6 +1307,90 @@ pub fn parse_zig_index_json(raw: &str, platform: TargetPlatform) -> Vec<CatalogS
     out
 }
 
+pub fn parse_dotnet_releases_index_json(
+    raw: &str,
+    platform: TargetPlatform,
+) -> Vec<CatalogSdkEntry> {
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return Vec::new();
+    };
+    let Some(channels) = val.get("releases-index").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for ch in channels {
+        let phase = ch
+            .get("support-phase")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if !matches!(phase, "active" | "maintenance") {
+            continue;
+        }
+        let Some(sdk_ver) = ch
+            .get("latest-sdk")
+            .and_then(|v| v.as_str())
+            .filter(|s| is_safe_version_token(s))
+        else {
+            continue;
+        };
+        let release_type = ch
+            .get("release-type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("sts");
+        let is_lts = release_type.eq_ignore_ascii_case("lts");
+        let tag = if is_lts { "LTS" } else { "STS" };
+        out.push(CatalogSdkEntry {
+            version: sdk_ver.to_string(),
+            label: format!(".NET SDK {sdk_ver} ({tag})"),
+            lts: is_lts,
+            os: platform.os.as_str().to_string(),
+            arch: platform.arch.as_str().to_string(),
+            url: dotnet_sdk_tarball_url(sdk_ver, platform),
+            size_hint: Some("210 MB".to_string()),
+            sha256: None,
+        });
+        if out.len() >= 6 {
+            break;
+        }
+    }
+    out
+}
+
+/// Official ZLS release artifact returned by `releases.zigtools.org/v1/zls/select-version`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZlsReleaseAsset {
+    pub version: String,
+    pub url: String,
+    pub sha256: String,
+}
+
+/// Parse `https://releases.zigtools.org/v1/zls/select-version` JSON for `platform`,
+/// requiring both an HTTPS tarball URL and a valid 64-hex SHA-256 digest (`shasum`).
+pub fn parse_zls_select_version_json(
+    raw: &str,
+    platform: TargetPlatform,
+) -> Option<ZlsReleaseAsset> {
+    let root: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let version = root
+        .get("version")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| is_safe_version_token(v))?
+        .to_string();
+    let target_obj = root.get(platform.zig_index_key())?;
+    let url = target_obj
+        .get("tarball")
+        .and_then(|v| v.as_str())
+        .filter(|u| u.starts_with("https://"))?
+        .to_string();
+    let sha256 = normalize_sha256(target_obj.get("shasum").and_then(|v| v.as_str()))?;
+    Some(ZlsReleaseAsset {
+        version,
+        url,
+        sha256,
+    })
+}
+
 // ── Live + Cached Catalog Client ─────────────────────────────────────────────
 
 struct CachedPlatformCatalog {
@@ -1185,19 +1497,29 @@ impl CatalogClient {
             }
         }
 
-        let (java, go, rust, zig, node, python) = tokio::join!(
+        let (java, go, rust, zig, dotnet, node, python) = tokio::join!(
             self.fetch_java(platform),
             self.fetch_go(platform),
             self.fetch_rust(platform),
             self.fetch_zig(platform),
+            self.fetch_dotnet(platform),
             self.fetch_node(platform),
             self.fetch_python(platform),
         );
-        let mut map = HashMap::with_capacity(11);
+        let mut map = HashMap::with_capacity(14);
         map.insert(EcosystemKind::Java, java);
+        map.insert(
+            EcosystemKind::Kotlin,
+            curated_catalog(EcosystemKind::Kotlin, platform),
+        );
         map.insert(EcosystemKind::Go, go);
         map.insert(EcosystemKind::Rust, rust);
         map.insert(EcosystemKind::Zig, zig);
+        map.insert(
+            EcosystemKind::Cpp,
+            curated_catalog(EcosystemKind::Cpp, platform),
+        );
+        map.insert(EcosystemKind::Dotnet, dotnet);
         map.insert(EcosystemKind::Node, node);
         map.insert(EcosystemKind::Python, python);
         map.insert(
@@ -1310,6 +1632,40 @@ impl CatalogClient {
         curated_catalog(EcosystemKind::Zig, platform)
     }
 
+    async fn fetch_dotnet(&self, platform: TargetPlatform) -> Vec<CatalogSdkEntry> {
+        if let Some(raw) = self
+            .get_text(
+                "https://dotnetcli.blob.core.windows.net/dotnet/release-metadata/releases-index.json",
+            )
+            .await
+        {
+            let parsed = parse_dotnet_releases_index_json(&raw, platform);
+            if !parsed.is_empty() {
+                return parsed;
+            }
+        }
+        curated_catalog(EcosystemKind::Dotnet, platform)
+    }
+
+    /// Resolve the official ZLS tarball URL + SHA-256 checksum matching `zig_version`
+    /// from `releases.zigtools.org` (returns `None` offline or when upstream has no match).
+    pub async fn fetch_zls_release(
+        &self,
+        zig_version: &str,
+        platform: TargetPlatform,
+    ) -> Option<ZlsReleaseAsset> {
+        let ver = zig_version.trim();
+        if Self::offline_mode() || !is_safe_version_token(ver) {
+            return None;
+        }
+        let encoded = ver.replace('+', "%2B");
+        let url = format!(
+            "https://releases.zigtools.org/v1/zls/select-version?zig_version={encoded}&compatibility=only-runtime"
+        );
+        let raw = self.get_text(&url).await?;
+        parse_zls_select_version_json(&raw, platform)
+    }
+
     async fn fetch_node(&self, platform: TargetPlatform) -> Vec<CatalogSdkEntry> {
         if let Some(raw) = self.get_text("https://nodejs.org/dist/index.json").await {
             let parsed = parse_node_dist_json(&raw, platform);
@@ -1382,11 +1738,14 @@ mod tests {
                 let items = curated_catalog(eco, platform);
                 if matches!(
                     eco,
-                    EcosystemKind::Ios | EcosystemKind::Android | EcosystemKind::Flutter
+                    EcosystemKind::Cpp
+                        | EcosystemKind::Ios
+                        | EcosystemKind::Android
+                        | EcosystemKind::Flutter
                 ) {
                     assert!(
                         items.is_empty(),
-                        "{eco:?} is a native SDK and should not expose archive tarballs"
+                        "{eco:?} is installed via native/system packages and should not expose archive tarballs"
                     );
                     continue;
                 }
@@ -1502,5 +1861,89 @@ mod tests {
         assert!(!is_safe_version_token("-rf"));
         assert!(!is_safe_version_token("../etc"));
         assert!(!is_safe_version_token("21; rm -rf /"));
+    }
+
+    #[test]
+    fn zls_select_version_parser_extracts_tarball_and_sha256() {
+        let mac_arm = ALL_PLATFORMS[0];
+        let linux_x64 = ALL_PLATFORMS[3];
+        let raw = r#"{
+            "version": "0.14.0",
+            "aarch64-macos": {
+                "tarball": "https://builds.zigtools.org/zls-macos-aarch64-0.14.0.tar.xz",
+                "shasum": "DFB627E1F9603583678F552D8035A12DCE878215C0A507B32D6F1B9D074D6C4D",
+                "size": "927968"
+            },
+            "x86_64-linux": {
+                "tarball": "https://builds.zigtools.org/zls-linux-x86_64-0.14.0.tar.xz",
+                "shasum": "not-a-valid-sha256"
+            }
+        }"#;
+        let mac = parse_zls_select_version_json(raw, mac_arm).expect("mac arm release");
+        assert_eq!(mac.version, "0.14.0");
+        assert_eq!(
+            mac.url,
+            "https://builds.zigtools.org/zls-macos-aarch64-0.14.0.tar.xz"
+        );
+        assert_eq!(
+            mac.sha256,
+            "dfb627e1f9603583678f552d8035a12dce878215c0a507b32d6f1b9d074d6c4d"
+        );
+
+        // Missing or malformed shasum must be rejected so ZLS never installs unverified.
+        assert!(parse_zls_select_version_json(raw, linux_x64).is_none());
+        let missing_sha = r#"{"version":"0.14.0","aarch64-macos":{"tarball":"https://builds.zigtools.org/zls-macos-aarch64-0.14.0.tar.xz"}}"#;
+        assert!(parse_zls_select_version_json(missing_sha, mac_arm).is_none());
+
+        // Non-HTTPS URLs and upstream error payloads must be rejected.
+        let insecure = r#"{"version":"0.14.0","aarch64-macos":{"tarball":"http://example.com/zls.tar.xz","shasum":"dfb627e1f9603583678f552d8035a12dce878215c0a507b32d6f1b9d074d6c4d"}}"#;
+        assert!(parse_zls_select_version_json(insecure, mac_arm).is_none());
+        assert!(
+            parse_zls_select_version_json(r#"{"code":1,"message":"incompatible"}"#, mac_arm)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn netcoredbg_download_asset_matches_verified_upstream_release_files() {
+        let mac_arm = ALL_PLATFORMS[0];
+        let mac_x64 = ALL_PLATFORMS[1];
+        let lin_arm = ALL_PLATFORMS[2];
+        let lin_x64 = ALL_PLATFORMS[3];
+
+        let mac = netcoredbg_download_asset(mac_arm).expect("macOS arm64 asset");
+        assert!(mac.is_zip);
+        assert!(
+            mac.url.ends_with("/3.2.0-1092/netcoredbg-osx-arm64.zip"),
+            "BUG-20: unexpected macOS arm64 asset URL: {}",
+            mac.url
+        );
+
+        let err_x64 = netcoredbg_download_asset(mac_x64).unwrap_err();
+        assert!(
+            err_x64.contains("macOS x86_64"),
+            "BUG-20: macOS x86_64 must fail clearly: {err_x64}"
+        );
+
+        let la = netcoredbg_download_asset(lin_arm).expect("linux arm64 asset");
+        assert!(!la.is_zip);
+        assert!(la
+            .url
+            .ends_with("/3.2.0-1092/netcoredbg-linux-arm64.tar.gz"));
+
+        let lx = netcoredbg_download_asset(lin_x64).expect("linux amd64 asset");
+        assert!(!lx.is_zip);
+        assert!(lx
+            .url
+            .ends_with("/3.2.0-1092/netcoredbg-linux-amd64.tar.gz"));
+    }
+
+    #[test]
+    fn csharp_ls_version_matches_selected_dotnet_sdk_major() {
+        assert_eq!(csharp_ls_version_for_dotnet_sdk(Some("8.0.408")), "0.16.0");
+        assert_eq!(csharp_ls_version_for_dotnet_sdk(Some("9.0.203")), "0.20.0");
+        assert_eq!(csharp_ls_version_for_dotnet_sdk(Some("10.0.100")), "0.26.0");
+        assert_eq!(csharp_ls_version_for_dotnet_sdk(Some("11.0.100")), "0.29.0");
+        assert_eq!(csharp_ls_version_for_dotnet_sdk(None), "0.20.0");
     }
 }

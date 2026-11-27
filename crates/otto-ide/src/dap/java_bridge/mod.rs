@@ -44,29 +44,49 @@ pub struct JavaJdwpBridgeSpec {
     pub source_map: HashMap<String, String>,
 }
 
-/// Infer the fully qualified Java class name for `path`.
+/// Infer the fully qualified Java or Kotlin JVM class name for `path`.
+///
+/// For Kotlin `.kt` files:
+/// - Respects `@file:JvmName("Custom")` when present.
+/// - Top-level `fun main` (without a class matching the file stem) resolves to `<pkg>.<Stem>Kt`.
+/// - Package statements in Kotlin do not require a trailing `;`.
 pub(crate) async fn infer_java_fqcn(target: &IdeTargetSpec, path: &str) -> String {
     let stem = Path::new(path)
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("Main");
+    let is_kt = path.ends_with(".kt") || path.ends_with(".kts");
     if target.kind == IdeTargetKind::Local {
         if let Ok(txt) = tokio::fs::read_to_string(path).await {
             let pkg = txt.lines().find_map(|l| {
                 l.trim()
                     .strip_prefix("package ")
-                    .and_then(|r| r.strip_suffix(';'))
-                    .map(|p| p.trim().to_string())
+                    .map(|r| r.trim_end_matches(';').trim().to_string())
             });
+            let cls = if is_kt {
+                infer_kotlin_class_stem(stem, &txt)
+            } else {
+                stem.to_string()
+            };
             if let Some(p) = pkg.filter(|p| !p.is_empty()) {
-                return format!("{p}.{stem}");
+                return format!("{p}.{cls}");
             }
-            return stem.to_string();
+            return cls;
         }
     }
-    for marker in ["/src/main/java/", "/src/test/java/", "/src/"] {
+    for marker in [
+        "/src/main/java/",
+        "/src/test/java/",
+        "/src/main/kotlin/",
+        "/src/test/kotlin/",
+        "/src/",
+    ] {
         if let Some((_, rel)) = path.split_once(marker) {
-            let without_ext = rel.strip_suffix(".java").unwrap_or(rel);
+            let without_ext = rel
+                .strip_suffix(".java")
+                .or_else(|| rel.strip_suffix(".kt"))
+                .or_else(|| rel.strip_suffix(".kts"))
+                .unwrap_or(rel);
             let dotted = without_ext.replace('/', ".");
             if !dotted.is_empty() {
                 return dotted;
@@ -74,6 +94,223 @@ pub(crate) async fn infer_java_fqcn(target: &IdeTargetSpec, path: &str) -> Strin
         }
     }
     stem.to_string()
+}
+
+pub(crate) fn infer_kotlin_class_stem(file_stem: &str, src: &str) -> String {
+    // Check `@file:JvmName("CustomMain")`
+    for line in src.lines().take(24) {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("@file:JvmName(") {
+            if let Some(inner) = rest.strip_suffix(')') {
+                let unquoted = inner.trim().trim_matches('"');
+                if !unquoted.is_empty() {
+                    return unquoted.to_string();
+                }
+            }
+        }
+    }
+    if kotlin_has_top_level_main(src) {
+        let mut chars = file_stem.chars();
+        let cap = match chars.next() {
+            Some(c) => format!("{}{}", c.to_ascii_uppercase(), chars.as_str()),
+            None => "Main".into(),
+        };
+        format!("{cap}Kt")
+    } else {
+        file_stem.to_string()
+    }
+}
+
+/// Lexical scanner for Kotlin source that skips `//` line comments, nested `/* ... */`
+/// block comments, `"""..."""` raw strings, `"..."` strings (respecting `\"` / `\$` escapes
+/// AND nested `${ ... }` string template expressions that themselves contain strings/braces),
+/// and `'...'` char literals before tracking `{`/`}` nesting and detecting top-level
+/// `fun main(` or `suspend fun main(`.
+fn kotlin_has_top_level_main(src: &str) -> bool {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum LexMode {
+        /// Outer code (`interp_depth = None`) or interpolated `${ ... }` expression
+        /// (`interp_depth = Some(d)` where `d` counts nested `{` inside the template).
+        Code {
+            interp_depth: Option<usize>,
+        },
+        String,
+        RawString,
+    }
+
+    let bytes = src.as_bytes();
+    let len = bytes.len();
+    let mut i = 0usize;
+    let mut brace_depth: i32 = 0;
+    let mut block_comment_depth: usize = 0;
+    let mut in_char = false;
+    let mut stack: Vec<LexMode> = vec![LexMode::Code { interp_depth: None }];
+    let mut top_level_buf = String::new();
+
+    while i < len {
+        let b = bytes[i];
+        if block_comment_depth > 0 {
+            if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
+                block_comment_depth += 1;
+                i += 2;
+            } else if b == b'*' && i + 1 < len && bytes[i + 1] == b'/' {
+                block_comment_depth -= 1;
+                i += 2;
+            } else {
+                if b == b'\n' && stack.len() == 1 && brace_depth == 0 {
+                    top_level_buf.push('\n');
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if in_char {
+            if b == b'\\' && i + 1 < len {
+                i += 2;
+            } else if b == b'\'' || b == b'\n' {
+                in_char = false;
+                if b == b'\n' && stack.len() == 1 && brace_depth == 0 {
+                    top_level_buf.push('\n');
+                }
+                i += 1;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+
+        let mode = *stack
+            .last()
+            .unwrap_or(&LexMode::Code { interp_depth: None });
+        match mode {
+            LexMode::RawString => {
+                if b == b'$' && i + 1 < len && bytes[i + 1] == b'{' {
+                    stack.push(LexMode::Code {
+                        interp_depth: Some(0),
+                    });
+                    i += 2;
+                } else if b == b'"' && i + 2 < len && bytes[i + 1] == b'"' && bytes[i + 2] == b'"' {
+                    while i + 3 < len && bytes[i + 3] == b'"' {
+                        i += 1;
+                    }
+                    stack.pop();
+                    i += 3;
+                } else {
+                    if b == b'\n' && stack.len() == 2 && brace_depth == 0 {
+                        top_level_buf.push('\n');
+                    }
+                    i += 1;
+                }
+            }
+            LexMode::String => {
+                if b == b'\\' && i + 1 < len {
+                    i += 2;
+                } else if b == b'$' && i + 1 < len && bytes[i + 1] == b'{' {
+                    stack.push(LexMode::Code {
+                        interp_depth: Some(0),
+                    });
+                    i += 2;
+                } else if b == b'"' {
+                    stack.pop();
+                    i += 1;
+                } else if b == b'\n' {
+                    stack.pop();
+                    if stack.len() == 1 && brace_depth == 0 {
+                        top_level_buf.push('\n');
+                    }
+                    i += 1;
+                } else {
+                    i += 1;
+                }
+            }
+            LexMode::Code { interp_depth } => {
+                if b == b'/' && i + 1 < len && bytes[i + 1] == b'/' {
+                    while i < len && bytes[i] != b'\n' {
+                        i += 1;
+                    }
+                    continue;
+                }
+                if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
+                    block_comment_depth = 1;
+                    i += 2;
+                    continue;
+                }
+                if b == b'"' && i + 2 < len && bytes[i + 1] == b'"' && bytes[i + 2] == b'"' {
+                    stack.push(LexMode::RawString);
+                    i += 3;
+                    continue;
+                }
+                if b == b'"' {
+                    stack.push(LexMode::String);
+                    i += 1;
+                    continue;
+                }
+                if b == b'\'' {
+                    in_char = true;
+                    i += 1;
+                    continue;
+                }
+                if let Some(d) = interp_depth {
+                    if b == b'{' {
+                        if let Some(LexMode::Code {
+                            interp_depth: Some(ref mut cur_d),
+                        }) = stack.last_mut()
+                        {
+                            *cur_d = d + 1;
+                        }
+                    } else if b == b'}' {
+                        if d == 0 {
+                            stack.pop();
+                        } else if let Some(LexMode::Code {
+                            interp_depth: Some(ref mut cur_d),
+                        }) = stack.last_mut()
+                        {
+                            *cur_d = d - 1;
+                        }
+                    }
+                    i += 1;
+                    continue;
+                }
+                if b == b'{' {
+                    if brace_depth == 0 {
+                        top_level_buf.push(' ');
+                    }
+                    brace_depth += 1;
+                    i += 1;
+                    continue;
+                }
+                if b == b'}' {
+                    brace_depth = (brace_depth - 1).max(0);
+                    if brace_depth == 0 {
+                        top_level_buf.push('\n');
+                    }
+                    i += 1;
+                    continue;
+                }
+                if brace_depth == 0 {
+                    let ch = src[i..].chars().next().unwrap_or(' ');
+                    top_level_buf.push(ch);
+                    i += ch.len_utf8();
+                } else {
+                    if b == b'\n' {
+                        top_level_buf.push('\n');
+                    }
+                    i += 1;
+                }
+            }
+        }
+    }
+
+    top_level_buf.lines().any(|line| {
+        let t = line.trim();
+        let rest = t
+            .strip_prefix("public ")
+            .or_else(|| t.strip_prefix("internal "))
+            .unwrap_or(t)
+            .trim_start();
+        let rest = rest.strip_prefix("suspend ").unwrap_or(rest).trim_start();
+        rest.starts_with("fun main(") || rest.starts_with("fun main (")
+    })
 }
 
 pub(crate) async fn spawn_java_jdwp_bridge(

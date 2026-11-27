@@ -2,7 +2,10 @@
 // and backend `/ide/deps/*` client helpers (`go.mod`, `pom.xml`, `build.gradle*`,
 // `package.json`, `Cargo.toml`, `requirements.txt`, `pyproject.toml`).
 
-export type ManifestEcosystem = 'go' | 'maven' | 'gradle' | 'npm' | 'cargo' | 'zig' | 'pypi';
+import { parseGradleManifestDependencies } from './cm-ide-deps-gradle.ts';
+import { parseZigManifestDependencies } from './cm-ide-deps-zig.ts';
+
+export type ManifestEcosystem = 'go' | 'maven' | 'gradle' | 'npm' | 'cargo' | 'zig' | 'cpp' | 'nuget' | 'pypi';
 
 export interface IdeDepVuln {
   id: string;
@@ -32,7 +35,21 @@ export interface IdeDepItem {
   end_line?: number;
   block_start_line?: number;
   block_end_line?: number;
+  version_col?: number;
+  version_end_col?: number;
   scope?: string | null;
+}
+
+/**
+ * True when a dependency has an inline editable version span in the manifest
+ * (false for plugin-managed `kotlin("stdlib")` or unversioned catalog/BOM entries).
+ */
+export function isDepVersionEditable(dep: IdeDepItem): boolean {
+  if (dep.version_col !== undefined) {
+    return dep.version_col > 0 && (dep.version_end_col ?? 0) > dep.version_col;
+  }
+  const v = dep.current_version.trim();
+  return Boolean(v && v !== 'plugin' && v !== 'managed' && v !== '*');
 }
 
 export type RawRemoteDepItem = Omit<IdeDepItem, 'deprecated'> & {
@@ -53,10 +70,28 @@ export function detectManifestEcosystem(filePath: string): ManifestEcosystem | n
   const base = filePath.split('?')[0].split('/').pop()?.toLowerCase() ?? '';
   if (base === 'go.mod') return 'go';
   if (base === 'pom.xml') return 'maven';
-  if (base === 'build.gradle' || base === 'build.gradle.kts') return 'gradle';
+  if (base === 'build.gradle' || base === 'build.gradle.kts' || base === 'libs.versions.toml') return 'gradle';
   if (base === 'package.json') return 'npm';
   if (base === 'cargo.toml') return 'cargo';
   if (base === 'build.zig.zon') return 'zig';
+  if (
+    base === 'vcpkg.json' ||
+    base === 'conanfile.txt' ||
+    base === 'cmakelists.txt' ||
+    base.endsWith('.uproject') ||
+    base.endsWith('.uplugin')
+  ) {
+    return 'cpp';
+  }
+  if (
+    base.endsWith('.csproj') ||
+    base.endsWith('.fsproj') ||
+    base.endsWith('.vbproj') ||
+    base === 'directory.packages.props' ||
+    base === 'packages.config'
+  ) {
+    return 'nuget';
+  }
   if (
     base === 'requirements.txt' ||
     base === 'pyproject.toml' ||
@@ -249,119 +284,151 @@ export function parseManifestDependencies(filePath: string, content: string): Id
       }
     }
   } else if (eco === 'zig') {
-    let inDeps = false;
-    let depDepth = 0;
-    let curName = '';
-    let curStart = 0;
-    let curUrl = '';
-    let curPath = '';
-    let curHash = '';
-    const flushDep = (endLn: number) => {
-      if (!curName) return;
-      let ver = '*';
-      if (curPath) {
-        ver = `path:${curPath}`;
-      } else if (curUrl) {
-        const seg = curUrl.split('/').pop() ?? curUrl;
-        ver = seg.replace(/\.(?:tar\.(?:gz|xz|zst)|tgz|zip)$/i, '') || curUrl;
-      } else if (curHash) {
-        ver = curHash.slice(0, 12);
-      }
-      items.push({
-        name: curName,
-        current_version: ver,
-        line: curStart,
-        end_line: endLn,
-        block_start_line: curStart,
-        block_end_line: endLn,
-        vulnerabilities: [],
-      });
-      curName = '';
-      curUrl = '';
-      curPath = '';
-      curHash = '';
-    };
-    const stripZigLineComment = (raw: string): string => {
-      let inStr = false;
-      for (let j = 0; j < raw.length; j++) {
-        if (inStr) {
-          if (raw[j] === '\\') { j++; continue; }
-          if (raw[j] === '"') inStr = false;
-        } else if (raw[j] === '"') {
-          inStr = true;
-        } else if (raw[j] === '/' && raw[j + 1] === '/') {
-          return raw.slice(0, j);
-        }
-      }
-      return raw;
-    };
-    for (let i = 0; i < lines.length; i++) {
-      const t = stripZigLineComment(lines[i]).trim();
-      const ln = i + 1;
-      if (!t) continue;
-      if (!inDeps) {
-        if (/^\.dependencies\s*=\s*\.\{/.test(t)) {
-          inDeps = true;
-          depDepth = 1;
-        }
-        continue;
-      }
-      if (depDepth === 1) {
-        const mDep = /^\.(?:"([^"]+)"|([A-Za-z_]\w*))\s*=\s*\.\{/.exec(t);
-        if (mDep) {
-          curName = mDep[1] || mDep[2];
-          curStart = ln;
-          curUrl = '';
-          curPath = '';
-          curHash = '';
-          if (t.includes('}')) {
-            const mu = /\.url\s*=\s*"([^"]+)"/.exec(t);
-            const mp = /\.path\s*=\s*"([^"]+)"/.exec(t);
-            const mh = /\.hash\s*=\s*"([^"]+)"/.exec(t);
-            if (mu) curUrl = mu[1];
-            if (mp) curPath = mp[1];
-            if (mh) curHash = mh[1];
-            flushDep(ln);
-          } else {
-            depDepth = 2;
-          }
+    items.push(...parseZigManifestDependencies(lines));
+  } else if (eco === 'cpp') {
+    const base = filePath.split('?')[0].split('/').pop()?.toLowerCase() ?? '';
+    if (base === 'vcpkg.json') {
+      let inDeps = false;
+      for (let i = 0; i < lines.length; i++) {
+        const t = lines[i].trim();
+        const ln = i + 1;
+        if (/"dependencies"\s*:\s*\[/.test(t)) { inDeps = !t.includes(']'); continue; }
+        if (inDeps && t.startsWith(']')) { inDeps = false; continue; }
+        if (!inDeps) continue;
+        const mStr = /^"([A-Za-z0-9._-]+)"\s*,?$/.exec(t);
+        if (mStr) {
+          items.push({ name: mStr[1], current_version: '*', line: ln, end_line: ln, vulnerabilities: [] });
           continue;
         }
-        if (t.startsWith('}')) {
-          inDeps = false;
-          depDepth = 0;
+        const mObj = /"name"\s*:\s*"([^"]+)"/.exec(t);
+        if (mObj) {
+          const mv = /"version(?:>=|==|#)?"\s*:\s*"([^"]+)"/.exec(t);
+          items.push({ name: mObj[1], current_version: mv?.[1] ?? '*', line: ln, end_line: ln, vulnerabilities: [] });
         }
-      } else if (depDepth >= 2) {
-        const mu = /^\.url\s*=\s*"([^"]+)"/.exec(t);
-        if (mu) curUrl = mu[1];
-        const mp = /^\.path\s*=\s*"([^"]+)"/.exec(t);
-        if (mp) curPath = mp[1];
-        const mh = /^\.hash\s*=\s*"([^"]+)"/.exec(t);
-        if (mh) curHash = mh[1];
-        const opens = (t.match(/\{/g) ?? []).length;
-        const closes = (t.match(/\}/g) ?? []).length;
-        depDepth += opens - closes;
-        if (depDepth <= 1) {
-          depDepth = 1;
-          flushDep(ln);
+      }
+    } else if (base === 'conanfile.txt') {
+      let section = '';
+      for (let i = 0; i < lines.length; i++) {
+        const t = lines[i].trim();
+        const ln = i + 1;
+        if (!t || t.startsWith('#')) continue;
+        if (t.startsWith('[') && t.endsWith(']')) { section = t.slice(1, -1).trim().toLowerCase(); continue; }
+        if (section === 'requires' || section === 'tool_requires' || section === 'test_requires') {
+          const slash = t.indexOf('/');
+          if (slash > 0) {
+            const name = t.slice(0, slash).trim();
+            const rest = t.slice(slash + 1).split(/[@#]/)[0].trim();
+            items.push({
+              name,
+              current_version: rest || '*',
+              scope: section === 'requires' ? null : section,
+              line: ln,
+              end_line: ln,
+              vulnerabilities: [],
+            });
+          }
+        }
+      }
+    } else if (base === 'cmakelists.txt') {
+      for (let i = 0; i < lines.length; i++) {
+        const t = lines[i].trim();
+        const ln = i + 1;
+        if (!t || t.startsWith('#')) continue;
+        const mPkg = /^find_package\s*\(\s*([A-Za-z0-9_.-]+)(?:\s+([0-9][0-9A-Za-z._-]*))?/i.exec(t);
+        if (mPkg) {
+          items.push({
+            name: mPkg[1],
+            current_version: mPkg[2] ?? '*',
+            scope: 'find_package',
+            line: ln,
+            end_line: ln,
+            vulnerabilities: [],
+          });
+          continue;
+        }
+        const mFc = /^FetchContent_Declare\s*\(\s*([A-Za-z0-9_.-]+)/i.exec(t);
+        if (mFc) {
+          items.push({
+            name: mFc[1],
+            current_version: 'FetchContent',
+            scope: 'fetchcontent',
+            line: ln,
+            end_line: ln,
+            vulnerabilities: [],
+          });
+        }
+      }
+    } else if (base.endsWith('.uproject') || base.endsWith('.uplugin')) {
+      let inPlugins = false;
+      let curName = '';
+      let curLine = 0;
+      let curEnabled = true;
+      for (let i = 0; i < lines.length; i++) {
+        const t = lines[i].trim();
+        const ln = i + 1;
+        if (/"Plugins"\s*:\s*\[/.test(t)) { inPlugins = true; continue; }
+        if (inPlugins && t.startsWith(']')) { inPlugins = false; continue; }
+        if (!inPlugins) continue;
+        const mn = /"Name"\s*:\s*"([^"]+)"/.exec(t);
+        if (mn) { curName = mn[1]; curLine = ln; curEnabled = true; }
+        const me = /"Enabled"\s*:\s*(true|false)/.exec(t);
+        if (me) curEnabled = me[1] === 'true';
+        if (t.includes('}') && curName) {
+          items.push({
+            name: curName,
+            current_version: curEnabled ? 'enabled' : 'disabled',
+            scope: 'unreal-plugin',
+            line: curLine || ln,
+            end_line: ln,
+            vulnerabilities: [],
+          });
+          curName = '';
         }
       }
     }
-  } else if (eco === 'gradle') {
+  } else if (eco === 'nuget') {
     for (let i = 0; i < lines.length; i++) {
-      const m = /^\s*(?:implementation|api|compileOnly|runtimeOnly|testImplementation)\s*\(?\s*['"]([^:'"]+):([^:'"]+):([^'"]+)['"]/.exec(
-        lines[i],
-      );
-      if (m) {
+      const raw = lines[i];
+      const ln = i + 1;
+      const mRef = /<(?:PackageReference|PackageVersion)\b([^>]*?)\/?>/i.exec(raw);
+      if (mRef) {
+        const attrs = mRef[1];
+        const mInc = /\b(?:Include|Update)=["']([^"']+)["']/i.exec(attrs);
+        if (!mInc) continue;
+        let ver = /\b(?:Version|VersionOverride)=["']([^"']+)["']/i.exec(attrs)?.[1] ?? '';
+        let endLn = ln;
+        if (!ver && !raw.includes('/>')) {
+          for (let j = i + 1; j < Math.min(lines.length, i + 8); j++) {
+            const mv = /<Version>\s*([^<\s]+)\s*<\/Version>/i.exec(lines[j]);
+            if (mv) ver = mv[1];
+            if (/<\/Package(?:Reference|Version)>/i.test(lines[j])) {
+              endLn = j + 1;
+              break;
+            }
+          }
+        }
         items.push({
-          name: `${m[1]}:${m[2]}`,
-          current_version: m[3],
-          line: i + 1,
-          end_line: i + 1,
+          name: mInc[1],
+          current_version: ver || 'central',
+          line: ln,
+          end_line: endLn,
+          vulnerabilities: [],
+        });
+        continue;
+      }
+      const mPkg = /<package\b[^>]*\bid=["']([^"']+)["'][^>]*\bversion=["']([^"']+)["']/i.exec(raw);
+      if (mPkg) {
+        items.push({
+          name: mPkg[1],
+          current_version: mPkg[2],
+          line: ln,
+          end_line: ln,
           vulnerabilities: [],
         });
       }
     }
+  } else if (eco === 'gradle') {
+    items.push(...parseGradleManifestDependencies(filePath, lines));
   } else if (eco === 'pypi') {
     const isPyProject = filePath.toLowerCase().endsWith('pyproject.toml');
     let inPoetry = false;

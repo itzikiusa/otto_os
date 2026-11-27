@@ -7,10 +7,11 @@ use std::path::{Path, PathBuf};
 use crate::types::{IdeDetectedSdk, IdeEcosystemKind};
 
 use super::discovery::{
-    bin_prefix, dir_name_version, find_executable_in, is_executable_file, is_goroot,
-    node_prefix_version, python_dir_version, read_go_root_version, read_java_release_version,
-    read_subdirs, resolve_java_home_dir, resolve_zig_home_dir, rust_toolchain_label,
-    system_search_dirs, zig_dir_version, zig_home_from_bin,
+    bin_prefix, dir_name_version, dotnet_dir_version, dotnet_root_from_bin, find_executable_in,
+    is_executable_file, is_goroot, node_prefix_version, python_dir_version, read_go_root_version,
+    read_java_release_version, read_subdirs, resolve_dotnet_root_dir, resolve_java_home_dir,
+    resolve_zig_home_dir, rust_toolchain_label, system_search_dirs, zig_dir_version,
+    zig_home_from_bin,
 };
 
 pub(super) fn scan_detected_sdks(
@@ -110,6 +111,53 @@ pub(super) fn scan_detected_sdks(
                     format!("Zig {v}"),
                     &v,
                     &zh,
+                    "otto",
+                );
+            }
+        }
+        for dir in read_subdirs(&root.join("cpp/sdks")) {
+            if dir.join("bin/clang++").is_file() || dir.join("bin/clang").is_file() {
+                let v = dir_name_version(&dir);
+                push_det(
+                    &mut out,
+                    &mut seen,
+                    "cpp",
+                    format!("LLVM / Clang {v}"),
+                    &v,
+                    &dir,
+                    "otto",
+                );
+            }
+        }
+        for dir in read_subdirs(&root.join("kotlin/sdks")) {
+            let kh = if dir.join("kotlinc/bin/kotlinc").is_file() {
+                dir.join("kotlinc")
+            } else {
+                dir.clone()
+            };
+            if kh.join("bin/kotlinc").is_file() {
+                let v = dir_name_version(&dir);
+                push_det(
+                    &mut out,
+                    &mut seen,
+                    "kotlin",
+                    format!("Kotlin {v}"),
+                    &v,
+                    &kh,
+                    "otto",
+                );
+            }
+        }
+        for dir in read_subdirs(&root.join("dotnet/sdks")) {
+            if let Some(dr) = resolve_dotnet_root_dir(&dir) {
+                let v = dotnet_dir_version(&dr);
+                push_det(
+                    &mut out,
+                    &mut seen,
+                    "dotnet",
+                    format!(".NET SDK {v}"),
+                    &v,
+                    &dr,
                     "otto",
                 );
             }
@@ -540,6 +588,148 @@ fn scan_python_and_rust_sdks(
         }
     }
 
+    // 6b. C / C++ toolchains (Xcode CLT, Homebrew LLVM/GCC, /usr/bin)
+    for (cand, label, src) in [
+        (
+            "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr",
+            "Xcode Clang Toolchain",
+            "xcode",
+        ),
+        (
+            "/Library/Developer/CommandLineTools/usr",
+            "Command Line Tools Clang",
+            "xcode-clt",
+        ),
+        (
+            "/opt/homebrew/opt/llvm",
+            "Homebrew LLVM / Clang",
+            "homebrew",
+        ),
+        ("/usr/local/opt/llvm", "Homebrew LLVM / Clang", "homebrew"),
+    ] {
+        let p = PathBuf::from(cand);
+        if p.join("bin/clang++").is_file() || p.join("bin/clang").is_file() {
+            push_det(out, seen, "cpp", label.to_string(), "system", &p, src);
+        }
+    }
+
+    // 6c. Kotlin compiler (SDKMAN, Homebrew, PATH)
+    if let Some(h) = home {
+        for dir in read_subdirs(&h.join(".sdkman/candidates/kotlin")) {
+            if dir.join("bin/kotlinc").is_file() {
+                let v = dir_name_version(&dir);
+                push_det(
+                    out,
+                    seen,
+                    "kotlin",
+                    format!("Kotlin {v} (SDKMAN)"),
+                    &v,
+                    &dir,
+                    "sdkman",
+                );
+            }
+        }
+    }
+    for cand in [
+        "/opt/homebrew/opt/kotlin/libexec",
+        "/usr/local/opt/kotlin/libexec",
+        "/opt/homebrew/opt/kotlin",
+        "/usr/local/opt/kotlin",
+    ] {
+        let p = PathBuf::from(cand);
+        if p.join("bin/kotlinc").is_file() {
+            let v = dir_name_version(&p);
+            push_det(
+                out,
+                seen,
+                "kotlin",
+                format!("Homebrew Kotlin ({v})"),
+                &v,
+                &p,
+                "homebrew",
+            );
+        }
+    }
+
+    // 6d. .NET SDK: DOTNET_ROOT, /usr/local/share/dotnet, Homebrew, ~/.dotnet, asdf/mise, PATH
+    for (cand, src, label_prefix) in [
+        ("/usr/local/share/dotnet", "system", ".NET SDK"),
+        (
+            "/opt/homebrew/opt/dotnet/libexec",
+            "homebrew",
+            "Homebrew .NET SDK",
+        ),
+        (
+            "/usr/local/opt/dotnet/libexec",
+            "homebrew",
+            "Homebrew .NET SDK",
+        ),
+        ("/usr/share/dotnet", "system", ".NET SDK"),
+    ] {
+        let p = PathBuf::from(cand);
+        if let Some(dr) = resolve_dotnet_root_dir(&p) {
+            let v = dotnet_dir_version(&dr);
+            push_det(
+                out,
+                seen,
+                "dotnet",
+                format!("{label_prefix} {v}"),
+                &v,
+                &dr,
+                src,
+            );
+        }
+    }
+    if let Some(h) = home {
+        let dot_dotnet = h.join(".dotnet");
+        if let Some(dr) = resolve_dotnet_root_dir(&dot_dotnet) {
+            let v = dotnet_dir_version(&dr);
+            push_det(
+                out,
+                seen,
+                "dotnet",
+                format!(".NET SDK {v} (~/.dotnet)"),
+                &v,
+                &dr,
+                "dotnet",
+            );
+        }
+        for (parent, src, tag) in [
+            (h.join(".asdf/installs/dotnet-core"), "asdf", "asdf"),
+            (h.join(".asdf/installs/dotnet"), "asdf", "asdf"),
+            (h.join(".local/share/mise/installs/dotnet"), "mise", "mise"),
+        ] {
+            for dir in read_subdirs(&parent) {
+                if let Some(dr) = resolve_dotnet_root_dir(&dir) {
+                    let v = dotnet_dir_version(&dr);
+                    push_det(
+                        out,
+                        seen,
+                        "dotnet",
+                        format!(".NET SDK {v} ({tag})"),
+                        &v,
+                        &dr,
+                        src,
+                    );
+                }
+            }
+        }
+    }
+    if let Some(bin) = find_executable_in(&system_search_dirs(), &["dotnet"]) {
+        if let Some(dr) = dotnet_root_from_bin(&bin) {
+            let v = dotnet_dir_version(&dr);
+            push_det(
+                out,
+                seen,
+                "dotnet",
+                format!(".NET SDK {v}"),
+                &v,
+                &dr,
+                "path",
+            );
+        }
+    }
+
     // 7. iOS / Xcode, Android SDK, and Flutter (zero-subprocess disk scan)
     scan_mobile_sdks(home, out, seen);
 }
@@ -775,9 +965,11 @@ fn push_det(
 ) {
     let eco = match ecosystem {
         "java" => IdeEcosystemKind::Java,
+        "kotlin" => IdeEcosystemKind::Kotlin,
         "go" => IdeEcosystemKind::Go,
         "rust" => IdeEcosystemKind::Rust,
         "zig" => IdeEcosystemKind::Zig,
+        "cpp" => IdeEcosystemKind::Cpp,
         "node" => IdeEcosystemKind::Node,
         "python" => IdeEcosystemKind::Python,
         "shell" => IdeEcosystemKind::Shell,
@@ -800,11 +992,13 @@ fn push_det(
         } else {
             let bin = match eco {
                 IdeEcosystemKind::Java => path.join("bin/java"),
+                IdeEcosystemKind::Kotlin => path.join("bin/kotlinc"),
                 IdeEcosystemKind::Go => path.join("bin/go"),
                 IdeEcosystemKind::Rust => path.join("bin/rustc"),
                 IdeEcosystemKind::Zig => {
                     super::discovery::zig_bin_in_home(path).unwrap_or_else(|| path.join("zig"))
                 }
+                IdeEcosystemKind::Cpp => path.join("bin/clang++"),
                 IdeEcosystemKind::Node => path.join("bin/node"),
                 IdeEcosystemKind::Python => path.join("bin/python3"),
                 IdeEcosystemKind::Ios => path.join("usr/bin/xcodebuild"),

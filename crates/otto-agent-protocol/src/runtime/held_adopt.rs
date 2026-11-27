@@ -113,11 +113,17 @@ impl AgentRuntime {
         for task in detach_tasks {
             let _ = task.await;
         }
-        for live in lives {
-            let (tx, rx) = oneshot::channel();
-            let _ = live.persist.send(PersistOp::Flush(tx));
-            let _ = rx.await;
-        }
+        // Queue all flushes up front and await them concurrently so a daemon
+        // with 10+ loaded workflow/review threads does not exhaust the restart
+        // detach window waiting on sequential SQLite commits.
+        let flushes: Vec<_> = lives
+            .into_iter()
+            .filter_map(|live| {
+                let (tx, rx) = oneshot::channel();
+                live.persist.send(PersistOp::Flush(tx)).ok().map(|()| rx)
+            })
+            .collect();
+        let _ = futures_util::future::join_all(flushes).await;
     }
 
     /// Scan `<holders_dir>/*.sock`, re-attach live `runtime-holder` processes,

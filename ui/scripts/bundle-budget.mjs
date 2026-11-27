@@ -159,6 +159,8 @@ const LAZY_ONLY = {
     'loops',
   ],
   'src/lib/components/CodeEditor.svelte': ['settings'],
+  'src/modules/ide/security/IdeSecurityPage.svelte': ['ide'],
+  'src/modules/ide/security/projectSecurityData.ts': ['ide'],
 };
 /** npm package → the page keys whose STATIC import set must not reach it
  *  (same rule as LAZY_ONLY, for a whole package). `three` (~650 kB) is only
@@ -173,7 +175,7 @@ const ruleFailures = [];
  *  statically somewhere), or the shared `_<Name>-<hash>.js` chunk when it is
  *  only ever imported statically. */
 function heavyFiles(src) {
-  const name = src.split('/').pop().replace(/\.svelte$/, '');
+  const name = src.split('/').pop().replace(/\.(svelte|ts)$/, '');
   const shared = new RegExp(`^_${name}-[\\w-]+\\.js$`);
   const files = new Set();
   for (const [k, c] of Object.entries(manifest)) {

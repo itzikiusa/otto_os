@@ -25,6 +25,7 @@ import {
 } from './ideDebugSnapshotSync';
 import {
   mergeGoBuildTagsIntoFlags,
+  resolveConfigDebugHints,
   resolveRepoGoBuildTags,
   resolveRepoRootForPath,
 } from './ideRepoTestAndBuildTags';
@@ -44,7 +45,7 @@ import {
   collabGuestPost, defaultRunnerForLanguage, GUTTER_TARGET_ID, IdeCollabHttpError, ideTargetKey, streamIdeSse, type IdeBottomTab,
   type IdeBreakpoint, type IdeCollabRoom, type IdeDebugSessionSnapshot, type IdeDetectedSdk,
   type IdeEnvVar, type IdeGutterItem, type IdeInstalledSdk, type IdeInstallJob,
-  type IdeOpenTab, type IdeProjectEnvironment, type IdeProjectRoot, type IdePythonVenv,
+  type IdeMlAcceleratorInfo, type IdeOpenTab, type IdeProjectEnvironment, type IdeProjectRoot, type IdePythonVenv,
   type IdeReplEntry, type IdeRunConfig, type IdeRunState, type IdeShellEnvResp,
   type IdeTargetSpec, type IdeToolchainEcosystem, type IdeVariable, type IdeWatch,
 } from './ideTypes';
@@ -70,6 +71,7 @@ export interface DebugAndEnvHost {
   shellEnvError?: string | null;
   keepTestcontainersAlive?: boolean;
   pythonVenvs: IdePythonVenv[];
+  accelerators: IdeMlAcceleratorInfo[];
   dotenvFiles: string[];
   runConfigs: IdeRunConfig[];
   detectedConfigs: IdeRunConfig[];
@@ -125,6 +127,8 @@ export function languageFromRunner(runner: string | undefined, fallback: string)
   if (runner.startsWith('go_')) return 'go';
   if (runner.startsWith('cargo_')) return 'rust';
   if (runner.startsWith('zig_')) return 'zig';
+  if (runner === 'cmake' || runner === 'ctest' || runner === 'cpp_run' || runner === 'make' || runner === 'meson' || runner === 'unreal') return 'cpp';
+  if (runner.startsWith('dotnet_')) return 'csharp';
   if (runner.startsWith('java_') || runner === 'maven' || runner === 'gradle') return 'java';
   if (runner === 'pytest' || runner === 'python') return 'python';
   if (runner === 'node' || runner === 'npm' || runner === 'vitest') return 'javascript';
@@ -309,6 +313,7 @@ export async function fetchEnvironments(host: DebugAndEnvHost): Promise<void> {
       configs: IdeRunConfig[];
       detected_configs?: IdeRunConfig[];
       effective_env?: Record<string, string>;
+      accelerators?: IdeMlAcceleratorInfo[];
     }>(`/ide/environments?${host.targetQuery()}`);
     // The project switched while this was in flight: its run configs belong to the old one.
     if (stale()) return;
@@ -318,6 +323,7 @@ export async function fetchEnvironments(host: DebugAndEnvHost): Promise<void> {
       host.syncAdditionalRootsFromEnv?.(resp.env.additional_roots);
     }
     host.pythonVenvs = resp.python_venvs ?? [];
+    host.accelerators = resp.accelerators ?? [];
     host.dotenvFiles = resp.dotenv_files ?? [];
     const backendDetected = resp.detected_configs ?? [];
     host.detectedConfigs = backendDetected.length > 0 ? backendDetected : host.detectedConfigs;
@@ -551,8 +557,11 @@ function selectedGutterTarget(host: DebugAndEnvHost): IdeGutterItem | null {
 }
 
 const TOOL_ARGV_RUNNERS = new Set([
-  'go_run', 'go_test', 'go_build', 'cargo_run', 'cargo_test', 'zig_build', 'zig_run', 'zig_test', 'pytest', 'npm', 'vitest', 'maven', 'java_junit', 'gradle',
+  'go_run', 'go_test', 'go_build', 'cargo_run', 'cargo_test', 'zig_build', 'zig_run', 'zig_test', 'cmake', 'ctest', 'cpp_run', 'make', 'meson', 'unreal', 'dotnet_build', 'dotnet_run', 'dotnet_test', 'pytest', 'npm', 'vitest', 'maven', 'java_junit', 'gradle',
 ]);
+
+import { resolveFrameworkDevDebugLaunch, runOnlyDebugRefusal } from './ideDebugLaunchHelpers';
+export { resolveFrameworkDevDebugLaunch };
 
 /** The toolbar/shortcut target when the caller named none (`null` = the caller did). */
 function toolbarLaunchPlan(host: DebugAndEnvHost, opts: { configId?: string; adhoc?: unknown; launch?: unknown }): LaunchPlan | null {
@@ -640,6 +649,16 @@ export async function launchDebugSession(
   }
   const rawCfgId = opts.configId ?? (plan?.kind === 'config' ? plan.configId : undefined);
   const cfg = rawCfgId ? host.runConfigs.find((c) => c.id === rawCfgId) : undefined;
+  const unrealSub = cfg?.runner === 'unreal' ? (cfg.args?.[0] ?? '').trim() : '';
+  // Build-only and run-only (BUG-30, the daemon's own text) configurations, whatever tab is focused.
+  const refusal = unrealSub === 'build' || unrealSub === 'gen-cdb' || unrealSub === 'build-plugin'
+    ? `Unreal '${unrealSub}' run configuration is build-only; start Debug on the Unreal Editor launch configuration instead`
+    : runOnlyDebugRefusal(cfg?.runner);
+  if (refusal) {
+    host.openBottomTab('debug');
+    ideDebugLaunch.startError = { message: refusal, kind: null, ecosystem: null };
+    return prevCtl;
+  }
   const fallbackLang = host.activeTab?.language || 'go';
   const language = opts.language || languageFromRunner(cfg?.runner, fallbackLang);
   const program = opts.launch?.program || cfg?.target_path || host.activePath || host.target.root;
@@ -657,16 +676,21 @@ export async function launchDebugSession(
       ? { SPRING_PROFILES_ACTIVE: host.activeSpringProfiles.join(',') }
       : {};
     const tcEnv: Record<string, string> = host.keepTestcontainersAlive ? { TESTCONTAINERS_RYUK_DISABLED: 'true' } : {};
+    const fwCliDebug = cfg ? resolveFrameworkDevDebugLaunch(cfg) : null;
+    const { isTest, envHints } = resolveConfigDebugHints(cfg);
     const baseLaunch = opts.launch ?? {
-      program,
+      program: fwCliDebug?.program ?? program,
       // A tool runner's args are its own command line (`run ./cmd/x`, `test -v ./...`),
       // not the debuggee's argv; script and custom runners pass theirs through.
       // A config saved with its script as the first argument names it once.
-      args: cfg && !TOOL_ARGV_RUNNERS.has(cfg.runner) ? cfg.args.filter((a, i) => i > 0 || a !== cfg.target_path) : [],
+      args: fwCliDebug
+        ? fwCliDebug.args
+        : (cfg && !TOOL_ARGV_RUNNERS.has(cfg.runner) ? cfg.args.filter((a, i) => i > 0 || a !== cfg.target_path) : []),
       build_flags: cfg?.build_flags ?? [],
       cwd: cfg?.cwd || repoInfo.path || host.target.root,
       test_name: cfg?.test_filter || undefined,
-      env: cfg?.env_overrides ?? {},
+      is_test: isTest,
+      env: { ...envHints, ...(cfg?.env_overrides ?? {}) },
       env_file: cfg?.env_file ?? null,
       inherit_shell_env: cfg?.inherit_shell_env ?? host.projectEnv?.inherit_shell_env ?? true,
       sdk_path: cfg?.sdk_path ?? modSdk ?? null,

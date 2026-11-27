@@ -1,9 +1,8 @@
 <script lang="ts">
   // The Agents inbox (patterns.md §10 — the Threads concept, where the owner
-  // works): terminal sessions AND structured threads in ONE list, needs you
-  // first, then the sort mode's order (agentsInbox.ts); working sessions in the
-  // pinned "Working" fold, closed ones in "History". Top: search · select ·
-  // sort/scope menu, then the workspace this list belongs to (click → switch).
+  // works): terminal sessions and structured threads in one inbox, grouped by
+  // workspace by default in All workspaces. Closed sessions stay in History.
+  // Top: search · select · show/sort menu, then the workspace switcher.
   // Foot: New session · the usage meter. It replaced the session tree that
   // hung under "Agents" in the app sidebar; everything that tree did is here
   // (scope by workspace, multi-select → Tile / Archive / Delete, drag to
@@ -14,6 +13,7 @@
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
+  import ProjectBadge from '../../lib/components/ProjectBadge.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { toastError } from '../../lib/toastError';
@@ -34,7 +34,7 @@
   import { ui } from '../../lib/stores/ui.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { ws, SCRATCH_WORKSPACE_ID } from '../../lib/stores/workspace.svelte';
-  import { lsGet } from '../../lib/storage';
+  import { lsGet, lsSet } from '../../lib/storage';
   import type { Session } from '../../lib/api/types';
   import { ShareModalChunk } from '../../shell/overlays.svelte';
   import { RemovedWorkspacesChunk } from '../../shell/lazyDialogs';
@@ -43,7 +43,10 @@
   import { LS_WS_RECENT, parseRecent, switcherItems, workspaceActivity } from '../../shell/workspaceSwitch';
   import { newScratchSession, newSessionIn, workspaceMenuItems } from '../../shell/workspaceActions';
   import AgentsInboxRow from './AgentsInboxRow.svelte';
-  import { agentsInbox, byRecent, matchesQuery } from './agentsInbox';
+  import {
+    byRecent, groupAgentSessions, matchesQuery, sessionListStatus,
+    SESSION_GROUPING_LABELS, SESSION_LIST_STATUS_LABELS, type InboxGroup, type SessionGrouping,
+  } from './agentsInbox';
   import { startThreadFeeds } from './threadFeeds.svelte';
 
   // The inbox lists the same structured threads as Threads (spec A: one set of sessions, two views).
@@ -95,11 +98,52 @@
     };
   });
 
-  // ── Sort (Recent · Manual · Tokens), persisted per workspace ──────────────
+  // Grouping and folded workspaces belong to the signed-in person, across
+  // workspace switches and sidebar remounts.
+  interface GroupPreferences {
+    groupBy: SessionGrouping;
+    collapsed: string[];
+  }
+  const preferencesKey = $derived(`otto_agents_inbox:${auth.me?.id ?? 'anonymous'}`);
+  let preferencesEdit = $state.raw<{ key: string; value: GroupPreferences } | null>(null);
+  const preferences = $derived.by((): GroupPreferences => {
+    if (preferencesEdit?.key === preferencesKey) return preferencesEdit.value;
+    try {
+      const saved = JSON.parse(lsGet(preferencesKey) ?? 'null') as Partial<GroupPreferences> | null;
+      return {
+        groupBy: saved?.groupBy === 'status' || saved?.groupBy === 'none' ? saved.groupBy : 'workspace',
+        collapsed: Array.isArray(saved?.collapsed) ? saved.collapsed.filter((id) => typeof id === 'string') : [],
+      };
+    } catch {
+      return { groupBy: 'workspace', collapsed: [] };
+    }
+  });
+  function setPreferences(value: GroupPreferences): void {
+    preferencesEdit = { key: preferencesKey, value };
+    lsSet(preferencesKey, JSON.stringify(value));
+  }
+  const collapsed = $derived(new Set(preferences.collapsed));
+  function isFiltering(): boolean {
+    return query.trim() !== '' || ws.needsYouFilter;
+  }
+  function isCollapsed(group: InboxGroup): boolean {
+    return group.kind === 'workspace' && collapsed.has(group.key) && !isFiltering();
+  }
+  function toggleWorkspace(id: string): void {
+    const next = new Set(collapsed);
+    if (!next.delete(id)) next.add(id);
+    setPreferences({ ...preferences, collapsed: [...next] });
+  }
+  const multiWorkspace = $derived(ws.multiWorkspaceScope);
+  const grouping = $derived(multiWorkspace ? preferences.groupBy : 'single');
+  const grouped = $derived(grouping === 'workspace' || grouping === 'status');
+
+  // ── Single-workspace sort (Recent · Manual · Tokens) ────────────────────
   $effect(() => sessionOrder.load(ws.currentId ?? SCRATCH_WORKSPACE_ID));
   const canUsage = $derived(auth.can('usage', 'view'));
   const usageWs = $derived(ws.currentId ?? SCRATCH_WORKSPACE_ID);
-  const tokensSort = $derived(sessionOrder.mode === 'tokens' && canUsage && sessionUsage.available);
+  const manualSort = $derived(!multiWorkspace && sessionOrder.mode === 'manual');
+  const tokensSort = $derived(!multiWorkspace && sessionOrder.mode === 'tokens' && canUsage && sessionUsage.available);
   // The 30-day rollup feeds the Tokens sort only; polled while it is on.
   $effect(() => {
     if (!tokensSort) return;
@@ -109,29 +153,33 @@
   });
 
   const stale = $derived(events.state !== 'connected');
+  const workspaceNames = $derived(new Map(ws.workspaces.map((w) => [w.id, w.name])));
   const wsName = (id: string | null | undefined): string =>
-    id === SCRATCH_WORKSPACE_ID || !id ? 'No workspace' : (ws.workspaces.find((w) => w.id === id)?.name ?? 'Workspace');
+    id === SCRATCH_WORKSPACE_ID || !id ? 'No workspace' : (workspaceNames.get(id) ?? 'Workspace');
   const isThread = (s: Session): boolean => !!rt && !!rt.get(s.id);
 
-  // Every row this scope shows: this workspace's terminals (+ "No workspace"),
-  // other workspaces' while "All workspaces" is on, and the structured threads.
-  const ptyRows = $derived.by(() => {
-    const own = sessionOrder.mode === 'manual'
-      ? applyOrder(ws.plainAgentSessions, sessionOrder.order)
-      : tokensSort
-        ? applyTokenOrder(ws.plainAgentSessions, sessionUsage.tokensFor(usageWs))
-        : byRecent(ws.plainAgentSessions);
-    return [...own, ...ws.scratchSessions, ...(ws.allWorkspaces ? ws.otherWsGroups.flatMap((g) => g.sessions) : [])];
-  });
+  const ownPtyRows = $derived(
+    manualSort ? applyOrder(ws.plainAgentSessions, sessionOrder.order)
+      : tokensSort ? applyTokenOrder(ws.plainAgentSessions, sessionUsage.tokensFor(usageWs))
+        : ws.plainAgentSessions,
+  );
+  // The current workspace's terminals, scratch, and the other workspaces'
+  // foreground terminals when All workspaces is on.
+  const ptyRows = $derived([
+    ...ownPtyRows, ...ws.scratchSessions, ...(multiWorkspace ? ws.otherAgentSessions : []),
+  ]);
   const scope = (s: Session): boolean =>
-    ws.allWorkspaces || s.workspace_id === ws.currentId || s.workspace_id === SCRATCH_WORKSPACE_ID;
-  const threadRows = $derived(rt ? byRecent(rt.rows().filter((s) => isForeground(s) && scope(s))) : []);
+    multiWorkspace || s.workspace_id === ws.currentId || s.workspace_id === SCRATCH_WORKSPACE_ID;
+  const threadRows = $derived(rt ? rt.rows().filter((s) => isForeground(s) && scope(s)) : []);
 
-  function stateOf(s: Session) {
-    return nav && isThread(s) ? nav.threadRowState(s) : sessionState(s, ws.statusMap[s.id] ?? s.status, ws.needsYou[s.id] === true, { stale });
+  function stateOf(s: Session, forDisplay = true) {
+    return nav && isThread(s)
+      ? (forDisplay ? nav.threadRowState(s) : nav.threadLastKnownState(s))
+      : sessionState(s, ws.statusMap[s.id] ?? s.status, ws.needsYou[s.id] === true, { stale: forDisplay && stale });
   }
   const unread = (s: Session): boolean => ws.unread[s.id] === true && ws.activeSessionId !== s.id;
-  const classOf = (s: Session) => (nav && isThread(s) ? nav.threadClass(s, unread(s)) : inboxClass(stateOf(s).key, unread(s)));
+  const classOf = (s: Session, state = stateOf(s, false)) =>
+    nav && isThread(s) ? nav.threadClass(s, unread(s), state) : inboxClass(state.key, unread(s));
   /** A thread's pending requests' kinds (Approval vs Question in its word). */
   const kindsOf = (s: Session): string[] => (live && isThread(s) ? live.kindsOf(s.id) : []);
   const branchOf = (s: Session): string | null => {
@@ -145,7 +193,18 @@
   const matches = (s: Session): boolean =>
     (!ws.needsYouFilter || classOf(s) === 'needs') && (!query.trim() || matchesQuery(s, query, [branchOf(s), wsName(s.workspace_id)]));
 
-  const inbox = $derived(agentsInbox([...ptyRows, ...threadRows].filter(matches), classOf));
+  // Use last-known state for ordering. Reconnecting changes the row's display
+  // hint, not its position or group.
+  const inbox = $derived(groupAgentSessions(
+    [...ptyRows, ...threadRows].filter(matches),
+    (s) => {
+      const state = stateOf(s, false);
+      return sessionListStatus(state.key, classOf(s, state));
+    },
+    grouping,
+    ws.currentId,
+    manualSort || tokensSort,
+  ));
   const historyRows = $derived(
     [...ws.archivedAgentSessions, ...(rt ? rt.rows(true).filter((s) => isForeground(s) && scope(s)) : [])].filter(matches),
   );
@@ -156,7 +215,8 @@
   // This workspace's rows (and "No workspace"), as the old list's select mode.
   const own = (s: Session): boolean => s.workspace_id === ws.currentId || s.workspace_id === SCRATCH_WORKSPACE_ID;
   const selectable = $derived(
-    [...inbox, ...(historyOpen ? historyRows : [])].filter((s) => !isThread(s) && own(s) && ws.canEditSession(s)),
+    [...inbox.flatMap((group) => isCollapsed(group) ? [] : group.sessions), ...(historyOpen ? historyRows : [])]
+      .filter((s) => !isThread(s) && own(s) && ws.canEditSession(s)),
   );
   const selIds = $derived(selectable.filter((s) => sel.has(s.id)).map((s) => s.id));
   const liveSel = $derived(selIds.filter((id) => !ws.archivedAgentSessions.some((a) => a.id === id)));
@@ -199,14 +259,14 @@
 
   // ── Manual order: drag rows (pointer only; the menu has "Move to top"). The
   // first drag implies Manual, seeded from the order as shown. ──────────────
-  const dragOn = $derived(!query.trim() && !selectMode && !ws.needsYouFilter && !viewport.isPhone);
+  const dragOn = $derived(!multiWorkspace && !query.trim() && !selectMode && !ws.needsYouFilter && !viewport.isPhone);
   const shownOwn = (): string[] =>
-    (sessionOrder.mode === 'manual' ? applyOrder(ws.plainAgentSessions, sessionOrder.order) : tokensSort ? applyTokenOrder(ws.plainAgentSessions, sessionUsage.tokensFor(usageWs)) : byRecent(ws.plainAgentSessions)).map((x) => x.id);
+    (manualSort || tokensSort ? ownPtyRows : byRecent(ownPtyRows)).map((x) => x.id);
   let dragId = $state<string | null>(null);
   let dragOver = $state<string | null>(null);
-  const ownIds = $derived(ws.plainAgentSessions.map((s) => s.id));
+  const ownIds = $derived(new Set(ws.plainAgentSessions.map((s) => s.id)));
   function dragFor(s: Session) {
-    if (!dragOn || !ownIds.includes(s.id)) return null;
+    if (!dragOn || !ownIds.has(s.id)) return null;
     return {
       over: dragOver === s.id,
       onstart: (e: DragEvent) => {
@@ -278,7 +338,7 @@
           // Session · Share · Danger — the tab and pane menus' order.
           ...(edit ? [{ label: 'Rename…', icon: 'edit' as const, action: () => void rename(s) }] : []),
           ...(other ? [] : [{ label: 'Open beside', icon: 'split' as const, action: () => void ws.openInSplit(s.id) }]),
-          ...(sessionOrder.mode === 'manual' && ownIds.includes(s.id)
+          ...(manualSort && ownIds.has(s.id)
             ? [{ label: 'Move to top', icon: 'arrowUp' as const, action: () => { const ids = shownOwn(); sessionOrder.dragTo(ids, s.id, ids[0]); } }]
             : []),
           { separator: true },
@@ -304,16 +364,28 @@
     ctxMenu.show(e, items);
   }
 
+  const sortLabel = $derived(grouping === 'single'
+    ? sessionOrder.mode === 'manual' ? 'Manual order' : sessionOrder.mode === 'tokens' ? 'Sorted by tokens' : 'Recent first'
+    : grouping === 'none' ? 'Recent first' : `Grouped by ${SESSION_GROUPING_LABELS[grouping].toLowerCase()}`);
   function sortMenu(e: MouseEvent): void {
+    const order: MenuItem[] = multiWorkspace
+      ? (Object.keys(SESSION_GROUPING_LABELS) as SessionGrouping[]).map((groupBy) => ({
+          label: `Group by ${SESSION_GROUPING_LABELS[groupBy]}`,
+          checked: grouping === groupBy,
+          action: () => setPreferences({ ...preferences, groupBy }),
+        }))
+      : [
+          { label: 'Sort: Recent', checked: sessionOrder.mode === 'recent', action: () => sessionOrder.setMode('recent') },
+          { label: 'Sort: Manual (drag rows)', checked: manualSort, action: () => sessionOrder.setMode('manual', byRecent(ws.plainAgentSessions).map((x) => x.id)) },
+          ...(canUsage ? [{ label: 'Sort: Tokens (most first, 30 days)', checked: sessionOrder.mode === 'tokens', action: () => sessionOrder.setMode('tokens') }] : []),
+          { label: 'Reset to recent', icon: 'refresh', disabled: sessionOrder.mode === 'recent', action: () => sessionOrder.reset() },
+        ];
     ctxMenu.showAt(e.currentTarget as HTMLElement, [
       { label: 'This workspace', checked: !ws.allWorkspaces, action: () => ws.setAllWorkspaces(false) },
       { label: 'All workspaces', checked: ws.allWorkspaces, action: () => ws.setAllWorkspaces(true) },
       { label: 'Only what needs you', checked: ws.needsYouFilter, action: () => (ws.needsYouFilter = !ws.needsYouFilter) },
       { separator: true },
-      { label: 'Sort: Recent', checked: sessionOrder.mode === 'recent', action: () => sessionOrder.setMode('recent') },
-      { label: 'Sort: Manual (drag rows)', checked: sessionOrder.mode === 'manual', action: () => sessionOrder.setMode('manual', byRecent(ws.plainAgentSessions).map((x) => x.id)) },
-      ...(canUsage ? [{ label: 'Sort: Tokens (most first, 30 days)', checked: sessionOrder.mode === 'tokens', action: () => sessionOrder.setMode('tokens') }] : []),
-      { label: 'Reset to recent', icon: 'refresh', disabled: sessionOrder.mode === 'recent', action: () => sessionOrder.reset() },
+      ...order,
     ]);
   }
   function wsSwitcher(e: MouseEvent): void {
@@ -338,14 +410,15 @@
   }
 </script>
 
-{#snippet row(s: Session)}
+{#snippet row(s: Session, showWorkspace = true)}
   {@const thread = isThread(s)}
   {@const st = stateOf(s)}
-  {@const word = s.archived ? { word: 'Stopped', tone: '' as const } : sessionWord(st, { unread: unread(s), kinds: kindsOf(s) })}
-  {@const cls = s.archived ? 'rest' : classOf(s)}
+  {@const wordState = st.key === 'stale' && grouped ? stateOf(s, false) : st}
+  {@const word = s.archived ? { word: 'Stopped', tone: '' as const } : sessionWord(wordState, { unread: unread(s), kinds: kindsOf(s) })}
+  {@const cls = s.archived ? 'rest' : classOf(s, wordState)}
   <AgentsInboxRow
     session={s}
-    project={ws.allWorkspaces || (s.workspace_id !== ws.currentId) ? wsName(s.workspace_id) : null}
+    project={showWorkspace && (ws.allWorkspaces || s.workspace_id !== ws.currentId) ? wsName(s.workspace_id) : null}
     status={word}
     strong={cls === 'needs' || cls === 'done'}
     kind={s.archived ? 'archived' : thread ? 'chat' : 'terminal'}
@@ -369,12 +442,12 @@
       <Icon name="search" size={14} />
       <input type="search" dir="auto" bind:value={query} placeholder="Search" aria-label="Search sessions, branches, workspaces" data-testid="agents-search" />
     </label>
-    {#if selectable.length > 0}
+    {#if selectMode || selectable.length > 0}
       <button type="button" class="icon-btn" class:on={selectMode} aria-pressed={selectMode} aria-label="Select sessions" title={selectMode ? 'Done selecting' : 'Select sessions to tile, archive or delete'} data-testid="agents-select-toggle" onclick={() => setSelectMode(!selectMode)}>
         <Icon name={selectMode ? 'check' : 'square'} size={14} />
       </button>
     {/if}
-    <button type="button" class="icon-btn" class:on={ws.allWorkspaces || sessionOrder.mode !== 'recent' || ws.needsYouFilter} aria-haspopup="menu" aria-label="Show and sort sessions" title="Showing {ws.allWorkspaces ? 'all workspaces' : 'this workspace'} · {sessionOrder.mode === 'manual' ? 'Manual order' : sessionOrder.mode === 'tokens' ? 'Sorted by tokens' : 'Recent first'}" data-testid="agents-sort-toggle" onclick={sortMenu}>
+    <button type="button" class="icon-btn" class:on={ws.allWorkspaces || sessionOrder.mode !== 'recent' || ws.needsYouFilter} aria-haspopup="menu" aria-label="Show and sort sessions" title="Showing {ws.allWorkspaces ? 'all workspaces' : 'this workspace'} · {sortLabel}" data-testid="agents-sort-toggle" onclick={sortMenu}>
       <Icon name="filter" size={14} />
     </button>
     {#if onhide}
@@ -403,10 +476,32 @@
   {/if}
 
   <div class="ai-body">
-    <div class="ai-scroll">
+    <div class="ai-scroll" class:grouped>
       <div class="ai-list" data-testid="agents-list">
-        {#each inbox as s (s.id)}
-          {@render row(s)}
+        {#each inbox as group (group.kind + ':' + group.key)}
+          {#if group.kind === 'workspace'}
+            {@const name = wsName(group.key)}
+            {@const expanded = !isCollapsed(group)}
+            <InboxFold
+              label={name}
+              count={group.sessions.length}
+              {expanded}
+              sticky
+              testid={`agents-workspace-${group.key}`}
+              ontoggle={isFiltering() ? undefined : () => toggleWorkspace(group.key)}
+            >
+              {#snippet leading()}<ProjectBadge {name} />{/snippet}
+              {#if expanded}
+                {#each group.sessions as s (s.id)}{@render row(s, false)}{/each}
+              {/if}
+            </InboxFold>
+          {:else if group.kind === 'status'}
+            <InboxFold label={SESSION_LIST_STATUS_LABELS[group.key]} count={group.sessions.length} sticky>
+              {#each group.sessions as s (s.id)}{@render row(s)}{/each}
+            </InboxFold>
+          {:else}
+            {#each group.sessions as s (s.id)}{@render row(s)}{/each}
+          {/if}
         {:else}
           {#if ws.sessionsLoading && ws.sessions.length === 0}
             <Skeleton rows={3} height={56} label="sessions" />
@@ -579,7 +674,17 @@
     flex-direction: column;
     gap: var(--sp-4);
   }
-  /* Working and History stay pinned above the foot (≤ 40 %); an open fold scrolls inside. */
+  /* Leave room for the sticky header when the browser scrolls a focused row into view. */
+  .ai-scroll.grouped {
+    margin-block-start: var(--sp-2);
+    padding-block-start: 0;
+    scroll-padding-block-start: var(--sp-9);
+  }
+  @media (max-width: 640px), (hover: none), (pointer: coarse) {
+    .ai-scroll.grouped {
+      scroll-padding-block-start: 44px;
+    }
+  }
   .ai-list {
     display: flex;
     flex-direction: column;

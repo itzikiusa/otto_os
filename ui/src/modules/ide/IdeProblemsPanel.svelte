@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { projectSecurity } from './security/projectSecurity.svelte';
   // Workspace & current-file Diagnostics panel: grouped by file, filterable by
   // Error / Warning / Info and search text, click-to-jump to line:col, and
   // Quick Fix… (⌥⏎) anchored menu powered by LSP / code-actions.
@@ -18,6 +19,7 @@
   import { ideAgent } from './store/ideAgentController.svelte';
   import { pushIdeNavLocation } from './editor/ideEditorStoreBridge.svelte';
 
+  const allProblems = $derived([...ide.problems, ...projectSecurity.problems]);
   const GROUP_ITEM_CAP = 100;
   type SeverityFilter = 'all' | 'error' | 'warning' | 'info';
 
@@ -31,8 +33,8 @@
 
   const scopedProblems = $derived(
     currentFileOnly && ide.activePath
-      ? ide.problems.filter((d) => d.path === ide.activePath)
-      : ide.problems,
+      ? allProblems.filter((d) => d.path === ide.activePath)
+      : allProblems,
   );
 
   const errorCount = $derived(scopedProblems.filter((d) => d.severity === 'error').length);
@@ -207,6 +209,9 @@
       fixingKey = null;
     }
   }
+  function hasClearableDiagnostics() {
+    return ide.problems.length > 0;
+  }
 </script>
 
 <div class="prob-root" data-testid="ide-problems-panel">
@@ -291,7 +296,7 @@
       class="icon-btn"
       aria-label="Clear diagnostics"
       title="Clear diagnostics"
-      disabled={ide.problems.length === 0}
+      disabled={!hasClearableDiagnostics()}
       onclick={() => ide.clearProblems()}
     >
       <Icon name="trash" size={13} />
@@ -299,7 +304,7 @@
   </header>
 
   <div class="prob-body">
-    {#if ide.problems.length === 0}
+    {#if allProblems.length === 0}
       <EmptyState
         icon="check"
         title="No problems detected"

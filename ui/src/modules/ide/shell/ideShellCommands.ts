@@ -134,6 +134,7 @@ export const WINDOW_COMMANDS: Record<IdeShortcutId, WindowCommand | undefined> =
   replaceInPath: { overSearch: true, window: true, run: () => ide.openSearchEverywhere('text', { replace: true }) },
   navigateBack: { run: () => (ide.canNavigateBack ? void ide.navigateBack() : false) },
   navigateForward: { run: () => (ide.canNavigateForward ? void ide.navigateForward() : false) },
+  switchHeaderSource: { file: true, noTerm: true, run: () => void ide.switchHeaderSource() },
   fileStructure: undefined,
   goToDefinition: undefined,
   findUsages: { file: true, run: () => { const p = pos(); if (p) void ide.findReferences(p.path, p.line, p.col); } },

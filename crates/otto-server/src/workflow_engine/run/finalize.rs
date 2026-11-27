@@ -184,7 +184,10 @@ pub(in crate::workflow_engine) async fn store_overview(
     run_id: &Id,
     rev: i64,
 ) -> Option<otto_core::workflows::RunOverview> {
-    let run = repo.get_run(run_id).await.ok()?;
+    let mut run = repo.get_run(run_id).await.ok()?;
+    if otto_workflows::goal_progress::has_goal_checks(&workflow.graph) {
+        run.checkpoints = repo.goal_checkpoints(run_id).await.unwrap_or_default();
+    }
     let mut ov = otto_workflows::overview::run_overview(
         &run,
         &workflow.graph,

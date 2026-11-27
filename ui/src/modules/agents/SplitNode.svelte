@@ -31,6 +31,7 @@
   import { splitter } from '../../lib/paneResizer';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import { shouldHandOffPlaceholderFocus } from './paneMountQueue';
   import {
     layout,
     presetItems,
@@ -43,8 +44,10 @@
     node: LayoutNode;
     /** Nesting depth — informational (styling hook), the tree recurses on `node`. */
     depth?: number;
+    /** Session leaf keys currently admitted to mount their live terminal. */
+    mountedKeys?: ReadonlySet<string>;
   }
-  let { node, depth = 0 }: Props = $props();
+  let { node, depth = 0, mountedKeys }: Props = $props();
 
   /** Bumped by the Database pane's Retry: re-keys the `{#await}` so a fresh
    *  `loadPage('database')` runs (a failed load is forgotten there). */
@@ -169,6 +172,26 @@
     ws.focusPane(layout.focusedIndex);
   }
 
+  // Hand keyboard focus to the new pane when hydration replaces a focused
+  // placeholder button, so Tab users never lose their position (FE-2).
+  let leafEl = $state<HTMLDivElement | null>(null);
+  let pendingBtn = $state<HTMLButtonElement | null>(null);
+  let restorePlaceholderFocus = false;
+  const sessionMounted = $derived(node.kind === 'leaf' && (!mountedKeys || mountedKeys.has(node.key)));
+  function capturePlaceholderFocus(): void {
+    if (shouldHandOffPlaceholderFocus(sessionMounted, pendingBtn, document.activeElement)) {
+      restorePlaceholderFocus = true;
+    }
+  }
+  function finishPlaceholderFocus(): void {
+    if (!sessionMounted || !restorePlaceholderFocus) return;
+    restorePlaceholderFocus = false;
+    if (!leafEl || leafEl.contains(document.activeElement)) return;
+    leafEl.querySelector<HTMLElement>('.pane-title, button, textarea, [tabindex]:not([tabindex="-1"])')?.focus();
+  }
+  $effect.pre(capturePlaceholderFocus);
+  $effect(finishPlaceholderFocus);
+
 </script>
 
 {#if node.kind === 'split'}
@@ -182,7 +205,7 @@
       ? `grid-template-columns: minmax(0, ${node.frac}fr) 8px minmax(0, ${1 - node.frac}fr); grid-template-rows: minmax(0, 1fr);`
       : `grid-template-rows: minmax(0, ${node.frac}fr) 8px minmax(0, ${1 - node.frac}fr); grid-template-columns: minmax(0, 1fr);`}
   >
-    <Self node={node.a} depth={depth + 1} />
+    <Self node={node.a} depth={depth + 1} {mountedKeys} />
     <!-- The window splitter (`splitter`: focus, keys, drag, double-click reset). -->
     <div
       class="gutter"
@@ -195,10 +218,10 @@
       aria-valuemax={90}
       use:splitter={{ onkeydown: gutterKeydown, onpointerdown: startDrag, ondblclick: () => node.kind === 'split' && layout.setFrac(node.key, 0.5) }}
     ></div>
-    <Self node={node.b} depth={depth + 1} />
+    <Self node={node.b} depth={depth + 1} {mountedKeys} />
   </div>
 {:else}
-  <div class="leaf" data-pane-key={node.key} data-session={node.ref.id}>
+  <div class="leaf" bind:this={leafEl} data-pane-key={node.key} data-session={node.ref.id}>
     {#if node.ref.id === DB_PANE_ID}
       <div
         class="db-pane"
@@ -251,7 +274,7 @@
         onfocus: () => ws.focusPane(idx),
         onclose: () => ws.closeTab(id),
       }} />{/key}
-    {:else}
+    {:else if sessionMounted}
       <SessionView
         sessionId={node.ref.id}
         focused={ws.focusedPane === idx && paneCount > 1}
@@ -263,6 +286,23 @@
         closeTitle={ws.closeTabTitle(node.ref.id, 'session')}
         onclosepane={() => void ws.requestCloseTab(node.ref.id)}
       />
+    {:else}
+      {@const pendingSession = ws.getSession(node.ref.id)}
+      <button
+        type="button"
+        class="pane pane-pending"
+        bind:this={pendingBtn}
+        onclick={() => ws.focusPane(idx)}
+        title="Click to focus this terminal now"
+      >
+        <span class="pane-pending-head">
+          <span class="pane-pending-title">{pendingSession?.title ?? node.ref.id}</span>
+        </span>
+        <span class="pane-pending-body">
+          <Icon name="terminal" size={24} />
+          <span class="pane-pending-cta">Opening terminal…</span>
+        </span>
+      </button>
     {/if}
     <!-- Drop veil: hit-testable only while a pane drag is in flight, so the
          terminal below never sees the drag. -->
@@ -309,6 +349,52 @@
     flex: 1;
     min-width: 0;
     min-height: 0;
+  }
+  .pane-pending {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    width: 100%;
+    height: 100%;
+    padding: 0;
+    text-align: start;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
+    overflow: hidden;
+    background: var(--term-bg);
+    color: var(--text);
+    cursor: pointer;
+  }
+  .pane-pending-head {
+    display: flex;
+    align-items: center;
+    height: 30px;
+    padding-inline: 10px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .pane-pending-title {
+    font-size: var(--fs-s);
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .pane-pending-body {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    color: var(--text-dim);
+  }
+  .pane-pending-cta {
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
   }
   .db-pane {
     position: relative;

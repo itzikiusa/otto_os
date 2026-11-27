@@ -8,6 +8,7 @@
     detectManifestEcosystem,
     executeIdeDepAction,
     inspectIdeDependencies,
+    isDepVersionEditable,
     parseManifestDependencies,
     type IdeDepItem,
   } from '../../../lib/components/cm-ide-deps';
@@ -191,7 +192,7 @@
             </div>
           {/if}
 
-          {#if (selectedDep.latest_version && selectedDep.latest_version !== selectedDep.current_version) || (selectedDep.latest_patch && selectedDep.latest_patch !== selectedDep.current_version)}
+          {#if isDepVersionEditable(selectedDep) && ((selectedDep.latest_version && selectedDep.latest_version !== selectedDep.current_version) || (selectedDep.latest_patch && selectedDep.latest_patch !== selectedDep.current_version))}
             <div class="ide-da-actions">
               {#if selectedDep.latest_version && selectedDep.latest_version !== selectedDep.current_version}
                 <button

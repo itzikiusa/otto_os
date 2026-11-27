@@ -372,6 +372,30 @@ export function childWord(c: ChildThread & { retried_attempt?: number | null }, 
   }
 }
 
+/** Concise label for one thread a step or summarizer is waiting on:
+ *  name, provider (unless already part of the name), and elapsed duration. */
+export function waitingThreadLabel(
+  w: { label: string; provider?: string; startedAt?: string },
+  now: number,
+): string {
+  const parts = [w.label.trim()];
+  const prov = w.provider?.trim();
+  if (prov && !w.label.toLowerCase().includes(prov.toLowerCase())) parts.push(prov);
+  if (w.startedAt) {
+    const start = t(w.startedAt);
+    if (start > 0 && now >= start) parts.push(elapsed(now - start));
+  }
+  return parts.filter(Boolean).join(' · ');
+}
+
+/** Word on a queued/pending summarizer: names how many reviewers are still running/queued. */
+export function summarizerWaitWord(runningCount: number, queuedCount: number): string | undefined {
+  if (runningCount > 0 && queuedCount > 0) return `After ${runningCount} running, ${queuedCount} queued`;
+  if (runningCount > 0) return `After ${runningCount} running`;
+  if (queuedCount > 0) return `After ${queuedCount} queued`;
+  return undefined;
+}
+
 /** One deliverable's words. */
 export function deliverableWord(d: Deliverable): Word {
   switch (d.state) {
@@ -396,6 +420,34 @@ export function errorParts(error: string): { title: string; body: string } {
   const m = /^(.+?[.!?])(\s+)([\s\S]+)$/.exec(text);
   if (!m) return { title: text, body: '' };
   return { title: m[1], body: m[3].trim() };
+}
+
+export interface StepErrorDisplay {
+  title: string;
+  body: string;
+  /** Collapse diagnostic detail behind a disclosure while the outer column
+   *  locks scroll to a retained live thread so tabs & conversation stay reachable. */
+  collapseBody: boolean;
+}
+
+/** Shape a failed step's error banner for the step header. On a retained
+ *  conversation tab, multi-line diagnostics without sentence punctuation also
+ *  split after the first line so only a one-line summary stays expanded above
+ *  the tabs while the rest collapses behind a disclosure. */
+export function stepErrorDisplay(error: string, showingThread: boolean): StepErrorDisplay {
+  let { title, body } = errorParts(error);
+  if (showingThread && !body) {
+    const nl = title.indexOf('\n');
+    if (nl !== -1) {
+      const first = title.slice(0, nl).trim();
+      const rest = title.slice(nl + 1).trim();
+      if (first && rest) {
+        title = first;
+        body = rest;
+      }
+    }
+  }
+  return { title, body, collapseBody: showingThread && !!body };
 }
 
 /** "24 hours", "7 days": a retention setting in words. */

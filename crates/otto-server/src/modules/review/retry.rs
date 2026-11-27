@@ -290,35 +290,14 @@ pub(crate) async fn retry_review_agent(
     let agent_registration =
         register_review_agent_cancel(&ctx.review_agent_cancels, &review_id, index);
     let agent_cancel = Arc::clone(agent_registration.flag());
-    let diff_file = std::env::temp_dir().join(format!("otto-review-{review_id}.diff"));
-    let mut diff_len = std::fs::metadata(&diff_file)
-        .map(|m| m.len() as usize)
-        .unwrap_or(0);
-    // A diff that can't be re-materialised refuses the retry instead of
-    // launching an agent at a missing file (it would read nothing and could
-    // report a clean pass).
-    if diff_len == 0 {
-        let restored = match ctx.reviews_store.get_diff(&review_id).await {
-            Ok(Some(diff)) => {
-                let len = diff.len();
-                std::fs::write(&diff_file, diff)
-                    .map(|()| len)
-                    .map_err(|e| Error::Internal(diff_write_failure(&e)))
-            }
-            Ok(None) => Err(Error::Conflict(
-                "this review has no stored diff to retry against; start a new review".into(),
-            )),
-            Err(e) => Err(Error::Internal(diff_write_failure(&e))),
-        };
-        match restored {
-            Ok(len) => diff_len = len,
+    let diff_len =
+        match otto_review::restart::ensure_review_diff(&ctx.reviews_store, &review_id).await {
+            Ok(diff) => diff.len(),
             Err(e) => {
-                // The claim above already flipped the row to `pending`.
                 claim.restore().await;
                 return Err(crate::error::ApiError(e));
             }
-        }
-    }
+        };
     let timeout = review_agent_timeout(diff_len, None);
     let manager = Arc::clone(&ctx.manager);
     let reviews = ctx.reviews_store.clone();
@@ -515,9 +494,31 @@ pub(crate) async fn rerun_summarizer(
             // user's checkout holds other line text and would re-key nothing.
             branch_retry_checkout(&ctx_bg, &repo, &review_id_bg, "-sum").await
         };
-        // The summarizer follows the repo's EFFECTIVE config (per-repo binding
-        // resolution included), same as a fresh run would.
-        let cfg = load_review_config_for_repo(&ctx_bg, &repo_id).await;
+        let (cfg, context) = match super::resume::load_resumed_review_config(
+            &ctx_bg,
+            &review_id_bg,
+            &repo_id,
+            &settled.agents,
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(error) => {
+                if let Some(wt) = pr_wt {
+                    teardown_pr_worktree(&repo.path, wt).await;
+                }
+                let msg = error.to_string();
+                let _ = transition(
+                    &ctx_bg,
+                    &workspace.id,
+                    &review_id_bg,
+                    ReviewStatus::Error,
+                    Some(&msg),
+                )
+                .await;
+                return;
+            }
+        };
         // A re-run replaces the previous draft comments; posted/approved/
         // declined ones are user decisions and stay untouched.
         match ctx_bg
@@ -544,10 +545,7 @@ pub(crate) async fn rerun_summarizer(
             &cfg,
             review_deadline,
             &agent_findings,
-            // A retry re-runs ONLY this stage, from findings stored earlier; the
-            // run that produced them is long gone, so there is no context to
-            // re-render. The findings themselves are unchanged either way.
-            "",
+            &context,
             // The original run's cwd/head is gone (a PR worktree is torn down
             // after the run; the head may have moved since), so this attempt
             // cannot prove a finding absent — it only re-summarizes.

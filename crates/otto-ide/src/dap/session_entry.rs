@@ -179,6 +179,7 @@ pub(super) struct ActiveConnection {
     pub(super) wire: Arc<DapWireClient>,
     pub(super) guard: Arc<BridgeGuard>,
     pub(super) supports_terminate: bool,
+    pub(super) supports_set_variable: bool,
     pub(super) exception_filters: Vec<String>,
 }
 
@@ -198,6 +199,10 @@ pub(super) struct SessionEntry {
     pub(super) snapshot: RwLock<IdeDebugSessionSnapshot>,
     pub(super) output_buf: Mutex<VecDeque<IdeDebugOutputEntry>>,
     pub(super) configured_bp_files: Mutex<BTreeSet<String>>,
+    /// Maps DAP adapter `breakpoint.id` -> `(display_path, current_1based_line)` so
+    /// asynchronous `breakpoint` changed events that relocate an initially unbound
+    /// breakpoint update the matching entry in `snapshot.breakpoints` (BUG3-10).
+    pub(super) bp_locs_by_adapter_id: Mutex<HashMap<i64, (String, u32)>>,
     pub(super) temp_run_to_cursor: Mutex<Option<(String, u32)>>,
     /// The last breakpoint stop: where it was and its instruction pointer
     /// (see `is_same_line_relocation`).
@@ -270,6 +275,7 @@ impl SessionEntry {
             error_kind: None,
             error_ecosystem: None,
             target_root: Some(req.target.root.clone()).filter(|r| !r.is_empty()),
+            supports_set_variable: false,
         };
         let initial_break_exc = req.break_on_exceptions;
         Arc::new(Self {
@@ -280,6 +286,7 @@ impl SessionEntry {
             snapshot: RwLock::new(initial_snap),
             output_buf: Mutex::new(output_buf),
             configured_bp_files: Mutex::new(BTreeSet::new()),
+            bp_locs_by_adapter_id: Mutex::new(HashMap::new()),
             temp_run_to_cursor: Mutex::new(None),
             last_bp_stop: Mutex::new(None),
             break_on_exceptions: Mutex::new(initial_break_exc),

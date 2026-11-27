@@ -277,9 +277,10 @@ class WorkspaceStore {
 
   // ── All-workspaces sidebar view ────────────────────────────────────────────
 
-  /** Sidebar toggle: also list sessions from every OTHER workspace, grouped by
-   *  workspace name. Persisted app-wide; default ON. */
+  /** Sidebar toggle: also list sessions from every other workspace.
+   *  Persisted app-wide; default ON. */
   allWorkspaces = $state(lsGet(LS_ALL_WS) !== '0');
+  multiWorkspaceScope = $derived(this.allWorkspaces && this.workspaces.length > 1);
 
   setAllWorkspaces(on: boolean): void {
     this.allWorkspaces = on;
@@ -296,24 +297,19 @@ class WorkspaceStore {
   /** Open views needing them whatever the toggle says (Threads: same threads on desktop and phone). */
   otherWsWanted = 0;
 
-  /** The all-workspaces view, grouped: every OTHER workspace that has at least
-   *  one foreground agent session, with its sessions newest-first. The current
-   *  workspace keeps its normal flat list above these groups. */
-  otherWsGroups: { ws: WorkspaceWithRole; sessions: Session[] }[] = $derived(
-    this.workspaces
-      .filter((w) => w.id !== this.currentId)
-      .map((w) => ({
-        ws: w,
-        sessions: this.otherWsSessions
-          .filter((s) => s.workspace_id === w.id && s.kind === 'agent' && isForeground(s) && !inThreadsScope(s, this.otherWsSessions))
-          .sort((a, b) => b.last_active_at.localeCompare(a.last_active_at)),
-      }))
-      .filter((g) => g.sessions.length > 0),
-  );
+  /** Foreground Agents rows from other workspaces. The inbox orders these
+   *  together with the current workspace, scratch and runtime threads. */
+  otherAgentSessions: Session[] = $derived.by(() => {
+    const otherIds = new Set(this.workspaces.filter((w) => w.id !== this.currentId).map((w) => w.id));
+    const pool = new Map(this.otherWsSessions.map((s) => [s.id, s] as const));
+    return this.otherWsSessions.filter(
+      (s) => otherIds.has(s.workspace_id) && s.kind === 'agent' && isForeground(s) && !inThreadsScope(s, pool),
+    );
+  });
 
-  /** Load sessions of every non-current workspace (the grouped sidebar view,
-   *  Threads) in ONE call (`GET /sessions`, live rows only, owner-scoped per
-   *  workspace) — not a per-workspace fan-out. A failure keeps the old groups. */
+  /** Load sessions of every non-current workspace (Agents and Threads)
+   *  in one call (`GET /sessions`, live rows only, owner-scoped per workspace).
+   *  A failure keeps the previous rows. */
   async refreshOtherSessions(): Promise<void> {
     if (!this.allWorkspaces && !this.otherWsWanted) return;
     const token = getToken();
@@ -399,10 +395,10 @@ class WorkspaceStore {
   private archivedCursor: Record<Id, string | null> = {};
   private archivedGeneration = 0;
 
-  // "Working" count for the Agents badge: exactly the green rows the Agents
-  // section renders ({@link visibleWorkingCount}), other workspaces' only while listed.
+  // "Working" count for the Agents badge, over the inbox's terminal scope
+  // before search and workspace folds are applied.
   workingCount: number = $derived(
-    visibleWorkingCount([this.buckets.plainAgent, this.buckets.scratch, ...(this.allWorkspaces ? this.otherWsGroups.map((g) => g.sessions) : [])], this.statusMap, this.needsYou),
+    visibleWorkingCount([this.buckets.plainAgent, this.buckets.scratch, this.multiWorkspaceScope ? this.otherAgentSessions : []], this.statusMap, this.needsYou),
   );
 
   /** Foreground agent sessions currently flagged "needs you" — the sidebar

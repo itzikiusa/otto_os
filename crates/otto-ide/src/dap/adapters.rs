@@ -16,6 +16,8 @@ use std::time::Duration;
 use otto_core::{Error, Result};
 use serde_json::{json, Value};
 
+use super::adapters_cpp::resolve_cpp_adapter;
+use super::adapters_dotnet::resolve_dotnet_adapter;
 pub(crate) use super::adapters_env::build_effective_env_with_manager;
 pub use super::adapters_env::{build_effective_env, display_target_path, normalize_target_path};
 pub(super) use super::adapters_env::{resolve_debug_sdk_override, validate_non_root_debug_request};
@@ -45,6 +47,15 @@ pub enum DapAdapterTransport {
         args: Vec<String>,
         cwd: String,
         env: BTreeMap<String, String>,
+    },
+    /// Stdio DAP adapter accompanied by a lifetime-bound companion process guard
+    /// (e.g., `dotnet test` with `VSTEST_HOST_DEBUG=1`).
+    StdioWithCompanion {
+        command: String,
+        args: Vec<String>,
+        cwd: String,
+        env: BTreeMap<String, String>,
+        companion: std::sync::Arc<super::BridgeGuard>,
     },
     /// Adapter spawns a headless loopback TCP server and prints its port on stdout/stderr.
     TcpListen {
@@ -118,6 +129,21 @@ impl std::fmt::Debug for DapAdapterTransport {
             } => {
                 let env_keys: Vec<&str> = env.keys().map(String::as_str).collect();
                 f.debug_struct("Stdio")
+                    .field("command", command)
+                    .field("args", args)
+                    .field("cwd", cwd)
+                    .field("env_keys", &env_keys)
+                    .finish()
+            }
+            Self::StdioWithCompanion {
+                command,
+                args,
+                cwd,
+                env,
+                ..
+            } => {
+                let env_keys: Vec<&str> = env.keys().map(String::as_str).collect();
+                f.debug_struct("StdioWithCompanion")
                     .field("command", command)
                     .field("args", args)
                     .field("cwd", cwd)
@@ -283,9 +309,14 @@ fn resolve_debug_launch_spec<'a>(
         "python" | "py" => "python",
         "rust" | "rs" => "rust",
         "zig" | "zon" => "zig",
-        "javascript" | "js" => "javascript",
-        "typescript" | "ts" | "node" => "typescript",
+        "c" | "cpp" | "c++" | "cxx" | "cc" | "h" | "hpp" | "hxx" | "hh" => "cpp",
+        "csharp" | "cs" | "csx" | "c#" | "dotnet" => "csharp",
+        "fsharp" | "fs" | "fsx" | "f#" => "fsharp",
+        "javascript" | "js" | "jsx" => "javascript",
+        "typescript" | "ts" | "tsx" | "node" | "svelte" | "vue" | "angular" | "browser"
+        | "chrome" => "typescript",
         "java" => "java",
+        "kotlin" | "kt" | "kts" => "kotlin",
         "shell" | "bash" | "sh" | "zsh" => "shell",
         other => other,
     };
@@ -306,13 +337,17 @@ fn resolve_debug_launch_spec<'a>(
             "python" => ("python".to_string(), "python-dap".to_string(), None),
             "rust" => ("rust".to_string(), "lldb".to_string(), None),
             "zig" => ("zig".to_string(), "lldb".to_string(), None),
+            "cpp" => ("cpp".to_string(), "lldb".to_string(), None),
+            "csharp" => ("csharp".to_string(), "netcoredbg".to_string(), None),
+            "fsharp" => ("fsharp".to_string(), "netcoredbg".to_string(), None),
             "javascript" => ("javascript".to_string(), "node-inspector".to_string(), None),
             "typescript" => ("typescript".to_string(), "node-inspector".to_string(), None),
             "java" => ("java".to_string(), "java-jdwp".to_string(), None),
+            "kotlin" => ("kotlin".to_string(), "java-jdwp".to_string(), None),
             "shell" => ("shell".to_string(), "shell-debug".to_string(), None),
             other => {
                 return Err(Error::Invalid(format!(
-                    "unsupported debug language '{other}'; install a DAP plugin or choose go, python, rust, zig, javascript, typescript, java, or shell"
+                    "unsupported debug language '{other}'; install a DAP plugin or choose go, python, rust, zig, c, cpp, csharp, fsharp, javascript, typescript, java, kotlin, or shell"
                 )));
             }
         }
@@ -365,13 +400,25 @@ pub(crate) async fn resolve_dap_adapter_with_manager(
         "python" => resolve_python_adapter(data_dir, req, ctx, &spec.cwd, spec.env).await,
         "rust" => resolve_rust_adapter(data_dir, req, ctx, &spec.cwd, spec.env).await,
         "zig" => resolve_zig_adapter(data_dir, req, ctx, &spec.cwd, spec.env).await,
+        "cpp" => resolve_cpp_adapter(data_dir, req, ctx, &spec.cwd, spec.env).await,
+        "csharp" | "fsharp" => {
+            resolve_dotnet_adapter(
+                data_dir,
+                &spec.canonical_lang,
+                req,
+                ctx,
+                &spec.cwd,
+                spec.env,
+            )
+            .await
+        }
         "javascript" | "typescript" => {
             resolve_js_ts_adapter(data_dir, &spec.raw_lang, req, ctx, &spec.cwd, spec.env).await
         }
-        "java" => resolve_java_adapter(data_dir, req, ctx, &spec.cwd, spec.env).await,
+        "java" | "kotlin" => resolve_java_adapter(data_dir, req, ctx, &spec.cwd, spec.env).await,
         "shell" => resolve_shell_adapter(req, ctx, &spec.cwd, spec.env).await,
         other => Err(Error::Invalid(format!(
-            "unsupported debug language '{other}'; install a DAP plugin or choose go, python, rust, zig, javascript, typescript, java, or shell"
+            "unsupported debug language '{other}'; install a DAP plugin or choose go, python, rust, zig, c, cpp, javascript, typescript, java, kotlin, or shell"
         ))),
     }
 }

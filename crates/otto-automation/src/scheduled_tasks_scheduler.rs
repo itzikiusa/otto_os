@@ -100,6 +100,9 @@ fn launch_after_await(cancel: &CancelSignal) -> bool {
 }
 
 async fn tick(ctx: &impl AutomationCtx, cancel: &CancelSignal) -> otto_core::Result<()> {
+    if let Err(e) = ctx.security_scan_tick().await {
+        warn!("project security scheduler tick: {e}");
+    }
     let now = Utc::now();
     let tasks = ctx.scheduled_tasks().list_enabled().await?;
     // Stop can land while `list_enabled` is in flight. Do not claim or spawn.

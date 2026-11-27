@@ -7,7 +7,7 @@ import { apiCtx } from './seed';
 
 // All-workspaces sidebar view + workspace management:
 //  - the Agents inbox's "All workspaces" scope lists sessions from OTHER
-//    workspaces (each row names its workspace); clicking one switches + opens it
+//    workspaces in named groups; clicking a session switches + opens it
 //  - workspace rows gain Rename… / Change folder… / Delete… context actions.
 // Desktop-only: the expanded Navigator is the desktop surface.
 
@@ -70,10 +70,9 @@ test.describe('all-workspaces sidebar + workspace management', () => {
     const nav = page.locator('.navigator');
     const inbox = page.getByTestId('agents-inbox');
 
-    // The row names workspace B on its first line.
-    const row = inbox.locator('[data-testid^="agents-row-"] .tr-main', { hasText: SESS_B });
+    const group = inbox.getByRole('region', { name: WS_B, exact: true });
+    const row = group.locator('[data-testid^="agents-row-"] .tr-main', { hasText: SESS_B });
     await expect(row).toBeVisible({ timeout: 15_000 });
-    await expect(row).toContainText(WS_B);
 
     // Clicking the foreign row switches the workspace and focuses the session.
     await row.click();

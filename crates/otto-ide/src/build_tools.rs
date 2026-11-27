@@ -171,6 +171,35 @@ pub fn build_tools_model(
     }
 
     let mobile = mobile::scan_mobile_roots(&canon_roots, home.as_deref(), is_root_user);
+    let mut spring_scan_roots = canon_roots.clone();
+    fn collect_project_roots(
+        projects: &[IdeBuildToolProject],
+        canon_roots: &[PathBuf],
+        is_root_user: bool,
+        out: &mut Vec<PathBuf>,
+    ) {
+        for proj in projects {
+            if let Some(c) =
+                confinable_project_dir(Path::new(&proj.root_dir), canon_roots, is_root_user)
+            {
+                if !out.contains(&c) {
+                    out.push(c);
+                }
+            }
+            collect_project_roots(&proj.modules, canon_roots, is_root_user, out);
+        }
+    }
+    collect_project_roots(
+        &projects,
+        &canon_roots,
+        is_root_user,
+        &mut spring_scan_roots,
+    );
+    let spring_boot = crate::spring_boot::detect_spring_boot_workspace_scoped(
+        &spring_scan_roots,
+        &canon_roots,
+        is_root_user,
+    );
 
     IdeBuildToolsModelResp {
         has_maven,
@@ -183,6 +212,7 @@ pub fn build_tools_model(
         profiles,
         projects,
         mobile_projects: mobile.projects,
+        spring_boot,
     }
 }
 

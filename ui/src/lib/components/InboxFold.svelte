@@ -16,26 +16,34 @@
     ontoggle?: () => void;
     /** On the fold button. */
     testid?: string;
+    /** Keep the header in view while its rows scroll. */
+    sticky?: boolean;
+    /** Badge before the section label. */
+    leading?: Snippet;
     /** Controls at the end of a calm heading (a section's ⋯). */
     actions?: Snippet;
     children: Snippet;
   }
 
-  let { label, ariaLabel, count, expanded = false, ontoggle, testid, actions, children }: Props = $props();
+  let { label, ariaLabel, count, expanded = false, ontoggle, testid, sticky = false, leading, actions, children }: Props = $props();
 </script>
 
-<section class="if-group" aria-label={ariaLabel ?? label}>
+<section class="if-group" class:sticky aria-label={ariaLabel ?? label}>
   {#if ontoggle}
     <button type="button" class="if-fold" aria-expanded={expanded} data-testid={testid} onclick={ontoggle}>
-      <span>{label}</span>
+      {@render leading?.()}
+      <span class="if-name ellipsis" dir="auto">{label}</span>
       {#if count}<span class="if-count">{count}</span>{/if}
       <Icon name={expanded ? 'chevronDown' : 'chevronRight'} size={12} />
     </button>
-  {:else if actions}
+  {:else if actions || leading || (sticky && count)}
     <div class="if-head">
-      <h2 class="if-label">{label}</h2>
+      <h2 class="if-label" class:with-leading={!!leading}>
+        {@render leading?.()}
+        <span class="ellipsis" dir="auto">{label}</span>
+      </h2>
       {#if count}<span class="if-count">{count}</span>{/if}
-      {@render actions()}
+      {@render actions?.()}
     </div>
   {:else}
     <h2 class="if-label">{label}</h2>
@@ -50,6 +58,18 @@
   .if-group {
     display: flex;
     flex-direction: column;
+  }
+  .sticky > :is(.if-fold, .if-head, .if-label) {
+    position: sticky;
+    inset-block-start: 0;
+    z-index: var(--z-sticky);
+    background: var(--bg-sidebar);
+  }
+  .sticky > .if-fold:hover {
+    background: color-mix(in srgb, var(--bg-sidebar), var(--text) 6%);
+  }
+  .if-name {
+    min-inline-size: 0;
   }
   .if-label {
     margin: 0;
@@ -67,6 +87,11 @@
   .if-head .if-label {
     flex: 1;
     min-width: 0;
+  }
+  .if-label.with-leading {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-3);
   }
   .if-fold {
     display: flex;
@@ -92,10 +117,16 @@
     flex-shrink: 0;
   }
   .if-count {
+    flex: none;
     margin-inline-start: auto;
     font-size: var(--fs-s);
     color: var(--text-dim);
     font-variant-numeric: tabular-nums;
+  }
+  @media (max-width: 640px) {
+    .sticky > .if-fold {
+      min-block-size: 44px;
+    }
   }
   @media (hover: none), (pointer: coarse) {
     .if-fold {

@@ -5,6 +5,23 @@
 
 use super::*;
 
+pub(super) async fn load_resumed_review_config(
+    ctx: &ServerCtx,
+    review_id: &Id,
+    repo_id: &Id,
+    agents: &[otto_core::domain::ReviewAgentState],
+) -> Result<(ReviewConfig, String)> {
+    if let Some(input) = otto_state::WorkflowsRepo::new(ctx.pool.clone())
+        .review_checkpoint_input(review_id)
+        .await?
+    {
+        return otto_review::engine::checkpoint_review_config(&input).map_err(Error::Invalid);
+    }
+    let mut cfg = load_review_config_for_repo(ctx, repo_id).await;
+    otto_review::engine::apply_summarizer_row(&mut cfg, agents);
+    Ok((cfg, String::new()))
+}
+
 /// `live`: the review's cancel flag, registered by boot before this task
 /// runs, so a resumed workflow step sees a live review at once (CR1-028).
 pub(crate) async fn resume_held_review(
@@ -45,7 +62,28 @@ pub(crate) async fn resume_held_review(
         let ws = ctx.workspaces.get(&repo.workspace_id).await?;
         let user = otto_review::restart::review_user(&otto_state::UsersRepo::new(ctx.pool.clone()))
             .await?;
-        let cfg = load_review_config_for_repo(&ctx, &repo.id).await;
+        let (mut cfg, context) =
+            load_resumed_review_config(&ctx, &review_id, &repo.id, &review.agents).await?;
+        if cfg.thread_meta.is_null() {
+            for sid in review
+                .agents
+                .iter()
+                .filter(|a| a.thread)
+                .filter_map(|a| a.session_id.as_deref())
+            {
+                if let Some(kept) = ctx
+                    .agent_runtime
+                    .get(&sid.into())
+                    .await
+                    .ok()
+                    .and_then(|s| s.meta)
+                    .and_then(|m| otto_review::thread_run::extract_workflow_meta(&m))
+                {
+                    cfg.thread_meta = kept;
+                    break;
+                }
+            }
+        }
         let Some(threads) = review_threads(&ctx, Some(&cfg)).await else {
             // Switched to the terminal runner meanwhile: the held agents stop.
             for agent in &review.agents {
@@ -53,10 +91,20 @@ pub(crate) async fn resume_held_review(
             }
             return Err(Error::Invalid(otto_review::restart::INTERRUPTED.into()));
         };
-        let diff = std::env::temp_dir().join(format!("otto-review-{review_id}.diff"));
-        let diff_len = std::fs::metadata(&diff)
-            .map(|m| m.len() as usize)
-            .unwrap_or(0);
+        let n_reviewers = review.agents.len().saturating_sub(1);
+        let needs_diff = review
+            .agents
+            .iter()
+            .take(n_reviewers)
+            .any(|r| matches!(r.status.as_str(), "pending" | "running" | "waiting"));
+        let diff_text = if needs_diff {
+            Some(otto_review::restart::ensure_review_diff(&ctx.reviews_store, &review_id).await?)
+        } else {
+            otto_review::restart::ensure_review_diff(&ctx.reviews_store, &review_id)
+                .await
+                .ok()
+        };
+        let diff_len = diff_text.as_ref().map_or(0, String::len);
         let resume = otto_review::thread_resume::ResumeCtx {
             manager: Arc::clone(&ctx.manager),
             threads,
@@ -66,16 +114,18 @@ pub(crate) async fn resume_held_review(
             cwd: cwd.clone(),
             review_id: review_id.to_string(),
             grace: review_agent_timeout(diff_len, cfg.timeout_secs),
+            max_attempts: cfg.max_attempts,
             skills_dir: stage_all_review_skills(&ctx.context_library).await,
             cancel: Some(Arc::clone(&cancel)),
             agent_cancels: ctx.review_agent_cancels.clone(),
         };
         let keep = resume.threads.clone();
         let findings = otto_review::thread_resume::resume_reviewers(resume).await?;
-        let blocker = Some(otto_review::verification::SUMMARIZER_RETRY_BLOCKER);
+        let blocker = otto_review::restart::resumed_resolve_blocker(diff_text.as_deref());
         let pr = review.pr_number;
         summarize_and_persist(
-            &ctx, &review_id, &cwd, &ws, &user, &repo.id, pr, &cfg, None, &findings, "", blocker,
+            &ctx, &review_id, &cwd, &ws, &user, &repo.id, pr, &cfg, None, &findings, &context,
+            blocker,
         )
         .await?;
         // A finished review's threads are kept for the success period.

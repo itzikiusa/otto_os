@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { projectSecurity } from '../security/projectSecurity.svelte';
   // IDE status strip (22px, under the dock): one home for the editor's state, as text. Every
   // item is a button that opens what it describes — the branch menu, Problems, Go to Line,
   // the language's settings, the language server's health. What the store does not know
@@ -19,7 +20,7 @@
   import { openGoToLine } from '../search/ideQuickOpen.svelte';
   import {
     applyIdeLspLink, ideEolLabel, ideLanguageLabel, ideLanguageSettingsSection, ideLspItem, ideLspLangFor,
-    ideLspRecordFor, ideProblemCounts, type IdeLspRecord,
+    ideLspRecordFor, ideLspTrustedAt, ideProblemCounts, type IdeLspRecord,
   } from './ideStatusModel';
 
   let lspRecords = $state<IdeLspRecord[]>(recentLspLinks().reduce(applyIdeLspLink, [] as IdeLspRecord[]));
@@ -45,13 +46,14 @@
     const repo = ideGit.findKnownRepoForPath(path);
     return repo ? (git.statusById[repo.id]?.branch ?? null) : null;
   });
-  const counts = $derived(ideProblemCounts(ide.problems));
+  const counts = $derived(ideProblemCounts([...ide.problems, ...projectSecurity.problems]));
   const langSection = $derived(tab ? ideLanguageSettingsSection(tab.path, tab.language) : null);
   const eol = $derived(tab ? ideEolLabel(tab) : null);
   const lsp = $derived.by(() => {
     if (!tab) return null;
     const lang = ideLspLangFor(tab.path, tab.language);
-    return lang ? ideLspItem(lang, ideLspRecordFor(lspRecords, lang, tab.path)) : null;
+    const rec = lang ? ideLspRecordFor(lspRecords, lang, tab.path) : null;
+    return lang ? ideLspItem(lang, rec, ideLspTrustedAt(ide.projectEnv?.env_vars, lang, rec, ide.target.root)) : null;
   });
 
   function openBranches(e: MouseEvent): void {
@@ -61,8 +63,10 @@
   }
 
   function onLsp(): void {
-    if (lsp?.action === 'retry' && tab) {
-      const rec = ideLspRecordFor(lspRecords, ideLspLangFor(tab.path, tab.language) ?? '', tab.path);
+    if ((lsp?.action === 'retry' || lsp?.action === 'trust') && tab) {
+      const lang = ideLspLangFor(tab.path, tab.language) ?? '';
+      const rec = ideLspRecordFor(lspRecords, lang, tab.path);
+      if (rec && lsp.action === 'trust') { void import('./ideLspTrustAction.svelte').then((m) => m.ideLspTrust.trust(lang, rec.rootPath)); return; }
       if (rec) { retryLspNow(rec.rootPath); return; }
     }
     ide.openSettings('plugins');

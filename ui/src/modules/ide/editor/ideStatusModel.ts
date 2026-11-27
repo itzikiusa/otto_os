@@ -5,12 +5,14 @@
 import { langKeyFor } from '../../../lib/components/langForPath.ts';
 import { isMakefilePath } from '../../../lib/components/makefilePath.ts';
 import type { IdeLspLinkDetail } from '../../../lib/components/cm-ide-lsp-reconnect';
+import type { IdeEnvVar } from '../store/ideTypes';
 
 export type IdeFileKind = 'code' | 'markup' | 'data' | 'text';
 
 const CODE_EXT = new Set([
   'go', 'rs', 'zig', 'zon', 'java', 'kt', 'kts', 'scala', 'groovy', 'ts', 'tsx', 'mts', 'cts', 'js', 'jsx', 'mjs', 'cjs',
-  'py', 'pyi', 'rb', 'php', 'c', 'h', 'cc', 'cpp', 'cxx', 'hpp', 'cs', 'swift', 'dart', 'lua', 'sh', 'bash',
+  'py', 'pyi', 'rb', 'php', 'c', 'h', 'cc', 'cpp', 'cxx', 'c++', 'hh', 'hpp', 'hxx', 'h++', 'inl', 'ipp', 'tpp', 'ixx', 'cppm', 'm', 'mm',
+  'cmake', 'meson', 'cs', 'csx', 'fs', 'fsx', 'fsi', 'razor', 'swift', 'dart', 'lua', 'sh', 'bash',
   'zsh', 'svelte', 'vue', 'css', 'scss', 'less', 'sql', 'proto',
 ]);
 /** Code without functions to step through. */
@@ -18,7 +20,7 @@ const FUNCTIONLESS_EXT = new Set(['css', 'scss', 'less', 'sql', 'proto']);
 const MARKUP_EXT = new Set(['md', 'markdown', 'mdx', 'rst', 'adoc', 'txt', 'html', 'htm', 'svg']);
 const DATA_EXT = new Set(['csv', 'tsv', 'json', 'jsonc', 'jsonl', 'ndjson', 'yaml', 'yml', 'toml', 'xml', 'ini', 'env', 'lock', 'properties']);
 const FORMATTABLE_DATA_EXT = new Set(['json', 'jsonc', 'yaml', 'yml', 'html', 'htm']);
-const CODE_LANGS = new Set(['go', 'rust', 'zig', 'java', 'kotlin', 'typescript', 'javascript', 'python', 'ruby', 'php', 'c', 'cpp', 'csharp', 'swift', 'shell', 'bash']);
+const CODE_LANGS = new Set(['go', 'rust', 'zig', 'java', 'kotlin', 'typescript', 'javascript', 'python', 'ruby', 'php', 'c', 'cpp', 'csharp', 'fsharp', 'swift', 'shell', 'bash']);
 
 function extOf(path: string): string {
   const base = path.split('?')[0].split('/').pop() ?? '';
@@ -59,16 +61,17 @@ export function ideEditorActionsFor(path: string, language: string | null | unde
 
 const LANG_LABELS: Record<string, string> = {
   go: 'Go', rust: 'Rust', zig: 'Zig', zon: 'Zig Object Notation', java: 'Java', kotlin: 'Kotlin', typescript: 'TypeScript', javascript: 'JavaScript',
-  python: 'Python', markdown: 'Markdown', json: 'JSON', jsonl: 'JSON Lines', csv: 'CSV', tsv: 'TSV', yaml: 'YAML',
+  python: 'Python', notebook: 'Jupyter Notebook', markdown: 'Markdown', json: 'JSON', jsonl: 'JSON Lines', csv: 'CSV', tsv: 'TSV', yaml: 'YAML',
   toml: 'TOML', xml: 'XML', html: 'HTML', css: 'CSS', scss: 'SCSS', sql: 'SQL', shell: 'Shell', bash: 'Shell',
-  dockerfile: 'Dockerfile', makefile: 'Makefile', svelte: 'Svelte', vue: 'Vue', c: 'C', cpp: 'C++', csharp: 'C#', ruby: 'Ruby', php: 'PHP',
+  dockerfile: 'Dockerfile', makefile: 'Makefile', cmake: 'CMake', meson: 'Meson', svelte: 'Svelte', vue: 'Vue', c: 'C', cpp: 'C++', csharp: 'C#', fsharp: 'F#', ruby: 'Ruby', php: 'PHP',
   properties: 'Properties', conf: 'Config', ini: 'INI', dotenv: '.env', ignore: 'Ignore file', requirements: 'pip requirements',
   nginx: 'nginx', proto: 'Protocol Buffers', protobuf: 'Protocol Buffers', hcl: 'HCL', diff: 'Diff', powershell: 'PowerShell',
   batch: 'Batch', vtt: 'WebVTT', groovy: 'Groovy', mod: 'Go module', sum: 'Go checksums', work: 'Go workspace',
 };
 const EXT_LANG: Record<string, string> = {
-  rs: 'rust', zon: 'zig', ts: 'typescript', tsx: 'typescript', js: 'javascript', jsx: 'javascript', mjs: 'javascript',
-  cjs: 'javascript', py: 'python', md: 'markdown', yml: 'yaml', sh: 'shell', kt: 'kotlin', rb: 'ruby',
+  rs: 'rust', zon: 'zig', cs: 'csharp', csx: 'csharp', razor: 'csharp', fs: 'fsharp', fsx: 'fsharp', fsi: 'fsharp', ts: 'typescript', tsx: 'typescript', js: 'javascript', jsx: 'javascript', mjs: 'javascript',
+  cjs: 'javascript', py: 'python', md: 'markdown', yml: 'yaml', sh: 'shell', kt: 'kotlin', kts: 'kotlin', rb: 'ruby',
+  h: 'cpp', hh: 'cpp', hpp: 'cpp', hxx: 'cpp', cc: 'cpp', cxx: 'cpp', inl: 'cpp', ipp: 'cpp', tpp: 'cpp', ixx: 'cpp', cppm: 'cpp', mm: 'cpp', m: 'c',
 };
 
 /** Display name of the file's language ("Plain text" when nothing is known). */
@@ -85,10 +88,13 @@ export function ideLanguageSettingsSection(path: string, language?: string | nul
   const lang = (language ?? EXT_LANG[extOf(path)] ?? extOf(path)).toLowerCase();
   if (lang === 'go') return 'lang.go';
   if (lang === 'java') return 'lang.java';
-  if (lang === 'typescript' || lang === 'javascript') return 'lang.node';
-  if (lang === 'python') return 'lang.python';
+  if (lang === 'kotlin') return 'lang.kotlin';
+  if (lang === 'typescript' || lang === 'javascript' || lang === 'svelte' || lang === 'vue' || lang === 'angular') return 'lang.node';
+  if (lang === 'python' || lang === 'notebook') return 'lang.python';
   if (lang === 'rust') return 'lang.rust';
   if (lang === 'zig') return 'lang.zig';
+  if (lang === 'c' || lang === 'cpp' || lang === 'cmake' || lang === 'meson') return 'lang.cpp';
+  if (lang === 'csharp' || lang === 'fsharp' || lang === 'dotnet') return 'lang.dotnet';
   if (lang === 'csv' || lang === 'tsv') return 'lang.csv';
   return null;
 }
@@ -113,11 +119,12 @@ export function ideProblemCounts(problems: readonly { severity: string }[]): { e
 // ── Language server ─────────────────────────────────────────────────────────
 
 const SERVER_NAMES: Record<string, string> = {
-  go: 'gopls', rust: 'rust-analyzer', zig: 'zls', java: 'jdtls', typescript: 'tsserver', javascript: 'tsserver', python: 'pyright',
+  go: 'gopls', rust: 'rust-analyzer', zig: 'zls', cpp: 'clangd', c: 'clangd', csharp: 'csharp-ls', fsharp: 'fsautocomplete', java: 'jdtls', kotlin: 'kotlin-language-server', typescript: 'tsserver', javascript: 'tsserver', svelte: 'svelteserver', vue: 'vue-language-server', angular: 'ngserver', python: 'pyright',
 };
 
 /** The language-server id (`go`, `typescript`, …) for a file, or null when Otto runs none for it. */
 export function ideLspLangFor(path: string, language?: string | null): string | null {
+  if (path.toLowerCase().endsWith('.component.html')) return 'angular';
   const raw = (language || EXT_LANG[extOf(path)] || extOf(path)).toLowerCase();
   const id = raw === 'golang' ? 'go' : raw;
   return SERVER_NAMES[id] ? id : null;
@@ -128,7 +135,7 @@ export function ideLspServerName(lang: string): string {
 }
 
 export type IdeLspPhase = 'starting' | 'ready' | 'restarting' | 'lost' | 'unavailable';
-export interface IdeLspRecord { lang: string; rootPath: string; phase: IdeLspPhase }
+export interface IdeLspRecord { lang: string; rootPath: string; phase: IdeLspPhase; reason?: string }
 
 const related = (a: string, b: string): boolean => a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
 
@@ -139,7 +146,7 @@ export function applyIdeLspLink(records: readonly IdeLspRecord[], d: IdeLspLinkD
   if (d.lang) {
     const phase: IdeLspPhase = d.state === 'ready' ? 'ready' : d.state === 'unavailable' ? 'unavailable' : 'starting';
     const rest = records.filter((r) => !(r.lang === d.lang && r.rootPath === root));
-    return [...rest, { lang: d.lang, rootPath: root, phase }];
+    return [...rest, { lang: d.lang, rootPath: root, phase, ...(d.reason ? { reason: d.reason } : {}) }];
   }
   const phase: IdeLspPhase | null =
     d.state === 'connected' ? 'ready' : d.state === 'lost' ? 'lost' : d.state === 'reconnecting' || d.state === 'waiting' ? 'restarting' : null;
@@ -158,10 +165,34 @@ export function ideLspRecordFor(records: readonly IdeLspRecord[], lang: string, 
   return best;
 }
 
-export interface IdeLspItem { label: string; tone: 'ok' | 'busy' | 'bad'; title: string; action: 'settings' | 'retry' }
+/** The saved-environment opt-ins the /ws/lsp trust gate reads (lsp_host/ws_bridge.rs). */
+export const IDE_TRUST_PROJECT_ENV = 'OTTO_IDE_TRUST_PROJECT_EXECUTION';
+const TRUST_LANG_ENV: Record<string, string> = {
+  zig: 'OTTO_IDE_TRUST_ZIG_BUILD', kotlin: 'OTTO_IDE_TRUST_KOTLIN_LSP', vue: 'OTTO_IDE_TRUST_VUE_LSP',
+  csharp: 'OTTO_IDE_TRUST_DOTNET_LSP', fsharp: 'OTTO_IDE_TRUST_DOTNET_LSP',
+};
 
-/** The status-strip item, or null before any server was asked for (no attach: nothing to say). */
-export function ideLspItem(lang: string, rec: IdeLspRecord | null): IdeLspItem | null {
+/** Whether the saved environment lets `lang`'s server run project code (a non-secret "1" for the
+ *  project-wide or the language key); null while it isn't loaded. */
+export function ideProjectTrusted(vars: readonly IdeEnvVar[] | null | undefined, lang: string): boolean | null {
+  if (!vars) return null;
+  const keys = [IDE_TRUST_PROJECT_ENV, TRUST_LANG_ENV[lang]];
+  return vars.some((v) => !v.secret && keys.includes(v.key) && (v.value ?? '').trim() === '1');
+}
+
+/** `ideProjectTrusted` for the server at `rec`: the gate reads the environment of the root the
+ *  socket asked for, which is the project's saved environment only for the opened root itself
+ *  (an attached folder has its own); null for any other root (unknown: no trust prompt). */
+export function ideLspTrustedAt(vars: readonly IdeEnvVar[] | null | undefined, lang: string, rec: IdeLspRecord | null, projectRoot: string): boolean | null {
+  const norm = (p: string): string => p.replace(/\/+$/, '') || '/';
+  return rec && norm(rec.rootPath) === norm(projectRoot) ? ideProjectTrusted(vars, lang) : null;
+}
+
+export interface IdeLspItem { label: string; tone: 'ok' | 'busy' | 'bad'; title: string; action: 'settings' | 'retry' | 'trust' }
+
+/** The status-strip item, or null before any server was asked for (no attach: nothing to say).
+ *  `trusted`: whether the project's saved environment opts in to project code (null: not loaded). */
+export function ideLspItem(lang: string, rec: IdeLspRecord | null, trusted: boolean | null = null): IdeLspItem | null {
   if (!rec) return null;
   const name = ideLspServerName(lang);
   switch (rec.phase) {
@@ -172,6 +203,10 @@ export function ideLspItem(lang: string, rec: IdeLspRecord | null): IdeLspItem |
     case 'lost':
       return { label: `${name} disconnected`, tone: 'bad', title: 'The language server connection dropped. Click to retry.', action: 'retry' };
     case 'unavailable':
+      // Closed before any session while the saved environment has no trust opt-in (ideLspTrust.ts).
+      if (rec.reason === 'trust_or_unavailable' && trusted === false) {
+        return { label: `${name} needs trust`, tone: 'busy', title: `${name} starts once you trust this project — click to trust it`, action: 'trust' };
+      }
       return {
         label: `${name} unavailable`,
         tone: 'bad',

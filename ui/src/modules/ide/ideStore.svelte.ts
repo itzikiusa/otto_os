@@ -140,7 +140,7 @@ class IdeStore {
   get shellEnvLoading() { return this.envState.shellEnvLoading; } set shellEnvLoading(v) { this.envState.shellEnvLoading = v; }
   get shellEnvAttempted() { return this.envState.shellEnvAttempted; } set shellEnvAttempted(v) { this.envState.shellEnvAttempted = v; }
   get shellEnvError() { return this.envState.shellEnvError; } set shellEnvError(v) { this.envState.shellEnvError = v; }
-  get pythonVenvs() { return this.envState.pythonVenvs; } set pythonVenvs(v) { this.envState.pythonVenvs = v; }
+  get pythonVenvs() { return this.envState.pythonVenvs; } set pythonVenvs(v) { this.envState.pythonVenvs = v; } get accelerators() { return this.envState.accelerators; } set accelerators(v) { this.envState.accelerators = v; }
   get dotenvFiles() { return this.envState.dotenvFiles; } set dotenvFiles(v) { this.envState.dotenvFiles = v; }
   get runConfigs() { return this.envState.runConfigs; } set runConfigs(v) { this.envState.runConfigs = v; }
   get detectedConfigs() { return this.envState.detectedConfigs; } set detectedConfigs(v) { this.envState.detectedConfigs = v; }
@@ -578,15 +578,14 @@ class IdeStore {
   applyRename(): Promise<boolean> { return loadLspMod().then((m) => m.runApplyRename(this, this.bufPerf)); }
   formatActiveFile(path?: string): Promise<void> { return this.bufPerf.enqueuePathOp((path ? this.resolvePath(path) : this._activePath) ?? '', () => loadLspMod().then((m) => m.runFormatActiveFile(this, this.bufPerf, path ? { path } : {}))); }
   organizeImportsActiveFile(): Promise<void> { return this.bufPerf.enqueuePathOp(this._activePath ?? '', () => loadLspMod().then((m) => m.runFormatActiveFile(this, this.bufPerf, { organizeImports: true }))); }
+  switchHeaderSource(path?: string): Promise<boolean> { return import('./editor/ideHeaderSwitchAction').then((m) => m.runSwitchHeaderSource(this, path)); }
   fetchCodeActions(path: string, line: number, column: number): Promise<IdeCodeAction[]> { return loadLspMod().then((m) => m.runFetchCodeActions(this, this.bufPerf, path, line, column)); }
   applyCodeAction(path: string, action: IdeCodeAction | IdeQuickFix): Promise<boolean> { return loadLspMod().then((m) => m.runApplyCodeAction(this, this.bufPerf, path, action)); }
   applyQuickFixEdits(edits: IdeTextEdit[], title?: string): Promise<boolean> { return loadLspMod().then((m) => m.runApplyQuickFixEdits(this, this.bufPerf, edits, title)); }
   searchWorkspace(query: string, mode: IdeSearchMode = 'all', opts: { caseSensitive?: boolean; wholeWord?: boolean; regex?: boolean; fileGlob?: string; scopePath?: string | null; limit?: number } = {}): Promise<void> {
     return loadLspMod().then((m) => m.runSearchWorkspace(this, query, mode, opts));
   }
-  replaceInWorkspace(query: string, replacement: string, dryRun: boolean, opts: { caseSensitive?: boolean; wholeWord?: boolean; regex?: boolean; fileGlob?: string; scopePath?: string | null; paths?: string[] } = {}): Promise<IdeReplaceResp | null> {
-    return loadLspMod().then((m) => m.runReplaceInWorkspace(this, this.bufPerf, query, replacement, dryRun, opts));
-  }
+  replaceInWorkspace(query: string, replacement: string, dryRun: boolean, opts: { caseSensitive?: boolean; wholeWord?: boolean; regex?: boolean; fileGlob?: string; scopePath?: string | null; paths?: string[] } = {}): Promise<IdeReplaceResp | null> { return loadLspMod().then((m) => m.runReplaceInWorkspace(this, this.bufPerf, query, replacement, dryRun, opts)); }
 
   async loadToolchains(opts: { includeCatalog?: boolean } = {}): Promise<void> {
     if (!this.collabIsGuest) await (await loadDebugEnvMod()).fetchToolchains(this, () => this.ensureJobsPoller(), opts);

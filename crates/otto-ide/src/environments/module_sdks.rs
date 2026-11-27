@@ -213,11 +213,41 @@ pub(crate) fn match_longest_module_sdk(
 enum SdkKindHint {
     Go,
     Java,
+    Kotlin,
     Python,
     Rust,
     Zig,
+    Cpp,
+    Dotnet,
     Node,
     GenericPath,
+}
+
+fn is_kotlin_sdk_path(sdk: &str) -> bool {
+    if !sdk.starts_with('/') {
+        return false;
+    }
+    let sp = Path::new(sdk);
+    let s_low = sdk.to_ascii_lowercase();
+    let has_kotlinc = sp.join("bin/kotlinc").is_file() || s_low.ends_with("/bin/kotlinc");
+    let has_javac = sp.join("bin/javac").is_file() || sp.join("bin/java").is_file();
+    (has_kotlinc && !has_javac)
+        || s_low.contains("/kotlin/")
+        || s_low.contains("kotlin-compiler")
+        || s_low.ends_with("/kotlinc")
+}
+
+fn is_jdk_sdk_path(sdk: &str) -> bool {
+    if !sdk.starts_with('/') {
+        return false;
+    }
+    let sp = Path::new(sdk);
+    let s_low = sdk.to_ascii_lowercase();
+    sp.join("bin/javac").is_file()
+        || sp.join("bin/java").is_file()
+        || s_low.contains("jdk")
+        || s_low.contains("javavirtualmachines")
+        || s_low.contains("/java/")
 }
 
 fn infer_sdk_kind(
@@ -225,7 +255,33 @@ fn infer_sdk_kind(
     runner: Option<IdeRunnerKind>,
     lang_or_path_hint: Option<&str>,
     mod_root: &str,
+    registered_ecosystem: Option<crate::toolchains_catalog::EcosystemKind>,
 ) -> SdkKindHint {
+    if let Some(eco) = registered_ecosystem {
+        match eco {
+            crate::toolchains_catalog::EcosystemKind::Kotlin => return SdkKindHint::Kotlin,
+            crate::toolchains_catalog::EcosystemKind::Java => return SdkKindHint::Java,
+            crate::toolchains_catalog::EcosystemKind::Go => return SdkKindHint::Go,
+            crate::toolchains_catalog::EcosystemKind::Rust => return SdkKindHint::Rust,
+            crate::toolchains_catalog::EcosystemKind::Zig => return SdkKindHint::Zig,
+            crate::toolchains_catalog::EcosystemKind::Cpp => return SdkKindHint::Cpp,
+            crate::toolchains_catalog::EcosystemKind::Dotnet => return SdkKindHint::Dotnet,
+            crate::toolchains_catalog::EcosystemKind::Node => return SdkKindHint::Node,
+            crate::toolchains_catalog::EcosystemKind::Python => return SdkKindHint::Python,
+            _ => {}
+        }
+    }
+    // Classify explicit Kotlin compiler homes (`kotlinc` without `javac`) before
+    // falling back to JVM runner kinds (which otherwise map to `Java` / `JAVA_HOME`).
+    if is_kotlin_sdk_path(sdk) {
+        return SdkKindHint::Kotlin;
+    }
+    // BUG2-5: Identify an installed JDK by its Java binaries/path BEFORE consulting a
+    // `.kt` / Kotlin language hint so a module JDK override on a Kotlin file sets
+    // `JAVA_HOME` rather than `KOTLIN_HOME`.
+    if is_jdk_sdk_path(sdk) {
+        return SdkKindHint::Java;
+    }
     if let Some(r) = runner {
         match r {
             IdeRunnerKind::GoRun | IdeRunnerKind::GoBuild | IdeRunnerKind::GoTest => {
@@ -242,9 +298,23 @@ fn infer_sdk_kind(
             IdeRunnerKind::ZigBuild | IdeRunnerKind::ZigRun | IdeRunnerKind::ZigTest => {
                 return SdkKindHint::Zig;
             }
+            IdeRunnerKind::Cmake
+            | IdeRunnerKind::Ctest
+            | IdeRunnerKind::CppRun
+            | IdeRunnerKind::Make
+            | IdeRunnerKind::Meson
+            | IdeRunnerKind::Unreal => {
+                return SdkKindHint::Cpp;
+            }
+            IdeRunnerKind::DotnetBuild | IdeRunnerKind::DotnetRun | IdeRunnerKind::DotnetTest => {
+                return SdkKindHint::Dotnet;
+            }
             IdeRunnerKind::Node
             | IdeRunnerKind::Npm
             | IdeRunnerKind::Vitest
+            | IdeRunnerKind::Jest
+            | IdeRunnerKind::Playwright
+            | IdeRunnerKind::Karma
             | IdeRunnerKind::ReactNative => {
                 return SdkKindHint::Node;
             }
@@ -263,6 +333,12 @@ fn infer_sdk_kind(
         if lower == "java" || lower.ends_with(".java") {
             return SdkKindHint::Java;
         }
+        if matches!(lower.as_str(), "kotlin" | "kt" | "kts")
+            || lower.ends_with(".kt")
+            || lower.ends_with(".kts")
+        {
+            return SdkKindHint::Kotlin;
+        }
         if lower == "python" || lower.ends_with(".py") {
             return SdkKindHint::Python;
         }
@@ -271,6 +347,28 @@ fn infer_sdk_kind(
         }
         if lower == "zig" || lower.ends_with(".zig") || lower.ends_with(".zon") {
             return SdkKindHint::Zig;
+        }
+        if matches!(lower.as_str(), "c" | "cpp" | "c++" | "cxx" | "cmake")
+            || lower.ends_with(".c")
+            || lower.ends_with(".cpp")
+            || lower.ends_with(".cc")
+            || lower.ends_with(".cxx")
+            || lower.ends_with(".h")
+            || lower.ends_with(".hpp")
+        {
+            return SdkKindHint::Cpp;
+        }
+        if matches!(lower.as_str(), "dotnet" | "csharp" | "fsharp" | "cs" | "fs")
+            || lower.ends_with(".cs")
+            || lower.ends_with(".csx")
+            || lower.ends_with(".fs")
+            || lower.ends_with(".fsx")
+            || lower.ends_with(".csproj")
+            || lower.ends_with(".fsproj")
+            || lower.ends_with(".sln")
+            || lower.ends_with(".slnx")
+        {
+            return SdkKindHint::Dotnet;
         }
         if matches!(
             lower.as_str(),
@@ -321,6 +419,22 @@ fn infer_sdk_kind(
     {
         return SdkKindHint::Zig;
     }
+    if sp.join("bin/clang++").is_file()
+        || sp.join("bin/clang").is_file()
+        || sp.join("bin/g++").is_file()
+        || s_low.contains("/llvm")
+        || s_low.contains("/cpp/")
+    {
+        return SdkKindHint::Cpp;
+    }
+    if sp.join("dotnet").is_file()
+        || sp.join("bin/dotnet").is_file()
+        || s_low.ends_with("/dotnet")
+        || s_low.contains("/dotnet/")
+        || s_low.contains(".dotnet")
+    {
+        return SdkKindHint::Dotnet;
+    }
     if sp.join("bin/node").is_file()
         || s_low.ends_with("/node")
         || s_low.contains("/node/")
@@ -347,10 +461,37 @@ fn infer_sdk_kind(
     if mr.join("build.zig").is_file() || mr.join("build.zig.zon").is_file() {
         return SdkKindHint::Zig;
     }
+    if mr.join("CMakeLists.txt").is_file()
+        || mr.join("meson.build").is_file()
+        || mr.join("compile_commands.json").is_file()
+    {
+        return SdkKindHint::Cpp;
+    }
+    if mr.join("global.json").is_file()
+        || mr.join("Directory.Build.props").is_file()
+        || (mr.join("Assets").is_dir() && mr.join("ProjectSettings").is_dir())
+        || dir_has_dotnet_manifest(mr)
+    {
+        return SdkKindHint::Dotnet;
+    }
     if mr.join("package.json").is_file() {
         return SdkKindHint::Node;
     }
     SdkKindHint::GenericPath
+}
+
+#[allow(clippy::disallowed_methods)] // shallow 1-level dir check on module root
+fn dir_has_dotnet_manifest(mr: &Path) -> bool {
+    std::fs::read_dir(mr).ok().is_some_and(|rd| {
+        rd.flatten().any(|e| {
+            e.file_name().to_str().is_some_and(|n| {
+                n.ends_with(".sln")
+                    || n.ends_with(".slnx")
+                    || n.ends_with(".csproj")
+                    || n.ends_with(".fsproj")
+            })
+        })
+    })
 }
 
 pub(crate) fn apply_module_sdk_to_project_env(
@@ -360,12 +501,36 @@ pub(crate) fn apply_module_sdk_to_project_env(
     runner: Option<IdeRunnerKind>,
     lang_or_path_hint: Option<&str>,
 ) {
+    apply_module_sdk_to_project_env_with_ecosystem(
+        proj,
+        mod_root,
+        sdk_path,
+        runner,
+        lang_or_path_hint,
+        None,
+    );
+}
+
+pub(crate) fn apply_module_sdk_to_project_env_with_ecosystem(
+    proj: &mut IdeProjectEnvironment,
+    mod_root: &str,
+    sdk_path: &str,
+    runner: Option<IdeRunnerKind>,
+    lang_or_path_hint: Option<&str>,
+    registered_ecosystem: Option<crate::toolchains_catalog::EcosystemKind>,
+) {
     let sdk = sdk_path.trim();
     if sdk.is_empty() {
         return;
     }
     let trimmed = sdk.trim_end_matches('/');
-    match infer_sdk_kind(trimmed, runner, lang_or_path_hint, mod_root) {
+    match infer_sdk_kind(
+        trimmed,
+        runner,
+        lang_or_path_hint,
+        mod_root,
+        registered_ecosystem,
+    ) {
         SdkKindHint::Go => {
             let root = trimmed
                 .strip_suffix("/bin/go")
@@ -380,6 +545,13 @@ pub(crate) fn apply_module_sdk_to_project_env(
                 .or_else(|| trimmed.strip_suffix("/bin"))
                 .unwrap_or(trimmed);
             proj.java_home = Some(root.to_string());
+        }
+        SdkKindHint::Kotlin => {
+            let root = trimmed
+                .strip_suffix("/bin/kotlinc")
+                .or_else(|| trimmed.strip_suffix("/bin"))
+                .unwrap_or(trimmed);
+            proj.kotlin_home = Some(root.to_string());
         }
         SdkKindHint::Python => {
             if trimmed.ends_with("/python")
@@ -408,6 +580,24 @@ pub(crate) fn apply_module_sdk_to_project_env(
                 .unwrap_or(trimmed);
             proj.zig_home = Some(root.to_string());
         }
+        SdkKindHint::Cpp => {
+            let root = trimmed
+                .strip_suffix("/bin/clang++")
+                .or_else(|| trimmed.strip_suffix("/bin/clang"))
+                .or_else(|| trimmed.strip_suffix("/bin/g++"))
+                .or_else(|| trimmed.strip_suffix("/bin/gcc"))
+                .or_else(|| trimmed.strip_suffix("/bin"))
+                .unwrap_or(trimmed);
+            proj.cpp_toolchain = Some(root.to_string());
+        }
+        SdkKindHint::Dotnet => {
+            let root = trimmed
+                .strip_suffix("/bin/dotnet")
+                .or_else(|| trimmed.strip_suffix("/dotnet"))
+                .or_else(|| trimmed.strip_suffix("/bin"))
+                .unwrap_or(trimmed);
+            proj.dotnet_root = Some(root.to_string());
+        }
         SdkKindHint::Node => {
             let root = trimmed
                 .strip_suffix("/bin/node")
@@ -430,6 +620,17 @@ pub(crate) fn apply_module_sdk_to_project_env(
             });
         }
     }
+}
+
+#[cfg(test)]
+pub(crate) async fn layer_child_and_module_sdk_for_run_test(
+    pool: &DbPool,
+    target: &IdeTargetSpec,
+    cfg: Option<&IdeRunConfig>,
+    proj: &mut IdeProjectEnvironment,
+) {
+    let mut stored_vars = Vec::new();
+    layer_child_and_module_sdk_for_run(pool, target, cfg, proj, &mut stored_vars).await;
 }
 
 pub(super) async fn layer_child_and_module_sdk_for_run(
@@ -503,6 +704,15 @@ pub(super) async fn layer_child_and_module_sdk_for_run(
                 if mod_proj.zig_home.is_some() {
                     proj.zig_home = mod_proj.zig_home;
                 }
+                if mod_proj.cpp_toolchain.is_some() {
+                    proj.cpp_toolchain = mod_proj.cpp_toolchain;
+                }
+                if mod_proj.kotlin_home.is_some() {
+                    proj.kotlin_home = mod_proj.kotlin_home;
+                }
+                if mod_proj.dotnet_root.is_some() {
+                    proj.dotnet_root = mod_proj.dotnet_root;
+                }
                 if mod_proj.node_home.is_some() {
                     proj.node_home = mod_proj.node_home;
                 }
@@ -554,12 +764,29 @@ pub(super) async fn layer_child_and_module_sdk_for_run(
         &candidates,
         target.kind == IdeTargetKind::Local,
     ) {
-        apply_module_sdk_to_project_env(
+        let host_key = match target.kind {
+            IdeTargetKind::Local => "local".to_string(),
+            IdeTargetKind::Ssh => target
+                .connection_id
+                .as_deref()
+                .map(|c| format!("ssh:{c}"))
+                .unwrap_or_else(|| "local".to_string()),
+        };
+        let registered =
+            crate::toolchains::load_registered_local_sdks_by_host(pool, &host_key).await;
+        let norm_sdk = sdk_val.trim().trim_end_matches('/');
+        let registered_eco = registered.iter().find_map(|(eco, sdks)| {
+            sdks.iter()
+                .any(|s| s.path.trim().trim_end_matches('/') == norm_sdk)
+                .then_some(*eco)
+        });
+        apply_module_sdk_to_project_env_with_ecosystem(
             proj,
             &mod_root,
             &sdk_val,
             Some(c.runner),
             resolved_tp.as_deref(),
+            registered_eco,
         );
     }
 }

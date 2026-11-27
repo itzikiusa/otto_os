@@ -1,11 +1,12 @@
 <script lang="ts">
   // IntelliJ IDEA right-side Maven / Gradle Tool Window:
   // Profiles (Maven/Gradle + Spring Boot), multi-module projects, Lifecycle, Plugins, Dependencies, Repositories.
-  import { onDestroy } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import Badge from '../../../lib/components/Badge.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
-  import type { IdeMobileProject } from '../../../lib/api/types';
+  import type { IdeMobileProject, IdeSpringBootInfo, IdeTargetSpec } from '../../../lib/api/types';
   import { shortenHomePath } from '../../../lib/homePath';
+  import IdeSpringBootSection from './IdeSpringBootSection.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
   import { confirmer } from '../../../lib/confirm.svelte';
   import { loadErrorText } from '../../../lib/loadError';
@@ -31,7 +32,10 @@
   let springProfiles = $state<string[]>([]);
   let modules = $state<IdeBuildToolModule[]>([]);
   let mobileProjects = $state<IdeMobileProject[]>([]);
-  let expanded = $state<Record<string, boolean>>({ profiles: false });
+  let springBoot = $state<IdeSpringBootInfo | null>(null);
+  let springTargetSig = $state('');
+  let springTarget = $state<IdeTargetSpec | null>(null);
+  let expanded = $state<Record<string, boolean>>({ profiles: false, springBoot: true });
 
   const labelTitle = $derived((ide.buildToolKind ?? tool) === 'gradle' ? 'Gradle' : 'Maven');
   const badgeMark = $derived((ide.buildToolKind ?? tool) === 'gradle' ? 'G' : 'm');
@@ -47,10 +51,19 @@
       profiles = [];
       springProfiles = [];
       modules = [];
+      springBoot = null;
+      springTargetSig = '';
+      springTarget = null;
       return;
     }
     const targetSig = currentTargetSig();
+    const targetSnap = { ...ide.targetPayload };
     const isStale = (): boolean => seq !== refreshSeq || currentTargetSig() !== targetSig;
+    if (springTargetSig !== targetSig) {
+      springBoot = null;
+      springTarget = null;
+      springTargetSig = '';
+    }
     loading = true;
     error = null;
     try {
@@ -61,6 +74,9 @@
       springProfiles = res.springProfiles;
       modules = res.modules;
       mobileProjects = res.mobileProjects;
+      springBoot = res.springBoot;
+      springTargetSig = targetSig;
+      springTarget = targetSnap;
       const nextExp = { ...expanded };
       if (modules.length <= 4) {
         for (const m of modules) {
@@ -81,9 +97,13 @@
   }
 
   $effect(() => {
+    void ide.target.kind;
     void ide.target.root;
-    void ide.additionalRoots.length;
-    void refreshModel();
+    void ide.target.connection_id;
+    void ide.additionalRoots.join('\0');
+    untrack(() => {
+      void refreshModel();
+    });
   });
 
   onDestroy(() => {
@@ -396,6 +416,18 @@
           </div>
         {/if}
       </div>
+
+      {#if springBoot?.detected && springTarget}
+        {#key springTargetSig}
+          <IdeSpringBootSection
+            info={springBoot}
+            target={springTarget}
+            disabled={loading}
+            open={Boolean(expanded.springBoot)}
+            ontoggle={() => toggleNode('springBoot')}
+          />
+        {/key}
+      {/if}
 
       {#if visibleMobileProjects.length > 0}
         {#each visibleMobileProjects as mp (`${mp.framework}:${mp.root_dir}`)}

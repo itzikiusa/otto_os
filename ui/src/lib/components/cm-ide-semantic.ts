@@ -8,6 +8,7 @@ import { Decoration, EditorView, ViewPlugin, type DecorationSet, type ViewUpdate
 import type { IdeDiagnostic } from '../api/types.ts';
 import { hasLiveLspDiagnosticsForFile } from './cm-ide-drafts.ts';
 import { extractGoBuildTagsFromSource, rewriteGoBuildTagDiagnostic } from './cm-ide-lsp-completion.ts';
+import { isSpringConfigPath, springConfigCompletion } from './cm-spring-config.ts';
 import type { IdeEditorPreferences } from './cm-ide-theme.ts';
 import {
   analyzeGoImports,
@@ -149,7 +150,7 @@ export function classifySemanticTokensWithModel(
       if (ch === '/' && docText[i + 1] === '/') {
         const nl = docText.indexOf('\n', i + 2);
         const end = nl >= 0 ? Math.min(to, nl) : to;
-        if ((docText[i + 2] === '/' && (lang === 'rust' || lang === 'zig')) || (docText[i + 2] === '!' && lang === 'zig')) {
+        if ((docText[i + 2] === '/' && (lang === 'rust' || lang === 'zig' || lang === 'csharp' || lang === 'fsharp')) || (docText[i + 2] === '!' && lang === 'zig')) {
           classifyDocComment(docText.slice(i, end), i, out);
         }
         i = end;
@@ -450,7 +451,7 @@ export interface CreateIdeSemanticOptions {
   onFindUsages?: ((ctx: { line: number; column: number; symbol?: string }) => void) | null;
 }
 
-const AUTHORITATIVE_LSP_SOURCES = new Set(['gopls', 'jdtls', 'rust-analyzer', 'zls', 'pyright', 'typescript', 'tsserver']);
+const AUTHORITATIVE_LSP_SOURCES = new Set(['gopls', 'jdtls', 'kotlin-language-server', 'rust-analyzer', 'zls', 'clangd', 'pyright', 'typescript', 'tsserver']);
 
 export function createIdeSemanticExtensions(opts: CreateIdeSemanticOptions): Extension {
   const lang = detectSemanticLang(opts.filePath, opts.language);
@@ -528,7 +529,7 @@ export function createIdeSemanticExtensions(opts: CreateIdeSemanticOptions): Ext
       scheduleDiagnostics(view: EditorView, delayMs: number) {
         if (this.timer) clearTimeout(this.timer);
         this.abort?.abort();
-        if (lang !== 'csv' && lang !== 'other' && opts.filePath) {
+        if ((lang !== 'csv' && lang !== 'other' || isSpringConfigPath(opts.filePath)) && opts.filePath) {
           this.timer = setTimeout(() => void this.runDiagnostics(view), delayMs);
         }
       }
@@ -551,7 +552,7 @@ export function createIdeSemanticExtensions(opts: CreateIdeSemanticOptions): Ext
         if (goImp && !lspOwnsDiags) clientDiags.push(...goImp.diagnostics);
         const unresolved = new Set<string>(jRes ? jRes.unresolvedIdents : []);
 
-        if (!lspOwnsDiags && opts.root && (lang === 'java' || lang === 'go' || lang === 'zig' || lang === 'python' || lang === 'shell' || lang === 'json')) {
+        if (!lspOwnsDiags && opts.root && (isSpringConfigPath(opts.filePath) || lang === 'java' || lang === 'kotlin' || lang === 'go' || lang === 'zig' || lang === 'cpp' || lang === 'python' || lang === 'shell' || lang === 'json')) {
           const ctrl = new AbortController();
           this.abort = ctrl;
           try {
@@ -752,5 +753,5 @@ export function createIdeSemanticExtensions(opts: CreateIdeSemanticOptions): Ext
     { decorations: (v) => v.decorations },
   );
 
-  return [lineQuickFixesField, serverUnresolvedField, importFoldExt, vpPlugin];
+  return [lineQuickFixesField, serverUnresolvedField, importFoldExt, springConfigCompletion(opts.filePath), vpPlugin];
 }

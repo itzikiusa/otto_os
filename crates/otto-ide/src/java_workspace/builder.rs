@@ -83,6 +83,11 @@ pub fn prepare_java_execution(
     out_base_dir: &Path,
 ) -> Result<JavaExecutionPlan> {
     let cp_sep = if cfg!(windows) { ";" } else { ":" };
+    // A main in test sources (Spring Boot's `TestApplication`) runs from the test source set.
+    let target_str = target_file_or_dir.to_string_lossy();
+    let include_tests = include_tests
+        || target_str.contains("/src/test/java")
+        || target_str.contains("/src/test/kotlin");
     let graph = scan_java_workspace(project_roots);
     let m2_repo = resolve_m2_repo(env_map);
     fs::create_dir_all(out_base_dir)
@@ -94,17 +99,20 @@ pub fn prepare_java_execution(
     let mut compiler_logs: Vec<String> = Vec::new();
 
     if let Some(owner) = graph.owning_module(target_file_or_dir) {
-        let maven = maven_module_classpath(owner, &graph, env_map, out_base_dir);
-        // A module whose deps Maven can't resolve (an attached repo that was never
-        // installed) still gets the javac build below; if that fails too, Maven's
-        // error is the one to show.
-        let maven_err = match maven {
+        let build_cp_res =
+            maven_module_classpath(owner, &graph, env_map, out_base_dir, include_tests).or_else(
+                || gradle_module_classpath(owner, &graph, env_map, out_base_dir, include_tests),
+            );
+        // A module whose deps Maven/Gradle can't resolve (an attached repo that was never
+        // installed) still gets the javac/kotlinc build below; if that fails too, the build
+        // tool's error is the one to show.
+        let build_tool_err = match build_cp_res {
             Some(Err(e)) => Some(e),
             Some(Ok(cp)) => {
                 let mut srcs = Vec::new();
                 for dir in owner.main_src_dirs.iter().chain(&owner.test_src_dirs) {
                     if dir.is_dir() {
-                        collect_java_files_rec(dir, &mut srcs);
+                        collect_jvm_files_rec(dir, &mut srcs);
                     }
                 }
                 // Every workspace module's sources, so stepping into a sibling module maps.
@@ -145,34 +153,50 @@ pub fn prepare_java_execution(
             fs::create_dir_all(&owner_out)
                 .map_err(|e| Error::Internal(format!("create target module classes dir: {e}")))?;
             let mut owner_srcs = Vec::new();
+            let mut owner_kt_srcs = Vec::new();
             for sdir in &owner.main_src_dirs {
                 if sdir.is_dir() {
                     source_roots.push(sdir.clone());
                     collect_java_files_rec(sdir, &mut owner_srcs);
+                    collect_kotlin_files_rec(sdir, &mut owner_kt_srcs);
                 }
             }
-            let target_is_test = target_file_or_dir
-                .to_string_lossy()
-                .contains("/src/test/java");
-            if include_tests || target_is_test {
+            if include_tests {
                 for tdir in &owner.test_src_dirs {
                     if tdir.is_dir() {
                         source_roots.push(tdir.clone());
                         collect_java_files_rec(tdir, &mut owner_srcs);
+                        collect_kotlin_files_rec(tdir, &mut owner_kt_srcs);
                     }
                 }
             }
-            if target_file_or_dir.is_file()
-                && target_file_or_dir.extension().and_then(|s| s.to_str()) == Some("java")
-                && !owner_srcs.iter().any(|p| same_file(p, target_file_or_dir))
-            {
-                owner_srcs.push(target_file_or_dir.to_path_buf());
+            if target_file_or_dir.is_file() {
+                match target_file_or_dir.extension().and_then(|s| s.to_str()) {
+                    Some("java")
+                        if !owner_srcs.iter().any(|p| same_file(p, target_file_or_dir)) =>
+                    {
+                        owner_srcs.push(target_file_or_dir.to_path_buf());
+                    }
+                    Some("kt")
+                        if !owner_kt_srcs
+                            .iter()
+                            .any(|p| same_file(p, target_file_or_dir)) =>
+                    {
+                        owner_kt_srcs.push(target_file_or_dir.to_path_buf());
+                    }
+                    _ => {}
+                }
             }
 
             let mut build_cp: Vec<String> = Vec::new();
             build_cp.extend(in_project_cp.iter().cloned());
             build_cp.extend(external_jars.iter().cloned());
-            for existing_rel in ["target/classes", "build/classes/java/main"] {
+            for existing_rel in [
+                "target/classes",
+                "build/classes/kotlin/main",
+                "build/classes/java/main",
+                "build/resources/main",
+            ] {
                 let ex = owner.dir.join(existing_rel);
                 if ex.is_dir() {
                     build_cp.push(ex.to_string_lossy().into_owned());
@@ -188,22 +212,53 @@ pub fn prepare_java_execution(
                     &mut compiler_logs,
                 )?;
             }
+            let mut kt_runtime_jars: Vec<String> = Vec::new();
+            if !owner_kt_srcs.is_empty() {
+                let mut kt_cp = vec![owner_out.to_string_lossy().into_owned()];
+                kt_cp.extend(build_cp.iter().cloned());
+                let kotlinc_bin = resolve_kotlinc_bin(env_map).ok_or_else(|| {
+                    Error::Invalid(
+                        "Kotlin sources require Gradle (`./gradlew`/`gradle`) or `kotlinc` (install Kotlin SDK via IDE → Toolchains)".into(),
+                    )
+                })?;
+                run_kotlinc(
+                    &kotlinc_bin,
+                    &owner_out,
+                    &kt_cp.join(cp_sep),
+                    &owner_kt_srcs,
+                    false,
+                    env_map,
+                    &mut compiler_logs,
+                )?;
+                kt_runtime_jars.extend(kotlin_stdlib_jars_for(&kotlinc_bin, env_map));
+            }
 
             let mut final_cp = vec![owner_out.to_string_lossy().into_owned()];
-            for rdir in &owner.resource_dirs {
+            let test_resources = include_tests.then(|| owner.dir.join("src/test/resources"));
+            for rdir in test_resources.iter().chain(&owner.resource_dirs) {
                 if rdir.is_dir() {
                     final_cp.push(rdir.to_string_lossy().into_owned());
                 }
             }
             final_cp.extend(in_project_cp);
             final_cp.extend(external_jars);
+            for jar in kt_runtime_jars {
+                if !final_cp.contains(&jar) {
+                    final_cp.push(jar);
+                }
+            }
             for existing_rel in [
                 "target/classes",
                 "target/test-classes",
+                "build/classes/kotlin/test",
+                "build/classes/kotlin/main",
+                "build/classes/java/test",
                 "build/classes/java/main",
+                "build/resources/test",
+                "build/resources/main",
             ] {
                 let ex = owner.dir.join(existing_rel);
-                if ex.is_dir() {
+                if ex.is_dir() && (include_tests || !existing_rel.contains("test")) {
                     let s = ex.to_string_lossy().into_owned();
                     if !final_cp.contains(&s) {
                         final_cp.push(s);
@@ -211,8 +266,10 @@ pub fn prepare_java_execution(
                 }
             }
 
+            let mut all_srcs = owner_srcs;
+            all_srcs.extend(owner_kt_srcs);
             let main_class =
-                resolve_main_class(explicit_main_class, target_file_or_dir, &owner_srcs)?;
+                resolve_main_class(explicit_main_class, target_file_or_dir, &all_srcs)?;
             Ok(JavaExecutionPlan {
                 main_class,
                 classpath: final_cp.join(cp_sep),
@@ -220,21 +277,21 @@ pub fn prepare_java_execution(
                 compiler_output: compiler_logs.join("\n"),
             })
         })();
-        return match (legacy, maven_err) {
-            (Err(_), Some(maven_err)) => Err(maven_err),
+        return match (legacy, build_tool_err) {
+            (Err(_), Some(bt_err)) => Err(bt_err),
             (legacy, _) => legacy,
         };
     }
 
-    // Standalone `.java` file / directory (no `pom.xml` or `build.gradle`)
+    // Standalone `.java` or `.kt` file / directory (no `pom.xml` or `build.gradle`)
     let target_file = if target_file_or_dir.is_file() {
         target_file_or_dir.to_path_buf()
     } else {
         let mut found = Vec::new();
-        collect_java_files_rec(target_file_or_dir, &mut found);
+        collect_jvm_files_rec(target_file_or_dir, &mut found);
         found.into_iter().next().ok_or_else(|| {
             Error::Invalid(format!(
-                "no .java source files found in '{}'",
+                "no .java or .kt source files found in '{}'",
                 target_file_or_dir.display()
             ))
         })?
@@ -244,6 +301,47 @@ pub fn prepare_java_execution(
         .unwrap_or_else(|| Path::new("."))
         .to_path_buf();
     source_roots.push(parent_dir.clone());
+    let is_kt_target = target_file
+        .extension()
+        .and_then(|s| s.to_str())
+        .is_some_and(|e| e == "kt");
+    if is_kt_target {
+        let mut peer_kt = Vec::new();
+        collect_kotlin_files_shallow(&parent_dir, &mut peer_kt);
+        if !peer_kt.iter().any(|p| same_file(p, &target_file)) {
+            peer_kt.push(target_file.clone());
+        }
+        let kotlinc_bin = resolve_kotlinc_bin(env_map).ok_or_else(|| {
+            Error::Invalid(
+                "kotlinc not found; install the Kotlin SDK via IDE → Toolchains to run/debug standalone .kt files".into(),
+            )
+        })?;
+        let out_jar = out_base_dir.join(format!(
+            "__standalone_{}.jar",
+            sanitize_slug(
+                target_file
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("main")
+            )
+        ));
+        run_kotlinc(
+            &kotlinc_bin,
+            &out_jar,
+            "",
+            &peer_kt,
+            true,
+            env_map,
+            &mut compiler_logs,
+        )?;
+        let main_class = resolve_main_class(explicit_main_class, &target_file, &peer_kt)?;
+        return Ok(JavaExecutionPlan {
+            main_class,
+            classpath: out_jar.to_string_lossy().into_owned(),
+            source_roots,
+            compiler_output: compiler_logs.join("\n"),
+        });
+    }
     let mut peer_srcs = Vec::new();
     collect_java_files_shallow(&parent_dir, &mut peer_srcs);
     if !peer_srcs.iter().any(|p| same_file(p, &target_file)) {
@@ -281,9 +379,10 @@ fn first_lines(text: &str) -> String {
     out
 }
 
-/// Maven's own classpath for a module with a `pom.xml`:
-/// `target/test-classes:target/classes:<dependency:build-classpath>`, after
-/// `test-compile`. Maven resolves parents, BOMs and transitive deps, which a
+/// Maven's own classpath for a module with a `pom.xml`: `target/classes:<deps but test>`
+/// after `compile` for an app launch (BUG2-6), or
+/// `target/test-classes:target/classes:<test deps>` after `test-compile` for a test.
+/// Maven resolves parents, BOMs and transitive deps, which a
 /// hand-built javac classpath gets wrong. `None` when the module has no pom, no
 /// `mvnw` / `mvn` is available, or it depends on an attached module outside its
 /// reactor (the caller falls back to javac).
@@ -292,6 +391,7 @@ fn maven_module_classpath(
     graph: &JavaWorkspaceGraph,
     env_map: &BTreeMap<String, String>,
     out_base_dir: &Path,
+    include_tests: bool,
 ) -> Option<Result<Vec<String>>> {
     let module_dir = owner.dir.as_path();
     if !module_dir.join("pom.xml").is_file() {
@@ -331,13 +431,21 @@ fn maven_module_classpath(
             cmd.arg("-pl").arg(rel).arg("-am");
         }
     }
-    cmd.args([
-        "-q",
-        "-B",
-        "test-compile",
-        "dependency:build-classpath",
-        "-Dmdep.includeScope=test",
-    ]);
+    // An app launch gets every scope but test (provided too, as spring-boot:run does). The
+    // plugin can't exclude test scope alone, so `dependency:list` names the test JARs to drop.
+    let list_file = cp_file.with_extension("scopes");
+    let _ = fs::remove_file(&list_file);
+    let phase = if include_tests {
+        "test-compile"
+    } else {
+        "compile"
+    };
+    cmd.args(["-q", "-B", phase, "dependency:build-classpath"]);
+    if !include_tests {
+        cmd.arg("dependency:list");
+        cmd.arg(format!("-DoutputFile={}", list_file.display()));
+        cmd.arg("-DoutputAbsoluteArtifactFilename=true");
+    }
     cmd.arg(format!("-Dmdep.outputFile={}", cp_file.display()));
     // The javac fallback reads the same repo, so both resolve the same JARs.
     if let Some(repo) = super::explicit_m2_repo(env_map) {
@@ -347,23 +455,548 @@ fn maven_module_classpath(
         let (status, output) = run_build_tool(cmd, env_map, "mvn")?;
         if !status.success() {
             return Err(Error::Invalid(format!(
-                "Maven could not build the module (mvn test-compile dependency:build-classpath):\n{}",
+                "Maven could not build the module (mvn {phase} dependency:build-classpath):\n{}",
                 first_lines(&output)
             )));
         }
         let deps = fs::read_to_string(&cp_file).unwrap_or_default();
-        let mut cp: Vec<String> = ["target/test-classes", "target/classes"]
+        // `   g:a:jar:1.0:test:/m2/…/a-1.0.jar -- module a [auto]`
+        let scopes = fs::read_to_string(&list_file).unwrap_or_default();
+        let test_jars: HashSet<&str> = scopes
+            .lines()
+            .filter_map(|l| {
+                let l = l.split(" -- ").next()?.trim();
+                let (coords, path) = l.split_at(l.find(":/")?);
+                (coords.rsplit(':').next() == Some("test")).then_some(&path[1..])
+            })
+            .collect();
+        let outputs: &[&str] = if include_tests {
+            &["target/test-classes", "target/classes"]
+        } else {
+            &["target/classes"]
+        };
+        let mut cp: Vec<String> = outputs
             .iter()
             .map(|d| module_dir.join(d).to_string_lossy().into_owned())
             .collect();
         cp.extend(
             deps.trim()
                 .split(if cfg!(windows) { ';' } else { ':' })
-                .filter(|s| !s.is_empty())
+                .filter(|s| !s.is_empty() && !test_jars.contains(s))
                 .map(str::to_string),
         );
         Ok(cp)
     })())
+}
+
+/// Gradle's own classpath for a module with `build.gradle` / `build.gradle.kts`:
+/// runs `classes` (or `testClasses`) + a lightweight init-script task that writes
+/// the resolved runtime classpath (compiling Kotlin + Java + resources) to a file.
+fn gradle_module_classpath(
+    owner: &WorkspaceJavaModule,
+    graph: &JavaWorkspaceGraph,
+    env_map: &BTreeMap<String, String>,
+    out_base_dir: &Path,
+    include_tests: bool,
+) -> Option<Result<Vec<String>>> {
+    let module_dir = owner.dir.as_path();
+    if !module_dir.join("build.gradle.kts").is_file() && !module_dir.join("build.gradle").is_file()
+    {
+        return None;
+    }
+    let gradle_root = find_owning_gradle_root(module_dir).unwrap_or_else(|| {
+        crate::lsp_host::servers::climb_to_build_root("kotlin", module_dir, &|_| true)
+    });
+    if depends_outside(owner, graph, &gradle_root) {
+        return None;
+    }
+    let root_wrapper = gradle_root.join("gradlew");
+    let gradle_bin = if crate::toolchains::is_executable_file(&root_wrapper) {
+        Some(root_wrapper)
+    } else {
+        crate::environments::find_build_wrapper(
+            &module_dir.to_string_lossy(),
+            "gradlew",
+            &[
+                "build.gradle.kts",
+                "build.gradle",
+                "settings.gradle.kts",
+                "settings.gradle",
+            ],
+        )
+        .map(PathBuf::from)
+    }
+    .or_else(|| {
+        let path = env_map.get("PATH")?;
+        crate::toolchains::find_executable_in(
+            &std::env::split_paths(path).collect::<Vec<_>>(),
+            &["gradle"],
+        )
+    })?;
+
+    let slug = sanitize_slug(&module_dir.to_string_lossy());
+    let cp_file = out_base_dir.join(format!("{slug}.gradle.classpath"));
+    let init_script = out_base_dir.join(format!("{slug}.otto-cp.init.gradle"));
+    let _ = fs::remove_file(&cp_file);
+    let escaped_cp = cp_file
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('\'', "\\'");
+    // BUG2-6: select ONLY `main` sourceSet for application launches (`include_tests == false`)
+    // so `src/test/resources` never overrides production config; reserve `test` for test runs.
+    // BUG2-7: compute `cpValue` during configuration (never call `project.extensions` inside
+    // `doLast`) AND pass `--no-configuration-cache` when supported (Gradle >= 6.6, BUG3-4).
+    let source_set_expr = if include_tests {
+        r#"ss.findByName("test") ?: ss.findByName("main")"#
+    } else {
+        r#"ss.findByName("main")"#
+    };
+    let init_body = format!(
+        r#"allprojects {{
+    tasks.register("ottoPrintClasspath") {{
+        def outFile = new File('{escaped_cp}')
+        def ss = project.extensions.findByName("sourceSets")
+        def cpValue = ""
+        if (ss != null) {{
+            def target = {source_set_expr}
+            if (target != null) {{
+                cpValue = target.runtimeClasspath.asPath
+            }}
+        }}
+        doLast {{
+            outFile.text = cpValue
+        }}
+    }}
+}}
+"#
+    );
+    if let Err(e) = fs::write(&init_script, init_body) {
+        return Some(Err(Error::Internal(format!(
+            "write gradle classpath init script: {e}"
+        ))));
+    }
+
+    let task_prefix = resolve_gradle_project_path(&gradle_root, module_dir);
+    let compile_task = if include_tests {
+        format!("{task_prefix}testClasses")
+    } else {
+        format!("{task_prefix}classes")
+    };
+    let print_task = format!("{task_prefix}ottoPrintClasspath");
+
+    let try_no_cfg_cache = gradle_wrapper_supports_no_configuration_cache(&gradle_root);
+    let build_cmd = |with_no_cfg_cache: bool| {
+        let mut cmd = Command::new(&gradle_bin);
+        cmd.current_dir(&gradle_root);
+        cmd.args(["-q", "--console=plain"]);
+        if with_no_cfg_cache {
+            cmd.arg("--no-configuration-cache");
+        }
+        cmd.arg("--init-script");
+        cmd.arg(&init_script);
+        cmd.arg(&compile_task);
+        cmd.arg(&print_task);
+        cmd
+    };
+
+    Some((|| {
+        let (mut status, mut output) =
+            run_build_tool(build_cmd(try_no_cfg_cache), env_map, "gradle")?;
+        // BUG3-4: older Gradle (< 6.6, e.g. 6.5.1) rejects `--no-configuration-cache` because
+        // configuration-cache was an enum option before 6.6. Retry cleanly without that flag.
+        if !status.success()
+            && try_no_cfg_cache
+            && output.contains("Unknown command-line option '--no-configuration-cache'")
+        {
+            let _ = fs::remove_file(&cp_file);
+            (status, output) = run_build_tool(build_cmd(false), env_map, "gradle")?;
+        }
+        if !status.success() {
+            return Err(Error::Invalid(format!(
+                "Gradle could not build the module (gradle {compile_task}):\n{}",
+                first_lines(&output)
+            )));
+        }
+        let deps = fs::read_to_string(&cp_file).unwrap_or_default();
+        let mut cp: Vec<String> = Vec::new();
+        let output_rels: &[&str] = if include_tests {
+            &[
+                "build/classes/kotlin/test",
+                "build/classes/java/test",
+                "build/resources/test",
+                "build/classes/kotlin/main",
+                "build/classes/java/main",
+                "build/resources/main",
+            ]
+        } else {
+            &[
+                "build/classes/kotlin/main",
+                "build/classes/java/main",
+                "build/resources/main",
+            ]
+        };
+        for rel in output_rels {
+            let d = module_dir.join(rel);
+            if d.is_dir() {
+                cp.push(d.to_string_lossy().into_owned());
+            }
+        }
+        for entry in deps
+            .trim()
+            .split(if cfg!(windows) { ';' } else { ':' })
+            .filter(|s| !s.is_empty())
+        {
+            if !cp.iter().any(|c| c == entry) {
+                cp.push(entry.to_string());
+            }
+        }
+        Ok(cp)
+    })())
+}
+
+/// Returns `false` when `gradle/wrapper/gradle-wrapper.properties` pins a Gradle release
+/// older than 6.6 (which predates the boolean `--no-configuration-cache` option, BUG3-4).
+pub(crate) fn gradle_wrapper_supports_no_configuration_cache(gradle_root: &Path) -> bool {
+    let props_path = gradle_root.join("gradle/wrapper/gradle-wrapper.properties");
+    let Ok(raw) = fs::read_to_string(&props_path) else {
+        return true;
+    };
+    let Ok(re) = Regex::new(r"gradle-(\d+)\.(\d+)(?:\.\d+)?(?:-[A-Za-z0-9.]+)?\.zip") else {
+        return true;
+    };
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') || trimmed.starts_with('!') {
+            continue;
+        }
+        if let Some(cap) = re.captures(trimmed) {
+            if let (Ok(maj), Ok(min)) = (cap[1].parse::<u32>(), cap[2].parse::<u32>()) {
+                return (maj, min) >= (6, 6);
+            }
+        }
+    }
+    true
+}
+
+/// Strip `//` line comments and `/* ... */` block comments from Groovy/Kotlin Gradle
+/// settings files while preserving single- and double-quoted string literals (BUG3-3).
+pub(super) fn strip_gradle_comments(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let len = bytes.len();
+    let mut out = String::with_capacity(len);
+    let mut i = 0usize;
+    let mut in_dq = false;
+    let mut in_sq = false;
+    let mut block_depth = 0usize;
+    while i < len {
+        let b = bytes[i];
+        if block_depth > 0 {
+            if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
+                block_depth += 1;
+                i += 2;
+            } else if b == b'*' && i + 1 < len && bytes[i + 1] == b'/' {
+                block_depth -= 1;
+                out.push(' ');
+                i += 2;
+            } else {
+                if b == b'\n' {
+                    out.push('\n');
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if in_dq {
+            if b == b'\\' && i + 1 < len {
+                out.push(bytes[i] as char);
+                out.push(bytes[i + 1] as char);
+                i += 2;
+                continue;
+            }
+            if b == b'"' {
+                in_dq = false;
+            }
+            if let Some(ch) = raw[i..].chars().next() {
+                out.push(ch);
+                i += ch.len_utf8();
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        if in_sq {
+            if b == b'\\' && i + 1 < len {
+                out.push(bytes[i] as char);
+                out.push(bytes[i + 1] as char);
+                i += 2;
+                continue;
+            }
+            if b == b'\'' {
+                in_sq = false;
+            }
+            if let Some(ch) = raw[i..].chars().next() {
+                out.push(ch);
+                i += ch.len_utf8();
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        if b == b'/' && i + 1 < len && bytes[i + 1] == b'/' {
+            while i < len && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
+            block_depth = 1;
+            i += 2;
+            continue;
+        }
+        if b == b'"' {
+            in_dq = true;
+            out.push('"');
+            i += 1;
+            continue;
+        }
+        if b == b'\'' {
+            in_sq = true;
+            out.push('\'');
+            i += 1;
+            continue;
+        }
+        if let Some(ch) = raw[i..].chars().next() {
+            out.push(ch);
+            i += ch.len_utf8();
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+fn normalize_gradle_project_path(raw: &str) -> String {
+    let trimmed = raw.trim().trim_matches(':');
+    if trimmed.is_empty() {
+        ":".to_string()
+    } else {
+        format!(":{trimmed}")
+    }
+}
+
+/// Parse active (uncommented) `include(...)` / `include '...'` project paths from
+/// `settings.gradle` / `settings.gradle.kts` (BUG3-3).
+pub(super) fn parse_gradle_included_projects(raw: &str) -> Vec<String> {
+    let stripped = strip_gradle_comments(raw);
+    let q_re = Regex::new(r#"['"]([^'"]+)['"]"#).unwrap();
+    let paren_re = Regex::new(r#"(?s)\binclude\s*\(([^)]+)\)"#).unwrap();
+    let groovy_re = Regex::new(r#"(?m)\binclude\s+([^(\n]+)"#).unwrap();
+    let mut out = Vec::new();
+    for cap in paren_re.captures_iter(&stripped) {
+        for q in q_re.captures_iter(&cap[1]) {
+            let p = normalize_gradle_project_path(&q[1]);
+            if !out.contains(&p) {
+                out.push(p);
+            }
+        }
+    }
+    for cap in groovy_re.captures_iter(&stripped) {
+        for q in q_re.captures_iter(&cap[1]) {
+            let p = normalize_gradle_project_path(&q[1]);
+            if !out.contains(&p) {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+/// Parse explicit, active (uncommented) `project(":api").projectDir = file("services/backend")`
+/// remappings from `settings.gradle` / `settings.gradle.kts`, restricted strictly to projects
+/// that are actually included by an active `include(...)` statement (BUG3-3).
+pub(super) fn parse_gradle_project_dir_overrides(raw: &str) -> Vec<(String, String)> {
+    let stripped = strip_gradle_comments(raw);
+    let included = parse_gradle_included_projects(&stripped);
+    let Ok(re) = Regex::new(
+        r#"project\s*\(\s*['"](:[^'"]+)['"]\s*\)\s*\.projectDir\s*=\s*(?:new\s+)?(?:file|File)\s*\(\s*(?:(?:rootDir|settingsDir)\s*,\s*)?['"]([^'"]+)['"]\s*\)"#,
+    ) else {
+        return Vec::new();
+    };
+    re.captures_iter(&stripped)
+        .filter_map(|cap| {
+            let proj = normalize_gradle_project_path(&cap[1]);
+            if !included.is_empty() && !included.contains(&proj) {
+                return None;
+            }
+            Some((proj, cap[2].trim().to_string()))
+        })
+        .collect()
+}
+
+/// Find the owning Gradle build root for `module_dir` even when intermediate parent
+/// folders (e.g. `services/` in `project(":api").projectDir = file("services/backend")`)
+/// contain no Gradle build markers themselves (BUG-14).
+pub(crate) fn find_owning_gradle_root(module_dir: &Path) -> Option<PathBuf> {
+    let canon_mod = fs::canonicalize(module_dir).unwrap_or_else(|_| module_dir.to_path_buf());
+    if canon_mod.join("settings.gradle.kts").is_file()
+        || canon_mod.join("settings.gradle").is_file()
+    {
+        return Some(canon_mod);
+    }
+    let mut cur = canon_mod.parent();
+    for _ in 0..8 {
+        let Some(anc) = cur else {
+            break;
+        };
+        for fname in ["settings.gradle.kts", "settings.gradle"] {
+            let sp = anc.join(fname);
+            let Ok(raw) = fs::read_to_string(&sp) else {
+                continue;
+            };
+            let overrides = parse_gradle_project_dir_overrides(&raw);
+            for (_, raw_dir) in &overrides {
+                let cand = if Path::new(raw_dir).is_absolute() {
+                    PathBuf::from(raw_dir)
+                } else {
+                    anc.join(raw_dir)
+                };
+                let canon_cand = fs::canonicalize(&cand).unwrap_or(cand);
+                if canon_cand == canon_mod {
+                    return Some(anc.to_path_buf());
+                }
+            }
+            for inc in parse_gradle_included_projects(&raw) {
+                if overrides.iter().any(|(p, _)| p == &inc) {
+                    continue;
+                }
+                let default_dir = anc.join(inc.replace(':', "/").trim_start_matches('/'));
+                let canon_def = fs::canonicalize(&default_dir).unwrap_or(default_dir);
+                if canon_def == canon_mod {
+                    return Some(anc.to_path_buf());
+                }
+            }
+        }
+        cur = anc.parent();
+    }
+    None
+}
+
+/// Resolve the Gradle task prefix (`""` for root project, `":api:"` for a subproject),
+/// honoring explicit active `project(":api").projectDir = file("backend")` remappings in
+/// `settings.gradle.kts` / `settings.gradle` before falling back to relative directory paths.
+pub(crate) fn resolve_gradle_project_path(gradle_root: &Path, module_dir: &Path) -> String {
+    let canon_root = fs::canonicalize(gradle_root).unwrap_or_else(|_| gradle_root.to_path_buf());
+    let canon_mod = fs::canonicalize(module_dir).unwrap_or_else(|_| module_dir.to_path_buf());
+    if canon_mod == canon_root {
+        return String::new();
+    }
+    for fname in ["settings.gradle.kts", "settings.gradle"] {
+        let Ok(raw) = fs::read_to_string(gradle_root.join(fname)) else {
+            continue;
+        };
+        for (proj_path, raw_dir) in parse_gradle_project_dir_overrides(&raw) {
+            let cand = if Path::new(&raw_dir).is_absolute() {
+                PathBuf::from(&raw_dir)
+            } else {
+                gradle_root.join(&raw_dir)
+            };
+            let canon_cand = fs::canonicalize(&cand).unwrap_or(cand);
+            if canon_cand == canon_mod {
+                let clean = proj_path.trim_end_matches(':');
+                return format!("{clean}:");
+            }
+        }
+    }
+    match canon_mod.strip_prefix(&canon_root) {
+        Ok(rel) if !rel.as_os_str().is_empty() => {
+            let segs: Vec<String> = rel
+                .components()
+                .filter_map(|c| c.as_os_str().to_str().map(String::from))
+                .collect();
+            if segs.is_empty() {
+                String::new()
+            } else {
+                format!(":{}:", segs.join(":"))
+            }
+        }
+        _ => String::new(),
+    }
+}
+
+fn resolve_kotlinc_bin(env_map: &BTreeMap<String, String>) -> Option<String> {
+    if let Some(kh) = env_map.get("KOTLIN_HOME").filter(|s| !s.trim().is_empty()) {
+        let cand = Path::new(kh.trim().trim_end_matches('/')).join("bin/kotlinc");
+        if crate::toolchains::is_executable_file(&cand) {
+            return Some(cand.to_string_lossy().into_owned());
+        }
+    }
+    if let Some(path) = env_map.get("PATH") {
+        let dirs: Vec<PathBuf> = std::env::split_paths(path).collect();
+        if let Some(hit) = crate::toolchains::find_executable_in(&dirs, &["kotlinc"]) {
+            return Some(hit.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
+fn kotlin_stdlib_jars_for(kotlinc_bin: &str, env_map: &BTreeMap<String, String>) -> Vec<String> {
+    let mut dirs = Vec::new();
+    if let Some(kh) = env_map.get("KOTLIN_HOME").filter(|s| !s.trim().is_empty()) {
+        dirs.push(Path::new(kh.trim().trim_end_matches('/')).join("lib"));
+    }
+    if let Some(lib) = Path::new(kotlinc_bin)
+        .parent()
+        .and_then(|b| b.parent())
+        .map(|home| home.join("lib"))
+    {
+        dirs.push(lib);
+    }
+    let mut jars = Vec::new();
+    for d in dirs {
+        for name in ["kotlin-stdlib.jar", "kotlin-reflect.jar"] {
+            let j = d.join(name);
+            if j.is_file() {
+                let s = j.to_string_lossy().into_owned();
+                if !jars.contains(&s) {
+                    jars.push(s);
+                }
+            }
+        }
+    }
+    jars
+}
+
+fn run_kotlinc(
+    kotlinc_bin: &str,
+    out_target: &Path,
+    cp: &str,
+    srcs: &[PathBuf],
+    include_runtime: bool,
+    env_map: &BTreeMap<String, String>,
+    logs: &mut Vec<String>,
+) -> Result<()> {
+    let mut cmd = Command::new(kotlinc_bin);
+    if include_runtime {
+        cmd.arg("-include-runtime");
+    }
+    cmd.arg("-d").arg(out_target);
+    if !cp.is_empty() {
+        cmd.arg("-cp").arg(cp);
+    }
+    for s in srcs {
+        cmd.arg(s);
+    }
+    let (status, combined) = run_build_tool(cmd, env_map, "kotlinc")?;
+    if !combined.trim().is_empty() {
+        logs.push(combined.trim().to_string());
+    }
+    if !status.success() {
+        return Err(Error::Invalid(format!(
+            "kotlinc compilation failed:\n{}",
+            first_lines(&combined)
+        )));
+    }
+    Ok(())
 }
 
 /// Whether `owner` (transitively) depends on a workspace module outside `reactor`.
@@ -702,10 +1335,15 @@ pub fn infer_java_fqcn_from_file(java_file: &Path) -> Option<String> {
     if simple.is_empty() {
         return None;
     }
-    let pkg = fs::read_to_string(java_file)
-        .ok()
-        .and_then(|src| {
-            src.lines().find_map(|line| {
+    let is_kt = java_file
+        .extension()
+        .and_then(|s| s.to_str())
+        .is_some_and(|e| e == "kt" || e == "kts");
+    let src = fs::read_to_string(java_file).ok();
+    let pkg = src
+        .as_deref()
+        .and_then(|s| {
+            s.lines().find_map(|line| {
                 let t = line.trim();
                 t.strip_prefix("package ")
                     .and_then(|rest| rest.split(';').next())
@@ -713,15 +1351,24 @@ pub fn infer_java_fqcn_from_file(java_file: &Path) -> Option<String> {
             })
         })
         .filter(|p| !p.is_empty());
+    let cls = if is_kt {
+        src.as_deref()
+            .map(|s| crate::dap::java_bridge::infer_kotlin_class_stem(simple, s))
+            .unwrap_or_else(|| simple.to_string())
+    } else {
+        simple.to_string()
+    };
     Some(match pkg {
-        Some(p) => format!("{p}.{simple}"),
-        None => simple.to_string(),
+        Some(p) => format!("{p}.{cls}"),
+        None => cls,
     })
 }
 
 fn main_method_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"\bpublic\s+static\s+void\s+main\s*\(").unwrap())
+    RE.get_or_init(|| {
+        Regex::new(r"(?:\bpublic\s+static\s+void\s+main\s*\(|\bfun\s+main\s*\()").unwrap()
+    })
 }
 
 fn resolve_main_class(
@@ -729,14 +1376,16 @@ fn resolve_main_class(
     target_file_or_dir: &Path,
     srcs: &[PathBuf],
 ) -> Result<String> {
-    if let Some(exp) = explicit
-        .map(str::trim)
-        .filter(|s| !s.is_empty() && !s.ends_with(".java") && !s.contains('/'))
-    {
+    if let Some(exp) = explicit.map(str::trim).filter(|s| {
+        !s.is_empty() && !s.ends_with(".java") && !s.ends_with(".kt") && !s.contains('/')
+    }) {
         return Ok(exp.to_string());
     }
     if target_file_or_dir.is_file()
-        && target_file_or_dir.extension().and_then(|s| s.to_str()) == Some("java")
+        && matches!(
+            target_file_or_dir.extension().and_then(|s| s.to_str()),
+            Some("java" | "kt" | "kts")
+        )
     {
         if let Some(fqcn) = infer_java_fqcn_from_file(target_file_or_dir) {
             return Ok(fqcn);
@@ -771,6 +1420,34 @@ pub fn collect_java_files_rec(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+fn collect_kotlin_files_rec(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(rd) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in rd.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            collect_kotlin_files_rec(&p, out);
+        } else if p.extension().and_then(|s| s.to_str()) == Some("kt") {
+            out.push(p);
+        }
+    }
+}
+
+fn collect_jvm_files_rec(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(rd) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in rd.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            collect_jvm_files_rec(&p, out);
+        } else if matches!(p.extension().and_then(|s| s.to_str()), Some("java" | "kt")) {
+            out.push(p);
+        }
+    }
+}
+
 fn collect_java_files_shallow(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(rd) = fs::read_dir(dir) else {
         return;
@@ -778,6 +1455,18 @@ fn collect_java_files_shallow(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in rd.flatten() {
         let p = entry.path();
         if p.is_file() && p.extension().and_then(|s| s.to_str()) == Some("java") {
+            out.push(p);
+        }
+    }
+}
+
+fn collect_kotlin_files_shallow(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(rd) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in rd.flatten() {
+        let p = entry.path();
+        if p.is_file() && p.extension().and_then(|s| s.to_str()) == Some("kt") {
             out.push(p);
         }
     }
@@ -935,12 +1624,13 @@ mod javac_process_tests {
         let (module, app) = maven_module(&root);
         let bin = root.join("bin");
         let seen = root.join("mvn-call");
-        // The fake mvn writes the classpath to -Dmdep.outputFile=… like the real plugin.
+        // The fake mvn writes the classpath to -Dmdep.outputFile=… and the scoped
+        // dependency list to -DoutputFile=… like the real plugin.
         fake_bin(
             &bin,
             "mvn",
             &format!(
-                r#"echo "$PWD $*" > {}; for a in "$@"; do case "$a" in -Dmdep.outputFile=*) printf '/m2/a.jar:/m2/b.jar' > "${{a#-Dmdep.outputFile=}}";; esac; done"#,
+                r#"echo "$PWD $*" > {}; for a in "$@"; do case "$a" in -Dmdep.outputFile=*) printf '/m2/a.jar:/m2/provided.jar:/m2/junit.jar' > "${{a#-Dmdep.outputFile=}}";; -DoutputFile=*) printf '%s\n' 'The following files have been resolved:' '   com.acme:a:jar:1:compile:/m2/a.jar' '   javax.servlet:provided:jar:4:provided:/m2/provided.jar' '   junit:junit:jar:4.13.2:test:/m2/junit.jar -- module junit [auto]' > "${{a#-DoutputFile=}}";; esac; done"#,
                 seen.display()
             ),
         );
@@ -962,13 +1652,11 @@ mod javac_process_tests {
         .unwrap();
         assert_eq!(plan.main_class, "com.acme.App");
         let t = |d: &str| module.join(d).to_string_lossy().into_owned();
+        // An app launch builds and runs main sources on every scope but test: provided
+        // stays (a WAR app's embedded server), test classes and test JARs never.
         assert_eq!(
             plan.classpath,
-            format!(
-                "{}:{}:/m2/a.jar:/m2/b.jar",
-                t("target/test-classes"),
-                t("target/classes")
-            )
+            format!("{}:/m2/a.jar:/m2/provided.jar", t("target/classes"))
         );
         assert!(
             !javac_hit.exists(),
@@ -977,12 +1665,41 @@ mod javac_process_tests {
         let call = fs::read_to_string(&seen).unwrap();
         assert!(
             call.starts_with(&format!(
-                "{} -pl svc -am -q -B test-compile dependency:build-classpath",
+                "{} -pl svc -am -q -B compile dependency:build-classpath dependency:list",
                 root.display()
             )),
             "built from the reactor root: {call}"
         );
         assert!(!call.contains("-Dmaven.repo.local"), "{call}");
+
+        // A test target runs on the test classpath, test classes first.
+        let test_dir = module.join("src/test/java/com/acme");
+        fs::create_dir_all(&test_dir).unwrap();
+        let test_src = test_dir.join("AppTest.java");
+        fs::write(&test_src, "package com.acme;\npublic class AppTest {}\n").unwrap();
+        let test_plan = prepare_java_execution(
+            &test_src,
+            None,
+            false,
+            std::slice::from_ref(&module),
+            &path_env(&bin),
+            &javac,
+            &root.join("out"),
+        )
+        .unwrap();
+        assert_eq!(
+            test_plan.classpath,
+            format!(
+                "{}:{}:/m2/a.jar:/m2/provided.jar:/m2/junit.jar",
+                t("target/test-classes"),
+                t("target/classes")
+            )
+        );
+        let call = fs::read_to_string(&seen).unwrap();
+        assert!(
+            call.contains(" -q -B test-compile dependency:build-classpath -Dmdep.outputFile="),
+            "{call}"
+        );
 
         // A run env that names the local repo hands it to Maven too.
         let mut env = path_env(&bin);
@@ -1046,6 +1763,75 @@ mod javac_process_tests {
             "tk's local sources are on the build: {:?}",
             plan.source_roots
         );
+    }
+
+    #[test]
+    fn the_javac_fallback_keeps_test_outputs_off_an_app_launch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let (module, app) = maven_module(&root);
+        fs::write(
+            module.join("pom.xml"),
+            "<project><groupId>com.acme</groupId><artifactId>svc</artifactId><version>1</version>\
+             <dependencies><dependency><groupId>com.acme</groupId><artifactId>tk</artifactId>\
+             <version>1</version></dependency></dependencies></project>",
+        )
+        .unwrap();
+        let tk = root.join("tk");
+        fs::create_dir_all(tk.join("src/main/java/com/acme/tk")).unwrap();
+        fs::write(
+            tk.join("pom.xml"),
+            "<project><groupId>com.acme</groupId><artifactId>tk</artifactId><version>1</version></project>",
+        )
+        .unwrap();
+        fs::write(
+            tk.join("src/main/java/com/acme/tk/G.java"),
+            "package com.acme.tk;\npublic class G {}\n",
+        )
+        .unwrap();
+        for d in [
+            module.join("src/main/resources"),
+            module.join("src/test/resources"),
+            module.join("target/test-classes"),
+            module.join("src/test/java/com/acme"),
+            tk.join("src/test/resources"),
+        ] {
+            fs::create_dir_all(d).unwrap();
+        }
+        let test_src = module.join("src/test/java/com/acme/AppTest.java");
+        fs::write(&test_src, "package com.acme;\npublic class AppTest {}\n").unwrap();
+        // No mvn on PATH: Otto's own javac builds the module.
+        let bin = root.join("bin");
+        let javac = fake_bin(&bin, "javac", "exit 0");
+        let plan = |target: &Path| {
+            prepare_java_execution(
+                target,
+                None,
+                false,
+                &[module.clone(), tk.clone()],
+                &path_env(&bin),
+                &javac,
+                &root.join("out"),
+            )
+            .unwrap()
+            .classpath
+        };
+        let app_cp = plan(&app);
+        assert!(app_cp.contains("svc/src/main/resources"), "{app_cp}");
+        for test_out in [
+            "svc/src/test/resources",
+            "svc/target/test-classes",
+            "tk/src/test/resources",
+        ] {
+            assert!(!app_cp.contains(test_out), "{test_out} on {app_cp}");
+        }
+        let test_cp = plan(&test_src);
+        assert!(
+            test_cp.contains("svc/src/test/resources")
+                && test_cp.contains("svc/target/test-classes"),
+            "{test_cp}"
+        );
+        assert!(!test_cp.contains("tk/src/test/resources"), "{test_cp}");
     }
 
     #[test]

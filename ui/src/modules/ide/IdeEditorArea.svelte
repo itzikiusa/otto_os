@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { projectSecurity } from './security/projectSecurity.svelte';
   import { onDestroy, untrack } from 'svelte';
   import CodeEditor, { registerIdeEditorCore } from '../../lib/components/CodeEditor.svelte';
   import type * as CmIdeDepsMod from '../../lib/components/cm-ide-deps';
@@ -29,12 +30,8 @@
   import { ideEditorDebugProps } from './editor/ideEditorDebugBridge';
   import { computeSplitRatioFromKey } from './editor/ideEditorHelpers';
   import { needsGitBaseRead, settledGitBaseDigest } from './editor/ideGitBaseDigest';
-  import { attachIdeEditorWindowEvents } from './editor/ideEditorWindowEvents';
   import { subscribeIdeBufferEvictions, subscribeIdeFileSaved } from './store/ideBufferPerf';
   import IdeTabBar from './editor/IdeTabBar.svelte';
-  import IdePreviewPane from './editor/IdePreviewPane.svelte';
-  import IdeDiskChangedBanner from './editor/IdeDiskChangedBanner.svelte';
-  import IdeTouchDebugBar from './editor/IdeTouchDebugBar.svelte';
   import {
     areIdeBreakpointsMuted, classifyIdeFile, evictPersistedIdeGitBase, fetchIdeGitBlame,
     flushAutoLocalHistorySnapshot, getIdeProjectFolders, getPersistedIdeGitBaseDigest,
@@ -43,15 +40,17 @@
     setPersistedIdeGitBase,
   } from './editor/ideEditorStoreBridge.svelte';
   import type { ideGit as IdeGitSingleton } from './git/ideGitController.svelte';
-  import { extractGutterHunks, findGutterHunkAtLine, resolveClickedDiffGutterLine, revertHunkInText, type IdeGutterHunk } from './git/ideGutterHunks';
+  import type { IdeGutterHunk } from './git/ideGutterHunks';
   import type { IdeOutlineNode } from './editor/ideLangAnalyzer';
   let langAnalyzerMod = $state<typeof import('./editor/ideLangAnalyzer') | null>(null);
+  let gutterHunksMod = $state<typeof import('./git/ideGutterHunks') | null>(null);
   let liveGit = $state<typeof IdeGitSingleton | null>(null);
   function fastDocKind(filePath: string, language?: string): string {
     const clean = filePath.split('?')[0].toLowerCase();
     const base = clean.slice(clean.lastIndexOf('/') + 1);
     const dot = base.lastIndexOf('.');
     const ext = dot >= 0 ? base.slice(dot + 1) : '';
+    if (ext === 'ipynb' || language === 'notebook') return 'notebook';
     if (ext === 'csv' || ext === 'tsv' || language === 'csv' || language === 'tsv') return 'csv';
     if (ext === 'jsonl' || ext === 'ndjson' || language === 'jsonl') return 'jsonl';
     if (ext === 'json' || ext === 'jsonc' || language === 'json') return 'json';
@@ -65,6 +64,7 @@
   IdeEditorSubbarLazy.prefetch();
   const IdeInlinePromptBarLazy = lazyComponent(() => import('./IdeInlinePromptBar.svelte'));
   const IdeCsvViewLazy = lazyComponent(() => import('./editor/IdeCsvView.svelte'));
+  const IdeNotebookViewLazy = lazyComponent(() => import('./editor/IdeNotebookView.svelte'));
   const IdeBreakpointPopoverLazy = lazyComponent(() => import('./editor/IdeBreakpointPopover.svelte'));
   const IdeFileStructureModalLazy = lazyComponent(() => import('./editor/IdeFileStructureModal.svelte'));
   const IdeRenameModalLazy = lazyComponent(() => import('./editor/IdeRenameModal.svelte'));
@@ -73,6 +73,10 @@
   const IdeClipboardHistoryModalLazy = lazyComponent(() => import('./editor/IdeClipboardHistoryModal.svelte'));
   const IdeGitHunkPopoverLazy = lazyComponent(() => import('./editor/IdeGitHunkPopover.svelte'));
   const IdeMarkdownBarLazy = lazyComponent(() => import('./editor/IdeMarkdownBar.svelte'));
+  const IdePreviewPaneLazy = lazyComponent(() => import('./editor/IdePreviewPane.svelte'));
+  const IdeDiskChangedBannerLazy = lazyComponent(() => import('./editor/IdeDiskChangedBanner.svelte'));
+  const IdeLspTrustNoticeLazy = lazyComponent(() => import('./editor/IdeLspTrustNotice.svelte'));
+  const IdeTouchDebugBarLazy = lazyComponent(() => import('./editor/IdeTouchDebugBar.svelte'));
 
   const SPLIT_RATIO_KEY = 'otto.ide.splitRatio.v1';
   function readSavedSplitRatio(): number {
@@ -161,6 +165,7 @@
     const cur = ide.activeTab;
     if (!cur) { stagedPrimaryTab = null; return; }
     if (!langAnalyzerMod) void import('./editor/ideLangAnalyzer').then((m) => { langAnalyzerMod = m; });
+    if (!gutterHunksMod) void import('./git/ideGutterHunks').then((m) => { gutterHunksMod = m; });
     if (!liveGit) void import('./git/ideGitController.svelte').then((m) => { liveGit = m.ideGit; });
     if (!cur.loading && !cur.error && histReady) { stagedPrimaryTab = cur; everMountedEditor = true; }
     else if (stagedPrimaryTab && !ide.tabs.some((t) => t.path === stagedPrimaryTab?.path)) stagedPrimaryTab = null;
@@ -194,15 +199,23 @@
     if (liveGit) liveGit.syncExternalRepoChanges();
   });
 
-  $effect(() => attachIdeEditorWindowEvents({
-    onPrefsChanged: () => { prefs = readIdePreferences(); },
-    onOpenClipboardHistory: () => { clipboardModalOpen = true; },
-    getPrimaryPath: () => stagedPrimaryTab?.path ?? null,
-    getSplitPath: () => stagedSplitTab?.path ?? null,
-    applyQuickFixEdits: (pane, edits) => (pane === 'primary' ? primaryEditorRef : splitEditorRef)?.applyQuickFixEdits?.(edits),
-    reconnectLspClients: (rootPath) => { primaryEditorRef?.reconnectLspClients?.(rootPath); splitEditorRef?.reconnectLspClients?.(rootPath); },
-    refreshGitBase: (tab) => refreshGitBaseForTab(tab, true),
-  }));
+  $effect(() => {
+    let dead = false;
+    let stop: (() => void) | null = null;
+    void import('./editor/ideEditorWindowEvents').then((m) => {
+      if (dead) return;
+      stop = m.attachIdeEditorWindowEvents({
+        onPrefsChanged: () => { prefs = readIdePreferences(); },
+        onOpenClipboardHistory: () => { clipboardModalOpen = true; },
+        getPrimaryPath: () => stagedPrimaryTab?.path ?? null,
+        getSplitPath: () => stagedSplitTab?.path ?? null,
+        applyQuickFixEdits: (pane, edits) => (pane === 'primary' ? primaryEditorRef : splitEditorRef)?.applyQuickFixEdits?.(edits),
+        reconnectLspClients: (rootPath) => { primaryEditorRef?.reconnectLspClients?.(rootPath); splitEditorRef?.reconnectLspClients?.(rootPath); },
+        refreshGitBase: (tab) => refreshGitBaseForTab(tab, true),
+      });
+    });
+    return () => { dead = true; stop?.(); };
+  });
 
   function disposeAllPooledLsp(): void {
     primaryEditorRef?.disposeLspClients?.();
@@ -226,11 +239,12 @@
     }
     if (pathList === 'all') {
       for (const ctl of gitBaseCtlByPath.values()) ctl.abort();
-      gitBaseCtlByPath.clear(); evictPersistedIdeGitBase('all'); gitBaseByPath = {};
+      gitBaseCtlByPath.clear(); evictPersistedIdeGitBase('all'); idePreviewMode.forgetRendered('all'); gitBaseByPath = {};
       blameEnabledByPath = {}; blameByPath = {}; manifestModeByPath = {}; manifestDepsByPath = {};
       bpEditor = null; intentionState = null; hunkPopover = null; disposeAllPooledLsp(); return;
     }
     evictPersistedIdeGitBase(pathList);
+    idePreviewMode.forgetRendered(pathList);
     const nextBlame = { ...blameByPath }, nextBlameOn = { ...blameEnabledByPath }, nextGitBase = { ...gitBaseByPath };
     const nextManMode = { ...manifestModeByPath }, nextManDeps = { ...manifestDepsByPath };
     for (const p of pathList) {
@@ -270,9 +284,12 @@
   const activeIsManifest = $derived(ide.activeTab ? isIdeManifestPath(ide.activeTab.path) : false);
   const effectiveManifestMode = $derived(ide.activeTab ? (manifestModeByPath[ide.activeTab.path] ?? 'text') : 'text');
   const activeFileMeta = $derived(ide.activeTab ? classifyIdeFile(ide.activeTab, ide.target.root, projectFolders.slice(1)) : { external: false, sdkLabel: null });
-  const effectiveViewMode = $derived.by((): 'table' | 'text' => {
+  const effectiveViewMode = $derived.by((): 'table' | 'notebook' | 'text' => {
     const t = ide.activeTab;
-    return t && idePreviewMode.layoutFor(t.path) === 'table' ? 'table' : 'text';
+    const layout = t ? idePreviewMode.layoutFor(t.path) : 'none';
+    if (layout === 'table') return 'table';
+    if (layout === 'notebook') return 'notebook';
+    return 'text';
   });
   const effectiveSymbols = $derived.by((): IdeSymbolNode[] => {
     const t = ide.activeTab;
@@ -287,17 +304,19 @@
   );
   const pathSegments = $derived(ide.activeTab ? ide.relativePath(ide.activeTab.path).split('/').filter(Boolean) : []);
   const diffBaseFor = (t: IdeOpenTab): string | null => (gitBaseByPath[t.path] !== undefined ? (gitBaseByPath[t.path] ?? null) : t.savedContent);
-  const activeGitHunks = $derived(ide.activeTab ? extractGutterHunks(diffBaseFor(ide.activeTab), ide.activeTab.content, ide.relativePath(ide.activeTab.path)) : []);
-  const activeCursorHunk = $derived(findGutterHunkAtLine(activeGitHunks, ide.cursorInfo.line));
+  const activeGitHunks = $derived(ide.activeTab && gutterHunksMod ? gutterHunksMod.extractGutterHunks(diffBaseFor(ide.activeTab), ide.activeTab.content, ide.relativePath(ide.activeTab.path)) : []);
+  const activeCursorHunk = $derived(gutterHunksMod ? gutterHunksMod.findGutterHunkAtLine(activeGitHunks, ide.cursorInfo.line) : null);
 
   $effect(() => {
     const el = panesEl;
     if (!el) return;
     const onDown = (e: MouseEvent): void => {
-      const ln = resolveClickedDiffGutterLine(e);
+      const gh = gutterHunksMod;
+      if (!gh) return;
+      const ln = gh.resolveClickedDiffGutterLine(e);
       if (ln == null) return;
       const tab = e.target instanceof Element && e.target.closest('.split-secondary') ? stagedSplitTab : stagedPrimaryTab;
-      const hit = tab ? findGutterHunkAtLine(extractGutterHunks(diffBaseFor(tab), tab.content, ide.relativePath(tab.path)), ln) : null;
+      const hit = tab ? gh.findGutterHunkAtLine(gh.extractGutterHunks(diffBaseFor(tab), tab.content, ide.relativePath(tab.path)), ln) : null;
       if (!tab || !hit) return;
       e.preventDefault(); e.stopPropagation();
       hunkPopover = { path: tab.path, hunkIndex: hit.index, x: e.clientX, y: e.clientY };
@@ -319,6 +338,7 @@
       lspRenameEdits: (line, column, newName) => ref.lspRenameEdits?.(line, column, newName) ?? Promise.resolve(null),
       lspReferences: (line, column) => ref.lspReferences?.(line, column) ?? Promise.resolve(null),
       lspQuickFixes: (line) => ref.lspQuickFixes?.(line) ?? Promise.resolve(null),
+      lspSwitchSourceHeader: () => ref.lspSwitchSourceHeader?.() ?? Promise.resolve(null),
     };
     return h;
   }
@@ -452,7 +472,8 @@
     {/if}
 
     {#if ideAgent.inlinePrompt?.open}<LazyMount lazy={IdeInlinePromptBarLazy} what="inline prompt" variant="compact" />{/if}
-    <IdeDiskChangedBanner tab={activeTab} />
+    <LazyMount lazy={IdeDiskChangedBannerLazy} what="disk change notice" quiet props={{ tab: activeTab }} />
+    <LazyMount lazy={IdeLspTrustNoticeLazy} what="language server trust notice" quiet props={{ tab: activeTab }} />
     {#if idePreviewMode.kindOf(activeTab.path) === 'markdown' && idePreviewMode.layoutFor(activeTab.path) !== 'only' && !activeTab.readOnly}<LazyMount lazy={IdeMarkdownBarLazy} what="the Markdown toolbar" variant="compact" />{/if}
 
     <div class="ide-panes" class:split-down={ide.splitDirection === 'down'} bind:this={panesEl}>
@@ -472,6 +493,18 @@
               onfilewritten: () => reloadTabFromDisk(stagedPrimaryTab!.path),
               onjumplocation: (loc: { path: string; line: number; column: number }) => { void performIdeDive('definition', stagedPrimaryTab!.path, loc, stagedPrimaryTab!.content); },
               onswitchtext: (ln: number) => { manifestModeByPath = { ...manifestModeByPath, [stagedPrimaryTab!.path]: 'text' }; requestAnimationFrame(() => primaryEditorRef?.goToLine(ln, 1)); },
+            }}
+          />
+        {:else if effectiveViewMode === 'notebook' && activeDocKind === 'notebook' && stagedPrimaryTab.path === activeTab.path}
+          <LazyMount
+            lazy={IdeNotebookViewLazy}
+            what="notebook editor"
+            variant="panel"
+            props={{
+              path: stagedPrimaryTab.path, content: stagedPrimaryTab.content,
+              readOnly: stagedPrimaryTab.readOnly || !ide.canEditCollab,
+              onchange: (targetPath: string, val: string) => { ide.updateBuffer(targetPath, val); },
+              onswitchtext: (targetPath: string) => { idePreviewMode.set(targetPath, 'source'); },
             }}
           />
         {:else if effectiveViewMode === 'table' && (activeDocKind === 'csv' || activeDocKind === 'jsonl') && stagedPrimaryTab.path === activeTab.path}
@@ -530,6 +563,7 @@
             onQuickFix={(ctx) => openIntentionPopoverAt(pTab.path, ctx.line, ctx.column, { x: ctx.clientX, y: ctx.clientY, symbol: ctx.symbol })}
             onRenameSymbol={(ctx) => void ide.openRenameModal(pTab.path, ctx.line, ctx.column, ctx.symbol, ctx.newName)}
             onFormat={() => void ide.formatActiveFile()}
+            securityFindings={projectSecurity.problems.filter((item) => item.path === pTab.path)}
             onDiagnostics={(diags) => ide.setDiagnostics(pTab.path, diags)}
             onAgentAction={(mode, sel) => {
               if (mode === 'inline') ideAgent.openInlineEdit({ path: pTab.path, ...sel });
@@ -538,8 +572,10 @@
           />
         {/if}
 
-        {#if stagedPrimaryTab?.path === activeTab.path}<IdePreviewPane tab={stagedPrimaryTab} />{/if}
-        <IdeTouchDebugBar />
+        {#if stagedPrimaryTab?.path === activeTab.path && (idePreviewMode.layoutFor(stagedPrimaryTab.path) === 'split' || idePreviewMode.layoutFor(stagedPrimaryTab.path) === 'only')}
+          <LazyMount lazy={IdePreviewPaneLazy} what="preview" variant="panel" props={{ tab: stagedPrimaryTab }} />
+        {/if}
+        {#if ide.activeDebug}<LazyMount lazy={IdeTouchDebugBarLazy} what="debugger controls" quiet />{/if}
         {#if activeIsManifest}
           <div class="ide-manifest-tabs" role="group" aria-label="Manifest editor mode" data-testid="ide-dep-mode-switcher">
             <button type="button" class="ide-man-tab" class:active={effectiveManifestMode === 'text'} aria-pressed={effectiveManifestMode === 'text'} onclick={() => (manifestModeByPath = { ...manifestModeByPath, [activeTab.path]: 'text' })}>Text</button>
@@ -572,7 +608,7 @@
             <span class="split-title">{ide.relativePath(splitTab.path)}</span>
             <button type="button" class="icon-btn" aria-label="Close split pane" title="Close split pane" onclick={() => ide.closeSplit()}><Icon name="x" size={12} /></button>
           </div>
-          {#if splitTab.path !== activeTab.path}<IdeDiskChangedBanner tab={splitTab} watch={false} />{/if}
+          {#if splitTab.path !== activeTab.path}<LazyMount lazy={IdeDiskChangedBannerLazy} what="disk change notice" quiet props={{ tab: splitTab, watch: false }} />{/if}
           <div class="split-body">
             {#if splitTab.error || !stagedSplitTab}
               <LoadState what={splitTab.name} variant="panel" loading={splitTab.loading} error={splitTab.error} empty={!stagedSplitTab} onretry={() => void ide.openFile(splitTab.path, { inSplit: true })} />
@@ -605,6 +641,7 @@
                 onQuickFix={(ctx) => openIntentionPopoverAt(sTab.path, ctx.line, ctx.column, { x: ctx.clientX, y: ctx.clientY, symbol: ctx.symbol })}
                 onRenameSymbol={(ctx) => void ide.openRenameModal(sTab.path, ctx.line, ctx.column, ctx.symbol, ctx.newName)}
                 onFormat={() => void ide.formatActiveFile(sTab.path)}
+                securityFindings={projectSecurity.problems.filter((item) => item.path === sTab.path)}
                 onDiagnostics={(diags) => ide.setDiagnostics(sTab.path, diags)}
                 onAgentAction={(mode, sel) => {
                   if (mode === 'inline') ideAgent.openInlineEdit({ path: sTab.path, ...sel });
@@ -678,7 +715,7 @@
 {#if hunkPopover}
   {@const hTab = ide.tabs.find((t) => t.path === hunkPopover?.path)}
   {@const hBase = hTab ? diffBaseFor(hTab) : null}
-  {@const hList = hTab && hBase != null ? extractGutterHunks(hBase, hTab.content, ide.relativePath(hTab.path)) : []}
+  {@const hList = hTab && hBase != null && gutterHunksMod ? gutterHunksMod.extractGutterHunks(hBase, hTab.content, ide.relativePath(hTab.path)) : []}
   {@const hRef = hunkPopover.path !== stagedPrimaryTab?.path && hunkPopover.path === stagedSplitTab?.path ? splitEditorRef : primaryEditorRef}
   {#if hTab && hBase != null && hList.length > 0}
     <LazyMount lazy={IdeGitHunkPopoverLazy} what="git hunk details" quiet onerror={() => (hunkPopover = null)} props={{
@@ -689,7 +726,8 @@
         if (nextH) hRef?.goToLine(nextH.anchorLine, 1);
       },
       onrevert: (h: IdeGutterHunk) => {
-        const nextText = revertHunkInText(hBase, hTab.content, h.index);
+        if (!gutterHunksMod) return;
+        const nextText = gutterHunksMod.revertHunkInText(hBase, hTab.content, h.index);
         if (nextText !== hTab.content && !hRef?.replaceBufferContent?.(nextText)) ide.updateBuffer(hTab.path, nextText);
       },
       onaskagent: (h: IdeGutterHunk) => {
@@ -708,7 +746,7 @@
       open: structureOpen, fileName: ide.activeTab?.name ?? '', symbols: effectiveSymbols, currentLine: ide.cursorInfo.line,
       onjump: (line: number, col: number) => {
         if (ide.activePath) pushIdeNavLocation(ide.activePath, ide.cursorInfo.line, ide.cursorInfo.col);
-        if (effectiveViewMode === 'table' && ide.activePath) idePreviewMode.set(ide.activePath, 'source');
+        if ((effectiveViewMode === 'table' || effectiveViewMode === 'notebook') && ide.activePath) idePreviewMode.set(ide.activePath, 'source');
         requestAnimationFrame(() => primaryEditorRef?.goToLine(line, col));
       },
       onclose: () => (structureOpen = false),

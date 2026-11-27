@@ -174,9 +174,21 @@ export type IdeRunnerKind =
   | 'zig_build'
   | 'zig_run'
   | 'zig_test'
+  | 'cmake'
+  | 'ctest'
+  | 'cpp_run'
+  | 'make'
+  | 'meson'
+  | 'unreal'
+  | 'dotnet_build'
+  | 'dotnet_run'
+  | 'dotnet_test'
   | 'node'
   | 'npm'
   | 'vitest'
+  | 'jest'
+  | 'playwright'
+  | 'karma'
   | 'pytest'
   | 'python'
   | 'shell'
@@ -216,9 +228,12 @@ export interface IdeGutterResp {
 
 export type IdeEcosystem =
   | 'java'
+  | 'kotlin'
   | 'go'
   | 'rust'
   | 'zig'
+  | 'cpp'
+  | 'dotnet'
   | 'node'
   | 'python'
   | 'shell'
@@ -400,9 +415,12 @@ export interface IdeNetBridgeStatusResp {
 
 export interface IdeProjectEnvironment {
   java_home?: string | null;
+  kotlin_home?: string | null;
   go_root?: string | null;
   rust_toolchain?: string | null;
   zig_home?: string | null;
+  cpp_toolchain?: string | null;
+  dotnet_root?: string | null;
   node_home?: string | null;
   python_interpreter?: string | null;
   android_home?: string | null;
@@ -464,6 +482,13 @@ export interface IdeRunConfig {
   coverage?: boolean;
 }
 
+export interface IdeMlAcceleratorInfo {
+  kind: 'mps' | 'cuda' | 'rocm' | string;
+  name: string;
+  memory_mb?: number | null;
+  available: boolean;
+}
+
 export interface IdeEnvironmentsResp {
   env: IdeProjectEnvironment;
   python_venvs: IdePythonVenv[];
@@ -471,6 +496,48 @@ export interface IdeEnvironmentsResp {
   configs: IdeRunConfig[];
   detected_configs?: IdeRunConfig[];
   effective_env?: Record<string, string>;
+  accelerators?: IdeMlAcceleratorInfo[];
+}
+
+export interface IdeNotebookKernelInfo {
+  id: string;
+  display_name: string;
+  language: string;
+  interpreter: string;
+  kind: 'venv' | 'uv' | 'conda' | 'poetry' | 'system' | string;
+  version?: string | null;
+  active: boolean;
+}
+
+export interface IdeNotebookVariable {
+  name: string;
+  var_type: string;
+  shape?: string | null;
+  preview: string;
+}
+
+export interface IdeNotebookKernelsResp {
+  kernels: IdeNotebookKernelInfo[];
+  accelerators: IdeMlAcceleratorInfo[];
+  active_session_id?: string | null;
+  active_interpreter?: string | null;
+  execution_count?: number;
+}
+
+export interface IdeNotebookExecuteResp {
+  session_id: string;
+  interpreter: string;
+  execution_count: number;
+  status: 'ok' | 'error' | string;
+  elapsed_ms: number;
+  outputs: Record<string, unknown>[];
+  variables: IdeNotebookVariable[];
+}
+
+export interface IdeNotebookVariablesResp {
+  session_id?: string | null;
+  execution_count?: number;
+  variables: IdeNotebookVariable[];
 }
 
 export interface IdeUpdateEnvironmentReq extends IdeProjectEnvironment {
@@ -545,7 +612,7 @@ export interface IdeRunResp {
 
 // ── DAP Debugger Engine ──────────────────────────────────────────────────────
 
-export type IdeDebugLanguage = 'go' | 'java' | 'rust' | 'zig' | 'javascript' | 'typescript' | 'python' | 'shell' | string;
+export type IdeDebugLanguage = 'go' | 'java' | 'kotlin' | 'rust' | 'zig' | 'cpp' | 'c' | 'csharp' | 'fsharp' | 'javascript' | 'typescript' | 'python' | 'shell' | string;
 
 export interface IdeBreakpoint {
   path: string;
@@ -564,7 +631,11 @@ export interface IdeDebugLaunch {
   build_flags?: string[];
   cwd?: string | null;
   test_name?: string | null;
+  is_test?: boolean;
   attach_port?: number | null;
+  attach_pid?: number | null;
+  attach_process_name?: string | null;
+  core_file?: string | null;
   env?: Record<string, string>;
   env_file?: string | null;
   inherit_shell_env?: boolean;
@@ -693,6 +764,7 @@ export interface IdeDebugSessionSnapshot {
   error?: string | null;
   /** Next-step class of a start failure next to `error`. */
   error_kind?: 'adapter_missing' | 'toolchain_missing' | 'build_failed' | null;
+  supports_set_variable?: boolean;
   /** Toolchain ecosystem of that failure (`go`, `python`, `rust`, `java`, `node`, `shell`). */
   error_ecosystem?: string | null;
   /** Root of the IDE target the session was launched from. */

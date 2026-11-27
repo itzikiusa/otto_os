@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   ago, attentionWord, childWord, deliverableWord, deliverablesInOrder, errorParts, fromHistory, inboxFolds, orbitTime, ordinal, retentionNote, runContext, runLine3, runTitle, runWord,
-  stepDuration, stepWord, subLine, type InboxRun,
+  stepDuration, stepWord, subLine, summarizerWaitWord, waitingThreadLabel, type InboxRun,
 } from '../src/modules/workflows/runs/runWords.ts';
 import type { RunOverview, RunState } from '../src/lib/api/types';
 import { at, node, T0 } from './workflowRunFixtures.ts';
@@ -175,4 +175,14 @@ test('the ring centre time labels elapsed duration unmistakably per state', () =
     assert.deepEqual(orbitTime(state, '14m'), { label: 'Took 14m', sub: 'total' }, state);
   }
   assert.deepEqual(orbitTime('unknown', '2m'), { label: 'Elapsed 2m', sub: 'elapsed' });
+});
+
+test('waitingThreadLabel and summarizerWaitWord name threads and reviewer counts concisely', () => {
+  assert.equal(waitingThreadLabel({ label: 'Correctness', provider: 'codex', startedAt: at(8) }, NOW), 'Correctness · codex · 4m');
+  assert.equal(waitingThreadLabel({ label: 'Security · Claude', provider: 'claude', startedAt: at(10) }, NOW), 'Security · Claude · 2m');
+  assert.equal(waitingThreadLabel({ label: 'Run tests', provider: '' }, NOW), 'Run tests');
+  assert.equal(summarizerWaitWord(3, 0), 'After 3 running');
+  assert.equal(summarizerWaitWord(2, 1), 'After 2 running, 1 queued');
+  assert.equal(summarizerWaitWord(0, 4), 'After 4 queued');
+  assert.equal(summarizerWaitWord(0, 0), undefined);
 });

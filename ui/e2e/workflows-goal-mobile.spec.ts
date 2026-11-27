@@ -5,7 +5,7 @@
 import { test, expect } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
 import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
-import { GOAL_RUN, GOAL_WF, serveGoalRun } from './fixtures/goalRun';
+import { GOAL_RUN, GOAL_WF, MULTI_LOOP_RUN, MULTI_LOOP_WF, serveGoalRun, serveMultiLoopGoalRun } from './fixtures/goalRun';
 
 // Once sw.js claims the page its fetches bypass `page.route`, and the run
 // served below never reaches the run page.
@@ -41,5 +41,18 @@ test('Extend and resume from the hold card, the sheet inside the viewport', asyn
   await expectFullyInViewport(page, go);
   await go.tap();
   await expect.poll(() => writes.map((w) => w.path)).toEqual([`/workflow-runs/${GOAL_RUN}/resume`]);
+  await expectNoHorizontalOverflow(page);
+});
+
+test('loop rounds and waiting-thread links fit inside a phone viewport without horizontal overflow', async ({ page }) => {
+  const { ctx, base } = await apiCtx();
+  const ws = await seedWorkspace(ctx, base);
+  await ctx.dispose();
+  await page.addInitScript((ws) => localStorage.setItem('otto_workspace', ws), ws);
+  await serveMultiLoopGoalRun(page, ws);
+  await page.goto(`/#/workflows/${MULTI_LOOP_WF}/runs/${MULTI_LOOP_RUN}`);
+  await expect(page.getByTestId('wf-run-page')).toHaveAttribute('data-state', 'running');
+  await expect(page.locator('[data-testid="wf-loop-rounds"][data-loop-id="ui"] [data-testid="wf-loop-round"]')).toHaveCount(3);
+  await expect(page.getByTestId('wf-step-waiting').first()).toContainText('Security · Claude');
   await expectNoHorizontalOverflow(page);
 });

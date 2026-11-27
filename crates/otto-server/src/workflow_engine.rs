@@ -19,6 +19,7 @@
 //! `RUN_WALL_CLOCK_TIMEOUT` before re-adding anything like it.
 //! `workflow_node_cache` is a dormant table.
 
+#[cfg(test)]
 use otto_review::engine::checks_review_agent;
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
@@ -399,6 +400,7 @@ enum ProgressItem {
     },
     Status(String),
     Post(String),
+    Flush(tokio::sync::oneshot::Sender<()>),
 }
 
 /// Cap on an attached step file — a runaway reply shouldn't turn into a
@@ -416,6 +418,7 @@ const PROGRESS_FILE_CAP: usize = 1024 * 1024;
 struct ProgressSink {
     tx: Option<tokio::sync::mpsc::UnboundedSender<ProgressItem>>,
     live: bool,
+    target: Option<(Channel, String, Option<String>)>,
 }
 
 impl ProgressSink {
@@ -423,6 +426,7 @@ impl ProgressSink {
         Self {
             tx: None,
             live: false,
+            target: None,
         }
     }
     fn send(&self, item: ProgressItem) {
@@ -483,6 +487,31 @@ impl ProgressSink {
     fn enabled(&self) -> bool {
         self.tx.is_some()
     }
+    fn targets(&self, channel: Channel, chat: &str, thread: Option<&str>) -> bool {
+        let Some((ch, c, th)) = &self.target else {
+            return false;
+        };
+        let norm_thread = thread.map(str::trim).filter(|s| !s.is_empty());
+        *ch == channel && c == chat.trim() && th.as_deref() == norm_thread
+    }
+    /// Wait until every item queued ahead of this call has been processed by
+    /// the pump (no-op when disabled, after the pump exits, or when the
+    /// destination differs from the pump's own channel/chat/thread).
+    /// Guarantees posted `per_step` lines, completed step uploads, and any
+    /// already-sent live card precede a direct send; retains the 3 s live edit
+    /// coalescer rather than forcing an unthrottled edit.
+    async fn flush_for(&self, channel: Channel, chat: &str, thread: Option<&str>) {
+        if !self.targets(channel, chat, thread) {
+            return;
+        }
+        let Some(tx) = &self.tx else {
+            return;
+        };
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        if tx.send(ProgressItem::Flush(done_tx)).is_ok() {
+            let _ = done_rx.await;
+        }
+    }
 }
 
 /// Spawn the progress pump: a single task that owns the receiver and the run's
@@ -497,6 +526,16 @@ fn spawn_progress_pump(
     target: ChatTarget,
     style: otto_workflows::chat_status::ChatUpdates,
 ) -> (ProgressSink, tokio::task::JoinHandle<()>) {
+    let dest = (
+        target.channel,
+        target.chat.trim().to_string(),
+        target
+            .thread
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+    );
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ProgressItem>();
     let redact = |s: &str| otto_core::redact::redact_text(s).value;
     let handle = tokio::spawn(async move {
@@ -543,6 +582,9 @@ fn spawn_progress_pump(
                         run::chat::persist(&ctx, &run_id, &thread).await;
                     }
                 }
+                ProgressItem::Flush(done) => {
+                    let _ = done.send(());
+                }
             }
         }
         if thread.flush().await {
@@ -550,7 +592,14 @@ fn spawn_progress_pump(
         }
     });
     let live = style == otto_workflows::chat_status::ChatUpdates::Live;
-    (ProgressSink { tx: Some(tx), live }, handle)
+    (
+        ProgressSink {
+            tx: Some(tx),
+            live,
+            target: Some(dest),
+        },
+        handle,
+    )
 }
 
 /// Prepend each resolved skill (body + references) ahead of `base`, in the same
@@ -1803,7 +1852,11 @@ async fn deliver_run_result(
     let (mut brief, full) = build_run_summary(workflow, states, status);
     // Live style (§9.2): the final post says what was delivered, in words.
     if run::chat::style(workflow, input) == otto_workflows::chat_status::ChatUpdates::Live {
-        if let Ok(run) = WorkflowsRepo::new(ctx.pool.clone()).get_run(run_id).await {
+        let repo = WorkflowsRepo::new(ctx.pool.clone());
+        if let Ok(mut run) = repo.get_run(run_id).await {
+            if otto_workflows::goal_progress::has_goal_checks(&workflow.graph) {
+                run.checkpoints = repo.checkpoints(run_id).await.unwrap_or_default();
+            }
             let ov = otto_workflows::overview::run_overview(
                 &run,
                 &workflow.graph,
@@ -2764,6 +2817,64 @@ mod event_wait_tests {
         let started = tokio::time::Instant::now();
         wake_on_event(&mut rx, |ev| is_gate_decision(ev, "r", "gate"), soon).await;
         assert!(started.elapsed() >= Duration::from_millis(45));
+    }
+}
+
+#[cfg(test)]
+mod progress_flush_tests {
+    use super::*;
+
+    /// PERF-2: flushing for a different channel, chat, or thread must return
+    /// immediately without waiting behind an unrelated stalled progress pump;
+    /// flushing for the pump's own destination must wait for the Flush barrier.
+    #[tokio::test]
+    async fn flush_for_skips_unrelated_destinations_and_waits_for_matching_one() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sink = ProgressSink {
+            tx: Some(tx),
+            live: false,
+            target: Some((Channel::Slack, "C1".into(), Some("T1".into()))),
+        };
+        // Different channel, different chat, different thread: none enqueue a Flush.
+        for (ch, chat, thread) in [
+            (Channel::Telegram, "TG1", None),
+            (Channel::Slack, "C2", Some("T1")),
+            (Channel::Slack, "C1", None),
+            (Channel::Slack, "C1", Some("T2")),
+        ] {
+            tokio::time::timeout(Duration::from_millis(100), sink.flush_for(ch, chat, thread))
+                .await
+                .expect("unrelated destination must not block behind the pump");
+            assert!(
+                rx.try_recv().is_err(),
+                "no Flush barrier queued for {ch:?}/{chat}/{thread:?}"
+            );
+        }
+        // Matching destination (modulo surrounding whitespace) waits until the pump signals done.
+        let sink_clone = sink.clone();
+        let waiter = tokio::spawn(async move {
+            sink_clone
+                .flush_for(Channel::Slack, " C1 ", Some(" T1 "))
+                .await;
+        });
+        let item = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("Flush barrier enqueued")
+            .expect("channel open");
+        assert!(
+            !waiter.is_finished(),
+            "must wait until pump acknowledges Flush"
+        );
+        match item {
+            ProgressItem::Flush(done) => {
+                let _ = done.send(());
+            }
+            _ => panic!("expected ProgressItem::Flush"),
+        }
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("waiter woke after ack")
+            .unwrap();
     }
 }
 

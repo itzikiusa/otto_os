@@ -2,6 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { keptSessions, paneTabs, phaseSegments } from '../src/modules/workflows/runs/stepTabs.ts';
+import { stepErrorDisplay } from '../src/modules/workflows/runs/runWords.ts';
 import { at, node, T0 } from './workflowRunFixtures.ts';
 
 test('each kind of step opens on its own first tab', () => {
@@ -41,4 +42,34 @@ test('an older step offers only the terminal sessions that still exist, and says
   // Not checked yet: no action, and no verdict either.
   assert.deepEqual(keptSessions(['s1', 's2'], { s1: false }), { open: [], gone: false });
   assert.deepEqual(keptSessions([], {}), { open: [], gone: false });
+});
+
+test('stepErrorDisplay collapses multi-sentence and multi-line diagnostics behind a disclosure on retained thread tabs (FE-1)', () => {
+  const multiSentence = 'upstream: Provider returned 500. Full trace line 1\nline 2\nline 3';
+  assert.deepEqual(stepErrorDisplay(multiSentence, true), {
+    title: 'Provider returned 500.',
+    body: 'Full trace line 1\nline 2\nline 3',
+    collapseBody: true,
+  });
+  // On non-thread tabs (where the outer column scrolls freely), detail stays inline.
+  assert.deepEqual(stepErrorDisplay(multiSentence, false), {
+    title: 'Provider returned 500.',
+    body: 'Full trace line 1\nline 2\nline 3',
+    collapseBody: false,
+  });
+
+  // A multi-line provider diagnostic without sentence punctuation still splits after line 1 on retained thread tabs.
+  const multiLineNoDot = 'upstream: API Error: 500\nrequest_id=abc\nstack line 1\nstack line 2';
+  assert.deepEqual(stepErrorDisplay(multiLineNoDot, true), {
+    title: 'API Error: 500',
+    body: 'request_id=abc\nstack line 1\nstack line 2',
+    collapseBody: true,
+  });
+
+  // Short one-line errors have no disclosure body.
+  assert.deepEqual(stepErrorDisplay('upstream: Not logged in', true), {
+    title: 'Not logged in',
+    body: '',
+    collapseBody: false,
+  });
 });

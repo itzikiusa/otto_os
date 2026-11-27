@@ -217,7 +217,11 @@ fn extract_strict_doc_comment(lang: &str, lines: &[&str], idx: usize) -> Option<
     let mut cur = idx;
     while cur > 0 {
         let prev = lines[cur - 1].trim();
-        if prev.starts_with('@') || prev.starts_with("#[") || prev.starts_with("//go:") {
+        if prev.starts_with('@')
+            || prev.starts_with("#[")
+            || prev.starts_with("//go:")
+            || (matches!(lang, "csharp" | "fsharp") && prev.starts_with('['))
+        {
             cur -= 1;
         } else {
             break;

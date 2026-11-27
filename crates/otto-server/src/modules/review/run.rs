@@ -4,22 +4,28 @@
 use super::*;
 
 /// Load ReviewConfig from settings or fall back to the default. The default
-/// config's reviewer agents follow the global default agent
-/// (`default_provider` setting, else "claude"); a stored config is used as-is.
+/// config's reviewers and summarizer follow the resolved default agent; a
+/// stored config is used as-is.
 pub(crate) async fn load_review_config(ctx: &ServerCtx) -> ReviewConfig {
+    load_review_config_with(ctx, None).await
+}
+
+async fn load_review_config_with(ctx: &ServerCtx, fallback: Option<&str>) -> ReviewConfig {
     let repo = otto_state::SettingsRepo::new(ctx.pool.clone());
-    let global_default = repo.get("default_provider").await.ok().flatten();
-    let default_provider =
-        otto_core::provider::resolve_provider(&[otto_core::provider::global_default(
-            global_default.as_ref(),
-        )]);
-    match repo.get("pr_review").await {
-        Ok(Some(v)) => serde_json::from_value(v).unwrap_or_else(|e| {
-            tracing::warn!("failed to deserialize pr_review config: {e}; using default");
-            default_review_config(&default_provider)
-        }),
-        _ => default_review_config(&default_provider),
+    if let Ok(Some(v)) = repo.get("pr_review").await {
+        match serde_json::from_value(v) {
+            Ok(cfg) => return cfg,
+            Err(e) => tracing::warn!("failed to deserialize pr_review config: {e}; using default"),
+        }
     }
+    let dp = match fallback {
+        Some(p) => p.to_string(),
+        None => {
+            ctx.resolve_provider_or_fallback(None, None, "load_review_config")
+                .await
+        }
+    };
+    default_review_config(&dp)
 }
 
 /// Load the named review-config presets (settings key `pr_review_presets`).
@@ -72,7 +78,14 @@ pub(crate) async fn load_review_config_for_repo(ctx: &ServerCtx, repo_id: &Id) -
             tracing::warn!(repo = %repo_id, preset = %pid, "repo review preset missing; using global config");
         }
     }
-    load_review_config(ctx).await
+    let ws_default = match ctx.git_store.get_repo(repo_id).await {
+        Ok(r) => ctx
+            .resolve_provider_for_ws(&r.workspace_id, None)
+            .await
+            .ok(),
+        Err(_) => None,
+    };
+    load_review_config_with(ctx, ws_default.as_deref()).await
 }
 
 /// The review mode a `review_run` step runs with when neither the run
@@ -171,62 +184,22 @@ pub(crate) async fn run_review(
     }
 }
 
-/// The review's error note when its diff file can't be written for the
-/// reviewers (a new run settles with it; a retry refuses with it).
-pub(crate) fn diff_write_failure(cause: &dyn std::fmt::Display) -> String {
-    format!("Couldn't write the diff for the reviewers: {cause}")
-}
+pub(crate) use otto_review::restart::remove_review_temp_files_in;
 
-/// Write the diff to a file the agents read themselves. Pasting a large PR
-/// diff into the prompt doesn't scale (and can blow past input limits); the
-/// agents are real sessions with file access, so they read it on demand.
-/// Fatal when it fails (ENOSPC, unwritable TMPDIR): every reviewer would
-/// otherwise burn a turn on a path that does not exist and the run would
-/// settle as a normal — possibly "clean" — review. The caller returns the
-/// error before any agent is spawned, so the review settles as `error` with
-/// this cause. Also stores the durable copy (0100): the prompt references the
-/// temp path, so a retry after a reboot/temp-sweep re-materializes the file.
 async fn materialize_review_diff(
     ctx: &ServerCtx,
     review_id: &Id,
     diff_text: &str,
 ) -> Result<std::path::PathBuf> {
-    let diff_path = std::env::temp_dir().join(format!("otto-review-{review_id}.diff"));
-    if let Err(e) = tokio::fs::write(&diff_path, diff_text).await {
-        tracing::warn!(review = %review_id, "could not write review diff file: {e}");
-        return Err(Error::Internal(diff_write_failure(&e)));
-    }
-    if let Err(e) = ctx.reviews_store.set_diff(review_id, diff_text).await {
-        tracing::warn!(review = %review_id, "could not persist review diff: {e}");
-    }
-    Ok(diff_path)
+    otto_review::restart::materialize_review_diff(&ctx.reviews_store, review_id, diff_text).await
 }
 
-/// Remove a review's `$TMPDIR/otto-review-<id>*` files (diff, per-agent
-/// prompts, findings JSON). A finished run's durable copies live in the DB
-/// (0100) and a retry re-materializes what it needs, so leaving them behind
-/// only grew the temp dir (100+ files per few days of reviews).
 pub(crate) async fn remove_review_temp_files(review_id: &str) {
     let prefix = format!("otto-review-{review_id}");
     let () = crate::offload::blocking(move || {
         remove_review_temp_files_in(&std::env::temp_dir(), &prefix)
     })
     .await;
-}
-
-/// [`remove_review_temp_files`] over an explicit dir — FILES only, so the
-/// `otto-review-wt-<id>` worktree directory is never touched.
-#[allow(clippy::disallowed_methods)] // sync helper: runs on the blocking pool via offload::blocking (or a test)
-pub(crate) fn remove_review_temp_files_in(dir: &std::path::Path, prefix: &str) {
-    if let Ok(rd) = std::fs::read_dir(dir) {
-        for entry in rd.flatten() {
-            if entry.file_name().to_string_lossy().starts_with(prefix)
-                && entry.file_type().is_ok_and(|t| t.is_file())
-            {
-                let _ = std::fs::remove_file(entry.path());
-            }
-        }
-    }
 }
 
 /// Core fallible review logic: given a unified diff text, optional Jira
@@ -381,7 +354,7 @@ pub(crate) async fn run_review_core(
     // `read_only` (forced Seatbelt, no shell) with `project_settings: false`
     // (`--setting-sources user`, so a PR's `.claude/settings.json` hooks never
     // load) — see `otto_review::session::review_session_meta`.
-    otto_review::engine::trust_checkout(&agent_runs, repo_path);
+    otto_review::engine::trust_checkout(&agent_runs, &cfg.summarizer.provider, repo_path);
 
     // Where this run reads the code: the source branch scopes local finding
     // resolution (S2-05) and the checkout + head are what a Retry re-enters
@@ -467,11 +440,21 @@ pub(crate) async fn run_review_core(
         .collect();
 
     let threads = review_threads(ctx, Some(&cfg)).await;
+    let prepared = otto_review::prompts::prepare_reviewer_prompts(
+        &ctx.reviews_store,
+        |p| ctx.manager.cli_family(p),
+        review_id,
+        agent_runs,
+        &branch_ctx,
+        changed_files,
+        changed_lines,
+        &user_ctx,
+        &jira_ctx,
+        &diff_path_str,
+    )
+    .await;
     let mut set = tokio::task::JoinSet::new();
-    for (n, (i, run)) in otto_review::engine::in_spawn_order(agent_runs)
-        .into_iter()
-        .enumerate()
-    {
+    for (n, (i, run, lens_slugs, prompt)) in prepared.into_iter().enumerate() {
         // Space the cold starts out (R3), waking immediately on cancel.
         let delay = otto_review::engine::spawn_gap(threads.is_some()) * u32::from(n > 0);
         if !otto_review::scope::stagger_wait(delay, cancel_flag.as_deref()).await {
@@ -486,39 +469,6 @@ pub(crate) async fn run_review_core(
         let cwd = repo_path.to_string();
         let review_id_s = review_id.to_string();
         let review_skills_dir = review_skills_dir.clone();
-        // An orchestrator run composes its lens block HERE: it names one output
-        // path per lens, and those are keyed on this run's index.
-        let prompt_lens = if run.lenses.is_empty() {
-            run.prompt_lens.clone()
-        } else {
-            compose_orchestrator_prompt(
-                &run.lenses,
-                &manager.cli_family(&run.provider),
-                |slug| otto_review::session::lens_findings_path(&review_id_s, i, slug),
-                &otto_review::session::findings_path(&review_id_s, i),
-            )
-        };
-        let lens_slugs = run.lens_slugs();
-        let prompt = otto_review::prompts::reviewer_prompt(
-            &branch_ctx,
-            changed_files,
-            changed_lines,
-            &prompt_lens,
-            &user_ctx,
-            &jira_ctx,
-            &diff_path_str,
-        );
-        // Persist the prompt so a per-agent Retry can re-run exactly this agent:
-        // temp file for the in-flight injection path, DB row (0100) so retry
-        // survives reboots / temp sweeps / daemon redeploys.
-        let _ = tokio::fs::write(otto_review::session::prompt_path(review_id, i), &prompt).await;
-        if let Err(e) = ctx
-            .reviews_store
-            .set_agent_prompt(review_id, i, &prompt)
-            .await
-        {
-            tracing::warn!(review = %review_id, agent = i, "could not persist agent prompt: {e}");
-        }
         let (max_attempts, threads) = (cfg.max_attempts, threads.clone());
         let slots = threads.is_none().then(reviewer_slots);
         set.spawn(async move {

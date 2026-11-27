@@ -15,6 +15,8 @@
   import { toasts } from '../../lib/toast.svelte';
   import { joinArgs, splitArgs } from '../../lib/shellArgs';
   import { ide, type IdeEnvVar, type IdePythonVenv, type IdeRunConfig } from './ideStore.svelte';
+  import IdeEnvTrustSwitch from './editor/IdeEnvTrustSwitch.svelte';
+  import { IDE_TRUST_PROJECT_ENV, ideProjectTrustOn, withProjectTrust } from './editor/ideLspTrust';
   import IdeNetworkBridgeCard from './shell/IdeNetworkBridgeCard.svelte';
   import IdeRunConfigEditor, { type ConfigDraft, emptyConfigDraft } from './shell/IdeRunConfigEditor.svelte';
   import IdeShellEnvCard from './shell/IdeShellEnvCard.svelte';
@@ -52,15 +54,20 @@
   let activeTab = $state<EnvTab>('env');
   let inheritShellEnv = $state(true);
   let javaHome = $state('');
+  let kotlinHome = $state('');
   let goRoot = $state('');
   let goBuildTagsText = $state('');
   let rustToolchain = $state('');
   let zigHome = $state('');
+  let cppToolchain = $state('');
+  let dotnetRoot = $state('');
   let nodeHome = $state('');
   let pythonInterpreter = $state('');
   let dotenvPath = $state('');
   let extraPath = $state('');
   let envRows = $state<EditableEnvRow[]>([]);
+  // OTTO_IDE_TRUST_PROJECT_EXECUTION as a switch, not a row (on = "1", off = removed).
+  let trustProject = $state(false);
   let bridgeDraft = $state<IdeNetworkBridgeDraft>(emptyNetworkBridgeDraft(null));
   let envValidationError = $state('');
   let savingEnv = $state(false);
@@ -78,14 +85,18 @@
     return JSON.stringify({
       inheritShellEnv,
       javaHome: javaHome.trim(),
+      kotlinHome: kotlinHome.trim(),
       goRoot: goRoot.trim(),
       goBuildTagsText: goBuildTagsText.trim(),
       rustToolchain: rustToolchain.trim(),
       zigHome: zigHome.trim(),
+      cppToolchain: cppToolchain.trim(),
+      dotnetRoot: dotnetRoot.trim(),
       nodeHome: nodeHome.trim(),
       pythonInterpreter: pythonInterpreter.trim(),
       dotenvPath: dotenvPath.trim(),
       extraPath: extraPath.trim(),
+      trustProject,
       bridge: ide.target.kind === 'local' ? normalizeBridgeDraftSnapshot(bridgeDraft) : null,
       envRows: envRows
         .map((r) => ({
@@ -209,16 +220,20 @@
     untrack(() => {
       inheritShellEnv = e.inherit_shell_env !== false;
       javaHome = e.java_home ?? '';
+      kotlinHome = e.kotlin_home ?? '';
       goRoot = e.go_root ?? '';
       goBuildTagsText = (e.go_build_tags ?? []).join(', ');
       rustToolchain = e.rust_toolchain ?? '';
       zigHome = e.zig_home ?? '';
+      cppToolchain = e.cpp_toolchain ?? '';
+      dotnetRoot = e.dotnet_root ?? '';
       nodeHome = e.node_home ?? '';
       pythonInterpreter = e.python_interpreter ?? '';
       dotenvPath = e.dotenv_path ?? '';
       extraPath = e.extra_path ?? '';
       bridgeDraft = emptyNetworkBridgeDraft(e.network_bridge);
-      envRows = (e.env_vars ?? []).map((v, idx) => ({
+      trustProject = ideProjectTrustOn(e.env_vars ?? []);
+      envRows = (e.env_vars ?? []).filter((v) => v.key !== IDE_TRUST_PROJECT_ENV).map((v, idx) => ({
         rowId: `ev-${idx}-${v.key}`,
         key: v.key,
         value: v.secret ? '' : (v.value ?? ''),
@@ -340,16 +355,19 @@
       const ok = await ide.saveEnvironment({
         inherit_shell_env: inheritShellEnv,
         java_home: javaHome.trim() || null,
+        kotlin_home: kotlinHome.trim() || null,
         go_root: goRoot.trim() || null,
         go_build_tags: parsedGoTags,
         rust_toolchain: rustToolchain.trim() || null,
         zig_home: zigHome.trim() || null,
+        cpp_toolchain: cppToolchain.trim() || null,
+        dotnet_root: dotnetRoot.trim() || null,
         node_home: nodeHome.trim() || null,
         python_interpreter: pythonInterpreter.trim() || null,
         dotenv_path: dotenvPath.trim() || null,
         extra_path: extraPath.trim() || null,
         network_bridge: ide.target.kind === 'local' ? serializedBridge.config : undefined,
-        env_vars: cleaned,
+        env_vars: withProjectTrust(cleaned, trustProject),
         ...(prodConfirmed ? { confirm_prod_targets: true } : {}),
       });
       if (ok) {
@@ -519,6 +537,14 @@
                 </div>
 
                 <div class="field">
+                  <label for="env-kotlin-home">Kotlin SDK (KOTLIN_HOME)</label>
+                  <input id="env-kotlin-home" class="input" type="text" dir="ltr" list="env-kotlin-datalist" placeholder="System default kotlinc" bind:value={kotlinHome} />
+                  <datalist id="env-kotlin-datalist">
+                    {#each sdkOptionsFor('kotlin') as opt (opt.value)}<option value={opt.value}>{opt.label}</option>{/each}
+                  </datalist>
+                </div>
+
+                <div class="field">
                   <label for="env-rust-tc">Rust toolchain</label>
                   <input id="env-rust-tc" class="input" type="text" dir="ltr" list="env-rust-datalist" placeholder="stable" bind:value={rustToolchain} />
                   <datalist id="env-rust-datalist">
@@ -533,6 +559,22 @@
                   <input id="env-zig-home" class="input" type="text" dir="ltr" list="env-zig-datalist" placeholder="System default zig" bind:value={zigHome} />
                   <datalist id="env-zig-datalist">
                     {#each sdkOptionsFor('zig') as opt (opt.value)}<option value={opt.value}>{opt.label}</option>{/each}
+                  </datalist>
+                </div>
+
+                <div class="field">
+                  <label for="env-cpp-tc">C / C++ toolchain</label>
+                  <input id="env-cpp-tc" class="input" type="text" dir="ltr" list="env-cpp-datalist" placeholder="System default clang / gcc" bind:value={cppToolchain} />
+                  <datalist id="env-cpp-datalist">
+                    {#each sdkOptionsFor('cpp') as opt (opt.value)}<option value={opt.value}>{opt.label}</option>{/each}
+                  </datalist>
+                </div>
+
+                <div class="field">
+                  <label for="env-dotnet-root">.NET SDK (DOTNET_ROOT)</label>
+                  <input id="env-dotnet-root" class="input" type="text" dir="ltr" list="env-dotnet-datalist" placeholder="System default dotnet" bind:value={dotnetRoot} />
+                  <datalist id="env-dotnet-datalist">
+                    {#each sdkOptionsFor('dotnet') as opt (opt.value)}<option value={opt.value}>{opt.label}</option>{/each}
                   </datalist>
                 </div>
 
@@ -591,6 +633,8 @@
                   <input id="env-extra-path" class="input" type="text" dir="ltr" placeholder="/opt/homebrew/bin:$HOME/go/bin" bind:value={extraPath} />
                 </div>
               </div>
+
+              <IdeEnvTrustSwitch checked={trustProject} onchange={(next) => (trustProject = next)} />
 
               <section class="env-vars-box" aria-labelledby="env-vars-heading">
                 <div class="env-vars-head">

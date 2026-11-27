@@ -1,0 +1,34 @@
+[package]
+name = "otto-security"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Confined, resource-governed security scans for local IDE projects"
+
+[dependencies]
+chrono = { workspace = true }
+chrono-tz = "0.10.4"
+flate2 = { workspace = true }
+globset = "0.4"
+ignore = { workspace = true }
+hex = { workspace = true }
+otto-core = { workspace = true }
+otto-netguard = { workspace = true }
+otto-sandbox = { workspace = true }
+otto-state = { workspace = true }
+percent-encoding = "2.3"
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+sha2 = { workspace = true }
+sqlx = { workspace = true }
+tar = "0.4"
+tempfile = { workspace = true }
+tokio = { workspace = true }
+tokio-util = "0.7"
+tracing = { workspace = true }
+zip = { version = "9.2.0", default-features = false, features = ["deflate"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"

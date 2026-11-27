@@ -1,8 +1,25 @@
 // A goal run's criteria rows (goal.md §3.5, GL8.1) — workflows/goal/goalCheck.ts.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { activeMs, criterionRows, graphCriteria, latestCheck, metCount, newestCheckpoint, readsCheckpoints } from '../src/modules/workflows/goal/goalCheck.ts';
-import type { CheckOutput, Criterion, NodeRunState, WorkflowCheckpoint } from '../src/lib/api/types.ts';
+import {
+  activeMs,
+  checkpointHistoryByCriterion,
+  checksByStep,
+  criterionKey,
+  criterionRows,
+  formatNum,
+  formatRatio,
+  graphCriteria,
+  latestCheck,
+  metCount,
+  newestCheckpoint,
+  newestCheckpointsByStep,
+  observedPairs,
+  progressPct,
+  readsCheckpoints,
+  recentTrend,
+} from '../src/modules/workflows/goal/goalCheck.ts';
+import type { CheckOutput, Criterion, GoalProgress, NodeRunState, WorkflowCheckpoint } from '../src/lib/api/types.ts';
 
 const criteria: Criterion[] = [
   { id: 'tests', text: 'Tests pass', verify: 'command', how: '', command: 'go test ./...' },
@@ -91,4 +108,164 @@ test('the card counts the criteria it lists, and a running loop shows the time i
   assert.equal(activeMs({ active_ms: 0 }, [cp(1, 0, null, { active_ms: 30_000 }), cp(1, 1, null, { active_ms: 8_000 }), cp(2, 0, null)]), 38_000);
   assert.equal(activeMs({ active_ms: 81_000 }, [cp(1, 0, null, { active_ms: 30_000 })]), 81_000, 'a stopped loop says its own');
   assert.equal(activeMs({ active_ms: 0 }), 0);
+});
+
+test('two check steps with the same criterion id stay distinct, each with its own progress and history', () => {
+  const reviewCrit: Criterion = {
+    id: 'review-passes',
+    text: 'A fresh independent review passes',
+    verify: 'expr',
+    how: '',
+    expr: 'steps.review.passed == true',
+  };
+  const graph = {
+    nodes: [
+      { id: 'start', kind: 'manual_trigger', name: 'Start', x: 0, y: 0, params: {} },
+      {
+        id: 'ui',
+        kind: 'loop',
+        name: 'UI',
+        x: 0,
+        y: 0,
+        params: { steps: [{ kind: 'review_run', name: 'review' }, { kind: 'check', name: 'check', params: { criteria: [reviewCrit] } }] },
+      },
+      {
+        id: 'server',
+        kind: 'loop',
+        name: 'server',
+        x: 0,
+        y: 0,
+        params: { steps: [{ kind: 'review_run', name: 'review' }, { kind: 'check', name: 'check', params: { criteria: [reviewCrit] } }] },
+      },
+    ],
+  };
+  const scoped = graphCriteria(graph);
+  assert.deepEqual(
+    scoped.map((c) => [c.step_id, c.step_name, c.id]),
+    [
+      ['ui.1', 'UI', 'review-passes'],
+      ['server.1', 'server', 'review-passes'],
+    ],
+  );
+
+  const checkOut = (met: boolean, score: number, blocker?: string): CheckOutput => ({
+    criteria: [
+      {
+        id: 'review-passes',
+        text: reviewCrit.text,
+        verify: 'expr',
+        met,
+        evidence: `steps.review.passed == true is ${met}`,
+        verified_by: 'rule',
+        progress: { value: score, target: 95, label: blocker, values: { 'steps.review.passed': met, score, threshold: 95 } },
+      },
+    ],
+    all_met: met,
+    met: met ? 1 : 0,
+    total: 1,
+    progress_pct: met ? 100 : 0,
+    verdict: met ? 'achieved' : 'continue',
+    feedback: '',
+    feedback_md: '',
+    repeat_signature: '',
+    repeated_failures: 0,
+  });
+
+  const checkpoints: WorkflowCheckpoint[] = [
+    cp(1, 1, checkOut(false, 35, '4 must-fix findings left'), { loop_id: 'ui', node_id: 'ui#1.1' }),
+    cp(2, 1, checkOut(false, 58, '3 must-fix findings left'), { loop_id: 'ui', node_id: 'ui#2.1' }),
+    cp(3, 1, checkOut(false, 72, '2 must-fix findings left'), { loop_id: 'ui', node_id: 'ui#3.1' }),
+    cp(1, 1, checkOut(false, 60, '2 must-fix findings left'), { loop_id: 'server', node_id: 'server#1.1' }),
+    cp(2, 1, checkOut(false, 80, '1 must-fix finding left'), { loop_id: 'server', node_id: 'server#2.1' }),
+    cp(3, 1, checkOut(true, 96), { loop_id: 'server', node_id: 'server#3.1' }),
+  ];
+
+  const newest = newestCheckpointsByStep(checkpoints);
+  assert.deepEqual([...newest.keys()], ['ui.1', 'server.1']);
+  assert.equal(newest.get('ui.1')?.iteration, 3);
+  assert.equal(newest.get('server.1')?.iteration, 3);
+
+  const checks = checksByStep([], checkpoints, scoped);
+  const rows = criterionRows(scoped, checks, [], undefined, checkpoints);
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].key, criterionKey('ui.1', 'review-passes'));
+  assert.equal(rows[1].key, criterionKey('server.1', 'review-passes'));
+  assert.equal(rows[0].state, 'not_met');
+  assert.equal(rows[1].state, 'met');
+  assert.equal(formatRatio(rows[0].progress), '72 / 95');
+  assert.equal(formatRatio(rows[1].progress), '96 / 95');
+  assert.equal(rows[0].progress?.label, '2 must-fix findings left');
+  assert.equal(recentTrend(rows[0].history), '35 → 58 → 72');
+  assert.equal(recentTrend(rows[1].history), '60 → 80 → 96');
+  assert.deepEqual(metCount(rows, { criteria_met: 0, criteria_total: 2 }), { met: 1, total: 2 });
+
+  const cpHist = checkpointHistoryByCriterion(checkpoints);
+  assert.equal(cpHist.get('ui.1::review-passes')?.length, 3);
+  assert.equal(cpHist.get('server.1::review-passes')?.length, 3);
+
+  // Overview goal.criteria supplies progress/history even before checkpoints load.
+  const goal: Pick<GoalProgress, 'criteria'> = {
+    criteria: [
+      {
+        step_id: 'ui.1',
+        step_name: 'UI',
+        id: 'review-passes',
+        met: false,
+        progress: { value: 72, target: 95, label: '3 must-fix findings left' },
+        history: [
+          { iteration: 1, met: false, value: 35 },
+          { iteration: 2, met: false, value: 58 },
+          { iteration: 3, met: false, value: 72 },
+        ],
+      },
+      {
+        step_id: 'server.1',
+        step_name: 'server',
+        id: 'review-passes',
+        met: true,
+        progress: { value: 96, target: 95 },
+        history: [{ iteration: 1, met: true, value: 96 }],
+      },
+    ],
+  };
+  const fromOverview = criterionRows(scoped, new Map(), [], goal);
+  assert.equal(fromOverview[0].state, 'not_met');
+  assert.equal(fromOverview[1].state, 'met');
+  assert.equal(recentTrend(fromOverview[0].history), '35 → 58 → 72');
+});
+
+test('progress formatting helpers: ratios, meters, trends, and observed pairs', () => {
+  assert.equal(formatNum(72), '72');
+  assert.equal(formatNum(9.5), '9.5');
+  assert.equal(formatNum(9.0), '9');
+  assert.equal(formatRatio({ value: 72, target: 95 }), '72 / 95');
+  assert.equal(formatRatio({ value: 64, target: 80, unit: '%' }), '64% / 80%');
+  assert.equal(formatRatio({ value: 120, target: 200, unit: 'ms' }), '120 / 200 ms');
+  assert.equal(formatRatio({ label: 'exit 1' }), '');
+  assert.equal(progressPct({ value: 72, target: 95 }, 'not_met'), 76);
+  assert.equal(progressPct({ value: 96, target: 95 }, 'met'), 100);
+  assert.equal(progressPct({ value: 1, target: 0 }, 'not_met'), null);
+  // INPUT-1: ceiling and exact-number rules (including flipped numeric equality) never show a directional floor meter.
+  assert.equal(progressPct({ value: 300, target: 200 }, 'not_met', 'steps.bench.latency <= 200'), null);
+  assert.equal(progressPct({ value: 5, target: 0 }, 'not_met', 'steps.bench.errors == 0'), null);
+  assert.equal(progressPct({ value: 300, target: 200 }, 'not_met', '200 >= steps.bench.latency'), null);
+  assert.equal(progressPct({ value: 300, target: 200 }, 'not_met', '200 == steps.build.artifact_count'), null);
+  // Floor rules (including review score/passed rules) still show a meter.
+  assert.equal(progressPct({ value: 72, target: 95 }, 'not_met', 'steps.review.passed == true'), 76);
+  assert.equal(progressPct({ value: 64, target: 80 }, 'not_met', 'steps.bench.coverage >= 80'), 80);
+  assert.equal(recentTrend([{ iteration: 1, met: false, value: 35 }]), '');
+  assert.equal(
+    recentTrend([
+      { iteration: 1, met: false, value: 20 },
+      { iteration: 2, met: false, value: 35 },
+      { iteration: 3, met: false, value: 58 },
+      { iteration: 4, met: false, value: 72 },
+    ]),
+    '35 → 58 → 72',
+  );
+  assert.deepEqual(observedPairs({ values: { 'steps.review.passed': false, score: 72, last_line: 'FAIL' } }), [
+    { key: 'steps.review.passed', value: 'false' },
+    { key: 'score', value: '72' },
+    { key: 'last_line', value: 'FAIL' },
+  ]);
 });

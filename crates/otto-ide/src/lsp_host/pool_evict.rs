@@ -19,6 +19,15 @@ use crate::plugins::IdePluginRegistry;
 use crate::types::{IdeLspAvailableServer, IdeLspServerStat, IdeLspStatusResp};
 
 fn is_build_manifest_name(name: &str) -> bool {
+    let low = name.to_ascii_lowercase();
+    if low.ends_with(".sln")
+        || low.ends_with(".slnx")
+        || low.ends_with(".csproj")
+        || low.ends_with(".fsproj")
+        || low.ends_with(".vbproj")
+    {
+        return true;
+    }
     matches!(
         name,
         "pom.xml"
@@ -34,12 +43,40 @@ fn is_build_manifest_name(name: &str) -> bool {
             | "Cargo.lock"
             | "build.zig"
             | "build.zig.zon"
+            | "CMakeLists.txt"
+            | "CMakePresets.json"
+            | "CMakeUserPresets.json"
+            | "compile_commands.json"
+            | "meson.build"
+            | ".clangd"
+            | ".clang-format"
+            | "global.json"
+            | "Directory.Build.props"
+            | "Directory.Packages.props"
+            | "nuget.config"
+            | "NuGet.Config"
             | "package.json"
             | "package-lock.json"
             | "pnpm-lock.yaml"
             | "yarn.lock"
             | "tsconfig.json"
             | "jsconfig.json"
+            | "angular.json"
+            | "svelte.config.js"
+            | "svelte.config.ts"
+            | "svelte.config.mjs"
+            | "next.config.ts"
+            | "next.config.mjs"
+            | "next.config.js"
+            | "nuxt.config.ts"
+            | "nuxt.config.js"
+            | "vite.config.ts"
+            | "vite.config.js"
+            | "vitest.config.ts"
+            | "jest.config.ts"
+            | "jest.config.js"
+            | "playwright.config.ts"
+            | "karma.conf.js"
             | "pyproject.toml"
             | "uv.lock"
             | "poetry.lock"

@@ -25,10 +25,63 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
   same pages work on the phone, with touch.
 - **Zig in the IDE.** Zig projects (`build.zig`) get what the other languages
   have: highlighting, toolchain detection and Otto's own installer, `zls`
-  for completion and navigation, run configurations and gutter Run / Debug on
-  `main` and on tests, and debugging with breakpoints, stepping, watch, set
-  variable and stops on `@panic`, with slices, optionals and error unions
-  shown as values.
+  (SHA-256 verified via zigtools' release selector) for completion and
+  navigation, run configurations and gutter Run / Debug on `main` and on tests,
+  and debugging with breakpoints, stepping, watch, set variable and stops on
+  `@panic`, with slices, optionals and error unions shown as values. `zls`
+  runs the project's `build.zig`, so it starts only after you trust the
+  project (see the language-server note below).
+- **C / C++, Unreal Engine, Kotlin, Spring Boot, .NET and web frameworks in the
+  IDE.** C / C++ & Unreal Engine get highlighting, `clangd` with auto
+  `--compile-commands-dir` and `⌥O` header/source switch, CMake / Presets /
+  CTest / Meson / Make / Unreal run configs, GoogleTest & Catch2 gutter runs,
+  `vcpkg`/`conan`/CMake/`.uproject` inspection, and LLDB debugging (STL &
+  Unreal formatters, exception breakpoints, PID/process-name attach and core
+  dumps). Kotlin & Spring Boot get Kotlin highlighting,
+  `kotlin-language-server`, mixed Java/Kotlin modules, JUnit 5 gutter runs
+  and Kotest spec-level gutter runs, Gradle `libs.versions.toml` inspection, JVM JDWP debugging,
+  `application.properties`/`application.yml` completion, hover, and navigation
+  (plus `.properties` deprecation quick fixes), a loopback-only Actuator
+  inspector (every `/env` value redacted), and DevTools `.reloadtrigger` restart check. .NET (C# / F# / Unity / Unreal C#) gets
+  highlighting, toolchain discovery/installer, `csharp-ls` / OmniSharp /
+  `fsautocomplete`, xUnit/NUnit/MSTest gutter runs, NuGet inspection, and
+  `netcoredbg` debugging (launch, VSTest test debugging of one test project
+  per session, and explicit PID attach; Unity Editor attach is not supported).
+  JS/TS web frameworks (Angular, React, Next.js,
+  Svelte/SvelteKit, Vue/Nuxt, Vite) get framework detection, `svelteserver` /
+  `vue-language-server` (standalone mode) / `ngserver`, Vitest/Jest/Playwright/Karma runners, and
+  Node + Browser CDP debugging (Debug is refused for Playwright and Karma
+  runs: use Run). `zls`, `kotlin-language-server`, `vue-language-server` and
+  the .NET servers (`csharp-ls`, `fsautocomplete`) run code from the project
+  (its build, the plugins its `tsconfig.json` names, or its MSBuild targets),
+  so they do not start until you trust the project: **Trust project…** in the
+  notice above the editor (or the status strip's "needs trust" item) asks,
+  then starts the server; *Edit run configurations… ▸ Project environment ▸
+  Trust this project* turns it off again.
+- **Jupyter notebooks & ML workflow in the IDE.** Open, edit, run and save
+  `.ipynb` notebooks directly in Otto with a built-in persistent Python kernel
+  (standard Python execution on the selected interpreter; IPython `%magic` and
+  other Jupyter kernels are not supported), inline
+  matplotlib plots and `_repr_html_` tables, interpreter selection across
+  `.venv` / `conda` / `uv` / Poetry / system Python, interrupt/restart, live
+  Variables view, isolated cell DAP debugging, Apple Silicon MPS / GPU
+  detection, and auto-discovered training and loopback TensorBoard run
+  configurations.
+- **Goal progress, loop rounds and waiting threads.** Goal criteria show numeric
+  progress (`value / target`), a progress meter, last-3-rounds trends and
+  blocker counts across multiple loops on the run page and in chat status
+  updates. Loop steps group children by round (current round open, earlier
+  rounds folded to one line), describe the loop's current position in words,
+  and list named clickable links to the threads a step or pending summarizer is
+  waiting on.
+- **Session inbox grouped by workspace & faster multi-terminal workspaces.**
+  In Agents, *All workspaces* groups sessions by workspace by default (current
+  workspace first, then by latest activity; *Needs you*, *Working*, *Idle*,
+  *Done* inside each), with collapsible headers and Workspace / Status / None
+  grouping saved per user. Tiled and Splits layouts mount the focused terminal
+  first and pace background panes progressively, skip exited/inactive tiles in
+  the auto-live budget, and keep the most-recently-focused terminal parked
+  across page switches.
 - **A step's conversation is the Threads view.** On the run page a step's
   Conversation is the same conversation Threads shows, folded and scrolled
   the same way (it opens on the newest line and follows it only while you are
@@ -59,13 +112,26 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
   budget*, with **Resume** or **Extend and resume…**. Loops made before this
   release stay readable under *Older goal loops*, and an unfinished one has
   **Continue as a goal**.
+- **Project security scans.** Run or schedule local Trivy and Opengrep checks in
+  the IDE Security view with incremental caching, resource limits and macOS
+  Seatbelt confinement. Review findings in Problems and the editor gutter,
+  manage suppressions and baselines, import or export SARIF 2.1.0, and audit
+  an explicitly confirmed development run target with passive HTTP header
+  checks. An active Nuclei DAST scan of that target runs only when a person
+  starts it by hand; schedules run the passive checks only
+  ([Security scans](docs/features/security-scans.md)).
 - **Chat.** A run started from chat keeps one live status message in its
-  thread instead of a message per step. Each step's file is still posted, and
-  files attached to the Slack message that starts a run reach the run. The
-  Start step's *Updates in the chat thread* brings back a message per step.
+  thread instead of a message per step, and flushes pending chat progress
+  updates before `channel_notify` sends its final message so delivery order
+  stays deterministic. Each step's file is still posted, and files attached to
+  the Slack message that starts a run reach the run. The Start step's *Updates
+  in the chat thread* brings back a message per step.
 - **Limits and restarts.** A step that hits a usage limit with a known reset
-  waits and continues when the limit resets, and a run cut by a restart or an
-  update continues from the step it was on.
+  waits and continues when the limit resets. Runs cut by a restart or update
+  continue from the step they were on — including held review summarizers,
+  queued reviews with persisted prompts, `check` completion reviews and
+  personal-agent delegations — and resumed workflow reviews stay on their
+  configured provider without falling back to Claude.
 - **For agents (MCP).** `otto.thread_close` can remove a sub-thread the agent
   no longer needs. `otto.control_workflow_run` is new, off by default and
   asks before it acts.
@@ -470,10 +536,10 @@ including behaviour changes to know before upgrading.
   hand over and reclaim terminal control at any moment, and generate a local
   structured recap (decisions, actions, open questions) once participants consent.
 - **IDE (Beta)** — a multi-language IDE (`#/ide`) on your local or SSH
-  projects (Go, Java, Rust, Zig, TypeScript/JS, Python, Shell): language servers
-  (`gopls`, `jdtls`, `rust-analyzer`, `zls`, `pyright`, `tsserver`), a git gutter,
-  run configurations with live output and test trees, a DAP debugger with
-  breakpoints, watches, variable editing, and an agent dock that proposes diffs
+  projects (Go, Java & Spring Boot, Kotlin, Rust, Zig, C/C++ & Unreal Engine, .NET C#/F#, TypeScript/JS & web frameworks, Python & Jupyter notebooks, Shell): language servers
+  (`gopls`, `jdtls`, `kotlin-language-server`, `rust-analyzer`, `zls`, `clangd`, `csharp-ls`, `svelteserver`, `vue-language-server`, `ngserver`, `pyright`, `tsserver`), header/source switch (`⌥O`), a git gutter,
+  run configurations (CMake/CTest, Meson, Make, Unreal, Go, Cargo, Zig, .NET, Maven/Gradle, pytest, npm/Vitest/Jest/Playwright/Karma) with live output and test trees, a DAP debugger with
+  breakpoints, watches, variable editing, PID/core attach, and an agent dock that proposes diffs
   you apply or undo. See `docs/features/ide.md`.
 - **Git & Pull Requests** — a GitKraken-style **commit graph** with a WIP row +
   staging panel, per-file diffs, folder-level stage/discard, an interactive

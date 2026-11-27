@@ -217,8 +217,14 @@ pub enum Event {
         waiting_approval: bool,
         /// The run's computed overview (≤ 4 KiB), so attention, queue,
         /// phase and wait show without a GET. `None` from emitters that
-        /// do not compute it.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        /// do not compute it. Serialized through `RunOverview::ws_projected`
+        /// so large goal histories or multi-byte names never break the 4 KiB
+        /// WS frame budget (and omitted if even the minimal form cannot fit).
+        #[serde(
+            default,
+            skip_serializing_if = "overview_omitted_on_ws",
+            serialize_with = "serialize_ws_overview"
+        )]
         overview: Option<Box<crate::workflows::RunOverview>>,
     },
     /// A skill-evaluation run advanced. Lets the Skill-Eval UI switch from
@@ -825,6 +831,23 @@ impl Event {
     }
 }
 
+fn overview_omitted_on_ws(overview: &Option<Box<crate::workflows::RunOverview>>) -> bool {
+    overview.as_ref().and_then(|o| o.ws_projected()).is_none()
+}
+
+fn serialize_ws_overview<S>(
+    overview: &Option<Box<crate::workflows::RunOverview>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match overview.as_ref().and_then(|o| o.ws_projected()) {
+        Some(projected) => serde::Serialize::serialize(&projected, serializer),
+        None => serializer.serialize_none(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1046,6 +1069,168 @@ mod tests {
         let v: serde_json::Value = serde_json::to_value(&ev).unwrap();
         assert!(v.get("node").is_none());
         assert!(v.get("overview").is_none(), "absent overview is omitted");
+    }
+
+    #[test]
+    fn workflow_run_updated_projects_overview_within_4_kib() {
+        let mut criteria = Vec::new();
+        for i in 0..4 {
+            let mut values = std::collections::BTreeMap::new();
+            values.insert("score".into(), serde_json::json!(80));
+            values.insert("threshold".into(), serde_json::json!(95));
+            let history = (1..=30)
+                .map(|iteration| crate::workflows::CriterionPoint {
+                    iteration,
+                    met: false,
+                    value: Some(50.0 + iteration as f64),
+                })
+                .collect();
+            criteria.push(crate::workflows::GoalCriterion {
+                step_id: format!("loop_{i}.1"),
+                step_name: format!("Component {i}"),
+                id: format!("review-passes-{i}"),
+                text: format!("A fresh independent review passes for component {i}"),
+                met: Some(false),
+                awaiting: false,
+                progress: Some(crate::workflows::CriterionProgress {
+                    value: Some(80.0),
+                    target: Some(95.0),
+                    unit: None,
+                    label: Some("2 must-fix findings left".into()),
+                    values,
+                }),
+                history,
+            });
+        }
+        let full = crate::workflows::RunOverview {
+            rev: 42,
+            state: crate::workflows::RunState::Running,
+            headline: "Round 30 of 50 — Component 0 80 / 95".into(),
+            goal: Some(crate::workflows::GoalProgress {
+                iteration: 30,
+                max_iterations: 50,
+                criteria_met: 0,
+                criteria_total: 4,
+                verdict: Some("continue".into()),
+                criteria,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(
+            serde_json::to_vec(&full).unwrap().len() > crate::workflows::WS_OVERVIEW_MAX_BYTES,
+            "full HTTP overview fixture must exceed 4 KiB"
+        );
+        let ev = Event::WorkflowRunUpdated {
+            workspace_id: "ws1".into(),
+            run_id: "r1".into(),
+            status: "running".into(),
+            node_id: Some("loop_0".into()),
+            rev: 42,
+            node: None,
+            nodes_done: 1,
+            nodes_total: 4,
+            waiting_approval: false,
+            overview: Some(Box::new(full)),
+        };
+        let wire: serde_json::Value = serde_json::to_value(&ev).unwrap();
+        let ov_bytes = serde_json::to_vec(&wire["overview"]).unwrap().len();
+        assert!(
+            ov_bytes <= crate::workflows::WS_OVERVIEW_MAX_BYTES,
+            "WS overview must stay within 4 KiB (got {ov_bytes})"
+        );
+        let h0 = wire["overview"]["goal"]["criteria"][0]["history"]
+            .as_array()
+            .map(Vec::len)
+            .unwrap_or(0);
+        assert!(h0 <= 3);
+
+        // API-1 (round 2): 8 parallel check steps awaiting verification with 100-char CJK
+        // names (>4,800 UTF-8 bytes in attention[].name + now.node_names) must still fit <= 4 KiB.
+        let cjk_name = "検".repeat(100);
+        let attention: Vec<_> = (0..8)
+            .map(|i| crate::workflows::AttentionRef {
+                node_id: format!("check_{i}"),
+                name: cjk_name.clone(),
+                attention: crate::agent_runtime::Attention {
+                    kind: crate::agent_runtime::AttentionKind::Verify,
+                    text: "確認してください ".repeat(20),
+                    since: chrono::Utc::now(),
+                    request_id: None,
+                    thread_id: None,
+                    criterion_id: Some(format!("c{i}")),
+                    resets_at: None,
+                    via: None,
+                },
+            })
+            .collect();
+        let cjk_overview = crate::workflows::RunOverview {
+            rev: 7,
+            state: crate::workflows::RunState::NeedsYou,
+            headline: format!("Needs you — {cjk_name}"),
+            now: Some(crate::workflows::Now {
+                node_ids: (0..8).map(|i| format!("check_{i}")).collect(),
+                node_names: vec![cjk_name.clone(); 8],
+                phase: crate::workflows::StepPhase::NeedsYou,
+                wait_text: Some(cjk_name.clone()),
+                fan: None,
+            }),
+            attention,
+            goal: None, // Also exercises non-goal overview trimming!
+            ..Default::default()
+        };
+        assert!(
+            serde_json::to_vec(&cjk_overview).unwrap().len()
+                > crate::workflows::WS_OVERVIEW_MAX_BYTES
+        );
+        let ev_cjk = Event::WorkflowRunUpdated {
+            workspace_id: "ws1".into(),
+            run_id: "r2".into(),
+            status: "running".into(),
+            node_id: None,
+            rev: 7,
+            node: None,
+            nodes_done: 0,
+            nodes_total: 8,
+            waiting_approval: false,
+            overview: Some(Box::new(cjk_overview)),
+        };
+        let wire_cjk: serde_json::Value = serde_json::to_value(&ev_cjk).unwrap();
+        let cjk_bytes = serde_json::to_vec(&wire_cjk["overview"]).unwrap().len();
+        assert!(
+            cjk_bytes <= crate::workflows::WS_OVERVIEW_MAX_BYTES,
+            "CJK non-goal overview must fit 4 KiB (got {cjk_bytes})"
+        );
+
+        // API-1 (round 2): when even the minimal bounded overview cannot fit, omit `overview`.
+        let unshrinkable = crate::workflows::RunOverview {
+            rev: 8,
+            state: crate::workflows::RunState::Failed,
+            failed_step: Some(crate::workflows::FailedStep {
+                node_id: "n".repeat(5_000),
+                name: "step".into(),
+                error: "failed".into(),
+                error_class: None,
+            }),
+            ..Default::default()
+        };
+        let ev_omit = Event::WorkflowRunUpdated {
+            workspace_id: "ws1".into(),
+            run_id: "r3".into(),
+            status: "error".into(),
+            node_id: None,
+            rev: 8,
+            node: None,
+            nodes_done: 0,
+            nodes_total: 1,
+            waiting_approval: false,
+            overview: Some(Box::new(unshrinkable)),
+        };
+        let wire_omit: serde_json::Value = serde_json::to_value(&ev_omit).unwrap();
+        assert!(
+            wire_omit.get("overview").is_none(),
+            "unshrinkable >4 KiB overview must be omitted from WS frame"
+        );
     }
 
     /// `session_removed` keeps the fields the SPA reads and adds the owner

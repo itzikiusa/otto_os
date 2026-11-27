@@ -54,9 +54,10 @@ test('shell, CSS and HTML buffers attach their servers; a plugin language attach
   assert.equal(shouldAttachIdeLsp('/ws/web/x.scss', 'scss', '/ws'), true);
   assert.equal(shouldAttachIdeLsp('/ws/web/index.html', 'html', '/ws'), true);
   assert.equal(shouldAttachIdeLsp('/ws/README.md', 'markdown', '/ws'), false);
-  assert.equal(shouldAttachIdeLsp('/ws/src/Main.kt', 'kotlin', '/ws'), false);
-  registerIdeLspPluginLanguage('kotlin');
   assert.equal(shouldAttachIdeLsp('/ws/src/Main.kt', 'kotlin', '/ws'), true);
+  assert.equal(shouldAttachIdeLsp('/ws/lib/app.ex', 'elixir', '/ws'), false);
+  registerIdeLspPluginLanguage('elixir');
+  assert.equal(shouldAttachIdeLsp('/ws/lib/app.ex', 'elixir', '/ws'), true);
 });
 
 test('quick fixes: a used import gets no "Remove unused import", and "Prefix with _" needs an unused diagnostic', () => {

@@ -62,7 +62,7 @@ export const SETTINGS_TREE: readonly SettingsTreeNode[] = [
     children: [
       { id: 'project.project', label: 'Project', desc: 'Project name and primary SDK.', keywords: ['project', 'name', 'sdk'] },
       { id: 'project.modules', label: 'Modules', desc: 'Multi-folder repository roots attached to this project, bulk attach, and per-module SDKs.', keywords: ['modules', 'folders', 'multi-repo', 'roots', 'attach'] },
-      { id: 'project.sdks', label: 'SDKs', desc: 'Language ecosystems: installed toolchains, detected host SDKs, LSP servers, and DAP debuggers.', keywords: ['sdks', 'toolchains', 'download', 'detected', 'goroot', 'jdk', 'node', 'python', 'rust', 'zig'] },
+      { id: 'project.sdks', label: 'SDKs', desc: 'Language ecosystems: installed toolchains, detected host SDKs, LSP servers, and DAP debuggers.', keywords: ['sdks', 'toolchains', 'download', 'detected', 'goroot', 'jdk', 'kotlin', 'node', 'python', 'rust', 'zig', 'cpp', 'clang', 'cmake', 'dotnet', 'csharp', 'fsharp'] },
     ],
   },
   {
@@ -123,18 +123,21 @@ export const SETTINGS_TREE: readonly SettingsTreeNode[] = [
     children: [
       { id: 'lang.go', label: 'Go', desc: 'GOROOT, GOPATH, GOPRIVATE, gopls, and Delve debugger configuration.', keywords: ['go', 'golang', 'goroot', 'gopath', 'goprivate', 'gomod', 'gopls', 'dlv', 'delve'] },
       { id: 'lang.java', label: 'Java', desc: 'JDK & Classpath picker with auto-detected Homebrew / SDKMAN / GraalVM JDKs and broken-SDK warnings.', keywords: ['java', 'jdk', 'java_home', 'classpath', 'maven', 'gradle', 'jdtls', 'graalvm', 'openjdk', 'lombok'] },
+      { id: 'lang.kotlin', label: 'Kotlin', desc: 'Kotlin compiler (KOTLIN_HOME), kotlin-language-server, Gradle Kotlin DSL / libs.versions.toml, Kotest, and JVM JDWP.', keywords: ['kotlin', 'kt', 'kts', 'kotlinc', 'kotlin_home', 'kotlin-language-server', 'kotest', 'gradle', 'maven', 'coroutines', 'ksp', 'kapt'] },
       { id: 'lang.node', label: 'JavaScript & TypeScript', desc: 'Node.js runtime and typescript-language-server configuration.', keywords: ['javascript', 'typescript', 'node', 'tsserver', 'npm'] },
       { id: 'lang.python', label: 'Python', desc: 'Python interpreter, .venv / uv / pyenv environments, pyright, and debugpy.', keywords: ['python', 'venv', 'virtualenv', 'uv', 'pyenv', 'pyright', 'debugpy'] },
       { id: 'lang.rust', label: 'Rust', desc: 'rustup toolchain, rust-analyzer, and codelldb / lldb-dap debugger.', keywords: ['rust', 'cargo', 'rustup', 'rust-analyzer', 'codelldb', 'lldb'] },
       { id: 'lang.zig', label: 'Zig', desc: 'Zig SDK, ZLS language server, and codelldb / lldb-dap debugger.', keywords: ['zig', 'zls', 'build.zig', 'build.zig.zon', 'codelldb', 'lldb'] },
+      { id: 'lang.cpp', label: 'C / C++ & Unreal', desc: 'Clang / GCC / LLVM toolchain, clangd, CMake / Meson / Make, Unreal .uproject, and LLDB debugger.', keywords: ['c', 'cpp', 'c++', 'clang', 'clangd', 'gcc', 'cmake', 'ctest', 'meson', 'make', 'gtest', 'catch2', 'unreal', 'uproject', 'lldb', 'codelldb'] },
+      { id: 'lang.dotnet', label: '.NET (C# / F#)', desc: '.NET SDK (DOTNET_ROOT), csharp-ls / OmniSharp / fsautocomplete, NuGet, Unity/Unreal C#, and netcoredbg debugger.', keywords: ['dotnet', 'csharp', 'c#', 'fsharp', 'f#', 'unity', 'unreal', 'nuget', 'csproj', 'sln', 'csharp-ls', 'omnisharp', 'netcoredbg'] },
       { id: 'lang.csv', label: 'CSV Formats', desc: 'CSV / TSV delimiter detection, header row, and rainbow column alignment.', keywords: ['csv', 'tsv', 'delimiter', 'table'] },
     ],
   },
   {
     id: 'plugins',
     label: 'Plugins & Language Servers',
-    desc: 'Live health of LSP servers (gopls, jdtls, tsserver, pyright, rust-analyzer, zls, bash-ls) and runtime IDE plugins.',
-    keywords: ['plugins', 'extensions', 'lsp', 'language server', 'gopls', 'jdtls', 'pyright', 'rust-analyzer', 'zls', 'zig', 'catalog'],
+    desc: 'Live health of LSP servers (gopls, jdtls, kotlin-language-server, tsserver, pyright, rust-analyzer, zls, clangd, csharp-ls, bash-ls) and runtime IDE plugins.',
+    keywords: ['plugins', 'extensions', 'lsp', 'language server', 'gopls', 'jdtls', 'kotlin-language-server', 'pyright', 'rust-analyzer', 'zls', 'zig', 'clangd', 'cpp', 'csharp-ls', 'dotnet', 'catalog'],
   },
 ];
 
@@ -147,9 +150,18 @@ const SECTION_ALIASES: Record<string, string> = {
   go: 'lang.go',
   java: 'lang.java',
   jdk: 'lang.java',
+  kotlin: 'lang.kotlin',
+  kt: 'lang.kotlin',
+  kts: 'lang.kotlin',
   python: 'lang.python',
   rust: 'lang.rust',
   zig: 'lang.zig',
+  cpp: 'lang.cpp',
+  c: 'lang.cpp',
+  unreal: 'lang.cpp',
+  dotnet: 'lang.dotnet',
+  csharp: 'lang.dotnet',
+  fsharp: 'lang.dotnet',
   node: 'lang.node',
   'lang.shell': 'plugins',
   'lang.json': 'editor.font',
@@ -211,9 +223,12 @@ export function filterSettingsTree(query: string): SettingsTreeNode[] {
 
 export interface EnvDraftState {
   java_home: string;
+  kotlin_home: string;
   go_root: string;
   rust_toolchain: string;
   zig_home: string;
+  cpp_toolchain: string;
+  dotnet_root: string;
   node_home: string;
   python_interpreter: string;
   android_home: string;
@@ -228,9 +243,12 @@ export interface EnvDraftState {
 function emptyEnvDraft(env: IdeProjectEnvironment | null): EnvDraftState {
   return {
     java_home: env?.java_home ?? '',
+    kotlin_home: env?.kotlin_home ?? '',
     go_root: env?.go_root ?? '',
     rust_toolchain: env?.rust_toolchain ?? '',
     zig_home: env?.zig_home ?? '',
+    cpp_toolchain: env?.cpp_toolchain ?? '',
+    dotnet_root: env?.dotnet_root ?? '',
     node_home: env?.node_home ?? '',
     python_interpreter: env?.python_interpreter ?? '',
     android_home: env?.android_home ?? '',
@@ -315,9 +333,12 @@ class IdeSettingsController {
     if ((this.envDirty || Object.keys(snap.moduleSdkMap).length > 0) && ide.hasTarget) {
       const envOk = await ide.saveEnvironment({
         java_home: this.envDraft.java_home || null,
+        kotlin_home: this.envDraft.kotlin_home || null,
         go_root: this.envDraft.go_root || null,
         rust_toolchain: this.envDraft.rust_toolchain || null,
         zig_home: this.envDraft.zig_home || null,
+        cpp_toolchain: this.envDraft.cpp_toolchain || null,
+        dotnet_root: this.envDraft.dotnet_root || null,
         node_home: this.envDraft.node_home || null,
         python_interpreter: this.envDraft.python_interpreter || null,
         android_home: this.envDraft.android_home || null,

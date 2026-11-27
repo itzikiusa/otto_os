@@ -324,6 +324,84 @@ fn is_broad_system_scan_root(parent: &Path, is_root_user: bool) -> bool {
     false
 }
 
+#[allow(clippy::disallowed_methods)] // runs inside spawn_blocking
+fn detect_web_framework_kind(dir: &Path) -> Option<&'static str> {
+    if dir.join("angular.json").is_file() || dir.join(".angular-cli.json").is_file() {
+        return Some("angular");
+    }
+    if [
+        "next.config.js",
+        "next.config.mjs",
+        "next.config.cjs",
+        "next.config.ts",
+    ]
+    .iter()
+    .any(|f| dir.join(f).is_file())
+    {
+        return Some("nextjs");
+    }
+    if [
+        "svelte.config.js",
+        "svelte.config.mjs",
+        "svelte.config.cjs",
+        "svelte.config.ts",
+    ]
+    .iter()
+    .any(|f| dir.join(f).is_file())
+    {
+        return Some("svelte");
+    }
+    if ["nuxt.config.ts", "nuxt.config.js", "nuxt.config.mjs"]
+        .iter()
+        .any(|f| dir.join(f).is_file())
+    {
+        return Some("nuxt");
+    }
+    if dir.join("vue.config.js").is_file() || dir.join("vue.config.ts").is_file() {
+        return Some("vue");
+    }
+    let pkg = fs::read_to_string(dir.join("package.json")).ok()?;
+    let val: serde_json::Value = serde_json::from_str(&pkg).ok()?;
+    let has_dep = |name: &str| -> bool {
+        val.get("dependencies").and_then(|d| d.get(name)).is_some()
+            || val
+                .get("devDependencies")
+                .and_then(|d| d.get(name))
+                .is_some()
+    };
+    if has_dep("@angular/core") {
+        return Some("angular");
+    }
+    if has_dep("next") {
+        return Some("nextjs");
+    }
+    if has_dep("@sveltejs/kit") || has_dep("svelte") {
+        return Some("svelte");
+    }
+    if has_dep("nuxt") {
+        return Some("nuxt");
+    }
+    if has_dep("vue") {
+        return Some("vue");
+    }
+    if has_dep("react") {
+        return Some("react");
+    }
+    if has_dep("vite")
+        || [
+            "vite.config.ts",
+            "vite.config.js",
+            "vite.config.mjs",
+            "vite.config.mts",
+        ]
+        .iter()
+        .any(|f| dir.join(f).is_file())
+    {
+        return Some("vite");
+    }
+    None
+}
+
 /// Fast 1-level scan of `parent_path` returning child repositories and folders
 /// so users can bulk-select multi-repo workspaces into one Named IDE Project.
 #[allow(clippy::disallowed_methods)] // runs inside spawn_blocking
@@ -371,24 +449,71 @@ pub fn scan_parent_repos(parent_path: &str, is_root_user: bool) -> Result<IdeSca
         }
 
         let has_go_mod = canon.join("go.mod").is_file() || canon.join("go.work").is_file();
+        let has_kotlin =
+            canon.join("src/main/kotlin").is_dir() || canon.join("build.gradle.kts").is_file();
         let has_pom_or_gradle = canon.join("pom.xml").is_file()
             || canon.join("build.gradle").is_file()
             || canon.join("build.gradle.kts").is_file();
         let has_cargo = canon.join("Cargo.toml").is_file();
         let has_zig = canon.join("build.zig").is_file() || canon.join("build.zig.zon").is_file();
+        let has_unreal = fs::read_dir(&canon).ok().is_some_and(|rd| {
+            rd.flatten().take(64).any(|e| {
+                e.file_name()
+                    .to_str()
+                    .is_some_and(|n| n.ends_with(".uproject") || n.ends_with(".uplugin"))
+            })
+        });
+        let has_cpp = canon.join("CMakeLists.txt").is_file()
+            || canon.join("CMakePresets.json").is_file()
+            || canon.join("meson.build").is_file()
+            || canon.join("compile_commands.json").is_file();
+        let is_unity = canon.join("Assets").is_dir() && canon.join("ProjectSettings").is_dir();
+        let has_dotnet = is_unity
+            || canon.join("global.json").is_file()
+            || canon.join("Directory.Build.props").is_file()
+            || fs::read_dir(&canon).ok().is_some_and(|rd| {
+                rd.flatten().any(|e| {
+                    e.file_name()
+                        .to_str()
+                        .map(|n| n.to_ascii_lowercase())
+                        .is_some_and(|n| {
+                            n.ends_with(".sln")
+                                || n.ends_with(".slnx")
+                                || n.ends_with(".csproj")
+                                || n.ends_with(".fsproj")
+                        })
+                })
+            });
         let has_node = canon.join("package.json").is_file();
+        let web_fw = if has_node {
+            detect_web_framework_kind(&canon)
+        } else {
+            None
+        };
         let has_py =
             canon.join("pyproject.toml").is_file() || canon.join("requirements.txt").is_file();
         let has_git = canon.join(".git").exists();
 
         let kind = if has_go_mod {
             "go"
+        } else if has_kotlin && !canon.join("src/main/java").is_dir() {
+            "kotlin"
         } else if has_pom_or_gradle {
             "java"
         } else if has_cargo {
             "rust"
         } else if has_zig {
             "zig"
+        } else if has_unreal {
+            "unreal"
+        } else if has_cpp {
+            "cpp"
+        } else if is_unity {
+            "unity"
+        } else if has_dotnet {
+            "dotnet"
+        } else if let Some(fw) = web_fw {
+            fw
         } else if has_node {
             "node"
         } else if has_py {
@@ -408,6 +533,7 @@ pub fn scan_parent_repos(parent_path: &str, is_root_user: bool) -> Result<IdeSca
             has_go_mod,
             has_pom_or_gradle,
             has_git,
+            has_dotnet,
         });
     }
     repos.sort_by(|a, b| {
@@ -512,5 +638,41 @@ mod tests {
         }
         let scanned = scan_parent_repos(&tmp.path().to_string_lossy(), true).expect("scan capped");
         assert_eq!(scanned.repos.len(), MAX_SCAN_REPOS_ENTRIES);
+    }
+
+    #[test]
+    fn scan_parent_repos_preserves_dotnet_signal_on_unreal_with_generated_solution() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let generated = tmp.path().join("UnrealWithSln");
+        fs::create_dir_all(&generated).unwrap();
+        fs::write(generated.join("Game.uproject"), "{}").unwrap();
+        fs::write(generated.join("Game.sln"), "").unwrap();
+
+        let fresh = tmp.path().join("UnrealFresh");
+        fs::create_dir_all(&fresh).unwrap();
+        fs::write(fresh.join("Game.uproject"), "{}").unwrap();
+
+        let scanned = scan_parent_repos(&tmp.path().to_string_lossy(), true).expect("scan ok");
+        let with_sln = scanned
+            .repos
+            .iter()
+            .find(|r| r.name == "UnrealWithSln")
+            .expect("UnrealWithSln scanned");
+        assert_eq!(with_sln.kind, "unreal");
+        assert!(
+            with_sln.has_dotnet,
+            "BUG-17: Unreal checkout with generated .sln must expose has_dotnet=true"
+        );
+
+        let no_sln = scanned
+            .repos
+            .iter()
+            .find(|r| r.name == "UnrealFresh")
+            .expect("UnrealFresh scanned");
+        assert_eq!(no_sln.kind, "unreal");
+        assert!(
+            !no_sln.has_dotnet,
+            "fresh .uproject without .sln/.csproj must have has_dotnet=false"
+        );
     }
 }

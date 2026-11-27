@@ -1668,6 +1668,11 @@ pub fn route_class(method: &Method, matched_path: &str) -> Option<RouteClass> {
                     | "/ide/deps/action"
                     | "/ide/runs"
                     | "/ide/debug/sessions"
+                    | "/ide/spring/devtools-restart"
+                    | "/ide/notebooks/execute"
+                    | "/ide/notebooks/interrupt"
+                    | "/ide/notebooks/restart"
+                    | "/ide/notebooks/shutdown"
                     | "/workspaces/{id}/lsp/install"
                     // MCP governance + the servers it spawns (`command`/`args`).
                     | "/mcp/otto-server"
@@ -1684,6 +1689,8 @@ pub fn route_class(method: &Method, matched_path: &str) -> Option<RouteClass> {
                     | "/workflow-runs/{id}/approve"
                     | "/database-changes/{id}/approve"
                     | "/runtime-sessions/{id}/requests/{request_id}"
+                    | "/ide/projects/{id}/security/dast"
+                    | "/ide/projects/{id}/security/dast/run"
             )
             || p.starts_with("/state/git/")
             // MCP control-plane registry (S11-301): a server row names the

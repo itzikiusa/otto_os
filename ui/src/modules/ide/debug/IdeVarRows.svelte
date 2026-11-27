@@ -60,7 +60,7 @@
   function openMenu(e: MouseEvent, v: IdeVariable, ancestors: readonly IdeVariable[], containerRef: number): void {
     e.preventDefault();
     const expr = copyExpression([...ancestors, v]);
-    const canSet = containerRef > 0 && ide.activeDebug?.state === 'paused';
+    const canSet = containerRef > 0 && ide.activeDebug?.state === 'paused' && Boolean(ide.activeDebug?.supports_set_variable);
     ctxMenu.show(e, [
       ...(canSet
         ? [

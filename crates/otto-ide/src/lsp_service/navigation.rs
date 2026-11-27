@@ -130,6 +130,33 @@ pub(super) async fn goto_definition_upto<S: IdeCtx>(
         }
     }
 
+    // 2b. Spring Boot bidirectional navigation between `@Value` / `@ConfigurationProperties`
+    // and `application*.{properties,yml,yaml}` configuration keys.
+    if let ResolvedTarget::Local { is_root_user, .. } = &resolved {
+        if crate::spring_boot::props::is_spring_config_path(&req.path)
+            || matches!(lang.as_str(), "java" | "kotlin")
+        {
+            let project_roots = resolved.local_project_roots();
+            let is_root = *is_root_user;
+            let path_c = req.path.clone();
+            let content_c = content.clone();
+            let line_no = req.line;
+            if let Ok(Some((symbol, locations))) = tokio::task::spawn_blocking(move || {
+                crate::spring_boot::props::navigate_spring_config(
+                    &path_c,
+                    &content_c,
+                    line_no,
+                    &project_roots,
+                    is_root,
+                )
+            })
+            .await
+            {
+                return Ok(IdeReferencesResp { symbol, locations });
+            }
+        }
+    }
+
     let (symbol, qualifier) =
         extract_symbol_and_qualifier(req.symbol.as_deref(), &lang, &content, req.line, col)
             .ok_or_else(|| {

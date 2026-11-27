@@ -1580,18 +1580,25 @@ impl PersonalAgentsRepo {
         Ok(paths)
     }
 
-    /// Mark every still-`running` run as `error` — called once at scheduler
-    /// start to clear zombie rows left by a daemon restart. Returns the count.
-    pub async fn reap_running(&self) -> Result<u64> {
-        let res = sqlx::query(
+    /// Mark every still-`running` run as `error` — called once at boot to clear
+    /// zombie rows left by a daemon restart. Returns the reaped run IDs so boot
+    /// closes only threads belonging to runs that were actually reaped (never
+    /// reopened follow-ups on already-completed runs).
+    pub async fn reap_running_ids(&self) -> Result<Vec<String>> {
+        sqlx::query_scalar(
             "UPDATE personal_agent_runs SET status = 'error', \
-             error = 'interrupted by daemon restart', finished_at = ? WHERE status = 'running'",
+             error = 'interrupted by daemon restart', finished_at = ? \
+             WHERE status = 'running' RETURNING id",
         )
         .bind(fmt(Utc::now()))
-        .execute(&self.pool)
+        .fetch_all(&self.pool)
         .await
-        .map_err(dberr("reap running personal agent runs"))?;
-        Ok(res.rows_affected())
+        .map_err(dberr("reap running personal agent runs"))
+    }
+
+    /// Mark every still-`running` run as `error` and return the count.
+    pub async fn reap_running(&self) -> Result<u64> {
+        Ok(self.reap_running_ids().await?.len() as u64)
     }
 }
 
@@ -2044,6 +2051,44 @@ mod tests {
         let schedule = repo.get_schedule(&captured.id).await.unwrap();
         assert!(schedule.last_run_at.is_none());
         assert!(schedule.enabled);
+    }
+
+    #[tokio::test]
+    async fn reap_running_ids_returns_only_running_runs_not_completed_ones() {
+        let (repo, agent, captured) = recovery_schedule().await;
+        let done_run = repo
+            .admit_captured_run(
+                &new_id(),
+                &agent,
+                Some(&captured),
+                "manual",
+                "directed",
+                false,
+                None,
+            )
+            .await
+            .unwrap();
+        sqlx::query("UPDATE personal_agent_runs SET status = 'done' WHERE id = ?")
+            .bind(&done_run.id)
+            .execute(&repo.pool)
+            .await
+            .unwrap();
+        let agent = repo.get(&agent.id).await.unwrap();
+        let live_run = repo
+            .admit_captured_run(
+                &new_id(),
+                &agent,
+                Some(&captured),
+                "manual",
+                "directed",
+                false,
+                None,
+            )
+            .await
+            .unwrap();
+        let reaped = repo.reap_running_ids().await.unwrap();
+        assert_eq!(reaped, vec![live_run.id]);
+        assert!(!reaped.contains(&done_run.id));
     }
 
     /// A proactive admit stamps the goal before a session exists. Releasing

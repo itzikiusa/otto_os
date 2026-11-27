@@ -35,7 +35,7 @@ pub async fn recover_before_serve(ctx: &ServerCtx, boot: &mut BootPhases) -> Res
     // delivery runs in the background, after this settles their rows' state.
     warn_on_err(
         "personal-agent delegation recovery",
-        otto_assistant::personal_agent_team::recover_delegations(ctx).await,
+        otto_assistant::personal_agent_team::recover_delegations(ctx, &adopted.handled_ids).await,
     );
     // Await old-life settlement before any supervisor or resumed workflow can
     // admit a fresh run; a detached sweep can accidentally reap that new work.
@@ -47,12 +47,22 @@ pub async fn recover_before_serve(ctx: &ServerCtx, boot: &mut BootPhases) -> Res
             .fail_running()
             .await,
     );
-    warn_on_err(
-        "personal-agent recovery",
-        otto_state::PersonalAgentsRepo::new(ctx.pool.clone())
-            .reap_running()
-            .await,
-    );
+    let reaped_pa_runs = match otto_state::PersonalAgentsRepo::new(ctx.pool.clone())
+        .reap_running_ids()
+        .await
+    {
+        Ok(ids) => ids,
+        Err(e) => {
+            tracing::warn!("personal-agent recovery: {e}");
+            Vec::new()
+        }
+    };
+    otto_assistant::personal_agent_team::close_reaped_run_threads(
+        ctx,
+        &adopted.handled_ids,
+        &reaped_pa_runs,
+    )
+    .await;
     // Status flips only; the vault rescans it needs run in the background.
     warn_on_err(
         "vault-docs recovery",
@@ -130,7 +140,12 @@ async fn restore_sessions(
 /// the rest fail as re-runnable, and every live agent row is settled too.
 async fn fail_orphaned_reviews(ctx: &ServerCtx, adopted: &otto_agent_protocol::Adopted) {
     let held = ctx.agent_runtime.held_reviews(adopted).await;
-    let settled = otto_review::restart::settle_after_restart(&ctx.reviews_store, &held).await;
+    let settled = otto_review::restart::settle_after_restart_with_threads(
+        &ctx.reviews_store,
+        &held,
+        Some(&adopted.handled_ids),
+    )
+    .await;
     let settled = settled
         .inspect_err(|e| tracing::warn!("review recovery: {e}"))
         .unwrap_or_default();

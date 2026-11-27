@@ -50,10 +50,9 @@
   import { ui } from '../stores/ui.svelte';
   import { keyContext } from '../keys';
   import { registerFindProvider } from '../findProviders';
-
-  const themeCompartment = new Compartment();
+  import { securityGutter, refreshSecurityGutter } from './cm-security-gutter';
+  const themeCompartment = new Compartment(), securityCompartment = new Compartment();
   type JumpTarget = { path?: string; line: number; column: number; symbol?: string; originLine?: number; originColumn?: number };
-
   interface Props {
     path: string; content: string; root: string; language?: string; readOnly?: boolean;
     onchange?: (value: string) => void; completionSource?: CompletionSource | null;
@@ -78,7 +77,7 @@
     onQuickFix?: ((ctx: { line: number; column: number; symbol?: string; clientX?: number; clientY?: number }) => void) | null;
     onRenameSymbol?: ((ctx: { line: number; column: number; symbol: string; newName?: string }) => void) | null;
     onFormat?: (() => void) | null; onToggleBlame?: (() => void) | null;
-    onDiagnostics?: ((diags: IdeDiagnostic[]) => void) | null;
+    securityFindings?: readonly Pick<IdeDiagnostic, 'line' | 'message'>[]; onDiagnostics?: ((diags: IdeDiagnostic[]) => void) | null;
     onAgentAction?: ((mode: 'chat' | 'inline', sel: CmIdeMod.IdeEditorSelectionRange) => void) | null;
     onGoToLine?: (() => void) | null; onPasteFromHistory?: (() => void) | null;
     onOpenLocalHistory?: (() => void) | null; onOpenDepAnalyzer?: (() => void) | null;
@@ -97,7 +96,7 @@
     onCursorChange = null, onDefinitionJump = null, onImplementationJump = null,
     onFindUsages = null, onFileStructure = null, onJumpSymbol = null, onNavigateBack = null, onNavigateForward = null,
     onQuickFix = null, onRenameSymbol = null, onFormat = null, onToggleBlame = null,
-    onDiagnostics = null, onAgentAction = null, onGoToLine = null, onPasteFromHistory = null,
+    securityFindings = [], onDiagnostics = null, onAgentAction = null, onGoToLine = null, onPasteFromHistory = null,
     onOpenLocalHistory = null, onOpenDepAnalyzer = null, onOpenManifestIntention = null, onManifestDepsUpdated = null,
   }: Props = $props();
 
@@ -437,7 +436,7 @@
   export function lspRenameEdits(line: number, column: number, name: string) { return view && ideMod ? ideMod.queryPooledLspRename(view, line, column, name) : Promise.resolve(null); }
   export function lspReferences(line: number, column: number) { return view && ideMod ? ideMod.queryPooledLspReferences(view, line, column) : Promise.resolve(null); }
   export function lspQuickFixes(line: number) { return view && ideMod ? ideMod.queryPooledLspCodeActions(view, line) : Promise.resolve(null); }
-
+  export function lspSwitchSourceHeader() { return view && ideMod ? ideMod.queryPooledLspSwitchSourceHeader(view) : Promise.resolve(null); }
   export function reconnectLspClients(rootPath?: string): void {
     ideMod?.disposePooledLspClients({ rootPath, forceAll: true });
     if (!view || !isIdeActive() || !ideMod) return;
@@ -462,7 +461,7 @@
     appliedLangReady = langExt != null || !cmLangPending(langExtOf(filePath, language));
 
     const baseExtensions: Extension[] = [
-      ...(minimal ? [] : [lineNumbers()]), ideBpCompartment.of(buildIdeBpExtIfLoaded(filePath)), // an IDE file keeps the gutters its language uses
+      ...(minimal ? [] : [lineNumbers()]), ideBpCompartment.of(buildIdeBpExtIfLoaded(filePath)), securityCompartment.of(securityGutter(securityFindings)), // an IDE file keeps the gutters its language uses
       indentOnInput(), indentCompartment.of(indentExt(filePath)), bracketMatching(),
       ideCompartment.of(buildIdeExtIfLoaded(filePath)),
       ideDepsCompartment.of(ideMode && isIdeManifestPath(filePath) ? coldGutters.deps : []),
@@ -638,7 +637,7 @@
       ];
       if (lsp) effects.push(...[setDiagnostics(kept.state, []).effects ?? []].flat()); // the kept marks belong to the detached LSP plugin
       if (ideMod && isIdeActive()) {
-        effects.push(ideBpCompartment.reconfigure(buildIdeBpExtIfLoaded(toPath)), ideCompartment.reconfigure(buildIdeExtIfLoaded(toPath)));
+        effects.push(ideBpCompartment.reconfigure(buildIdeBpExtIfLoaded(toPath)), ideCompartment.reconfigure(buildIdeExtIfLoaded(toPath)), securityCompartment.reconfigure(securityGutter(securityFindings)));
       }
       appliedDialect = kept.dialect; appliedLangReady = kept.langReady; appliedLanguage = kept.language;
       if (sqlDialect !== kept.dialect || !kept.langReady || language !== kept.language) {
@@ -730,6 +729,7 @@
   });
   $effect(() => { const v = blameByLine; syncIdeEffect('blame', v != null, (m) => m.setBlameLinesEffect.of(v)); });
   $effect(() => { const b = breakpoints, mu = breakpointsMuted; syncIdeEffect('bp', b.length > 0 || !!onToggleBreakpoint, (m) => m.setBreakpointsEffect.of({ breakpoints: b, muted: mu })); });
+  $effect(() => { const items = securityFindings; untrack(() => refreshSecurityGutter(view, securityCompartment, items)); });
   $effect(() => { const v = gutterItems; syncIdeEffect('gutter', v.length > 0, (m) => m.setGutterItemsEffect.of(v)); });
   $effect(() => {
     const p = effectivePausedLine, sf = selectedFrameLine, iv = inlineValues, curPath = path;

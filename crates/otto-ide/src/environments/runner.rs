@@ -161,6 +161,7 @@ impl RunStateInner {
 pub(super) struct ActiveRunHandle {
     pub(super) seq: u64,
     pub(super) owner_user_id: String,
+    pub(super) security_audit: Option<(String, String, String)>,
     pub(super) state: Mutex<RunStateInner>,
     pub(super) stop_tx: watch::Sender<bool>,
     pub(super) events_tx: broadcast::Sender<IdeRunState>,
@@ -261,6 +262,10 @@ pub(super) async fn execute_run_task(
                 && !cfg.args.iter().any(|a| a == "-bench")
         });
         apply_runtime_profile_and_module_venv(&cfg, &target, &cwd, &mut env_map);
+        // The SSH Maven / Gradle launchers look for the build wrapper up to the target root.
+        if target.kind == IdeTargetKind::Ssh {
+            env_map.insert("OTTO_TARGET_ROOT".into(), target.root.clone());
+        }
         if let Some(ref nb) = netbridge {
             nb.apply_to_env(&mut env_map);
         }
@@ -334,6 +339,108 @@ pub(super) async fn execute_run_task(
         } else {
             None
         };
+        // BUG2-2 + BUG-35: When running a single named Zig test in a `build.zig` project,
+        // attach our patched `--build-runner` + `OTTO_ZIG_TEST_FILTER` so `zig build test`
+        // runs only the selected case inside the real module graph (instead of running
+        // unrelated failing sibling tests).
+        if cfg.runner == IdeRunnerKind::ZigTest
+            && cfg.args.first().map(String::as_str) == Some("build")
+            && !cfg.args.iter().any(|a| a == "--build-runner")
+        {
+            if let Some(filter) = cfg
+                .test_filter
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                let zig_prog = cfg
+                    .command
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("zig")
+                    .to_string();
+                let runner_path = if target.kind == IdeTargetKind::Local {
+                    let cache_root = crate::go_build_cache::ide_build_cache_root();
+                    tokio::task::spawn_blocking(move || {
+                        crate::dap::adapters_zig::prepare_local_zig_build_runner(
+                            &zig_prog,
+                            &cache_root,
+                        )
+                    })
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|p| p.to_string_lossy().into_owned())
+                } else {
+                    crate::dap::adapters_zig::prepare_ssh_zig_build_runner(
+                        &target,
+                        ssh.as_ref(),
+                        &zig_prog,
+                        &cwd,
+                        &env_map,
+                    )
+                    .await
+                };
+                if let Some(rp) = runner_path {
+                    env_map.insert("OTTO_ZIG_TEST_FILTER".into(), filter.to_string());
+                    if let Some(tp) = cfg
+                        .target_path
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                    {
+                        env_map.insert("OTTO_ZIG_TEST_FILE".into(), tp.to_string());
+                    }
+                    cfg.args.insert(1, rp);
+                    cfg.args.insert(1, "--build-runner".into());
+                } else if cfg
+                    .target_path
+                    .as_deref()
+                    .is_some_and(|p| p.ends_with(".zig"))
+                {
+                    append_run_line(
+                        &handle,
+                        "otto: selected-test runs inside build.zig need Zig 0.14.x's build runner, which this SDK lacks; falling back to a standalone zig test of the file".into(),
+                    );
+                }
+            }
+        }
+
+        // SSH C/C++: a source inside a remote CMake / Meson project fails like Debug
+        // instead of compiling on its own (BUG-10).
+        let cpp_src = cfg
+            .target_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("main.cpp");
+        if target.kind == IdeTargetKind::Ssh
+            && cfg.runner == IdeRunnerKind::CppRun
+            && cfg.command.as_deref().is_none_or(|c| c.trim().is_empty())
+            && crate::environments::runner_cmd::is_cpp_source_path(cpp_src)
+        {
+            if let Some(err) = crate::dap::adapters_cpp::remote_cpp_project_error(
+                &target,
+                ssh.as_ref(),
+                cpp_src,
+                &cwd,
+                &env_map,
+            )
+            .await
+            {
+                end_run(
+                    &runs,
+                    &handle,
+                    IdeRunStatus::Failed,
+                    Some(1),
+                    started,
+                    Some(err),
+                );
+                return;
+            }
+        }
+
         let (program, args) = match compiled {
             None => build_runner_command(&cfg, target.kind, &cwd, &env_map),
             Some(Some(Ok(built))) => built,
@@ -505,8 +612,14 @@ fn is_test_runner(runner: IdeRunnerKind) -> bool {
         runner,
         IdeRunnerKind::GoTest
             | IdeRunnerKind::CargoTest
+            | IdeRunnerKind::ZigTest
+            | IdeRunnerKind::Ctest
+            | IdeRunnerKind::DotnetTest
             | IdeRunnerKind::Pytest
             | IdeRunnerKind::Vitest
+            | IdeRunnerKind::Jest
+            | IdeRunnerKind::Playwright
+            | IdeRunnerKind::Karma
             | IdeRunnerKind::Node
             | IdeRunnerKind::JavaJunit
             | IdeRunnerKind::Maven
@@ -542,7 +655,10 @@ fn end_run(
 
 fn multi_step_label(cfg: &IdeRunConfig) -> &'static str {
     match cfg.runner {
-        IdeRunnerKind::GoBuild => "build",
+        IdeRunnerKind::GoBuild
+        | IdeRunnerKind::Cmake
+        | IdeRunnerKind::Make
+        | IdeRunnerKind::Meson => "build",
         _ => "run",
     }
 }

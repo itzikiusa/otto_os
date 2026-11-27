@@ -151,8 +151,27 @@ export const ZIG_MAIN_SOURCE = [
   '',
 ].join('\n');
 
+export const DOTNET_PROGRAM_SOURCE = [
+  'using System;',
+  '',
+  'namespace OttoDotnet;',
+  '',
+  'public static class Settlement',
+  '{',
+  '    /// <summary>Computes settlement bonus.</summary>',
+  '    public static int ComputeBonus(int amount, int rate) => amount + rate * 2;',
+  '',
+  '    public static void Main(string[] args)',
+  '    {',
+  '        var total = ComputeBonus(40, 5);',
+  '        Console.WriteLine($"DOTNET_SETTLEMENT_DONE:{total}");',
+  '    }',
+  '}',
+  '',
+].join('\n');
+
 export function seedPolyglotFiles(dir: string): void {
-  for (const sub of ['app', 'decimal', 'pyapp', 'zigapp/src', 'web', 'scripts', 'notes', 'src/main/java/com/otto']) {
+  for (const sub of ['app', 'decimal', 'pyapp', 'zigapp/src', 'cppapp/include', 'cppapp/src', 'dotnetapp', 'web', 'scripts', 'notes', 'src/main/java/com/otto']) {
     mkdirSync(join(dir, sub), { recursive: true });
   }
 
@@ -261,6 +280,74 @@ export function seedPolyglotFiles(dir: string): void {
     ].join('\n'),
   );
   writeFileSync(join(dir, 'zigapp', 'src', 'main.zig'), ZIG_MAIN_SOURCE);
+
+  writeFileSync(
+    join(dir, 'cppapp', 'CMakeLists.txt'),
+    [
+      'cmake_minimum_required(VERSION 3.16)',
+      'project(cppapp LANGUAGES CXX)',
+      'set(CMAKE_CXX_STANDARD 20)',
+      'set(CMAKE_EXPORT_COMPILE_COMMANDS ON)',
+      'add_executable(cppapp src/main.cpp src/calc.cpp)',
+      'target_include_directories(cppapp PRIVATE include)',
+      'target_compile_options(cppapp PRIVATE -g -O0)',
+      'enable_testing()',
+      'add_test(NAME cppapp_smoke COMMAND cppapp)',
+      '',
+    ].join('\n'),
+  );
+  writeFileSync(
+    join(dir, 'cppapp', 'include', 'calc.hpp'),
+    '#pragma once\nnamespace calc {\nint add(int a, int b);\n}\n',
+  );
+  writeFileSync(
+    join(dir, 'cppapp', 'src', 'calc.cpp'),
+    '#include "calc.hpp"\nnamespace calc {\nint add(int a, int b) { return a + b; }\n}\n',
+  );
+  writeFileSync(
+    join(dir, 'cppapp', 'src', 'main.cpp'),
+    '#include <iostream>\n#include "calc.hpp"\nint main() {\n    int left = 30;\n    int total = calc::add(left, 12);\n    std::cout << "CPP_SETTLEMENT_DONE:" << total << "\\n";\n    return 0;\n}\n',
+  );
+
+  mkdirSync(join(dir, 'kotlinapp', 'gradle'), { recursive: true });
+  mkdirSync(join(dir, 'kotlinapp', 'src', 'main', 'kotlin', 'com', 'otto'), { recursive: true });
+  mkdirSync(join(dir, 'kotlinapp', 'src', 'test', 'kotlin', 'com', 'otto'), { recursive: true });
+  writeFileSync(
+    join(dir, 'kotlinapp', 'settings.gradle.kts'),
+    'rootProject.name = "kotlinapp"\n',
+  );
+  writeFileSync(
+    join(dir, 'kotlinapp', 'gradle', 'libs.versions.toml'),
+    '[versions]\ncoroutines = "1.9.0"\nkotest = "5.9.1"\n\n[libraries]\nkotlinx-coroutines = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "coroutines" }\nkotest-runner = { module = "io.kotest:kotest-runner-junit5", version.ref = "kotest" }\n',
+  );
+  writeFileSync(
+    join(dir, 'kotlinapp', 'build.gradle.kts'),
+    'plugins {\n    kotlin("jvm") version "2.1.20"\n}\ndependencies {\n    implementation(kotlin("stdlib"))\n    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")\n    testImplementation("io.kotest:kotest-runner-junit5:5.9.1")\n}\n',
+  );
+  writeFileSync(
+    join(dir, 'kotlinapp', 'src', 'main', 'kotlin', 'com', 'otto', 'App.kt'),
+    'package com.otto\n\ndata class Settlement(val amount: Int)\n\nfun main() {\n    val s = Settlement(42)\n    println("KOTLIN_DONE:${s.amount}")\n}\n',
+  );
+  writeFileSync(
+    join(dir, 'kotlinapp', 'src', 'test', 'kotlin', 'com', 'otto', 'AppSpec.kt'),
+    'package com.otto\n\nimport io.kotest.core.spec.style.StringSpec\n\nclass AppSpec : StringSpec({\n    "computes settlement" {\n        assert(Settlement(42).amount == 42)\n    }\n})\n',
+  );
+
+  writeFileSync(
+    join(dir, 'dotnetapp', 'DotnetApp.csproj'),
+    [
+      '<Project Sdk="Microsoft.NET.Sdk">',
+      '  <PropertyGroup>',
+      '    <OutputType>Exe</OutputType>',
+      '    <TargetFramework>net8.0</TargetFramework>',
+      '    <ImplicitUsings>enable</ImplicitUsings>',
+      '    <Nullable>enable</Nullable>',
+      '  </PropertyGroup>',
+      '</Project>',
+      '',
+    ].join('\n'),
+  );
+  writeFileSync(join(dir, 'dotnetapp', 'Program.cs'), DOTNET_PROGRAM_SOURCE);
 
   writeFileSync(
     join(dir, 'package.json'),

@@ -411,6 +411,84 @@ pub(super) async fn install_local_sdk(
             run_local_cmd(mgr, job_id, 58, &zig_bin, &["version"], &[]).await?;
             Ok(dest.to_string_lossy().into_owned())
         }
+        EcosystemKind::Cpp => Err(
+            "C/C++ compiler toolchains (Clang / GCC / LLVM) are installed via Xcode Command Line Tools (`xcode-select --install`), Homebrew (`brew install llvm`), or your Linux package manager (`apt install clang` / `dnf install clang`), then auto-detected or added via 'Add Local SDK'.".into(),
+        ),
+        EcosystemKind::Kotlin => {
+            let archive = tmp.join(format!("kotlin-compiler-{}.zip", entry.version));
+            download_https_to_file(mgr, job_id, &entry.url, &archive, exp_sha, 15).await?;
+            let dest = root.join("kotlin/sdks").join(&entry.version);
+            let _ = tokio::fs::remove_dir_all(&dest).await;
+            tokio::fs::create_dir_all(&dest)
+                .await
+                .map_err(|e| e.to_string())?;
+            run_local_cmd(
+                mgr,
+                job_id,
+                50,
+                Path::new("unzip"),
+                &[
+                    "-q",
+                    "-o",
+                    &archive.to_string_lossy(),
+                    "-d",
+                    &dest.to_string_lossy(),
+                ],
+                &[],
+            )
+            .await?;
+            let _ = tokio::fs::remove_file(&archive).await;
+            let home = if dest.join("kotlinc/bin/kotlinc").is_file() {
+                dest.join("kotlinc")
+            } else {
+                dest.clone()
+            };
+            let kotlinc = home.join("bin/kotlinc");
+            if !kotlinc.is_file() {
+                return Err("Kotlin compiler archive missing bin/kotlinc".into());
+            }
+            make_executable(&kotlinc)?;
+            relink_current(&root.join("kotlin/current"), &home);
+            Ok(home.to_string_lossy().into_owned())
+        }
+        EcosystemKind::Dotnet => {
+            let archive = tmp.join(format!("dotnet-sdk-{}.tar.gz", entry.version));
+            download_https_to_file(mgr, job_id, &entry.url, &archive, exp_sha, 15).await?;
+            let dest = root.join("dotnet/sdks").join(&entry.version);
+            let _ = tokio::fs::remove_dir_all(&dest).await;
+            tokio::fs::create_dir_all(&dest)
+                .await
+                .map_err(|e| e.to_string())?;
+            run_local_cmd(
+                mgr,
+                job_id,
+                50,
+                Path::new("tar"),
+                &[
+                    "-xzf",
+                    &archive.to_string_lossy(),
+                    "-C",
+                    &dest.to_string_lossy(),
+                ],
+                &[],
+            )
+            .await?;
+            let _ = tokio::fs::remove_file(&archive).await;
+            let dotnet_bin = super::discovery::dotnet_bin_in_root(&dest)
+                .ok_or(".NET SDK archive missing dotnet executable")?;
+            make_executable(&dotnet_bin)?;
+            relink_current(&root.join("dotnet/current"), &dest);
+            run_local_cmd(
+                mgr,
+                job_id,
+                58,
+                &dotnet_bin,
+                &["--version"],
+                &[("DOTNET_ROOT", &dest)],
+            )
+            .await?;
+            Ok(dest.to_string_lossy().into_owned())
+        }
         EcosystemKind::Node => {
             let archive = tmp.join(format!("node-{}.tar.gz", entry.version));
             download_https_to_file(mgr, job_id, &entry.url, &archive, exp_sha, 15).await?;
@@ -600,7 +678,10 @@ pub(super) fn resolve_best_sdk_bin(
     let sp = mgr.shell_path();
     discover_local_sdks_with_shell(&[root.to_path_buf()], eco, sp.as_deref())
         .into_iter()
-        .map(|sdk| PathBuf::from(sdk.path).join("bin").join(bin_name))
+        .flat_map(|sdk| {
+            let base = PathBuf::from(sdk.path);
+            [base.join("bin").join(bin_name), base.join(bin_name)]
+        })
         .find(|cand| is_executable_file(cand))
         .or_else(|| find_executable_in(&system_search_dirs_with_shell(sp.as_deref()), &[bin_name]))
 }

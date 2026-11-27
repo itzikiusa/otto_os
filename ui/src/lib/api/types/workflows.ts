@@ -267,7 +267,38 @@ export interface RunSubject {
   branch?: string;
 }
 
-/** A goal run's progress. */
+/** How close one criterion is to its target (additive on CriterionResult and GoalCriterion). */
+export interface CriterionProgress {
+  value?: number;
+  target?: number;
+  unit?: string;
+  label?: string;
+  values?: Record<string, unknown>;
+}
+
+/** One round's recorded outcome/value for a criterion (bounded to 50). */
+export interface CriterionPoint {
+  iteration: number;
+  met: boolean;
+  value?: number;
+}
+
+/** One criterion's current state and per-round history on GoalProgress, keyed by `(step_id, id)`. */
+export interface GoalCriterion {
+  step_id: string;
+  step_name?: string;
+  id: string;
+  text?: string;
+  met?: boolean;
+  awaiting?: boolean;
+  progress?: CriterionProgress;
+  history?: CriterionPoint[];
+}
+
+/** A goal run's progress. On `workflow_run_updated` WS events, `criteria` is
+ *  projected to stay within the 4 KiB overview budget (at most 3 recent history
+ *  points per criterion, `progress.values` omitted, further trimmed if needed);
+ *  HTTP detail reads carry full history (up to 50 rounds) and `progress.values`. */
 export interface GoalProgress {
   iteration: number;
   max_iterations: number;
@@ -277,6 +308,10 @@ export interface GoalProgress {
   max_active_ms?: number;
   /** Criterion ids parked for a person. */
   awaiting?: string[];
+  /** Aggregate completion verdict from check outputs (`achieved` | `continue` | `blocked`). */
+  verdict?: 'achieved' | 'continue' | 'blocked' | string;
+  /** Per-criterion current status and per-round history, keyed by `(step_id, id)`. */
+  criteria?: GoalCriterion[];
 }
 
 export type HoldKind = 'paused' | 'blocked' | 'exhausted' | 'unknown';
@@ -349,6 +384,8 @@ export interface CriterionResult {
   evidence: string;
   /** `command` · `rule` · `agent` · the person's name. */
   verified_by: string;
+  /** Numeric progress, blocker label, and values inspected by the check. */
+  progress?: CriterionProgress;
 }
 
 export type CheckVerdict = 'achieved' | 'continue' | 'blocked' | 'unknown';

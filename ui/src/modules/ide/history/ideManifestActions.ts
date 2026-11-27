@@ -15,6 +15,19 @@ export interface DepsActionResp {
   output?: string;
 }
 
+export function classifyDepsActionOutcome(
+  res: DepsActionResp,
+  label: string,
+  fileName: string,
+): { level: 'success' | 'error'; title: string; detail: string } {
+  const out = (res.output ?? '').trim();
+  const detail = out ? out.split('\n')[0].slice(0, 140) : fileName;
+  if (!res.ok) {
+    return { level: 'error', title: `Couldn’t run ${label}`, detail };
+  }
+  return { level: 'success', title: label, detail };
+}
+
 export async function runManifestDepsAction(
   filePath: string,
   action: string,
@@ -38,10 +51,13 @@ export async function runManifestDepsAction(
     void ideGit.refreshActive();
 
     const out = (res.output ?? '').trim();
-    if (showModalOutput && out && onTreeOutput) {
+    const outcome = classifyDepsActionOutcome(res, label, ideBasename(filePath));
+    if (outcome.level === 'error') {
+      toasts.error(outcome.title, outcome.detail);
+    } else if (showModalOutput && out && onTreeOutput) {
       onTreeOutput(`${label} — ${ideBasename(filePath)}`, out);
     } else {
-      toasts.success(label, out ? out.split('\n')[0].slice(0, 140) : ideBasename(filePath));
+      toasts.success(outcome.title, outcome.detail);
     }
   } catch (e) {
     toastError(`Couldn’t run ${label}`, e);
@@ -115,6 +131,68 @@ export function buildManifestMenuItems(
         icon: 'refresh',
         action: () =>
           void runManifestDepsAction(filePath, 'sync', 'Zig Fetch Dependencies', onTreeOutput, false),
+      },
+    ];
+  }
+  const lower = fileName.toLowerCase();
+  if (lower === 'cmakelists.txt') {
+    return [
+      { separator: true },
+      {
+        label: 'CMake Configure (Generate compile_commands.json)',
+        icon: 'refresh',
+        action: () =>
+          void runManifestDepsAction(filePath, 'sync', 'CMake Configure', onTreeOutput, false),
+      },
+    ];
+  }
+  if (lower === 'vcpkg.json') {
+    return [
+      { separator: true },
+      {
+        label: 'vcpkg Install Dependencies',
+        icon: 'refresh',
+        action: () =>
+          void runManifestDepsAction(filePath, 'sync', 'vcpkg Install', onTreeOutput, false),
+      },
+    ];
+  }
+  if (lower === 'conanfile.txt') {
+    return [
+      { separator: true },
+      {
+        label: 'Conan Install Dependencies',
+        icon: 'refresh',
+        action: () =>
+          void runManifestDepsAction(filePath, 'sync', 'Conan Install', onTreeOutput, false),
+      },
+    ];
+  }
+  if (lower.endsWith('.csproj') || lower.endsWith('.fsproj') || lower.endsWith('.vbproj') || lower === 'directory.packages.props') {
+    return [
+      { separator: true },
+      {
+        label: 'Restore NuGet Packages',
+        icon: 'refresh',
+        action: () =>
+          void runManifestDepsAction(filePath, 'sync', 'Restore NuGet Packages', onTreeOutput, false),
+      },
+      {
+        label: 'List Outdated NuGet Packages',
+        icon: 'layers',
+        action: () =>
+          void runManifestDepsAction(filePath, 'outdated', 'Outdated NuGet Packages', onTreeOutput, true),
+      },
+    ];
+  }
+  if (lower === 'requirements.txt' || lower === 'pyproject.toml') {
+    return [
+      { separator: true },
+      {
+        label: 'Sync Python Dependencies (uv / pip)',
+        icon: 'refresh',
+        action: () =>
+          void runManifestDepsAction(filePath, 'sync', 'Sync Python Dependencies', onTreeOutput, false),
       },
     ];
   }

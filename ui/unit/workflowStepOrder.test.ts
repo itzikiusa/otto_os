@@ -3,11 +3,41 @@
 // selection — runs/stepOrder.ts.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { annotateRetriedChildren, childCrumb, childNoun, childTrail, defaultSelection, doneFold, entrySteps, loopChildren, mergeStepChildren, orderChildren, orderChildTree, orderSteps, resolveThreadSelection, RESULT, retriedAttemptReason, runtimeChildStatus, sameStepChildren, settledNodes, stepNumber, timeBar, topoOrder } from '../src/modules/workflows/runs/stepOrder.ts';
+import {
+  annotateRetriedChildren,
+  childCrumb,
+  childNoun,
+  childTrail,
+  defaultSelection,
+  doneFold,
+  entrySteps,
+  groupLoopRounds,
+  isWaitingOnSubagents,
+  loopChildren,
+  loopPositionLine,
+  mergeStepChildren,
+  orderChildren,
+  orderChildTree,
+  orderSteps,
+  resolveThreadSelection,
+  RESULT,
+  retriedAttemptReason,
+  reuseMergedNode,
+  runtimeChildStatus,
+  sameNodeFields,
+  sameStepChildren,
+  settledNodes,
+  stepNumber,
+  timeBar,
+  topoOrder,
+  waitingReviewers,
+  waitingThreads,
+} from '../src/modules/workflows/runs/stepOrder.ts';
+import { applyLiveNode, mergeRunProgress } from '../src/modules/workflows/runProgress.ts';
 import { paneTabs } from '../src/modules/workflows/runs/stepTabs.ts';
 import { at, fanoutNodes, node, PR_GRAPH, reviewers, T0 } from './workflowRunFixtures.ts';
 import { childWord, stepWord } from '../src/modules/workflows/runs/runWords.ts';
-import type { RuntimeSession, WorkflowGraph } from '../src/lib/api/types';
+import type { RuntimeSession, WorkflowGraph, WorkflowRun } from '../src/lib/api/types';
 
 const NOW = T0 + 12 * 60_000;
 const shape = (entries: ReturnType<typeof orderSteps>) => entries.map((e) => (e.type === 'group' ? e.steps.map((s) => s.id) : e.step.id));
@@ -439,4 +469,318 @@ test('annotateRetriedChildren marks earlier failed attempts as muted retried row
   assert.equal(retriedAttemptReason('Build', 1, { nodeLogs: ['attempt 1: exit code 1'] }), 'exit code 1');
   assert.equal(retriedAttemptReason('Build', 2, { nodeLogs: ['attempt 1: exit code 1'] }), null);
   assert.equal(sameStepChildren(annotated, children), false);
+});
+
+test('groupLoopRounds groups a review-fix loop by round, nests each review’s reviewers & summarizer, and summarizes earlier rounds', () => {
+  const loopGraphNode = {
+    id: 'ui',
+    kind: 'loop',
+    name: 'UI',
+    x: 0,
+    y: 0,
+    params: {
+      max_iterations: 5,
+      steps: [
+        { kind: 'review_run', name: 'review' },
+        { kind: 'check', name: 'check' },
+        { kind: 'agent_prompt', name: 'fix' },
+      ],
+    },
+  };
+  const mkCp = (node_id: string, iteration: number, step_index: number, kind: string, name: string, status: string, output: unknown = null, extra: Record<string, unknown> = {}) =>
+    ({ node_id, loop_id: 'ui', iteration, step_index, kind, name, status, attempts: 1, input: null, output, logs: [], updated_at: at(iteration), ...extra }) as never;
+
+  const checkpoints = [
+    mkCp('ui#1.0#review.0', 1, 0, 'review_run', 'review — app', 'success', { review_id: 'rev-1' }),
+    mkCp('ui#1.0', 1, 0, 'review_run', 'review', 'success', { review_id: 'rev-1', score: 35, threshold: 95, open: 68 }),
+    mkCp('ui#1.1', 1, 1, 'check', 'check', 'success', { criteria: [{ id: 'review-passes', met: false, progress: { value: 35, target: 95 } }], all_met: false, met: 0, total: 1 }),
+    mkCp('ui#1.2', 1, 2, 'agent_prompt', 'fix', 'success', {}, { thread_id: 'th-fix-1' }),
+    mkCp('ui#2.0#review.0', 2, 0, 'review_run', 'review — app', 'success', { review_id: 'rev-2' }),
+    mkCp('ui#2.0', 2, 0, 'review_run', 'review', 'success', { review_id: 'rev-2', score: 58, threshold: 95, open: 14 }),
+    mkCp('ui#2.1', 2, 1, 'check', 'check', 'success', { criteria: [{ id: 'review-passes', met: false, progress: { value: 58, target: 95 } }], all_met: false, met: 0, total: 1 }),
+    mkCp('ui#2.2', 2, 2, 'agent_prompt', 'fix', 'success', {}, { thread_id: 'th-fix-2' }),
+    mkCp('ui#3.0#review.0', 3, 0, 'review_run', 'review — app', 'running', { review_id: 'rev-3' }),
+  ];
+
+  // Round 3 has 12 reviewers: 9 done, 2 running, 1 queued, plus its own pending Summarizer.
+  const round3Reviewers = [
+    ...Array.from({ length: 9 }, (_, i) => ({ id: `rev-3.${i}`, label: `Lens ${i + 1}`, provider: 'codex', status: 'success' as const, note: '2 findings', thread_id: `t3-${i}` })),
+    { id: 'rev-3.9', label: 'Security · Claude', provider: 'claude', status: 'running' as const, started_at: at(8), thread_id: 't3-9' },
+    { id: 'rev-3.10', label: 'Correctness · Codex', provider: 'codex', status: 'running' as const, started_at: at(9), thread_id: 't3-10' },
+    { id: 'rev-3.11', label: 'Performance · Gemini', provider: 'gemini', status: 'queued' as const },
+    { id: 'rev-3.12', label: 'Summarizer', provider: 'claude', status: 'pending' as const },
+  ];
+
+  const loopNode = node('ui', 'running', 0, null, {
+    logs: ['🔁 iteration 1/5', '🔁 iteration 2/5', '🔁 iteration 3/5'],
+    review_ids: ['rev-1', 'rev-2', 'rev-3'],
+    children: [
+      { id: 'rev-1.0', label: 'Correctness', provider: 'codex', status: 'success', note: '68 findings' },
+      { id: 'rev-1.1', label: 'Summarizer', provider: 'claude', status: 'success', note: 'Done' },
+      { id: 'th-fix-1', label: 'fix · iteration 1', provider: 'claude', status: 'success', thread_id: 'th-fix-1' },
+      { id: 'rev-2.0', label: 'Correctness', provider: 'codex', status: 'success', note: '14 findings' },
+      { id: 'rev-2.1', label: 'Summarizer', provider: 'claude', status: 'success', note: 'Done' },
+      { id: 'th-fix-2', label: 'fix · iteration 2', provider: 'claude', status: 'success', thread_id: 'th-fix-2' },
+      ...round3Reviewers,
+    ],
+  });
+
+  const goal = {
+    iteration: 3,
+    max_iterations: 5,
+    criteria_met: 0,
+    criteria_total: 1,
+    active_ms: 0,
+    criteria: [
+      {
+        step_id: 'ui.1',
+        step_name: 'UI',
+        id: 'review-passes',
+        progress: { value: 58, target: 95 },
+        history: [
+          { iteration: 1, met: false, value: 35 },
+          { iteration: 2, met: false, value: 58 },
+        ],
+      },
+    ],
+  };
+
+  const view = groupLoopRounds({ id: 'ui', kind: 'loop', node: loopNode }, { graphNode: loopGraphNode, checkpoints, goal })!;
+  assert.equal(view.maxIterations, 5);
+  assert.equal(view.currentIteration, 3);
+  assert.equal(view.rounds.length, 3);
+  assert.equal(view.ungrouped.length, 0);
+
+  // Earlier rounds are not current and have one-line summaries with score, comments, and fix outcome.
+  assert.equal(view.rounds[0].current, false);
+  assert.equal(view.rounds[0].scoreText, '35 / 95');
+  assert.equal(view.rounds[0].summary, '35 / 95 · 68 comments · fixed');
+  assert.deepEqual(view.rounds[0].steps.map((s) => s.name), ['review', 'check', 'fix']);
+  // Each round's Summarizer stays nested inside THAT round's review step (never loose at the bottom).
+  assert.deepEqual(view.rounds[0].steps[0].children.trailing.map((e) => e.child.id), ['rev-1.1']);
+  assert.deepEqual(view.rounds[1].steps[0].children.trailing.map((e) => e.child.id), ['rev-2.1']);
+  assert.deepEqual(view.rounds[2].steps[0].children.trailing.map((e) => e.child.id), ['rev-3.12']);
+
+  // Current round is Round 3, open and running, with 9 of 12 reviewers done and waiting reviewers named.
+  assert.equal(view.rounds[2].current, true);
+  assert.equal(view.rounds[2].steps[0].status, 'running');
+  assert.equal(view.rounds[2].steps[0].summary, '9 of 12 reviewers done');
+  assert.equal(loopPositionLine({ kind: 'loop', node: loopNode }, view), 'Round 3 of 5 · reviewing (9 of 12 reviewers done)');
+
+  const revWait = waitingReviewers(view.rounds[2].steps[0].allChildren);
+  assert.deepEqual(revWait.running.map((r) => [r.childId, r.label, r.provider]), [
+    ['rev-3.9', 'Security · Claude', 'claude'],
+    ['rev-3.10', 'Correctness · Codex', 'codex'],
+  ]);
+  assert.equal(revWait.queued, 1);
+});
+
+test('groupLoopRounds keeps a retried fix attempt inside its round and supports two independent loops in one run', () => {
+  const graph: WorkflowGraph = {
+    nodes: [
+      { id: 'start', kind: 'manual_trigger', name: 'Start', x: 0, y: 0, params: {} },
+      { id: 'ui', kind: 'loop', name: 'UI', x: 0, y: 100, params: { max_iterations: 5, steps: [{ kind: 'review_run', name: 'review' }, { kind: 'check', name: 'check' }, { kind: 'agent_prompt', name: 'fix' }] } },
+      { id: 'server', kind: 'loop', name: 'server', x: 200, y: 100, params: { max_iterations: 5, steps: [{ kind: 'review_run', name: 'review' }, { kind: 'check', name: 'check' }, { kind: 'agent_prompt', name: 'fix' }] } },
+    ],
+    edges: [{ id: 'e1', source: 'start', target: 'ui' }, { id: 'e2', source: 'start', target: 'server' }],
+  };
+  const uiChildren = annotateRetriedChildren([
+    { id: 'u-fix-1a', label: 'fix · iteration 1', provider: 'claude', status: 'error', thread_id: 'u-fix-1a', depth: 0, parent_child_id: null },
+    { id: 'u-fix-1b', label: 'fix · iteration 1', provider: 'claude', status: 'success', thread_id: 'u-fix-1b', depth: 0, parent_child_id: null },
+    { id: 'u-fix-2', label: 'fix · iteration 2', provider: 'claude', status: 'running', thread_id: 'u-fix-2', depth: 0, parent_child_id: null },
+  ], { loopId: 'ui', nodeLogs: ['  [1/fix] attempt 1: timed out'] });
+
+  const uiNode = node('ui', 'running', 0, null, { logs: ['🔁 iteration 2/5'], children: uiChildren });
+  const serverNode = node('server', 'running', 0, null, {
+    logs: ['🔁 iteration 1/5'],
+    children: [{ id: 's-rev.0', label: 'Correctness', provider: 'codex', status: 'success' }],
+  });
+  const serverCps = [
+    { node_id: 'server#1.0', loop_id: 'server', iteration: 1, step_index: 0, kind: 'review_run', name: 'review', status: 'success', attempts: 1, input: null, output: { review_id: 's-rev', score: 81, threshold: 95 }, logs: [], updated_at: at(1) } as never,
+    { node_id: 'server#1.1', loop_id: 'server', iteration: 1, step_index: 1, kind: 'check', name: 'check', status: 'running', attempts: 1, input: null, output: null, logs: [], updated_at: at(2) } as never,
+  ];
+
+  const uiView = groupLoopRounds({ id: 'ui', kind: 'loop', node: uiNode }, { graphNode: graph.nodes[1], checkpoints: serverCps })!;
+  assert.equal(uiView.rounds.length, 2);
+  // Retried attempt 1 stays inside Round 1's fix step (in its done fold), never leaking to Round 2.
+  const r1Fix = uiView.rounds[0].steps.find((s) => s.name === 'fix')!;
+  assert.deepEqual(r1Fix.allChildren.map((c) => [c.id, c.retried_attempt ?? null]), [['u-fix-1a', 1], ['u-fix-1b', null]]);
+  assert.equal(r1Fix.status, 'success');
+  assert.equal(loopPositionLine({ kind: 'loop', node: uiNode }, uiView), 'Round 2 of 5 · fixing');
+
+  const serverView = groupLoopRounds({ id: 'server', kind: 'loop', node: serverNode }, { graphNode: graph.nodes[2], checkpoints: serverCps })!;
+  assert.equal(serverView.rounds.length, 1);
+  assert.equal(serverView.rounds[0].scoreText, '81 / 95');
+  assert.equal(loopPositionLine({ kind: 'loop', node: serverNode }, serverView), 'Round 1 of 5 · checking');
+
+  // Non-loop steps return null (runs with no loops are untouched).
+  assert.equal(groupLoopRounds({ id: 'n7', kind: 'review_run', node: node('n7', 'running', 0, null) }), null);
+});
+
+test('isWaitingOnSubagents and waitingThreads name the live threads a step is waiting on', () => {
+  const stepNode = node('loop', 'running', 0, null, {
+    phase: 'finishing',
+    activity: {
+      phase: 'waiting on 2 sub-agent(s)',
+      updated_at: at(10),
+      pending_tasks: 2,
+      subagents: [
+        { id: 'th-a', description: 'Check API contract', status: 'running', started_at: at(5) },
+        { id: 'sa-extra', description: 'Run smoke tests', status: 'running', started_at: at(8) },
+      ],
+    },
+    children: [
+      { id: 'c-a', label: 'Check API contract', provider: 'codex', status: 'running', thread_id: 'th-a', started_at: at(5) },
+      { id: 'c-done', label: 'Done helper', provider: 'claude', status: 'success', thread_id: 'th-done' },
+    ],
+  });
+  assert.equal(isWaitingOnSubagents(stepNode), true);
+  const refs = waitingThreads(stepNode);
+  assert.deepEqual(refs, [
+    { childId: 'c-a', label: 'Check API contract', provider: 'codex', startedAt: at(5) },
+    { childId: null, label: 'Run smoke tests', provider: '', startedAt: at(8) },
+  ]);
+  assert.equal(isWaitingOnSubagents(node('ok', 'success', 0, 1000)), false);
+});
+
+test('reuseMergedNode reflects in-place live node mutations while reusing unchanged merged children (BUG-15)', () => {
+  const baseNode = node('n3', 'running', 1, null, {
+    phase: 'working',
+    detail_version: 'v1',
+    thread: { thread_id: 'th-root', runner: 'threads', provider: 'claude', turns: 1, usage: {} as never },
+    children: [{ id: 'c1', label: 'Helper', provider: 'codex', status: 'success', thread_id: 'th-kid' }],
+  });
+  const run: WorkflowRun = {
+    id: 'run-1',
+    workflow_id: 'wf-1',
+    status: 'running',
+    summary: true,
+    rev: 1,
+    waiting_approval: false,
+    input: null,
+    output: null,
+    error: null,
+    started_at: at(0),
+    ended_at: null,
+    nodes: [baseNode],
+    checkpoints: [],
+  } as unknown as WorkflowRun;
+
+  const merged1 = [{ id: 'c1', label: 'Helper', provider: 'codex', status: 'success' as const, thread_id: 'th-kid', depth: 0, parent_child_id: null }];
+  const entry1 = reuseMergedNode(run.nodes[0], merged1, undefined);
+  assert.notEqual(entry1.node, run.nodes[0], 'merged children created a wrapper copy');
+  assert.equal(entry1.node.phase, 'working');
+
+  // Unrelated runtime-session tick with structurally identical children preserves exact node reference.
+  const mergedTick = merged1.map((c) => ({ ...c }));
+  const entryTick = reuseMergedNode(run.nodes[0], mergedTick, entry1);
+  assert.equal(entryTick, entry1);
+  assert.equal(entryTick.node, entry1.node);
+
+  // Live event mutates `run.nodes[0]` in place (same object identity) to `needs_you` with unchanged children.
+  const applied = applyLiveNode(run, {
+    rev: 2,
+    status: 'running',
+    waitingApproval: true,
+    overview: { state: 'needs_you', headline: 'Needs approval' } as never,
+    node: {
+      ...baseNode,
+      phase: 'needs_you',
+      detail_version: 'v2',
+      attention: { kind: 'approval', text: 'Approve command', since: at(2) },
+    },
+  });
+  assert.equal(applied, true);
+  assert.equal(run.nodes[0], baseNode, 'applyLiveNode mutated the node in place');
+  assert.equal(sameNodeFields(run.nodes[0], entry1.node), false);
+
+  const entry2 = reuseMergedNode(run.nodes[0], merged1.map((c) => ({ ...c })), entry1);
+  assert.equal(entry2.node.phase, 'needs_you');
+  assert.equal(entry2.node.attention?.text, 'Approve command');
+  assert.equal(entry2.children, entry1.children, 'unchanged merged children array is still reused');
+
+  // Progress poll settles the step in place and drops `thread`.
+  const settledSummary: WorkflowRun = {
+    ...run,
+    rev: 3,
+    status: 'success',
+    nodes: [
+      {
+        ...baseNode,
+        status: 'success',
+        phase: undefined,
+        attention: undefined,
+        thread: undefined,
+        duration_ms: 4200,
+        detail_version: 'v3',
+      },
+    ],
+  };
+  assert.equal(mergeRunProgress(run, settledSummary), true);
+  assert.equal(run.nodes[0], baseNode, 'mergeRunProgress mutated the node in place');
+  const entry3 = reuseMergedNode(run.nodes[0], merged1.map((c) => ({ ...c })), entry2);
+  assert.equal(entry3.node.status, 'success');
+  assert.equal(entry3.node.duration_ms, 4200);
+  assert.equal(entry3.node.thread, undefined, 'deleted field is no longer retained on cached node');
+  assert.equal(entry3.children, entry2.children);
+});
+
+test('annotateRetriedChildren keeps independent same-named failed threads active without checkpoint retry evidence (BUG-16)', () => {
+  // Agent opens two independent child threads with the same fallback/title; first fails, second runs.
+  const agentKids = [
+    { id: 'th-a', label: 'codex', provider: 'codex', status: 'error' as const, thread_id: 'th-a', depth: 0, parent_child_id: null },
+    { id: 'th-b', label: 'codex', provider: 'codex', status: 'running' as const, thread_id: 'th-b', depth: 0, parent_child_id: null },
+    { id: 'th-c', label: 'Check tests', provider: 'claude', status: 'error' as const, thread_id: 'th-c', depth: 0, parent_child_id: null },
+    { id: 'th-d', label: 'Check tests', provider: 'claude', status: 'running' as const, thread_id: 'th-d', depth: 0, parent_child_id: null },
+  ];
+  // Even if the parent step's own logs carry a bare `attempt 1:` line, independent child threads are NOT retried attempts.
+  const annotated = annotateRetriedChildren(agentKids, {
+    loopId: 'agent-step',
+    nodeLogs: ['attempt 1: parent step retried once'],
+  });
+  assert.equal(annotated, agentKids, 'returns original array untouched when no checkpoint retry evidence exists');
+  assert.deepEqual(childWord(annotated[0], NOW), { word: 'Failed', tone: 'danger' });
+  assert.deepEqual(childWord(annotated[2], NOW), { word: 'Failed', tone: 'danger' });
+  const tree = orderChildTree(annotated);
+  assert.deepEqual(tree.active.map((e) => e.child.id), ['th-a', 'th-b', 'th-c', 'th-d']);
+  assert.equal(tree.done.length, 0);
+
+  // Nested agent sub-threads under a loop iteration are never treated as checkpoint retries even if their label matches.
+  const loopCpBase = {
+    node_id: 'loop#1.0',
+    loop_id: 'loop',
+    iteration: 1,
+    step_index: 0,
+    kind: 'agent_prompt',
+    name: 'fix',
+    status: 'success',
+    attempts: 2,
+    input: null,
+    output: null,
+    logs: ['attempt 1: timed out'],
+    updated_at: at(1),
+  };
+  const loopCp = loopCpBase as never;
+  const nestedKids = [
+    { id: 'iter-1', label: 'fix · iteration 1', provider: 'claude', status: 'running' as const, thread_id: 'iter-1', depth: 0, parent_child_id: null },
+    { id: 'sub-1', label: 'fix', provider: 'codex', status: 'error' as const, thread_id: 'sub-1', depth: 1, parent_child_id: 'iter-1' },
+    { id: 'sub-2', label: 'fix', provider: 'codex', status: 'running' as const, thread_id: 'sub-2', depth: 1, parent_child_id: 'iter-1' },
+  ];
+  assert.equal(annotateRetriedChildren(nestedKids, { loopId: 'loop', checkpoints: [loopCp] }), nestedKids);
+
+  // Even an iteration-shaped label requires checkpoint `attempts > attempt` or attempt logs.
+  const singleAttemptCp = { ...loopCpBase, attempts: 1, logs: [] } as never;
+  const unconfirmed = [
+    { id: 'x1', label: 'fix · iteration 1', provider: 'claude', status: 'error' as const, thread_id: 'x1', depth: 0, parent_child_id: null },
+    { id: 'x2', label: 'fix · iteration 1', provider: 'claude', status: 'running' as const, thread_id: 'x2', depth: 0, parent_child_id: null },
+  ];
+  assert.equal(annotateRetriedChildren(unconfirmed, { loopId: 'loop', checkpoints: [singleAttemptCp] }), unconfirmed);
+
+  // A checkpoint with `attempts: 2` confirms the retry even before attempt logs are populated.
+  const countOnlyCp = { ...loopCpBase, attempts: 2, logs: [] } as never;
+  const confirmed = annotateRetriedChildren(unconfirmed, { loopId: 'loop', checkpoints: [countOnlyCp] });
+  assert.equal(confirmed[0].retried_attempt, 1);
+  assert.equal(confirmed[0].retried_reason, undefined);
+  assert.deepEqual(childWord(confirmed[0], NOW), { word: 'Attempt 1 failed · retried', tone: '' });
+  assert.deepEqual(orderChildTree(confirmed).done.map((e) => e.child.id), ['x1']);
 });

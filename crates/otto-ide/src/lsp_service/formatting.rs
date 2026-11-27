@@ -44,6 +44,21 @@ pub(super) fn formatter_candidates(
             "zig".into(),
             vec!["fmt".into(), "--stdin".into()],
         )],
+        "c" | "cpp" => vec![(
+            "clang-format",
+            "clang-format".into(),
+            vec![format!("--assume-filename={path}")],
+        )],
+        "csharp" => vec![(
+            "csharpier",
+            "csharpier".into(),
+            vec!["format".into(), "--write-stdout".into()],
+        )],
+        "fsharp" => vec![(
+            "fantomas",
+            "fantomas".into(),
+            vec!["--stdin".into(), "--stdout".into()],
+        )],
         "python" => vec![
             (
                 "ruff",
@@ -62,6 +77,18 @@ pub(super) fn formatter_candidates(
             "google-java-format".into(),
             vec!["-".into()],
         )],
+        "kotlin" => vec![
+            (
+                "ktfmt",
+                "ktfmt".into(),
+                vec![format!("--stdin-name={path}"), "-".into()],
+            ),
+            (
+                "ktlint",
+                "ktlint".into(),
+                vec!["--format".into(), "--stdin".into()],
+            ),
+        ],
         "shell" | "bash" | "sh" | "zsh" => vec![(
             "shfmt",
             "shfmt".into(),
@@ -279,10 +306,18 @@ pub(super) async fn run_stdin_formatter<S: IdeCtx>(
         .await
         .ok()?
         .ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8(out.stdout).ok())
-        .flatten()
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let snippet: String = stderr.trim().chars().take(240).collect();
+        tracing::warn!(
+            formatter = cmd,
+            exit_code = ?out.status.code(),
+            stderr = %snippet,
+            "IDE stdin formatter exited non-zero"
+        );
+        return None;
+    }
+    String::from_utf8(out.stdout).ok()
 }
 
 /// The project opted in to formatter configs that run code: its stored

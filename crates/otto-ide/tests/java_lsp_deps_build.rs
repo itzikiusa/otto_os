@@ -10,6 +10,8 @@ use std::time::Duration;
 
 use axum::http::{Method, StatusCode};
 use common::{build_test_app, send_json};
+use otto_ide::environments::EnvironmentManager;
+use otto_ide::lsp_host::pool::{LspPool, PoolKey};
 use serde_json::{json, Value};
 use tokio::process::Command;
 
@@ -610,4 +612,94 @@ async fn run_java_main_and_collect_output(
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     panic!("timed out waiting for Java run {run_id}");
+}
+
+/// jdtls's first import of a Maven module runs a full build that deletes every class in
+/// `target/classes` before compiling it again: the folder Otto's Run and Debug start the
+/// JVM on after their own `mvn test-compile`. A class the program loaded in that window
+/// was a `NoClassDefFoundError` (the JUnit gutter-debug e2e ending at its first
+/// breakpoint). Otto's jdtls never builds, so Maven's classes stay put.
+#[tokio::test]
+async fn jdtls_import_leaves_maven_target_classes_alone() {
+    if !common::ensure_bins_or_skip(&["jdtls", "javac"]) {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let module = std::fs::canonicalize(tmp.path()).unwrap().join("core");
+    let pkg = module.join("src/main/java/com/acme/core");
+    std::fs::create_dir_all(&pkg).unwrap();
+    std::fs::write(
+        module.join("pom.xml"),
+        "<project xmlns=\"http://maven.apache.org/POM/4.0.0\"><modelVersion>4.0.0</modelVersion><groupId>com.acme</groupId><artifactId>core</artifactId><version>1.0.0</version><properties><maven.compiler.release>17</maven.compiler.release></properties></project>\n",
+    )
+    .unwrap();
+    std::fs::write(
+        pkg.join("Calc.java"),
+        "package com.acme.core;\n\npublic class Calc {\n    public static int add(int a, int b) {\n        return a + b;\n    }\n}\n",
+    )
+    .unwrap();
+    let javac = Command::new("javac")
+        .args(["--release", "17", "-d", "target/classes"])
+        .arg(pkg.join("Calc.java"))
+        .current_dir(&module)
+        .status()
+        .await
+        .unwrap();
+    assert!(javac.success());
+    let class = module.join("target/classes/com/acme/core/Calc.class");
+    let built = std::fs::metadata(&class).unwrap().modified().unwrap();
+
+    let pool = LspPool::new_managed(
+        tmp.path().join("data"),
+        Duration::from_secs(120),
+        EnvironmentManager::new(tmp.path().join("env")),
+    );
+    pool.record_owner_privilege("root", true);
+    let key = PoolKey {
+        owner: "root".into(),
+        lang: "java".into(),
+        root: module.to_string_lossy().into_owned(),
+        ssh: None,
+        go_build_tags: Vec::new(),
+    };
+    let data = tmp.path().join("jdtls-data").to_string_lossy().into_owned();
+    let mut lsp = pool.attach(key, "jdtls", &["-data".into(), data]).unwrap();
+    let root_uri = format!("file://{}", module.display());
+    let init = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"rootUri": root_uri, "capabilities": {}}});
+    assert!(lsp.send(init.to_string()).await);
+
+    // Watch the class through the import: present all along and never rewritten.
+    let mut gone = false;
+    let mut ready: Option<tokio::time::Instant> = None;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    while tokio::time::Instant::now() < deadline
+        && ready.is_none_or(|t| t.elapsed() < Duration::from_secs(10))
+    {
+        gone |= !class.exists();
+        let Ok(Some(text)) = tokio::time::timeout(Duration::from_millis(1), lsp.rx.recv()).await
+        else {
+            continue;
+        };
+        let msg: Value = serde_json::from_str(&text).unwrap();
+        if msg["id"] == json!(1) && msg.get("method").is_none() {
+            let initialized = json!({"jsonrpc": "2.0", "method": "initialized", "params": {}});
+            assert!(lsp.send(initialized.to_string()).await);
+        } else if let (Some(id), Some(_)) = (msg.get("id"), msg.get("method")) {
+            let reply = json!({"jsonrpc": "2.0", "id": id, "result": null});
+            assert!(lsp.send(reply.to_string()).await);
+        } else if msg["params"]["type"] == json!("ServiceReady") {
+            ready.get_or_insert_with(tokio::time::Instant::now);
+        }
+    }
+    let rewritten = std::fs::metadata(&class).map(|m| m.modified().unwrap() != built);
+    pool.shutdown();
+    assert!(ready.is_some(), "jdtls never reported ServiceReady");
+    assert!(!gone, "jdtls deleted {} during its import", class.display());
+    assert_eq!(
+        rewritten.ok(),
+        Some(false),
+        "jdtls rewrote {}",
+        class.display()
+    );
 }

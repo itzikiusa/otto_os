@@ -39,7 +39,7 @@ import {
   disposePooledLspClients, hasWarmPooledLspClient, lspUriToPath, notifyLspDidSave, requestIdeDiveAtPos,
   type AttachPooledLspOptions, type DirectLspOptions,
 } from './cm-ide-lsp.ts';
-import { queryPooledLspCodeActions, queryPooledLspReferences, queryPooledLspRename } from './cm-ide-lsp-requests.ts';
+import { queryPooledLspCodeActions, queryPooledLspReferences, queryPooledLspRename, queryPooledLspSwitchSourceHeader } from './cm-ide-lsp-requests.ts';
 import {
   applyConcreteEditsToView, computeDeterministicQuickFixes, hasDeterministicQuickFixAtLine, lintMessagesAtLine, previewConcreteEdits,
   type IdeConcreteTextEdit, type IdeQuickFixAction,
@@ -67,7 +67,7 @@ export {
   detectInlineRefactorHints, disposePooledLspClients, duplicateLineOrSelection,
   getIdeQuickFixesAtLine, hasWarmPooledLspClient, lintMessagesAtLine,
   isBpTargetGutterElement, lspUriToPath, moveLineDown, moveLineUp, notifyLspDidSave,
-  openReplaceInFile, previewConcreteEdits, queryPooledLspCodeActions, queryPooledLspReferences, queryPooledLspRename, rectangularSelection, requestIdeDiveAtPos,
+  openReplaceInFile, previewConcreteEdits, queryPooledLspCodeActions, queryPooledLspReferences, queryPooledLspRename, queryPooledLspSwitchSourceHeader, rectangularSelection, requestIdeDiveAtPos,
   selectAllOccurrences, selectNextOccurrence, selectionOrCurrentLine,
   setBaselineSourceEffect, setBlameLinesEffect, setDiskSavedContentEffect, setSavedContentEffect, smartExpandSelection,
   splitSelectionIntoLines, startNewLineBelow, toggleLineComment, wordAtCursor,

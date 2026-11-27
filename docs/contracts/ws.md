@@ -451,17 +451,18 @@ credentials are refused with 403 (`RootRoute::Lsp`).
   outside Otto's data dir and secret directories (`~/.ssh`, key files). When optional `file` is
   supplied inside an authorized directory, the bridge walks up from `file` to
   the nearest module manifest (`go.mod`, `Cargo.toml`, `build.zig`, `build.zig.zon`,
-  `pom.xml`, `build.gradle*`, `package.json`, `pyproject.toml`) so multi-repo workspaces always bind to the
+  `compile_commands.json`, `CMakeLists.txt`, `CMakePresets.json`, `meson.build`, `*.uproject`,
+  `*.sln`, `*.slnx`, `*.csproj`, `*.fsproj`, `pom.xml`, `build.gradle*`, `package.json`, `pyproject.toml`) so multi-repo workspaces always bind to the
   active file's module root. Binary discovery checks
   `<data_dir>/toolchains/**/bin` first (prepend to `PATH`, plus managed JDK
   `JAVA_HOME`), then standard developer bin directories (`~/.cargo/bin`,
-  `~/go/bin`, `~/.zvm/bin`, `~/.local/bin`, Homebrew, …), and includes both the built-in
-  language servers (`gopls`, `typescript-language-server`, `jdtls`,
-  `rust-analyzer`, `zls`, `pyright-langserver`, `bash-language-server`,
+  `~/go/bin`, `~/.zvm/bin`, `~/.dotnet/tools`, `~/.local/bin`, Homebrew, …), and includes both the built-in
+  language servers (`gopls`, `typescript-language-server`, `svelteserver`,
+  `vue-language-server`, `ngserver`, `jdtls`, `kotlin-language-server`,
+  `rust-analyzer`, `zls`, `clangd`, `csharp-ls` / `OmniSharp` / `fsautocomplete`, `pyright-langserver`, `bash-language-server`,
   `vscode-json-language-server`, `vscode-css-language-server`,
   `vscode-html-language-server`, `marksman`) and any enabled runtime IDE plugin
-  language servers (`IdePluginRegistry`, e.g. `kotlin-language-server` or
-  `clangd`). Local spawns inherit the cached user
+  language servers (`IdePluginRegistry`). Local spawns inherit the cached user
   login+interactive shell environment (`$SHELL -lic`, e.g. `GOPRIVATE`, plus
   cold-start process `SSH_AUTH_SOCK`/`GOPRIVATE`/`GONOSUMDB`/`GOPATH`/`GOMODCACHE`) merged
   with the project's SDK environment and enforce explicit child memory caps
@@ -469,6 +470,17 @@ credentials are refused with 403 (`RootRoute::Lsp`).
   `RA_LRU_CAP=128`, Node-based LSPs `--max-old-space-size=384`) in a dedicated
   Unix process group (`process_group(0)`). Missing binary → HTTP 503
   `server_unavailable`.
+- **Project trust (local and SSH):** `lang=zig`, `lang=kotlin`, `lang=vue`,
+  `lang=csharp` and `lang=fsharp` run project code (`build.zig`, the Gradle / Maven
+  build import, the Vue plugins named by `tsconfig.json`, the MSBuild design-time
+  build), so they need a non-secret `OTTO_IDE_TRUST_ZIG_BUILD=1`,
+  `OTTO_IDE_TRUST_KOTLIN_LSP=1`, `OTTO_IDE_TRUST_VUE_LSP=1` or
+  `OTTO_IDE_TRUST_DOTNET_LSP=1` (or
+  `OTTO_IDE_TRUST_PROJECT_EXECUTION=1`) in the opened root's project environment
+  (or a module inside it, never an ancestor); otherwise HTTP 403
+  `zig_lsp_requires_trust` / `kotlin_lsp_requires_trust` / `vue_lsp_requires_trust`
+  / `dotnet_lsp_requires_trust`
+  before the upgrade.
 - **Remote SSH target (`connection_id` set):** Resolves the saved SSH
   `Connection` (`ConnectionKind::Ssh`) through the caller's workspace/global
   `Connections` grants and resource access (`discover` + `shell`, plus
@@ -1021,9 +1033,14 @@ non-terminal so the view converges even with no WS connection.
   in place without a second GET (`nodes_total` 0 = unknown, keep last counts).
 - `waiting_approval` — true on the pause event; the approve/reject decision
   re-emits with false.
-- `overview` — the run's computed `RunOverview` (api.md "Run view"; ≤ 4 KiB:
-  `now.node_ids` ≤ 8, `attention` ≤ 8, `deliverables` ≤ 12, `goal.awaiting` ≤ 8,
-  strings clipped), so attention, queue, phase and wait show without a GET.
+- `overview` — the run's computed `RunOverview` (api.md "Run view"; ≤ 4 KiB
+  UTF-8 JSON bytes: `now.node_ids` ≤ 8, `attention` ≤ 8, `deliverables` ≤ 12,
+  `goal.awaiting` ≤ 8, `goal.criteria` projected via `ws_projected` to at most
+  the last 3 history points per criterion with `progress.values` omitted, then
+  remaining contributors clipped/trimmed in priority order to stay ≤ 4 KiB;
+  omitted if even the minimal bounded representation cannot fit; full 50-round
+  history, `progress.values`, and unclipped names stay on HTTP detail reads), so
+  attention, queue, phase and wait show without a GET.
   Omitted by emitters that do not compute it; clients keep the last one then.
   The `node` summary carries the run-view node fields `/progress` serves
   (`phase`, `wait`, `attention`, `thread` without digest, …).

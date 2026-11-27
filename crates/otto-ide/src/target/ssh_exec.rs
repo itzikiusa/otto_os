@@ -100,6 +100,9 @@ const REMOTE_TOOLCHAIN_PATH_EXPRS: &[&str] = &[
     "\"$HOME\"/.otto/toolchains/java/current/bin",
     "\"$HOME\"/.otto/toolchains/go/current/bin",
     "\"$HOME\"/.otto/toolchains/go/bin",
+    "\"$HOME\"/.otto/toolchains/zig/current",
+    "\"$HOME\"/.otto/toolchains/zig/current/bin",
+    "\"$HOME\"/.otto/toolchains/zig/bin",
     "\"$HOME\"/.otto/toolchains/node/current/bin",
     "\"$HOME\"/.otto/toolchains/python/current/bin",
     "\"$HOME\"/.otto/toolchains/python/bin",
@@ -109,6 +112,7 @@ const REMOTE_TOOLCHAIN_PATH_EXPRS: &[&str] = &[
     "\"$HOME\"/.otto/toolchains/json/bin",
     "\"$HOME\"/go/bin",
     "\"$HOME\"/.cargo/bin",
+    "\"$HOME\"/.zvm/bin",
     "\"$HOME\"/.local/bin",
 ];
 
@@ -511,6 +515,7 @@ pub(crate) fn format_remote_env_exports(env: &BTreeMap<String, String>) -> Strin
                 | "VIRTUAL_ENV"
                 | "CARGO_HOME"
                 | "RUSTUP_HOME"
+                | "OTTO_TARGET_ROOT"
         ) {
             quote_remote_home_expr(v)
         } else {
@@ -639,10 +644,10 @@ pub(crate) fn wrap_remote_stdio_with_eof_kill_and_env(
     };
     format!(
         "{prefix}exec 4<&0; \
-         fifo=\"/tmp/.otto-ide-$$-$(date +%s 2>/dev/null || echo 0)\"; \
+         fifo_dir=$(mktemp -d) || exit 1; fifo=\"$fifo_dir/f\"; \
          mkfifo -m 600 \"$fifo\" || exit 1; \
          ( exec 4<&-; {exec_line} ) <\"$fifo\" & pid=$!; \
-         exec 3>\"$fifo\"; rm -f \"$fifo\"; \
+         exec 3>\"$fifo\"; rm -f \"$fifo\"; rmdir \"$fifo_dir\"; \
          ( cat <&4 >&3; exec 3>&-; sleep 1; kill -TERM \"$pid\" ) >/dev/null 2>&1 & watcher=$!; \
          exec 3>&- 4<&-; wait \"$pid\"; rc=$?; kill \"$watcher\" 2>/dev/null; exit \"$rc\""
     )
@@ -811,5 +816,37 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("timed out"), "unexpected: {err}");
         assert!(start.elapsed() < Duration::from_secs(3));
+    }
+
+    #[allow(clippy::disallowed_methods)]
+    #[tokio::test]
+    async fn stdio_eof_kill_fifo_lives_in_a_private_mktemp_dir() {
+        use tokio::io::AsyncWriteExt;
+
+        // A predictable /tmp FIFO name lets another host user pre-create it and break
+        // every SSH LSP/DAP start; the FIFO goes in a fresh mktemp -d dir instead.
+        let script = wrap_remote_stdio_with_eof_kill("cat");
+        assert!(!script.contains("/tmp/"), "{script}");
+        let tmp = tempfile::tempdir().unwrap();
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", &script])
+            .env("TMPDIR", tmp.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(b"frame\n").await.unwrap();
+        drop(stdin);
+        let out = tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(out.stdout, b"frame\n");
+        assert_eq!(
+            std::fs::read_dir(tmp.path()).unwrap().count(),
+            0,
+            "fifo dir left behind"
+        );
     }
 }

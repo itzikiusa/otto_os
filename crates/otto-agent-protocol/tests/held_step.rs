@@ -258,6 +258,193 @@ async fn a_reviewer_held_through_a_restart_names_its_review_for_recovery() {
     rt2.shutdown().await;
 }
 
+/// TEST-1: a real-holder restart test for a held review summarizer — detaches
+/// while the live summarizer turn is running, waits for the detached holder to
+/// write its `result.json` handoff BEFORE adoption, adopts on a fresh runtime,
+/// drives the review summarizer finalizer (`Threads::drive_held_summarizer` +
+/// `parse_summarizer_comments`), and asserts the persisted review result.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_summarizer_held_through_a_restart_writes_handoff_while_detached_and_adopts() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let db = root.join("state.db");
+    let pool1 = open_db(&db).await;
+    let reviews1 = otto_state::ReviewsRepo::new(pool1.clone());
+    let review = reviews1.create_review(&Id::from("repo1"), 0).await.unwrap();
+    let sum_dir = root.join("otto-summary-test");
+    std::fs::create_dir_all(&sum_dir).unwrap();
+    let result_path = sum_dir.join("result.json");
+    let payload = r#"[{"source_ids":["0:0"],"path":"src/lib.rs","line":1,"severity":"bug","body":"add subtracts","category":"correctness","disposition":"verified","evidence":"src/lib.rs:1"}]"#;
+    let prompt = format!(
+        "OTTO_FAKE: sleep 400\nOTTO_FAKE: write otto-summary-test/result.json {payload}\nOTTO_FAKE: reply summarized"
+    );
+    let rt1 = held_runtime(&pool1, &root);
+    let mut t = turn(&root, &prompt);
+    t.title = "Review summarizer".into();
+    t.handoff = Some(result_path.clone());
+    t.meta = serde_json::json!({
+        "source": "review_summarizer",
+        "review_id": review.id,
+        "result_path": result_path.to_string_lossy(),
+    });
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let runner = ThreadStepRunner::new(rt1.clone(), Arc::new(NoStepHost));
+    let t1 = t.clone();
+    let task = tokio::spawn(async move { runner.run(t1, tx, CancelSignal::new()).await });
+    let mut id = None;
+    while let Some(e) = tokio::time::timeout(Duration::from_secs(15), rx.recv())
+        .await
+        .unwrap()
+    {
+        if let StepEvent::Started { thread_id, .. } = &e {
+            id = Some(thread_id.clone());
+        }
+        if e == StepEvent::Working {
+            break;
+        }
+    }
+    let id = id.expect("summarizer thread started");
+    let mut rows = vec![
+        otto_core::domain::ReviewAgentState {
+            name: "Lens 1".into(),
+            provider: "claude".into(),
+            status: "done".into(),
+            ..Default::default()
+        },
+        otto_core::domain::ReviewAgentState {
+            name: "Summarizer".into(),
+            provider: "claude".into(),
+            status: "running".into(),
+            thread: true,
+            session_id: Some(id.to_string()),
+            ..Default::default()
+        },
+    ];
+    reviews1.set_agents(&review.id, &rows).await.unwrap();
+    // Detach BEFORE result.json exists; wait for the detached holder to write it
+    // before the restarted daemon runtime is even constructed.
+    assert!(
+        !result_path.exists(),
+        "handoff must not exist before detach"
+    );
+    rt1.shutdown_for_restart().await;
+    task.abort();
+    drop(rt1);
+    let mut detached_ready = false;
+    for _ in 0..200 {
+        if std::fs::read_to_string(&result_path)
+            .ok()
+            .is_some_and(|s| s.trim() == payload)
+        {
+            detached_ready = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        detached_ready,
+        "detached holder must write result.json BEFORE restart adoption"
+    );
+
+    let pool2 = open_db(&db).await;
+    let rt2 = held_runtime(&pool2, &root);
+    let adopted = rt2.recover_and_adopt().await.unwrap();
+    assert!(
+        adopted.handled_ids.contains(&id),
+        "summarizer thread adopted"
+    );
+    assert_eq!(
+        rt2.held_reviews(&adopted).await,
+        [review.id.clone()].into(),
+        "held summarizer keeps review in recovery set"
+    );
+    let s = rt2.get(&id).await.unwrap();
+    let resumed_path =
+        otto_review::summarizer::held_result_path(s.meta.as_ref()).expect("result_path in meta");
+    assert_eq!(resumed_path, result_path);
+    let runner2 = Arc::new(ThreadStepRunner::new(rt2.clone(), Arc::new(NoStepHost)));
+    let threads = otto_review::thread_run::Threads {
+        runner: runner2,
+        has_driver: Arc::new(|p| p == "claude"),
+        meta: serde_json::Value::Null,
+        keep_failed: chrono::Duration::hours(24),
+        keep_success: chrono::Duration::hours(24),
+    };
+    let ws = Workspace {
+        id: Id::from("w1"),
+        name: "W".into(),
+        root_path: root.display().to_string(),
+        settings: serde_json::json!({}),
+        archived: false,
+        created_at: Utc::now(),
+    };
+    let user = otto_core::domain::User {
+        id: Id::from("u1"),
+        username: "u".into(),
+        display_name: "U".into(),
+        is_root: false,
+        disabled: false,
+        created_at: Utc::now(),
+    };
+    let sum_cfg = otto_core::domain::ReviewAgentCfg {
+        name: "Summarizer".into(),
+        provider: "claude".into(),
+        ..Default::default()
+    };
+    let text = threads
+        .drive_held_summarizer(
+            &id,
+            &resumed_path,
+            (&prompt, &sum_cfg, &ws, &user, &ws.root_path),
+            tokio::time::Instant::now() + Duration::from_secs(15),
+            std::future::pending::<()>(),
+            None,
+        )
+        .await
+        .unwrap();
+    let parsed =
+        otto_review::summarizer::parse_summarizer_comments(&review.id, &mut rows[1], 1, &text)
+            .unwrap();
+    assert_eq!(parsed.len(), 1);
+    assert_eq!(parsed[0].severity, "bug");
+    let reviews2 = otto_state::ReviewsRepo::new(pool2.clone());
+    reviews2
+        .add_comment(
+            &review.id,
+            parsed[0].path.as_deref(),
+            parsed[0].line,
+            otto_core::domain::CommentSeverity::Bug,
+            &parsed[0].body,
+        )
+        .await
+        .unwrap();
+    rows[1].status = "done".into();
+    rows[1].comment_count = 1;
+    reviews2.set_agents(&review.id, &rows).await.unwrap();
+    reviews2
+        .set_status(&review.id, otto_core::domain::ReviewStatus::Done, None)
+        .await
+        .unwrap();
+    let persisted = reviews2.get_review(&review.id).await.unwrap();
+    assert_eq!(persisted.status, otto_core::domain::ReviewStatus::Done);
+    assert_eq!(persisted.comments.len(), 1);
+    assert_eq!(persisted.comments[0].body, "add subtracts");
+    assert!(
+        !sum_dir.exists(),
+        "drive_held_summarizer must remove persisted otto-summary-* dir"
+    );
+    let sum_threads = rt2
+        .list_filtered(&Id::from("w1"), None, Some("review_summarizer"), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        sum_threads.len(),
+        1,
+        "resumed held summarizer must not spawn a second summarizer thread"
+    );
+    rt2.shutdown().await;
+}
+
 /// The daemon's step host as a resumed step meets it: one MCP approval card
 /// waiting, a plan usage limit that resets at `.0`.
 struct AfterRestart(chrono::DateTime<Utc>);

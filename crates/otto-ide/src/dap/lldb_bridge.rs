@@ -136,13 +136,52 @@ class _LldbDapBridge:
                     return f'.{tstr}'
         return None
 
+    def _format_cpp_sbval(self, v, tname):
+        if 'vector<' in tname and ('std::' in tname or 'TArray<' in tname):
+            n = v.GetNumChildren(16)
+            if n == 0:
+                return '[] (size=0)'
+            shown = min(n, 8)
+            elems = []
+            for i in range(shown):
+                c = v.GetChildAtIndex(i)
+                elems.append(c.GetSummary() or c.GetValue() or '{...}')
+            more = ', ...' if n > shown else ''
+            return f'[{", ".join(elems)}{more}] (size={n})'
+        if ('map<' in tname or 'unordered_map<' in tname) and 'std::' in tname:
+            n = v.GetNumChildren(16)
+            if n == 0:
+                return '{} (size=0)'
+            shown = min(n, 6)
+            pairs = []
+            for i in range(shown):
+                c = v.GetChildAtIndex(i)
+                k = c.GetChildMemberWithName('first')
+                val = c.GetChildMemberWithName('second')
+                if k and k.IsValid() and val and val.IsValid():
+                    pairs.append(f'{k.GetSummary() or k.GetValue()}: {val.GetSummary() or val.GetValue()}')
+                else:
+                    pairs.append(c.GetSummary() or c.GetValue() or '{...}')
+            more = ', ...' if n > shown else ''
+            return '{' + ', '.join(pairs) + more + f'}} (size={n})'
+        if 'optional<' in tname and 'std::' in tname:
+            if v.GetNumChildren(2) == 0:
+                return 'std::nullopt'
+            val = v.GetChildMemberWithName('Value') or v.GetChildAtIndex(0)
+            if val and val.IsValid():
+                return val.GetSummary() or val.GetValue() or '{...}'
+        return None
+
     def _format_sbval(self, v):
         tname = v.GetDisplayTypeName() or v.GetTypeName() or ''
         zig_disp = self._format_zig_sbval(v, tname)
+        cpp_disp = self._format_cpp_sbval(v, tname) if zig_disp is None else None
         summary = v.GetSummary()
         val = v.GetValue()
         if zig_disp is not None:
             disp = zig_disp
+        elif cpp_disp is not None:
+            disp = cpp_disp
         elif summary and val:
             disp = f'{summary}' if tname.endswith('str') or 'String' in tname else f'{val} ({summary})'
         elif summary:
@@ -318,14 +357,18 @@ class _LldbDapBridge:
                 'supportsTerminateRequest': True,
                 'exceptionBreakpointFilters': [
                     {'filter': 'rust_panic', 'label': 'Rust Panics'},
-                    {'filter': 'zig_panic', 'label': 'Zig Panics'}
+                    {'filter': 'zig_panic', 'label': 'Zig Panics'},
+                    {'filter': 'cpp_throw', 'label': 'C++ Exceptions (throw)'}
                 ]
             }})
         elif cmd in ('launch', 'attach'):
             self.launch_cfg = args
+            self.is_attach = (cmd == 'attach')
             prog = args.get('program') or ''
             if prog:
                 self.target = self.dbg.CreateTargetWithFileAndArch(os.path.realpath(prog), lldb.LLDB_ARCH_DEFAULT)
+            elif self.is_attach:
+                self.target = self.dbg.CreateTarget('')
             if not self.target or not self.target.IsValid():
                 _send({'type': 'response', 'request_seq': rseq, 'success': False, 'command': cmd, 'message': f'LLDB failed to load target executable: {prog}'})
                 return
@@ -359,25 +402,59 @@ class _LldbDapBridge:
                 self.panic_bp_ids = []
                 if filters and self.target and self.target.IsValid():
                     lang = (self.launch_cfg.get('language') or '').lower()
-                    names = ['debug.defaultPanic', 'builtin.default_panic', 'debug.panicImpl'] if lang == 'zig' else ['rust_panic']
+                    if lang == 'zig':
+                        names = ['debug.defaultPanic', 'builtin.default_panic', 'debug.panicImpl']
+                    elif lang in ('c', 'cpp') or 'cpp_throw' in filters:
+                        try:
+                            ebp = self.target.BreakpointCreateForException(lldb.eLanguageTypeC_plus_plus, False, True)
+                            if ebp and ebp.IsValid():
+                                self.panic_bp_ids.append(ebp.GetID())
+                        except Exception:
+                            pass
+                        names = ['__cxa_throw']
+                    else:
+                        names = ['rust_panic']
                     for sym in names:
                         pbp = self.target.BreakpointCreateByName(sym)
                         self.panic_bp_ids.append(pbp.GetID())
             _send({'type': 'response', 'request_seq': rseq, 'success': True, 'command': cmd, 'body': {}})
         elif cmd == 'configurationDone':
-            argv = [str(x) for x in (self.launch_cfg.get('args') or [])]
-            cwd = os.path.realpath(self.launch_cfg.get('cwd') or os.getcwd())
-            li = lldb.SBLaunchInfo(argv)
-            li.SetWorkingDirectory(cwd)
-            li.SetListener(self.listener)
-            env_list = [f'{k}={v}' for k, v in os.environ.items()]
-            li.SetEnvironmentEntries(env_list, False)
             err = lldb.SBError()
-            self.process = self.target.Launch(li, err)
-            if not self.process or not self.process.IsValid() or err.Fail():
-                msg = err.GetCString() or 'LLDB process launch failed'
-                _send({'type': 'response', 'request_seq': rseq, 'success': False, 'command': cmd, 'message': msg})
-                return
+            if getattr(self, 'is_attach', False):
+                core_file = self.launch_cfg.get('coreFile')
+                pid = self.launch_cfg.get('pid')
+                pname = self.launch_cfg.get('processName')
+                if core_file:
+                    self.process = self.target.LoadCore(os.path.realpath(core_file))
+                elif pid:
+                    self.process = self.target.AttachToProcessWithID(self.listener, int(pid), err)
+                elif pname:
+                    self.process = self.target.AttachToProcessWithName(self.listener, str(pname), False, err)
+                else:
+                    _send({'type': 'response', 'request_seq': rseq, 'success': False, 'command': cmd, 'message': 'attach requires pid, processName, or coreFile'})
+                    return
+                if not self.process or not self.process.IsValid() or err.Fail():
+                    msg = err.GetCString() or 'LLDB attach failed'
+                    _send({'type': 'response', 'request_seq': rseq, 'success': False, 'command': cmd, 'message': msg})
+                    return
+                if core_file:
+                    _send({'type': 'response', 'request_seq': rseq, 'success': True, 'command': cmd, 'body': {}})
+                    tid = self.process.GetThreadAtIndex(0).GetThreadID() if self.process.GetNumThreads() > 0 else 1
+                    _send({'type': 'event', 'event': 'stopped', 'body': {'reason': 'exception', 'threadId': tid, 'allThreadsStopped': True}})
+                    return
+            else:
+                argv = [str(x) for x in (self.launch_cfg.get('args') or [])]
+                cwd = os.path.realpath(self.launch_cfg.get('cwd') or os.getcwd())
+                li = lldb.SBLaunchInfo(argv)
+                li.SetWorkingDirectory(cwd)
+                li.SetListener(self.listener)
+                env_list = [f'{k}={v}' for k, v in os.environ.items()]
+                li.SetEnvironmentEntries(env_list, False)
+                self.process = self.target.Launch(li, err)
+                if not self.process or not self.process.IsValid() or err.Fail():
+                    msg = err.GetCString() or 'LLDB process launch failed'
+                    _send({'type': 'response', 'request_seq': rseq, 'success': False, 'command': cmd, 'message': msg})
+                    return
             threading.Thread(target=self._event_pump, daemon=True).start()
             _send({'type': 'response', 'request_seq': rseq, 'success': True, 'command': cmd, 'body': {}})
         elif cmd == 'threads':

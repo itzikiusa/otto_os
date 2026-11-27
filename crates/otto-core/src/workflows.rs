@@ -555,6 +555,80 @@ pub struct Subject {
     pub branch: Option<String>,
 }
 
+/// How close one criterion is to its target (additive on `CriterionResult` and
+/// `GoalCriterion`). Small and generic across rules, review outputs, and commands.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CriterionProgress {
+    /// Current measured value (e.g. review score `72`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<f64>,
+    /// Target value to reach (e.g. review threshold `95`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<f64>,
+    /// Optional unit (e.g. `"%"`, `"ms"`; omitted for plain ratios like `72 / 95`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    /// Short human-readable blocker or status (e.g. `"3 must-fix findings left"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Values inspected by the check (rule identifiers, review counts, command
+    /// exit code and last meaningful line).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub values: std::collections::BTreeMap<String, Value>,
+}
+
+impl CriterionProgress {
+    pub fn is_empty(&self) -> bool {
+        self.value.is_none()
+            && self.target.is_none()
+            && self.unit.is_none()
+            && self.label.is_none()
+            && self.values.is_empty()
+    }
+}
+
+/// One round's recorded outcome/value for a criterion (bounded to 50 rounds).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CriterionPoint {
+    pub iteration: u32,
+    pub met: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<f64>,
+}
+
+/// One criterion's current state and per-round history on [`GoalProgress`],
+/// keyed by `(step_id, id)` so two check steps with the same criterion id stay
+/// distinct everywhere.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct GoalCriterion {
+    /// Stable check-step key: top-level node id, or `<loop_id>.<step_index>`.
+    pub step_id: String,
+    /// Human-readable step or loop label (e.g. `"UI"`, `"server"`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub step_name: String,
+    /// Criterion id within its check step.
+    pub id: String,
+    /// Criterion text (clipped for overview compactness).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub text: String,
+    /// Latest check outcome (`None` before its first check).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub met: Option<bool>,
+    /// True while parked waiting for a person to verify this criterion.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub awaiting: bool,
+    /// Latest progress (value, target, unit, label, inspected values).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<CriterionProgress>,
+    /// Per-round history from the loop's checkpoints (ascending, ≤ 50).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<CriterionPoint>,
+}
+
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
 /// A goal run's progress (the run's graph has a loop with a check step).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct GoalProgress {
@@ -570,6 +644,13 @@ pub struct GoalProgress {
     /// Criterion ids parked for a person.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub awaiting: Vec<String>,
+    /// Aggregate completion verdict from check outputs (`"achieved"`, `"continue"`,
+    /// `"blocked"`), omitted when only counts are available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict: Option<String>,
+    /// Per-criterion current status and round history, keyed by `(step_id, id)`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub criteria: Vec<GoalCriterion>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -676,6 +757,168 @@ pub struct RunOverview {
     pub hold: Option<RunHold>,
 }
 
+/// Hard serialized byte ceiling for `overview` on `workflow_run_updated` WS
+/// events (`docs/contracts/ws.md`).
+pub const WS_OVERVIEW_MAX_BYTES: usize = 4_096;
+/// Max per-criterion history points kept on the WS event projection (the trend
+/// window shown inline; full 50-round history stays on HTTP detail reads).
+const MAX_WS_CRITERION_HISTORY: usize = 3;
+
+impl RunOverview {
+    /// Return a bounded projection of this overview suitable for
+    /// `Event::WorkflowRunUpdated` (≤ 4 KiB UTF-8 JSON bytes), or `None` if
+    /// even the minimal bounded representation cannot fit (in which case the
+    /// event omits `overview` and clients keep the last one or refetch). Full
+    /// 50-round history, `progress.values`, and unclipped names remain on HTTP
+    /// detail / progress reads.
+    pub fn ws_projected(&self) -> Option<Self> {
+        let mut out = self.clone();
+        if let Some(goal) = out.goal.as_mut() {
+            for c in &mut goal.criteria {
+                c.text = clip_utf8(&c.text, 80);
+                if let Some(p) = c.progress.as_mut() {
+                    p.values.clear();
+                }
+                if c.history.len() > MAX_WS_CRITERION_HISTORY {
+                    let drop = c.history.len() - MAX_WS_CRITERION_HISTORY;
+                    c.history.drain(..drop);
+                }
+            }
+        }
+        if ws_overview_json_len(&out) <= WS_OVERVIEW_MAX_BYTES {
+            return Some(out);
+        }
+        if let Some(goal) = out.goal.as_mut() {
+            for c in &mut goal.criteria {
+                c.history.clear();
+            }
+        }
+        if ws_overview_json_len(&out) <= WS_OVERVIEW_MAX_BYTES {
+            return Some(out);
+        }
+        if let Some(goal) = out.goal.as_mut() {
+            for c in &mut goal.criteria {
+                c.text.clear();
+                if let Some(p) = c.progress.as_mut() {
+                    p.label = None;
+                }
+            }
+        }
+        while ws_overview_json_len(&out) > WS_OVERVIEW_MAX_BYTES {
+            let Some(goal) = out.goal.as_mut() else {
+                break;
+            };
+            if goal.criteria.pop().is_none() {
+                break;
+            }
+        }
+        if ws_overview_json_len(&out) <= WS_OVERVIEW_MAX_BYTES {
+            return Some(out);
+        }
+
+        // Whole-overview trimming in priority order (handles multi-byte CJK step
+        // names, long attention/deliverable text, and non-goal overviews).
+        out.headline = clip_utf8(&out.headline, 160);
+        for a in &mut out.attention {
+            a.name = clip_utf8(&a.name, 64);
+            a.attention.text = clip_utf8(&a.attention.text, 160);
+        }
+        if let Some(now) = out.now.as_mut() {
+            for n in &mut now.node_names {
+                *n = clip_utf8(n, 64);
+            }
+            if let Some(w) = now.wait_text.as_mut() {
+                *w = clip_utf8(w, 120);
+            }
+        }
+        for d in &mut out.deliverables {
+            d.label = clip_utf8(&d.label, 64);
+            if let Some(det) = d.detail.as_mut() {
+                *det = clip_utf8(det, 120);
+            }
+        }
+        if let Some(fs) = out.failed_step.as_mut() {
+            fs.name = clip_utf8(&fs.name, 64);
+            fs.error = clip_utf8(&fs.error, 160);
+        }
+        if let Some(h) = out.hold.as_mut() {
+            h.reason = clip_utf8(&h.reason, 160);
+        }
+        if ws_overview_json_len(&out) <= WS_OVERVIEW_MAX_BYTES {
+            return Some(out);
+        }
+
+        // Drop lower-priority detail fields progressively until ≤ 4 KiB.
+        for d in &mut out.deliverables {
+            d.detail = None;
+            d.url = None;
+        }
+        while !out.deliverables.is_empty() && ws_overview_json_len(&out) > WS_OVERVIEW_MAX_BYTES {
+            out.deliverables.pop();
+        }
+        if ws_overview_json_len(&out) <= WS_OVERVIEW_MAX_BYTES {
+            return Some(out);
+        }
+        if let Some(now) = out.now.as_mut() {
+            now.node_names.clear();
+            now.wait_text = None;
+        }
+        if ws_overview_json_len(&out) <= WS_OVERVIEW_MAX_BYTES {
+            return Some(out);
+        }
+        while out.attention.len() > 1 && ws_overview_json_len(&out) > WS_OVERVIEW_MAX_BYTES {
+            out.attention.pop();
+        }
+        if ws_overview_json_len(&out) <= WS_OVERVIEW_MAX_BYTES {
+            return Some(out);
+        }
+        out.origin = None;
+        out.subject = None;
+        if let Some(goal) = out.goal.as_mut() {
+            goal.awaiting.clear();
+        }
+        if ws_overview_json_len(&out) <= WS_OVERVIEW_MAX_BYTES {
+            return Some(out);
+        }
+        out.attention.clear();
+        out.now = None;
+        if let Some(fs) = out.failed_step.as_mut() {
+            fs.error.clear();
+        }
+        if let Some(h) = out.hold.as_mut() {
+            h.reason.clear();
+        }
+        out.headline = clip_utf8(&out.headline, 64);
+        if ws_overview_json_len(&out) <= WS_OVERVIEW_MAX_BYTES {
+            Some(out)
+        } else {
+            None
+        }
+    }
+}
+
+fn clip_utf8(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    let ellipsis = "…";
+    let cap = max_bytes.saturating_sub(ellipsis.len());
+    let mut end = cap.min(s.len());
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = String::with_capacity(end + ellipsis.len());
+    out.push_str(&s[..end]);
+    if cap > 0 {
+        out.push_str(ellipsis);
+    }
+    out
+}
+
+fn ws_overview_json_len(o: &RunOverview) -> usize {
+    serde_json::to_vec(o).map_or(usize::MAX, |v| v.len())
+}
+
 /// How a `check` criterion is verified (wire values `command` | `agent` |
 /// `human` | `expr`; the UI calls `expr` "Rule").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -720,6 +963,9 @@ pub struct CriterionResult {
     pub evidence: String,
     /// `command` | `rule` | `agent` | the person's name.
     pub verified_by: String,
+    /// Numeric progress, blocker label, and values inspected by the check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<CriterionProgress>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1364,5 +1610,80 @@ mod tests {
             ..cp
         };
         assert_eq!(serde_json::to_value(&banked).unwrap()["active_ms"], 42);
+    }
+
+    #[test]
+    fn criterion_progress_and_goal_criteria_are_optional_and_round_trip() {
+        // Legacy rows without `criteria` or `progress` still decode cleanly.
+        let old_goal: GoalProgress = serde_json::from_value(json!({
+            "iteration": 2, "max_iterations": 5, "criteria_met": 1, "criteria_total": 2, "active_ms": 1000
+        }))
+        .unwrap();
+        assert!(old_goal.criteria.is_empty());
+        assert!(serde_json::to_value(&old_goal)
+            .unwrap()
+            .get("criteria")
+            .is_none());
+
+        let old_res: CriterionResult = serde_json::from_value(json!({
+            "id": "r", "text": "t", "verify": "expr", "met": false, "evidence": "e", "verified_by": "rule"
+        }))
+        .unwrap();
+        assert!(old_res.progress.is_none());
+        assert!(serde_json::to_value(&old_res)
+            .unwrap()
+            .get("progress")
+            .is_none());
+
+        let mut values = std::collections::BTreeMap::new();
+        values.insert("score".into(), json!(72));
+        values.insert("threshold".into(), json!(95));
+        let full_goal = GoalProgress {
+            iteration: 3,
+            max_iterations: 5,
+            criteria_met: 0,
+            criteria_total: 1,
+            active_ms: 5000,
+            max_active_ms: None,
+            awaiting: vec![],
+            verdict: Some("continue".into()),
+            criteria: vec![GoalCriterion {
+                step_id: "ui.1".into(),
+                step_name: "UI".into(),
+                id: "review-passes".into(),
+                text: "Review passes".into(),
+                met: Some(false),
+                awaiting: false,
+                progress: Some(CriterionProgress {
+                    value: Some(72.0),
+                    target: Some(95.0),
+                    unit: None,
+                    label: Some("3 must-fix findings left".into()),
+                    values,
+                }),
+                history: vec![
+                    CriterionPoint {
+                        iteration: 1,
+                        met: false,
+                        value: Some(35.0),
+                    },
+                    CriterionPoint {
+                        iteration: 2,
+                        met: false,
+                        value: Some(58.0),
+                    },
+                    CriterionPoint {
+                        iteration: 3,
+                        met: false,
+                        value: Some(72.0),
+                    },
+                ],
+            }],
+        };
+        let encoded = serde_json::to_value(&full_goal).unwrap();
+        assert_eq!(
+            serde_json::from_value::<GoalProgress>(encoded).unwrap(),
+            full_goal
+        );
     }
 }

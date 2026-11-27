@@ -11,10 +11,18 @@ mod collab_sse;
 mod db_watch;
 #[path = "http/intelligence.rs"]
 mod intelligence;
+#[path = "http/notebooks.rs"]
+mod notebooks;
 #[path = "http/projects_deps.rs"]
 mod projects_deps;
 #[path = "http/runtime_debug.rs"]
 mod runtime_debug;
+#[path = "http/security.rs"]
+pub mod security;
+#[path = "http/security_dast.rs"]
+mod security_dast;
+#[path = "http/spring_boot.rs"]
+mod spring_boot;
 #[path = "http/sse_framing.rs"]
 mod sse_framing;
 #[path = "http/toolchains_env.rs"]
@@ -46,6 +54,10 @@ use self::intelligence::{
     lsp_definition, lsp_diagnostics, lsp_format, lsp_hover, lsp_implementation, lsp_references,
     lsp_rename, lsp_status, lsp_symbols,
 };
+use self::notebooks::{
+    notebook_execute, notebook_interrupt, notebook_kernels, notebook_restart, notebook_shutdown,
+    notebook_variables,
+};
 use self::projects_deps::{
     add_project_folders_bulk, build_tools_model, delete_project, deps_action, deps_inspect,
     list_projects, scan_repos, upsert_project,
@@ -56,6 +68,7 @@ use self::runtime_debug::{
     list_run_configs, set_debug_breakpoints, start_debug_session, start_run, stop_run,
     stream_debug_events, stream_run_events, upsert_run_config,
 };
+use self::spring_boot::{spring_actuator, spring_devtools_restart};
 use self::toolchains_env::{
     add_project_folder, delete_local_sdk, get_environments, get_shell_env, get_toolchain_job,
     install_toolchain, list_toolchains, put_environments, register_local_sdk, reload_shell_env,
@@ -179,6 +192,36 @@ pub fn api_router<S: IdeCtx>() -> Router<S> {
                 get(list_projects::<S>).post(upsert_project::<S>),
             )
             .route("/ide/projects/{id}", delete(delete_project::<S>))
+            .route(
+                "/ide/projects/{id}/security",
+                get(security::project::<S>).put(security::configure::<S>),
+            )
+            .route(
+                "/ide/projects/{id}/security/scans",
+                post(security::start::<S>),
+            )
+            .route(
+                "/ide/projects/{id}/security/scans/{scan_id}",
+                get(security::detail::<S>).delete(security::cancel::<S>),
+            )
+            .route(
+                "/ide/projects/{id}/security/manage",
+                post(security::manage::<S>).layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
+            )
+            .route(
+                "/ide/projects/{id}/security/scans/{scan_id}/sarif",
+                get(security::export::<S>),
+            )
+            .route(
+                "/ide/projects/{id}/security/dast",
+                get(security_dast::config::<S>)
+                    .put(security_dast::confirm::<S>)
+                    .delete(security_dast::revoke::<S>),
+            )
+            .route(
+                "/ide/projects/{id}/security/dast/run",
+                post(security_dast::start::<S>),
+            )
             .route("/ide/projects/scan-repos", post(scan_repos::<S>))
             .route(
                 "/ide/projects/folders",
@@ -191,6 +234,11 @@ pub fn api_router<S: IdeCtx>() -> Router<S> {
             .route("/ide/deps/inspect", post(deps_inspect::<S>))
             .route("/ide/deps/action", post(deps_action::<S>))
             .route("/ide/build-tools/model", post(build_tools_model::<S>))
+            .route("/ide/spring/actuator", post(spring_actuator::<S>))
+            .route(
+                "/ide/spring/devtools-restart",
+                post(spring_devtools_restart::<S>),
+            )
             .route(
                 "/ide/environments",
                 get(get_environments::<S>).put(put_environments::<S>),
@@ -212,6 +260,13 @@ pub fn api_router<S: IdeCtx>() -> Router<S> {
             .route("/ide/runs/{run_id}", get(get_run::<S>))
             .route("/ide/runs/{run_id}/events", get(stream_run_events::<S>))
             .route("/ide/runs/{run_id}/stop", post(stop_run::<S>))
+            // C2. Jupyter / Python Notebooks
+            .route("/ide/notebooks/kernels", post(notebook_kernels::<S>))
+            .route("/ide/notebooks/execute", post(notebook_execute::<S>))
+            .route("/ide/notebooks/interrupt", post(notebook_interrupt::<S>))
+            .route("/ide/notebooks/restart", post(notebook_restart::<S>))
+            .route("/ide/notebooks/variables", post(notebook_variables::<S>))
+            .route("/ide/notebooks/shutdown", post(notebook_shutdown::<S>))
             // D. Full DAP Debugger Engine
             .route(
                 "/ide/debug/sessions",

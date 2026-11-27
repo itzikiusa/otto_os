@@ -64,11 +64,11 @@ test('the scratch group counts and a row listed twice counts once', () => {
   assert.equal(visibleWorkingCount([b.plainAgent, b.scratch, [s]], {}, {}), 1);
 });
 
-test('the store badge is derived from the rendered groups', () => {
+test('the store badge uses the same scoped sessions as the inbox', () => {
   const src = readFileSync(new URL('../src/lib/stores/workspace.svelte.ts', import.meta.url), 'utf8');
   const decl = src.slice(src.indexOf('workingCount: number'), src.indexOf('needsYouCount: number'));
   assert.match(decl, /visibleWorkingCount\(\[this\.buckets\.plainAgent, this\.buckets\.scratch/);
-  assert.match(decl, /this\.allWorkspaces \? this\.otherWsGroups/);
+  assert.match(decl, /this\.multiWorkspaceScope \? this\.otherAgentSessions/);
   assert.doesNotMatch(decl, /foregroundActive/);
 });
 

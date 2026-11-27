@@ -421,6 +421,55 @@ export function sameStepChildren(a: readonly StepChild[], b: readonly StepChild[
   return true;
 }
 
+/** True when every non-`children` enumerable property on `base` still matches
+ *  `cached`. Reads all keys of `base` so reactive proxies register dependencies
+ *  and in-place `applyNodeSummary` mutations (status, phase, attention, deleted
+ *  fields) invalidate any spread wrapper copy. */
+export function sameNodeFields(base: NodeRunState, cached: NodeRunState): boolean {
+  if (base === cached) return true;
+  const baseRec = base as unknown as Record<string, unknown>;
+  const cachedRec = cached as unknown as Record<string, unknown>;
+  const baseKeys = Object.keys(baseRec);
+  const cachedKeys = Object.keys(cachedRec);
+  let baseCount = 0;
+  for (const k of baseKeys) {
+    if (k === 'children') continue;
+    baseCount++;
+    if (!Object.prototype.hasOwnProperty.call(cachedRec, k)) return false;
+    if (!Object.is(baseRec[k], cachedRec[k])) return false;
+  }
+  let cachedCount = 0;
+  for (const k of cachedKeys) {
+    if (k === 'children') continue;
+    cachedCount++;
+  }
+  return baseCount === cachedCount;
+}
+
+export interface MergedNodeCacheEntry {
+  children: StepChild[];
+  node: NodeRunState;
+}
+
+/** Reuse the previous merged child array across unrelated runtime-session ticks
+ *  while never masking in-place mutations to the authoritative node fields. */
+export function reuseMergedNode(
+  base: NodeRunState,
+  annotated: StepChild[],
+  prev: MergedNodeCacheEntry | undefined,
+): MergedNodeCacheEntry {
+  if (annotated.length === 0 && !base.children?.length) {
+    return { children: annotated, node: base };
+  }
+  const sameChildren = !!prev && sameStepChildren(prev.children, annotated);
+  const stableChildren = sameChildren ? prev.children : annotated;
+  if (sameChildren && sameNodeFields(base, prev.node)) {
+    return prev;
+  }
+  const node = stableChildren !== base.children ? { ...base, children: stableChildren } : base;
+  return { children: stableChildren, node };
+}
+
 /** Parse `"attempt N: <reason>"` from a checkpoint or node log list. */
 function attemptReasonFromLogs(
   logs: readonly string[] | undefined,
@@ -442,6 +491,52 @@ function attemptReasonFromLogs(
   return null;
 }
 
+function parseIterationLabel(label: string): { stepName: string; iteration: number | null } {
+  const iterMatch = /^(.+?)\s*·\s*iteration\s+(\d+)$/i.exec(label.trim());
+  return iterMatch
+    ? { stepName: iterMatch[1].trim(), iteration: Number(iterMatch[2]) }
+    : { stepName: label.trim(), iteration: null };
+}
+
+/** Check whether checkpoint state or loop-scoped attempt logs prove that a
+ *  failed child row was an earlier retried attempt of that checkpoint (as
+ *  opposed to two independent agent-opened threads sharing a title/provider). */
+function checkpointRetryEvidence(
+  label: string,
+  attempt: number,
+  opts: { loopId?: string; checkpoints?: readonly WorkflowCheckpoint[]; nodeLogs?: readonly string[] },
+): { confirmed: boolean; reason: string | null } {
+  const { stepName, iteration } = parseIterationLabel(label);
+  let confirmed = false;
+  let reason: string | null = null;
+  for (const cp of opts.checkpoints ?? []) {
+    if (opts.loopId && cp.loop_id !== opts.loopId) continue;
+    if (cp.name !== stepName) continue;
+    if (iteration !== null) {
+      if (cp.iteration !== iteration) continue;
+    } else if ((cp.iteration ?? 0) > 0) {
+      // A bare label without `· iteration N` cannot claim a loop iteration checkpoint.
+      continue;
+    }
+    const cpReason = attemptReasonFromLogs(cp.logs, attempt);
+    if (cpReason) {
+      confirmed = true;
+      if (!reason) reason = cpReason;
+    }
+    if ((cp.attempts ?? 1) > attempt) {
+      confirmed = true;
+    }
+  }
+  if (iteration !== null) {
+    const prefixed = attemptReasonFromLogs(opts.nodeLogs, attempt, { iteration, name: stepName });
+    if (prefixed) {
+      confirmed = true;
+      if (!reason) reason = prefixed;
+    }
+  }
+  return { confirmed, reason };
+}
+
 /** Extract the failure reason for a retried child attempt from matching
  *  `checkpoints[].logs` (first) or the parent step's `logs` (fallback). */
 export function retriedAttemptReason(
@@ -449,9 +544,7 @@ export function retriedAttemptReason(
   attempt: number,
   opts: { loopId?: string; checkpoints?: readonly WorkflowCheckpoint[]; nodeLogs?: readonly string[] } = {},
 ): string | null {
-  const iterMatch = /^(.+?)\s*·\s*iteration\s+(\d+)$/i.exec(label.trim());
-  const stepName = iterMatch ? iterMatch[1].trim() : label.trim();
-  const iteration = iterMatch ? Number(iterMatch[2]) : null;
+  const { stepName, iteration } = parseIterationLabel(label);
   for (const cp of opts.checkpoints ?? []) {
     if (opts.loopId && cp.loop_id !== opts.loopId) continue;
     if (cp.name !== stepName) continue;
@@ -466,9 +559,11 @@ export function retriedAttemptReason(
   return attemptReasonFromLogs(opts.nodeLogs, attempt);
 }
 
-/** Mark failed child rows that are followed by a later attempt of the same
- *  label (`retried_attempt`, plus `retried_reason` from checkpoint/node logs).
- *  The last attempt for any label keeps its normal status and wording. */
+/** Mark failed top-level child rows that have checkpoint or loop-attempt-log
+ *  evidence of being followed by a later retry attempt of the same checkpoint
+ *  (`retried_attempt`, plus `retried_reason` when available). Independent
+ *  agent-opened sub-threads that merely share a label keep their normal failure
+ *  status, and the last attempt for any label always keeps normal wording. */
 export function annotateRetriedChildren(
   children: readonly StepChild[],
   opts: { loopId?: string; checkpoints?: readonly WorkflowCheckpoint[]; nodeLogs?: readonly string[] } = {},
@@ -477,10 +572,10 @@ export function annotateRetriedChildren(
   const groups = new Map<string, number[]>();
   for (let i = 0; i < children.length; i++) {
     const c = children[i];
-    const key = `${c.parent_child_id ?? ''}\u0000${c.label}`;
-    const list = groups.get(key);
+    if (c.parent_child_id) continue;
+    const list = groups.get(c.label);
     if (list) list.push(i);
-    else groups.set(key, [i]);
+    else groups.set(c.label, [i]);
   }
   let changed = false;
   const out = children.slice();
@@ -491,7 +586,8 @@ export function annotateRetriedChildren(
       const c = out[idx];
       if (c.status !== 'error') continue;
       const attempt = pos + 1;
-      const reason = retriedAttemptReason(c.label, attempt, opts);
+      const { confirmed, reason } = checkpointRetryEvidence(c.label, attempt, opts);
+      if (!confirmed) continue;
       out[idx] = { ...c, retried_attempt: attempt, ...(reason ? { retried_reason: reason } : {}) };
       changed = true;
     }
@@ -618,3 +714,15 @@ export function loopChildren(checkpoints: readonly WorkflowCheckpoint[], loopId:
     };
   });
 }
+
+export {
+  groupLoopRounds,
+  isWaitingOnSubagents,
+  loopPositionLine,
+  waitingReviewers,
+  waitingThreads,
+  type LoopRound,
+  type LoopRoundStep,
+  type LoopRoundsView,
+  type WaitingThreadRef,
+} from './loopRounds.ts';

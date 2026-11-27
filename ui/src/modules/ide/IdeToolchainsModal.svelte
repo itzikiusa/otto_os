@@ -37,8 +37,11 @@
   const BASE_ECOS: readonly { id: string; label: string }[] = [
     { id: 'go', label: 'Go' },
     { id: 'java', label: 'Java' },
+    { id: 'kotlin', label: 'Kotlin' },
     { id: 'rust', label: 'Rust' },
     { id: 'zig', label: 'Zig' },
+    { id: 'cpp', label: 'C / C++' },
+    { id: 'dotnet', label: '.NET (C# / F#)' },
     { id: 'node', label: 'JavaScript / TypeScript (Node)' },
     { id: 'python', label: 'Python' },
     { id: 'ios', label: 'iOS / Xcode' },
@@ -63,11 +66,13 @@
   function defaultEcoFromWorkspace(): string {
     const lang = ide.activeTab?.language;
     if (lang === 'swift' || lang === 'objc') return 'ios';
-    if (lang === 'kotlin') return 'android';
+    if (lang === 'kotlin') return 'kotlin';
     if (lang === 'dart') return 'flutter';
     if (lang === 'java') return 'java';
     if (lang === 'rust') return 'rust';
     if (lang === 'zig') return 'zig';
+    if (lang === 'c' || lang === 'cpp' || lang === 'cmake' || lang === 'meson') return 'cpp';
+    if (lang === 'csharp' || lang === 'fsharp') return 'dotnet';
     if (lang === 'python') return 'python';
     if (lang === 'typescript' || lang === 'javascript') return 'node';
     if (lang === 'go') return 'go';
@@ -78,6 +83,11 @@
     if (names.has('pom.xml') || names.has('build.gradle') || names.has('build.gradle.kts')) return 'java';
     if (names.has('Cargo.toml')) return 'rust';
     if (names.has('build.zig') || names.has('build.zig.zon')) return 'zig';
+    if (names.has('CMakeLists.txt') || names.has('meson.build') || names.has('compile_commands.json') || [...names].some((n) => n.endsWith('.uproject'))) return 'cpp';
+    if (
+      names.has('global.json') ||
+      [...names].some((n) => n.endsWith('.sln') || n.endsWith('.slnx') || n.endsWith('.csproj') || n.endsWith('.fsproj'))
+    ) return 'dotnet';
     if (names.has('pyproject.toml') || names.has('requirements.txt')) return 'python';
     if (names.has('package.json')) return 'node';
     return 'go';
@@ -180,9 +190,12 @@
     const env = ide.projectEnv;
     if (!env) return false;
     if (ecosystem === 'java') return env.java_home === sdk.path;
+    if (ecosystem === 'kotlin') return env.kotlin_home === sdk.path;
     if (ecosystem === 'go') return env.go_root === sdk.path;
     if (ecosystem === 'rust') return env.rust_toolchain === sdk.version || env.rust_toolchain === sdk.path;
     if (ecosystem === 'zig') return env.zig_home === sdk.path;
+    if (ecosystem === 'cpp') return env.cpp_toolchain === sdk.path;
+    if (ecosystem === 'dotnet') return env.dotnet_root === sdk.path;
     if (ecosystem === 'node') return env.node_home === sdk.path;
     if (ecosystem === 'python') return env.python_interpreter === sdk.path;
     if (ecosystem === 'ios') return env.xcode_developer_dir === sdk.path;
@@ -195,13 +208,19 @@
     const patch =
       ecosystem === 'java'
         ? { java_home: pathOrVersion }
-        : ecosystem === 'go'
+        : ecosystem === 'kotlin'
+          ? { kotlin_home: pathOrVersion }
+          : ecosystem === 'go'
           ? { go_root: pathOrVersion }
           : ecosystem === 'rust'
             ? { rust_toolchain: pathOrVersion }
             : ecosystem === 'zig'
               ? { zig_home: pathOrVersion }
-              : ecosystem === 'node'
+              : ecosystem === 'cpp'
+                ? { cpp_toolchain: pathOrVersion }
+                : ecosystem === 'dotnet'
+                  ? { dotnet_root: pathOrVersion }
+                : ecosystem === 'node'
               ? { node_home: pathOrVersion }
               : ecosystem === 'python'
                 ? { python_interpreter: pathOrVersion }

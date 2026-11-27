@@ -150,8 +150,16 @@ pub(crate) fn validate_non_root_debug_request(
         return Ok(());
     }
     if req.launch.attach_port.is_some()
+        || req.launch.attach_pid.is_some()
+        || req
+            .launch
+            .attach_process_name
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty())
         || env.contains_key("DLV_ATTACH_PID")
         || req.launch.env.contains_key("DLV_ATTACH_PID")
+        || env.contains_key("DOTNET_ATTACH_PID")
+        || req.launch.env.contains_key("DOTNET_ATTACH_PID")
         || env.contains_key("OTTO_JAVA_DEBUG_DAP_PORT")
         || req.launch.env.contains_key("OTTO_JAVA_DEBUG_DAP_PORT")
     {
@@ -175,6 +183,15 @@ pub(crate) fn validate_non_root_debug_request(
     };
 
     check_within_roots("cwd", effective_cwd)?;
+    if let Some(cf) = req
+        .launch
+        .core_file
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        check_within_roots("core_file", cf)?;
+    }
     let prog = req.launch.program.trim();
     if !prog.is_empty() && !(req.language.eq_ignore_ascii_case("java") && is_bare_java_fqcn(prog)) {
         check_within_roots("program", prog)?;
@@ -405,12 +422,19 @@ pub(crate) fn build_effective_env_with_manager(
     let mut effective_proj = ctx.project_env.clone().unwrap_or_default();
     if allow_sdk_and_path_overrides {
         if let Some(sdk_override) = resolve_debug_sdk_override(req, ctx, &effective_cwd) {
-            crate::environments::module_sdks::apply_module_sdk_to_project_env(
+            let norm_sdk = sdk_override.trim().trim_end_matches('/');
+            let registered_eco = ctx.registered_sdks.iter().find_map(|(eco, sdks)| {
+                sdks.iter()
+                    .any(|s| s.path.trim().trim_end_matches('/') == norm_sdk)
+                    .then_some(*eco)
+            });
+            crate::environments::module_sdks::apply_module_sdk_to_project_env_with_ecosystem(
                 &mut effective_proj,
                 &effective_cwd,
                 &sdk_override,
                 ctx.run_config.as_ref().map(|rc| rc.runner),
                 Some(req.language.as_str()),
+                registered_eco,
             );
         }
     }
@@ -453,6 +477,12 @@ pub(crate) fn build_effective_env_with_manager(
             "rust/bin",
             "zig/current",
             "zig/bin",
+            "cpp/current/bin",
+            "cpp/bin",
+            "dotnet/current",
+            "dotnet/tools",
+            "dotnet/netcoredbg",
+            "dotnet/dap/netcoredbg",
             "node/current/bin",
             "python/current/bin",
             "python/bin",
@@ -468,7 +498,14 @@ pub(crate) fn build_effective_env_with_manager(
         }
         if !otto_core::e2e::isolated() && ctx.caller_is_root {
             if let Some(home) = dirs::home_dir() {
-                for rel in ["go/bin", ".cargo/bin", ".zvm/bin", ".local/bin"] {
+                for rel in [
+                    "go/bin",
+                    ".cargo/bin",
+                    ".zvm/bin",
+                    ".dotnet",
+                    ".dotnet/tools",
+                    ".local/bin",
+                ] {
                     let p = home.join(rel);
                     if p.is_dir() {
                         crate::environments::push_unique(
@@ -479,7 +516,13 @@ pub(crate) fn build_effective_env_with_manager(
                 }
             }
         }
-        for sys_bin in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/local/go/bin"] {
+        for sys_bin in [
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/usr/local/go/bin",
+            "/usr/local/share/dotnet",
+            "/opt/homebrew/opt/dotnet/libexec",
+        ] {
             if Path::new(sys_bin).is_dir() {
                 crate::environments::push_unique(&mut path_entries, sys_bin.to_string());
             }

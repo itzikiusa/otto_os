@@ -81,6 +81,157 @@ pub fn eval_bool(src: &str, ctx: &Value) -> bool {
     }
 }
 
+/// What a boolean rule expression inspected when evaluated against a context.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ExprInspection {
+    /// Whether the expression evaluated to truthy.
+    pub met: bool,
+    /// Distinct dotted paths referenced by the expression, in order, with their
+    /// evaluated values.
+    pub paths: Vec<(String, Value)>,
+    /// Numeric comparison `(value, target)` when the expression compares a
+    /// numeric path against a numeric target (e.g. `steps.review.score >= 95`).
+    pub numeric_target: Option<(f64, f64)>,
+    /// Whether `numeric_target` is a directional floor rule (`value >= target` or
+    /// `value > target`, including flipped `target <= value`), as opposed to a
+    /// ceiling (`<=`, `<`) or equality (`==`) comparison.
+    pub numeric_is_floor: bool,
+}
+
+/// Evaluate `src` as a boolean rule and record every path value it inspected
+/// plus any direct numeric comparison against a target.
+pub fn inspect_bool(src: &str, ctx: &Value) -> ExprInspection {
+    let Ok(toks) = lex(src) else {
+        return ExprInspection::default();
+    };
+    let mut p = Parser::new(toks);
+    let Ok(ast) = p.parse_expr() else {
+        return ExprInspection::default();
+    };
+    if p.expect_eof().is_err() {
+        return ExprInspection::default();
+    }
+    let met = eval_ast(&ast, ctx).is_ok_and(|v| truthy(&v));
+    let mut paths = Vec::new();
+    let mut numeric_target = None;
+    let mut numeric_is_floor = false;
+    collect_inspection(
+        &ast,
+        ctx,
+        &mut paths,
+        &mut numeric_target,
+        &mut numeric_is_floor,
+    );
+    ExprInspection {
+        met,
+        paths,
+        numeric_target,
+        numeric_is_floor,
+    }
+}
+
+fn collect_inspection(
+    ast: &Ast,
+    ctx: &Value,
+    paths: &mut Vec<(String, Value)>,
+    numeric_target: &mut Option<(f64, f64)>,
+    numeric_is_floor: &mut bool,
+) {
+    match ast {
+        Ast::Lit(_) => {}
+        Ast::Path(segs) => {
+            let name = format_path(segs, ctx);
+            if !paths.iter().any(|(p, _)| p == &name) {
+                let val = resolve_path(segs, ctx).unwrap_or(Value::Null);
+                paths.push((name, val));
+            }
+            for seg in segs {
+                if let Seg::Index(e) = seg {
+                    collect_inspection(e, ctx, paths, numeric_target, numeric_is_floor);
+                }
+            }
+        }
+        Ast::Unary(_, inner) => {
+            collect_inspection(inner, ctx, paths, numeric_target, numeric_is_floor)
+        }
+        Ast::Bin(op, l, r) => {
+            if numeric_target.is_none()
+                && matches!(
+                    op,
+                    BinOp::Ge | BinOp::Gt | BinOp::Le | BinOp::Lt | BinOp::Eq
+                )
+            {
+                if let Some((val, target, floor)) = numeric_comparison(*op, l, r, ctx) {
+                    *numeric_target = Some((val, target));
+                    *numeric_is_floor = floor;
+                }
+            }
+            collect_inspection(l, ctx, paths, numeric_target, numeric_is_floor);
+            collect_inspection(r, ctx, paths, numeric_target, numeric_is_floor);
+        }
+        Ast::Call(_, args) => {
+            for a in args {
+                collect_inspection(a, ctx, paths, numeric_target, numeric_is_floor);
+            }
+        }
+    }
+}
+
+fn numeric_comparison(op: BinOp, l: &Ast, r: &Ast, ctx: &Value) -> Option<(f64, f64, bool)> {
+    let as_lit = |a: &Ast| -> Option<f64> {
+        match a {
+            Ast::Lit(v) => v.as_f64().filter(|n| n.is_finite()),
+            Ast::Unary('-', inner) => match inner.as_ref() {
+                Ast::Lit(v) => v.as_f64().filter(|n| n.is_finite()).map(|n| -n),
+                _ => None,
+            },
+            _ => None,
+        }
+    };
+    let as_path_num = |a: &Ast| -> Option<f64> {
+        if let Ast::Path(segs) = a {
+            resolve_path(segs, ctx)
+                .ok()
+                .and_then(|v| v.as_f64())
+                .filter(|n| n.is_finite())
+        } else {
+            None
+        }
+    };
+    if let (Some(val), Some(target)) = (as_path_num(l), as_lit(r)) {
+        let floor = matches!(op, BinOp::Ge | BinOp::Gt);
+        return Some((val, target, floor));
+    }
+    if let (Some(target), Some(val)) = (as_lit(l), as_path_num(r)) {
+        let floor = matches!(op, BinOp::Le | BinOp::Lt);
+        return Some((val, target, floor));
+    }
+    None
+}
+
+fn format_path(segs: &[Seg], ctx: &Value) -> String {
+    let mut out = String::new();
+    for (i, seg) in segs.iter().enumerate() {
+        match seg {
+            Seg::Key(k) => {
+                if i > 0 {
+                    out.push('.');
+                }
+                out.push_str(k);
+            }
+            Seg::Index(e) => {
+                let idx = eval_ast(e, ctx)
+                    .map(|v| stringify(&v))
+                    .unwrap_or_else(|_| "?".into());
+                out.push('[');
+                out.push_str(&idx);
+                out.push(']');
+            }
+        }
+    }
+    out
+}
+
 /// Render a template, replacing every `{{ expr }}` with the stringified result of
 /// evaluating `expr` against `ctx`. Text outside `{{ … }}` is copied verbatim, so
 /// the legacy `{key}` substitution can run first/independently. An expression that
@@ -1057,5 +1208,48 @@ mod tests {
         // modest nesting still works
         assert!(eval_bool(&format!("{}true", "!".repeat(64)), &json!({})));
         assert_eq!(eval("((((1 + 2))))", &json!({})).unwrap(), json!(3));
+    }
+
+    #[test]
+    fn inspect_bool_records_paths_and_numeric_targets() {
+        let ctx = json!({
+            "steps": {
+                "review": {"passed": false, "score": 72},
+                "bench": {"coverage": 64.5}
+            }
+        });
+        let r = inspect_bool("steps.review.passed == true", &ctx);
+        assert!(!r.met);
+        assert_eq!(r.paths, vec![("steps.review.passed".into(), json!(false))]);
+        assert_eq!(r.numeric_target, None);
+
+        let r2 = inspect_bool("steps.review.score >= 95", &ctx);
+        assert!(!r2.met);
+        assert_eq!(r2.paths, vec![("steps.review.score".into(), json!(72))]);
+        assert_eq!(r2.numeric_target, Some((72.0, 95.0)));
+        assert!(r2.numeric_is_floor);
+
+        let r3 = inspect_bool("80 <= steps.bench.coverage", &ctx);
+        assert!(!r3.met);
+        assert_eq!(r3.numeric_target, Some((64.5, 80.0)));
+        assert!(r3.numeric_is_floor);
+
+        let r4 = inspect_bool("steps.bench.coverage <= 50", &ctx);
+        assert!(!r4.met);
+        assert_eq!(r4.numeric_target, Some((64.5, 50.0)));
+        assert!(!r4.numeric_is_floor);
+
+        let r4 = inspect_bool(
+            "steps.review.passed == false && steps.review.score >= 70",
+            &ctx,
+        );
+        assert!(r4.met);
+        assert_eq!(r4.paths.len(), 2);
+        assert_eq!(r4.numeric_target, Some((72.0, 70.0)));
+
+        // Parse error yields default (met = false, no paths).
+        let bad = inspect_bool("steps.review.passed ==", &ctx);
+        assert!(!bad.met);
+        assert!(bad.paths.is_empty());
     }
 }

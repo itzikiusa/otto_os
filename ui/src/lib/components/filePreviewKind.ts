@@ -5,7 +5,7 @@
 
 // `d2` is the IDE's own (its renderer, Canvas' D2 bridge, is a module): the IDE
 // preview pane renders it; FilePreview itself never gets it.
-export type FilePreviewKind = 'markdown' | 'html' | 'svg' | 'image' | 'pdf' | 'json' | 'mermaid' | 'd2' | 'csv' | 'tsv' | 'jsonl';
+export type FilePreviewKind = 'markdown' | 'html' | 'svg' | 'image' | 'pdf' | 'json' | 'mermaid' | 'd2' | 'csv' | 'tsv' | 'jsonl' | 'notebook';
 export type FilePreviewMode = 'source' | 'split' | 'preview';
 
 function baseOf(path: string): string {
@@ -27,6 +27,7 @@ export function filePreviewKind(path: string): FilePreviewKind | null {
   if (b.endsWith('.csv')) return 'csv';
   if (b.endsWith('.tsv')) return 'tsv';
   if (/\.(jsonl|ndjson)$/.test(b)) return 'jsonl';
+  if (b.endsWith('.ipynb')) return 'notebook';
   return null;
 }
 
@@ -38,6 +39,11 @@ export function isBinaryPreviewKind(kind: FilePreviewKind | null): boolean {
 /** The IDE shows these as its editable table (IdeCsvView) in Preview mode. */
 export function isTablePreviewKind(kind: FilePreviewKind | null): boolean {
   return kind === 'csv' || kind === 'tsv' || kind === 'jsonl';
+}
+
+/** The IDE shows Jupyter notebooks (.ipynb) in its interactive IdeNotebookView in Preview mode. */
+export function isNotebookPreviewKind(kind: FilePreviewKind | null): boolean {
+  return kind === 'notebook';
 }
 
 /** Threads' file viewer kinds (`threadsHelpers` re-exports these unchanged). */
@@ -108,7 +114,7 @@ export function resolvePreviewHref(fromFile: string, href: string, root?: string
 /** What a kind opens in before the person picks: images/PDF/SVG and tables
  *  show rendered (CSV/TSV already opened as a table); text formats show source. */
 export function defaultPreviewMode(kind: FilePreviewKind | null): FilePreviewMode {
-  if (kind === 'image' || kind === 'pdf' || kind === 'svg' || kind === 'csv' || kind === 'tsv') return 'preview';
+  if (kind === 'image' || kind === 'pdf' || kind === 'svg' || kind === 'csv' || kind === 'tsv' || kind === 'notebook') return 'preview';
   return 'source';
 }
 
@@ -128,7 +134,7 @@ export function effectivePreviewMode(kind: FilePreviewKind | null, saved: FilePr
 }
 
 const MODES: readonly FilePreviewMode[] = ['source', 'split', 'preview'];
-const KINDS: readonly FilePreviewKind[] = ['markdown', 'html', 'svg', 'image', 'pdf', 'json', 'mermaid', 'd2', 'csv', 'tsv', 'jsonl'];
+const KINDS: readonly FilePreviewKind[] = ['markdown', 'html', 'svg', 'image', 'pdf', 'json', 'mermaid', 'd2', 'csv', 'tsv', 'jsonl', 'notebook'];
 
 /** The remembered mode per kind (localStorage JSON); junk entries are dropped. */
 export function parsePreviewModes(raw: string | null | undefined): Partial<Record<FilePreviewKind, FilePreviewMode>> {

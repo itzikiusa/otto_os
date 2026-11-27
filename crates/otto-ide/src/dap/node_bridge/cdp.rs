@@ -225,12 +225,24 @@ impl InspectorWs {
     }
 }
 
-pub(super) async fn discover_attach_ws_path(port: u16) -> Result<String> {
-    discover_attach_ws_path_with_timeout(port, CDP_HANDSHAKE_TIMEOUT).await
+pub(super) async fn discover_attach_ws_path(
+    port: u16,
+    requested_url: Option<&str>,
+) -> Result<String> {
+    discover_attach_ws_path_for(port, requested_url, CDP_HANDSHAKE_TIMEOUT).await
 }
 
+#[cfg(test)]
 pub(super) async fn discover_attach_ws_path_with_timeout(
     port: u16,
+    timeout: Duration,
+) -> Result<String> {
+    discover_attach_ws_path_for(port, None, timeout).await
+}
+
+async fn discover_attach_ws_path_for(
+    port: u16,
+    requested_url: Option<&str>,
     timeout: Duration,
 ) -> Result<String> {
     let raw = tokio::time::timeout(timeout, async {
@@ -266,15 +278,90 @@ pub(super) async fn discover_attach_ws_path_with_timeout(
         .unwrap_or(text.as_ref());
     let arr: Value = serde_json::from_str(body.trim())
         .map_err(|e| Error::Upstream(format!("parse /json/list: {e}")))?;
-    let ws_url = arr
-        .as_array()
-        .and_then(|a| a.first())
-        .and_then(|item| item.get("webSocketDebuggerUrl"))
-        .and_then(Value::as_str)
-        .ok_or_else(|| Error::Upstream("Node inspector returned no debuggable target".into()))?;
-    extract_ws_port_and_path(ws_url)
+    let ws_url = select_cdp_target_ws_url_for(&arr, requested_url).ok_or_else(|| {
+        if let Some(u) = requested_url {
+            Error::NotFound(format!("No open browser tab matched requested URL '{u}'"))
+        } else {
+            Error::Upstream("Node/Browser inspector returned no debuggable target".into())
+        }
+    })?;
+    extract_ws_port_and_path(&ws_url)
         .map(|(_, path)| path)
         .ok_or_else(|| Error::Upstream(format!("invalid webSocketDebuggerUrl '{ws_url}'")))
+}
+
+/// Pick the best debuggable WebSocket URL from a CDP `/json/list` payload:
+/// when `requested_url` is provided (BUG-28), match only a `"page"` target whose URL
+/// matches `requested_url` (normalized trailing slash); otherwise prefer `"node"`,
+/// else a web `"page"` target (skipping `devtools://` and `chrome-extension://`).
+pub(crate) fn select_cdp_target_ws_url_for(
+    arr: &Value,
+    requested_url: Option<&str>,
+) -> Option<String> {
+    let items = arr.as_array()?;
+    let ws_of = |item: &Value| -> Option<String> {
+        item.get("webSocketDebuggerUrl")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+    };
+    if let Some(req_url) = requested_url.map(str::trim).filter(|s| !s.is_empty()) {
+        let norm_req = req_url.trim_end_matches('/');
+        let is_page = |i: &&Value| i.get("type").and_then(Value::as_str) == Some("page");
+        // Pass 1 (BUG-28): prefer an exact normalized URL match over descendants/query variants.
+        if let Some(ws) = items
+            .iter()
+            .filter(is_page)
+            .find(|i| {
+                i.get("url")
+                    .and_then(Value::as_str)
+                    .is_some_and(|u| u.trim_end_matches('/') == norm_req)
+            })
+            .and_then(ws_of)
+        {
+            return Some(ws);
+        }
+        // Pass 2: same-app descendant or query/fragment variant if no exact match is open.
+        return items
+            .iter()
+            .filter(is_page)
+            .find(|i| {
+                i.get("url").and_then(Value::as_str).is_some_and(|u| {
+                    let norm_u = u.trim_end_matches('/');
+                    norm_u.starts_with(&format!("{norm_req}/"))
+                        || norm_u.starts_with(&format!("{norm_req}?"))
+                        || norm_u.starts_with(&format!("{norm_req}#"))
+                })
+            })
+            .and_then(ws_of);
+    }
+    if let Some(ws) = items
+        .iter()
+        .find(|i| i.get("type").and_then(Value::as_str) == Some("node"))
+        .and_then(ws_of)
+    {
+        return Some(ws);
+    }
+    if let Some(ws) = items
+        .iter()
+        .find(|i| {
+            i.get("type").and_then(Value::as_str) == Some("page")
+                && i.get("url").and_then(Value::as_str).is_some_and(|u| {
+                    (u.starts_with("http://") || u.starts_with("https://"))
+                        && !u.starts_with("devtools://")
+                        && !u.starts_with("chrome-extension://")
+                })
+        })
+        .and_then(ws_of)
+    {
+        return Some(ws);
+    }
+    items.iter().find_map(ws_of)
+}
+
+#[cfg(test)]
+pub(crate) fn select_cdp_target_ws_url(arr: &Value) -> Option<String> {
+    select_cdp_target_ws_url_for(arr, None)
 }
 
 pub(super) fn extract_ws_port_and_path(line: &str) -> Option<(u16, String)> {

@@ -79,6 +79,10 @@ pub struct ChatView<'a> {
 
 /// Over this many characters the finished steps fold into one line.
 pub const STATUS_FOLD_CHARS: usize = 3_000;
+/// Character budget for chat messages (leaves headroom under Telegram's 4,096
+/// character limit for HTML conversion/escaping so `sendMessage` and the
+/// follow-up file upload are never suppressed).
+pub const CHAT_MAX_CHARS: usize = 3_600;
 
 /// The live status message (engine.md §9.2).
 pub fn render_status(
@@ -119,6 +123,11 @@ pub fn render_status(
     if let Some(t) = overview.typical_ms {
         first.push_str(&format!(" (usually {})", approx(t)));
     }
+    let allow_reached = overview.hold.is_none() && overview.state != RunState::Blocked;
+    let mut header = vec![first];
+    if let Some(goal) = overview.goal.as_ref() {
+        header.extend(budget_goal_block(goal, allow_reached, CHAT_MAX_CHARS / 2));
+    }
     let lines: Vec<(bool, String)> = listed
         .iter()
         .map(|(n, s)| {
@@ -126,7 +135,9 @@ pub fn render_status(
             (ok, status_line(view, n, *s))
         })
         .collect();
-    let full = std::iter::once(first.clone())
+    let full = header
+        .iter()
+        .cloned()
         .chain(lines.iter().map(|(_, l)| l.clone()))
         .collect::<Vec<_>>()
         .join("\n");
@@ -134,7 +145,7 @@ pub fn render_status(
         return full;
     }
     let folded = lines.iter().filter(|(ok, _)| *ok).count();
-    let mut out = vec![first];
+    let mut out = header;
     let mut said = false;
     for (ok, line) in lines {
         match (ok, said) {
@@ -273,36 +284,214 @@ pub fn render_final(
             }
         }
     }
+    let outcome = lines.pop().unwrap_or_default();
+    let outcome = if outcome.chars().count() > CHAT_MAX_CHARS.saturating_sub(200) {
+        clip(&outcome, CHAT_MAX_CHARS.saturating_sub(200))
+    } else {
+        outcome
+    };
+    let mut deliv_lines = vec![];
     for d in &overview.deliverables {
         let detail = d.detail.as_deref().filter(|s| !s.trim().is_empty());
         let words = match d.state {
-            DeliverableState::Done => detail.unwrap_or("posted").to_string(),
-            DeliverableState::Partial => detail.unwrap_or("partly posted").to_string(),
+            DeliverableState::Done => detail
+                .map(|s| clip(s, 180))
+                .unwrap_or_else(|| "posted".into()),
+            DeliverableState::Partial => detail
+                .map(|s| clip(s, 180))
+                .unwrap_or_else(|| "partly posted".into()),
             DeliverableState::Failed => match detail {
-                Some(why) => format!("not posted ({why})"),
+                Some(why) => format!("not posted ({})", clip(why, 180)),
                 None => "not posted".into(),
             },
             DeliverableState::PendingApproval => "pending approval".into(),
             DeliverableState::Unknown => "not confirmed".into(),
         };
-        lines.push(match &d.url {
-            Some(url) => format!("• [{}]({url}): {words}", d.label),
-            None => format!("• {}: {words}", d.label),
+        deliv_lines.push(match &d.url {
+            Some(url) => format!("• [{}]({url}): {words}", clip(&d.label, 80)),
+            None => format!("• {}: {words}", clip(&d.label, 80)),
         });
     }
     let posted = overview
         .deliverables
         .iter()
         .any(|d| matches!(d.state, DeliverableState::Done | DeliverableState::Partial));
+    let mut fixed_tail = vec![];
     if overview.state == RunState::Failed && !posted && overview.hold.is_none() {
         if let Some(pr) = overview.subject.as_ref().and_then(|s| s.pr.as_ref()) {
-            lines.push(format!("Nothing was posted on PR #{}.", pr.number));
+            fixed_tail.push(format!("Nothing was posted on PR #{}.", pr.number));
         }
     }
     if let Some(url) = link {
-        lines.push(format!("[Open in Otto]({url})"));
+        fixed_tail.push(format!("[Open in Otto]({url})"));
     }
-    lines.join("\n")
+
+    let fixed_chars = outcome.chars().count()
+        + if fixed_tail.is_empty() {
+            0
+        } else {
+            1 + joined_chars(&fixed_tail)
+        };
+    let middle_budget = CHAT_MAX_CHARS.saturating_sub(fixed_chars);
+
+    let mut goal_lines = vec![];
+    let mut kept_delivs = vec![];
+    if let Some(goal) = overview.goal.as_ref() {
+        let allow_reached = overview.hold.is_none() && overview.state != RunState::Blocked;
+        let goal_reserve = if middle_budget >= 160 { 120 } else { 0 };
+        let deliv_budget = if deliv_lines.is_empty() {
+            0
+        } else {
+            // Reserve separator newline for goal + deliverables.
+            middle_budget.saturating_sub(goal_reserve + 2)
+        };
+        kept_delivs = budget_deliverable_lines(&deliv_lines, deliv_budget);
+        let deliv_used = if kept_delivs.is_empty() {
+            0
+        } else {
+            1 + joined_chars(&kept_delivs)
+        };
+        let goal_budget = middle_budget.saturating_sub(deliv_used + 1);
+        goal_lines = budget_goal_block(goal, allow_reached, goal_budget);
+    } else if !deliv_lines.is_empty() {
+        kept_delivs = budget_deliverable_lines(&deliv_lines, middle_budget.saturating_sub(1));
+    }
+
+    let mut out = vec![outcome];
+    out.extend(goal_lines);
+    out.extend(kept_delivs);
+    out.extend(fixed_tail);
+    out.join("\n")
+}
+
+/// Fit deliverable lines within `max_chars`, capping overlong lines and folding
+/// trailing deliverables into `"• … N more deliverables"` so the final brief
+/// never exceeds Telegram's limit.
+fn budget_deliverable_lines(deliv_lines: &[String], max_chars: usize) -> Vec<String> {
+    if deliv_lines.is_empty() || max_chars == 0 {
+        return Vec::new();
+    }
+    if joined_chars(deliv_lines) <= max_chars {
+        return deliv_lines.to_vec();
+    }
+    let mut kept: Vec<String> = Vec::new();
+    let mut used: usize = 0;
+    for (idx, line) in deliv_lines.iter().enumerate() {
+        let sep = usize::from(!kept.is_empty());
+        let remaining_after = deliv_lines.len() - 1 - idx;
+        let fold_reserve = if remaining_after > 0 { 28 } else { 0 };
+        let avail = max_chars.saturating_sub(used + sep + fold_reserve);
+        if avail < 16 {
+            break;
+        }
+        let fit = if line.chars().count() <= avail {
+            line.clone()
+        } else {
+            clip(line, avail)
+        };
+        used += sep + fit.chars().count();
+        kept.push(fit);
+    }
+    let omitted = deliv_lines.len().saturating_sub(kept.len());
+    if omitted > 0 {
+        let sep = usize::from(!kept.is_empty());
+        let word = if omitted == 1 {
+            "deliverable"
+        } else {
+            "deliverables"
+        };
+        let fold = format!("• … {omitted} more {word}");
+        if used + sep + fold.chars().count() <= max_chars {
+            kept.push(fold);
+        }
+    }
+    kept
+}
+
+fn joined_chars(lines: &[String]) -> usize {
+    if lines.is_empty() {
+        return 0;
+    }
+    lines.iter().map(|l| l.chars().count()).sum::<usize>() + lines.len().saturating_sub(1)
+}
+
+/// Fit the goal status line and newest round lines within `max_chars`,
+/// preserving the newest rounds and falling back to compact counts if needed.
+fn budget_goal_block(
+    goal: &otto_core::workflows::GoalProgress,
+    allow_reached: bool,
+    max_chars: usize,
+) -> Vec<String> {
+    if max_chars == 0 {
+        return Vec::new();
+    }
+    let Some(full_goal) = crate::goal_progress::chat_goal_line_for(goal, allow_reached) else {
+        return Vec::new();
+    };
+    let rounds = crate::goal_progress::chat_round_lines(goal);
+    let mut full = Vec::with_capacity(1 + rounds.len());
+    full.push(full_goal.clone());
+    full.extend(rounds.iter().cloned());
+    if joined_chars(&full) <= max_chars {
+        return full;
+    }
+
+    // Choose the goal headline that fits (full numeric list, else compact count).
+    let goal_line = if full_goal.chars().count() <= max_chars {
+        full_goal
+    } else if let Some(compact) = crate::goal_progress::compact_chat_goal_line(goal, allow_reached)
+        .filter(|c| c.chars().count() <= max_chars)
+    {
+        compact
+    } else {
+        clip(&full_goal, max_chars)
+    };
+    let mut used = goal_line.chars().count();
+    let mut kept_rev: Vec<String> = Vec::new();
+    let mut omitted_rounds: usize = 0;
+
+    // Preserve the newest rounds first (skip any pre-existing fold line).
+    let actual_rounds: Vec<&String> = rounds.iter().filter(|l| !l.starts_with("… ")).collect();
+    let pre_omitted: usize = rounds
+        .first()
+        .and_then(|l| l.strip_prefix("… "))
+        .and_then(|s| s.split_whitespace().next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0);
+
+    for line in actual_rounds.iter().rev() {
+        let remaining = max_chars.saturating_sub(used + 1);
+        if remaining < 16 {
+            omitted_rounds += 1;
+            continue;
+        }
+        // Reserve room for an "… N earlier rounds" line if earlier rounds remain.
+        let earlier_after_this = actual_rounds.len() - 1 - kept_rev.len() + pre_omitted;
+        let fold_reserve = if earlier_after_this > 0 { 24 } else { 0 };
+        let avail = remaining.saturating_sub(fold_reserve);
+        if line.chars().count() <= avail {
+            used += 1 + line.chars().count();
+            kept_rev.push((*line).clone());
+        } else if kept_rev.is_empty() && avail >= 24 {
+            let clipped = clip(line, avail);
+            used += 1 + clipped.chars().count();
+            kept_rev.push(clipped);
+        } else {
+            omitted_rounds += 1;
+        }
+    }
+    kept_rev.reverse();
+
+    let mut out = vec![goal_line];
+    let total_omitted = pre_omitted + omitted_rounds;
+    if total_omitted > 0 && !kept_rev.is_empty() {
+        let fold = format!("… {total_omitted} earlier rounds");
+        if used + 1 + fold.chars().count() <= max_chars {
+            out.push(fold);
+        }
+    }
+    out.extend(kept_rev);
+    out
 }
 
 /// The new post when a step starts waiting on a person (edits do not

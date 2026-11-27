@@ -220,10 +220,9 @@ pub fn reviewer_slots() -> Arc<tokio::sync::Semaphore> {
         .clone()
 }
 
-/// The default config used when no `pr_review` setting has been stored. The
-/// reviewer agents follow the configured default agent (`default_provider`);
-/// the summarizer stays on claude because its run path is hard-wired to the
-/// claude PTY driver (see `run_review_core`).
+/// The default config used when no `pr_review` setting has been stored. Both
+/// reviewer agents and the summarizer follow the configured default agent
+/// (`default_provider`).
 pub fn default_review_config(default_provider: &str) -> ReviewConfig {
     ReviewConfig {
         cross_provider_check: false,
@@ -262,7 +261,7 @@ pub fn default_review_config(default_provider: &str) -> ReviewConfig {
         ],
         summarizer: ReviewAgentCfg {
             name: "Summarizer".to_string(),
-            provider: "claude".to_string(),
+            provider: default_provider.to_string(),
             providers: vec![],
             model: "".to_string(),
             prompt: format!("You are deduplicating and prioritizing code review comments. Output ONLY \
@@ -421,11 +420,16 @@ pub fn checks_review_agent(default_provider: &str, checks: &[(String, String)]) 
     }
 }
 
-/// Pre-trust the checkout for every provider a review runs (reviewers + the
-/// claude summarizer), so no agent stalls on the "trust this folder?" prompt.
-pub fn trust_checkout(runs: &[AgentRun], repo_path: &str) {
+/// Pre-trust the checkout for every provider a review runs (reviewers + its
+/// configured summarizer), so no agent stalls on the "trust this folder?" prompt.
+pub fn trust_checkout(runs: &[AgentRun], summarizer_provider: &str, repo_path: &str) {
     let mut trusted = std::collections::HashSet::<&str>::new();
-    for provider in runs.iter().map(|r| r.provider.as_str()).chain(["claude"]) {
+    let sum = summarizer_provider.trim();
+    for provider in runs
+        .iter()
+        .map(|r| r.provider.as_str())
+        .chain((!sum.is_empty()).then_some(sum))
+    {
         if trusted.insert(provider) {
             otto_sessions::trust::ensure_trusted(provider, repo_path);
         }
@@ -1606,6 +1610,7 @@ pub fn workflow_review_config(
     } else {
         providers.to_vec()
     };
+    base.summarizer.provider = provs[0].clone();
     if lenses.is_empty() {
         for a in base.agents.iter_mut() {
             a.provider = provs[0].clone();
@@ -1626,6 +1631,172 @@ pub fn workflow_review_config(
             .collect();
     }
     base
+}
+
+/// Apply a `review_run` node's `summarizer` JSON object onto `cfg`.
+pub fn apply_summarizer_param(cfg: &mut ReviewConfig, s: &Value) {
+    if let Some(p) = s
+        .get("provider")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|x| !x.is_empty())
+    {
+        cfg.summarizer.provider = p.to_string();
+        cfg.summarizer.providers = vec![];
+    }
+    if let Some(m) = s.get("model").and_then(Value::as_str) {
+        cfg.summarizer.model = m.to_string();
+    }
+    if let Some(e) = s.get("effort").and_then(Value::as_str) {
+        cfg.summarizer.effort = e.to_string();
+    }
+    if let Some(instr) = s
+        .get("instructions")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|x| !x.is_empty())
+    {
+        cfg.summarizer.prompt = format!(
+            "{}\n\n--- Additional summarizer guidance ---\n{instr}",
+            cfg.summarizer.prompt
+        );
+    }
+}
+
+/// Extract the frozen `ReviewConfig` and summarizer context (`run_context` +
+/// `jira_context`) saved in a workflow review checkpoint's `input`.
+pub fn checkpoint_review_config(input: &Value) -> Result<(ReviewConfig, String), String> {
+    let raw = input
+        .get("config")
+        .ok_or_else(|| "workflow review checkpoint is missing its frozen config".to_string())?;
+    let cfg: ReviewConfig = serde_json::from_value(raw.clone())
+        .map_err(|e| format!("workflow review checkpoint config is unreadable: {e}"))?;
+    let mut ctx = match input
+        .get("run_context")
+        .and_then(Value::as_str)
+        .map(str::trim)
+    {
+        Some(c) if !c.is_empty() => format!("## Reviewer guidance\n{c}\n\n---\n\n"),
+        _ => String::new(),
+    };
+    if let Some(jira) = input.get("jira_context").and_then(Value::as_str) {
+        ctx.push_str(jira);
+    }
+    Ok((cfg, ctx))
+}
+
+/// Overlay any non-empty provider/model/effort recorded on a review's last
+/// (summarizer) row onto `cfg` (used for standalone non-workflow reviews).
+pub fn apply_summarizer_row(
+    cfg: &mut ReviewConfig,
+    agents: &[otto_core::domain::ReviewAgentState],
+) {
+    let Some(sum) = agents.last() else { return };
+    if !sum.provider.trim().is_empty() {
+        cfg.summarizer.provider = sum.provider.clone();
+    }
+    if !sum.model.trim().is_empty() {
+        cfg.summarizer.model = sum.model.clone();
+    }
+    if !sum.effort.trim().is_empty() {
+        cfg.summarizer.effort = sum.effort.clone();
+    }
+}
+
+/// Base `ReviewConfig` when a `review_run` step explicitly declares reviewers,
+/// providers or lenses; returns `None` when reviewers are left implicit so each
+/// target inherits its own resolved repository review configuration (BUG-13).
+pub fn workflow_review_base_config(
+    default_provider: &str,
+    p: &Value,
+    reviewers: &[Value],
+    providers: &[String],
+    lenses: &[String],
+) -> Option<ReviewConfig> {
+    if !reviewers.is_empty() {
+        Some(workflow_review_config_from_json(
+            default_provider,
+            reviewers,
+            p.get("summarizer"),
+        ))
+    } else if !providers.is_empty() || !lenses.is_empty() {
+        Some(workflow_review_config(default_provider, providers, lenses))
+    } else {
+        None
+    }
+}
+
+/// Whether the `review_run` node carries per-step overlays (`summarizer`,
+/// `checks`, or review-wide params) to layer onto either its explicit config
+/// or each target's inherited repository configuration.
+pub fn has_workflow_review_overlays(p: &Value, check_specs: &[(String, String)]) -> bool {
+    !check_specs.is_empty() || p.get("summarizer").is_some() || has_node_review_params(p)
+}
+
+/// Layer a `review_run` node's `summarizer`, `checks`, and review-wide params
+/// onto `cfg` (either an explicit workflow config or a target's inherited repo
+/// config). `summarizer_already_applied` avoids appending `instructions` twice
+/// when `workflow_review_config_from_json` already applied them.
+pub fn apply_workflow_review_overlays(
+    cfg: &mut ReviewConfig,
+    default_provider: &str,
+    p: &Value,
+    check_specs: &[(String, String)],
+    summarizer_already_applied: bool,
+) {
+    if !summarizer_already_applied {
+        if let Some(s) = p.get("summarizer") {
+            apply_summarizer_param(cfg, s);
+        }
+    }
+    if !check_specs.is_empty() {
+        let check_provider = cfg
+            .agents
+            .first()
+            .map(|a| a.provider.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| {
+                (!cfg.summarizer.provider.trim().is_empty())
+                    .then_some(cfg.summarizer.provider.as_str())
+            })
+            .unwrap_or(default_provider)
+            .to_string();
+        cfg.agents
+            .push(checks_review_agent(&check_provider, check_specs));
+    }
+    if has_node_review_params(p) {
+        apply_node_review_params(cfg, p);
+    }
+}
+
+/// Provider for `review_run` goal grading: explicit node `summarizer.provider`,
+/// else the explicit workflow override's summarizer provider (only `Some` when
+/// the step named reviewers/providers/lenses), else flat `providers[0]`, else
+/// `default_provider` (never an accidental hardcoded `claude` from checks — BUG-14).
+pub fn goals_provider(
+    p: &Value,
+    explicit_cfg: Option<&ReviewConfig>,
+    providers: &[String],
+    default_provider: &str,
+) -> String {
+    p.get("summarizer")
+        .and_then(|s| s.get("provider"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            explicit_cfg
+                .map(|c| c.summarizer.provider.trim())
+                .filter(|s| !s.is_empty())
+        })
+        .or_else(|| {
+            providers
+                .first()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or(default_provider)
+        .to_string()
 }
 
 /// Rich workflow-review config (PR-review parity): each reviewer carries its OWN
@@ -1714,34 +1885,11 @@ pub fn workflow_review_config_from_json(
         })
         .collect();
     if !agents.is_empty() {
+        base.summarizer.provider = agents[0].provider.clone();
         base.agents = agents;
     }
     if let Some(s) = summarizer {
-        if let Some(p) = s
-            .get("provider")
-            .and_then(Value::as_str)
-            .filter(|x| !x.is_empty())
-        {
-            base.summarizer.provider = p.to_string();
-            base.summarizer.providers = vec![];
-        }
-        if let Some(m) = s.get("model").and_then(Value::as_str) {
-            base.summarizer.model = m.to_string();
-        }
-        if let Some(e) = s.get("effort").and_then(Value::as_str) {
-            base.summarizer.effort = e.to_string();
-        }
-        if let Some(instr) = s
-            .get("instructions")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|x| !x.is_empty())
-        {
-            base.summarizer.prompt = format!(
-                "{}\n\n--- Additional summarizer guidance ---\n{instr}",
-                base.summarizer.prompt
-            );
-        }
+        apply_summarizer_param(&mut base, s);
     }
     base
 }

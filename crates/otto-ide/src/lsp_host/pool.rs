@@ -71,6 +71,12 @@ pub struct SpawnLaunch {
     pub args: Vec<String>,
     pub fallback_cmd: Option<String>,
     pub fallback_args: Vec<String>,
+    /// Opened umbrella/project root so child modules can inherit project-level SDK pins (BUG-6).
+    pub project_root: Option<String>,
+    /// Project-pinned Zig SDK home so remote SSH launches select the matching ZLS slot (BUG-4).
+    pub zig_home: Option<String>,
+    /// Verified TypeScript `tsdk` (`typescript/lib`) path on the target host for standalone Vue LSP (RED-2).
+    pub vue_tsdk: Option<String>,
 }
 
 impl SpawnLaunch {
@@ -80,6 +86,9 @@ impl SpawnLaunch {
             args,
             fallback_cmd: None,
             fallback_args: Vec::new(),
+            project_root: None,
+            zig_home: None,
+            vue_tsdk: None,
         }
     }
 }
@@ -600,6 +609,7 @@ impl LspPool {
             last_active,
             owner_is_root,
             go_tags,
+            launch.vue_tsdk.clone(),
         ));
         Ok(Attached {
             client,
