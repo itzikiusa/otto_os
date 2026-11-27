@@ -1783,7 +1783,10 @@ fn kotlin_gradle_and_standalone_kotlinc_execution_plans_work() {
         test_main_plan.classpath
     );
     let test_main_call = std::fs::read_to_string(&gradle_seen).unwrap();
-    assert!(test_main_call.contains(":api:testClasses"), "{test_main_call}");
+    assert!(
+        test_main_call.contains(":api:testClasses"),
+        "{test_main_call}"
+    );
 
     // Standalone `.kt` file compiles via `kotlinc -include-runtime -d <jar>`.
     let kotlinc_seen = root.join("kotlinc-call");
