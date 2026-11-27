@@ -15,6 +15,8 @@
   import { toasts } from '../../lib/toast.svelte';
   import { joinArgs, splitArgs } from '../../lib/shellArgs';
   import { ide, type IdeEnvVar, type IdePythonVenv, type IdeRunConfig } from './ideStore.svelte';
+  import IdeEnvTrustSwitch from './editor/IdeEnvTrustSwitch.svelte';
+  import { IDE_TRUST_PROJECT_ENV, ideProjectTrustOn, withProjectTrust } from './editor/ideLspTrust';
   import IdeNetworkBridgeCard from './shell/IdeNetworkBridgeCard.svelte';
   import IdeRunConfigEditor, { type ConfigDraft, emptyConfigDraft } from './shell/IdeRunConfigEditor.svelte';
   import IdeShellEnvCard from './shell/IdeShellEnvCard.svelte';
@@ -64,6 +66,8 @@
   let dotenvPath = $state('');
   let extraPath = $state('');
   let envRows = $state<EditableEnvRow[]>([]);
+  // OTTO_IDE_TRUST_PROJECT_EXECUTION as a switch, not a row (on = "1", off = removed).
+  let trustProject = $state(false);
   let bridgeDraft = $state<IdeNetworkBridgeDraft>(emptyNetworkBridgeDraft(null));
   let envValidationError = $state('');
   let savingEnv = $state(false);
@@ -92,6 +96,7 @@
       pythonInterpreter: pythonInterpreter.trim(),
       dotenvPath: dotenvPath.trim(),
       extraPath: extraPath.trim(),
+      trustProject,
       bridge: ide.target.kind === 'local' ? normalizeBridgeDraftSnapshot(bridgeDraft) : null,
       envRows: envRows
         .map((r) => ({
@@ -227,7 +232,8 @@
       dotenvPath = e.dotenv_path ?? '';
       extraPath = e.extra_path ?? '';
       bridgeDraft = emptyNetworkBridgeDraft(e.network_bridge);
-      envRows = (e.env_vars ?? []).map((v, idx) => ({
+      trustProject = ideProjectTrustOn(e.env_vars ?? []);
+      envRows = (e.env_vars ?? []).filter((v) => v.key !== IDE_TRUST_PROJECT_ENV).map((v, idx) => ({
         rowId: `ev-${idx}-${v.key}`,
         key: v.key,
         value: v.secret ? '' : (v.value ?? ''),
@@ -361,7 +367,7 @@
         dotenv_path: dotenvPath.trim() || null,
         extra_path: extraPath.trim() || null,
         network_bridge: ide.target.kind === 'local' ? serializedBridge.config : undefined,
-        env_vars: cleaned,
+        env_vars: withProjectTrust(cleaned, trustProject),
         ...(prodConfirmed ? { confirm_prod_targets: true } : {}),
       });
       if (ok) {
@@ -627,6 +633,8 @@
                   <input id="env-extra-path" class="input" type="text" dir="ltr" placeholder="/opt/homebrew/bin:$HOME/go/bin" bind:value={extraPath} />
                 </div>
               </div>
+
+              <IdeEnvTrustSwitch checked={trustProject} onchange={(next) => (trustProject = next)} />
 
               <section class="env-vars-box" aria-labelledby="env-vars-heading">
                 <div class="env-vars-head">

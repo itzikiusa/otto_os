@@ -157,7 +157,7 @@ test('build.zig.zon manifest parser, nesting, test plans, and debug previews', (
 
   // OBS2-1: Failed-attach cooldowns are scoped per project root so an untrusted
   // Zig project's 403 does not suppress ZLS in a separate trusted Zig project,
-  // and the status item surfaces the project trust opt-in reason.
+  // and the status item asks for trust only while the project has no opt-in.
   assert.notEqual(
     lspCooldownKey('zig', null, '/untrusted-zig'),
     lspCooldownKey('zig', null, '/trusted-zig'),
@@ -175,6 +175,6 @@ test('build.zig.zon manifest parser, nesting, test plans, and debug previews', (
     lang: 'zig',
     reason: zigReason,
   });
-  const item = ideLspItem('zig', recs[0]);
-  assert.ok(item?.title.includes('OTTO_IDE_TRUST_ZIG_BUILD=1'));
+  assert.equal(ideLspItem('zig', recs[0], false)?.action, 'trust');
+  assert.equal(ideLspItem('zig', recs[0], true)?.label, 'zls unavailable');
 });

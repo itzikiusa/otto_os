@@ -29,7 +29,7 @@ test('Web framework LSP gating, status strip labels, and settings links', async 
   assert.equal(ideLspServerName('vue'), 'vue-language-server');
   assert.equal(ideLspServerName('angular'), 'ngserver');
 
-  // SEC3-2: Vue LSP trust refusal surfaces the trust opt-in message in the status strip.
+  // SEC3-2: a Vue LSP trust refusal asks for trust in the status strip.
   const { lspHandshakeFailureReason } = await import('../src/lib/components/cm-ide-lsp-reconnect.ts');
   const { ideLspItem } = await import('../src/modules/ide/editor/ideStatusModel.ts');
   assert.equal(lspHandshakeFailureReason('vue'), 'trust_or_unavailable');
@@ -38,8 +38,9 @@ test('Web framework LSP gating, status strip labels, and settings links', async 
     rootPath: '/app',
     phase: 'unavailable',
     reason: 'trust_or_unavailable',
-  });
-  assert.ok(vueItem?.title.includes('OTTO_IDE_TRUST_VUE_LSP=1'));
+  }, false);
+  assert.equal(vueItem?.label, 'vue-language-server needs trust');
+  assert.equal(vueItem?.action, 'trust');
 });
 
 test('Angular and SvelteKit tree nesting, repo badges, and runner/debug metadata', () => {

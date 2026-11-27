@@ -18,6 +18,7 @@
   import { ideGit } from '../git/ideGitController.svelte';
   import { ide } from '../ideStore.svelte';
   import { openGoToLine } from '../search/ideQuickOpen.svelte';
+  import { ideProjectTrusted } from './ideLspTrust';
   import {
     applyIdeLspLink, ideEolLabel, ideLanguageLabel, ideLanguageSettingsSection, ideLspItem, ideLspLangFor,
     ideLspRecordFor, ideProblemCounts, type IdeLspRecord,
@@ -52,7 +53,7 @@
   const lsp = $derived.by(() => {
     if (!tab) return null;
     const lang = ideLspLangFor(tab.path, tab.language);
-    return lang ? ideLspItem(lang, ideLspRecordFor(lspRecords, lang, tab.path)) : null;
+    return lang ? ideLspItem(lang, ideLspRecordFor(lspRecords, lang, tab.path), ideProjectTrusted(ide.projectEnv?.env_vars, lang)) : null;
   });
 
   function openBranches(e: MouseEvent): void {
@@ -62,8 +63,10 @@
   }
 
   function onLsp(): void {
-    if (lsp?.action === 'retry' && tab) {
-      const rec = ideLspRecordFor(lspRecords, ideLspLangFor(tab.path, tab.language) ?? '', tab.path);
+    if ((lsp?.action === 'retry' || lsp?.action === 'trust') && tab) {
+      const lang = ideLspLangFor(tab.path, tab.language) ?? '';
+      const rec = ideLspRecordFor(lspRecords, lang, tab.path);
+      if (rec && lsp.action === 'trust') { void import('./ideLspTrustAction.svelte').then((m) => m.ideLspTrust.trust(lang, rec.rootPath)); return; }
       if (rec) { retryLspNow(rec.rootPath); return; }
     }
     ide.openSettings('plugins');

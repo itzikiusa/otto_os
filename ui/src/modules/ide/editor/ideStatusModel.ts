@@ -164,10 +164,11 @@ export function ideLspRecordFor(records: readonly IdeLspRecord[], lang: string, 
   return best;
 }
 
-export interface IdeLspItem { label: string; tone: 'ok' | 'busy' | 'bad'; title: string; action: 'settings' | 'retry' }
+export interface IdeLspItem { label: string; tone: 'ok' | 'busy' | 'bad'; title: string; action: 'settings' | 'retry' | 'trust' }
 
-/** The status-strip item, or null before any server was asked for (no attach: nothing to say). */
-export function ideLspItem(lang: string, rec: IdeLspRecord | null): IdeLspItem | null {
+/** The status-strip item, or null before any server was asked for (no attach: nothing to say).
+ *  `trusted`: whether the project's saved environment opts in to project code (null: not loaded). */
+export function ideLspItem(lang: string, rec: IdeLspRecord | null, trusted: boolean | null = null): IdeLspItem | null {
   if (!rec) return null;
   const name = ideLspServerName(lang);
   switch (rec.phase) {
@@ -178,37 +179,9 @@ export function ideLspItem(lang: string, rec: IdeLspRecord | null): IdeLspItem |
     case 'lost':
       return { label: `${name} disconnected`, tone: 'bad', title: 'The language server connection dropped. Click to retry.', action: 'retry' };
     case 'unavailable':
-      if (rec.reason === 'trust_or_unavailable' && lang === 'zig') {
-        return {
-          label: `${name} untrusted / unavailable`,
-          tone: 'bad',
-          title: `${name} did not start for this project — set OTTO_IDE_TRUST_ZIG_BUILD=1 (or OTTO_IDE_TRUST_PROJECT_EXECUTION=1) in Project Environment to trust build.zig, or install zls via Toolchains & SDKs.`,
-          action: 'settings',
-        };
-      }
-      if (rec.reason === 'trust_or_unavailable' && lang === 'kotlin') {
-        return {
-          label: `${name} untrusted / unavailable`,
-          tone: 'bad',
-          title: `${name} did not start for this project — set OTTO_IDE_TRUST_KOTLIN_LSP=1 (or OTTO_IDE_TRUST_PROJECT_EXECUTION=1) in Project Environment to trust build import, or install it via Toolchains & SDKs.`,
-          action: 'settings',
-        };
-      }
-      if (rec.reason === 'trust_or_unavailable' && (lang === 'csharp' || lang === 'fsharp')) {
-        return {
-          label: `${name} untrusted / unavailable`,
-          tone: 'bad',
-          title: `${name} did not start for this project — set OTTO_IDE_TRUST_DOTNET_LSP=1 (or OTTO_IDE_TRUST_PROJECT_EXECUTION=1) in Project Environment to trust the MSBuild project load, or install it via Toolchains & SDKs.`,
-          action: 'settings',
-        };
-      }
-      if (rec.reason === 'trust_or_unavailable' && lang === 'vue') {
-        return {
-          label: `${name} untrusted / unavailable`,
-          tone: 'bad',
-          title: `${name} did not start for this project — set OTTO_IDE_TRUST_VUE_LSP=1 (or OTTO_IDE_TRUST_PROJECT_EXECUTION=1) in Project Environment to trust project Vue/TypeScript plugins, or install Node LSP via Toolchains & SDKs.`,
-          action: 'settings',
-        };
+      // Closed before any session while the saved environment has no trust opt-in (ideLspTrust.ts).
+      if (rec.reason === 'trust_or_unavailable' && trusted === false) {
+        return { label: `${name} needs trust`, tone: 'busy', title: `${name} starts once you trust this project — click to trust it`, action: 'trust' };
       }
       return {
         label: `${name} unavailable`,

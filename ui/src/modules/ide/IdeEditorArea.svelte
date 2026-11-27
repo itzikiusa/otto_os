@@ -75,6 +75,7 @@
   const IdeMarkdownBarLazy = lazyComponent(() => import('./editor/IdeMarkdownBar.svelte'));
   const IdePreviewPaneLazy = lazyComponent(() => import('./editor/IdePreviewPane.svelte'));
   const IdeDiskChangedBannerLazy = lazyComponent(() => import('./editor/IdeDiskChangedBanner.svelte'));
+  const IdeLspTrustNoticeLazy = lazyComponent(() => import('./editor/IdeLspTrustNotice.svelte'));
   const IdeTouchDebugBarLazy = lazyComponent(() => import('./editor/IdeTouchDebugBar.svelte'));
 
   const SPLIT_RATIO_KEY = 'otto.ide.splitRatio.v1';
@@ -472,6 +473,7 @@
 
     {#if ideAgent.inlinePrompt?.open}<LazyMount lazy={IdeInlinePromptBarLazy} what="inline prompt" variant="compact" />{/if}
     <LazyMount lazy={IdeDiskChangedBannerLazy} what="disk change notice" quiet props={{ tab: activeTab }} />
+    <LazyMount lazy={IdeLspTrustNoticeLazy} what="language server trust notice" quiet props={{ tab: activeTab }} />
     {#if idePreviewMode.kindOf(activeTab.path) === 'markdown' && idePreviewMode.layoutFor(activeTab.path) !== 'only' && !activeTab.readOnly}<LazyMount lazy={IdeMarkdownBarLazy} what="the Markdown toolbar" variant="compact" />{/if}
 
     <div class="ide-panes" class:split-down={ide.splitDirection === 'down'} bind:this={panesEl}>
