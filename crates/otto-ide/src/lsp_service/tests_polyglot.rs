@@ -1760,6 +1760,31 @@ fn kotlin_gradle_and_standalone_kotlinc_execution_plans_work() {
     let test_call = std::fs::read_to_string(&gradle_seen).unwrap();
     assert!(test_call.contains(":api:testClasses"), "{test_call}");
 
+    // An app launch (include_tests = false, as Run and Debug pass) of a main in test sources
+    // (Spring Boot's TestApplication) still builds and runs the test source set.
+    let test_main_kt = test_src_dir.join("TestApp.kt");
+    std::fs::write(&test_main_kt, "package com.acme\nfun main() {}\n").unwrap();
+    let test_main_plan = prepare_java_execution(
+        &test_main_kt,
+        None,
+        false,
+        std::slice::from_ref(&repo_dir),
+        &env,
+        "/nonexistent/javac",
+        &root.join("out-gradle-test-main"),
+    )
+    .expect("Gradle Kotlin test-source main plan");
+    assert_eq!(test_main_plan.main_class, "com.acme.TestAppKt");
+    assert!(
+        test_main_plan
+            .classpath
+            .contains("backend/build/classes/kotlin/test"),
+        "a main in test sources needs test classes: {}",
+        test_main_plan.classpath
+    );
+    let test_main_call = std::fs::read_to_string(&gradle_seen).unwrap();
+    assert!(test_main_call.contains(":api:testClasses"), "{test_main_call}");
+
     // Standalone `.kt` file compiles via `kotlinc -include-runtime -d <jar>`.
     let kotlinc_seen = root.join("kotlinc-call");
     let fake_kotlinc = bin.join("kotlinc");

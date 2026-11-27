@@ -83,6 +83,11 @@ pub fn prepare_java_execution(
     out_base_dir: &Path,
 ) -> Result<JavaExecutionPlan> {
     let cp_sep = if cfg!(windows) { ";" } else { ":" };
+    // A main in test sources (Spring Boot's `TestApplication`) runs from the test source set.
+    let target_str = target_file_or_dir.to_string_lossy();
+    let include_tests = include_tests
+        || target_str.contains("/src/test/java")
+        || target_str.contains("/src/test/kotlin");
     let graph = scan_java_workspace(project_roots);
     let m2_repo = resolve_m2_repo(env_map);
     fs::create_dir_all(out_base_dir)
@@ -156,10 +161,7 @@ pub fn prepare_java_execution(
                     collect_kotlin_files_rec(sdir, &mut owner_kt_srcs);
                 }
             }
-            let target_str = target_file_or_dir.to_string_lossy();
-            let target_is_test =
-                target_str.contains("/src/test/java") || target_str.contains("/src/test/kotlin");
-            if include_tests || target_is_test {
+            if include_tests {
                 for tdir in &owner.test_src_dirs {
                     if tdir.is_dir() {
                         source_roots.push(tdir.clone());

@@ -138,14 +138,6 @@ pub(in crate::environments) fn has_manual_classpath(cfg: &IdeRunConfig) -> bool 
         .any(|a| a == "-cp" || a == "-classpath" || a == "--class-path")
 }
 
-/// Production `JavaMain` application launches compile and run ONLY main sources/resources
-/// so `src/test/resources/application.properties` never overrides production config (BUG2-6);
-/// only an entry point located directly inside `src/test/{java,kotlin}` includes tests.
-pub(crate) fn java_main_run_include_tests(target_file_or_dir: &Path) -> bool {
-    let s = target_file_or_dir.to_string_lossy();
-    s.contains("/src/test/java") || s.contains("/src/test/kotlin")
-}
-
 /// Prepare the JVM build + classpath plan for a `JavaMain` Run configuration (used by
 /// [`compile_java_main_step`] and directly testable without spawning a live run handle).
 pub(crate) fn prepare_java_main_run_plan(
@@ -211,11 +203,11 @@ pub(crate) fn prepare_java_main_run_plan(
         .unwrap_or_else(|| resolve_program_in_env("javac", env_map))
         .to_string_lossy()
         .into_owned();
-    let include_tests = java_main_run_include_tests(&target_file_or_dir);
+    // An app launch builds main sources only (BUG2-6); a main in test sources adds them.
     let plan = crate::java_workspace::prepare_java_execution_cancellable(
         &target_file_or_dir,
         explicit_main.as_deref(),
-        include_tests,
+        false,
         &roots,
         env_map,
         &javac_bin,
