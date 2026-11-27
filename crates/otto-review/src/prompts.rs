@@ -149,20 +149,21 @@ pub fn reviewer_prompt(
         )
 }
 
-/// The summarizer's turn budget for `total_findings` findings in.
-pub fn summarizer_budget(total_findings: usize) -> Duration {
-    // The summarizer used to get a flat 120s regardless of how much it had to
-    // consolidate. That was survivable while it was capped at 20 items; with the
-    // cap gone it must dedupe and re-emit EVERY finding, and a 180-file review
-    // (12 agents, 36k-line diff) blew straight through it — dropping to the
-    // deterministic fallback, whose own cap then produced exactly 20 findings,
-    // all `high`. The run looked clean; it was truncated twice over. Scale the
-    // budget with the work, capped so a wedged summarizer still fails rather
-    // than hanging. The budget also covers the CLI's cold start and the paste,
-    // and at ~1s/finding on a 2-minute floor 9 of 10 runs on one day hit the
-    // absolute deadline and fell back to the deterministic summary (which only
-    // dedupes exact text): ~3s per finding on a 5-minute floor, capped at 30.
-    Duration::from_secs((300 + 3 * total_findings as u64).clamp(300, 1_800))
+const SUMMARIZER_SECONDS_PER_FINDING: u64 = 30;
+const MIN_SUMMARIZER_BUDGET: Duration = Duration::from_secs(10 * 60);
+pub const STANDALONE_SUMMARIZER_CEILING: Duration = Duration::from_secs(2 * 60 * 60);
+const SUMMARIZER_PUBLISH_MARGIN: Duration = Duration::from_secs(30);
+
+/// The shared budget for all verifier attempts, including startup and queueing.
+pub fn summarizer_budget(total_findings: usize, review_remaining: Option<Duration>) -> Duration {
+    let ceiling = review_remaining.map_or(STANDALONE_SUMMARIZER_CEILING, |remaining| {
+        remaining.saturating_sub(SUMMARIZER_PUBLISH_MARGIN)
+    });
+    let work = 300_u64
+        .saturating_add(SUMMARIZER_SECONDS_PER_FINDING.saturating_mul(total_findings as u64));
+    Duration::from_secs(work)
+        .max(MIN_SUMMARIZER_BUDGET)
+        .min(ceiling)
 }
 
 /// The summarizer row once the summary is in: done, its comment count, and
@@ -340,5 +341,46 @@ pub fn fallback_note(cause: Option<&str>, n: usize) -> String {
     match cause {
         Some(why) => format!("deterministic fallback (summarizer: {why}) — {n} final comment{s}"),
         None => format!("{n} final comment{s}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn summarizer_budget_scales_with_findings_and_review_time() {
+        let five_hours = Some(Duration::from_secs(5 * 60 * 60));
+        let twenty_minutes = Some(Duration::from_secs(20 * 60));
+        for (findings, review_remaining, seconds) in [
+            (10, five_hours, 600),
+            (167, five_hours, 5_310),
+            (2_000, five_hours, 17_970),
+            (10, twenty_minutes, 600),
+            (167, twenty_minutes, 1_170),
+            (2_000, twenty_minutes, 1_170),
+            (10, None, 600),
+            (167, None, 5_310),
+            (2_000, None, 7_200),
+        ] {
+            assert_eq!(
+                summarizer_budget(findings, review_remaining),
+                Duration::from_secs(seconds),
+                "{findings} findings, {review_remaining:?} remaining"
+            );
+        }
+    }
+
+    #[test]
+    fn summarizer_budget_applies_the_floor_before_the_deadline_cap() {
+        assert_eq!(summarizer_budget(0, None), Duration::from_secs(600));
+        assert_eq!(
+            summarizer_budget(0, Some(Duration::from_secs(45))),
+            Duration::from_secs(15)
+        );
+        assert_eq!(
+            summarizer_budget(0, Some(Duration::from_secs(30))),
+            Duration::ZERO
+        );
     }
 }

@@ -3,7 +3,9 @@
 //! absolute deadline ends the attempt.
 
 use std::{future::Future, path::PathBuf, time::Duration};
-use tokio::sync::oneshot;
+use tokio::{sync::oneshot, time::Instant};
+
+pub const DEADLINE_EXCEEDED: &str = "summarizer absolute deadline exceeded";
 
 /// Largest summarizer brief pasted into the terminal as is; longer ones go
 /// through [`Attempt::instructions_path`].
@@ -135,7 +137,7 @@ pub async fn until_cancelled<F, C, CF>(
 pub async fn drive<T, C, P, PF, S, SF>(
     turn: T,
     mut ready: oneshot::Receiver<String>,
-    budget: Duration,
+    deadline: Instant,
     cancelled: C,
     publish: P,
     stop: S,
@@ -174,11 +176,15 @@ where
                 }
             }
         };
-        tokio::select! {
-            biased;
-            _ = cancelled => Err("review cancelled".into()),
-            result = tokio::time::timeout(budget, work) => result
-                .unwrap_or_else(|_| Err("summarizer absolute deadline exceeded".into())),
+        if Instant::now() >= deadline {
+            Err(DEADLINE_EXCEEDED.into())
+        } else {
+            tokio::select! {
+                biased;
+                _ = cancelled => Err("review cancelled".into()),
+                _ = tokio::time::sleep_until(deadline) => Err(DEADLINE_EXCEEDED.into()),
+                result = work => result,
+            }
         }
     }; // Drop the turn (including its live hold) BEFORE releasing the PTY.
        // Cancellation can win the select immediately after the callback fired.
@@ -282,7 +288,7 @@ mod tests {
             let result = drive(
                 turn,
                 ready_rx,
-                Duration::from_secs(1),
+                Instant::now() + Duration::from_secs(1),
                 std::future::pending(),
                 |sid| async move {
                     published.lock().unwrap().push(format!("published {sid}"));
@@ -324,7 +330,7 @@ mod tests {
             let result = drive(
                 turn,
                 ready_rx,
-                Duration::from_millis(20),
+                Instant::now() + Duration::from_millis(20),
                 cancel,
                 |_| async {
                     if mode == "publish-error" {
@@ -341,6 +347,21 @@ mod tests {
             assert!(result.is_err(), "{mode}");
             assert_eq!(*stopped.lock().unwrap(), ["session"], "{mode}");
         }
+    }
+
+    #[tokio::test]
+    async fn an_expired_deadline_does_not_start_an_attempt() {
+        let (_ready_tx, ready_rx) = oneshot::channel();
+        let result = drive(
+            async { panic!("attempt started after its deadline") },
+            ready_rx,
+            Instant::now(),
+            std::future::pending(),
+            |_| async { unreachable!() },
+            |_| async { unreachable!() },
+        )
+        .await;
+        assert_eq!(result.unwrap_err(), DEADLINE_EXCEEDED);
     }
 
     #[tokio::test]

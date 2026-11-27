@@ -671,13 +671,16 @@ the review association and current summarizer. Reviewer and summarizer threads
 are engine threads (§3): closed when their turn ends, kept for the run's
 retention period, never in your Threads lists.
 
-Failures, the finding-count timeout (5–30 minutes), and empty summaries
-when findings exist can preserve a deterministic summary. This is not independently
-verified output: adaptive reviews remain incomplete and cannot pass on fallback
-alone. The run labels this
-**Deterministic fallback**. Cancelling a review stops its summarizer and leaves
-the review cancelled, without creating a fallback summary. Each retry uses a new
-session and result file; incomplete JSON is never a completion signal.
+The verifier budget is 5 minutes plus 30 seconds per input finding, with a
+10-minute floor. In an awaited review step, the budget is capped at the time
+left minus 30 seconds for saving results. Without a step deadline, the cap
+is 2 hours. Both attempts share one deadline.
+
+Failures, verifier timeouts, and empty summaries when findings exist can
+preserve a **Deterministic fallback**. The review remains incomplete until
+independent verification succeeds. Cancelling a review stops its summarizer and
+leaves the review cancelled, without creating a fallback summary. Each retry
+uses a new session and result file. The verifier needs complete JSON to finish.
 
 ### `review_run`, gating & auto-PR
 `review_run` drives the **same adaptive engine as a PR review**. It assesses

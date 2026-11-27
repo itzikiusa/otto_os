@@ -32,6 +32,7 @@ pub(crate) async fn run_review_for_branch(
     jira_context: Option<String>,
     run_context: Option<String>,
     mode_override: Option<otto_core::domain::ReviewMode>,
+    review_deadline: Option<std::time::Instant>,
     workflow: (&Id, otto_core::workflows::WorkflowCheckpoint),
 ) -> Result<(Id, otto_git::ResolvedBase, bool)> {
     start_review_for_branch(
@@ -43,6 +44,7 @@ pub(crate) async fn run_review_for_branch(
         jira_context,
         run_context,
         mode_override,
+        review_deadline,
         Some(workflow),
     )
     .await
@@ -59,6 +61,7 @@ async fn start_review_for_branch(
     jira_context: Option<String>,
     run_context: Option<String>,
     mode_override: Option<otto_core::domain::ReviewMode>,
+    review_deadline: Option<std::time::Instant>,
     mut workflow: Option<(&Id, otto_core::workflows::WorkflowCheckpoint)>,
 ) -> Result<(Id, otto_git::ResolvedBase, bool, usize)> {
     let repo = ctx.git_store.get_repo(repo_id).await?;
@@ -100,7 +103,7 @@ async fn start_review_for_branch(
                     .and_then(serde_json::Value::as_str)
                 {
                     if let Ok(review) = ctx.reviews_store.get_review(&id.to_string()).await {
-                        if adopt(ctx, &review, &repo.workspace_id).await {
+                        if adopt(ctx, &review, &repo.workspace_id, review_deadline).await {
                             return Ok((
                                 review.id,
                                 resolved,
@@ -200,6 +203,7 @@ async fn start_review_for_branch(
                 branches,
                 cfg_override,
                 mode_override,
+                review_deadline,
             )
             .await;
         });
@@ -212,7 +216,12 @@ async fn start_review_for_branch(
 /// running, or finished complete), or once only its summarizer has been
 /// re-run — "Retry step" on a review whose reviewers all finished but whose
 /// verifier failed re-verifies the stored findings instead of re-reviewing.
-async fn adopt(ctx: &ServerCtx, review: &otto_core::domain::Review, workspace_id: &str) -> bool {
+async fn adopt(
+    ctx: &ServerCtx,
+    review: &otto_core::domain::Review,
+    workspace_id: &str,
+    review_deadline: Option<std::time::Instant>,
+) -> bool {
     use otto_review::restart::{adoption, review_user, Adoption};
     match adoption(review) {
         Adoption::Adopt => true,
@@ -221,7 +230,7 @@ async fn adopt(ctx: &ServerCtx, review: &otto_core::domain::Review, workspace_id
             let users = otto_state::UsersRepo::new(ctx.pool.clone());
             let rerun = async {
                 review_budget_gate(ctx, workspace_id).await?;
-                rerun_summarizer(ctx, &review.id, review_user(&users).await?).await
+                rerun_summarizer(ctx, &review.id, review_user(&users).await?, review_deadline).await
             };
             // A rerun that cannot start falls back to a new review.
             rerun

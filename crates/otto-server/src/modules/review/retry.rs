@@ -424,7 +424,7 @@ pub(crate) async fn retry_summarizer(
     review_budget_gate(&ctx, &repo.workspace_id)
         .await
         .map_err(crate::error::ApiError)?;
-    rerun_summarizer(&ctx, &review_id, user)
+    rerun_summarizer(&ctx, &review_id, user, None)
         .await
         .map_err(crate::error::ApiError)?;
     Ok(Json(
@@ -439,7 +439,12 @@ pub(crate) async fn retry_summarizer(
 /// and a restart resume (`otto_review::restart`): claim the settled review,
 /// then summarize its stored reviewer findings in the background. `user` runs
 /// the summarizer session (the caller, or the root user).
-pub(crate) async fn rerun_summarizer(ctx: &ServerCtx, review_id: &Id, user: User) -> Result<()> {
+pub(crate) async fn rerun_summarizer(
+    ctx: &ServerCtx,
+    review_id: &Id,
+    user: User,
+    review_deadline: Option<std::time::Instant>,
+) -> Result<()> {
     let review = ctx.reviews_store.get_review(review_id).await?;
     let repo = ctx.git_store.get_repo(&review.repo_id).await?;
     let workspace = ctx.workspaces.get(&repo.workspace_id).await?;
@@ -537,6 +542,7 @@ pub(crate) async fn rerun_summarizer(ctx: &ServerCtx, review_id: &Id, user: User
             &repo_id,
             pr_number,
             &cfg,
+            review_deadline,
             &agent_findings,
             // A retry re-runs ONLY this stage, from findings stored earlier; the
             // run that produced them is long gone, so there is no context to

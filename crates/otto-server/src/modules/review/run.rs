@@ -106,6 +106,7 @@ pub(crate) async fn run_review(
     // Per-run/per-node execution mode (`review_run`). `None` ⇒ the stored
     // config decides, then `FanOut`.
     mode_override: Option<otto_core::domain::ReviewMode>,
+    review_deadline: Option<std::time::Instant>,
 ) {
     // Join the launch-registered flag (or register one). The guard unregisters
     // it on every exit path (incl. the early return) — but only while the
@@ -132,6 +133,7 @@ pub(crate) async fn run_review(
         branches.as_ref(),
         cfg_override,
         mode_override,
+        review_deadline,
     )
     .await;
     // The run is over (done, error, or cancelled): its temp artifacts are spent.
@@ -245,11 +247,10 @@ pub(crate) async fn run_review_core(
     branches: Option<&ReviewBranches>,
     cfg_override: Option<ReviewConfig>,
     mode_override: Option<otto_core::domain::ReviewMode>,
+    review_deadline: Option<std::time::Instant>,
 ) -> Result<()> {
     let jira_ctx = jira_context.unwrap_or_default();
-    // Build the optional free-text guidance block (prepended to every agent
-    // prompt before the Jira block). Empty/absent => no block, identical to old
-    // behaviour.
+    // Prepend nonempty reviewer guidance before the Jira context.
     let mut user_ctx = match user_context {
         Some(c) if !c.trim().is_empty() => {
             format!("## Reviewer guidance\n{}\n\n---\n\n", c.trim())
@@ -594,6 +595,7 @@ pub(crate) async fn run_review_core(
         repo_id,
         pr_number,
         &cfg,
+        review_deadline,
         &agent_findings,
         &format!("{user_ctx}{jira_ctx}"),
         resolve_blocker(pr_number, branches, &diff_text),
@@ -912,6 +914,7 @@ pub(crate) async fn run_pr_review_inner(
         repo_id,
         pr_number,
         branches.as_ref(),
+        None,
         None,
         None,
     )
