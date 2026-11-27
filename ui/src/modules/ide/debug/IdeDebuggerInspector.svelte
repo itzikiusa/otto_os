@@ -175,6 +175,16 @@
       {/if}
     </header>
     <div class="dbg-scroll">
+      {#if dbg.targets?.length}
+        <ul class="dbg-targets" aria-label="Debugged processes" data-testid="ide-debug-targets">
+          {#each dbg.targets as t (t.id)}
+            <li class="dbg-target" class:is-error={!!t.error} title={t.error ? `${t.name}: not attached: ${t.error}` : t.name}>
+              <span class="dbg-target-name mono ellipsis" dir="ltr">{t.name}</span>
+              <span class="dbg-target-state">{t.error ? 'not attached' : t.paused ? 'paused' : 'running'}</span>
+            </li>
+          {/each}
+        </ul>
+      {/if}
       {#if dbg.stack_frames.length === 0}
         <p class="dbg-muted">{isPaused ? 'No stack frames reported.' : 'Pause execution or hit a breakpoint to inspect stack frames.'}</p>
       {:else}
@@ -320,6 +330,11 @@
   .dbg-thread-one { font-size: var(--fs-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-inline-size: 0; }
   .dbg-scroll { flex: 1; min-block-size: 0; overflow-y: auto; padding-block: 4px; }
   .dbg-muted { margin: 0; padding: 12px; font-size: var(--fs-xs); color: var(--text-dim); }
+  .dbg-targets { margin: 0; padding: 0 0 4px; list-style: none; border-block-end: 1px solid var(--separator); }
+  .dbg-target { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 10px; font-size: var(--fs-xs); }
+  .dbg-target-name { flex: 1; min-inline-size: 0; }
+  .dbg-target-state { flex-shrink: 0; color: var(--text-dim); }
+  .dbg-target.is-error .dbg-target-state { color: var(--danger); }
   .dbg-frame { display: flex; align-items: center; justify-content: space-between; gap: 8px; inline-size: 100%; padding: 4px 10px; border: 0; background: transparent; color: var(--text); text-align: start; cursor: pointer; font-size: var(--fs-xs); }
   .dbg-frame:hover { background: var(--hover); }
   .dbg-frame.is-selected { background: var(--accent-soft); color: var(--accent-text); }

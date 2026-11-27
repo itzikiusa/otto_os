@@ -381,6 +381,8 @@ export interface IdeDebugSessionSnapshot {
   target_root?: string | null; supports_set_variable?: boolean;
   /** Debug All runs: one step per test project / framework or test suite. */
   steps?: IdeDebugStep[]; current_step?: number | null;
+  /** js-debug sessions: one entry per debugged process (`IdeDebugTarget`). */
+  targets?: { id: string; name: string; paused: boolean; error?: string | null }[];
 }
 
 export interface IdeWatch { id: string; expression: string; value: string; var_type?: string | null; error?: string | null }
