@@ -1973,6 +1973,41 @@ async fn kotlin_round3_fixes_template_braces_ssh_kotest_configless_jdk_and_regis
         Some("/opt/kotlin-2.1"),
         "BUG2-5: config-less Debug JDK override must not overwrite kotlin_home"
     );
+    // The same module JDK through the real Debug env builder with no run config.
+    let mod_root = tmp.path().canonicalize().unwrap();
+    let mod_root_s = mod_root.to_string_lossy().into_owned();
+    let cfgless_req: IdeStartDebugReq = serde_json::from_value(serde_json::json!({
+        "target": { "kind": "local", "root": mod_root_s },
+        "language": "kotlin",
+        "launch": {
+            "program": mod_root.join("src/main/kotlin/App.kt").to_string_lossy(),
+            "cwd": mod_root_s,
+            "args": []
+        }
+    }))
+    .unwrap();
+    let cfgless_ctx = DapStartContext::new()
+        .with_caller_is_root(true)
+        .with_project_env(Some(IdeProjectEnvironment {
+            kotlin_home: Some("/opt/kotlin-2.1".into()),
+            module_sdks: BTreeMap::from([(
+                mod_root_s.clone(),
+                jdk21.canonicalize().unwrap().to_string_lossy().into_owned(),
+            )]),
+            ..Default::default()
+        }));
+    let cfgless_env =
+        build_effective_env_with_manager(tmp.path(), &cfgless_req, &cfgless_ctx, None);
+    assert_eq!(
+        cfgless_env.get("JAVA_HOME").map(String::as_str),
+        Some(jdk21.canonicalize().unwrap().to_string_lossy().as_ref()),
+        "BUG2-5: config-less Kotlin Debug must put the module JDK on JAVA_HOME: {cfgless_env:?}"
+    );
+    assert_eq!(
+        cfgless_env.get("KOTLIN_HOME").map(String::as_str),
+        Some("/opt/kotlin-2.1"),
+        "BUG2-5: config-less Kotlin Debug must keep KOTLIN_HOME: {cfgless_env:?}"
+    );
 
     // BUG-16: SSH `JavaJunit` Kotest command inspects the remote workspace at runtime,
     // dispatching to Gradle in Gradle-only repos and Maven in Maven repos.
