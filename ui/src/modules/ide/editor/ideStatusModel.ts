@@ -59,7 +59,7 @@ export function ideEditorActionsFor(path: string, language: string | null | unde
 
 const LANG_LABELS: Record<string, string> = {
   go: 'Go', rust: 'Rust', zig: 'Zig', zon: 'Zig Object Notation', java: 'Java', kotlin: 'Kotlin', typescript: 'TypeScript', javascript: 'JavaScript',
-  python: 'Python', markdown: 'Markdown', json: 'JSON', jsonl: 'JSON Lines', csv: 'CSV', tsv: 'TSV', yaml: 'YAML',
+  python: 'Python', notebook: 'Jupyter Notebook', markdown: 'Markdown', json: 'JSON', jsonl: 'JSON Lines', csv: 'CSV', tsv: 'TSV', yaml: 'YAML',
   toml: 'TOML', xml: 'XML', html: 'HTML', css: 'CSS', scss: 'SCSS', sql: 'SQL', shell: 'Shell', bash: 'Shell',
   dockerfile: 'Dockerfile', makefile: 'Makefile', svelte: 'Svelte', vue: 'Vue', c: 'C', cpp: 'C++', csharp: 'C#', fsharp: 'F#', ruby: 'Ruby', php: 'PHP',
   properties: 'Properties', conf: 'Config', ini: 'INI', dotenv: '.env', ignore: 'Ignore file', requirements: 'pip requirements',
@@ -86,7 +86,7 @@ export function ideLanguageSettingsSection(path: string, language?: string | nul
   if (lang === 'go') return 'lang.go';
   if (lang === 'java') return 'lang.java';
   if (lang === 'typescript' || lang === 'javascript' || lang === 'svelte' || lang === 'vue' || lang === 'angular') return 'lang.node';
-  if (lang === 'python') return 'lang.python';
+  if (lang === 'python' || lang === 'notebook') return 'lang.python';
   if (lang === 'rust') return 'lang.rust';
   if (lang === 'zig') return 'lang.zig';
   if (lang === 'csharp' || lang === 'fsharp' || lang === 'dotnet') return 'lang.dotnet';

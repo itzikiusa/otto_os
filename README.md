@@ -29,6 +29,12 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
   `main` and on tests, and debugging with breakpoints, stepping, watch, set
   variable and stops on `@panic`, with slices, optionals and error unions
   shown as values.
+- **Jupyter notebooks & ML workflow in the IDE.** Open, edit, run and save
+  `.ipynb` notebooks directly in Otto with a persistent Python kernel, inline
+  matplotlib plots and HTML DataFrame tables, kernel selection across `.venv` /
+  `conda` / `uv` / Poetry / Jupyter kernelspecs, interrupt/restart, live
+  Variables view, cell DAP debugging, Apple Silicon MPS / GPU detection, and
+  auto-discovered training and TensorBoard run configurations.
 - **A step's conversation is the Threads view.** On the run page a step's
   Conversation is the same conversation Threads shows, folded and scrolled
   the same way (it opens on the newest line and follows it only while you are

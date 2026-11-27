@@ -37,7 +37,7 @@
     activeJsonPath: string | null;
     sdkLabel: string | null;
     activeDocKind: string;
-    effectiveViewMode: 'table' | 'text';
+    effectiveViewMode: 'table' | 'notebook' | 'text';
     hasNonEmptySelection: boolean;
     blameActive: boolean;
     activeGitHunk?: IdeGutterHunk | null;

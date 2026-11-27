@@ -411,6 +411,7 @@ pub fn detect_language(path: &str) -> Option<&'static str> {
         "go" => "go",
         "java" | "class" => "java",
         "py" | "pyi" => "python",
+        "ipynb" => "notebook",
         "ts" | "tsx" | "mts" | "cts" => "typescript",
         "js" | "jsx" | "mjs" | "cjs" => "javascript",
         "kt" | "kts" => "kotlin",

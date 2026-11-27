@@ -25,6 +25,7 @@ pub mod local_history;
 pub mod lsp_host;
 pub mod lsp_service;
 pub mod netbridge;
+pub mod notebooks;
 pub mod plugins;
 pub mod proc_group;
 pub mod projects;
@@ -122,6 +123,7 @@ pub struct IdeEngine {
     pub watches: db_watch::WatchRegistry,
     pub fs_watch: fs_watch::FsWatchRegistry,
     pub netbridge: netbridge::NetBridgeManager,
+    pub notebooks: notebooks::NotebookManager,
 }
 
 impl IdeEngine {
@@ -161,6 +163,7 @@ impl IdeEngine {
             watches: db_watch::WatchRegistry::new(),
             fs_watch: fs_watch::FsWatchRegistry::new(),
             netbridge: netbridge::NetBridgeManager::new(data_dir.clone()),
+            notebooks: notebooks::NotebookManager::new(),
             data_dir,
         }
     }

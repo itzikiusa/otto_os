@@ -27,7 +27,7 @@ zero-rebuild **runtime IDE plugins**.
     (`GET/PUT /ide/environments`) and minting a collab share room
     (`POST /ide/collab/rooms`) carry `RouteClass::Secret` (human credentials only);
     and subprocess-spawning workspace mutations (`python-venv`, `deps/action`,
-    `POST /ide/runs`, `POST /ide/debug/sessions`) carry `RouteClass::Admin`
+    `POST /ide/runs`, `POST /ide/debug/sessions`, `POST /ide/notebooks/{execute,interrupt,restart,shutdown}`) carry `RouteClass::Admin`
     (human credentials only).
   - Public guest routes (`/api/v1/ide/collab/guest/*`) sit outside the bearer
     chokepoint and authenticate each request with the room's capability share
@@ -92,7 +92,7 @@ zero-rebuild **runtime IDE plugins**.
 - Code:
   - Engine & routers: `crates/otto-ide/` (`target.rs`, `target/fs_ops.rs`,
     `toolchains_catalog.rs`, `toolchains.rs`, `environments.rs`,
-    `environments/runner.rs`, `gutter.rs`, `dap/`, `lsp_service.rs`,
+    `environments/runner.rs`, `notebooks.rs`, `http/notebooks.rs`, `gutter.rs`, `dap/`, `lsp_service.rs`,
     `lsp_host/`, `collab.rs`, `plugins.rs`, `http.rs`).
   - Host wiring & `/ws/lsp` bridge: `crates/otto-server/src/lsp/mod.rs`,
     `crates/otto-server/src/modules/ctx_impls.rs`, `crates/otto-server/src/policy.rs`.

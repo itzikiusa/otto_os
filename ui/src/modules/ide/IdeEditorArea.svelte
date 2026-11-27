@@ -52,6 +52,7 @@
     const base = clean.slice(clean.lastIndexOf('/') + 1);
     const dot = base.lastIndexOf('.');
     const ext = dot >= 0 ? base.slice(dot + 1) : '';
+    if (ext === 'ipynb' || language === 'notebook') return 'notebook';
     if (ext === 'csv' || ext === 'tsv' || language === 'csv' || language === 'tsv') return 'csv';
     if (ext === 'jsonl' || ext === 'ndjson' || language === 'jsonl') return 'jsonl';
     if (ext === 'json' || ext === 'jsonc' || language === 'json') return 'json';
@@ -65,6 +66,7 @@
   IdeEditorSubbarLazy.prefetch();
   const IdeInlinePromptBarLazy = lazyComponent(() => import('./IdeInlinePromptBar.svelte'));
   const IdeCsvViewLazy = lazyComponent(() => import('./editor/IdeCsvView.svelte'));
+  const IdeNotebookViewLazy = lazyComponent(() => import('./editor/IdeNotebookView.svelte'));
   const IdeBreakpointPopoverLazy = lazyComponent(() => import('./editor/IdeBreakpointPopover.svelte'));
   const IdeFileStructureModalLazy = lazyComponent(() => import('./editor/IdeFileStructureModal.svelte'));
   const IdeRenameModalLazy = lazyComponent(() => import('./editor/IdeRenameModal.svelte'));
@@ -270,9 +272,12 @@
   const activeIsManifest = $derived(ide.activeTab ? isIdeManifestPath(ide.activeTab.path) : false);
   const effectiveManifestMode = $derived(ide.activeTab ? (manifestModeByPath[ide.activeTab.path] ?? 'text') : 'text');
   const activeFileMeta = $derived(ide.activeTab ? classifyIdeFile(ide.activeTab, ide.target.root, projectFolders.slice(1)) : { external: false, sdkLabel: null });
-  const effectiveViewMode = $derived.by((): 'table' | 'text' => {
+  const effectiveViewMode = $derived.by((): 'table' | 'notebook' | 'text' => {
     const t = ide.activeTab;
-    return t && idePreviewMode.layoutFor(t.path) === 'table' ? 'table' : 'text';
+    const layout = t ? idePreviewMode.layoutFor(t.path) : 'none';
+    if (layout === 'table') return 'table';
+    if (layout === 'notebook') return 'notebook';
+    return 'text';
   });
   const effectiveSymbols = $derived.by((): IdeSymbolNode[] => {
     const t = ide.activeTab;
@@ -472,6 +477,18 @@
               onfilewritten: () => reloadTabFromDisk(stagedPrimaryTab!.path),
               onjumplocation: (loc: { path: string; line: number; column: number }) => { void performIdeDive('definition', stagedPrimaryTab!.path, loc, stagedPrimaryTab!.content); },
               onswitchtext: (ln: number) => { manifestModeByPath = { ...manifestModeByPath, [stagedPrimaryTab!.path]: 'text' }; requestAnimationFrame(() => primaryEditorRef?.goToLine(ln, 1)); },
+            }}
+          />
+        {:else if effectiveViewMode === 'notebook' && activeDocKind === 'notebook' && stagedPrimaryTab.path === activeTab.path}
+          <LazyMount
+            lazy={IdeNotebookViewLazy}
+            what="notebook editor"
+            variant="panel"
+            props={{
+              path: stagedPrimaryTab.path, content: stagedPrimaryTab.content,
+              readOnly: stagedPrimaryTab.readOnly || !ide.canEditCollab,
+              onchange: (val: string) => { ide.updateBuffer(stagedPrimaryTab!.path, val); },
+              onswitchtext: () => { idePreviewMode.set(stagedPrimaryTab!.path, 'source'); },
             }}
           />
         {:else if effectiveViewMode === 'table' && (activeDocKind === 'csv' || activeDocKind === 'jsonl') && stagedPrimaryTab.path === activeTab.path}
@@ -708,7 +725,7 @@
       open: structureOpen, fileName: ide.activeTab?.name ?? '', symbols: effectiveSymbols, currentLine: ide.cursorInfo.line,
       onjump: (line: number, col: number) => {
         if (ide.activePath) pushIdeNavLocation(ide.activePath, ide.cursorInfo.line, ide.cursorInfo.col);
-        if (effectiveViewMode === 'table' && ide.activePath) idePreviewMode.set(ide.activePath, 'source');
+        if ((effectiveViewMode === 'table' || effectiveViewMode === 'notebook') && ide.activePath) idePreviewMode.set(ide.activePath, 'source');
         requestAnimationFrame(() => primaryEditorRef?.goToLine(line, col));
       },
       onclose: () => (structureOpen = false),

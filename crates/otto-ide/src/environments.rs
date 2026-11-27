@@ -5,7 +5,7 @@
 
 mod crud;
 mod crud_folders;
-mod db_store;
+pub(crate) mod db_store;
 pub mod discovery;
 mod discovery_jvm_py;
 mod discovery_mobile;

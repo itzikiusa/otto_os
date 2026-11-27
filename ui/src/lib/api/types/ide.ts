@@ -472,6 +472,13 @@ export interface IdeRunConfig {
   coverage?: boolean;
 }
 
+export interface IdeMlAcceleratorInfo {
+  kind: 'mps' | 'cuda' | 'rocm' | string;
+  name: string;
+  memory_mb?: number | null;
+  available: boolean;
+}
+
 export interface IdeEnvironmentsResp {
   env: IdeProjectEnvironment;
   python_venvs: IdePythonVenv[];
@@ -479,6 +486,48 @@ export interface IdeEnvironmentsResp {
   configs: IdeRunConfig[];
   detected_configs?: IdeRunConfig[];
   effective_env?: Record<string, string>;
+  accelerators?: IdeMlAcceleratorInfo[];
+}
+
+export interface IdeNotebookKernelInfo {
+  id: string;
+  display_name: string;
+  language: string;
+  interpreter: string;
+  kind: 'venv' | 'uv' | 'conda' | 'poetry' | 'kernelspec' | 'system' | string;
+  version?: string | null;
+  active: boolean;
+}
+
+export interface IdeNotebookVariable {
+  name: string;
+  var_type: string;
+  shape?: string | null;
+  preview: string;
+}
+
+export interface IdeNotebookKernelsResp {
+  kernels: IdeNotebookKernelInfo[];
+  accelerators: IdeMlAcceleratorInfo[];
+  active_session_id?: string | null;
+  active_interpreter?: string | null;
+  execution_count?: number;
+}
+
+export interface IdeNotebookExecuteResp {
+  session_id: string;
+  interpreter: string;
+  execution_count: number;
+  status: 'ok' | 'error' | string;
+  elapsed_ms: number;
+  outputs: Record<string, unknown>[];
+  variables: IdeNotebookVariable[];
+}
+
+export interface IdeNotebookVariablesResp {
+  session_id?: string | null;
+  execution_count?: number;
+  variables: IdeNotebookVariable[];
 }
 
 export interface IdeUpdateEnvironmentReq extends IdeProjectEnvironment {

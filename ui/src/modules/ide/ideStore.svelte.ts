@@ -140,7 +140,7 @@ class IdeStore {
   get shellEnvLoading() { return this.envState.shellEnvLoading; } set shellEnvLoading(v) { this.envState.shellEnvLoading = v; }
   get shellEnvAttempted() { return this.envState.shellEnvAttempted; } set shellEnvAttempted(v) { this.envState.shellEnvAttempted = v; }
   get shellEnvError() { return this.envState.shellEnvError; } set shellEnvError(v) { this.envState.shellEnvError = v; }
-  get pythonVenvs() { return this.envState.pythonVenvs; } set pythonVenvs(v) { this.envState.pythonVenvs = v; }
+  get pythonVenvs() { return this.envState.pythonVenvs; } set pythonVenvs(v) { this.envState.pythonVenvs = v; } get accelerators() { return this.envState.accelerators; } set accelerators(v) { this.envState.accelerators = v; }
   get dotenvFiles() { return this.envState.dotenvFiles; } set dotenvFiles(v) { this.envState.dotenvFiles = v; }
   get runConfigs() { return this.envState.runConfigs; } set runConfigs(v) { this.envState.runConfigs = v; }
   get detectedConfigs() { return this.envState.detectedConfigs; } set detectedConfigs(v) { this.envState.detectedConfigs = v; }

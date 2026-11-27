@@ -12,6 +12,7 @@ import type {
   IdeDetectedSdk,
   IdeInstalledSdk,
   IdeInstallJob,
+  IdeMlAcceleratorInfo,
   IdePeerCursor,
   IdePluginCatalogEntry,
   IdePluginInfo,
@@ -63,6 +64,7 @@ export class IdeTargetEnvState {
   shellEnvAttempted = $state(false);
   shellEnvError = $state<string | null>(null);
   pythonVenvs = $state<IdePythonVenv[]>([]);
+  accelerators = $state<IdeMlAcceleratorInfo[]>([]);
   dotenvFiles = $state<string[]>([]);
   runConfigs = $state<IdeRunConfig[]>([]);
   detectedConfigs = $state<IdeRunConfig[]>([]);
@@ -91,6 +93,7 @@ export class IdeTargetEnvState {
     this.shellEnvAttempted = false;
     this.shellEnvError = null;
     this.pythonVenvs = [];
+    this.accelerators = [];
     this.dotenvFiles = [];
     this.runConfigs = [];
     this.detectedConfigs = [];

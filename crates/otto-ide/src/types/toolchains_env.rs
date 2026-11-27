@@ -645,6 +645,17 @@ pub struct IdeRunConfigsResp {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdeMlAcceleratorInfo {
+    /// `"mps"` | `"cuda"` | `"rocm"` | `"cpu"`.
+    pub kind: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_mb: Option<u64>,
+    #[serde(default)]
+    pub available: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdeEnvironmentsResp {
     pub env: IdeProjectEnvironment,
     pub python_venvs: Vec<IdePythonVenvInfo>,
@@ -654,6 +665,8 @@ pub struct IdeEnvironmentsResp {
     pub detected_configs: Vec<IdeRunConfig>,
     #[serde(default)]
     pub effective_env: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accelerators: Vec<IdeMlAcceleratorInfo>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

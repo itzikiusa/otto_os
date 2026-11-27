@@ -136,5 +136,16 @@ export function buildManifestMenuItems(
       },
     ];
   }
+  if (lowName === 'requirements.txt' || lowName === 'pyproject.toml') {
+    return [
+      { separator: true },
+      {
+        label: 'Sync Python Dependencies (uv / pip)',
+        icon: 'refresh',
+        action: () =>
+          void runManifestDepsAction(filePath, 'sync', 'Sync Python Dependencies', onTreeOutput, false),
+      },
+    ];
+  }
   return [];
 }

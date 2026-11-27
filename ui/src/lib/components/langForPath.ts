@@ -31,7 +31,7 @@ export const EXT_ALIAS: Readonly<Record<string, string>> = {
   xsd: 'xml', xsl: 'xml', xslt: 'xml', plist: 'xml', pom: 'xml', svg: 'xml', csproj: 'xml', fsproj: 'xml',
   vbproj: 'xml', props: 'xml', targets: 'xml', iml: 'xml', storyboard: 'xml', xib: 'xml', wsdl: 'xml',
   xaml: 'xml', resx: 'xml', nuspec: 'xml', xhtml: 'html',
-  json5: 'json', geojson: 'json', webmanifest: 'json', har: 'json',
+  json5: 'json', geojson: 'json', webmanifest: 'json', har: 'json', ipynb: 'json',
   ddl: 'sql', pgsql: 'sql', psql: 'sql', plsql: 'sql', mysql: 'sql',
 };
 

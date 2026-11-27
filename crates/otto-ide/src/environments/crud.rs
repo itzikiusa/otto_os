@@ -280,7 +280,7 @@ impl EnvironmentManager {
 
         let saved_configs = self.list_run_configs(pool, target).await?;
 
-        let (dotenv_files, python_venvs, detected_configs) = match target.kind {
+        let (dotenv_files, python_venvs, detected_configs, accelerators) = match target.kind {
             IdeTargetKind::Local => {
                 let target_clone = target.clone();
                 let extra_roots = env.additional_roots.clone();
@@ -297,7 +297,8 @@ impl EnvironmentManager {
                         }
                     }
                     let detected = discover_run_configs(&target_clone, &extra_roots);
-                    (dotenvs, venvs, detected)
+                    let accels = crate::notebooks::detect_local_accelerators();
+                    (dotenvs, venvs, detected, accels)
                 })
                 .await
                 .map_err(|e| Error::Internal(format!("local environment discovery: {e}")))?
@@ -311,7 +312,7 @@ impl EnvironmentManager {
                     .discover_python_venvs(targets, target, ssh)
                     .await
                     .unwrap_or_default();
-                (dotenvs, venvs, Vec::new())
+                (dotenvs, venvs, Vec::new(), Vec::new())
             }
         };
 
@@ -347,6 +348,7 @@ impl EnvironmentManager {
             configs,
             detected_configs,
             effective_env,
+            accelerators,
         })
     }
 

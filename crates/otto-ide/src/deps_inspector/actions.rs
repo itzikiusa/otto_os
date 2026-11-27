@@ -257,6 +257,42 @@ pub async fn run_deps_action_scoped(
             )
             .await?
         }
+        ("requirements.txt", "sync") => {
+            if let Ok((true, out)) = exec_cmd(
+                "uv",
+                &["pip", "install", "-r", "requirements.txt"],
+                &dir,
+                env_map,
+                actor_is_root,
+            )
+            .await
+            {
+                (true, out)
+            } else {
+                exec_cmd(
+                    "python3",
+                    &["-m", "pip", "install", "-r", "requirements.txt"],
+                    &dir,
+                    env_map,
+                    actor_is_root,
+                )
+                .await?
+            }
+        }
+        ("pyproject.toml", "sync") => {
+            if let Ok((true, out)) = exec_cmd("uv", &["sync"], &dir, env_map, actor_is_root).await {
+                (true, out)
+            } else {
+                exec_cmd(
+                    "python3",
+                    &["-m", "pip", "install", "-e", "."],
+                    &dir,
+                    env_map,
+                    actor_is_root,
+                )
+                .await?
+            }
+        }
         (_, "vuln_scan") => {
             let inspect = super::inspect_dependencies_scoped(
                 manifest_path,

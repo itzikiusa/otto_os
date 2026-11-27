@@ -236,16 +236,24 @@
 {:else if section === 'lang.python'}
   <div class="lg-sec" data-testid="ide-settings-lang-python">
     <div class="lg-card">
-      <span class="lg-title">Python Interpreter (.venv / uv / pyenv)</span>
+      <div class="lg-head-row">
+        <span class="lg-title">Python Interpreter (.venv / conda / uv / pyenv)</span>
+        {#each ide.accelerators as acc (`${acc.kind}:${acc.name}`)}
+          <Badge tone={acc.available ? 'ok' : 'neutral'} variant="outline" label={acc.memory_mb ? `${acc.name} (${Math.round(acc.memory_mb / 1024)} GB)` : acc.name} />
+        {/each}
+      </div>
       <div class="goroot-bar">
         <select class="input goroot-sel" aria-label="Python interpreter" value={ideSettings.envDraft.python_interpreter} onchange={(e) => ideSettings.patchEnv({ python_interpreter: (e.currentTarget as HTMLSelectElement).value })}>
-          <option value="">&lt;Auto-detect .venv or python3&gt;</option>
+          <option value="">&lt;Auto-detect .venv, conda, uv or python3&gt;</option>
           {#each ide.pythonVenvs as v (v.interpreter_path || v.path)}<option value={v.interpreter_path || v.path}>{v.name || `${v.kind} Python ${v.version}`} ({v.interpreter_path || v.path})</option>{/each}
           {#each pyEco?.installed ?? [] as sdk (sdk.path)}<option value={sdk.path}>Python {sdk.version} ({sdk.path})</option>{/each}
         </select>
         <button type="button" class="btn small ghost" onclick={() => (pickerEco = 'python')}>Browse…</button>
         <button type="button" class="btn small" disabled={creatingVenv || !ide.hasTarget} onclick={() => void handleCreateVenv()}>{creatingVenv ? 'Creating…' : 'Create .venv'}</button>
       </div>
+      <p class="lg-sub">
+        Jupyter notebooks (<code>.ipynb</code>) run directly on your selected venv, conda, uv, Poetry or system Python interpreter with persistent kernel state, inline plots/tables, Variables view and cell debugging. Training scripts (<code>train.py</code>, <code>finetune.py</code>) and TensorBoard run configurations are discovered automatically.
+      </p>
     </div>
   </div>
 

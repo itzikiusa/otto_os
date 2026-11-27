@@ -47,6 +47,79 @@ pub(super) fn discover_python(
         }
     }
 
+    // ML training & evaluation scripts (stream unbuffered live logs).
+    for train_rel in [
+        "train.py",
+        "finetune.py",
+        "evaluate.py",
+        "eval.py",
+        "scripts/train.py",
+        "src/train.py",
+    ] {
+        if root.join(train_rel).is_file() {
+            let mut cfg = make_auto_config(
+                root_badge,
+                IdeRunnerKind::Python,
+                &format!("ml-{}", train_rel.replace('/', "-")),
+                format!("ML Train ({train_rel})"),
+                Some("python3"),
+                vec!["-u".into()],
+                cwd.clone(),
+                Some(train_rel.into()),
+            );
+            cfg.env_overrides
+                .insert("PYTHONUNBUFFERED".into(), "1".into());
+            out.push(cfg);
+        }
+    }
+
+    // TensorBoard run config when ML logging dirs or ML dependencies are present.
+    let deps_text = read_head(&root.join("requirements.txt")).unwrap_or_default()
+        + "\n"
+        + &read_head(&root.join("pyproject.toml")).unwrap_or_default();
+    let deps_low = deps_text.to_ascii_lowercase();
+    let tb_logdir = ["runs", "tb_logs", "lightning_logs", "logs"]
+        .into_iter()
+        .find(|d| root.join(d).is_dir());
+    let has_ml_deps = deps_low.contains("tensorboard")
+        || deps_low.contains("torch")
+        || deps_low.contains("tensorflow");
+    if tb_logdir.is_some() || has_ml_deps {
+        let logdir = tb_logdir.unwrap_or("runs");
+        out.push(make_auto_config(
+            root_badge,
+            IdeRunnerKind::Python,
+            "tensorboard",
+            format!("TensorBoard (--logdir {logdir})"),
+            Some("python3"),
+            vec![
+                "-m".into(),
+                "tensorboard.main".into(),
+                "--logdir".into(),
+                logdir.into(),
+                "--bind_all".into(),
+            ],
+            cwd.clone(),
+            None,
+        ));
+    }
+
+    // Jupyter Lab server config when notebooks exist in root or `notebooks/`.
+    let has_notebooks = !list_files_with_suffix(root, ".ipynb").is_empty()
+        || !list_files_with_suffix(&root.join("notebooks"), ".ipynb").is_empty();
+    if has_notebooks {
+        out.push(make_auto_config(
+            root_badge,
+            IdeRunnerKind::Python,
+            "jupyter-lab",
+            "Jupyter Lab".into(),
+            Some("python3"),
+            vec!["-m".into(), "jupyterlab".into()],
+            cwd.clone(),
+            None,
+        ));
+    }
+
     // A `tests/` folder alone is no Python sign (Go and JS repos have one too).
     let has_py_tests_dir = ["tests", "test"]
         .iter()
