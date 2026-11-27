@@ -94,16 +94,20 @@
   let lastFetch = 0;
   const nodeId = $derived(node?.node_id ?? null);
   const nodeAttempts = $derived(node?.attempts ?? 0);
+  const nodeStartedAt = $derived(node?.started_at ?? null);
   const detailVersion = $derived(node?.detail_version);
   const needsBody = $derived(!!node && !child && (['output', 'log', 'summary', 'preview', 'conversation'].includes(tab) || (tab === 'criteria' && step?.kind === 'check')));
   $effect(() => {
     const id = nodeId;
-    void nodeAttempts;
+    const att = nodeAttempts;
+    const started = nodeStartedAt;
     void detailVersion;
     void retry;
     if (!id || !needsBody) return;
-    // Another step's error never shows while this one's body loads.
-    if (untrack(() => detail?.node_id) !== id) detailError = null;
+    // Another step's (or an earlier retry attempt's) error never shows while this one's body loads.
+    if (untrack(() => detail?.node_id !== id || detail?.attempts !== att || (detail?.started_at ?? null) !== started)) {
+      detailError = null;
+    }
     const ac = new AbortController();
     const t = setTimeout(() => {
       lastFetch = Date.now();
@@ -122,14 +126,27 @@
       ac.abort();
     };
   });
-  // Match both node id and attempt so a Retry never flashes the previous attempt's body or thread.
-  const body = $derived(detail?.node_id === node?.node_id && detail?.attempts === node?.attempts ? detail : null);
+  // Bind cached detail to the current execution identity (node, attempt, start
+  // timestamp, and associated thread) so a manual Retry (which resets attempts
+  // to 1) never flashes a previous attempt's body or thread.
+  const body = $derived(
+    detail &&
+      node &&
+      detail.node_id === node.node_id &&
+      detail.attempts === node.attempts &&
+      (detail.started_at ?? null) === (node.started_at ?? null) &&
+      (!detail.thread?.thread_id || !node.thread?.thread_id || detail.thread.thread_id === node.thread.thread_id)
+      ? detail
+      : null,
+  );
 
   const word = $derived(child ? childWord(child, now) : node ? stepWord(node, { now, run: runState, kind: step?.kind }) : null);
   const thread = $derived<StepThread | null>(
     child
       ? child.thread_id ? { thread_id: child.thread_id, runner: 'threads', provider: child.provider, model: child.model, effort: child.effort, turns: 0, usage: {} as StepThread['usage'] } : null
-      : (body?.thread && (!node?.thread || body.thread.thread_id === node.thread.thread_id) ? body.thread : node?.thread ?? null),
+      : (node?.thread
+          ? (body?.thread?.thread_id === node.thread.thread_id ? body.thread : node.thread)
+          : null),
   );
   const modelChip = $derived(thread ? [thread.provider, thread.model || 'Default', thread.effort || 'Default'].join(' · ') : null);
   const segs = $derived(!child && node?.phases?.length ? phaseSegments(node.phases, node.status === 'running' ? now : Date.parse(node.started_at ?? '') + (node.duration_ms ?? 0)) : []);
