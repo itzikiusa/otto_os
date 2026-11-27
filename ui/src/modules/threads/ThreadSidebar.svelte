@@ -24,7 +24,7 @@
   import ListPane from '../../lib/components/side/ListPane.svelte';
   import type { MenuItem } from '../../lib/contextmenu.svelte';
   import { toastError } from '../../lib/toastError';
-  import { PullRequestsView, SettingsView } from './threadLazy.svelte';
+  import { PullRequestsView, SettingsView, UsageView } from './threadLazy.svelte';
   import { threadRepos } from './threadRepos.svelte';
   import { registry } from '../../lib/commands.svelte';
   import { openAdjacentThread, openNextNeedsYou, THREAD_KEYS, threadNav } from './threadNav.svelte';
@@ -430,10 +430,12 @@
   function paneMenu(): MenuItem[] {
     SettingsView.prefetch();
     PullRequestsView.prefetch();
+    UsageView.prefetch();
     return [
       { label: 'Add project…', icon: 'folder', action: () => (addingProject = true) },
       { label: 'Pull requests', icon: 'branch', action: () => { threadsChrome.stageView = 'prs'; onselect?.(); } },
       { label: 'Threads settings…', icon: 'gear', action: () => (threadsChrome.sheet = 'settings') },
+      { label: 'Usage…', icon: 'chart', action: () => (threadsChrome.sheet = 'usage') },
       { separator: true },
       { label: 'Refresh threads and git status', icon: 'refresh', disabled: syncing, action: () => void sync() },
     ];

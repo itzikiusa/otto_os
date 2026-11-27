@@ -301,10 +301,15 @@ test('the footer meter shows the focused agent’s tightest plan window and open
     await page.getByTestId('threads-sidebar').screenshot({ path: join(SHOTS, `after-meter-${scheme}.png`) });
   }
 
-  // A Claude thread: no Claude numbers here, so the plain Usage icon.
+  // A Claude thread: no Claude numbers here, so no meter — and no footer at
+  // all (it has nothing to say); Usage stays in the pane's ⋯.
   await row(page, 'done').locator('.tr-main').click();
   await expect(page.getByTestId('threads-usage-meter')).toHaveCount(0);
-  await expect(btn).toHaveAttribute('aria-label', 'Usage statistics');
+  await expect(btn).toHaveCount(0);
+  await expect(page.getByTestId('threads-sidebar').locator('.side-pane-foot')).toBeHidden();
+  await page.getByTestId('threads-sidebar').getByRole('button', { name: 'Threads actions' }).click();
+  await expect(page.getByRole('menuitem', { name: 'Usage…' })).toBeVisible();
+  await page.keyboard.press('Escape');
 
   // ≥ 80 % used is a warning (the next poll / a reload brings it).
   used = 85;

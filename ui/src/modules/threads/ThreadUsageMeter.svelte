@@ -14,7 +14,8 @@
   import { threads } from './threadsStore.svelte';
 
   // The Agents inbox passes its focused session's provider and opens the Usage page.
-  let { provider: forProvider, onopen }: { provider?: string | null; onopen?: () => void } = $props();
+  // `quiet`: no numbers → nothing (the Threads list's footer then hides; Usage is in its ⋯).
+  let { provider: forProvider, onopen, quiet = false }: { provider?: string | null; onopen?: () => void; quiet?: boolean } = $props();
   $effect(() => limits.mount());
   const provider = $derived.by(() => {
     if (forProvider !== undefined) return forProvider;
@@ -39,7 +40,7 @@
     <span class="th-meter-bar" aria-hidden="true"><span class="th-meter-fill" style:inline-size="{Math.min(100, meter.used)}%"></span></span>
     <span class="th-meter-pct" data-testid="threads-usage-meter">{meter.used}%</span>
   </button>
-{:else}
+{:else if !quiet}
   <button
     type="button"
     class="icon-btn"
