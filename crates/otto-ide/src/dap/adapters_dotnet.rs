@@ -56,12 +56,6 @@ pub(crate) fn parse_dotnet_project_meta(proj_path: &Path, xml: &str) -> (Option<
     (tfm, asm)
 }
 
-/// Compute the Unity Editor Mono Soft Debugger port from the editor's PID.
-#[cfg(test)]
-pub(crate) const fn unity_editor_debug_port(pid: u32) -> u16 {
-    56000 + (pid % 1000) as u16
-}
-
 /// Parse `Process Id: <pid>` emitted by `dotnet test` when `VSTEST_HOST_DEBUG=1`.
 pub(crate) fn parse_vstest_host_pid(output: &str) -> Option<u32> {
     for line in output.lines() {
@@ -85,6 +79,7 @@ pub(crate) fn parse_vstest_host_pid(output: &str) -> Option<u32> {
 }
 
 /// Check whether `dir` (or an ancestor up to `root`) is a Unity project (`Assets/` + `ProjectSettings/`).
+#[cfg(test)]
 #[allow(clippy::disallowed_methods)]
 pub(crate) fn detect_unity_project_root(
     start: &Path,
@@ -274,14 +269,11 @@ pub(super) async fn resolve_dotnet_adapter(
         .or_insert_with(|| "1".into());
 
     let raw_program = req.launch.program.trim();
-    let is_unity_attach = raw_program.eq_ignore_ascii_case("unity://attach")
-        || req.launch.env.contains_key("UNITY_ATTACH_PID")
-        || (req.target.kind == IdeTargetKind::Local
-            && req.launch.attach_port.is_some()
-            && detect_unity_project_root(Path::new(cwd), Path::new(&req.target.root)).is_some());
-
-    if is_unity_attach {
-        return resolve_unity_attach(req, cwd);
+    if raw_program.eq_ignore_ascii_case("unity://attach") {
+        return Err(Error::Invalid(
+            "Unity Editor attach is not supported (Unity uses the Mono Soft Debugger protocol rather than DAP)."
+                .into(),
+        ));
     }
 
     // Check for explicit direct TCP DAP attach port (e.g. remote netcoredbg --server=PORT).
@@ -289,7 +281,7 @@ pub(super) async fn resolve_dotnet_adapter(
     if let Some(port) = req.launch.attach_port {
         let pid = extract_dotnet_attach_pid(req, &env).ok_or_else(|| {
             Error::Invalid(
-                "Direct TCP .NET attach requires a target process ID (set DOTNET_ATTACH_PID or pass --pid <PID>)."
+                "Direct TCP .NET attach requires a target process ID (set attach_pid, DOTNET_ATTACH_PID, or pass --pid <PID>)."
                     .into(),
             )
         })?;
@@ -335,17 +327,8 @@ pub(super) async fn resolve_dotnet_adapter(
         "netcoredbg"
     };
 
-    // Explicit PID attach via `DOTNET_ATTACH_PID`
-    if let Some(pid_str) = req
-        .launch
-        .env
-        .get("DOTNET_ATTACH_PID")
-        .or_else(|| env.get("DOTNET_ATTACH_PID"))
-    {
-        let pid: u32 = pid_str
-            .trim()
-            .parse()
-            .map_err(|_| Error::Invalid(format!("invalid DOTNET_ATTACH_PID '{pid_str}'")))?;
+    // Explicit PID attach via `launch.attach_pid`, `DOTNET_ATTACH_PID`, or `--pid`
+    if let Some(pid) = extract_dotnet_attach_pid(req, &env) {
         return Ok(ResolvedDapAdapter {
             adapter_name: adapter_name.into(),
             language: language.to_string(),
@@ -402,6 +385,7 @@ pub(super) async fn resolve_dotnet_adapter(
 
     // Application launch mode: if `program` is already a `.dll`, launch directly;
     // otherwise locate nearest `.csproj`/`.fsproj`, build Debug, and resolve TargetPath / Debug DLL.
+    let mut built_proj_path: Option<PathBuf> = None;
     let target_dll = if norm_program.ends_with(".dll") {
         norm_program
     } else {
@@ -416,6 +400,7 @@ pub(super) async fn resolve_dotnet_adapter(
             }
             IdeTargetKind::Ssh => select_ssh_dotnet_build_target(&norm_program, cwd),
         };
+        built_proj_path = Some(proj_path.clone());
         let build_target = proj_path.to_string_lossy().into_owned();
         let build_args = vec![
             "build".to_string(),
@@ -521,13 +506,9 @@ pub(super) async fn resolve_dotnet_adapter(
         }
     };
 
-    let launch_cwd = Path::new(&target_dll)
-        .parent()
-        .and_then(|p| p.parent())
-        .and_then(|p| p.parent())
-        .and_then(|p| p.parent())
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| cwd.to_string());
+    // BUG2-10: Preserve the project / launch cwd instead of deriving cwd from TargetPath
+    // (which breaks .NET 8+ Artifacts output layouts like `repo/artifacts/bin/App/debug/App.dll`).
+    let launch_cwd = compute_dotnet_launch_cwd(built_proj_path.as_deref(), cwd);
 
     Ok(ResolvedDapAdapter {
         adapter_name: adapter_name.into(),
@@ -572,7 +553,7 @@ async fn resolve_dotnet_test_debug(
     mut initial_output: Vec<IdeDebugOutputEntry>,
 ) -> Result<ResolvedDapAdapter> {
     let proj_path = match req.target.kind {
-        IdeTargetKind::Local => find_local_dotnet_project(norm_program, cwd)
+        IdeTargetKind::Local => select_local_dotnet_test_project(norm_program, cwd)
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|| cwd.to_string()),
         IdeTargetKind::Ssh => select_ssh_dotnet_build_target(norm_program, cwd)
@@ -661,6 +642,11 @@ async fn resolve_dotnet_test_debug(
                 |_| {},
             );
         }
+        // OBS-1: Transfer child + its process group to `BridgeGuard` BEFORE awaiting
+        // `Process Id:` so cancelling/stopping the resolver mid-wait kills both
+        // `dotnet test` and any spawned `testhost` process immediately on drop.
+        let companion = super::BridgeGuard::new();
+        companion.push_child(child);
         let mut lines = BufReader::new(stdout).lines();
         let mut host_pid: Option<u32> = None;
         let mut captured = String::new();
@@ -680,8 +666,6 @@ async fn resolve_dotnet_test_debug(
                 Err(_) => continue,
             }
         }
-        let companion = super::BridgeGuard::new();
-        companion.push_child(child);
         if let Some(pid) = host_pid {
             // Drain remaining stdout lines so `dotnet test` never blocks on a full pipe.
             tokio::spawn(async move { while let Ok(Some(_)) = lines.next_line().await {} });
@@ -689,7 +673,7 @@ async fn resolve_dotnet_test_debug(
                 seq: 0,
                 category: "console".into(),
                 text: format!(
-                    "Attached {adapter_name} to dotnet testhost PID {pid} ({})\n",
+                    "VSTest host paused at PID {pid}; attaching {adapter_name} ({})\n",
                     filter_expr
                         .as_deref()
                         .map(|f| format!("filter: {f}"))
@@ -754,22 +738,92 @@ async fn resolve_dotnet_test_debug(
     })
 }
 
-fn resolve_unity_attach(req: &IdeStartDebugReq, cwd: &str) -> Result<ResolvedDapAdapter> {
-    let unity_info = detect_unity_project_root(Path::new(cwd), Path::new(&req.target.root));
-    let ver_label = unity_info
-        .as_ref()
-        .and_then(|(_, v)| v.as_deref())
-        .unwrap_or("unknown");
-    Err(Error::Invalid(format!(
-        "Unity Editor ({ver_label}) uses the Mono Soft Debugger protocol rather than DAP. Direct built-in DAP attach is not supported; install a Unity DAP adapter plugin to debug Unity Editor scripts."
-    )))
+/// Compute launch working directory for a `.NET` app session, preserving the project
+/// directory (or requested `cwd`) even when MSBuild `TargetPath` points into a `.NET 8+`
+/// Artifacts output layout (BUG2-10).
+pub(crate) fn compute_dotnet_launch_cwd(built_proj_path: Option<&Path>, cwd: &str) -> String {
+    if let Some(proj) = built_proj_path {
+        if proj
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("csproj") || e.eq_ignore_ascii_case("fsproj"))
+        {
+            if let Some(parent) = proj.parent().filter(|p| !p.as_os_str().is_empty()) {
+                return parent.to_string_lossy().into_owned();
+            }
+        }
+    }
+    cwd.to_string()
 }
 
-/// Extract an explicit `.NET` attach PID from `DOTNET_ATTACH_PID` or `--pid <n>` args (API-6).
+/// Check whether a `.csproj`/`.fsproj` XML declares a VSTest test project.
+fn is_dotnet_test_csproj(path: &Path) -> bool {
+    std::fs::read_to_string(path).is_ok_and(|xml| {
+        xml.contains("Microsoft.NET.Test.Sdk")
+            || xml.contains("<IsTestProject>true</IsTestProject>")
+    })
+}
+
+/// Select the local `.csproj`/`.fsproj` (or `.sln`) target for `.NET` test debugging,
+/// scanning bounded subdirectories when Debug Tests is invoked on a solution/repo root
+/// whose test project lives in a child folder such as `tests/App.Tests/App.Tests.csproj` (BUG-25).
+#[allow(clippy::disallowed_methods)] // bounded depth-3 scan at debug session start
+pub(crate) fn select_local_dotnet_test_project(norm_program: &str, cwd: &str) -> Option<PathBuf> {
+    if let Some(direct) = find_local_dotnet_project(norm_program, cwd) {
+        if is_dotnet_test_csproj(&direct) {
+            return Some(direct);
+        }
+    }
+    let root = if !norm_program.is_empty() && Path::new(norm_program).is_dir() {
+        PathBuf::from(norm_program)
+    } else {
+        PathBuf::from(cwd)
+    };
+    let mut sln_fallback: Option<PathBuf> = None;
+    let mut stack = vec![(root, 0usize)];
+    while let Some((dir, depth)) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut entries: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+        entries.sort();
+        for p in entries {
+            let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if p.is_file() {
+                let low = name.to_ascii_lowercase();
+                if (low.ends_with(".csproj") || low.ends_with(".fsproj"))
+                    && is_dotnet_test_csproj(&p)
+                {
+                    return Some(p);
+                }
+                if sln_fallback.is_none() && (low.ends_with(".sln") || low.ends_with(".slnx")) {
+                    sln_fallback = Some(p);
+                }
+            } else if p.is_dir()
+                && depth < 3
+                && !matches!(
+                    name,
+                    ".git" | "bin" | "obj" | "node_modules" | "artifacts" | ".vs" | "packages"
+                )
+            {
+                stack.push((p, depth + 1));
+            }
+        }
+    }
+    sln_fallback.or_else(|| find_local_dotnet_project(norm_program, cwd))
+}
+
+/// Extract an explicit `.NET` attach PID from `launch.attach_pid`, `DOTNET_ATTACH_PID`,
+/// or `--pid <n>` args (API-6).
 pub(crate) fn extract_dotnet_attach_pid(
     req: &IdeStartDebugReq,
     env: &BTreeMap<String, String>,
 ) -> Option<u32> {
+    if let Some(pid) = req.launch.attach_pid.filter(|&p| p > 0) {
+        return Some(pid);
+    }
     if let Some(pid) = req
         .launch
         .env
@@ -855,10 +909,11 @@ pub(crate) fn detect_dotnet_test_debug_intent(
     {
         return Some(Some(test_name.to_string()));
     }
-    if ctx
-        .run_config
-        .as_ref()
-        .is_some_and(|c| c.runner == crate::types::IdeRunnerKind::DotnetTest)
+    if req.launch.is_test
+        || ctx
+            .run_config
+            .as_ref()
+            .is_some_and(|c| c.runner == crate::types::IdeRunnerKind::DotnetTest)
         || req
             .launch
             .env
@@ -870,12 +925,8 @@ pub(crate) fn detect_dotnet_test_debug_intent(
     }
     if req.target.kind == IdeTargetKind::Local && !norm_program.ends_with(".dll") {
         if let Some(proj) = find_local_dotnet_project(norm_program, cwd) {
-            if let Ok(xml) = std::fs::read_to_string(&proj) {
-                if xml.contains("Microsoft.NET.Test.Sdk")
-                    || xml.contains("<IsTestProject>true</IsTestProject>")
-                {
-                    return Some(None);
-                }
+            if is_dotnet_test_csproj(&proj) {
+                return Some(None);
             }
         }
     }
@@ -970,7 +1021,6 @@ mod dotnet_support_tests {
             ),
             Some(48123)
         );
-        assert_eq!(unity_editor_debug_port(12345), 56345);
     }
 
     #[test]
@@ -1093,13 +1143,19 @@ public class MathTests
         assert_eq!(deps[2].current_version, "4.2.0");
     }
 
-    #[test]
-    fn dotnet_review_fixes_unity_attach_pid_test_intent_and_ssh_nested_project() {
+    #[tokio::test]
+    async fn dotnet_review_fixes_unity_attach_pid_test_intent_and_ssh_nested_project() {
+        use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
+        let data_dir = tmp.path().join("data");
         let target = crate::types::IdeTargetSpec::local(root.to_string_lossy().into_owned());
+        let ctx = DapStartContext {
+            caller_is_root: true,
+            ..Default::default()
+        };
 
-        // API-4: Unity attach returns clear protocol error instead of sending DAP to Mono SDB port
+        // API-4: Unity attach is removed/rejected with clear Mono Soft Debugger message.
         let unity_req = IdeStartDebugReq {
             target: target.clone(),
             language: "csharp".into(),
@@ -1109,61 +1165,205 @@ public class MathTests
                 attach_port: Some(56123),
                 ..Default::default()
             },
-            breakpoints: Vec::new(),
-            project_folders: Vec::new(),
-            maven_profiles: Vec::new(),
-            spring_profiles: Vec::new(),
-            skip_tests: false,
-            offline: false,
-            break_on_exceptions: false,
-            confirm_prod_targets: false,
+            ..Default::default()
         };
-        let err = resolve_unity_attach(&unity_req, &root.to_string_lossy()).unwrap_err();
+        let err = resolve_dotnet_adapter(
+            &data_dir,
+            "csharp",
+            &unity_req,
+            &ctx,
+            &root.to_string_lossy(),
+            BTreeMap::new(),
+        )
+        .await
+        .err()
+        .expect("unity://attach must error");
         assert!(err.to_string().contains("Mono Soft Debugger"));
 
-        // API-6: Direct TCP attach requires processId (from env or --pid arg)
-        let mut req_no_pid = unity_req.clone();
-        req_no_pid.launch.program = "App.csproj".into();
-        let empty_env = BTreeMap::new();
-        assert_eq!(extract_dotnet_attach_pid(&req_no_pid, &empty_env), None);
-        req_no_pid.launch.args = vec!["--pid".into(), "4242".into()];
-        assert_eq!(
-            extract_dotnet_attach_pid(&req_no_pid, &empty_env),
-            Some(4242)
-        );
-        req_no_pid.launch.args.clear();
-        req_no_pid
-            .launch
-            .env
-            .insert("DOTNET_ATTACH_PID".into(), "9001".into());
-        assert_eq!(
-            extract_dotnet_attach_pid(&req_no_pid, &empty_env),
-            Some(9001)
-        );
+        // API-6: Direct TCP attach uses launch.attach_pid (or DOTNET_ATTACH_PID / --pid)
+        // and emits `processId` in the real DAP `attach` envelope, failing when missing.
+        let mut req_tcp = unity_req.clone();
+        req_tcp.launch.program = "App.csproj".into();
+        req_tcp.launch.attach_port = Some(4711);
+        assert!(resolve_dotnet_adapter(
+            &data_dir,
+            "csharp",
+            &req_tcp,
+            &ctx,
+            &root.to_string_lossy(),
+            BTreeMap::new(),
+        )
+        .await
+        .is_err());
+        req_tcp.launch.attach_pid = Some(4242);
+        let tcp_res = resolve_dotnet_adapter(
+            &data_dir,
+            "csharp",
+            &req_tcp,
+            &ctx,
+            &root.to_string_lossy(),
+            BTreeMap::new(),
+        )
+        .await
+        .expect("direct TCP attach with launch.attach_pid");
+        assert_eq!(tcp_res.launch_command, "attach");
+        assert_eq!(tcp_res.launch_args["processId"], json!(4242));
 
-        // BUG-25: Whole-project .NET test debug intent triggers even without a test_name filter
-        let test_proj_dir = root.join("Tests");
-        std::fs::create_dir_all(&test_proj_dir).unwrap();
-        let test_csproj = test_proj_dir.join("My.Tests.csproj");
+        // BUG-25: Whole-project Debug Tests from a solution root (`is_test: true`) selects
+        // nested `tests/App.Tests/App.Tests.csproj` and routes to VSTest debug intent.
+        let sln_root = root.join("MultiProjSln");
+        let app_dir = sln_root.join("src/App");
+        let test_dir = sln_root.join("tests/App.Tests");
+        std::fs::create_dir_all(&app_dir).unwrap();
+        std::fs::create_dir_all(&test_dir).unwrap();
+        std::fs::write(
+            app_dir.join("App.csproj"),
+            r#"<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType></PropertyGroup></Project>"#,
+        )
+        .unwrap();
+        let test_csproj = test_dir.join("App.Tests.csproj");
         std::fs::write(
             &test_csproj,
             r#"<Project Sdk="Microsoft.NET.Sdk"><ItemGroup><PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.0" /></ItemGroup></Project>"#,
         )
         .unwrap();
-        let ctx = DapStartContext::default();
-        let mut test_req = req_no_pid.clone();
-        test_req.launch.program = test_csproj.to_string_lossy().into_owned();
-        test_req.launch.test_name = None;
-        test_req.launch.env.clear();
+        let mut repo_test_req = IdeStartDebugReq {
+            target: crate::types::IdeTargetSpec::local(sln_root.to_string_lossy().into_owned()),
+            language: "csharp".into(),
+            launch: crate::types::IdeDebugLaunchSpec {
+                program: sln_root.to_string_lossy().into_owned(),
+                cwd: Some(sln_root.to_string_lossy().into_owned()),
+                is_test: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         assert_eq!(
             detect_dotnet_test_debug_intent(
-                &test_req,
+                &repo_test_req,
                 &ctx,
-                &test_csproj.to_string_lossy(),
-                &test_proj_dir.to_string_lossy()
+                &sln_root.to_string_lossy(),
+                &sln_root.to_string_lossy()
             ),
             Some(None)
         );
+        assert_eq!(
+            select_local_dotnet_test_project(
+                &sln_root.to_string_lossy(),
+                &sln_root.to_string_lossy()
+            ),
+            Some(test_csproj.clone())
+        );
+        repo_test_req.launch.is_test = false;
+        repo_test_req.launch.program = test_csproj.to_string_lossy().into_owned();
+        assert_eq!(
+            detect_dotnet_test_debug_intent(
+                &repo_test_req,
+                &ctx,
+                &test_csproj.to_string_lossy(),
+                &test_dir.to_string_lossy()
+            ),
+            Some(None)
+        );
+
+        // BUG2-10: MSBuild TargetPath pointing to .NET 8+ Artifacts output layout
+        // (`repo/artifacts/bin/App/debug/App.dll`) must keep launch cwd at `src/App`.
+        let artifacts_dll = sln_root.join("artifacts/bin/App/debug/App.dll");
+        std::fs::create_dir_all(artifacts_dll.parent().unwrap()).unwrap();
+        std::fs::write(&artifacts_dll, "fake-dll").unwrap();
+        let fake_nc = data_dir.join("toolchains/dotnet/netcoredbg/netcoredbg");
+        let fake_dotnet = data_dir.join("toolchains/dotnet/current/dotnet");
+        for p in [&fake_nc, &fake_dotnet] {
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        }
+        std::fs::write(&fake_nc, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::write(
+            &fake_dotnet,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = \"msbuild\" ]; then echo '{}'; exit 0; fi\nexit 0\n",
+                artifacts_dll.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake_nc, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&fake_dotnet, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let app_req = IdeStartDebugReq {
+            target: crate::types::IdeTargetSpec::local(sln_root.to_string_lossy().into_owned()),
+            language: "csharp".into(),
+            launch: crate::types::IdeDebugLaunchSpec {
+                program: app_dir.join("App.csproj").to_string_lossy().into_owned(),
+                cwd: Some(app_dir.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let app_res = resolve_dotnet_adapter(
+            &data_dir,
+            "csharp",
+            &app_req,
+            &ctx,
+            &app_dir.to_string_lossy(),
+            BTreeMap::new(),
+        )
+        .await
+        .expect("artifacts TargetPath launch");
+        let expected_app_cwd = std::fs::canonicalize(&app_dir).unwrap_or_else(|_| app_dir.clone());
+        assert_eq!(
+            app_res.launch_args["cwd"].as_str(),
+            Some(expected_app_cwd.to_string_lossy().as_ref()),
+            "BUG2-10: launch cwd must stay at project dir, not artifacts dir: {}",
+            app_res.launch_args
+        );
+
+        // OBS-1: Cancelling a VSTest PID-wait future drops BridgeGuard and kills the
+        // entire process group (both parent wrapper and spawned child testhost).
+        #[cfg(unix)]
+        {
+            let pid_file = root.join("child_testhost.pid");
+            let mut cmd = tokio::process::Command::new("sh");
+            cmd.args([
+                "-c",
+                &format!(
+                    "sleep 30 >/dev/null 2>&1 & echo $! > '{}'; sleep 30",
+                    pid_file.display()
+                ),
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+            cmd.process_group(0);
+            let child = cmd.spawn().unwrap();
+            let guard = super::super::BridgeGuard::new();
+            guard.push_child(child);
+            let wait_task = tokio::spawn(async move {
+                let _held = guard;
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            });
+            for _ in 0..40 {
+                if pid_file.is_file() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            let child_pid: i32 = std::fs::read_to_string(&pid_file)
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            wait_task.abort();
+            let _ = wait_task.await;
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            extern "C" {
+                fn kill(pid: std::ffi::c_int, sig: std::ffi::c_int) -> std::ffi::c_int;
+            }
+            #[allow(unsafe_code)]
+            let alive = unsafe { kill(child_pid, 0) == 0 };
+            assert!(
+                !alive,
+                "OBS-1: cancelling PID wait must kill spawned testhost child {child_pid}"
+            );
+        }
 
         // BUG-24: Nested SSH project path & MSBuild TargetPath parsing
         let ssh_target = crate::types::IdeTargetSpec {

@@ -481,7 +481,6 @@ pub fn scan_parent_repos(parent_path: &str, is_root_user: bool) -> Result<IdeSca
                                 || n.ends_with(".slnx")
                                 || n.ends_with(".csproj")
                                 || n.ends_with(".fsproj")
-                                || n.ends_with(".uproject")
                         })
                 })
             });
@@ -534,6 +533,7 @@ pub fn scan_parent_repos(parent_path: &str, is_root_user: bool) -> Result<IdeSca
             has_go_mod,
             has_pom_or_gradle,
             has_git,
+            has_dotnet,
         });
     }
     repos.sort_by(|a, b| {
@@ -638,5 +638,41 @@ mod tests {
         }
         let scanned = scan_parent_repos(&tmp.path().to_string_lossy(), true).expect("scan capped");
         assert_eq!(scanned.repos.len(), MAX_SCAN_REPOS_ENTRIES);
+    }
+
+    #[test]
+    fn scan_parent_repos_preserves_dotnet_signal_on_unreal_with_generated_solution() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let generated = tmp.path().join("UnrealWithSln");
+        fs::create_dir_all(&generated).unwrap();
+        fs::write(generated.join("Game.uproject"), "{}").unwrap();
+        fs::write(generated.join("Game.sln"), "").unwrap();
+
+        let fresh = tmp.path().join("UnrealFresh");
+        fs::create_dir_all(&fresh).unwrap();
+        fs::write(fresh.join("Game.uproject"), "{}").unwrap();
+
+        let scanned = scan_parent_repos(&tmp.path().to_string_lossy(), true).expect("scan ok");
+        let with_sln = scanned
+            .repos
+            .iter()
+            .find(|r| r.name == "UnrealWithSln")
+            .expect("UnrealWithSln scanned");
+        assert_eq!(with_sln.kind, "unreal");
+        assert!(
+            with_sln.has_dotnet,
+            "BUG-17: Unreal checkout with generated .sln must expose has_dotnet=true"
+        );
+
+        let no_sln = scanned
+            .repos
+            .iter()
+            .find(|r| r.name == "UnrealFresh")
+            .expect("UnrealFresh scanned");
+        assert_eq!(no_sln.kind, "unreal");
+        assert!(
+            !no_sln.has_dotnet,
+            "fresh .uproject without .sln/.csproj must have has_dotnet=false"
+        );
     }
 }

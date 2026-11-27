@@ -127,7 +127,10 @@ test('NuGet manifest parser, nesting, test plans, and debug previews', () => {
     goBuildTags: [],
   });
   assert.equal(dbgPlan.kind, 'debug');
-  if (dbgPlan.kind === 'debug') assert.equal(dbgPlan.language, 'csharp');
+  if (dbgPlan.kind === 'debug') {
+    assert.equal(dbgPlan.language, 'csharp');
+    assert.equal(dbgPlan.launch.is_test, true);
+  }
 
   assert.equal(inferTestDebugLanguage('/proj/Tests/CalcTests.cs'), 'csharp');
   assert.equal(inferTestDebugLanguage('/proj/Tests/CalcTests.fs'), 'fsharp');
@@ -136,4 +139,14 @@ test('NuGet manifest parser, nesting, test plans, and debug previews', () => {
     launchPreview({ language: 'csharp', program: '/proj/Tests/CalcTests.cs', root: '/proj', test_name: 'AddsNumbers' }),
     'dotnet test --filter "FullyQualifiedName~AddsNumbers" Tests/CalcTests.cs',
   );
+});
+
+test('BUG-17: buildDedupedBulkRepos preserves dotnet badge on Unreal repos with generated .sln', async () => {
+  const { buildDedupedBulkRepos } = await import('../src/modules/ide/shell/bulkRepoModel.ts');
+  const { techByPath } = buildDedupedBulkRepos([
+    { name: 'UnrealWithSln', path: '/ws/UnrealWithSln', kind: 'unreal', has_go_mod: false, has_pom_or_gradle: false, has_git: true, has_dotnet: true },
+    { name: 'UnrealFresh', path: '/ws/UnrealFresh', kind: 'unreal', has_go_mod: false, has_pom_or_gradle: false, has_git: true, has_dotnet: false },
+  ]);
+  assert.deepEqual(techByPath['/ws/UnrealWithSln'], ['cpp', 'dotnet']);
+  assert.deepEqual(techByPath['/ws/UnrealFresh'], ['cpp']);
 });

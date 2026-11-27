@@ -280,6 +280,7 @@ export interface IdeScannedRepo {
   has_go_mod: boolean;
   has_pom_or_gradle: boolean;
   has_git: boolean;
+  has_dotnet?: boolean;
 }
 
 export interface IdeScanReposReq {
@@ -506,7 +507,8 @@ export interface IdeSpringDevtoolsRestartReq {
 export interface IdeSpringDevtoolsRestartResp {
   ok: boolean;
   trigger_path: string;
-  restarted_at: string;
+  requested_at: string;
+  restarted_at?: string | null;
   message: string;
 }
 

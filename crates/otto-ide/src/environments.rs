@@ -479,6 +479,76 @@ impl EnvironmentManager {
         lookup_snapshot_in(&self.snapshots, project_key_or_root)
     }
 
+    /// Look up cached project environment for `module_root`, falling back to
+    /// `opened_project_root` ONLY when `module_root` is equal to or strictly inside
+    /// `opened_project_root` (inheriting umbrella SDK pins such as `zig_home` without
+    /// crossing into unrelated filesystem ancestors).
+    #[allow(clippy::disallowed_methods)]
+    pub fn cached_project_env_for_module(
+        &self,
+        module_root: &str,
+        opened_project_root: Option<&str>,
+    ) -> Option<IdeProjectEnvironment> {
+        if let Some(exact) = self.cached_project_env(module_root) {
+            return Some(exact);
+        }
+        let opened = opened_project_root?.trim().trim_end_matches('/');
+        let module = module_root.trim().trim_end_matches('/');
+        if opened.is_empty() || module.is_empty() || opened == module {
+            return None;
+        }
+        let mod_p = Path::new(module);
+        let open_p = Path::new(opened);
+        let inside = mod_p.starts_with(open_p)
+            || match (std::fs::canonicalize(mod_p), std::fs::canonicalize(open_p)) {
+                (Ok(cm), Ok(co)) => cm.starts_with(&co),
+                _ => false,
+            };
+        if inside {
+            self.cached_project_env(opened)
+        } else {
+            None
+        }
+    }
+
+    /// Look up cached project environment for `project_key_or_root`, falling back to
+    /// the nearest ancestor local project snapshot when an umbrella workspace opens a
+    /// nested module root without its own standalone snapshot (BUG-23).
+    pub fn cached_project_env_or_ancestor(
+        &self,
+        project_key_or_root: &str,
+    ) -> Option<IdeProjectEnvironment> {
+        if let Some(exact) = lookup_snapshot_in(&self.snapshots, project_key_or_root) {
+            return Some(exact);
+        }
+        let trimmed = project_key_or_root
+            .trim()
+            .strip_prefix("local:")
+            .unwrap_or(project_key_or_root.trim())
+            .trim_end_matches('/');
+        if !trimmed.starts_with('/') {
+            return None;
+        }
+        let guard = self.snapshots.read().unwrap_or_else(|e| e.into_inner());
+        let mut cur = std::path::Path::new(trimmed).parent();
+        while let Some(anc) = cur {
+            let anc_str = anc.to_string_lossy();
+            let anc_trim = anc_str.trim_end_matches('/');
+            if anc_trim.is_empty() {
+                break;
+            }
+            let local_key = format!("local:{anc_trim}");
+            if let Some(found) = guard.iter().rev().find(|s| {
+                let sk = s.key.trim_end_matches('/');
+                sk == anc_trim || sk == local_key
+            }) {
+                return Some(found.env.clone());
+            }
+            cur = anc.parent();
+        }
+        None
+    }
+
     pub fn cached_additional_roots(&self, project_key_or_root: &str) -> Vec<String> {
         lookup_snapshot_in(&self.snapshots, project_key_or_root)
             .map(|e| e.additional_roots)

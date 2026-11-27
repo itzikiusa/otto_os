@@ -48,7 +48,7 @@ export function buildDedupedBulkRepos(repos: readonly IdeScannedRepo[]): {
     if (k === 'zig') detected.push('zig');
     if (k === 'cpp' || k === 'c' || k === 'unreal') detected.push('cpp');
     if (k === 'unity') detected.push('unity');
-    if (k === 'dotnet' || k === 'csharp' || k === 'fsharp') detected.push('dotnet');
+    if (r.has_dotnet || k === 'dotnet' || k === 'csharp' || k === 'fsharp') detected.push('dotnet');
     if (k === 'angular' || k === 'nextjs' || k === 'svelte' || k === 'nuxt' || k === 'vue' || k === 'react' || k === 'vite') detected.push(k);
     if (k === 'node' || k === 'ts' || k === 'javascript' || k === 'typescript') detected.push('node');
     if (k === 'python') detected.push('python');

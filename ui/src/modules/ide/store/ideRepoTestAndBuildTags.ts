@@ -275,7 +275,7 @@ export function resolveRepoTestPlan(opts: {
         repoRoot,
         repoName,
         language: 'csharp',
-        launch: { program: repoRoot, args: [], build_flags: [], cwd: repoRoot },
+        launch: { program: repoRoot, args: [], build_flags: [], cwd: repoRoot, is_test: true },
       };
     }
     if (eco === 'maven' || eco === 'gradle') {

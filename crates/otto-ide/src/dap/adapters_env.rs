@@ -160,8 +160,6 @@ pub(crate) fn validate_non_root_debug_request(
         || req.launch.env.contains_key("DLV_ATTACH_PID")
         || env.contains_key("DOTNET_ATTACH_PID")
         || req.launch.env.contains_key("DOTNET_ATTACH_PID")
-        || env.contains_key("UNITY_ATTACH_PID")
-        || req.launch.env.contains_key("UNITY_ATTACH_PID")
         || env.contains_key("OTTO_JAVA_DEBUG_DAP_PORT")
         || req.launch.env.contains_key("OTTO_JAVA_DEBUG_DAP_PORT")
     {
