@@ -561,36 +561,9 @@ pub(crate) fn resolve_local_lsp_dotnet_root(
     servers::detect_toolchain_dotnet_root(data_dir)
 }
 
-/// Read `sdk.version` from the nearest `global.json` at or above `project_root` (BUG-22).
-#[allow(clippy::disallowed_methods)]
-fn read_dotnet_global_json_version(project_root: &Path) -> Option<String> {
-    let mut cur = Some(project_root);
-    for _ in 0..8 {
-        let dir = cur?;
-        let gj = dir.join("global.json");
-        if gj.is_file() {
-            if let Ok(raw) = std::fs::read_to_string(&gj) {
-                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
-                    if let Some(ver) = val
-                        .pointer("/sdk/version")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                    {
-                        return Some(ver.to_string());
-                    }
-                }
-            }
-            break;
-        }
-        cur = dir.parent();
-    }
-    None
-}
-
 /// Select the per-SDK-major managed `csharp-ls` slot binary (`toolchains/dotnet/tools/net<major>/csharp-ls`)
-/// matching the active SDK for `project_root` under `dotnet_root` (honoring `global.json` and
-/// `dotnet --version` in `project_root` before falling back to `dotnet_dir_version`, BUG-22).
+/// matching the SDK `dotnet --version` resolves in `project_root` under `dotnet_root`, falling
+/// back to `dotnet_dir_version` (BUG-22).
 #[allow(clippy::disallowed_methods)]
 pub(crate) fn resolve_local_csharp_ls_for_dotnet_root(
     data_dir: &Path,
@@ -605,45 +578,37 @@ pub(crate) fn resolve_local_csharp_ls_for_dotnet_root(
     if !is_csharp_ls {
         return fallback_cmd.to_string();
     }
-    let global_ver = read_dotnet_global_json_version(project_root);
-    let active_bin_ver = global_ver
-        .is_none()
-        .then(|| {
-            crate::toolchains::discovery::dotnet_bin_in_root(dotnet_root).and_then(|bin| {
-                let out = std::process::Command::new(&bin)
-                    .arg("--version")
-                    .current_dir(project_root)
-                    .env("DOTNET_ROOT", dotnet_root)
-                    .env("DOTNET_CLI_TELEMETRY_OPTOUT", "1")
-                    .env("DOTNET_NOLOGO", "1")
-                    .stdin(std::process::Stdio::null())
-                    .output()
-                    .ok()?;
-                if !out.status.success() {
-                    return None;
-                }
-                let first = String::from_utf8_lossy(&out.stdout)
-                    .lines()
-                    .next()
-                    .map(str::trim)
-                    .unwrap_or("")
-                    .to_string();
-                first
-                    .chars()
-                    .next()
-                    .is_some_and(|c| c.is_ascii_digit())
-                    .then_some(first)
-            })
-        })
-        .flatten();
-    let dir_ver = (global_ver.is_none() && active_bin_ver.is_none())
-        .then(|| crate::toolchains::discovery::dotnet_dir_version(dotnet_root))
-        .filter(|v| v != "system");
-    let ver_opt = global_ver
-        .as_deref()
-        .or(active_bin_ver.as_deref())
-        .or(dir_ver.as_deref());
-    let slot = crate::toolchains_catalog::dotnet_sdk_major_slot(ver_opt);
+    // `dotnet --version` run in the project resolves its `global.json` (and rollForward)
+    // exactly as the SDK itself will for this project.
+    let active_ver = crate::toolchains::discovery::dotnet_bin_in_root(dotnet_root).and_then(|bin| {
+        let out = std::process::Command::new(&bin)
+            .arg("--version")
+            .current_dir(project_root)
+            .env("DOTNET_ROOT", dotnet_root)
+            .env("DOTNET_CLI_TELEMETRY_OPTOUT", "1")
+            .env("DOTNET_NOLOGO", "1")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let first = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .next()
+            .map(str::trim)
+            .unwrap_or("")
+            .to_string();
+        first
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_digit())
+            .then_some(first)
+    });
+    let ver_opt = active_ver.or_else(|| {
+        Some(crate::toolchains::discovery::dotnet_dir_version(dotnet_root)).filter(|v| v != "system")
+    });
+    let slot = crate::toolchains_catalog::dotnet_sdk_major_slot(ver_opt.as_deref());
     let cand = data_dir
         .join("toolchains/dotnet/tools")
         .join(slot)
@@ -1476,7 +1441,12 @@ mod resource_metric_tests {
             std::fs::write(p, body).unwrap();
             std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
         };
-        write_exec(&shared_root.join("dotnet"), "#!/bin/sh\necho 9.0.200\n");
+        // Fake SDK resolution in the cwd, as the real `dotnet --version` does: a
+        // global.json rolling 8.0.100 forward to the latest major resolves to 9.
+        write_exec(
+            &shared_root.join("dotnet"),
+            "#!/bin/sh\nif grep -q latestMajor global.json 2>/dev/null; then echo 9.0.200; elif grep -q '\"8\\.' global.json 2>/dev/null; then echo 8.0.408; else echo 9.0.200; fi\n",
+        );
         write_exec(&sdk11.join("dotnet"), "#!/bin/sh\necho 11.0.100\n");
         write_exec(&net8_dir.join("csharp-ls"), "#!/bin/sh\necho CSHARP_NET8\n");
         write_exec(&net9_dir.join("csharp-ls"), "#!/bin/sh\necho CSHARP_NET9\n");
@@ -1487,6 +1457,13 @@ mod resource_metric_tests {
         std::fs::write(
             proj8_gj.join("global.json"),
             r#"{"sdk":{"version":"8.0.408"}}"#,
+        )
+        .unwrap();
+        let proj_roll = tmp.path().join("proj-roll-forward");
+        std::fs::create_dir_all(&proj_roll).unwrap();
+        std::fs::write(
+            proj_roll.join("global.json"),
+            r#"{"sdk":{"version":"8.0.100","rollForward":"latestMajor"}}"#,
         )
         .unwrap();
 
@@ -1507,6 +1484,14 @@ mod resource_metric_tests {
         );
         assert_eq!(picked8, net8_dir.join("csharp-ls").to_string_lossy());
         assert_eq!(picked9, net9_dir.join("csharp-ls").to_string_lossy());
+        // The slot follows the SDK the project resolves to, not global.json's literal version.
+        let picked_roll = resolve_local_csharp_ls_for_dotnet_root(
+            &data_dir,
+            &shared_root,
+            &proj_roll,
+            "csharp-ls",
+        );
+        assert_eq!(picked_roll, net9_dir.join("csharp-ls").to_string_lossy());
 
         // BUG-22 (SSH): Remote SSH script maps .NET 11 to net11 (matching installer_remote.rs)
         // instead of misrouting .NET 11 to net10.
