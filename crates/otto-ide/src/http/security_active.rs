@@ -139,7 +139,17 @@ pub(super) async fn view<S: IdeCtx>(
     project: &str,
     roots: &[PathBuf],
 ) -> Result<ActiveSchedule> {
-    let grant = active_grant::get(&ctx.pool(), project).await?;
+    let mut grant = active_grant::get(&ctx.pool(), project).await?;
+    // Show a change at once: the pause itself is recorded by the next run.
+    if let Some(grant) = grant
+        .as_mut()
+        .filter(|grant| grant.invalid_reason.is_none())
+    {
+        let state = live_state(ctx, project, roots).await?;
+        if let Err(refusal) = active_grant::check(grant, &state.live(None)) {
+            grant.invalid_reason = refusal.pauses().then(|| refusal.message());
+        }
+    }
     Ok(match offer(ctx, user, project, roots).await? {
         Ok(offer) => ActiveSchedule {
             grant,
@@ -440,7 +450,7 @@ where
                     "url": target.url,
                     "addresses": grant.addresses,
                     "nuclei": run.version.version,
-                    "templates_checked_at": run.version.checked_at,
+                    "nuclei_checked_at": run.version.checked_at,
                     "findings": findings.len(),
                     "high_or_critical": serious,
                 }),
@@ -774,6 +784,11 @@ mod tests {
         let f = fixture().await;
         let offer = f.allow().await;
         f.confirm().await;
+        // Settings shows the pause at once; the next run records it.
+        assert_eq!(
+            f.view().await["grant"]["invalid_reason"],
+            "The audit target changed after you allowed scheduled active checks."
+        );
         let detail = f.due_scan().await;
         assert_eq!(
             detail.scan.status,
