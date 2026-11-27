@@ -452,6 +452,8 @@
       return;
     }
     selectedDirPath = parentDirOfPath(node.entry.path);
+    // A phone: the file is pushed over the list — the marked one too (it comes back unchanged).
+    ideLayout.pane = 'editor';
     void ide.openFile(node.entry.path, { preview: false });
   }
 

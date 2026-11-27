@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { idePane } from './ide-panes';
 import { mkdtempSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -178,16 +179,10 @@ test('IDE Devices panel, Toolchains modal (iOS/Android/Flutter), and Browser↔I
   await assertZeroCutOff(page, 'ide initial');
 
   // On stacked phone/landscape viewports, switch to the Tools pane first.
-  const toolsTab = page.getByTestId('ide-stack-tab-tools');
   const dock = page.getByTestId('ide-bottom-dock');
-  await expect(toolsTab.or(dock).first()).toBeVisible({ timeout: 20_000 });
-  if (await toolsTab.isVisible()) {
-    await expect(async () => {
-      await toolsTab.click();
-      await expect(toolsTab).toHaveAttribute('aria-pressed', 'true');
-      await expect(dock).toBeVisible({ timeout: 2_000 });
-    }).toPass({ timeout: 15_000 });
-  }
+  await expect(page.getByTestId('ide-page')).toBeVisible({ timeout: 20_000 });
+  await idePane(page, 'tools');
+  await expect(dock).toBeVisible();
 
   // Open the on-demand Devices tool window via dock view menu (or directly if already visible).
   const devicesTab = page.getByTestId('ide-tab-devices');

@@ -1,4 +1,5 @@
 import { test, expect, type Locator, type Page } from '@playwright/test';
+import { idePane } from './ide-panes';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -234,8 +235,7 @@ test.describe('IDE debugger on a phone: the step bar over the code', () => {
       const dockDebug = page.getByTestId('ide-tab-debug');
       if (await dockDebug.count()) await dockDebug.click();
       await expect(page.getByTestId('ide-debug-status')).toContainText('Paused', { timeout: 30_000 });
-      const editorTab = page.getByTestId('ide-stack-tab-editor');
-      if ((await editorTab.getAttribute('aria-pressed')) !== 'true') await editorTab.click();
+      await idePane(page, 'editor');
 
       const bar = page.getByTestId('ide-touch-debug-bar');
       await expect(bar).toBeVisible({ timeout: 20_000 });

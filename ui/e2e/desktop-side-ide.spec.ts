@@ -1,5 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
-import { mkdirSync, mkdtempSync, realpathSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { daemonCall, seedPolyglotFiles } from './ide-polyglot-fixtures';
@@ -12,6 +12,7 @@ async function getSeed(): Promise<{ workspaceId: string; root: string }> {
   if (seed) return seed;
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'otto-side-ide-')));
   seedPolyglotFiles(root);
+  writeFileSync(join(root, 'notes', 'explore.ipynb'), JSON.stringify({ cells: [{ cell_type: 'code', source: ['x = 1'], metadata: {}, outputs: [], execution_count: null }], metadata: {}, nbformat: 4, nbformat_minor: 5 }));
   const c = await apiCtx();
   try {
     const ws = await daemonCall<{ id: string }>(c.ctx, c.base, c.token, 'POST', '/workspaces', { name: `Side IDE ${Date.now()}`, root_path: root });
@@ -105,4 +106,17 @@ test('explorer pane header, hide / show, ⌘B, width key; agent Detail pane', as
   await tree(page).getByTestId('ide-tree-tab-structure').click();
   await expect(page.locator('.struct-row').first()).toBeVisible({ timeout: 20_000 });
   await shot(page, 'ide-desktop-structure');
+
+  // The notebook's kernel variables: a Detail pane beside the cells.
+  await tree(page).getByTestId('ide-tree-tab-files').click();
+  const notes = row(page, 'notes');
+  if ((await notes.getAttribute('aria-expanded')) !== 'true') await notes.click();
+  await row(page, 'notes/explore.ipynb').click();
+  await page.getByTestId('ide-nb-vars-toggle').click();
+  const vars = page.getByTestId('ide-nb-vars-pane');
+  await expect(vars).toBeVisible();
+  await expect(vars.getByRole('heading', { name: 'Kernel variables' })).toBeVisible();
+  await shot(page, 'ide-desktop-notebook-vars');
+  await page.getByTestId('ide-nb-vars-pane-close').click();
+  await expect(vars).toBeHidden();
 });

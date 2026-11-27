@@ -84,7 +84,7 @@ test.describe('Desktop IDE — tool windows', () => {
       await shot(page, `01-tree-badges-dock-${scheme}.png`);
       if (scheme === 'dark') {
         // The ⋯ holds the rest; Debug can be put on the strip from it.
-        await page.getByTestId('ide-tree-more-btn').click();
+        await page.getByTestId('ide-project-tree-more').click();
         const menu = page.locator('.ctx-menu');
         for (const name of ['Add folder to project…', 'Local history and deleted files…', 'Collapse all folders', 'Refresh']) {
           await expect(menu.getByRole('menuitem', { name })).toBeVisible();
@@ -98,7 +98,7 @@ test.describe('Desktop IDE — tool windows', () => {
     // I1-23: opening a file elsewhere (quick tab switch) reveals it in the tree.
     await openPolyglotFile(page, 'app', 'main.go');
     await openPolyglotFile(page, 'notes', 'roadmap.md');
-    await page.getByTestId('ide-tree-more-btn').click();
+    await page.getByTestId('ide-project-tree-more').click();
     await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Collapse all folders' }).click();
     await expect(treeRow(page, 'app/main.go')).toHaveCount(0);
     await page.locator('.ide-tab-btn', { hasText: 'main.go' }).first().click();
@@ -118,7 +118,7 @@ test.describe('Desktop IDE — tool windows', () => {
     expect(execFileSync('git', ['status', '--porcelain'], { cwd: seed.workspaceRoot, encoding: 'utf8' }).trim()).toBe('');
   });
 
-  test('Git diff has one layout control; at 1280 the agent leaves the editor ≥ 700 px', async ({ page }) => {
+  test('Git diff has one layout control; at 1280 the agent is a Detail pane beside explorer and editor', async ({ page }) => {
     test.setTimeout(90_000);
     appendFileSync(join(seed.workspaceRoot, 'notes', 'roadmap.md'), '\nA second change.\n');
     await bootPolyglotIde(page, seed, 'dark');
@@ -142,13 +142,15 @@ test.describe('Desktop IDE — tool windows', () => {
     await expect(page.getByTestId('ide-project-tree')).toBeVisible();
     await page.getByTestId('ide-toggle-agent').click();
     await expect(page.getByTestId('ide-agent-panel')).toBeVisible({ timeout: 15_000 });
-    await expect(page.getByTestId('ide-project-tree')).toHaveCount(0);
+    // The shared side rules (design.md §2): the explorer stays (the list pane clamps), the
+    // agent is inline while the editor keeps 480 px, else a sheet over it.
+    await expect(page.getByTestId('ide-project-tree')).toBeVisible();
     const editorW = (await page.locator('.ide-editor-area').first().boundingBox())?.width ?? 0;
-    expect(editorW).toBeGreaterThanOrEqual(700);
+    expect(editorW).toBeGreaterThanOrEqual(480);
     await shot(page, '04-agent-1280-dark.png');
-    // Closing the agent brings the explorer back.
     await page.getByTestId('ide-toggle-agent').click();
-    await expect(page.getByTestId('ide-project-tree')).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByTestId('ide-agent-panel')).toBeHidden();
+    await expect(page.getByTestId('ide-project-tree')).toBeVisible();
   });
 
   test('agent empty state, settings memory and an empty local history', async ({ page }) => {

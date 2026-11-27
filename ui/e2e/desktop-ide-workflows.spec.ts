@@ -606,7 +606,7 @@ test.describe('Desktop IDE Workflows — Polyglot Debug, Settings, Git, History 
     await expect(tree.locator('button.tree-item[title$="recoverable.txt"]')).toHaveCount(0, { timeout: 10_000 });
     expect(existsSync(recAbs)).toBe(false);
 
-    await page.getByTestId('ide-tree-more-btn').click();
+    await page.getByTestId('ide-project-tree-more').click();
     await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Local history and deleted files…' }).click();
     await expect(cmpModal).toBeVisible({ timeout: 10_000 });
     await page.getByTestId('ide-local-history-filter-deleted').click();

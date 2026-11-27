@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { expectIdePane, idePane } from './ide-panes';
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,9 +9,10 @@ import { apiCtx } from './seed';
 
 // IDE on phones & tablets.
 //
-// The IDE picks its layout from its OWN size (shell/ideLayout.svelte.ts):
-// under 700 px wide or 520 px tall it stacks one pane at a time (Files ·
-// Editor · Tools · Agent), otherwise it is the workbench. A phone on its side
+// The IDE stacks on a phone, or a phone on its side (viewport.navDrawer,
+// shell/ideLayout.svelte.ts): the explorer is the page and a file is pushed
+// with "‹ Files"; ⋯ › Terminal and tools fills the content; the agent is a
+// Detail pane (e2e/ide-panes.ts). Otherwise it is the workbench. A phone on its side
 // (~814×380 here) is short, so it stays stacked; the shell's "short" rule
 // turns the Navigator into a closable drawer and drops the status bar there.
 //
@@ -111,19 +113,8 @@ async function shot(page: Page, name: string): Promise<void> {
   writeFileSync(join(SHOTS, `${name}.json`), JSON.stringify(audit, null, 2));
 }
 
-async function showPane(page: Page, pane: Pane): Promise<void> {
-  const tab = page.getByTestId(`ide-stack-tab-${pane}`);
-  await tab.click();
-  await expect(tab).toHaveAttribute('aria-pressed', 'true');
-}
-
-async function expectPane(page: Page, pane: Pane): Promise<void> {
-  await expect(page.getByTestId(`ide-stack-tab-${pane}`)).toHaveAttribute('aria-pressed', 'true');
-  if (pane === 'files') await expect(page.getByTestId('ide-project-tree')).toBeVisible();
-  if (pane === 'editor') await expect(page.locator('.ide-editor-area .cm-editor').first()).toBeVisible();
-  if (pane === 'tools') await expect(page.getByTestId('ide-bottom-dock')).toBeVisible();
-  if (pane === 'agent') await expect(page.getByTestId('ide-agent-panel')).toBeVisible();
-}
+const showPane = (page: Page, pane: Pane): Promise<void> => idePane(page, pane);
+const expectPane = (page: Page, pane: Pane): Promise<void> => expectIdePane(page, pane);
 
 async function heightOf(page: Page, selector: string): Promise<number> {
   const box = await page.locator(selector).first().boundingBox();
@@ -133,7 +124,12 @@ async function heightOf(page: Page, selector: string): Promise<number> {
 /** One toolbar row: a single ⋯, every header control on screen, Run visible. */
 async function expectHeaderFits(page: Page, what: string): Promise<void> {
   const header = page.getByTestId('page-header').first();
-  await expect(header.getByRole('button', { name: 'More actions' }), `${what}: exactly one ⋯ in the header`).toHaveCount(1);
+  // The Files list page: its header is the list's (views · + · ⋯), no Run.
+  if (await page.getByTestId('ide-project-tree').isVisible() && !(await header.getByTestId('phone-back').isVisible())) {
+    expect(await header.getByRole('button', { name: 'More actions' }).filter({ visible: true }).count(), `${what}: at most one ⋯`).toBeLessThanOrEqual(1);
+    return;
+  }
+  await expect(header.getByRole('button', { name: 'More actions' }).filter({ visible: true }), `${what}: exactly one ⋯ in the header`).toHaveCount(1);
   await expectFullyInViewport(page, page.getByTestId('ide-more-btn'), `${what}: header ⋯`);
   await expectFullyInViewport(page, page.getByTestId('ide-run-btn').first(), `${what}: Run`);
 }
@@ -163,14 +159,10 @@ test.describe('IDE on phones and tablets', () => {
     const p = info.project.name;
     await bootIde(page);
     await expect(page.getByTestId('ide-page')).toHaveClass(/\bstack\b/);
-    await expect(page.getByTestId('ide-stack-switcher')).toBeVisible();
+    // No pane switcher: the explorer is pushed from (design.md §7).
+    await expect(page.getByTestId('ide-stack-switcher')).toHaveCount(0);
     await expectHeaderFits(page, p);
     await expectNoHorizontalOverflow(page);
-    // Finger-sized pane switcher.
-    for (const pane of PANES) {
-      const h = (await page.getByTestId(`ide-stack-tab-${pane}`).boundingBox())?.height ?? 0;
-      expect(h, `${p}: ${pane} tab height`).toBeGreaterThanOrEqual(36);
-    }
     const dockPrefBefore = await dockOpenPref(page);
 
     await openFileByTap(page);
@@ -270,7 +262,7 @@ test.describe('IDE on phones and tablets', () => {
       await expectPane(page, pane);
       await expect(page.locator('.shell-main > .sidebar')).toHaveCount(0);
       await expect(page.locator('.statusbar')).toHaveCount(0);
-      await expect(page.locator('.ide-agent-wrap')).toHaveCount(pane === 'agent' ? 1 : 0);
+      await expect(page.getByTestId('ide-agent')).toHaveCount(pane === 'agent' ? 1 : 0);
       await expect(page.getByRole('button', { name: 'Open navigator' })).toBeVisible();
       await expectHeaderFits(page, `landscape from ${pane}`);
       if (pane === 'editor') {
@@ -348,7 +340,7 @@ test('IDE dock on a phone: the "More tabs" chevron stays on the tab row when the
   // A folded Galaxy Z Fold's 280 px cover screen: the four dock tabs overflow it even on a row of their own.
   await page.setViewportSize({ width: 280, height: 653 });
   await bootIde(page);
-  await page.getByTestId('ide-stack-tab-tools').click();
+  await idePane(page, 'tools');
   const dock = page.getByTestId('ide-bottom-dock');
   const list = dock.getByTestId('ide-dock-tabs');
   await expect(list).toBeVisible({ timeout: 20_000 });

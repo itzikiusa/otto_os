@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { idePane } from './ide-panes';
 import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 import { bootPreviewIde, previewShot, treeFile } from './ide-preview-fixtures';
 
@@ -16,15 +17,12 @@ async function openReadmeByTap(page: Page): Promise<void> {
   const active = page.getByTestId('ide-tabs-strip').locator('.ide-tab.active');
   await page.waitForFunction(() => document.querySelector('[data-testid="ide-tabs-strip"] .ide-tab.active') || document.querySelector('[data-testid="ide-project-tree"] button.tree-item'));
   if (!((await active.count()) && (await active.textContent())?.includes('README.md'))) {
-    const files = page.getByTestId('ide-stack-tab-files');
-    await files.click();
+    await idePane(page, 'files');
     const file = treeFile(page, 'README.md');
     await expect(file).toBeVisible({ timeout: 15_000 });
     await file.click(); // one tap opens it
   }
-  const editorTab = page.getByTestId('ide-stack-tab-editor');
-  if ((await editorTab.getAttribute('aria-pressed')) !== 'true') await editorTab.click();
-  await expect(editorTab).toHaveAttribute('aria-pressed', 'true');
+  await idePane(page, 'editor');
   await expect(active).toContainText('README.md', { timeout: 15_000 });
 }
 

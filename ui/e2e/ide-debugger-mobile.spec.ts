@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { idePane } from './ide-panes';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -59,8 +60,7 @@ test.describe('IDE debugger on a phone', () => {
       const panel = page.getByTestId('ide-debugger-panel');
       await expect(panel.getByTestId('ide-debug-status')).toContainText('Paused', { timeout: 30_000 });
       // The re-attach opens the paused file in the editor pane; come back to Tools.
-      const tools = page.getByTestId('ide-stack-tab-tools');
-      if ((await tools.getAttribute('aria-pressed')) !== 'true') await tools.click();
+      await idePane(page, 'tools');
       await page.getByTestId('ide-tab-debug').click();
       await expect(panel).toBeVisible();
 
