@@ -399,6 +399,7 @@ enum ProgressItem {
     },
     Status(String),
     Post(String),
+    Flush(tokio::sync::oneshot::Sender<()>),
 }
 
 /// Cap on an attached step file — a runaway reply shouldn't turn into a
@@ -483,6 +484,19 @@ impl ProgressSink {
     fn enabled(&self) -> bool {
         self.tx.is_some()
     }
+    /// Wait until every item queued ahead of this call has been handled by the
+    /// pump (no-op when disabled or after the pump exits). Direct chat senders
+    /// like `channel_notify` flush here so their message never overtakes
+    /// `▶ *step* started` or earlier step uploads.
+    async fn flush(&self) {
+        let Some(tx) = &self.tx else {
+            return;
+        };
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        if tx.send(ProgressItem::Flush(done_tx)).is_ok() {
+            let _ = done_rx.await;
+        }
+    }
 }
 
 /// Spawn the progress pump: a single task that owns the receiver and the run's
@@ -542,6 +556,9 @@ fn spawn_progress_pump(
                     if thread.post(&redact(&text)).await {
                         run::chat::persist(&ctx, &run_id, &thread).await;
                     }
+                }
+                ProgressItem::Flush(done) => {
+                    let _ = done.send(());
                 }
             }
         }

@@ -918,3 +918,105 @@ fn live_style_keeps_one_status_message_and_captions_every_file() {
         "every step file captioned: {step_files:?}"
     );
 }
+
+/// Regression: `channel_notify` sends directly over the outbound adapter while
+/// `▶ *step* started` is queued on the background progress pump. Even when
+/// formatted progress posts are delayed (simulating chat API latency or CI
+/// scheduling lag), `channel_notify` must flush the pump first so its plain
+/// message never lands ahead of `▶ *step* started`.
+#[tokio::test]
+async fn channel_notify_waits_for_progress_pump() {
+    let h = harness().await;
+    h.rec.delay_formatted(Duration::from_millis(30));
+    let graph: WorkflowGraph = serde_json::from_value(json!({
+        "nodes": [
+            {
+                "id": "n1",
+                "kind": "manual_trigger",
+                "name": "Start 1",
+                "params": { "chat_updates": "per_step" }
+            },
+            {
+                "id": "n2",
+                "kind": "channel_notify",
+                "name": "Notify 9",
+                "params": { "message": "notify body" }
+            }
+        ],
+        "edges": [
+            { "id": "e1", "source": "n1", "target": "n2" }
+        ]
+    }))
+    .unwrap();
+    let repo = WorkflowsRepo::new(h.pool.clone());
+    let created = repo
+        .create(&WS.into(), "Notify Order", "", "", &graph, &"root".into())
+        .await
+        .unwrap();
+    let text = format!(
+        "Action: Workflow\nName: {}\nMsg: test\nWorking Directory: {}\nBranch: main\n",
+        created.name,
+        h.repo.display()
+    );
+    let msg = h.rec.inbound(USER, &text);
+    let bridge = otto_channels::Bridge::new_with_workflow_trigger(
+        h.ctx.manager.clone(),
+        h.ctx.workspaces.clone(),
+        otto_state::SettingsRepo::new(h.pool.clone()),
+        otto_channels::Mirror::new(h.ctx.manager.clone()),
+        "root".into(),
+        Some(Arc::new(WorkflowChatTriggerImpl { ctx: h.ctx.clone() })),
+        Default::default(),
+    );
+    let integ = h
+        .ctx
+        .integrations_store
+        .get(&WS.into(), Channel::Slack)
+        .await
+        .unwrap()
+        .unwrap();
+    let Admission::Work(permit) = bridge
+        .admission
+        .admit("slack", &msg.chat, msg.thread.as_deref())
+    else {
+        panic!("the bridge admits one message");
+    };
+    bridge.handle(&integ, h.rec.clone(), msg, permit).await;
+    let (run_id,): (String,) = sqlx::query_as("SELECT id FROM workflow_runs WHERE workflow_id = ?")
+        .bind(&created.id)
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let run = loop {
+        let run = repo.get_run(&run_id).await.unwrap();
+        if matches!(
+            run.status,
+            RunStatus::Success | RunStatus::Error | RunStatus::Canceled
+        ) && !otto_server::workflow_engine::driver_alive(&run_id)
+        {
+            break run;
+        }
+        assert!(Instant::now() < deadline, "run did not settle");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_eq!(run.status, RunStatus::Success, "{:?}", run.error);
+    let sends: Vec<(bool, String)> = h
+        .rec
+        .recorded()
+        .into_iter()
+        .filter_map(|r| match r {
+            Recorded::Send {
+                formatted, text, ..
+            } => Some((formatted, text)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sends.len(), 6, "unexpected sends: {sends:#?}");
+    assert!(sends[0].0 && sends[0].1.starts_with("🚀 Started workflow"));
+    assert!(sends[1].0 && sends[1].1.starts_with("🚀 *Notify Order* started"));
+    assert_eq!(sends[2], (true, "▶ *Notify 9* started".to_string()));
+    assert_eq!(sends[3], (false, "notify body".to_string()));
+    assert!(sends[4].0 && sends[4].1.starts_with("✅ *Notify 9* done"));
+    assert!(sends[5].0 && sends[5].1.starts_with("✅ *Notify Order* — success"));
+}
