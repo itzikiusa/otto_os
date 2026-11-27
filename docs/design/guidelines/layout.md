@@ -65,9 +65,11 @@ The parts of the shell:
   (`shell/PhoneNavDrawer.svelte`, `min(86vw, 320px)`): the Navigator with the
   bell, modules, workspaces, then Commands, Light / Full, Machine, Help,
   Settings and the account.
-- **Tablet.** Two rows (the shell bar with Back / Forward, title and Side
-  panel, then the page's header) and the **Rail** by default; expanding it to
-  the Navigator is the person's choice, remembered on the device.
+- **Tablet.** ONE header row too: the page's `PageHeader`, the Side panel
+  button last (no ☰ — the Navigator is a column). History arrows and the bell
+  stay in the Rail / Navigator. The **Rail** is the default; expanding it to
+  the Navigator is the person's choice, remembered on the device. Desktop,
+  tablet and phone all have one header row.
 
 ### 1.1 What lives where
 

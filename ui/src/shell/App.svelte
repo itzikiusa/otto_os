@@ -18,7 +18,6 @@
   import PhoneNavDrawer from './PhoneNavDrawer.svelte';
   import { DRAWER_LEFT_WIDTH } from '../lib/components/side/paneKeys';
   import Skeleton from '../lib/components/Skeleton.svelte';
-  import NavButtons from './NavButtons.svelte';
   import Icon from '../lib/components/Icon.svelte';
   import LoadState from '../lib/components/LoadState.svelte';
   import LazyMount from '../lib/components/LazyMount.svelte';
@@ -1021,10 +1020,11 @@
      (⌘+/−), which re-rasterizes everything (terminal included) and keeps
      coordinates correct. ui.zoom still drives native zoom inside Tauri. -->
 <div class="shell" class:vibrant class:embedded={isEmbedded} class:mobile={compactShell} class:tablet={compactShell && viewport.isTablet} class:short={compactShell && viewport.isShort} class:bnav={compactShell && viewport.isPhone} class:page-titled={pageTitled}>
-  <!-- Phone: ONE header row (design.md §7.1). A page's PageHeader IS the top bar there (☰ or
-       ‹ Back, title, actions, Side panel); a page without one keeps this bar with the same
-       contents. Tablet keeps two rows: this bar (Back / Forward, title, Side panel) and the page's. -->
-  {#if compactShell && !(viewport.navDrawer && pageTitled && !isTauri)}
+  <!-- Phone and tablet: ONE header row (design.md §7.1, decision 12). A page's PageHeader IS the
+       top bar (☰ or ‹ Back on a phone, title, actions, Side panel); a page without one keeps this
+       bar with the same contents. History arrows stay in the Rail / Navigator. A narrow Mac
+       window keeps the bar for its traffic lights. -->
+  {#if compactShell && !(pageTitled && !isTauri)}
   <header class="mtopbar" class:tauri-top={isTauri} data-tauri-drag-region use:windowDrag={isTauri}>
     {#if viewport.navDrawer}
       <button
@@ -1038,8 +1038,6 @@
         <Icon name="sidebar" size={20} />
       </button>
     {/if}
-    <!-- Back/Forward on a tablet (a phone has no history arrows: design.md §7.1). -->
-    {#if !viewport.navDrawer}<NavButtons />{/if}
     <!-- Agents: the pane header (‹ · word · title) names the session; the bar says where you are. -->
     <span class="mtop-title">{moduleTitle}</span>
     <span class="grow"></span>

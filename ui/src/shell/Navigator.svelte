@@ -425,9 +425,8 @@
     <img class="nav-logo" src="/otto-mark-64.png" alt="" width="20" height="20" />
     <span class="nav-title">Otto</span>
     <span class="grow"></span>
-    <!-- Phone / tablet: the top bar carries Back / Forward (NavButtons) — a
-         second pair here was duplicate chrome. -->
-    {#if viewport.isDesktop}
+    <!-- Desktop and tablet: Back / Forward here (the Rail has them too); a phone has none. -->
+    {#if !viewport.navDrawer}
     <button
       class="icon-btn nav-back"
       onclick={() => router.back()}

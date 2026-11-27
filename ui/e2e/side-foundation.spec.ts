@@ -12,7 +12,8 @@ import { expectNoHorizontalOverflow } from './helpers';
 //           BottomNav "Menu" tab opens the same drawer; Threads is a list page
 //           (push): list → thread → ‹ Threads → another thread; the Side panel
 //           is one tap away from the header.
-//   tablet  the Rail by default; Threads' list is a column beside the content.
+//   tablet  ONE header row too (the page's, Side panel last; arrows in the
+//           Rail), the Rail by default; Threads' list is a column beside the content.
 // Screenshots (OTTO_E2E_SHOTS) → side-foundation/.
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -148,7 +149,11 @@ test('tablet: the Rail by default; the Threads list is a column beside the conve
   await page.setViewportSize({ width: 820, height: 1180 });
   await page.goto('/#/home');
   await expect(page.locator('.msidebar.mfolded .rail')).toBeVisible({ timeout: 20_000 });
-  await expect(page.locator('.mtopbar'), 'a tablet keeps two rows').toBeVisible();
+  await expect(page.locator('.mtopbar'), 'a tablet has ONE header row too').toHaveCount(0);
+  const header = page.locator('.mcenter [data-testid="page-header"]').first();
+  await expect(header.getByRole('button', { name: 'Side panel', exact: true })).toBeVisible();
+  await expect(header.getByRole('button', { name: 'Open navigator' }), 'the Navigator is a column here').toHaveCount(0);
+  await expect(page.locator('.rail').getByRole('button', { name: 'Go back' }), 'history arrows stay in the Rail').toBeVisible();
   await shot(page, 'tablet-shell');
   await page.goto(`/#/threads/${ids[0]}`);
   const list = page.getByTestId('threads-sidebar');

@@ -243,8 +243,9 @@ test('iPad: the thread list is a column beside the conversation; Otto shows its 
   const tb = (await thread.boundingBox())!;
   expect(lb.x + lb.width, 'list left of the conversation').toBeLessThanOrEqual(tb.x + 2);
   expect(tb.width, 'the conversation keeps a usable width').toBeGreaterThanOrEqual(480);
-  // A tablet keeps two rows: the shell bar (Back / Forward, title, Side panel) and Threads' header.
-  await expect(page.locator('.mtopbar')).toHaveCount(1);
+  // ONE header row on a tablet too: Threads' header, the Side panel last.
+  await expect(page.locator('.mtopbar')).toHaveCount(0);
+  await expect(page.locator('[data-testid="threads-page"] > .page-header-bar').getByRole('button', { name: 'Side panel', exact: true })).toBeVisible();
   await expect(page.locator('.msidebar.mfolded .rail')).toBeVisible();
   await expect(page.getByTestId('threads-toggle-inspector')).toHaveCount(1);
   await expectNoHorizontalOverflow(page);

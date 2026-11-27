@@ -851,7 +851,7 @@ for (const f of files) {
 
 // ---------- ratcheted markup rules: icon-size / inline-retry / local-tablist ----------
 /** Phone touch chrome, where a 20 px icon is the documented exception (foundations §9). */
-const ICON_TOUCH_CHROME = new Set(['src/shell/BottomNav.svelte', 'src/shell/MobileActionBar.svelte', 'src/shell/App.svelte', 'src/lib/components/side/PhoneBack.svelte', 'src/lib/components/side/PageLead.svelte', 'src/lib/components/PageHeader.svelte']);
+const ICON_TOUCH_CHROME = new Set(['src/shell/BottomNav.svelte', 'src/shell/MobileActionBar.svelte', 'src/shell/App.svelte', 'src/lib/components/side/PhoneBack.svelte', 'src/lib/components/side/HeaderChrome.svelte', 'src/lib/components/PageHeader.svelte']);
 const ICON_SIZES = new Set([12, 13, 14, 16, 24, 25, 26]);
 for (const f of files) {
   if (!f.path.endsWith('.svelte')) continue;

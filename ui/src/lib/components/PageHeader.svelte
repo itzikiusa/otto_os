@@ -50,9 +50,8 @@
   import { uiControl } from '../stores/uiControl.svelte';
   import { ctxMenu, type MenuItem } from '../contextmenu.svelte';
   import { FitGate, StyleWriter, WidthCache, nodeSig } from './headerFit';
-  import PageLead from './side/PageLead.svelte';
+  import HeaderChrome from './side/HeaderChrome.svelte';
   import { pageNav } from './side/pageNav.svelte';
-  import { SIDE_PANEL } from '../rightTabs';
 
   interface Props {
     title: string;
@@ -124,17 +123,19 @@
   const hostsBar = $derived(!!rootEl && uiControl.barOwner === rootEl);
   // The page's own top header (not one inside a panel or the side pane).
   const pageTop = $derived(hostsBar && !isEmbedded && !isPopout);
-  // Phone: this header IS the one top row (design.md §7.1, §7.11) — ☰ on a
-  // list / top-level page or the list's ‹ Back on a page pushed from it
-  // (pageNav, from ListDetail), the page's title and actions, ⋯, and the
-  // Side panel last. No history arrows and no bell (the bell is at the top of
-  // the drawer). A narrow Mac window keeps the shell bar for its traffic lights.
+  // Phone and tablet: this header IS the one top row (design.md §7.1, §7.11,
+  // decision 12) — the page's title and actions, ⋯, and the Side panel last
+  // (HeaderChrome). A phone adds ☰ on a list / top-level page or the list's
+  // ‹ Back on a page pushed from it (pageNav, from ListDetail). History arrows
+  // and the bell stay in the Rail / Navigator / drawer. A narrow Mac window
+  // keeps the shell bar for its traffic lights.
   let inCenter = $state(false);
   $effect(() => {
     void viewport.mode;
     inCenter = !!rootEl?.closest('.mcenter');
   });
-  const phoneRow = $derived(pageTop && inCenter && viewport.navDrawer && !isTauri);
+  const compactRow = $derived(pageTop && inCenter && !isTauri);
+  const phoneRow = $derived(compactRow && viewport.navDrawer);
   const back = $derived(phoneRow ? pageNav.back : null);
   // …and while a list IS the page (ListDetail on a phone), the row is that
   // list's header: ☰ · name count · its one primary · its ⋯ · Side panel.
@@ -420,6 +421,7 @@
   bind:this={rootEl}
   class="page-header-bar chrome-material {klass}"
   class:tauri-pad={padTraffic}
+  class:compact-top={compactRow}
   class:phone-top={phoneRow}
   class:has-below={tabsBelow}
   data-tauri-drag-region
@@ -429,7 +431,7 @@
   <div class="ph-row">
     {#if (leading && !listPage) || phoneRow || showPane}
       <div class="ph-leading">
-        <PageLead {phoneRow} {back} show={showPane} />
+        <HeaderChrome part="lead" drawer={phoneRow} {back} show={showPane} />
         {#if !listPage}{@render leading?.()}{/if}
       </div>
     {/if}
@@ -462,7 +464,7 @@
         {#if listPage}
           {#if listPage.primary}
             {@const p = listPage.primary}
-            <button type="button" class="icon-btn ph-phone-btn" data-keep onclick={p.onclick} title={p.label} aria-label={p.label} data-testid={p.testid}>
+            <button type="button" class="icon-btn ph-list-primary" data-keep onclick={p.onclick} title={p.label} aria-label={p.label} data-testid={p.testid}>
               <Icon name={p.icon} size={20} />
             </button>
           {/if}
@@ -482,20 +484,7 @@
       {/if}
     </div>
     {#if hostsPane}<PaneControls />{:else if hostsPrimaryPane}<PaneControls pane="primary" />{/if}
-    {#if phoneRow}
-      <button
-        type="button"
-        class="icon-btn ph-phone-btn ph-side"
-        class:on={ui.rightOpenNow}
-        onclick={() => ui.toggleRight()}
-        title={SIDE_PANEL}
-        aria-label={SIDE_PANEL}
-        aria-expanded={ui.rightOpenNow}
-        data-testid="open-side-panel"
-      >
-        <Icon name="panel" size={20} />
-      </button>
-    {/if}
+    {#if compactRow}<HeaderChrome part="trail" />{/if}
   </div>
   {#if tabs && !listPage && tabsBelow}
     <div class="ph-tabs-below">{@render tabs()}</div>
@@ -720,9 +709,10 @@
       min-inline-size: 44px;
     }
   }
-  /* Phone: the ONE top row (design.md §7.1). It reaches up into the status
-     bar strip like the shell bar it replaces, in the same chrome colour. */
-  .page-header-bar.phone-top {
+  /* Phone / tablet: the ONE top row (design.md §7.1, decision 12). It reaches
+     up into the status bar strip like the shell bar it replaced, in the same
+     chrome colour. */
+  .page-header-bar.compact-top {
     background: var(--bg-sidebar);
     border-bottom-color: var(--border);
     margin-block-start: calc(-1 * var(--safe-top));
@@ -737,22 +727,18 @@
     flex: 1 1 auto;
     padding-inline-start: 4px;
   }
+  .ph-list-primary {
+    inline-size: 38px;
+    block-size: min(44px, var(--ph-h));
+  }
   .ph-views {
     display: flex;
     min-width: 0;
     overflow-x: auto;
     scrollbar-width: none;
   }
-  /* 44 px targets, never taller than the row (38 px on a phone on its side). */
-  .ph-row :global(:is(.ph-phone-btn, .phone-back)) {
-    flex: none;
+  .ph-row :global(.phone-back) {
     block-size: min(44px, var(--ph-h));
-  }
-  .ph-row :global(.ph-phone-btn) {
-    inline-size: 38px;
-  }
-  .ph-phone-btn.on {
-    color: var(--accent-text);
   }
   .ph-tabs-below {
     display: flex;

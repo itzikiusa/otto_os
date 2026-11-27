@@ -28,9 +28,10 @@ for (const id of PAGES) {
 // Directional icons mirror in ONE place (Icon.svelte's DIRECTIONAL set), so a
 // back chevron points toward inline-start in RTL — exactly once (a leftover
 // per-module `scaleX(-1)` override on a wrapper would cancel it out visually).
-// Non-directional glyphs stay put. The phone top bar always renders NavButtons.
+// Non-directional glyphs stay put. The iPad-landscape (desktop) shell's
+// Navigator / Rail always carries Back / Forward (a phone has no history arrows).
 test('rtl — directional icons mirror once, others do not', async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name !== 'iphone-portrait', 'phone top bar carries NavButtons');
+  test.skip(testInfo.project.name !== 'ipad-landscape', 'the Navigator / Rail carries Back / Forward');
   await openPage(page, 'home');
   await expect.poll(() => page.evaluate(() => document.documentElement.dir)).toBe('rtl');
   const transformOf = (sel: string) =>
@@ -50,6 +51,6 @@ test('rtl — directional icons mirror once, others do not', async ({ page }, te
     return flips;
   });
   expect(ancestorFlips).toBe(0);
-  // A non-directional glyph (the navigator toggle) is not mirrored.
-  expect(await transformOf('button[aria-label="Open navigator"] svg')).toBe('none');
+  // A non-directional glyph (the sidebar toggle) is not mirrored.
+  expect(await transformOf('button[aria-label$="sidebar"] svg')).toBe('none');
 });
