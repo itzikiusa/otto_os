@@ -16,7 +16,9 @@ use super::adapters::{
 use super::adapters_env::canonical_target_roots;
 use super::adapters_rust_sh::locate_lldb_python_bridge;
 use super::lldb_bridge::LLDB_PYTHON_DAP_BRIDGE;
-use super::{run_target_command, DapStartContext};
+use super::{
+    run_target_command, ssh_private_cache_dir, ssh_private_cache_dir_script, DapStartContext,
+};
 use crate::types::{
     IdeDebugOutputEntry, IdeRunnerKind, IdeStartDebugReq, IdeTargetKind, IdeTargetSpec,
 };
@@ -777,7 +779,7 @@ async fn zig_debug_out_bin(
     let remote_dir = if req.target.kind == IdeTargetKind::Local {
         None
     } else {
-        Some(ssh_private_zig_debug_dir(req, ctx, zig_cwd, env).await?)
+        Some(ssh_private_cache_dir(&req.target, ctx.ssh.as_ref(), "zig-debug", zig_cwd, env).await?)
     };
     zig_debug_cache_bin_path(data_dir, remote_dir.as_deref(), zig_cwd, source, is_test)
 }
@@ -1506,59 +1508,6 @@ __OTTO_ZIG_RUNNER__\n\
          printf 'RUNNER_PATH:%s\\n' \"$DEST\"\n",
         ssh_private_cache_dir_script("zig-build-runners")
     )
-}
-
-/// POSIX shell lines that create (or verify) `$HOME/.otto/cache/<sub>` as `DIR`: every
-/// level owned by the SSH user, `0700`, never a symlink — never the shared `/tmp` (SEC3-1).
-fn ssh_private_cache_dir_script(sub: &str) -> String {
-    format!(
-        "set -eu\n\
-         umask 077\n\
-         BASE=\"$HOME/.otto\"\n\
-         CACHE=\"$BASE/cache\"\n\
-         DIR=\"$CACHE/{sub}\"\n\
-         for d in \"$BASE\" \"$CACHE\" \"$DIR\"; do\n\
-           if [ -L \"$d\" ]; then echo 'otto: refusing symlink cache dir' >&2; exit 1; fi\n\
-           if [ ! -d \"$d\" ]; then mkdir -m 700 \"$d\"; fi\n\
-           if [ ! -O \"$d\" ]; then echo 'otto: cache dir not owned by SSH user' >&2; exit 1; fi\n\
-           chmod 700 \"$d\"\n\
-         done\n"
-    )
-}
-
-/// The SSH user's private `$HOME/.otto/cache/zig-debug` directory (absolute path) for
-/// debug executables, so another host user can't swap the binary LLDB launches (SEC3-1).
-async fn ssh_private_zig_debug_dir(
-    req: &IdeStartDebugReq,
-    ctx: &DapStartContext,
-    zig_cwd: &str,
-    env: &BTreeMap<String, String>,
-) -> Result<String> {
-    let script = format!(
-        "{}printf 'DIR:%s\\n' \"$DIR\"\n",
-        ssh_private_cache_dir_script("zig-debug")
-    );
-    let out = run_target_command(
-        &req.target,
-        ctx.ssh.as_ref(),
-        "sh",
-        &["-c".into(), script],
-        zig_cwd,
-        env,
-        crate::proc_group::BUILD_STEP_TIMEOUT,
-    )
-    .await?;
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .find_map(|l| l.trim().strip_prefix("DIR:"))
-        .filter(|d| out.status.success() && d.starts_with('/'))
-        .map(String::from)
-        .ok_or_else(|| {
-            Error::Upstream(format!(
-                "cannot prepare private Zig debug directory on the SSH host: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            ))
-        })
 }
 
 /// Prepare and cache the patched `runner-*.zig` inside the SSH user's private

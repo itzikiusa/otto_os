@@ -26,7 +26,7 @@ use super::adapters::{
 use super::adapters_env::canonical_target_roots;
 use super::adapters_rust_sh::locate_lldb_python_bridge;
 use super::lldb_bridge::LLDB_PYTHON_DAP_BRIDGE;
-use super::{run_target_command, DapStartContext};
+use super::{run_target_command, ssh_private_cache_dir, DapStartContext};
 use crate::environments::discovery_cpp::parse_cmake_executables;
 use crate::types::{
     IdeDebugOutputEntry, IdeRunnerKind, IdeStartDebugReq, IdeTargetKind, IdeTargetSpec,
@@ -814,7 +814,23 @@ async fn compile_cpp_debug_artifact(
 
     let is_c = src_file.to_ascii_lowercase().ends_with(".c");
     let compiler = resolve_cpp_compiler(req, ctx, cwd, env, is_c).await?;
-    let out_bin = cpp_debug_cache_bin_path(data_dir, req.target.kind, &project_dir, &src_file)?;
+    // SSH: the SSH user's private cache, never the shared `/tmp` (SEC3-1).
+    let remote_dir = if is_local {
+        None
+    } else {
+        Some(
+            ssh_private_cache_dir(
+                &req.target,
+                ctx.ssh.as_ref(),
+                "cpp-debug",
+                &project_dir,
+                env,
+            )
+            .await?,
+        )
+    };
+    let out_bin =
+        cpp_debug_cache_bin_path(data_dir, remote_dir.as_deref(), &project_dir, &src_file)?;
 
     let mut args = vec![
         "-g".to_string(),
@@ -910,7 +926,7 @@ async fn resolve_cpp_compiler(
 #[allow(clippy::disallowed_methods)]
 fn cpp_debug_cache_bin_path(
     data_dir: &Path,
-    target_kind: IdeTargetKind,
+    remote_dir: Option<&str>,
     cwd: &str,
     source: &str,
 ) -> Result<String> {
@@ -924,7 +940,9 @@ fn cpp_debug_cache_bin_path(
         .and_then(|s| s.to_str())
         .filter(|s| !s.is_empty())
         .unwrap_or("cpp_app");
-    if target_kind == IdeTargetKind::Local {
+    if let Some(dir) = remote_dir {
+        Ok(format!("{dir}/{}-{stem}-bin", &digest[..12]))
+    } else {
         let dir = data_dir
             .join("ide-build-cache")
             .join("cpp")
@@ -935,8 +953,6 @@ fn cpp_debug_cache_bin_path(
             .join(format!("{stem}-bin"))
             .to_string_lossy()
             .into_owned())
-    } else {
-        Ok(format!("/tmp/otto-cpp-dbg-{}-{stem}-bin", &digest[..10]))
     }
 }
 
@@ -1460,6 +1476,49 @@ int main(int argc, char** argv) {
         assert!(
             err.contains("build-only"),
             "BUG-13: expected build-only rejection for existing .uplugin, got: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ssh_cpp_debug_binary_is_never_in_shared_tmp() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // SEC3-1 (C++): another host user could pre-create or swap a predictable /tmp
+        // binary before LLDB launches it; it lives in the SSH user's 0700 cache instead.
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let target = crate::types::IdeTargetSpec::local(tmp.path().to_string_lossy().as_ref());
+        let env = std::collections::BTreeMap::from([(
+            "HOME".to_string(),
+            home.to_string_lossy().into_owned(),
+        )]);
+        let dir = super::ssh_private_cache_dir(
+            &target,
+            None,
+            "cpp-debug",
+            &tmp.path().to_string_lossy(),
+            &env,
+        )
+        .await
+        .unwrap();
+        let want = home.join(".otto/cache/cpp-debug");
+        assert_eq!(dir, want.to_string_lossy());
+        assert_eq!(
+            std::fs::metadata(&want).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        let bin = super::cpp_debug_cache_bin_path(
+            tmp.path(),
+            Some(&dir),
+            "/srv/proj",
+            "/srv/proj/main.cpp",
+        )
+        .unwrap();
+        assert!(
+            bin.starts_with(&format!("{dir}/")) && bin.ends_with("main-bin"),
+            "{bin}"
         );
     }
 }
