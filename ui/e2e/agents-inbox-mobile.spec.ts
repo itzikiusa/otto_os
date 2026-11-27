@@ -39,13 +39,27 @@ test('the list is the page; a tap pushes the terminal; Back returns', async ({ p
   expect(box!.height).toBeGreaterThanOrEqual(44);
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/agents-inbox-${info.project.name}.png` });
 
+  // ONE header row: the list's header is the page's (☰ · Sessions N · New · ⋯ · Side panel).
+  await expect(page.locator('.mtopbar')).toHaveCount(0);
+  const head = page.locator('.page-header-bar').first();
+  await expect(head.locator('.ph-title')).toHaveText('Sessions');
+  await expect(head.getByTestId('open-navigator')).toBeVisible();
+  await expect(head.getByTestId('agents-inbox-new')).toBeVisible();
+  await expect(head.getByTestId('open-side-panel')).toBeVisible();
+
   await row.tap();
   await expect(page.locator('.term-host').first()).toBeVisible({ timeout: 30_000 });
-  await expect(page.getByTestId('agents-inbox')).toHaveCount(0);
+  await expect(page.getByTestId('agents-inbox')).toBeHidden();
+  // …and the pushed session's pane header IS the row: ‹ Sessions · word · title · ⋯ · Side panel.
+  await expect(page.locator('.mtopbar')).toHaveCount(0);
+  await expect(page.getByTestId('agents-back-to-list')).toHaveText('Sessions');
+  await expect(page.locator('.pane-head [data-testid="open-side-panel"]')).toBeVisible();
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/agents-session-${info.project.name}.png` });
 
   await page.getByTestId('agents-back-to-list').tap();
   await expect(page.getByTestId('agents-inbox')).toBeVisible();
+  // Back keeps the session marked in the list.
+  await expect(row).toHaveAttribute('aria-current', 'true');
   await row.tap();
   await expect(page.locator('.term-host').first()).toBeVisible({ timeout: 30_000 });
   await page.goBack();
@@ -72,15 +86,20 @@ test('a terminal\'s ‹ steps back to the list; the system Back then leaves Agen
 test('the list and the app bar give 44 px targets', async ({ page }) => {
   await page.goto('/#/agents');
   await expect(page.getByTestId('agents-inbox')).toBeVisible({ timeout: 20_000 });
-  // …and the workspace switch and the usage meter (design review 2, H8).
+  // …and the workspace switch (design review 2, H8). With no usage numbers the
+  // footer says nothing and is not shown (decision 13); Usage is in the ⋯.
   const targets = [page.getByTestId('agents-select-toggle'), page.getByTestId('agents-sort-toggle'), page.getByTestId('agents-inbox-new'), page.getByTestId('agents-current-ws')];
-  await expect(page.getByTestId('threads-open-usage')).toBeVisible({ timeout: 15_000 });
-  targets.push(page.getByTestId('threads-open-usage'));
-  for (const b of await page.locator('.mtopbar button:visible').all()) targets.push(b);
+  await expect(page.getByTestId('threads-open-usage')).toHaveCount(0);
   for (const t of targets) {
     const box = (await t.boundingBox())!;
     expect(Math.round(box.height), await t.getAttribute('aria-label') ?? await t.innerText()).toBeGreaterThanOrEqual(44);
     expect(Math.round(box.width), await t.getAttribute('aria-label') ?? await t.innerText()).toBeGreaterThanOrEqual(44);
+  }
+  // The one header row's buttons: 44 tall, 38 wide (components sheet "Phone header row").
+  for (const b of await page.locator('.page-header-bar .ph-row button:visible').all()) {
+    const box = (await b.boundingBox())!;
+    expect(Math.round(box.height), (await b.getAttribute('aria-label')) ?? '').toBeGreaterThanOrEqual(44);
+    expect(Math.round(box.width), (await b.getAttribute('aria-label')) ?? '').toBeGreaterThanOrEqual(38);
   }
 });
 

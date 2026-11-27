@@ -20,6 +20,7 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { rightPanel } from '../../lib/stores/rightPanel.svelte';
+  import PanePhoneRow from './PanePhoneRow.svelte';
   import { asThreadSession, runtimeThreads } from '../threads/runtime/runtimeThreads.svelte'; // ui-guards: allow — the thread's own row (one store with Threads)
 
   interface Props {
@@ -58,6 +59,7 @@
     return () => void rightPanel.paneFolders.delete(id);
   });
   let paneW = $state(0);
+  let headEl = $state<HTMLElement | null>(null);
   const gripOn = $derived(showGrip && dragKey != null && !viewport.isPhone);
 
   // A thread that is gone leaves the canvas: deleted while shown, or a stored
@@ -110,10 +112,8 @@
   bind:clientWidth={paneW}
   onpointerdown={() => { if (!focused) onfocus(); }}
 >
-  <header class="tpane-head" class:touch={!viewport.isDesktop}>
-    {#if viewport.isPhone}
-      <button type="button" class="icon-btn tpane-back" aria-label="Back to sessions" title="Back to sessions" data-testid="agents-back-to-list" onclick={() => router.backTo('agents')}><Icon name="chevronLeft" size={16} /></button>
-    {/if}
+  <header class="tpane-head" class:touch={!viewport.isDesktop} bind:this={headEl}>
+    <PanePhoneRow part="lead" />
     <span class="tpane-word {word.tone}" data-testid="pane-status" data-state={st.key} title={st.hint ?? st.label}>{word.word}</span>
     <button
       type="button"
@@ -130,7 +130,9 @@
     <span class="grow"></span>
     <button type="button" class="icon-btn tpane-more" title="More…" aria-label="More… — {s?.title ?? 'thread'}" aria-haspopup="menu" onclick={openMenu}><Icon name="more" size={13} /></button>
     {#if showClose}<button type="button" class="icon-btn tpane-close" title="Close pane (the thread keeps running)" aria-label="Close pane" onclick={onclose}><Icon name="x" size={12} /></button>{/if}
+    <PanePhoneRow part="trail" head={headEl} />
   </header>
+  <PanePhoneRow part="below" head={headEl} />
   <div class="tpane-body">
     <LazyMount lazy={View} what="the conversation" variant="panel" props={{ sessionId: threadId, workspaceId: row?.workspace_id ?? '', compact: paneW > 0 && paneW < 520, hideEmbedBarWhenUnlinked: true, onstatus: (x: RuntimeEmbedStatus) => (embed = x) }} />
   </div>
@@ -167,14 +169,10 @@
   .tpane-head.touch {
     height: var(--mobile-topbar-h);
   }
-  /* Phone / tablet: Back and ⋯ are finger-sized (44 px), as on a terminal pane. */
-  .tpane-head.touch > :is(.tpane-back, .tpane-more) {
+  /* Phone / tablet: ⋯ is finger-sized (44 px), as on a terminal pane. */
+  .tpane-head.touch > .tpane-more {
     inline-size: 44px;
     block-size: 44px;
-  }
-  .tpane-back {
-    flex-shrink: 0;
-    margin-inline-start: calc(-1 * var(--sp-3));
   }
   /* As a terminal pane's word: a calm one gives way before the title (M7). */
   .tpane-word {

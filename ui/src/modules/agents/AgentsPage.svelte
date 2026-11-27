@@ -1,14 +1,16 @@
 <script lang="ts">
   // Agent Mode: the inbox (AgentsInbox — every session, needs you first) beside
-  // the canvas (tabbed split panes or the tiled grid). While it is open the
-  // app's navigator folds to its icon rail (foldNavWhileMounted), as on
-  // Threads. A phone shows the inbox as the page (`#/agents`) and a session
-  // full-height (`#/agents/<id>`, its pane header's ‹ returns to the list).
+  // the canvas (tabbed split panes or the tiled grid), as a ListDetail (design.md
+  // §2–§4): the list pane hides under its ⋯ or ⌘B ("Show Sessions" then sits at
+  // the start of the tab strip), and with nothing at all to list the canvas's
+  // EmptyState / first-run coach owns the page. While it is open the app's
+  // navigator folds to its icon rail (the person's preference, as on Threads).
+  // A phone pushes: `#/agents` is the list (its header is this page's one row),
+  // `#/agents/<id>` the session (its pane header carries ‹ Sessions).
   import { onMount, untrack } from 'svelte';
   import AgentsInbox from './AgentsInbox.svelte';
-  import PaneDivider from '../../lib/components/PaneDivider.svelte';
-  import Icon from '../../lib/components/Icon.svelte';
-  import { loadPaneWidth } from '../../lib/paneResizer';
+  import ListDetail from '../../lib/components/side/ListDetail.svelte';
+  import PageHeader from '../../lib/components/PageHeader.svelte';
   import { foldNavWhileMounted } from '../../lib/foldNavWhileMounted.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { activity } from '../../lib/stores/activity.svelte';
@@ -24,19 +26,46 @@
   import { ui } from '../../lib/stores/ui.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { pageKeyOf } from '../../shell/pages.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
+  import { rightPanel } from '../../lib/stores/rightPanel.svelte';
+
+  // The focused session's details card (Threads' card: folder, branch, changes
+  // → commit → push → PR, context, MCP, subagents) is this page's Side panel
+  // tab "Session" (design.md §3: a page registers its tab, as the Vault does).
+  // A chat pane's folder comes from its thread row (read by the card's chunk,
+  // loaded only when the tab is shown).
+  const SessionDetails = lazyComponent(() => import('./SessionDetailsCard.svelte'));
+  const SESSION_TAB = 'page:agents-session' as const;
+  const sessionDetails = $derived.by(() => {
+    if (router.module !== 'agents' && router.module !== '') return null; // kept alive under another page
+    const id = ws.activeSessionId;
+    if (id && ws.threadPanes.includes(id)) return { threadId: id, cwd: null };
+    const s = rightPanel.session ? ws.getSession(id) : null;
+    return s?.cwd ? { threadId: s.id, cwd: s.cwd } : null;
+  });
+  // Until the person picks a Side panel tab, it opens on this one here (A5).
+  onMount(() => {
+    if (lsGet('otto_right_tab') === null) ui.rightTab = SESSION_TAB;
+  });
+  $effect(() => {
+    const props = sessionDetails;
+    if (!props) return;
+    return untrack(() =>
+      rightPanel.register({
+        id: SESSION_TAB,
+        label: 'Session',
+        icon: 'terminal',
+        component: LazyMount,
+        props: { lazy: SessionDetails, what: 'the session details', variant: 'compact', props },
+      }),
+    );
+  });
 
   const tiled = $derived(ws.viewMode === 'tiled');
 
-  const INBOX_W_KEY = 'agents.inboxW';
-  let inboxW = $state(loadPaneWidth(INBOX_W_KEY, 272, 220, 420));
-  let inboxHidden = $state(lsGet('otto_agents_inbox_hidden') === '1');
-  function setInboxHidden(on: boolean): void {
-    inboxHidden = on;
-    lsSet('otto_agents_inbox_hidden', on ? '1' : '0');
-  }
-  const phone = $derived(viewport.isPhone);
-  /** Phone: `#/agents` is the list, `#/agents/<id>` the session. */
-  const phoneList = $derived(phone && !router.parts[1]);
+  /** Phone: `#/agents` is the list, `#/agents/<id>` the session (pushed). */
+  const sessionRouted = $derived(!!router.parts[1]);
   onMount(() =>
     foldNavWhileMounted({
       get: () => lsGet('otto_agents_fold_nav') !== '0',
@@ -76,11 +105,18 @@
   );
   let rt = $state<{ byId: Record<string, unknown> } | null>(null);
   let rtFailed = $state(false); // its chunk didn't load: no coach, but never a skeleton for good
+  // Nothing at all to list (no session here or elsewhere, none in History, no
+  // thread): no list pane — the canvas's EmptyState or the coach owns the page.
+  const ptyNone = $derived(
+    ws.agentSessions.length === 0 && ws.scratchSessions.length === 0 && ws.otherWsSessions.length === 0 &&
+      ws.telegramSessions.length === 0 && ws.slackSessions.length === 0 && !ws.hasArchived,
+  );
   $effect(() => {
-    if (coachMaybe && ptyKnown && !rt) void startThreadFeeds().then(([m]) => (rt = m.runtimeThreads), () => (rtFailed = true));
+    if ((coachMaybe || ptyNone) && ptyKnown && !rt) void startThreadFeeds().then(([m]) => (rt = m.runtimeThreads), () => (rtFailed = true));
   });
   const coachKnown = $derived(ptyKnown && ((threadFeeds.settled && !!rt) || rtFailed));
   const coachReady = $derived(coachMaybe && coachKnown && !!rt && Object.keys(rt.byId).length === 0);
+  const listEmpty = $derived(ptyNone && coachKnown && (rtFailed || Object.keys(rt?.byId ?? {}).length === 0));
   let coachLatched = $state(false);
   $effect(() => {
     if (coachReady) coachLatched = true;
@@ -120,23 +156,21 @@
   });
 </script>
 
-<div class="agents" class:phone>
-  {#if !phone && !inboxHidden}
-    <div class="agents-inbox" style:inline-size="{inboxW}px">
-      <AgentsInbox onhide={() => setInboxHidden(true)} />
-    </div>
-    <PaneDivider bind:width={inboxW} storageKey={INBOX_W_KEY} min={220} max={420} defaultWidth={272} label="Resize the session list" />
-  {:else if !phone}
-    <div class="agents-reveal">
-      <button type="button" class="icon-btn" aria-label="Show the session list" title="Show the session list" data-testid="agents-inbox-show" onclick={() => setInboxHidden(false)}>
-        <Icon name="sidebar" size={14} />
-      </button>
-    </div>
-  {/if}
-  {#if phoneList && !showCoach && !coachPending}
-    <!-- A fresh account gets the first-run coach here, not an empty list. -->
-    <div class="agents-body"><AgentsInbox /></div>
-  {:else}
+<div class="agents-page">
+{#if viewport.navDrawer && !sessionRouted}
+  <!-- Phone: the list page's one header row (☰ · Sessions N · New · ⋯ · Side panel). -->
+  <PageHeader title="Agents" />
+{/if}
+<div class="agents">
+  <ListDetail
+    module="agents"
+    name="Sessions"
+    open={sessionRouted}
+    onback={() => router.backTo('agents')}
+    empty={listEmpty}
+    legacy={{ w: 'agents.inboxW', hidden: () => (lsGet('otto_agents_inbox_hidden') === '1' ? true : null) }}
+  >
+    {#snippet list()}<AgentsInbox />{/snippet}
   <div class="agents-body">
   <!-- Scratch-session discovery can begin after the no-workspace coach has
        accepted a draft. Keep that form mounted; real workspace navigation
@@ -171,7 +205,7 @@
       <EmptyState
         icon="terminal"
         title="No open tabs"
-        body="Pick a session in the sidebar, switch to tiled view, or start a new one (⌘T)."
+        body="Pick a session in the list, switch to tiled view, or start a new one (⌘T)."
         variant="page"
         actionIcon="plus"
         actionLabel="New session…"
@@ -182,28 +216,21 @@
     <Splits />
   {/if}
   </div>
-  {/if}
+  </ListDetail>
+</div>
 </div>
 
 <style>
-  .agents {
+  .agents-page {
     height: 100%;
     min-height: 0;
     display: flex;
-  }
-  .agents.phone {
     flex-direction: column;
   }
-  .agents-inbox {
-    flex-shrink: 0;
+  .agents {
+    flex: 1;
     min-height: 0;
     display: flex;
-    flex-direction: column;
-  }
-  .agents-reveal {
-    flex-shrink: 0;
-    padding: var(--sp-2);
-    border-inline-end: 1px solid var(--separator);
   }
   .agents-body {
     flex: 1;
@@ -216,5 +243,4 @@
     flex: 1;
     min-height: 0;
   }
-
 </style>

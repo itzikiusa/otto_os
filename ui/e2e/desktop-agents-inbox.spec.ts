@@ -133,21 +133,23 @@ test('select mode: Tile lays the checked sessions out side by side', async ({ pa
   await page.getByTestId('agents-select-toggle').click();
   await page.getByLabel('Select Pirlo').check();
   await page.getByLabel('Select Seedorf').check();
-  // The count never runs under Tile (design review 2, M3), and is said once.
+  // The selection bar replaces the pane header: count · Archive · ⋯ (Tile, Delete…) · Done.
   const tools = page.getByTestId('agents-select-tools');
   const count = (await tools.locator('.ai-count span').boundingBox())!;
-  const tile = (await page.getByTestId('agents-tile-selected').boundingBox())!;
-  expect(count.x + count.width).toBeLessThanOrEqual(tile.x + 0.5);
+  const archive = (await page.getByTestId('agents-archive-selected').boundingBox())!;
+  expect(count.x + count.width).toBeLessThanOrEqual(archive.x + 0.5);
   await expect(tools.locator('.ai-count span')).toHaveText('2');
-  await expect(page.getByTestId('agents-delete-selected')).toHaveText('Delete');
+  await expect(page.locator('[data-testid="agents-inbox"] .side-pane-head.selecting')).toBeVisible();
   if (SHOTS) for (const s of ['light', 'dark'] as const) { await scheme(page, s); await page.screenshot({ path: `${SHOTS}/agents-select-mode-1440-${s}.png`, animations: 'disabled' }); }
-  await page.getByTestId('agents-tile-selected').click();
+  await page.getByTestId('agents-select-more').click();
+  await expect(page.getByRole('menuitem', { name: 'Delete…' })).toBeEnabled();
+  await page.getByRole('menuitem', { name: 'Tile' }).click();
   await expect(page.locator(`[data-tile-id="${ids.Pirlo}"]`)).toBeVisible({ timeout: 15_000 });
   await expect(page.locator(`[data-tile-id="${ids.Seedorf}"]`)).toBeVisible();
   await expect(page.getByTestId('agents-select-tools')).toHaveCount(0);
 });
 
-test('a row opens its session; rename from the row menu; hide and show the list', async ({ page }) => {
+test('a row opens its session; rename from the row menu; hide and show the list; arrow keys walk it', async ({ page }) => {
   await page.goto('/#/agents');
   await expect(rows(page)).toHaveCount(3, { timeout: 20_000 });
   await page.locator(`[data-testid="agents-row-${ids.Seedorf}"] .tr-main`).click();
@@ -160,10 +162,37 @@ test('a row opens its session; rename from the row menu; hide and show the list'
   await page.getByRole('button', { name: 'Rename' }).click();
   await expect(page.locator(`[data-testid="agents-row-${ids.Pirlo}"]`)).toContainText('Pirlo il Maestro');
 
-  await page.getByTestId('agents-inbox-hide').click();
-  await expect(page.getByTestId('agents-inbox')).toHaveCount(0);
-  await page.getByTestId('agents-inbox-show').click();
+  // The pane header: "Sessions N · New session · ⋯"; ⋯ starts with Hide Sessions ⌘B.
+  const inbox = page.getByTestId('agents-inbox');
+  await expect(inbox.locator('.side-pane-head .sph-title')).toHaveText('Sessions');
+  await expect(inbox.locator('.side-pane-head .sph-count')).toHaveText('3');
+  await page.getByTestId('agents-inbox-more').click();
+  await page.getByRole('menuitem', { name: 'Hide Sessions' }).click();
+  await expect(inbox).toBeHidden();
+  await page.getByTestId('show-list-pane').click();
+  await expect(inbox).toBeVisible();
+  // ⌘B hides and shows it; the choice survives a reload.
+  await page.locator(`[data-testid="agents-row-${ids.Pirlo}"] .tr-main`).focus();
+  await page.keyboard.press('Meta+b');
+  await expect(inbox).toBeHidden();
+  await page.reload();
+  await expect(page.getByTestId('show-list-pane')).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByTestId('agents-inbox')).toBeHidden();
+  // (A focused terminal keeps ⌘B for itself: lib/keys.ts.)
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  await page.keyboard.press('Meta+b');
   await expect(page.getByTestId('agents-inbox')).toBeVisible();
+  // ↑ ↓ Home End walk the rows (the shared listNav), Enter opens.
+  const first = rows(page).first().locator('.tr-main');
+  await first.focus();
+  await page.keyboard.press('ArrowDown');
+  await expect(rows(page).nth(1).locator('.tr-main')).toBeFocused();
+  await page.keyboard.press('End');
+  await expect(rows(page).last().locator('.tr-main')).toBeFocused();
+  await page.keyboard.press('Home');
+  await expect(first).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(first).toHaveAttribute('aria-current', 'true');
 });
 
 test('the rarely used dialogs load on demand from the pane ⋯', async ({ page }) => {
@@ -304,7 +333,7 @@ test('New session is a stage: tiles, Terminal | Chat, a first message, Start; th
   await expect(page.locator('[data-testid^="agents-row-"]', { hasText: 'Kaladze' })).toBeVisible({ timeout: 15_000 });
 });
 
-test('the right panel opens on the session details card; nothing loads while it is closed (A5)', async ({ page }) => {
+test('the Side panel opens on the page’s Session tab (the details card); nothing loads while it is closed (A5)', async ({ page }) => {
   const cardChunks: string[] = [];
   page.on('request', (r) => { if (r.url().includes('ThreadDetailsCard')) cardChunks.push(r.url()); });
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -313,6 +342,8 @@ test('the right panel opens on the session details card; nothing loads while it 
   await page.waitForLoadState('networkidle');
   expect(cardChunks).toEqual([]);
   await page.keyboard.press('Meta+j');
+  // A page tab the Agents page registers (as the Vault does), not a card the shell hard-wires.
+  await expect(page.locator('#side-panel-content')).toHaveAttribute('aria-label', /^Session ·/);
   const card = page.getByTestId('agents-details-card');
   await expect(card).toBeVisible({ timeout: 15_000 });
   await expect(card).toContainText('tmp');

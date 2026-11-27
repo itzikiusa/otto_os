@@ -27,7 +27,8 @@ test('six tiled streaming terminals: frame delay on the Agents page', async ({ p
   await page.goto('/#/agents');
   await page.getByTestId('agents-select-toggle').click();
   for (let i = 0; i < 6; i++) await page.getByLabel(`Select Stream ${i}`).check();
-  await page.getByTestId('agents-tile-selected').click();
+  await page.getByTestId('agents-select-more').click();
+  await page.getByRole('menuitem', { name: 'Tile' }).click();
   await expect(page.locator('[data-tile-id] .term-host')).toHaveCount(6, { timeout: 30_000 });
   for (const id of ids) {
     await ctx.post(`${base}/api/v1/sessions/${id}/input`, { data: { text: 'for i in $(seq 1 4000); do echo "line $i $(date +%s%N) lorem ipsum dolor sit amet consectetur"; sleep 0.003; done', submit: true } });
@@ -86,7 +87,8 @@ test('a streaming chat pane beside six streaming terminals: frame delay', async 
   await page.goto('/#/agents');
   await page.getByTestId('agents-select-toggle').click();
   for (let i = 0; i < 6; i++) await page.getByLabel(`Select Stream ${i}`).check();
-  await page.getByTestId('agents-tile-selected').click();
+  await page.getByTestId('agents-select-more').click();
+  await page.getByRole('menuitem', { name: 'Tile' }).click();
   await expect(page.locator('[data-tile-id] .term-host')).toHaveCount(6, { timeout: 30_000 });
   // A plain click keeps the grid: the thread tiles beside the terminals.
   await page.getByTestId(`agents-row-${threadId}`).click();

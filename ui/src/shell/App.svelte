@@ -966,8 +966,8 @@
       <button class="pb-dismiss" onclick={() => serviceHealth.dismiss()} aria-label="Dismiss notice" title="Dismiss notice"><Icon name="x" size={12} /></button>
     </div>
   {/if}
-  <!-- A phone shows one session at a time (#/agents is the list): no strip. -->
-  {#if moduleName === 'agents' && !viewport.isPhone}
+  <!-- A phone (or one on its side) shows one session at a time (#/agents is the list): no strip. -->
+  {#if moduleName === 'agents' && !viewport.navDrawer}
     <TabBar />
   {/if}
   {#if workspaceLoadError}

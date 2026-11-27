@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { rowMenu } from '../../lib/rowMenu';
+  import { rowMenu } from '../../lib/rowMenu'; import PanePhoneRow from './PanePhoneRow.svelte';
   import { focusOnMount } from '../../lib/focusOnMount';
   import { toastError } from '../../lib/toastError';
   // One pane: a compact, width-adaptive session header (status + title first;
@@ -188,7 +188,7 @@
   // the pane with CSS container queries on `.pane` (see the style block); this
   // script-side twin of the same breakpoints only decides which of the controls
   // the CSS hid come back as rows in the ⋯ menu, so nothing is unreachable.
-  let headW = $state(0);
+  let headW = $state(0), headEl = $state<HTMLElement | null>(null);
   const tier = $derived<PaneTier>(paneTier(headW));
   /** Zoom, ✕ and the details chip are hidden inline (CSS `minimal`). */
   const foldedMinimal = $derived(tierAtMost(tier, 'minimal'));
@@ -606,7 +606,7 @@
        pane` rules below (full ≥720 · compact 420–719 · minimal 200–419 ·
        micro <200). The word, the title and ⋯ never go; everything else is in
        ⋯. `data-tier` mirrors the script's twin of the breakpoints for tests. -->
-  <header style:height={!viewport.isDesktop ? 'var(--mobile-topbar-h)' : undefined} class="pane-head" class:touch={!viewport.isDesktop} class:grip-on={gripOn} data-tier={tier} bind:clientWidth={headW}>
+  <header style:height={!viewport.isDesktop ? 'var(--mobile-topbar-h)' : undefined} class="pane-head" class:touch={!viewport.isDesktop} class:grip-on={gripOn} data-tier={tier} bind:clientWidth={headW} bind:this={headEl}>
     {#if gripOn}
       <!-- C3a: drag this pane onto another to swap (centre) or move (edge). It
            sits in the header's leading padding and only shows on hover/focus;
@@ -625,10 +625,7 @@
         <Icon name="grip" size={12} />
       </button>
     {/if}
-    {#if viewport.isPhone}
-      <!-- Phone: the session is pushed over the list (#/agents); Back returns. -->
-      <button type="button" class="icon-btn pane-back" aria-label="Back to sessions" title="Back to sessions" data-testid="agents-back-to-list" onclick={() => router.backTo('agents')}><Icon name="chevronLeft" size={16} /></button>
-    {/if}
+    <PanePhoneRow part="lead" /><!-- phone: ‹ Sessions (the session is pushed over #/agents) -->
     <span class="pane-word {word.tone}" data-testid="pane-status" data-state={paneState.key} title={suspendNote ?? paneState.hint ?? paneState.label}>{word.word}</span>
     {#if renaming}
       <input dir="auto"
@@ -731,7 +728,9 @@
       aria-haspopup="menu"
     ><Icon name="more" size={13} /></button>
     {#if showClose}<button class="icon-btn pane-close" onclick={onclosepane} title={closeTitle} aria-label={closeTitle}><Icon name="x" size={12} /></button>{/if}
+    <PanePhoneRow part="trail" head={headEl} />
   </header>
+  <PanePhoneRow part="below" head={headEl} />
   <!-- Network strip only with a profile (or asked via ⋯ → Network profile…). -->
   {#if session && auth.can('connections', 'view') && (networkProfileId || netOpen)}
     {#key sessionId}<SessionNetworkStatus defaultOpen={netOpen && !networkProfileId} {sessionId} workspaceId={session.workspace_id} selectedProfileId={typeof session.meta?.network_profile_id === 'string' ? session.meta.network_profile_id : ''} editable={!readOnly} manageEditable={!readOnly && auth.can('connections', 'edit')} onchange={async (id) => { await ws.updateSessionMeta(sessionId, { network_profile_id: id || null }); }} />{/key}
@@ -986,16 +985,12 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  /* Terminal | Chat. */
-  .pane-back {
-    flex-shrink: 0;
-    margin-inline-start: calc(-1 * var(--sp-3));
-  }
-  /* Phone / tablet header: Back and ⋯ are finger-sized (44 px). */
-  .pane-head.touch > :is(.pane-back, .pane-more) {
+  /* Phone / tablet header: ⋯ is finger-sized (44 px). */
+  .pane-head.touch > .pane-more {
     inline-size: 44px;
     block-size: 44px;
   }
+  /* Terminal | Chat. */
   .pane-view {
     flex-shrink: 0;
     display: inline-flex;

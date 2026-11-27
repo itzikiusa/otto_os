@@ -44,7 +44,10 @@ test('a thread row pushes the full-height chat; Back returns to the list', async
   await row.tap();
   const pane = page.getByTestId(`thread-pane-${threadId}`);
   await expect(pane).toBeVisible({ timeout: 30_000 });
-  await expect(page.getByTestId('agents-inbox')).toHaveCount(0);
+  await expect(page.getByTestId('agents-inbox')).toBeHidden();
+  // One header row: the chat pane's header (‹ Sessions … Side panel), no shell bar.
+  await expect(page.locator('.mtopbar')).toHaveCount(0);
+  await expect(pane.getByTestId('open-side-panel')).toBeVisible();
   const thread = pane.getByTestId(`runtime-thread-${threadId}`);
   await expect(thread).toBeVisible({ timeout: 30_000 });
   await expect(thread.getByTestId('runtime-composer')).toBeVisible();

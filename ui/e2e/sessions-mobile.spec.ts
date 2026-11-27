@@ -416,8 +416,10 @@ test('phone: navigator + activity drawers open within the viewport', async ({ pa
   await openSession(page, shellA);
   test.skip(!(await liveIsPhone(page)), 'phone-mode only (≤640px live viewport)');
 
-  // Open the left navigator drawer from the top bar.
-  await page.locator('.mtop-btn[aria-label="Open navigator"]').click();
+  // A session pushed from the list has ONE header row (its pane header: ‹ Sessions
+  // … Side panel) and no shell bar; the navigator drawer is BottomNav's Menu.
+  await expect(page.locator('.mtopbar')).toHaveCount(0);
+  await page.getByTestId('bottomnav-menu').click();
   const leftDrawer = page.locator('.drawer[aria-label="Navigator"]').first();
   await expect(leftDrawer).toBeVisible();
   await expectOnScreen(page, await settledBox(leftDrawer), 'navigator drawer');
@@ -427,8 +429,9 @@ test('phone: navigator + activity drawers open within the viewport', async ({ pa
   await expect(leftDrawer).toBeHidden();
 
   // Open the right activity drawer (the Side panel toggle shows on every page).
-  const rightToggle = page.locator('.mtop-btn[aria-label="Side panel"]');
-  if (await rightToggle.count()) {
+  const rightToggle = page.locator('.pane-head [data-testid="open-side-panel"]');
+  await expect(rightToggle).toBeVisible();
+  {
     await rightToggle.click();
     const rightDrawer = page.locator('.drawer[aria-label="Side panel"]').first();
     await expect(rightDrawer).toBeVisible();

@@ -74,7 +74,8 @@ test('select mode: bulk delete closes every deleted session’s tab', async ({ p
   await page.getByTestId('agents-select-toggle').click();
   await page.getByLabel('Select Baggio').check();
   await page.getByLabel('Select Zola').check();
-  await page.getByTestId('agents-delete-selected').click();
+  await page.getByTestId('agents-select-more').click();
+  await page.getByRole('menuitem', { name: 'Delete…' }).click();
   await page.getByRole('dialog').getByRole('button', { name: 'Delete', exact: true }).click();
   await expect(baggio).toBeHidden({ timeout: 10_000 });
   await expect(zola).toBeHidden({ timeout: 10_000 });

@@ -141,7 +141,9 @@ test('archived list: multi-select deletes the checked sessions in one confirm', 
   await page.getByLabel('Select Nesta').check();
   // The count sits beside select-all (a bare number); Delete carries no "(N)".
   await expect(page.getByTestId('agents-select-tools').locator('.ai-count')).toHaveText('2');
-  const del = page.getByTestId('agents-delete-selected');
+  // Delete is under the selection bar's ⋯ (Archive is its one button).
+  await page.getByTestId('agents-select-more').click();
+  const del = page.getByRole('menuitem', { name: 'Delete…' });
   await expect(del).toBeEnabled();
   await del.click();
   // The shared bulk-close confirm (shell/closeConfirm.ts, ux-design-3-03)
@@ -216,7 +218,8 @@ test('agents list: select mode archives / deletes the checked sessions in bulk',
 
   await page.getByTestId('agents-select-toggle').click();
   await page.getByLabel('Select Maldini').check();
-  await page.getByTestId('agents-delete-selected').click();
+  await page.getByTestId('agents-select-more').click();
+  await page.getByRole('menuitem', { name: 'Delete…' }).click();
   await expect(page.locator('.cf-msg')).toContainText('Delete 1 session');
   await page.getByRole('dialog').getByRole('button', { name: 'Delete', exact: true }).click();
   await expect.poll(() => exists(idByTitle.Maldini), { timeout: 15_000 }).toBe(false);
@@ -242,16 +245,18 @@ test('archived list: bulk toolbar stays inside the sidebar with many long titles
   const count = page.getByTestId('agents-select-tools').locator('.ai-count');
   await expect(count).toHaveText('30');
   await expectFullyInViewport(page, count, 'selected count');
-  const del = page.getByTestId('agents-delete-selected');
-  await expect(del).toBeEnabled();
-  await expectFullyInViewport(page, del, 'Delete selected button');
+  const more = page.getByTestId('agents-select-more');
+  await expectFullyInViewport(page, more, 'selection ⋯ button');
+  await more.click();
+  await expect(page.getByRole('menuitem', { name: 'Delete…' })).toBeEnabled();
+  await page.keyboard.press('Escape');
   // No horizontal overflow inside the session list.
   const nav = page.getByTestId('agents-inbox');
   const overflow = await nav.evaluate((el) => {
     const right = el.getBoundingClientRect().right;
     const bad: string[] = [];
     // The rail's own resize handle deliberately straddles the edge — skip it.
-    el.querySelectorAll('.ai-body *').forEach((n) => {
+    el.querySelectorAll('.side-pane-body *').forEach((n) => {
       const r = n.getBoundingClientRect();
       if (r.width > 0 && r.right > right + 1) bad.push(`${n.tagName.toLowerCase()}.${(n as HTMLElement).className.toString().split(' ').join('.')} right=${Math.round(r.right)} nav=${Math.round(right)}`);
     });
