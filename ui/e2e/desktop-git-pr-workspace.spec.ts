@@ -35,9 +35,9 @@ test('a PR deep link opens in the workspace with header, stats and timeline', as
   await expect(page.locator('.prd-title')).toContainText('VIP program');
   // The route is handed back to the tab store; the PR stays open as a tab.
   await expect.poll(() => page.evaluate(() => location.hash)).toBe('#/git');
-  // One PR open: no tab strip; its header starts with the list toggle.
+  // One PR open: no tab strip; its header starts with the Detail pane's toggles.
   await expect(page.locator('.prw-tabs')).toHaveCount(0);
-  await expect(page.locator('.prd-head').getByRole('button', { name: 'Hide the list' })).toBeVisible();
+  await expect(page.locator('.prd-head').getByTestId('pr-details-toggle')).toBeVisible();
   await expect(page.locator('.prd-stats')).toContainText('23 files');
   // One primary that follows state (the mock's CI fails), one secondary, ⋯ — Merge waits in ⋯.
   await expect(page.getByTestId('pr-primary')).toHaveText('Fix checks');
@@ -90,8 +90,9 @@ test('Code tab: hide tests, viewed marks persist, tree, one commit', async ({ pa
   await expect.poll(async () => Math.round((await tb.boundingBox())!.y - paneTop)).toBe(0);
   await expect(tb.getByRole('textbox', { name: /search/i })).toBeInViewport();
 
-  await page.getByRole('button', { name: 'Show file tree' }).click();
-  await expect(page.locator('.diff-nav .nav-file').first()).toBeVisible();
+  // The PR's one file tree is the Files panel under the list (the diff has no rail of its own).
+  await expect(page.getByRole('button', { name: 'Show file tree' })).toHaveCount(0);
+  await expect(page.getByRole('region', { name: 'Files in pull request #51' }).locator('.nav-file').first()).toBeVisible();
 
   // One commit: the picker swaps the diff to that commit's files.
   await page.locator('.prd-commit-pick').first().click();
@@ -233,26 +234,39 @@ test('PR header never overlaps: repo · #n · state stay whole as the window nar
   }
 });
 
-test('reading column: the details card beside it from 1200 px of content, under it below (1440×900, list open and hidden)', async ({ page }) => {
+test('the details card is the Detail pane beside the reading column; the list hides under ⋯ and ⌘B (1440×900)', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('/#/git/rep_otto/pr/51');
   await expect(page.locator('.prd-title')).toBeVisible({ timeout: 15_000 });
-  const layout = () => page.evaluate(() => {
-    const r = (s: string) => document.querySelector(s)!.getBoundingClientRect();
-    return { content: (document.querySelector('.prd-body') as HTMLElement).clientWidth, main: r('.prd-main'), card: r('[data-testid="pr-details-card"]') };
-  });
-  // List open: under 1200 px of content, so the card drops under the column.
-  let l = await layout();
-  expect(l.content).toBeLessThan(1200);
-  expect(l.main.width).toBeLessThanOrEqual(761);
-  expect(l.card.top).toBeGreaterThanOrEqual(l.main.bottom);
-  // List hidden: room for both, the card floats beside the reading column.
-  await page.locator('.prd-head').getByRole('button', { name: 'Hide the list' }).click();
-  await expect.poll(async () => (await layout()).content).toBeGreaterThanOrEqual(1200);
-  l = await layout();
-  expect(l.main.width).toBeLessThanOrEqual(761);
-  expect(l.card.left).toBeGreaterThanOrEqual(l.main.right);
-  await page.locator('.prd-head').getByRole('button', { name: 'Show the list' }).click();
+  const pane = page.getByTestId('pr-pane');
+  const card = pane.getByTestId('pr-details-card');
+  // Inline beside the reading column (no sheet): the card is right of the text.
+  await expect(card).toBeVisible();
+  await expect(page.getByRole('dialog', { name: 'Pull request details' })).toHaveCount(0);
+  const main = (await page.locator('.prd-main').boundingBox())!;
+  expect(main.width).toBeLessThanOrEqual(761);
+  expect((await card.boundingBox())!.x).toBeGreaterThanOrEqual(main.x + main.width);
+  // The list pane: name · count · + · ⋯ — ⋯ starts with Hide; the page header then shows it back.
+  const list = page.getByRole('complementary', { name: 'Pull requests' });
+  await expect(list.locator('.sph-title')).toHaveText('Pull requests');
+  await list.getByTestId('pr-list-more').click();
+  await page.locator('.ctx-menu').getByText('Hide Pull requests').click();
+  await expect(page.locator('.pr-search')).toBeHidden();
+  await page.getByRole('button', { name: 'Show Pull requests' }).click();
+  await expect(page.locator('.pr-search')).toBeVisible();
+  await page.locator('.prd-title').click();
+  await page.keyboard.press('Meta+b');
+  await expect(page.locator('.pr-search')).toBeHidden();
+  await page.keyboard.press('Meta+b');
+  await expect(page.locator('.pr-search')).toBeVisible();
+  // Close the pane: it stays closed across a reload; ⓘ brings it back.
+  await pane.getByRole('button', { name: 'Close Pull request details' }).click();
+  await expect(card).toHaveCount(0);
+  await page.reload();
+  await expect(page.locator('.prd-title')).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByTestId('pr-details-card')).toHaveCount(0);
+  await page.locator('.prd-head').getByTestId('pr-details-toggle').click();
+  await expect(page.getByTestId('pr-details-card')).toBeVisible();
   await expectNoHorizontalOverflow(page);
 });
 
@@ -269,10 +283,10 @@ test('select several PRs in the list and open them together as tabs', async ({ p
   // Close the front tab: the neighbour comes forward.
   await page.getByRole('button', { name: 'Close #50' }).click();
   await expect(page.locator('.prw-tab')).toHaveCount(2);
-  // Down to one: the strip goes; the list toggle moves into the PR header.
+  // Down to one: the strip goes; the pane toggles move into the PR header.
   await page.getByRole('button', { name: /^Close #/ }).first().click();
   await expect(page.locator('.prw-tabs')).toHaveCount(0);
-  await expect(page.locator('.prd-head').getByRole('button', { name: 'Hide the list' })).toBeVisible();
+  await expect(page.locator('.prd-head').getByTestId('pr-details-toggle')).toBeVisible();
   // Search qualifiers narrow the list.
   await page.locator('.pr-search').fill('label:bug');
   await expect(page.locator('.pr-row')).toHaveCount(1);

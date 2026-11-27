@@ -135,20 +135,6 @@ test('prCommentPostHint names PR destination and visibility for post, reply, and
   );
 });
 
-// ── 6. DiffNav RTL drag inversion ────────────────────────────────────────────
-
-test('computeSidebarResizeWidth flips horizontal drag delta in RTL and clamps bounds', () => {
-  // LTR: dragging right (+40px) widens sidebar.
-  assert.equal(helpers.computeSidebarResizeWidth(240, 200, 240, false), 280);
-  // RTL: dragging right (+40px) narrows sidebar; dragging left (-40px) widens it.
-  assert.equal(helpers.computeSidebarResizeWidth(240, 200, 240, true), 200);
-  assert.equal(helpers.computeSidebarResizeWidth(240, 200, 160, true), 280);
-  // Clamping at min (180) and max (520).
-  assert.equal(helpers.computeSidebarResizeWidth(240, 200, 0, false), 180);
-  assert.equal(helpers.computeSidebarResizeWidth(240, 200, 900, false), 520);
-  assert.equal(helpers.computeSidebarResizeWidth(240, 900, 0, true), 520);
-});
-
 // ── 7. WipPanel commit draft Stop / cancelDraft ──────────────────────────────
 
 test('commitComposer.cancelDraft aborts signal, clears in-flight entry, and blocks parking', async () => {
