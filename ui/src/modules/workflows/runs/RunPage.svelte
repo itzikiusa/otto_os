@@ -130,31 +130,33 @@
     workflowsUi.shownRun = run;
   });
   $effect(() => () => (workflowsUi.shownRun = null));
-  // Load each step's thread row and its linked group (agent-opened sub-threads
-  // and their descendants) once known, so StepList shows every live sub-session.
-  const loadedStepThreads = new Set<string>();
+  // Watch each step's thread family and load its linked sub-threads so StepList
+  // stays live across ticks, retries failed loads, and survives reconnects.
   const stepThreadKey = $derived(
     run
-      ? run.nodes
-          .flatMap((n) => [
+      ? [...new Set(
+          run.nodes.flatMap((n) => [
             ...(n.thread?.runner === 'threads' && n.thread.available !== false && n.thread.thread_id ? [n.thread.thread_id] : []),
             ...(n.children ?? []).flatMap((c) => (c.thread_id ? [c.thread_id] : [])),
-          ])
-          .join(',')
+          ]),
+        )].join(',')
       : '',
   );
   $effect(() => {
     const port = rtPort;
     const key = stepThreadKey;
     if (!port || !key) return;
+    const ids = key.split(',').filter(Boolean);
+    const releases = untrack(() => ids.map((tid) => port.runtimeThreads.watchGroup(tid)));
     untrack(() => {
-      for (const tid of key.split(',')) {
-        if (!tid || loadedStepThreads.has(tid)) continue;
-        loadedStepThreads.add(tid);
+      for (const tid of ids) {
         const ready = port.runtimeThreads.get(tid) ? Promise.resolve() : port.runtimeThreads.loadOne(tid).then(() => undefined, () => undefined);
-        void ready.then(() => port.runtimeThreads.loadLinked(tid).catch(() => {}));
+        void ready.then(() => port.runtimeThreads.loadLinked(tid, 2000).catch(() => {}));
       }
     });
+    return () => {
+      for (const off of releases) off();
+    };
   });
 
   // A loop step's iterations are its child rows (from the run's checkpoints),

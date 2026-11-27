@@ -199,7 +199,7 @@
   {#if item.id === hideItemId}
     <!-- Said once, by the failed turn's block under the timeline. -->
   {:else if subagents.groups.has(item.id)}
-    <RuntimeChildGroup kids={subagents.groups.get(item.id) ?? []} {sessionId} activity={children} output={outputMap} />
+    <RuntimeChildGroup kids={subagents.groups.get(item.id) ?? []} {sessionId} activity={children} output={outputMap} {expandWork} />
   {:else if subagents.skip.has(item.id)}
     <!-- Drawn inside its turn's subagent row. -->
   {:else if item.type === 'subagent'}
@@ -227,6 +227,8 @@
 {#snippet workPart(part: WorkPart)}
   {#if part.kind === 'item'}
     {@render entryRow(part.entry)}
+  {:else if expandWork}
+    {#each part.entries as e (e.item.id)}{@render entryRow(e)}{/each}
   {:else}
     <RuntimeWorkGroup id={part.id} entries={part.entries} cwd={cwd ?? undefined} open={part.entries.some((e) => e.approval && approvals.has(e.approval.request_id))}>
       {#each part.entries as e (e.item.id)}{@render entryRow(e)}{/each}
@@ -259,7 +261,7 @@
     {@const a = messageAttribution(row.item.text)!}
     {@const peerIso = row.item.started_at ?? row.item.updated_at}
     {@const peerClock = formatMessageClock(peerIso)}
-    {@const foldable = longBody(a.body)}
+    {@const foldable = !expandWork && longBody(a.body)}
     {@const folded = foldable && !openedFrom.has(row.item.id)}
     <div class="rt-from" class:reply={a.reply} data-testid="rt-from" data-reply={a.reply ? 'true' : undefined} data-rt-msg={row.item.id}>
       <span class="rt-from-h">

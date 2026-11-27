@@ -330,10 +330,11 @@ export interface RuntimeSessionPort {
     live(closed?: boolean): RuntimeSession[];
     mount(): () => void;
     watch(id: string): () => void;
+    watchGroup(id: string): () => void;
     load(workspaceId: string): Promise<void>;
     loadAll(): Promise<void>;
     loadOne(id: string): Promise<RuntimeSession>;
-    loadLinked(id: string): Promise<void>;
+    loadLinked(id: string, ms?: number): Promise<void>;
     start(
       workspaceId: string,
       req: {

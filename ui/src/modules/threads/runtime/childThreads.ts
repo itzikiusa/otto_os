@@ -37,6 +37,29 @@ export function childOf(s: RuntimeSession | null | undefined): ChildOf | null {
   return v && typeof v.id === 'string' && (v.by === 'person' || v.by === 'agent') ? { id: v.id, by: v.by } : null;
 }
 
+/** True when `row` is in the thread family of any id in `watched` (itself,
+ *  its `parent_id`, or any `meta.child_of` ancestor held in `byId`). Used so
+ *  workspace reloads preserve watched engine families (root + live sub-threads). */
+export function inWatchedFamily(
+  row: RuntimeSession,
+  byId: Readonly<Record<string, RuntimeSession>>,
+  watched: ReadonlySet<string> | ReadonlyMap<string, number>,
+): boolean {
+  if (watched.size === 0) return false;
+  if (watched.has(row.id) || (row.parent_id ? watched.has(row.parent_id) : false)) return true;
+  const seen = new Set<string>([row.id]);
+  let cur = childOf(row)?.id ?? null;
+  while (cur && !seen.has(cur) && seen.size <= 10) {
+    if (watched.has(cur)) return true;
+    seen.add(cur);
+    const parent = byId[cur];
+    if (!parent) return false;
+    if (parent.parent_id && watched.has(parent.parent_id)) return true;
+    cur = childOf(parent)?.id ?? null;
+  }
+  return false;
+}
+
 /** `background`: no turn runs, but work the child's agent started does — its
  *  Stop stops that work (an interrupt would do nothing). */
 export type ChildTone = 'starting' | 'working' | 'background' | 'needs-you' | 'done' | 'failed' | 'stopped';

@@ -212,9 +212,13 @@ export function defaultSelection(state: RunState, entries: readonly StepEntry[],
     case 'running': {
       const s = steps.find((x) => x.node.status === 'running' && x.node.phase !== 'waiting' && x.node.phase !== 'queued')
         ?? steps.find((x) => x.node.status === 'running');
-      // Container steps (review_run, loop) have no thread of their own, so open their active child;
-      // an agent step stays on its own conversation even while its agent runs sub-threads.
-      const child = s && !s.node.thread ? s.node.children?.find((c) => c.status === 'running') : undefined;
+      // Container steps (review_run, loop) open their active child even when a
+      // loop carries a thread; an agent step stays on its own conversation
+      // even while its agent runs sub-threads.
+      const child =
+        s && (s.kind === 'review_run' || s.kind === 'loop' || !s.node.thread)
+          ? s.node.children?.find((c) => c.status === 'running')
+          : undefined;
       return s ? { node: s.id, child: child?.id ?? null } : pick(trigger);
     }
     case 'waiting':
@@ -271,7 +275,22 @@ export function mergeStepChildren(
   rootThreadId: string | null | undefined,
   sessions: readonly RuntimeSession[],
 ): StepChild[] {
-  if (sessions.length === 0) return recorded.map((c) => ({ ...c, depth: 0, parent_child_id: null }));
+  // A same-thread loop can record the same sub-thread across multiple iterations:
+  // keep one canonical row per thread_id (or id) in first-seen order with the latest fields.
+  const deduped: ChildThread[] = [];
+  const seenKey = new Map<string, number>();
+  for (const c of recorded) {
+    const key = c.thread_id ? `t:${c.thread_id}` : `i:${c.id}`;
+    const at = seenKey.get(key);
+    if (at === undefined) {
+      seenKey.set(key, deduped.length);
+      deduped.push(c);
+    } else {
+      const prev = deduped[at];
+      deduped[at] = { ...prev, ...c, id: prev.id };
+    }
+  }
+  if (sessions.length === 0) return deduped.map((c) => ({ ...c, depth: 0, parent_child_id: null }));
 
   const bySessionId = new Map<string, RuntimeSession>();
   for (const s of sessions) bySessionId.set(s.id, s);
@@ -279,13 +298,13 @@ export function mergeStepChildren(
   const rootIds = new Set<string>();
   if (rootThreadId) rootIds.add(rootThreadId);
   const threadToChildId = new Map<string, string>();
-  for (const c of recorded) {
+  for (const c of deduped) {
     if (c.thread_id) {
       rootIds.add(c.thread_id);
       threadToChildId.set(c.thread_id, c.id);
     }
   }
-  if (rootIds.size === 0) return recorded.map((c) => ({ ...c, depth: 0, parent_child_id: null }));
+  if (rootIds.size === 0) return deduped.map((c) => ({ ...c, depth: 0, parent_child_id: null }));
 
   const belongsToStep = (s: RuntimeSession): boolean => {
     if (rootThreadId && s.id === rootThreadId) return false;
@@ -308,7 +327,7 @@ export function mergeStepChildren(
   const recordedIds = new Set<string>();
   const recordedThreadIds = new Set<string>();
 
-  for (const c of recorded) {
+  for (const c of deduped) {
     recordedIds.add(c.id);
     if (c.thread_id) recordedThreadIds.add(c.thread_id);
     const live = c.thread_id ? bySessionId.get(c.thread_id) : bySessionId.get(c.id);
@@ -361,6 +380,8 @@ export function mergeStepChildren(
 export interface NestedChildEntry {
   child: StepChild;
   depth: number;
+  /** Direct parent child's label when nested (`depth > 0`); null for direct children of the step. */
+  parentLabel: string | null;
 }
 
 export interface NestedChildView {
@@ -401,13 +422,13 @@ export function orderChildTree(children: readonly StepChild[]): NestedChildView 
   const expand = (root: StepChild): NestedChildEntry[] => {
     const res: NestedChildEntry[] = [];
     const seen = new Set<string>();
-    const visit = (c: StepChild, depth: number): void => {
+    const visit = (c: StepChild, depth: number, parentLabel: string | null): void => {
       if (seen.has(c.id) || depth > 8) return;
       seen.add(c.id);
-      res.push({ child: c, depth });
-      for (const k of kidsOf.get(c.id) ?? []) visit(k, depth + 1);
+      res.push({ child: c, depth, parentLabel });
+      for (const k of kidsOf.get(c.id) ?? []) visit(k, depth + 1, c.label);
     };
-    visit(root, 0);
+    visit(root, 0, null);
     return res;
   };
 
