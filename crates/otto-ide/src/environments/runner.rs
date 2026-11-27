@@ -505,6 +505,8 @@ fn is_test_runner(runner: IdeRunnerKind) -> bool {
         runner,
         IdeRunnerKind::GoTest
             | IdeRunnerKind::CargoTest
+            | IdeRunnerKind::ZigTest
+            | IdeRunnerKind::Ctest
             | IdeRunnerKind::Pytest
             | IdeRunnerKind::Vitest
             | IdeRunnerKind::Node
@@ -542,7 +544,10 @@ fn end_run(
 
 fn multi_step_label(cfg: &IdeRunConfig) -> &'static str {
     match cfg.runner {
-        IdeRunnerKind::GoBuild => "build",
+        IdeRunnerKind::GoBuild
+        | IdeRunnerKind::Cmake
+        | IdeRunnerKind::Make
+        | IdeRunnerKind::Meson => "build",
         _ => "run",
     }
 }

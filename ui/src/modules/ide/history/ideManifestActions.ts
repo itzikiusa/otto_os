@@ -118,5 +118,39 @@ export function buildManifestMenuItems(
       },
     ];
   }
+  const lower = fileName.toLowerCase();
+  if (lower === 'cmakelists.txt') {
+    return [
+      { separator: true },
+      {
+        label: 'CMake Configure (Generate compile_commands.json)',
+        icon: 'refresh',
+        action: () =>
+          void runManifestDepsAction(filePath, 'sync', 'CMake Configure', onTreeOutput, false),
+      },
+    ];
+  }
+  if (lower === 'vcpkg.json') {
+    return [
+      { separator: true },
+      {
+        label: 'vcpkg Install Dependencies',
+        icon: 'refresh',
+        action: () =>
+          void runManifestDepsAction(filePath, 'sync', 'vcpkg Install', onTreeOutput, false),
+      },
+    ];
+  }
+  if (lower === 'conanfile.txt') {
+    return [
+      { separator: true },
+      {
+        label: 'Conan Install Dependencies',
+        icon: 'refresh',
+        action: () =>
+          void runManifestDepsAction(filePath, 'sync', 'Conan Install', onTreeOutput, false),
+      },
+    ];
+  }
   return [];
 }

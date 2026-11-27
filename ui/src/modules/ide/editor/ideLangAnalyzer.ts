@@ -63,7 +63,7 @@ function detectOutlineCsvDelim(sampleText: string, filePath: string): OutlineCsv
 export type IdeOutlineNode = IdeSymbolNode & { column?: number };
 
 export type IdeDocKind =
-  | 'go' | 'ts' | 'java' | 'rust' | 'zig' | 'python' | 'shell' | 'json' | 'jsonl' | 'csv' | 'other';
+  | 'go' | 'ts' | 'java' | 'kotlin' | 'rust' | 'zig' | 'cpp' | 'python' | 'shell' | 'json' | 'jsonl' | 'csv' | 'other';
 
 export function detectIdeDocKind(filePath: string, language?: string): IdeDocKind {
   if (filePath.startsWith('jdt://')) return 'java';
@@ -76,8 +76,13 @@ export function detectIdeDocKind(filePath: string, language?: string): IdeDocKin
   if (ext === 'json' || ext === 'jsonc' || language === 'json') return 'json';
   if (ext === 'go' || language === 'go') return 'go';
   if (ext === 'java' || ext === 'class' || language === 'java') return 'java';
+  if (ext === 'kt' || ext === 'kts' || language === 'kotlin') return 'kotlin';
   if (ext === 'rs' || language === 'rust') return 'rust';
   if (ext === 'zig' || ext === 'zon' || language === 'zig') return 'zig';
+  if (
+    ['c', 'h', 'cc', 'cpp', 'cxx', 'c++', 'hh', 'hpp', 'hxx', 'h++', 'inl', 'ipp', 'tpp', 'ixx', 'cppm', 'm', 'mm'].includes(ext) ||
+    language === 'cpp' || language === 'c'
+  ) return 'cpp';
   if (ext === 'py' || ext === 'pyi' || language === 'python') return 'python';
   if (
     ext === 'sh' || ext === 'bash' || ext === 'zsh' || ext === 'bats' ||
@@ -181,6 +186,28 @@ export function extractInstantSymbols(filePath: string, language: string | undef
       if (mMeth && !['if', 'for', 'while', 'switch', 'catch'].includes(mMeth[1])) {
         out.push({ name: `${mMeth[1]}()`, kind: 'method', line: ln, column: 1, end_line: ln, children: [] });
       }
+    } else if (kind === 'kotlin') {
+      const mComp = /^companion\s+object(?:\s+(\w+))?/.exec(trimmed);
+      if (mComp) {
+        out.push({ name: mComp[1] || 'Companion', kind: 'object', line: ln, column: 1, end_line: ln, children: [] });
+        continue;
+      }
+      const mType = /^(?:(?:public|private|protected|internal|open|abstract|sealed|data|value|inline|inner|enum|annotation|expect|actual|fun)\s+)*(class|interface|object)\s+(\w+)/.exec(trimmed);
+      if (mType) {
+        out.push({ name: mType[2], kind: mType[1], line: ln, column: 1, end_line: ln, children: [] });
+        continue;
+      }
+      const mFun = /^(?:(?:public|private|protected|internal|open|override|suspend|inline|infix|operator|tailrec|external|expect|actual|abstract|final)\s+)*fun\s+(?:<[^>]+>\s+)?(?:[A-Za-z_][\w.<>,?\s]*\.)?(?:`([^`]+)`|(\w+))\s*\(/.exec(trimmed);
+      if (mFun) {
+        const fname = mFun[1] || mFun[2];
+        out.push({ name: `${fname}()`, kind: 'function', line: ln, column: 1, end_line: ln, children: [] });
+        continue;
+      }
+      const mKotest = /^(?:test|context|should|describe|it|given|when|then|feature|scenario)\s*\(\s*"([^"]+)"\s*\)/.exec(trimmed)
+        ?? /^"([^"]+)"\s*(?:\{|should\s*\{)/.exec(trimmed);
+      if (mKotest) {
+        out.push({ name: mKotest[1], kind: 'test', line: ln, column: 1, end_line: ln, children: [] });
+      }
     } else if (kind === 'rust') {
       const mItem = /^(?:pub(?:\([^)]*\))?\s+)?(?:async\s+|unsafe\s+|const\s+)*(fn|struct|enum|trait|mod|type)\s+(\w+)/.exec(trimmed);
       if (mItem) {
@@ -213,6 +240,32 @@ export function extractInstantSymbols(filePath: string, language: string | undef
       const mTestDecl = /^test\s+([A-Za-z_]\w*)\s*\{?/.exec(trimmed);
       if (mTestDecl) {
         out.push({ name: mTestDecl[1], kind: 'test', line: ln, column: 1, end_line: ln, children: [] });
+      }
+    } else if (kind === 'cpp') {
+      const mNs = /^(?:inline\s+)?namespace\s+([A-Za-z_][\w:]*)/.exec(trimmed);
+      if (mNs) {
+        out.push({ name: mNs[1], kind: 'namespace', line: ln, column: 1, end_line: ln, children: [] });
+        continue;
+      }
+      const mType = /^(?:template\s*<[^>]*>\s*)?(class|struct|enum(?:\s+class)?|union)\s+(?:[A-Z0-9_]+_API\s+)?([A-Za-z_]\w*)/.exec(trimmed);
+      if (mType) {
+        const k = mType[1].startsWith('enum') ? 'enum' : mType[1];
+        out.push({ name: mType[2], kind: k, line: ln, column: 1, end_line: ln, children: [] });
+        continue;
+      }
+      const mGtest = /^(?:TEST|TEST_F|TEST_P|TYPED_TEST)\s*\(\s*([A-Za-z_]\w*)\s*,\s*([A-Za-z_]\w*)\s*\)/.exec(trimmed);
+      if (mGtest) {
+        out.push({ name: `${mGtest[1]}.${mGtest[2]}`, kind: 'test', line: ln, column: 1, end_line: ln, children: [] });
+        continue;
+      }
+      const mCatch = /^(?:TEST_CASE|SCENARIO)\s*\(\s*"([^"]+)"/.exec(trimmed);
+      if (mCatch) {
+        out.push({ name: mCatch[1], kind: 'test', line: ln, column: 1, end_line: ln, children: [] });
+        continue;
+      }
+      const mFn = /^(?:(?:template\s*<[^>]*>\s*)?(?:static|inline|virtual|explicit|constexpr|consteval|extern|friend|const|unsigned|signed)\s+)*[A-Za-z_][\w:<>*,&\s]*?\s+([A-Za-z_~][\w:~]*)\s*\([^;]*\)\s*(?:const\s*)?(?:noexcept(?:\([^)]*\))?\s*)?(?:override\s*)?(?:final\s*)?(?:\{|->|;)/.exec(trimmed);
+      if (mFn && !['if', 'for', 'while', 'switch', 'catch', 'return', 'else'].includes(mFn[1])) {
+        out.push({ name: `${mFn[1]}()`, kind: mFn[1].includes('::') ? 'method' : 'function', line: ln, column: 1, end_line: ln, children: [] });
       }
     } else if (kind === 'shell') {
       const mFn = /^(?:function\s+([\w.:-]+)(?:\s*\(\s*\))?|([\w.:-]+)\s*\(\s*\))\s*\{?/.exec(trimmed);

@@ -319,6 +319,7 @@
       lspRenameEdits: (line, column, newName) => ref.lspRenameEdits?.(line, column, newName) ?? Promise.resolve(null),
       lspReferences: (line, column) => ref.lspReferences?.(line, column) ?? Promise.resolve(null),
       lspQuickFixes: (line) => ref.lspQuickFixes?.(line) ?? Promise.resolve(null),
+      lspSwitchSourceHeader: () => ref.lspSwitchSourceHeader?.() ?? Promise.resolve(null),
     };
     return h;
   }

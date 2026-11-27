@@ -269,6 +269,7 @@ const DENIED_ENV: &[&str] = &[
     "MAVEN_OPTS",
     "GRADLE_OPTS",
     "JAVA_HOME",
+    "KOTLIN_HOME",
     "CLASSPATH",
     // C1-019: files / endpoints a tool the program runs reads as code,
     // credentials or a server to trust (credential_process, exec plugins,
@@ -302,6 +303,8 @@ const DENIED_ENV: &[&str] = &[
     // Flutter toolchain roots, the cache owner and the shell's directory.
     "DEVELOPER_DIR",
     "FLUTTER_ROOT",
+    "UE_ROOT",
+    "UNREAL_ENGINE_ROOT",
     "USER",
     "LOGNAME",
     "PWD",

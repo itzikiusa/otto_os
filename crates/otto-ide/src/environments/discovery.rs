@@ -118,6 +118,10 @@ fn has_project_manifest(dir: &Path) -> bool {
         "build.gradle.kts",
         "pubspec.yaml",
         "Package.swift",
+        "CMakeLists.txt",
+        "CMakePresets.json",
+        "meson.build",
+        "compile_commands.json",
     ];
     if MANIFESTS.iter().any(|m| dir.join(m).is_file()) {
         return true;
@@ -125,7 +129,11 @@ fn has_project_manifest(dir: &Path) -> bool {
     if let Ok(rd) = std::fs::read_dir(dir) {
         for e in rd.flatten().take(MAX_DIR_ENTRIES) {
             if let Some(name) = e.file_name().to_str() {
-                if name.ends_with(".xcodeproj") || name.ends_with(".xcworkspace") {
+                if name.ends_with(".xcodeproj")
+                    || name.ends_with(".xcworkspace")
+                    || name.ends_with(".uproject")
+                    || name.ends_with(".uplugin")
+                {
                     return true;
                 }
             }
@@ -133,6 +141,8 @@ fn has_project_manifest(dir: &Path) -> bool {
     }
     !list_files_with_suffix(dir, ".go").is_empty()
         || !list_files_with_suffix(dir, ".zig").is_empty()
+        || !list_files_with_suffix(dir, ".cpp").is_empty()
+        || !list_files_with_suffix(dir, ".c").is_empty()
         || !list_files_with_suffix(dir, ".py").is_empty()
         || !list_files_with_suffix(dir, ".sh").is_empty()
 }
@@ -154,6 +164,10 @@ fn scan_project_folder(root: &Path, root_badge: Option<&str>, out: &mut Vec<IdeR
         return;
     }
     discover_zig(root, &proj_name, root_badge, &cwd_override, out);
+    if out.len() >= MAX_DISCOVERED_CONFIGS {
+        return;
+    }
+    super::discovery_cpp::discover_cpp_and_unreal(root, &proj_name, root_badge, &cwd_override, out);
     if out.len() >= MAX_DISCOVERED_CONFIGS {
         return;
     }

@@ -21,13 +21,17 @@
 
   const goEco = $derived(ide.toolchains.find((e) => e.ecosystem === 'go') ?? null);
   const javaEco = $derived(ide.toolchains.find((e) => e.ecosystem === 'java') ?? null);
+  const kotlinEco = $derived(ide.toolchains.find((e) => e.ecosystem === 'kotlin') ?? null);
   const nodeEco = $derived(ide.toolchains.find((e) => e.ecosystem === 'node') ?? null);
   const pyEco = $derived(ide.toolchains.find((e) => e.ecosystem === 'python') ?? null);
   const rustEco = $derived(ide.toolchains.find((e) => e.ecosystem === 'rust') ?? null);
   const zigEco = $derived(ide.toolchains.find((e) => e.ecosystem === 'zig') ?? null);
+  const cppEco = $derived(ide.toolchains.find((e) => e.ecosystem === 'cpp') ?? null);
   const goDetected = $derived(ide.detectedSdks.filter((d) => d.ecosystem === 'go'));
   const zigDetected = $derived(ide.detectedSdks.filter((d) => d.ecosystem === 'zig'));
+  const cppDetected = $derived(ide.detectedSdks.filter((d) => d.ecosystem === 'cpp'));
   const javaDetected = $derived(ide.detectedSdks.filter((d) => d.ecosystem === 'java'));
+  const kotlinDetected = $derived(ide.detectedSdks.filter((d) => d.ecosystem === 'kotlin'));
   const gopathVal = $derived(ide.shellEnv?.vars?.GOPATH || ide.effectiveEnv?.GOPATH || '~/go');
   const goprivateVal = $derived(ide.shellEnv?.vars?.GOPRIVATE || ide.effectiveEnv?.GOPRIVATE || '');
   const isBroken = (s: IdeInstalledSdk): boolean => s.broken === true || s.valid === false;
@@ -47,14 +51,30 @@
     ]);
   }
 
+  function openCppPlusMenu(e: MouseEvent): void {
+    ctxMenu.show(e, [
+      { label: 'Local toolchain…', icon: 'folder', action: () => (pickerEco = 'cpp') },
+      { label: 'Download LLVM…', icon: 'download', action: () => onnavigate('project.sdks') },
+    ]);
+  }
+
+  function openKotlinPlusMenu(e: MouseEvent): void {
+    ctxMenu.show(e, [
+      { label: 'Local KOTLIN_HOME…', icon: 'folder', action: () => (pickerEco = 'kotlin') },
+      { label: 'Download Kotlin…', icon: 'download', action: () => onnavigate('project.sdks') },
+    ]);
+  }
+
   async function selectDetected(det: IdeDetectedSdk): Promise<void> {
     const p = det.home_path || det.path || '';
     if (!p) return;
     const reg = await ide.addLocalToolchain(det.ecosystem, p);
     const chosen = reg?.path || p;
     if (det.ecosystem === 'java') ideSettings.patchEnv({ java_home: chosen });
+    else if (det.ecosystem === 'kotlin') ideSettings.patchEnv({ kotlin_home: chosen });
     else if (det.ecosystem === 'go') ideSettings.patchEnv({ go_root: chosen });
     else if (det.ecosystem === 'zig') ideSettings.patchEnv({ zig_home: chosen });
+    else if (det.ecosystem === 'cpp') ideSettings.patchEnv({ cpp_toolchain: chosen });
     toasts.success(`Registered ${det.label || `${det.ecosystem.toUpperCase()} ${det.version}`}`);
   }
 
@@ -111,8 +131,10 @@
     const val = reg?.path || picked;
     if (eco === 'go') ideSettings.patchEnv({ go_root: val });
     else if (eco === 'java') ideSettings.patchEnv({ java_home: val });
+    else if (eco === 'kotlin') ideSettings.patchEnv({ kotlin_home: val });
     else if (eco === 'node') ideSettings.patchEnv({ node_home: val });
     else if (eco === 'zig') ideSettings.patchEnv({ zig_home: val });
+    else if (eco === 'cpp') ideSettings.patchEnv({ cpp_toolchain: val });
     else if (eco === 'python') ideSettings.patchEnv({ python_interpreter: val });
   }
 
@@ -204,6 +226,48 @@
 
       <p class="lg-sub">
         Multi-repo Maven (<code>pom.xml</code>) &amp; Gradle (<code>build.gradle</code>) build pipes share local <code>~/.m2</code> snapshots across attached workspace modules and attach JDWP over an ephemeral loopback port.
+      </p>
+    </div>
+  </div>
+
+{:else if section === 'lang.kotlin'}
+  <div class="lg-sec" data-testid="ide-settings-lang-kotlin">
+    <div class="lg-card">
+      <div class="lg-head-row">
+        <span class="lg-title">Kotlin SDK (kotlinc / kotlin-language-server / JDWP)</span>
+        {#if kotlinEco?.lsp_status || kotlinEco?.lsp}
+          {@const lsp = kotlinEco.lsp_status ?? kotlinEco.lsp!}
+          {@const ok = Boolean(lsp.available ?? lsp.installed)}
+          <Badge tone={ok ? 'ok' : 'neutral'} variant="outline" label={ok ? 'kotlin-language-server ✓' : 'kotlin-language-server missing'} />
+        {/if}
+        {#if kotlinEco?.dap_status || kotlinEco?.dap}
+          {@const dap = kotlinEco.dap_status ?? kotlinEco.dap!}
+          {@const ok = Boolean(dap.available ?? dap.installed)}
+          <Badge tone={ok ? 'ok' : 'neutral'} variant="outline" label={ok ? `${dap.name} ✓` : 'JDWP missing'} />
+        {/if}
+      </div>
+      <div class="goroot-bar">
+        <select
+          class="input goroot-sel"
+          aria-label="Kotlin SDK (KOTLIN_HOME)"
+          value={ideSettings.envDraft.kotlin_home}
+          onchange={(e) => ideSettings.patchEnv({ kotlin_home: (e.currentTarget as HTMLSelectElement).value })}
+          data-testid="ide-kotlinhome-select"
+        >
+          <option value="">&lt;Auto-detect from PATH / Gradle / Maven&gt;</option>
+          {#each kotlinEco?.installed ?? [] as sdk (sdk.path)}
+            <option value={sdk.path}>Kotlin {sdk.version} ({sdk.path}){isBroken(sdk) ? ' [Invalid]' : ''}</option>
+          {/each}
+          {#each kotlinDetected as det (`det:${det.home_path || det.path}`)}
+            <option value={det.home_path || det.path}>{det.label || `Detected Kotlin ${det.version}`} ({det.home_path || det.path})</option>
+          {/each}
+        </select>
+        <button type="button" class="icon-btn goroot-plus" aria-label="Add or download Kotlin SDK" title="Add local KOTLIN_HOME or download Kotlin Compiler" onclick={openKotlinPlusMenu} data-testid="ide-kotlinhome-add-btn">
+          <Icon name="plus" size={14} />
+        </button>
+      </div>
+      <p class="lg-sub">
+        Supports Gradle Kotlin DSL (<code>build.gradle.kts</code>), Version Catalogs (<code>gradle/libs.versions.toml</code>), Maven mixed Java/Kotlin modules, JUnit 5 &amp; Kotest gutter runs, <code>ktfmt</code>/<code>ktlint</code> formatting, and JVM JDWP debugging.
       </p>
     </div>
   </div>
@@ -301,6 +365,48 @@
       </div>
       <p class="lg-sub">
         Supports <code>build.zig</code> steps, <code>build.zig.zon</code> dependencies, <code>zig fmt</code>, <code>zig ast-check</code> diagnostics, <code>zls</code>, and native LLDB debugging with Zig slice/string/optional/error-union pretty-printers.
+      </p>
+    </div>
+  </div>
+
+{:else if section === 'lang.cpp'}
+  <div class="lg-sec" data-testid="ide-settings-lang-cpp">
+    <div class="lg-card">
+      <div class="lg-head-row">
+        <span class="lg-title">C / C++ &amp; Unreal Engine (clangd / CMake / Meson / LLDB)</span>
+        {#if cppEco?.lsp_status || cppEco?.lsp}
+          {@const lsp = cppEco.lsp_status ?? cppEco.lsp!}
+          {@const ok = Boolean(lsp.available ?? lsp.installed)}
+          <Badge tone={ok ? 'ok' : 'neutral'} variant="outline" label={ok ? 'clangd ✓' : 'clangd missing'} />
+        {/if}
+        {#if cppEco?.dap_status || cppEco?.dap}
+          {@const dap = cppEco.dap_status ?? cppEco.dap!}
+          {@const ok = Boolean(dap.available ?? dap.installed)}
+          <Badge tone={ok ? 'ok' : 'neutral'} variant="outline" label={ok ? `${dap.name} ✓` : 'lldb missing'} />
+        {/if}
+      </div>
+      <div class="goroot-bar">
+        <select
+          class="input goroot-sel"
+          aria-label="C / C++ toolchain"
+          value={ideSettings.envDraft.cpp_toolchain}
+          onchange={(e) => ideSettings.patchEnv({ cpp_toolchain: (e.currentTarget as HTMLSelectElement).value })}
+          data-testid="ide-cpptoolchain-select"
+        >
+          <option value="">&lt;Auto-detect clang / gcc from PATH&gt;</option>
+          {#each cppEco?.installed ?? [] as sdk (sdk.path)}
+            <option value={sdk.path}>C/C++ {sdk.version} ({sdk.path}){isBroken(sdk) ? ' [Invalid]' : ''}</option>
+          {/each}
+          {#each cppDetected as det (`det:${det.home_path || det.path}`)}
+            <option value={det.home_path || det.path}>{det.label || `Detected C/C++ ${det.version}`} ({det.home_path || det.path})</option>
+          {/each}
+        </select>
+        <button type="button" class="icon-btn goroot-plus" aria-label="Add or download C/C++ toolchain" title="Add local LLVM/GCC toolchain or download LLVM" onclick={openCppPlusMenu} data-testid="ide-cpptoolchain-add-btn">
+          <Icon name="plus" size={14} />
+        </button>
+      </div>
+      <p class="lg-sub">
+        Supports <code>compile_commands.json</code>, CMake (Presets &amp; CTest), Make, Meson, GoogleTest/Catch2 gutter runs, Unreal <code>.uproject</code>/<code>.uplugin</code>, header/source switch (<code>⌥O</code>), and LLDB debugging with STL &amp; Unreal pretty-printers, PID attach, and core dumps.
       </p>
     </div>
   </div>

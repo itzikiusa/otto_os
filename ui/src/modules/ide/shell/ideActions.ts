@@ -132,6 +132,7 @@ export const IDE_ACTIONS: readonly IdeAction[] = [
   // Navigate & tabs
   { id: 'back', title: 'Navigate back', group: 'Navigate', icon: 'chevronLeft', homes: ['search'], shortcut: 'navigateBack', run: () => void navigateIdeBack() },
   { id: 'forward', title: 'Navigate forward', group: 'Navigate', icon: 'chevronRight', homes: ['search'], shortcut: 'navigateForward', run: () => void navigateIdeForward() },
+  { id: 'switchHeaderSource', title: 'Switch header / source', group: 'Navigate', icon: 'swap', homes: PS, shortcut: 'switchHeaderSource', keywords: 'cpp c header source hpp clangd', disabled: noFile, run: () => void ide.switchHeaderSource() },
   { id: 'reveal', title: 'Reveal active file in project tree', group: 'Navigate', icon: 'target', homes: PS, disabled: noFile, run: () => void ide.revealInProjectTree() },
   { id: 'save', title: 'Save file', group: 'Tabs', icon: 'download', homes: ['search'], shortcut: 'save', disabled: noFile, run: () => void ide.saveFile() },
   { id: 'saveAll', title: 'Save all files', group: 'Tabs', icon: 'download', homes: PS, shortcut: 'saveAll', run: () => void ide.saveAll() },

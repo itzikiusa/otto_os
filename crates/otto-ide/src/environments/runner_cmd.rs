@@ -433,6 +433,325 @@ fn build_zig_runner_cmd(
     }
 }
 
+#[allow(clippy::too_many_arguments, clippy::disallowed_methods)]
+fn build_cpp_runner_cmd(
+    runner: IdeRunnerKind,
+    cfg: &IdeRunConfig,
+    target_kind: IdeTargetKind,
+    cwd: &str,
+    env_map: &BTreeMap<String, String>,
+    cmd_opt: Option<&str>,
+    args: Vec<String>,
+    build_flags: Vec<String>,
+    filter: Option<&str>,
+) -> (String, Vec<String>) {
+    let tp = cfg
+        .target_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    match runner {
+        IdeRunnerKind::Cmake => {
+            let prog = cmd_opt.unwrap_or("cmake").to_string();
+            let mut out = if args.is_empty() {
+                vec!["--build".into(), "build".into()]
+            } else {
+                args
+            };
+            out.extend(build_flags);
+            (prog, out)
+        }
+        IdeRunnerKind::Ctest => {
+            // Direct test binary invocation (e.g., GoogleTest/Catch2 binary or gutter test).
+            if let Some(explicit) = cmd_opt.filter(|c| *c != "ctest" && *c != "cmake") {
+                let mut out = build_flags;
+                out.extend(args);
+                if let Some(f) = filter {
+                    let has_filter = out
+                        .iter()
+                        .any(|a| a.starts_with("--gtest_filter=") || a == "-R" || a == f);
+                    if !has_filter {
+                        if f.contains('.') {
+                            out.push(format!("--gtest_filter={f}"));
+                        } else {
+                            out.push(f.to_string());
+                        }
+                    }
+                }
+                return (explicit.to_string(), out);
+            }
+            let prog = cmd_opt.unwrap_or("ctest").to_string();
+            let mut out = if args.is_empty() {
+                let test_dir = find_cpp_build_dir(cwd).unwrap_or_else(|| "build".into());
+                vec!["--test-dir".into(), test_dir, "--output-on-failure".into()]
+            } else {
+                args
+            };
+            out.extend(build_flags);
+            if let Some(f) = filter {
+                if !out.iter().any(|a| a == "-R" || a == "--tests-regex") {
+                    out.extend(["-R".into(), f.to_string()]);
+                }
+            }
+            (prog, out)
+        }
+        IdeRunnerKind::Make => {
+            let prog = cmd_opt.unwrap_or("make").to_string();
+            let mut out = build_flags;
+            if let Some(t) = tp {
+                if !args.iter().any(|a| a == t) {
+                    out.push(t.to_string());
+                }
+            }
+            out.extend(args);
+            (prog, out)
+        }
+        IdeRunnerKind::Meson => {
+            let prog = cmd_opt.unwrap_or("meson").to_string();
+            let mut out = if args.is_empty() {
+                vec!["compile".into(), "-C".into(), "builddir".into()]
+            } else {
+                args
+            };
+            out.extend(build_flags);
+            (prog, out)
+        }
+        IdeRunnerKind::CppRun => {
+            if let Some(explicit) = cmd_opt {
+                let mut out = build_flags;
+                out.extend(args);
+                return (explicit.to_string(), out);
+            }
+            // If `target_path` is a built CMake/Meson target name (not a source file),
+            // locate the compiled executable inside common build directories or build + run it.
+            let is_source = tp.is_some_and(|p| {
+                let l = p.to_ascii_lowercase();
+                l.ends_with(".c")
+                    || l.ends_with(".cpp")
+                    || l.ends_with(".cc")
+                    || l.ends_with(".cxx")
+                    || l.ends_with(".c++")
+            });
+            if let Some(target_name) = tp.filter(|_| !is_source) {
+                if target_kind == IdeTargetKind::Local {
+                    if let Some(exe) = find_built_cpp_executable(cwd, target_name) {
+                        return (exe, args);
+                    }
+                    // Build with CMake then run if CMakeLists.txt is present.
+                    if Path::new(cwd).join("CMakeLists.txt").is_file() {
+                        let build_dir = find_cpp_build_dir(cwd).unwrap_or_else(|| "build".into());
+                        let q_bd = shell_words::quote(&build_dir);
+                        let q_t = shell_words::quote(target_name);
+                        let script = format!(
+                            "if [ ! -f {q_bd}/CMakeCache.txt ]; then cmake -S . -B {q_bd} -DCMAKE_BUILD_TYPE=Debug -DCMAKE_EXPORT_COMPILE_COMMANDS=ON || exit $?; fi; \
+                             cmake --build {q_bd} --target {q_t} || exit $?; \
+                             if [ -x {q_bd}/{q_t} ]; then exec {q_bd}/{q_t} \"$@\"; \
+                             elif [ -x {q_bd}/Debug/{q_t} ]; then exec {q_bd}/Debug/{q_t} \"$@\"; \
+                             else found=$(find {q_bd} -maxdepth 3 -type f -name {q_t} -perm -111 2>/dev/null | head -n 1); \
+                             [ -n \"$found\" ] && exec \"$found\" \"$@\"; echo \"Built target '{target_name}' not found under {build_dir}\" >&2; exit 1; fi"
+                        );
+                        let mut sh_args = vec!["-c".into(), script, "otto-cpp-run".into()];
+                        sh_args.extend(args);
+                        return ("sh".into(), sh_args);
+                    }
+                }
+                return (format!("./build/{target_name}"), args);
+            }
+            // Compile and run a single C or C++ source file cleanly via a temp binary.
+            let src = tp.unwrap_or("main.cpp");
+            let is_c = src.to_ascii_lowercase().ends_with(".c");
+            let compiler = if is_c {
+                env_map
+                    .get("CC")
+                    .filter(|s| !s.trim().is_empty())
+                    .map(String::as_str)
+                    .unwrap_or("clang")
+            } else {
+                env_map
+                    .get("CXX")
+                    .filter(|s| !s.trim().is_empty())
+                    .map(String::as_str)
+                    .unwrap_or("clang++")
+            };
+            let std_flag = if is_c { "-std=c17" } else { "-std=c++20" };
+            let extra_flags = if build_flags.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", shell_words::join(&build_flags))
+            };
+            let q_cc = shell_words::quote(compiler);
+            let q_src = shell_words::quote(src);
+            let script = format!(
+                "tmp=$(mktemp \"${{TMPDIR:-/tmp}}/otto-cpp-XXXXXX\") || exit 1; \
+                 trap 'rm -f \"$tmp\"' EXIT; \
+                 {q_cc} -g -O0 {std_flag}{extra_flags} {q_src} -o \"$tmp\" && \"$tmp\" \"$@\""
+            );
+            let mut sh_args = vec!["-c".into(), script, "otto-cpp-run".into()];
+            sh_args.extend(args);
+            ("sh".into(), sh_args)
+        }
+        IdeRunnerKind::Unreal => build_unreal_runner_cmd(env_map, cmd_opt, args, build_flags),
+        _ => (cmd_opt.unwrap_or("cmake").to_string(), args),
+    }
+}
+
+#[allow(clippy::disallowed_methods)]
+pub(crate) fn find_cpp_build_dir(cwd: &str) -> Option<String> {
+    let base = Path::new(cwd);
+    for rel in [
+        "build",
+        "cmake-build-debug",
+        "out/build",
+        "out/build/debug",
+        "builddir",
+    ] {
+        let cand = base.join(rel);
+        if cand.join("CMakeCache.txt").is_file() || cand.join("CTestTestfile.cmake").is_file() {
+            return Some(rel.to_string());
+        }
+    }
+    None
+}
+
+#[allow(clippy::disallowed_methods)]
+pub(crate) fn find_built_cpp_executable(cwd: &str, target_name: &str) -> Option<String> {
+    let base = Path::new(cwd);
+    for dir in [
+        "build",
+        "build/Debug",
+        "build/bin",
+        "cmake-build-debug",
+        "out/build",
+        "builddir",
+    ] {
+        let cand = base.join(dir).join(target_name);
+        if is_executable_file(&cand) {
+            return Some(cand.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
+#[allow(clippy::disallowed_methods)]
+pub(crate) fn resolve_unreal_engine_root(env_map: &BTreeMap<String, String>) -> Option<PathBuf> {
+    for key in ["UE_ROOT", "UNREAL_ENGINE_ROOT"] {
+        if let Some(val) = env_map.get(key).map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            let p = PathBuf::from(val);
+            if p.join("Engine").is_dir() {
+                return Some(p);
+            }
+        }
+    }
+    for base in ["/Users/Shared/Epic Games", "/opt/UnrealEngine"] {
+        let bp = Path::new(base);
+        if bp.join("Engine").is_dir() {
+            return Some(bp.to_path_buf());
+        }
+        if let Ok(rd) = std::fs::read_dir(bp) {
+            let mut versions: Vec<PathBuf> = rd
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_dir() && p.join("Engine").is_dir())
+                .collect();
+            versions.sort();
+            if let Some(latest) = versions.pop() {
+                return Some(latest);
+            }
+        }
+    }
+    None
+}
+
+fn build_unreal_runner_cmd(
+    env_map: &BTreeMap<String, String>,
+    cmd_opt: Option<&str>,
+    args: Vec<String>,
+    build_flags: Vec<String>,
+) -> (String, Vec<String>) {
+    if let Some(explicit) = cmd_opt {
+        let mut out = build_flags;
+        out.extend(args);
+        return (explicit.to_string(), out);
+    }
+    let Some(ue_root) = resolve_unreal_engine_root(env_map) else {
+        return (
+            "sh".into(),
+            vec![
+                "-c".into(),
+                "echo 'Unreal Engine not found: set UE_ROOT (or UNREAL_ENGINE_ROOT) in Project Environment, or install Unreal Engine under /Users/Shared/Epic Games/UE_5.*' >&2; exit 1".into(),
+            ],
+        );
+    };
+    let sub = args.first().map(String::as_str).unwrap_or("build");
+    let platform = if cfg!(target_os = "macos") {
+        "Mac"
+    } else {
+        "Linux"
+    };
+    match sub {
+        "build" => {
+            let script = ue_root.join(format!("Engine/Build/BatchFiles/{platform}/Build.sh"));
+            let target = args
+                .get(1)
+                .cloned()
+                .unwrap_or_else(|| "UnrealEditor".into());
+            let plat = args.get(2).cloned().unwrap_or_else(|| platform.into());
+            let cfg_mode = args.get(3).cloned().unwrap_or_else(|| "Development".into());
+            let mut out = vec![target, plat, cfg_mode];
+            if let Some(uproj) = args.get(4) {
+                out.push(format!("-Project={uproj}"));
+            }
+            out.push("-WaitMutex".into());
+            out.extend(build_flags);
+            (script.to_string_lossy().into_owned(), out)
+        }
+        "gen-cdb" => {
+            let script = ue_root.join(format!("Engine/Build/BatchFiles/{platform}/Build.sh"));
+            let target = args
+                .get(1)
+                .cloned()
+                .unwrap_or_else(|| "UnrealEditor".into());
+            let plat = args.get(2).cloned().unwrap_or_else(|| platform.into());
+            let cfg_mode = args.get(3).cloned().unwrap_or_else(|| "Development".into());
+            let mut out = vec!["-mode=GenerateClangDatabase".into(), target, plat, cfg_mode];
+            if let Some(uproj) = args.get(4) {
+                out.push(format!("-Project={uproj}"));
+            }
+            out.push("-OutputDir=.".into());
+            out.extend(build_flags);
+            (script.to_string_lossy().into_owned(), out)
+        }
+        "editor" => {
+            let editor_bin = if cfg!(target_os = "macos") {
+                ue_root.join("Engine/Binaries/Mac/UnrealEditor.app/Contents/MacOS/UnrealEditor")
+            } else {
+                ue_root.join("Engine/Binaries/Linux/UnrealEditor")
+            };
+            let mut out: Vec<String> = args.into_iter().skip(1).collect();
+            out.extend(build_flags);
+            (editor_bin.to_string_lossy().into_owned(), out)
+        }
+        "build-plugin" => {
+            let uat = ue_root.join("Engine/Build/BatchFiles/RunUAT.sh");
+            let uplugin = args.get(1).cloned().unwrap_or_default();
+            let mut out = vec![
+                "BuildPlugin".into(),
+                format!("-Plugin={uplugin}"),
+                "-Package=Saved/PackagedPlugin".into(),
+            ];
+            out.extend(build_flags);
+            (uat.to_string_lossy().into_owned(), out)
+        }
+        _ => {
+            let script = ue_root.join(format!("Engine/Build/BatchFiles/{platform}/Build.sh"));
+            let mut out = args;
+            out.extend(build_flags);
+            (script.to_string_lossy().into_owned(), out)
+        }
+    }
+}
+
 pub(super) fn build_runner_command(
     cfg: &IdeRunConfig,
     target_kind: IdeTargetKind,
@@ -514,6 +833,22 @@ pub(super) fn build_runner_command(
         IdeRunnerKind::ZigBuild | IdeRunnerKind::ZigRun | IdeRunnerKind::ZigTest => {
             build_zig_runner_cmd(cfg.runner, cfg, cwd, cmd_opt, args, build_flags, filter)
         }
+        IdeRunnerKind::Cmake
+        | IdeRunnerKind::Ctest
+        | IdeRunnerKind::CppRun
+        | IdeRunnerKind::Make
+        | IdeRunnerKind::Meson
+        | IdeRunnerKind::Unreal => build_cpp_runner_cmd(
+            cfg.runner,
+            cfg,
+            target_kind,
+            cwd,
+            env_map,
+            cmd_opt,
+            args,
+            build_flags,
+            filter,
+        ),
         IdeRunnerKind::Pytest => build_pytest_cmd(
             cfg,
             target_kind,

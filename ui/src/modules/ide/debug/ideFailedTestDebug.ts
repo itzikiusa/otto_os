@@ -42,8 +42,10 @@ export function inferTestDebugLanguage(
   if (lower.endsWith('.go')) return 'go';
   if (lower.endsWith('.rs')) return 'rust';
   if (lower.endsWith('.zig')) return 'zig';
+  if (/\.(?:c|cc|cpp|cxx|h|hh|hpp|hxx|inl|mm?)$/.test(lower)) return 'cpp';
   if (lower.endsWith('.py') || lower.endsWith('.pyi')) return 'python';
   if (lower.endsWith('.java')) return 'java';
+  if (lower.endsWith('.kt') || lower.endsWith('.kts')) return 'kotlin';
   if (lower.endsWith('.ts') || lower.endsWith('.tsx') || lower.endsWith('.mts') || lower.endsWith('.cts')) return 'typescript';
   if (lower.endsWith('.js') || lower.endsWith('.jsx') || lower.endsWith('.mjs') || lower.endsWith('.cjs')) return 'javascript';
   if (lower.endsWith('.sh') || lower.endsWith('.bash') || lower.endsWith('.zsh')) return 'shell';
@@ -52,6 +54,7 @@ export function inferTestDebugLanguage(
   if (r.startsWith('go_')) return 'go';
   if (r.startsWith('cargo_')) return 'rust';
   if (r.startsWith('zig_')) return 'zig';
+  if (r === 'cmake' || r === 'ctest' || r === 'cpp_run' || r === 'make' || r === 'meson' || r === 'unreal') return 'cpp';
   if (r.startsWith('java_') || r === 'maven' || r === 'gradle') return 'java';
   if (r === 'pytest' || r === 'python') return 'python';
   if (r === 'node' || r === 'npm' || r === 'vitest') return 'javascript';
@@ -108,7 +111,7 @@ export function planFailedTestDebug(input: FailedTestDebugInput): FailedTestDebu
   const language = inferTestDebugLanguage(resolvedFile || input.activePath, input.runner, input.activeLanguage);
   const suite = input.test.suite?.trim() ?? '';
   const testName =
-    language === 'java' && suite && rawName && !rawName.includes('#') && !rawName.includes('.')
+    (language === 'java' || language === 'kotlin') && suite && rawName && !rawName.includes('#') && !rawName.includes('.')
       ? `${suite}#${rawName}`
       : rawName;
 

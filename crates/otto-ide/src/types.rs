@@ -398,6 +398,8 @@ pub fn detect_language(path: &str) -> Option<&'static str> {
     let base = clean.rsplit('/').next().unwrap_or(clean);
     match base {
         "Makefile" | "GNUmakefile" | "makefile" => return Some("makefile"),
+        "CMakeLists.txt" => return Some("cmake"),
+        "meson.build" | "meson.options" | "meson_options.txt" => return Some("meson"),
         "Dockerfile" => return Some("dockerfile"),
         "Podfile" | "Fastfile" | "Appfile" | "Matchfile" => return Some("ruby"),
         ".bashrc" | ".bash_profile" | ".zshrc" | ".zshenv" | ".zprofile" => return Some("shell"),
@@ -418,12 +420,14 @@ pub fn detect_language(path: &str) -> Option<&'static str> {
         "dart" => "dart",
         "m" | "mm" => "objc",
         "c" | "h" => "c",
-        "cc" | "cpp" | "cxx" | "hpp" | "hxx" => "cpp",
+        "cc" | "cpp" | "cxx" | "c++" | "hpp" | "hxx" | "hh" | "h++" | "inl" | "ipp" | "tpp"
+        | "ixx" | "cppm" | "cu" | "cuh" => "cpp",
+        "cmake" => "cmake",
         "cs" => "csharp",
         "rb" | "podspec" => "ruby",
         "php" => "php",
         "sql" => "sql",
-        "json" | "jsonc" | "arb" => "json",
+        "json" | "jsonc" | "arb" | "uproject" | "uplugin" => "json",
         "jsonl" | "ndjson" => "jsonl",
         "csv" => "csv",
         "tsv" => "tsv",

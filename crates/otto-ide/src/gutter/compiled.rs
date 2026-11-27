@@ -281,10 +281,17 @@ pub(super) fn detect_java(path: &str, dir: &str, content: &str, out: &mut Vec<Id
                 .map(|(c, _)| c.as_str())
                 .unwrap_or("Main");
             let fqcn = qualify_java(&package_name, cls_name);
+            let is_spring = content.contains("@SpringBootApplication")
+                || content.contains("SpringApplication.run(");
+            let label = if is_spring {
+                format!("Spring Boot {cls_name}")
+            } else {
+                format!("{cls_name}.main()")
+            };
             out.push(IdeGutterItem {
                 line: line_no,
                 kind: IdeGutterKind::Main,
-                label: format!("{cls_name}.main()"),
+                label,
                 language: "java".into(),
                 run_spec: IdeQuickRunSpec {
                     runner: IdeRunnerKind::JavaMain,
@@ -388,6 +395,308 @@ fn qualify_java(package_name: &str, class_name: &str) -> String {
     } else {
         format!("{package_name}.{class_name}")
     }
+}
+
+// ---------------------------------------------------------------------------
+// 2b. Kotlin (`fun main`, JUnit `@Test`/`@ParameterizedTest` incl. backticks,
+//     and Kotest specs: StringSpec, FunSpec, BehaviorSpec, DescribeSpec, etc.)
+// ---------------------------------------------------------------------------
+
+pub(super) fn detect_kotlin(path: &str, dir: &str, content: &str, out: &mut Vec<IdeGutterItem>) {
+    static RE_PKG: OnceLock<Regex> = OnceLock::new();
+    static RE_CLASS: OnceLock<Regex> = OnceLock::new();
+    static RE_KOTEST_CLASS: OnceLock<Regex> = OnceLock::new();
+    static RE_TEST_ANN: OnceLock<Regex> = OnceLock::new();
+    static RE_MAIN: OnceLock<Regex> = OnceLock::new();
+    static RE_FUN: OnceLock<Regex> = OnceLock::new();
+    static RE_KOTEST_BLOCK: OnceLock<Regex> = OnceLock::new();
+    static RE_KOTEST_STRING: OnceLock<Regex> = OnceLock::new();
+
+    let re_pkg =
+        RE_PKG.get_or_init(|| Regex::new(r"^\s*package\s+([A-Za-z_][A-Za-z0-9_.]*)").unwrap());
+    let re_class = RE_CLASS.get_or_init(|| {
+        Regex::new(
+            r"^\s*(?:(?:public|protected|private|internal|abstract|final|open|sealed|data|inner)\s+)*(?:class|object)\s+([A-Za-z_][A-Za-z0-9_]*)",
+        )
+        .unwrap()
+    });
+    let re_kotest_class = RE_KOTEST_CLASS.get_or_init(|| {
+        Regex::new(
+            r"^\s*(?:(?:public|internal|open|abstract)\s+)*class\s+([A-Za-z_][A-Za-z0-9_]*)\b[^:{]*:\s*(?:io\.kotest\.core\.spec\.style\.)?(StringSpec|FunSpec|BehaviorSpec|DescribeSpec|ShouldSpec|WordSpec|FreeSpec|FeatureSpec|ExpectSpec|AnnotationSpec)\b",
+        )
+        .unwrap()
+    });
+    let re_test_ann = RE_TEST_ANN.get_or_init(|| {
+        Regex::new(
+            r"@(?:org\.junit\.jupiter\.api\.|org\.junit\.jupiter\.params\.|org\.junit\.|kotlin\.test\.|org\.testng\.annotations\.)?(?:Test|ParameterizedTest|RepeatedTest|TestFactory)\b",
+        )
+        .unwrap()
+    });
+    let re_main = RE_MAIN.get_or_init(|| {
+        Regex::new(r"^\s*(?:(?:public|internal|suspend)\s+)*fun\s+main\s*\(").unwrap()
+    });
+    let re_fun = RE_FUN.get_or_init(|| {
+        Regex::new(
+            r"^\s*(?:(?:public|protected|private|internal|override|open|suspend|inline)\s+)*fun\s+(?:`([^`]+)`|([A-Za-z_][A-Za-z0-9_]*))\s*\(",
+        )
+        .unwrap()
+    });
+    let re_kotest_block = RE_KOTEST_BLOCK.get_or_init(|| {
+        Regex::new(
+            r#"^\s*(?:test|context|describe|it|should|feature|scenario|given|When|when|then|expect)\s*\(\s*"([^"]+)"\s*\)"#,
+        )
+        .unwrap()
+    });
+    let re_kotest_string = RE_KOTEST_STRING
+        .get_or_init(|| Regex::new(r#"^\s*"([^"]+)"\s*(?:\{|\.config\s*\()"#).unwrap());
+
+    let dir = path
+        .rfind("/src/")
+        .filter(|&i| i > 0)
+        .map_or(dir, |i| &path[..i]);
+
+    let mut package_name = String::new();
+    for line in content.lines() {
+        if let Some(cap) = re_pkg.captures(line) {
+            package_name = cap[1].to_string();
+            break;
+        }
+    }
+
+    let file_stem = std::path::Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("Main");
+    let top_level_cls = crate::dap::java_bridge::infer_kotlin_class_stem(file_stem, content);
+
+    let mut current_class: Option<(String, u32)> = None;
+    let mut current_kotest: Option<(String, String, u32)> = None; // (cls, style, line)
+    let mut class_has_tests = false;
+    let mut pending_test_ann = false;
+    let mut emitted_suite_line: Option<u32> = None;
+    let mut brace_depth: i32 = 0;
+
+    for (idx, line) in content.lines().enumerate() {
+        let line_no = (idx + 1) as u32;
+        let trimmed = line.trim();
+        if trimmed.starts_with("//") || trimmed.starts_with('*') || trimmed.starts_with("/*") {
+            continue;
+        }
+
+        if let Some(cap) = re_kotest_class.captures(line) {
+            let cls = cap[1].to_string();
+            let style = cap[2].to_string();
+            let fqcn = qualify_java(&package_name, &cls);
+            current_class = Some((cls.clone(), line_no));
+            current_kotest = Some((cls.clone(), style, line_no));
+            class_has_tests = true;
+            emitted_suite_line = Some(line_no);
+            out.push(IdeGutterItem {
+                line: line_no,
+                kind: IdeGutterKind::Suite,
+                label: cls,
+                language: "kotlin".into(),
+                run_spec: IdeQuickRunSpec {
+                    runner: IdeRunnerKind::JavaJunit,
+                    command: None,
+                    args: Vec::new(),
+                    cwd: Some(dir.to_string()),
+                    target_path: Some(path.to_string()),
+                    test_filter: Some(fqcn.clone()),
+                    debug_program: Some(fqcn.clone()),
+                    debug_test_name: Some(fqcn),
+                },
+            });
+        } else if let Some(cap) = re_class.captures(line) {
+            let cls = cap[1].to_string();
+            current_class = Some((cls, line_no));
+            current_kotest = None;
+            class_has_tests = false;
+            emitted_suite_line = None;
+        }
+
+        if re_test_ann.is_match(line) {
+            pending_test_ann = true;
+            let after_ann = re_test_ann.replace_all(line, "");
+            if let Some(cap) = re_fun.captures(&after_ann) {
+                let method = cap
+                    .get(1)
+                    .or_else(|| cap.get(2))
+                    .map(|m| m.as_str())
+                    .unwrap_or("test");
+                emit_kotlin_test(
+                    path,
+                    dir,
+                    &package_name,
+                    &current_class,
+                    method,
+                    line_no,
+                    &mut class_has_tests,
+                    &mut emitted_suite_line,
+                    out,
+                );
+                pending_test_ann = false;
+            }
+        } else if re_main.is_match(line) {
+            let cls_name = if brace_depth == 0 {
+                top_level_cls.as_str()
+            } else {
+                current_class
+                    .as_ref()
+                    .map(|(c, _)| c.as_str())
+                    .unwrap_or(top_level_cls.as_str())
+            };
+            let fqcn = qualify_java(&package_name, cls_name);
+            let is_spring = content.contains("@SpringBootApplication")
+                || content.contains("SpringApplication.run(")
+                || content.contains("runApplication<");
+            let label = if is_spring {
+                format!("Spring Boot {cls_name}")
+            } else {
+                format!("{cls_name}.main()")
+            };
+            out.push(IdeGutterItem {
+                line: line_no,
+                kind: IdeGutterKind::Main,
+                label,
+                language: "kotlin".into(),
+                run_spec: IdeQuickRunSpec {
+                    runner: IdeRunnerKind::JavaMain,
+                    command: None,
+                    args: Vec::new(),
+                    cwd: Some(dir.to_string()),
+                    target_path: Some(path.to_string()),
+                    test_filter: Some(fqcn.clone()),
+                    debug_program: Some(fqcn),
+                    debug_test_name: None,
+                },
+            });
+            pending_test_ann = false;
+        } else if pending_test_ann {
+            if !trimmed.starts_with('@') && !trimmed.is_empty() {
+                if let Some(cap) = re_fun.captures(line) {
+                    let method = cap
+                        .get(1)
+                        .or_else(|| cap.get(2))
+                        .map(|m| m.as_str())
+                        .unwrap_or("test");
+                    emit_kotlin_test(
+                        path,
+                        dir,
+                        &package_name,
+                        &current_class,
+                        method,
+                        line_no,
+                        &mut class_has_tests,
+                        &mut emitted_suite_line,
+                        out,
+                    );
+                }
+                pending_test_ann = false;
+            }
+        } else if let Some((ref cls, ref style, _)) = current_kotest {
+            let kt_name = re_kotest_block
+                .captures(line)
+                .map(|c| c[1].to_string())
+                .or_else(|| {
+                    if style == "StringSpec" || style == "FreeSpec" || style == "WordSpec" {
+                        re_kotest_string.captures(line).map(|c| c[1].to_string())
+                    } else {
+                        None
+                    }
+                });
+            if let Some(test_title) = kt_name {
+                let fqcn = qualify_java(&package_name, cls);
+                let selector = format!("{fqcn}#{test_title}");
+                out.push(IdeGutterItem {
+                    line: line_no,
+                    kind: IdeGutterKind::Test,
+                    label: format!("{cls}.{test_title}"),
+                    language: "kotlin".into(),
+                    run_spec: IdeQuickRunSpec {
+                        runner: IdeRunnerKind::JavaJunit,
+                        command: None,
+                        args: Vec::new(),
+                        cwd: Some(dir.to_string()),
+                        target_path: Some(path.to_string()),
+                        test_filter: Some(fqcn.clone()),
+                        debug_program: Some(fqcn),
+                        debug_test_name: Some(selector),
+                    },
+                });
+            }
+        }
+
+        let code_only = strip_line_comment(line);
+        for ch in code_only.chars() {
+            if ch == '{' {
+                brace_depth += 1;
+            } else if ch == '}' {
+                brace_depth = (brace_depth - 1).max(0);
+                if brace_depth == 0 {
+                    current_kotest = None;
+                }
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_kotlin_test(
+    path: &str,
+    dir: &str,
+    package_name: &str,
+    current_class: &Option<(String, u32)>,
+    method: &str,
+    line_no: u32,
+    class_has_tests: &mut bool,
+    emitted_suite_line: &mut Option<u32>,
+    out: &mut Vec<IdeGutterItem>,
+) {
+    let (cls_name, cls_line) = current_class
+        .as_ref()
+        .map(|(c, l)| (c.as_str(), *l))
+        .unwrap_or(("Test", 1));
+    let fqcn = qualify_java(package_name, cls_name);
+
+    if !*class_has_tests && *emitted_suite_line != Some(cls_line) {
+        *class_has_tests = true;
+        *emitted_suite_line = Some(cls_line);
+        out.push(IdeGutterItem {
+            line: cls_line,
+            kind: IdeGutterKind::Suite,
+            label: cls_name.to_string(),
+            language: "kotlin".into(),
+            run_spec: IdeQuickRunSpec {
+                runner: IdeRunnerKind::JavaJunit,
+                command: None,
+                args: Vec::new(),
+                cwd: Some(dir.to_string()),
+                target_path: Some(path.to_string()),
+                test_filter: Some(fqcn.clone()),
+                debug_program: Some(fqcn.clone()),
+                debug_test_name: Some(fqcn.clone()),
+            },
+        });
+    }
+
+    let selector = format!("{fqcn}#{method}");
+    out.push(IdeGutterItem {
+        line: line_no,
+        kind: IdeGutterKind::Test,
+        label: format!("{cls_name}.{method}"),
+        language: "kotlin".into(),
+        run_spec: IdeQuickRunSpec {
+            runner: IdeRunnerKind::JavaJunit,
+            command: None,
+            args: Vec::new(),
+            cwd: Some(dir.to_string()),
+            target_path: Some(path.to_string()),
+            test_filter: Some(selector.clone()),
+            debug_program: Some(fqcn),
+            debug_test_name: Some(selector),
+        },
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -635,4 +944,141 @@ fn find_zig_project_root(dir: &str) -> Option<String> {
         cur = d.parent();
     }
     None
+}
+
+// ---------------------------------------------------------------------------
+// 5. C / C++ (`int main`, GoogleTest `TEST*`, Catch2 `TEST_CASE` / `SCENARIO`)
+// ---------------------------------------------------------------------------
+
+pub(super) fn detect_c_cpp(
+    path: &str,
+    dir: &str,
+    lang: &str,
+    content: &str,
+    out: &mut Vec<IdeGutterItem>,
+) {
+    static RE_MAIN: OnceLock<Regex> = OnceLock::new();
+    static RE_GTEST: OnceLock<Regex> = OnceLock::new();
+    static RE_CATCH: OnceLock<Regex> = OnceLock::new();
+
+    let re_main = RE_MAIN
+        .get_or_init(|| Regex::new(r"^\s*(?:(?:int|auto|signed)\s+)main\s*\([^;]*$").unwrap());
+    let re_gtest = RE_GTEST.get_or_init(|| {
+        Regex::new(
+            r"^\s*(?:TEST|TEST_F|TEST_P|TYPED_TEST|TYPED_TEST_P)\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*,\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)",
+        )
+        .unwrap()
+    });
+    let re_catch = RE_CATCH.get_or_init(|| {
+        Regex::new(r#"^\s*(?:TEST_CASE|SCENARIO|TEMPLATE_TEST_CASE)\s*\(\s*"((?:\\.|[^"\\])+)""#)
+            .unwrap()
+    });
+
+    let effective_cwd = find_cpp_project_root(dir).unwrap_or_else(|| dir.to_string());
+    let mut emitted_suites = std::collections::HashSet::<String>::new();
+
+    for (idx, line) in content.lines().enumerate() {
+        let line_no = (idx + 1) as u32;
+        let trimmed = line.trim();
+        if trimmed.starts_with("//") || trimmed.starts_with('*') || trimmed.starts_with("/*") {
+            continue;
+        }
+
+        if re_main.is_match(line) && !trimmed.ends_with(';') {
+            out.push(IdeGutterItem {
+                line: line_no,
+                kind: IdeGutterKind::Main,
+                label: "main".into(),
+                language: lang.to_string(),
+                run_spec: IdeQuickRunSpec {
+                    runner: IdeRunnerKind::CppRun,
+                    command: None,
+                    args: Vec::new(),
+                    cwd: Some(effective_cwd.clone()),
+                    target_path: Some(path.to_string()),
+                    test_filter: None,
+                    debug_program: Some(path.to_string()),
+                    debug_test_name: None,
+                },
+            });
+        } else if let Some(cap) = re_gtest.captures(line) {
+            let suite = cap[1].to_string();
+            let name = cap[2].to_string();
+            let full = format!("{suite}.{name}");
+            if emitted_suites.insert(suite.clone()) {
+                let suite_filter = format!("{suite}.*");
+                out.push(IdeGutterItem {
+                    line: line_no,
+                    kind: IdeGutterKind::Suite,
+                    label: suite.clone(),
+                    language: lang.to_string(),
+                    run_spec: IdeQuickRunSpec {
+                        runner: IdeRunnerKind::Ctest,
+                        command: None,
+                        args: Vec::new(),
+                        cwd: Some(effective_cwd.clone()),
+                        target_path: Some(path.to_string()),
+                        test_filter: Some(suite_filter.clone()),
+                        debug_program: Some(path.to_string()),
+                        debug_test_name: Some(suite_filter),
+                    },
+                });
+            }
+            out.push(IdeGutterItem {
+                line: line_no,
+                kind: IdeGutterKind::Test,
+                label: full.clone(),
+                language: lang.to_string(),
+                run_spec: IdeQuickRunSpec {
+                    runner: IdeRunnerKind::Ctest,
+                    command: None,
+                    args: Vec::new(),
+                    cwd: Some(effective_cwd.clone()),
+                    target_path: Some(path.to_string()),
+                    test_filter: Some(full.clone()),
+                    debug_program: Some(path.to_string()),
+                    debug_test_name: Some(full),
+                },
+            });
+        } else if let Some(cap) = re_catch.captures(line) {
+            let test_name = cap[1].replace("\\\"", "\"");
+            out.push(IdeGutterItem {
+                line: line_no,
+                kind: IdeGutterKind::Test,
+                label: test_name.clone(),
+                language: lang.to_string(),
+                run_spec: IdeQuickRunSpec {
+                    runner: IdeRunnerKind::Ctest,
+                    command: None,
+                    args: Vec::new(),
+                    cwd: Some(effective_cwd.clone()),
+                    target_path: Some(path.to_string()),
+                    test_filter: Some(test_name.clone()),
+                    debug_program: Some(path.to_string()),
+                    debug_test_name: Some(test_name),
+                },
+            });
+        }
+    }
+}
+
+fn find_cpp_project_root(dir: &str) -> Option<String> {
+    let mut cur = Some(std::path::Path::new(dir));
+    let mut hops = 0usize;
+    let mut best = None;
+    while let Some(d) = cur {
+        if d.join("CMakePresets.json").is_file()
+            || d.join("CMakeLists.txt").is_file()
+            || d.join("meson.build").is_file()
+            || d.join("compile_commands.json").is_file()
+        {
+            best = Some(d.to_string_lossy().into_owned());
+        }
+        hops += 1;
+        if hops >= 8 {
+            break;
+        }
+        cur = d.parent();
+    }
+    best
 }

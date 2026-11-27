@@ -44,6 +44,8 @@ pub fn normalize_lsp_lang(lang: &str) -> &str {
         "containerfile" => "dockerfile",
         "kt" | "kts" => "kotlin",
         "zon" => "zig",
+        "c" | "h" | "cc" | "cxx" | "c++" | "hpp" | "hxx" | "hh" | "h++" | "inl" | "ipp" | "tpp"
+        | "ixx" | "cppm" | "c_cpp" | "cu" | "cuh" => "cpp",
         other => other,
     }
 }
@@ -94,6 +96,15 @@ pub static REGISTRY: &[ServerDef] = &[
         fallback_args: &[],
         extensions: &[".java"],
         install_command: Some("brew install jdtls"),
+    },
+    ServerDef {
+        lang: "kotlin",
+        cmd: "kotlin-language-server",
+        args: &[],
+        fallback_cmd: None,
+        fallback_args: &[],
+        extensions: &[".kt", ".kts"],
+        install_command: Some("brew install kotlin-language-server"),
     },
     ServerDef {
         lang: "rust",
@@ -157,6 +168,23 @@ pub static REGISTRY: &[ServerDef] = &[
         fallback_args: &[],
         extensions: &[".zig", ".zon"],
         install_command: Some("brew install zls"),
+    },
+    ServerDef {
+        lang: "cpp",
+        cmd: "clangd",
+        args: &[
+            "--background-index",
+            "--clang-tidy",
+            "--header-insertion=iwyu",
+            "--completion-style=detailed",
+        ],
+        fallback_cmd: None,
+        fallback_args: &[],
+        extensions: &[
+            ".c", ".h", ".cc", ".cpp", ".cxx", ".c++", ".hpp", ".hxx", ".hh", ".h++", ".inl",
+            ".ipp", ".tpp", ".ixx", ".cppm",
+        ],
+        install_command: Some("xcode-select --install"),
     },
 ];
 
@@ -229,10 +257,14 @@ fn collect_developer_bin_dirs(
         }
     }
     for sys in [
+        "/opt/homebrew/opt/llvm/bin",
         "/opt/homebrew/bin",
         "/opt/homebrew/sbin",
+        "/usr/local/opt/llvm/bin",
         "/usr/local/go/bin",
         "/usr/local/bin",
+        "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin",
+        "/Library/Developer/CommandLineTools/usr/bin",
         "/usr/bin",
         "/bin",
     ] {

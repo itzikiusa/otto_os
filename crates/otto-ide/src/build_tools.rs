@@ -171,6 +171,7 @@ pub fn build_tools_model(
     }
 
     let mobile = mobile::scan_mobile_roots(&canon_roots, home.as_deref(), is_root_user);
+    let spring_boot = crate::spring_boot::detect_spring_boot_workspace(&canon_roots);
 
     IdeBuildToolsModelResp {
         has_maven,
@@ -183,6 +184,7 @@ pub fn build_tools_model(
         profiles,
         projects,
         mobile_projects: mobile.projects,
+        spring_boot,
     }
 }
 

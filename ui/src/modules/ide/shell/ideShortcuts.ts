@@ -57,6 +57,7 @@ export const IDE_SHORTCUTS = [
   { id: 'replaceInPath', title: 'Replace in path', category: 'Navigate', scope: 'window', jetbrains: [m('r', { shift: true })], standard: [m('h', { shift: true })] },
   { id: 'navigateBack', title: 'Navigate back', category: 'Navigate', scope: 'window', jetbrains: [m('[')], standard: [k('-', { ctrl: true })] },
   { id: 'navigateForward', title: 'Navigate forward', category: 'Navigate', scope: 'window', jetbrains: [m(']')], standard: [k('-', { ctrl: true, shift: true })] },
+  { id: 'switchHeaderSource', title: 'Switch header / source', category: 'Navigate', scope: 'window', ...both(k('o', { alt: true })) },
   { id: 'fileStructure', title: 'File structure', category: 'Navigate', scope: 'editor', ...both(m('F12')) },
   { id: 'goToDefinition', title: 'Go to definition', category: 'Code', scope: 'editor', jetbrains: [m('b')], standard: [k('F12')] },
   { id: 'findUsages', title: 'Find usages', category: 'Code', scope: 'window', jetbrains: [k('F7', { alt: true })], standard: [k('F12', { shift: true })] },

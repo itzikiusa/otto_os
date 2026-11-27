@@ -23,6 +23,9 @@ pub(super) fn collect_managed_bin_dirs(tc_root: &Path, out: &mut Vec<PathBuf>) {
     for rel in [
         "java/lsp/bin",
         "java/current/bin",
+        "kotlin/bin",
+        "kotlin/current/bin",
+        "kotlin/lsp/server/bin",
         "go/bin",
         "rust/bin",
         "rust/cargo/bin",
@@ -31,6 +34,9 @@ pub(super) fn collect_managed_bin_dirs(tc_root: &Path, out: &mut Vec<PathBuf>) {
         "zig/bin",
         "zig/current",
         "zig/current/bin",
+        "cpp/bin",
+        "cpp/current/bin",
+        "cpp/dap/extension/adapter",
         "node/current/bin",
         "node/lsp/node_modules/.bin",
         "python/bin",
@@ -48,8 +54,10 @@ pub(super) fn collect_managed_bin_dirs(tc_root: &Path, out: &mut Vec<PathBuf>) {
     }
     for sub in [
         "java/jdks",
+        "kotlin/sdks",
         "go/sdks",
         "zig/sdks",
+        "cpp/sdks",
         "node/sdks",
         "python/interpreters",
     ] {
@@ -57,7 +65,7 @@ pub(super) fn collect_managed_bin_dirs(tc_root: &Path, out: &mut Vec<PathBuf>) {
             if sub == "zig/sdks" && p.join("zig").is_file() && !out.contains(&p) {
                 out.push(p.clone());
             }
-            for rel in ["bin", "Contents/Home/bin", "go/bin"] {
+            for rel in ["bin", "Contents/Home/bin", "go/bin", "kotlinc/bin"] {
                 let b = p.join(rel);
                 if b.is_dir() && !out.contains(&b) {
                     out.push(b);
@@ -185,6 +193,27 @@ fn scan_otto_sdks(
                 if let Some(zh) = resolve_zig_home_dir(&dir) {
                     let v = zig_dir_version(&dir);
                     push_sdk(out, seen, "zig", &v, &zh, "otto");
+                }
+            }
+        }
+        EcosystemKind::Cpp => {
+            for dir in read_subdirs(&root.join("cpp/sdks")) {
+                if dir.join("bin/clang++").is_file() || dir.join("bin/clang").is_file() {
+                    let v = dir_name_version(&dir);
+                    push_sdk(out, seen, "cpp", &v, &dir, "otto");
+                }
+            }
+        }
+        EcosystemKind::Kotlin => {
+            for dir in read_subdirs(&root.join("kotlin/sdks")) {
+                let kh = if dir.join("kotlinc/bin/kotlinc").is_file() {
+                    dir.join("kotlinc")
+                } else {
+                    dir.clone()
+                };
+                if kh.join("bin/kotlinc").is_file() {
+                    let v = dir_name_version(&dir);
+                    push_sdk(out, seen, "kotlin", &v, &kh, "otto");
                 }
             }
         }
@@ -326,6 +355,65 @@ fn scan_system_sdks(
                 }
             }
         }
+        EcosystemKind::Cpp => {
+            for (cand, label_src) in [
+                (
+                    "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr",
+                    "xcode",
+                ),
+                ("/Library/Developer/CommandLineTools/usr", "xcode-clt"),
+                ("/opt/homebrew/opt/llvm", "homebrew"),
+                ("/usr/local/opt/llvm", "homebrew"),
+            ] {
+                let p = PathBuf::from(cand);
+                let bin = p.join("bin/clang++");
+                if is_executable_file(&bin) {
+                    let v = read_cpp_compiler_version(&bin)
+                        .unwrap_or_else(|| dir_name_version(&p));
+                    push_sdk(out, seen, "cpp", &v, &p, label_src);
+                }
+            }
+            if let Some(cxx_bin) = find_executable_in(&search, &["clang++", "g++", "clang", "gcc"])
+            {
+                let prefix = bin_prefix(&cxx_bin).unwrap_or_else(|| {
+                    cxx_bin
+                        .parent()
+                        .and_then(|p| p.parent())
+                        .map(Path::to_path_buf)
+                        .unwrap_or_else(|| PathBuf::from("/usr"))
+                });
+                let v = read_cpp_compiler_version(&cxx_bin).unwrap_or_else(|| "system".into());
+                push_sdk(out, seen, "cpp", &v, &prefix, "system");
+            }
+        }
+        EcosystemKind::Kotlin => {
+            if let Some(h) = &home {
+                for dir in read_subdirs(&h.join(".sdkman/candidates/kotlin")) {
+                    if dir.join("bin/kotlinc").is_file() {
+                        let v = dir_name_version(&dir);
+                        push_sdk(out, seen, "kotlin", &v, &dir, "sdkman");
+                    }
+                }
+            }
+            for cand in [
+                "/opt/homebrew/opt/kotlin/libexec",
+                "/usr/local/opt/kotlin/libexec",
+                "/opt/homebrew/opt/kotlin",
+                "/usr/local/opt/kotlin",
+            ] {
+                let p = PathBuf::from(cand);
+                if p.join("bin/kotlinc").is_file() {
+                    let v = dir_name_version(&p);
+                    push_sdk(out, seen, "kotlin", &v, &p, "homebrew");
+                }
+            }
+            if let Some(kc) = find_executable_in(&search, &["kotlinc"]) {
+                if let Some(kh) = bin_prefix(&kc) {
+                    let v = dir_name_version(&kh);
+                    push_sdk(out, seen, "kotlin", &v, &kh, "system");
+                }
+            }
+        }
         EcosystemKind::Node => {
             if let Some(h) = &home {
                 for dir in read_subdirs(&h.join(".nvm/versions/node")) {
@@ -404,9 +492,14 @@ pub(super) fn discover_local_lsp_with_shell(
     let name = eco.lsp_name().to_string();
     let rels: &[&str] = match eco {
         EcosystemKind::Java => &["java/lsp/bin/jdtls"],
+        EcosystemKind::Kotlin => &[
+            "kotlin/bin/kotlin-language-server",
+            "kotlin/lsp/server/bin/kotlin-language-server",
+        ],
         EcosystemKind::Go => &["go/bin/gopls"],
         EcosystemKind::Rust => &["rust/bin/rust-analyzer", "rust/cargo/bin/rust-analyzer"],
         EcosystemKind::Zig => &["zig/bin/zls"],
+        EcosystemKind::Cpp => &["cpp/bin/clangd", "cpp/current/bin/clangd"],
         EcosystemKind::Node => &["node/lsp/node_modules/.bin/typescript-language-server"],
         EcosystemKind::Python => &["python/bin/pyright-langserver", "python/bin/pyright"],
         EcosystemKind::Shell => &["shell/lsp/node_modules/.bin/bash-language-server"],
@@ -432,9 +525,11 @@ pub(super) fn discover_local_lsp_with_shell(
     }
     let sys_names: &[&str] = match eco {
         EcosystemKind::Java => &["jdtls"],
+        EcosystemKind::Kotlin => &["kotlin-language-server"],
         EcosystemKind::Go => &["gopls"],
         EcosystemKind::Rust => &["rust-analyzer"],
         EcosystemKind::Zig => &["zls"],
+        EcosystemKind::Cpp => &["clangd"],
         EcosystemKind::Node => &["typescript-language-server"],
         EcosystemKind::Python => &["pyright-langserver", "pyright"],
         EcosystemKind::Shell => &["bash-language-server"],
@@ -446,11 +541,18 @@ pub(super) fn discover_local_lsp_with_shell(
     let mut search = system_search_dirs_with_shell(shell_path);
     if matches!(
         eco,
-        EcosystemKind::Rust | EcosystemKind::Zig | EcosystemKind::Ios
+        EcosystemKind::Rust | EcosystemKind::Zig | EcosystemKind::Cpp | EcosystemKind::Ios
     ) {
-        let xcode_dap_dir = PathBuf::from("/Applications/Xcode.app/Contents/Developer/usr/bin");
-        if xcode_dap_dir.is_dir() && !search.contains(&xcode_dap_dir) {
-            search.push(xcode_dap_dir);
+        for extra_dir in [
+            "/opt/homebrew/opt/llvm/bin",
+            "/usr/local/opt/llvm/bin",
+            "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin",
+            "/Applications/Xcode.app/Contents/Developer/usr/bin",
+        ] {
+            let p = PathBuf::from(extra_dir);
+            if p.is_dir() && !search.contains(&p) {
+                search.push(p);
+            }
         }
     }
     if let Some(sys) = find_executable_in(&search, sys_names) {
@@ -478,9 +580,10 @@ pub(super) fn discover_local_dap_with_shell(
     let name = eco.dap_name().to_string();
     let java_rel = format!("java/dap/{JAVA_DEBUG_JAR_NAME}");
     let rels: Vec<&str> = match eco {
-        EcosystemKind::Java => vec![java_rel.as_str()],
+        EcosystemKind::Java | EcosystemKind::Kotlin => vec![java_rel.as_str()],
         EcosystemKind::Go => vec!["go/bin/dlv", "dlv/dlv"],
-        EcosystemKind::Rust | EcosystemKind::Zig => vec![
+        EcosystemKind::Rust | EcosystemKind::Zig | EcosystemKind::Cpp => vec![
+            "cpp/dap/extension/adapter/codelldb",
             "rust/dap/extension/adapter/codelldb",
             "rust/codelldb/adapter/codelldb",
             "zig/dap/extension/adapter/codelldb",
@@ -498,10 +601,14 @@ pub(super) fn discover_local_dap_with_shell(
         for rel in &rels {
             let cand = root.join(rel);
             let ok = match eco {
-                EcosystemKind::Java | EcosystemKind::Node | EcosystemKind::Python => cand.is_file(),
+                EcosystemKind::Java
+                | EcosystemKind::Kotlin
+                | EcosystemKind::Node
+                | EcosystemKind::Python => cand.is_file(),
                 EcosystemKind::Go
                 | EcosystemKind::Rust
                 | EcosystemKind::Zig
+                | EcosystemKind::Cpp
                 | EcosystemKind::Shell
                 | EcosystemKind::Json
                 | EcosystemKind::Ios
@@ -520,9 +627,11 @@ pub(super) fn discover_local_dap_with_shell(
         }
     }
     let sys_names: &[&str] = match eco {
-        EcosystemKind::Java => &["java-debug", "java"],
+        EcosystemKind::Java | EcosystemKind::Kotlin => &["java-debug", "java"],
         EcosystemKind::Go => &["dlv"],
-        EcosystemKind::Rust | EcosystemKind::Zig => &["codelldb", "lldb-dap", "lldb"],
+        EcosystemKind::Rust | EcosystemKind::Zig | EcosystemKind::Cpp => {
+            &["codelldb", "lldb-dap", "lldb"]
+        }
         EcosystemKind::Node => &["js-debug-dap", "node"],
         EcosystemKind::Python => &["debugpy", "debugpy-adapter", "python3"],
         EcosystemKind::Shell => &["bashdb", "bash", "zsh"],
@@ -534,11 +643,18 @@ pub(super) fn discover_local_dap_with_shell(
     let mut search = system_search_dirs_with_shell(shell_path);
     if matches!(
         eco,
-        EcosystemKind::Rust | EcosystemKind::Zig | EcosystemKind::Ios
+        EcosystemKind::Rust | EcosystemKind::Zig | EcosystemKind::Cpp | EcosystemKind::Ios
     ) {
-        let xcode_dap_dir = PathBuf::from("/Applications/Xcode.app/Contents/Developer/usr/bin");
-        if xcode_dap_dir.is_dir() && !search.contains(&xcode_dap_dir) {
-            search.push(xcode_dap_dir);
+        for extra_dir in [
+            "/opt/homebrew/opt/llvm/bin",
+            "/usr/local/opt/llvm/bin",
+            "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin",
+            "/Applications/Xcode.app/Contents/Developer/usr/bin",
+        ] {
+            let p = PathBuf::from(extra_dir);
+            if p.is_dir() && !search.contains(&p) {
+                search.push(p);
+            }
         }
     }
     if let Some(sys) = find_executable_in(&search, sys_names) {
@@ -762,6 +878,27 @@ fn python_has_debugpy(python: &str) -> bool {
         .is_ok_and(|s| s.success())
 }
 
+#[allow(clippy::disallowed_methods)]
+pub(crate) fn read_cpp_compiler_version(bin: &Path) -> Option<String> {
+    let out = std::process::Command::new(bin)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let first = text.lines().next()?.trim();
+    for tok in first.split_whitespace() {
+        let clean = tok.trim_matches(|c: char| matches!(c, '(' | ')' | ','));
+        if clean.chars().next().is_some_and(|c| c.is_ascii_digit()) && clean.contains('.') {
+            return Some(clean.to_string());
+        }
+    }
+    (!first.is_empty()).then(|| first.chars().take(32).collect())
+}
+
 pub(super) fn mark_active_sdk(
     installed: &mut [IdeInstalledSdk],
     eco: EcosystemKind,
@@ -769,9 +906,11 @@ pub(super) fn mark_active_sdk(
 ) {
     let chosen = active_env.and_then(|env| match eco {
         EcosystemKind::Java => env.java_home.as_deref(),
+        EcosystemKind::Kotlin => env.kotlin_home.as_deref(),
         EcosystemKind::Go => env.go_root.as_deref(),
         EcosystemKind::Rust => env.rust_toolchain.as_deref(),
         EcosystemKind::Zig => env.zig_home.as_deref(),
+        EcosystemKind::Cpp => env.cpp_toolchain.as_deref(),
         EcosystemKind::Node => env.node_home.as_deref(),
         EcosystemKind::Python => env.python_interpreter.as_deref(),
         EcosystemKind::Ios => env.xcode_developer_dir.as_deref(),

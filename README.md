@@ -470,10 +470,10 @@ including behaviour changes to know before upgrading.
   hand over and reclaim terminal control at any moment, and generate a local
   structured recap (decisions, actions, open questions) once participants consent.
 - **IDE (Beta)** — a multi-language IDE (`#/ide`) on your local or SSH
-  projects (Go, Java, Rust, Zig, TypeScript/JS, Python, Shell): language servers
-  (`gopls`, `jdtls`, `rust-analyzer`, `zls`, `pyright`, `tsserver`), a git gutter,
-  run configurations with live output and test trees, a DAP debugger with
-  breakpoints, watches, variable editing, and an agent dock that proposes diffs
+  projects (Go, Java & Spring Boot, Kotlin, Rust, Zig, C/C++ & Unreal Engine, TypeScript/JS, Python, Shell): language servers
+  (`gopls`, `jdtls`, `kotlin-language-server`, `rust-analyzer`, `zls`, `clangd`, `pyright`, `tsserver`), header/source switch (`⌥O`), a git gutter,
+  run configurations (CMake/CTest, Meson, Make, Unreal, Go, Cargo, Zig, Maven/Gradle, pytest, npm) with live output and test trees, a DAP debugger with
+  breakpoints, watches, variable editing, PID/core attach, and an agent dock that proposes diffs
   you apply or undo. See `docs/features/ide.md`.
 - **Git & Pull Requests** — a GitKraken-style **commit graph** with a WIP row +
   staging panel, per-file diffs, folder-level stage/discard, an interactive

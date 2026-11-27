@@ -87,3 +87,17 @@ export async function queryPooledLspReferences(view: EditorView, line: number, c
     return null;
   }
 }
+
+/** Query clangd's `textDocument/switchSourceHeader` extension for the active C/C++ buffer. */
+export async function queryPooledLspSwitchSourceHeader(view: EditorView): Promise<string | null> {
+  const plugin = await pluginOf(view);
+  if (!plugin?.client.ready) return null;
+  const rpc = rpcOf(plugin.client);
+  if (!rpc) return null;
+  try {
+    const res = await rpc.request('textDocument/switchSourceHeader', { uri: plugin.documentUri });
+    return typeof res === 'string' && res.trim() ? res.trim() : null;
+  } catch {
+    return null;
+  }
+}

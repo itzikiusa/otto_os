@@ -278,8 +278,8 @@ export interface IdeInstallJob {
 export interface IdeEnvVar { key: string; value?: string; secret: boolean; has_secret?: boolean }
 
 export interface IdeProjectEnvironment {
-  java_home?: string | null; go_root?: string | null; rust_toolchain?: string | null; zig_home?: string | null;
-  node_home?: string | null; python_interpreter?: string | null;
+  java_home?: string | null; kotlin_home?: string | null; go_root?: string | null; rust_toolchain?: string | null; zig_home?: string | null;
+  cpp_toolchain?: string | null; node_home?: string | null; python_interpreter?: string | null;
   android_home?: string | null; flutter_root?: string | null; xcode_developer_dir?: string | null;
   dotenv_path?: string | null; extra_path?: string | null;
   inherit_shell_env?: boolean; additional_roots?: string[];
@@ -420,6 +420,7 @@ export interface IdeEditorHandle {
   /** The live language server's answers; `null` when none owns the file. */
   lspReferences?: (line: number, column: number) => Promise<Array<{ path: string; line: number; column: number }> | null>;
   lspQuickFixes?: (line: number) => Promise<Array<{ title: string; isPreferred: boolean; edits: IdeTextEdit[] }> | null>;
+  lspSwitchSourceHeader?: () => Promise<string | null>;
 }
 
 export function isReadOnlySdkOrCachePath(p: string): boolean {
@@ -430,6 +431,14 @@ export function isReadOnlySdkOrCachePath(p: string): boolean {
   if (p.includes('/.m2/repository/') || p.includes('/.gradle/caches/')) return true;
   if (p.includes('/.cargo/registry/') || p.includes('/rustlib/src/')) return true;
   if (p.includes('/.cache/zig/') || p.includes('/lib/zig/std/') || p.includes('/lib/std/') || p.includes('/.zvm/')) return true;
+  if (
+    p.startsWith('/usr/include/') ||
+    p.startsWith('/usr/local/include/') ||
+    p.includes('/SDKs/MacOSX') ||
+    p.includes('/Toolchains/XcodeDefault.xctoolchain/') ||
+    p.includes('/.conan2/') ||
+    p.includes('/vcpkg_installed/')
+  ) return true;
   if (p.includes('/node_modules/') || p.includes('/site-packages/') || p.includes('/dist-packages/')) return true;
   if (p.includes('/.otto/toolchains/')) return true;
   return false;
@@ -449,9 +458,14 @@ export function detectIdeLanguage(p: string): string {
   const base = ideBasename(p);
   const lower = base.toLowerCase();
   if (lower === 'bashrc' || lower === '.bashrc' || lower === '.zshrc' || lower === '.zshenv') return 'shell';
+  if (lower === 'cmakelists.txt') return 'cmake';
+  if (lower === 'meson.build' || lower === 'meson_options.txt' || lower === 'meson.options') return 'meson';
   const ext = lower.includes('.') ? (lower.split('.').pop() ?? '') : '';
   const map: Record<string, string> = {
-    go: 'go', java: 'java', class: 'java', rs: 'rust', zig: 'zig', zon: 'zig', py: 'python', pyi: 'python',
+    go: 'go', java: 'java', class: 'java', kt: 'kotlin', kts: 'kotlin', rs: 'rust', zig: 'zig', zon: 'zig', py: 'python', pyi: 'python',
+    c: 'c', m: 'c', cpp: 'cpp', cc: 'cpp', cxx: 'cpp', 'c++': 'cpp', h: 'cpp', hh: 'cpp', hpp: 'cpp', hxx: 'cpp',
+    'h++': 'cpp', inl: 'cpp', ipp: 'cpp', tpp: 'cpp', ixx: 'cpp', cppm: 'cpp', mm: 'cpp',
+    cmake: 'cmake', meson: 'meson', uproject: 'json', uplugin: 'json',
     ts: 'typescript', mts: 'typescript', cts: 'typescript', tsx: 'tsx',
     js: 'javascript', mjs: 'javascript', cjs: 'javascript', jsx: 'jsx',
     json: 'json', jsonc: 'json', jsonl: 'jsonl', csv: 'csv', tsv: 'tsv',
@@ -476,7 +490,8 @@ export const GUTTER_TARGET_ID = 'gutter';
 
 export function defaultRunnerForLanguage(lang: string): string {
   const map: Record<string, string> = {
-    go: 'go_run', rust: 'cargo_run', zig: 'zig_run', java: 'java_main', python: 'python',
+    go: 'go_run', rust: 'cargo_run', zig: 'zig_run', c: 'cpp_run', cpp: 'cpp_run',
+    cmake: 'cmake', meson: 'meson', java: 'java_main', kotlin: 'java_main', python: 'python',
     javascript: 'node', typescript: 'node', tsx: 'npm', jsx: 'node', shell: 'shell',
   };
   return map[lang] ?? 'custom';
@@ -504,11 +519,39 @@ export function buildNewFileTemplate(fullPath: string, rootPath: string, sibling
     const pkgLine = m?.[1] ? `package ${m[1].replace(/\//g, '.')};\n\n` : '';
     return `${pkgLine}public class ${stem} {\n}\n`;
   }
+  if (lower.endsWith('.kt')) {
+    const stem = name.slice(0, -3).replace(/[^A-Za-z0-9_]/g, '') || 'Main';
+    const m = parentDir.match(/\/src\/(?:main|test)\/(?:kotlin|java)\/(.+)$/);
+    const pkgLine = m?.[1] ? `package ${m[1].replace(/\//g, '.')}\n\n` : '';
+    if (lower === 'main.kt') return `${pkgLine}fun main() {\n}\n`;
+    return `${pkgLine}class ${stem} {\n}\n`;
+  }
   if (lower.endsWith('.zig')) {
     if (lower === 'main.zig') {
       return `const std = @import("std");\n\npub fn main() !void {\n}\n`;
     }
     return `const std = @import("std");\n\n`;
+  }
+  if (lower.endsWith('.hpp') || lower.endsWith('.h') || lower.endsWith('.hxx') || lower.endsWith('.hh')) {
+    return `#pragma once\n\n`;
+  }
+  if (lower.endsWith('.cpp') || lower.endsWith('.cc') || lower.endsWith('.cxx')) {
+    if (lower === 'main.cpp') {
+      return `#include <iostream>\n\nint main() {\n  return 0;\n}\n`;
+    }
+    const stem = name.slice(0, name.lastIndexOf('.'));
+    const hasHpp = siblingEntries.some((e) => e.name === `${stem}.hpp` || e.name === `${stem}.h`);
+    if (hasHpp) {
+      const hdr = siblingEntries.find((e) => e.name === `${stem}.hpp`)?.name ?? `${stem}.h`;
+      return `#include "${hdr}"\n\n`;
+    }
+    return '';
+  }
+  if (lower.endsWith('.c')) {
+    if (lower === 'main.c') {
+      return `#include <stdio.h>\n\nint main(void) {\n  return 0;\n}\n`;
+    }
+    return '';
   }
   if (lower.endsWith('.sh') || lower.endsWith('.bash')) return '#!/usr/bin/env bash\nset -euo pipefail\n\n';
   if (lower.endsWith('.zsh')) return '#!/usr/bin/env zsh\nset -euo pipefail\n\n';
@@ -569,7 +612,7 @@ export async function collabGuestPost<T>(path: string, guestToken: string | null
   return (await resp.json()) as T;
 }
 
-const ENTRY_FILE_NAMES = ['readme.md', 'main.go', 'main.rs', 'main.zig', 'main.py', 'index.ts', 'app.svelte', 'go.mod', 'cargo.toml', 'build.zig', 'package.json'];
+const ENTRY_FILE_NAMES = ['readme.md', 'main.go', 'main.rs', 'main.kt', 'main.zig', 'main.cpp', 'main.c', 'main.py', 'index.ts', 'app.svelte', 'go.mod', 'cargo.toml', 'build.gradle.kts', 'build.zig', 'cmakelists.txt', 'meson.build', 'package.json'];
 
 export function pickInitialEntryFile(entries: IdeFsEntry[]): IdeFsEntry | null {
   const files = entries.filter((e) => e.kind === 'file' && !e.name.startsWith('.'));

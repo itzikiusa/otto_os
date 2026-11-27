@@ -216,6 +216,7 @@ enum SdkKindHint {
     Python,
     Rust,
     Zig,
+    Cpp,
     Node,
     GenericPath,
 }
@@ -241,6 +242,14 @@ fn infer_sdk_kind(
             IdeRunnerKind::CargoRun | IdeRunnerKind::CargoTest => return SdkKindHint::Rust,
             IdeRunnerKind::ZigBuild | IdeRunnerKind::ZigRun | IdeRunnerKind::ZigTest => {
                 return SdkKindHint::Zig;
+            }
+            IdeRunnerKind::Cmake
+            | IdeRunnerKind::Ctest
+            | IdeRunnerKind::CppRun
+            | IdeRunnerKind::Make
+            | IdeRunnerKind::Meson
+            | IdeRunnerKind::Unreal => {
+                return SdkKindHint::Cpp;
             }
             IdeRunnerKind::Node
             | IdeRunnerKind::Npm
@@ -271,6 +280,16 @@ fn infer_sdk_kind(
         }
         if lower == "zig" || lower.ends_with(".zig") || lower.ends_with(".zon") {
             return SdkKindHint::Zig;
+        }
+        if matches!(lower.as_str(), "c" | "cpp" | "c++" | "cxx" | "cmake")
+            || lower.ends_with(".c")
+            || lower.ends_with(".cpp")
+            || lower.ends_with(".cc")
+            || lower.ends_with(".cxx")
+            || lower.ends_with(".h")
+            || lower.ends_with(".hpp")
+        {
+            return SdkKindHint::Cpp;
         }
         if matches!(
             lower.as_str(),
@@ -321,6 +340,14 @@ fn infer_sdk_kind(
     {
         return SdkKindHint::Zig;
     }
+    if sp.join("bin/clang++").is_file()
+        || sp.join("bin/clang").is_file()
+        || sp.join("bin/g++").is_file()
+        || s_low.contains("/llvm")
+        || s_low.contains("/cpp/")
+    {
+        return SdkKindHint::Cpp;
+    }
     if sp.join("bin/node").is_file()
         || s_low.ends_with("/node")
         || s_low.contains("/node/")
@@ -346,6 +373,12 @@ fn infer_sdk_kind(
     }
     if mr.join("build.zig").is_file() || mr.join("build.zig.zon").is_file() {
         return SdkKindHint::Zig;
+    }
+    if mr.join("CMakeLists.txt").is_file()
+        || mr.join("meson.build").is_file()
+        || mr.join("compile_commands.json").is_file()
+    {
+        return SdkKindHint::Cpp;
     }
     if mr.join("package.json").is_file() {
         return SdkKindHint::Node;
@@ -407,6 +440,16 @@ pub(crate) fn apply_module_sdk_to_project_env(
                 .or_else(|| trimmed.strip_suffix("/bin"))
                 .unwrap_or(trimmed);
             proj.zig_home = Some(root.to_string());
+        }
+        SdkKindHint::Cpp => {
+            let root = trimmed
+                .strip_suffix("/bin/clang++")
+                .or_else(|| trimmed.strip_suffix("/bin/clang"))
+                .or_else(|| trimmed.strip_suffix("/bin/g++"))
+                .or_else(|| trimmed.strip_suffix("/bin/gcc"))
+                .or_else(|| trimmed.strip_suffix("/bin"))
+                .unwrap_or(trimmed);
+            proj.cpp_toolchain = Some(root.to_string());
         }
         SdkKindHint::Node => {
             let root = trimmed
@@ -502,6 +545,12 @@ pub(super) async fn layer_child_and_module_sdk_for_run(
                 }
                 if mod_proj.zig_home.is_some() {
                     proj.zig_home = mod_proj.zig_home;
+                }
+                if mod_proj.cpp_toolchain.is_some() {
+                    proj.cpp_toolchain = mod_proj.cpp_toolchain;
+                }
+                if mod_proj.kotlin_home.is_some() {
+                    proj.kotlin_home = mod_proj.kotlin_home;
                 }
                 if mod_proj.node_home.is_some() {
                     proj.node_home = mod_proj.node_home;

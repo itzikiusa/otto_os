@@ -119,6 +119,7 @@ pub(super) fn match_brace_symbol(
         "rust" => match_rust_symbol(trimmed),
         "go" => match_go_symbol(trimmed),
         "zig" => match_zig_symbol(trimmed),
+        "c" | "cpp" => match_cpp_symbol(trimmed),
         "java" | "kotlin" => match_jvm_symbol(trimmed),
         "javascript" | "typescript" | "svelte" | "vue" => match_ts_symbol(trimmed),
         "protobuf" => match_proto_symbol(trimmed),
@@ -296,15 +297,120 @@ fn match_zig_symbol(trimmed: &str) -> Option<(String, String, Option<String>, bo
     Some((cap[2].to_string(), cap[1].to_string(), None, false))
 }
 
+fn match_cpp_symbol(trimmed: &str) -> Option<(String, String, Option<String>, bool)> {
+    static RE_NS: OnceLock<Regex> = OnceLock::new();
+    static RE_TYPE: OnceLock<Regex> = OnceLock::new();
+    static RE_GTEST: OnceLock<Regex> = OnceLock::new();
+    static RE_CATCH: OnceLock<Regex> = OnceLock::new();
+    static RE_FN: OnceLock<Regex> = OnceLock::new();
+
+    if let Some(cap) = RE_NS
+        .get_or_init(|| {
+            Regex::new(r"^(?:inline\s+)?namespace\s+([A-Za-z_][A-Za-z0-9_:]*)").unwrap()
+        })
+        .captures(trimmed)
+    {
+        return Some((cap[1].to_string(), "namespace".into(), None, true));
+    }
+    if let Some(cap) = RE_TYPE
+        .get_or_init(|| {
+            Regex::new(
+                r"^(?:template\s*<[^>]*>\s*)?(?:typedef\s+)?(class|struct|enum\s+class|enum|union)\s+(?:[A-Z0-9_]+_API\s+)?([A-Za-z_][A-Za-z0-9_]*)",
+            )
+            .unwrap()
+        })
+        .captures(trimmed)
+    {
+        let kind = if cap[1].starts_with("enum") {
+            "enum"
+        } else {
+            &cap[1]
+        };
+        return Some((cap[2].to_string(), kind.into(), None, true));
+    }
+    if let Some(cap) = RE_GTEST
+        .get_or_init(|| {
+            Regex::new(
+                r"^(?:TEST|TEST_F|TEST_P|TYPED_TEST)\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*,\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)",
+            )
+            .unwrap()
+        })
+        .captures(trimmed)
+    {
+        return Some((format!("{}.{}", &cap[1], &cap[2]), "test".into(), None, false));
+    }
+    if let Some(cap) = RE_CATCH
+        .get_or_init(|| Regex::new(r#"^(?:TEST_CASE|SCENARIO)\s*\(\s*"([^"]+)""#).unwrap())
+        .captures(trimmed)
+    {
+        return Some((cap[1].to_string(), "test".into(), None, false));
+    }
+    if trimmed.starts_with("return ")
+        || trimmed.starts_with("if ")
+        || trimmed.starts_with("if(")
+        || trimmed.starts_with("for ")
+        || trimmed.starts_with("for(")
+        || trimmed.starts_with("while ")
+        || trimmed.starts_with("while(")
+        || trimmed.starts_with("switch ")
+        || trimmed.starts_with("switch(")
+        || trimmed.starts_with("catch ")
+        || trimmed.starts_with("catch(")
+        || trimmed.starts_with("else ")
+    {
+        return None;
+    }
+    let cap = RE_FN
+        .get_or_init(|| {
+            Regex::new(
+                r"^(?:(?:template\s*<[^>]*>\s*)?(?:static|inline|virtual|explicit|constexpr|consteval|extern|friend|override|final|unsigned|signed|const|volatile)\s+)*(?:[A-Za-z_][A-Za-z0-9_:<>*,&\s]*?)\s+([A-Za-z_~][A-Za-z0-9_:~]*)\s*\(([^)]*)\)\s*(?:const\s*)?(?:noexcept(?:\([^)]*\))?\s*)?(?:override\s*)?(?:final\s*)?(?:\{|->|;)",
+            )
+            .unwrap()
+        })
+        .captures(trimmed)?;
+    let full_name = &cap[1];
+    let params = cap[2].trim();
+    if matches!(
+        full_name,
+        "if" | "for" | "while" | "switch" | "catch" | "return" | "sizeof" | "alignof" | "decltype"
+    ) {
+        return None;
+    }
+    let kind = if full_name.contains("::") {
+        "method"
+    } else {
+        "function"
+    };
+    Some((
+        full_name.to_string(),
+        kind.into(),
+        Some(format!("({params})")),
+        false,
+    ))
+}
+
 fn match_jvm_symbol(trimmed: &str) -> Option<(String, String, Option<String>, bool)> {
     static RE_CLS: OnceLock<Regex> = OnceLock::new();
+    static RE_COMPANION: OnceLock<Regex> = OnceLock::new();
     static RE_KT: OnceLock<Regex> = OnceLock::new();
     static RE_M: OnceLock<Regex> = OnceLock::new();
 
+    if let Some(cap) = RE_COMPANION
+        .get_or_init(|| {
+            Regex::new(r"^companion\s+object(?:\s+([A-Za-z_][A-Za-z0-9_]*))?\b").unwrap()
+        })
+        .captures(trimmed)
+    {
+        let name = cap
+            .get(1)
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_else(|| "Companion".into());
+        return Some((name, "object".into(), None, true));
+    }
     if let Some(cap) = RE_CLS
         .get_or_init(|| {
             Regex::new(
-                r"^(?:(?:public|private|protected|abstract|final|static|sealed|non-sealed|open|data|internal)\s+)*(class|interface|enum|record|object)\s+([A-Za-z_][A-Za-z0-9_]*)",
+                r"^(?:(?:public|private|protected|abstract|final|static|sealed|non-sealed|open|data|internal|annotation|value|inline|inner|enum|expect|actual)\s+)*(class|interface|enum|record|object)\s+([A-Za-z_][A-Za-z0-9_]*)",
             )
             .unwrap()
         })
@@ -315,7 +421,7 @@ fn match_jvm_symbol(trimmed: &str) -> Option<(String, String, Option<String>, bo
     if let Some(cap) = RE_KT
         .get_or_init(|| {
             Regex::new(
-                r"^(?:(?:public|private|protected|internal|override|suspend|inline)\s+)*fun\s+`?([A-Za-z0-9_ ]+?)`?\s*\(([^)]*)\)",
+                r"^(?:(?:public|private|protected|internal|override|open|final|abstract|suspend|inline|tailrec|operator|infix|external|expect|actual)\s+)*fun\s+(?:<[^>]*>\s+)?(?:[A-Za-z_][A-Za-z0-9_<>,.?* ]*\.)?`?([A-Za-z0-9_ ]+?)`?\s*\(([^)]*)\)",
             )
             .unwrap()
         })

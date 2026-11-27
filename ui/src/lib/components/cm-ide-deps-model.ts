@@ -2,7 +2,9 @@
 // and backend `/ide/deps/*` client helpers (`go.mod`, `pom.xml`, `build.gradle*`,
 // `package.json`, `Cargo.toml`, `requirements.txt`, `pyproject.toml`).
 
-export type ManifestEcosystem = 'go' | 'maven' | 'gradle' | 'npm' | 'cargo' | 'zig' | 'pypi';
+import { parseGradleManifestDependencies } from './cm-ide-deps-gradle.ts';
+
+export type ManifestEcosystem = 'go' | 'maven' | 'gradle' | 'npm' | 'cargo' | 'zig' | 'cpp' | 'pypi';
 
 export interface IdeDepVuln {
   id: string;
@@ -53,10 +55,19 @@ export function detectManifestEcosystem(filePath: string): ManifestEcosystem | n
   const base = filePath.split('?')[0].split('/').pop()?.toLowerCase() ?? '';
   if (base === 'go.mod') return 'go';
   if (base === 'pom.xml') return 'maven';
-  if (base === 'build.gradle' || base === 'build.gradle.kts') return 'gradle';
+  if (base === 'build.gradle' || base === 'build.gradle.kts' || base === 'libs.versions.toml') return 'gradle';
   if (base === 'package.json') return 'npm';
   if (base === 'cargo.toml') return 'cargo';
   if (base === 'build.zig.zon') return 'zig';
+  if (
+    base === 'vcpkg.json' ||
+    base === 'conanfile.txt' ||
+    base === 'cmakelists.txt' ||
+    base.endsWith('.uproject') ||
+    base.endsWith('.uplugin')
+  ) {
+    return 'cpp';
+  }
   if (
     base === 'requirements.txt' ||
     base === 'pyproject.toml' ||
@@ -347,21 +358,109 @@ export function parseManifestDependencies(filePath: string, content: string): Id
         }
       }
     }
-  } else if (eco === 'gradle') {
-    for (let i = 0; i < lines.length; i++) {
-      const m = /^\s*(?:implementation|api|compileOnly|runtimeOnly|testImplementation)\s*\(?\s*['"]([^:'"]+):([^:'"]+):([^'"]+)['"]/.exec(
-        lines[i],
-      );
-      if (m) {
-        items.push({
-          name: `${m[1]}:${m[2]}`,
-          current_version: m[3],
-          line: i + 1,
-          end_line: i + 1,
-          vulnerabilities: [],
-        });
+  } else if (eco === 'cpp') {
+    const base = filePath.split('?')[0].split('/').pop()?.toLowerCase() ?? '';
+    if (base === 'vcpkg.json') {
+      let inDeps = false;
+      for (let i = 0; i < lines.length; i++) {
+        const t = lines[i].trim();
+        const ln = i + 1;
+        if (/"dependencies"\s*:\s*\[/.test(t)) { inDeps = !t.includes(']'); continue; }
+        if (inDeps && t.startsWith(']')) { inDeps = false; continue; }
+        if (!inDeps) continue;
+        const mStr = /^"([A-Za-z0-9._-]+)"\s*,?$/.exec(t);
+        if (mStr) {
+          items.push({ name: mStr[1], current_version: '*', line: ln, end_line: ln, vulnerabilities: [] });
+          continue;
+        }
+        const mObj = /"name"\s*:\s*"([^"]+)"/.exec(t);
+        if (mObj) {
+          const mv = /"version(?:>=|==|#)?"\s*:\s*"([^"]+)"/.exec(t);
+          items.push({ name: mObj[1], current_version: mv?.[1] ?? '*', line: ln, end_line: ln, vulnerabilities: [] });
+        }
+      }
+    } else if (base === 'conanfile.txt') {
+      let section = '';
+      for (let i = 0; i < lines.length; i++) {
+        const t = lines[i].trim();
+        const ln = i + 1;
+        if (!t || t.startsWith('#')) continue;
+        if (t.startsWith('[') && t.endsWith(']')) { section = t.slice(1, -1).trim().toLowerCase(); continue; }
+        if (section === 'requires' || section === 'tool_requires' || section === 'test_requires') {
+          const slash = t.indexOf('/');
+          if (slash > 0) {
+            const name = t.slice(0, slash).trim();
+            const rest = t.slice(slash + 1).split(/[@#]/)[0].trim();
+            items.push({
+              name,
+              current_version: rest || '*',
+              scope: section === 'requires' ? null : section,
+              line: ln,
+              end_line: ln,
+              vulnerabilities: [],
+            });
+          }
+        }
+      }
+    } else if (base === 'cmakelists.txt') {
+      for (let i = 0; i < lines.length; i++) {
+        const t = lines[i].trim();
+        const ln = i + 1;
+        if (!t || t.startsWith('#')) continue;
+        const mPkg = /^find_package\s*\(\s*([A-Za-z0-9_.-]+)(?:\s+([0-9][0-9A-Za-z._-]*))?/i.exec(t);
+        if (mPkg) {
+          items.push({
+            name: mPkg[1],
+            current_version: mPkg[2] ?? '*',
+            scope: 'find_package',
+            line: ln,
+            end_line: ln,
+            vulnerabilities: [],
+          });
+          continue;
+        }
+        const mFc = /^FetchContent_Declare\s*\(\s*([A-Za-z0-9_.-]+)/i.exec(t);
+        if (mFc) {
+          items.push({
+            name: mFc[1],
+            current_version: 'FetchContent',
+            scope: 'fetchcontent',
+            line: ln,
+            end_line: ln,
+            vulnerabilities: [],
+          });
+        }
+      }
+    } else if (base.endsWith('.uproject') || base.endsWith('.uplugin')) {
+      let inPlugins = false;
+      let curName = '';
+      let curLine = 0;
+      let curEnabled = true;
+      for (let i = 0; i < lines.length; i++) {
+        const t = lines[i].trim();
+        const ln = i + 1;
+        if (/"Plugins"\s*:\s*\[/.test(t)) { inPlugins = true; continue; }
+        if (inPlugins && t.startsWith(']')) { inPlugins = false; continue; }
+        if (!inPlugins) continue;
+        const mn = /"Name"\s*:\s*"([^"]+)"/.exec(t);
+        if (mn) { curName = mn[1]; curLine = ln; curEnabled = true; }
+        const me = /"Enabled"\s*:\s*(true|false)/.exec(t);
+        if (me) curEnabled = me[1] === 'true';
+        if (t.includes('}') && curName) {
+          items.push({
+            name: curName,
+            current_version: curEnabled ? 'enabled' : 'disabled',
+            scope: 'unreal-plugin',
+            line: curLine || ln,
+            end_line: ln,
+            vulnerabilities: [],
+          });
+          curName = '';
+        }
       }
     }
+  } else if (eco === 'gradle') {
+    items.push(...parseGradleManifestDependencies(filePath, lines));
   } else if (eco === 'pypi') {
     const isPyProject = filePath.toLowerCase().endsWith('pyproject.toml');
     let inPoetry = false;

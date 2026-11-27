@@ -136,6 +136,36 @@ pub(crate) fn apply_project_sdk_layers(
             push_unique(&mut proj_path_dirs, base.to_string());
         }
     }
+    if let Some(ch) = proj.cpp_toolchain.as_deref().filter(|s| !s.is_empty()) {
+        let base = ch.trim_end_matches('/');
+        let bin_dir = if base.ends_with("/bin") {
+            base.to_string()
+        } else {
+            format!("{base}/bin")
+        };
+        push_unique(&mut proj_path_dirs, bin_dir.clone());
+        if target_kind == IdeTargetKind::Local {
+            let clang = Path::new(&bin_dir).join("clang");
+            let clangxx = Path::new(&bin_dir).join("clang++");
+            let gcc = Path::new(&bin_dir).join("gcc");
+            let gxx = Path::new(&bin_dir).join("g++");
+            if clang.is_file() {
+                map.insert("CC".into(), clang.to_string_lossy().into_owned());
+            } else if gcc.is_file() {
+                map.insert("CC".into(), gcc.to_string_lossy().into_owned());
+            }
+            if clangxx.is_file() {
+                map.insert("CXX".into(), clangxx.to_string_lossy().into_owned());
+            } else if gxx.is_file() {
+                map.insert("CXX".into(), gxx.to_string_lossy().into_owned());
+            }
+        }
+    }
+    if let Some(kh) = proj.kotlin_home.as_deref().filter(|s| !s.is_empty()) {
+        let base = kh.trim_end_matches('/');
+        map.insert("KOTLIN_HOME".into(), base.to_string());
+        push_unique(&mut proj_path_dirs, format!("{base}/bin"));
+    }
     if let Some(nh) = proj.node_home.as_deref().filter(|s| !s.is_empty()) {
         push_unique(
             &mut proj_path_dirs,

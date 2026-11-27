@@ -174,6 +174,12 @@ export type IdeRunnerKind =
   | 'zig_build'
   | 'zig_run'
   | 'zig_test'
+  | 'cmake'
+  | 'ctest'
+  | 'cpp_run'
+  | 'make'
+  | 'meson'
+  | 'unreal'
   | 'node'
   | 'npm'
   | 'vitest'
@@ -216,9 +222,11 @@ export interface IdeGutterResp {
 
 export type IdeEcosystem =
   | 'java'
+  | 'kotlin'
   | 'go'
   | 'rust'
   | 'zig'
+  | 'cpp'
   | 'node'
   | 'python'
   | 'shell'
@@ -400,9 +408,11 @@ export interface IdeNetBridgeStatusResp {
 
 export interface IdeProjectEnvironment {
   java_home?: string | null;
+  kotlin_home?: string | null;
   go_root?: string | null;
   rust_toolchain?: string | null;
   zig_home?: string | null;
+  cpp_toolchain?: string | null;
   node_home?: string | null;
   python_interpreter?: string | null;
   android_home?: string | null;
@@ -545,7 +555,7 @@ export interface IdeRunResp {
 
 // ── DAP Debugger Engine ──────────────────────────────────────────────────────
 
-export type IdeDebugLanguage = 'go' | 'java' | 'rust' | 'zig' | 'javascript' | 'typescript' | 'python' | 'shell' | string;
+export type IdeDebugLanguage = 'go' | 'java' | 'kotlin' | 'rust' | 'zig' | 'cpp' | 'c' | 'javascript' | 'typescript' | 'python' | 'shell' | string;
 
 export interface IdeBreakpoint {
   path: string;
@@ -565,6 +575,9 @@ export interface IdeDebugLaunch {
   cwd?: string | null;
   test_name?: string | null;
   attach_port?: number | null;
+  attach_pid?: number | null;
+  attach_process_name?: string | null;
+  core_file?: string | null;
   env?: Record<string, string>;
   env_file?: string | null;
   inherit_shell_env?: boolean;

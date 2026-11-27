@@ -90,8 +90,10 @@ fn detect_gutter_items_inner(
         _ => match lang {
             "go" => compiled::detect_go(normalized_path, &dir, content, &mut items),
             "java" => compiled::detect_java(normalized_path, &dir, content, &mut items),
+            "kotlin" => compiled::detect_kotlin(normalized_path, &dir, content, &mut items),
             "rust" => compiled::detect_rust(normalized_path, &dir, content, &mut items),
             "zig" => compiled::detect_zig(normalized_path, &dir, content, &mut items),
+            "c" | "cpp" => compiled::detect_c_cpp(normalized_path, &dir, lang, content, &mut items),
             "python" => scripting::detect_python(normalized_path, &dir, content, &mut items),
             "javascript" | "typescript" => {
                 scripting::detect_js_ts(normalized_path, &dir, lang, content, &mut items);
@@ -104,6 +106,7 @@ fn detect_gutter_items_inner(
     }
 
     if !extra_detectors.is_empty() {
+        let mut plugin_items = Vec::new();
         scripting::apply_plugin_detectors(
             normalized_path,
             &dir,
@@ -111,8 +114,18 @@ fn detect_gutter_items_inner(
             lang,
             content,
             extra_detectors,
-            &mut items,
+            &mut plugin_items,
         );
+        // When an explicit plugin detector matches the same `(line, kind)` as a built-in
+        // detector, let the plugin override it instead of emitting duplicate gutter buttons.
+        if !plugin_items.is_empty() {
+            items.retain(|b| {
+                !plugin_items
+                    .iter()
+                    .any(|p| p.line == b.line && p.kind == b.kind)
+            });
+            items.extend(plugin_items);
+        }
     }
 
     items.sort_by(|a, b| a.line.cmp(&b.line).then_with(|| a.label.cmp(&b.label)));

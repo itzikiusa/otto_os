@@ -371,6 +371,15 @@ pub enum IdeRunnerKind {
     ZigTest,
     #[serde(alias = "zig")]
     ZigRun,
+    Cmake,
+    #[serde(alias = "gtest", alias = "catch2")]
+    Ctest,
+    #[serde(alias = "cpp", alias = "c")]
+    CppRun,
+    Make,
+    Meson,
+    #[serde(alias = "ue", alias = "ubt")]
+    Unreal,
     Node,
     #[serde(alias = "npm_script")]
     Npm,

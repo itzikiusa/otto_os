@@ -437,7 +437,7 @@
   export function lspRenameEdits(line: number, column: number, name: string) { return view && ideMod ? ideMod.queryPooledLspRename(view, line, column, name) : Promise.resolve(null); }
   export function lspReferences(line: number, column: number) { return view && ideMod ? ideMod.queryPooledLspReferences(view, line, column) : Promise.resolve(null); }
   export function lspQuickFixes(line: number) { return view && ideMod ? ideMod.queryPooledLspCodeActions(view, line) : Promise.resolve(null); }
-
+  export function lspSwitchSourceHeader() { return view && ideMod ? ideMod.queryPooledLspSwitchSourceHeader(view) : Promise.resolve(null); }
   export function reconnectLspClients(rootPath?: string): void {
     ideMod?.disposePooledLspClients({ rootPath, forceAll: true });
     if (!view || !isIdeActive() || !ideMod) return;

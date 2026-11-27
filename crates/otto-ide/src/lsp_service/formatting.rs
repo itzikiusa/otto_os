@@ -44,6 +44,11 @@ pub(super) fn formatter_candidates(
             "zig".into(),
             vec!["fmt".into(), "--stdin".into()],
         )],
+        "c" | "cpp" => vec![(
+            "clang-format",
+            "clang-format".into(),
+            vec![format!("--assume-filename={path}")],
+        )],
         "python" => vec![
             (
                 "ruff",
@@ -62,6 +67,18 @@ pub(super) fn formatter_candidates(
             "google-java-format".into(),
             vec!["-".into()],
         )],
+        "kotlin" => vec![
+            (
+                "ktfmt",
+                "ktfmt".into(),
+                vec!["--stdinpath".into(), path.to_string(), "-".into()],
+            ),
+            (
+                "ktlint",
+                "ktlint".into(),
+                vec!["--format".into(), "--stdin".into()],
+            ),
+        ],
         "shell" | "bash" | "sh" | "zsh" => vec![(
             "shfmt",
             "shfmt".into(),

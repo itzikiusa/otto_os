@@ -49,6 +49,15 @@ fn manifest_names_for_lang(norm_lang: &str) -> &'static [&'static str] {
         ],
         "rust" => &["Cargo.toml"],
         "zig" => &["build.zig", "build.zig.zon"],
+        "cpp" | "c" => &[
+            "compile_commands.json",
+            "CMakePresets.json",
+            "CMakeLists.txt",
+            "meson.build",
+            ".clangd",
+            "Makefile",
+            "GNUmakefile",
+        ],
         "typescript" | "javascript" => &["tsconfig.json", "jsconfig.json", "package.json"],
         "python" => &[
             "pyproject.toml",
@@ -74,10 +83,23 @@ fn manifest_names_for_lang(norm_lang: &str) -> &'static [&'static str] {
     }
 }
 
+fn dir_has_unreal_descriptor(dir: &Path) -> bool {
+    #[allow(clippy::disallowed_methods)]
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    rd.flatten().take(64).any(|e| {
+        e.file_name()
+            .to_str()
+            .is_some_and(|n| n.ends_with(".uproject") || n.ends_with(".uplugin"))
+    })
+}
+
 fn dir_has_any_manifest(dir: &Path, names: &[&str], extra_markers: &[String]) -> bool {
     names
         .iter()
         .any(|m| dir.join(m).is_file() || dir.join(m).is_dir())
+        || (names.contains(&"CMakeLists.txt") && dir_has_unreal_descriptor(dir))
         || extra_markers
             .iter()
             .map(|s| s.trim())
@@ -96,11 +118,14 @@ fn dir_looks_like_child_repo(dir: &Path) -> bool {
         "build.gradle.kts",
         "Cargo.toml",
         "build.zig",
+        "CMakeLists.txt",
+        "meson.build",
         "package.json",
         "pyproject.toml",
     ]
     .iter()
     .any(|m| dir.join(m).is_file())
+        || dir_has_unreal_descriptor(dir)
 }
 
 /// Detect whether `dir` is a multi-repository parent umbrella folder (no own
@@ -139,6 +164,12 @@ fn is_dependency_dir(dir: &Path) -> bool {
         || parts.windows(2).any(|w| w == [".cache", "zig"])
         || parts.windows(3).any(|w| w == ["lib", "zig", "std"])
         || parts.windows(2).any(|w| w == ["lib", "std"])
+        // C/C++ system SDK headers (macOS CLT/Xcode, Homebrew, Linux /usr/include) and Conan/vcpkg caches.
+        || parts.windows(2).any(|w| w == ["CommandLineTools", "SDKs"])
+        || parts.windows(2).any(|w| w == ["Xcode.app", "Contents"])
+        || parts.windows(2).any(|w| w == ["usr", "include"])
+        || parts.windows(2).any(|w| w == ["homebrew", "include"])
+        || parts.iter().any(|c| matches!(*c, ".conan2" | "vcpkg_installed"))
 }
 
 #[allow(clippy::disallowed_methods)]
@@ -206,6 +237,16 @@ pub(crate) fn climb_to_build_root(
             // Cargo binds a member to its nearest `[workspace]` ancestor.
             "rust" if is_cargo_workspace(&parent) => return parent,
             "rust" => true,
+            // CMake sub-directories (`src/CMakeLists.txt`) and Unreal modules (`Source/MyGame`)
+            // belong to the top-most ancestor holding `CMakeLists.txt`, `CMakePresets.json`,
+            // `compile_commands.json`, `meson.build`, or `*.uproject`.
+            "cpp" | "c" => {
+                parent.join("CMakeLists.txt").is_file()
+                    || parent.join("CMakePresets.json").is_file()
+                    || parent.join("compile_commands.json").is_file()
+                    || parent.join("meson.build").is_file()
+                    || dir_has_unreal_descriptor(&parent)
+            }
             _ => false,
         };
         if !climb {
@@ -453,26 +494,26 @@ mod tests {
     #[test]
     fn includes_custom_lsp_from_enabled_ide_plugin() {
         let tmp = tempfile::tempdir().unwrap();
-        let plugin_dir = tmp.path().join("ide-plugins/kotlin-ide");
+        let plugin_dir = tmp.path().join("ide-plugins/elixir-ide");
         std::fs::create_dir_all(&plugin_dir).unwrap();
-        let fake_bin_dir = tmp.path().join("toolchains/kotlin/bin");
+        let fake_bin_dir = tmp.path().join("toolchains/elixir/bin");
         std::fs::create_dir_all(&fake_bin_dir).unwrap();
-        let fake_kls = fake_bin_dir.join("kotlin-language-server");
-        std::fs::write(&fake_kls, "#!/bin/sh\nexit 0\n").unwrap();
+        let fake_els = fake_bin_dir.join("elixir-ls");
+        std::fs::write(&fake_els, "#!/bin/sh\nexit 0\n").unwrap();
 
         std::fs::write(
             plugin_dir.join("otto-ide-plugin.json"),
             r#"{
-                "slug": "kotlin-ide",
-                "name": "Kotlin IDE",
+                "slug": "elixir-ide",
+                "name": "Elixir IDE",
                 "version": "1.0.0",
                 "contributions": {
                     "lsp_servers": [{
-                        "language": "kotlin",
-                        "command": "kotlin-language-server",
+                        "language": "elixir",
+                        "command": "elixir-ls",
                         "args": [],
-                        "extensions": [".kt", ".kts"],
-                        "install_hint": "brew install kotlin-language-server"
+                        "extensions": [".ex", ".exs"],
+                        "install_hint": "brew install elixir-ls"
                     }]
                 }
             }"#,
@@ -481,13 +522,13 @@ mod tests {
 
         let reg = IdePluginRegistry::with_dirs(tmp.path().to_path_buf(), None);
         assert!(
-            resolve_lang_with_ide("kotlin", tmp.path(), &reg).is_none(),
+            resolve_lang_with_ide("elixir", tmp.path(), &reg).is_none(),
             "unrecorded on-disk plugin directory must remain disabled until explicitly toggled"
         );
-        reg.toggle("kotlin-ide", true).unwrap();
-        let resolved = resolve_lang_with_ide("kotlin", tmp.path(), &reg).unwrap();
+        reg.toggle("elixir-ide", true).unwrap();
+        let resolved = resolve_lang_with_ide("elixir", tmp.path(), &reg).unwrap();
         assert!(resolved.available);
-        assert_eq!(resolved.command, fake_kls.to_string_lossy());
+        assert_eq!(resolved.command, fake_els.to_string_lossy());
     }
 
     #[test]

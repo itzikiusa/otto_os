@@ -25,10 +25,12 @@
   const LSP_SERVERS: readonly { name: string; eco: string; lang: string }[] = [
     { name: 'gopls', eco: 'go', lang: 'Go' },
     { name: 'jdtls', eco: 'java', lang: 'Java' },
+    { name: 'kotlin-language-server', eco: 'kotlin', lang: 'Kotlin' },
     { name: 'typescript-language-server', eco: 'node', lang: 'TypeScript / JS' },
     { name: 'pyright', eco: 'python', lang: 'Python' },
     { name: 'rust-analyzer', eco: 'rust', lang: 'Rust' },
     { name: 'zls', eco: 'zig', lang: 'Zig' },
+    { name: 'clangd', eco: 'cpp', lang: 'C / C++' },
     { name: 'bash-language-server', eco: 'shell', lang: 'Shell (zsh / bash)' },
   ];
 

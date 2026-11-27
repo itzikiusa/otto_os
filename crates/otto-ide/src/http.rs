@@ -15,6 +15,8 @@ mod intelligence;
 mod projects_deps;
 #[path = "http/runtime_debug.rs"]
 mod runtime_debug;
+#[path = "http/spring_boot.rs"]
+mod spring_boot;
 #[path = "http/sse_framing.rs"]
 mod sse_framing;
 #[path = "http/toolchains_env.rs"]
@@ -56,6 +58,7 @@ use self::runtime_debug::{
     list_run_configs, set_debug_breakpoints, start_debug_session, start_run, stop_run,
     stream_debug_events, stream_run_events, upsert_run_config,
 };
+use self::spring_boot::{spring_actuator, spring_devtools_restart};
 use self::toolchains_env::{
     add_project_folder, delete_local_sdk, get_environments, get_shell_env, get_toolchain_job,
     install_toolchain, list_toolchains, put_environments, register_local_sdk, reload_shell_env,
@@ -191,6 +194,11 @@ pub fn api_router<S: IdeCtx>() -> Router<S> {
             .route("/ide/deps/inspect", post(deps_inspect::<S>))
             .route("/ide/deps/action", post(deps_action::<S>))
             .route("/ide/build-tools/model", post(build_tools_model::<S>))
+            .route("/ide/spring/actuator", post(spring_actuator::<S>))
+            .route(
+                "/ide/spring/devtools-restart",
+                post(spring_devtools_restart::<S>),
+            )
             .route(
                 "/ide/environments",
                 get(get_environments::<S>).put(put_environments::<S>),

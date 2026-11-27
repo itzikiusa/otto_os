@@ -6,7 +6,7 @@
 import type { Text } from '@codemirror/state';
 
 export type SemanticLangKind =
-  | 'go' | 'java' | 'ts' | 'rust' | 'zig' | 'python' | 'shell' | 'json' | 'csv' | 'other';
+  | 'go' | 'java' | 'kotlin' | 'ts' | 'rust' | 'zig' | 'cpp' | 'python' | 'shell' | 'json' | 'csv' | 'other';
 
 export type SemanticRole =
   | 'fg' | 'keyword' | 'control' | 'func-decl' | 'func-call' | 'field'
@@ -91,11 +91,18 @@ export function detectSemanticLang(filePath: string, language?: string): Semanti
   const ext = clean.slice(Math.max(0, clean.lastIndexOf('/'))).split('.').pop() ?? '';
   if (ext === 'go' || language === 'go') return 'go';
   if (ext === 'java' || ext === 'class' || language === 'java') return 'java';
+  if (ext === 'kt' || ext === 'kts' || language === 'kotlin') return 'kotlin';
   if (['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'mts', 'cts'].includes(ext) || language === 'typescript' || language === 'javascript') {
     return 'ts';
   }
   if (ext === 'rs' || language === 'rust') return 'rust';
   if (ext === 'zig' || ext === 'zon' || language === 'zig') return 'zig';
+  if (
+    ['c', 'h', 'cc', 'cpp', 'cxx', 'c++', 'hh', 'hpp', 'hxx', 'h++', 'inl', 'ipp', 'tpp', 'ixx', 'cppm', 'm', 'mm'].includes(ext) ||
+    language === 'cpp' || language === 'c'
+  ) {
+    return 'cpp';
+  }
   if (ext === 'py' || ext === 'pyi' || language === 'python') return 'python';
   if (['sh', 'bash', 'zsh', 'bats'].includes(ext) || language === 'shell' || language === 'shellscript') return 'shell';
   if (['json', 'jsonc', 'jsonl', 'ndjson'].includes(ext) || language === 'json' || language === 'jsonl') return 'json';

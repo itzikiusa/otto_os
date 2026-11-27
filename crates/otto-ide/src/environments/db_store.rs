@@ -40,6 +40,10 @@ pub(super) struct StoredMobileSdks {
     pub(super) xcode_developer_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) zig_home: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) cpp_toolchain: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) kotlin_home: Option<String>,
 }
 
 pub(crate) fn is_reserved_internal_env_key(key: &str) -> bool {
@@ -257,6 +261,17 @@ pub(super) fn apply_run_config_sdk_override(
             }
         }
         IdeRunnerKind::ZigBuild | IdeRunnerKind::ZigRun | IdeRunnerKind::ZigTest => {
+            if trimmed.starts_with('/') {
+                push_unique(path_dirs, format!("{trimmed}/bin"));
+                push_unique(path_dirs, trimmed.to_string());
+            }
+        }
+        IdeRunnerKind::Cmake
+        | IdeRunnerKind::Ctest
+        | IdeRunnerKind::CppRun
+        | IdeRunnerKind::Make
+        | IdeRunnerKind::Meson
+        | IdeRunnerKind::Unreal => {
             if trimmed.starts_with('/') {
                 push_unique(path_dirs, format!("{trimmed}/bin"));
                 push_unique(path_dirs, trimmed.to_string());
@@ -481,6 +496,8 @@ fn decode_project_env_row(
         go_root: row.try_get("go_root").ok().flatten(),
         rust_toolchain: row.try_get("rust_toolchain").ok().flatten(),
         zig_home: mobile_sdks.zig_home,
+        cpp_toolchain: mobile_sdks.cpp_toolchain,
+        kotlin_home: mobile_sdks.kotlin_home,
         node_home: row.try_get("node_home").ok().flatten(),
         python_interpreter: row.try_get("python_interpreter").ok().flatten(),
         android_home: mobile_sdks.android_home,

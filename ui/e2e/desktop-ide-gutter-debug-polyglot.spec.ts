@@ -129,6 +129,17 @@ const CELLS: Cell[] = [
     needs: ['zig', 'lldb'],
   },
   {
+    name: 'cpp main in src/main.cpp',
+    files: {
+      'src/main.cpp': '#include <iostream>\n\nint mul(int a, int b) {\n    return a * b;\n}\n\nint main() {\n    int left = 6;\n    int product = mul(left, 7);\n    std::cout << "CPP_DEEP_DONE:" << product << "\\n";\n    return 0;\n}\n',
+    },
+    open: 'src/main.cpp',
+    gutterKind: 'main',
+    menu: /^Debug/,
+    stops: [{ line: 9, text: 'int product', local: 'left' }, { line: 10, text: 'CPP_DEEP_DONE', local: 'product' }],
+    needs: ['clang++', 'lldb'],
+  },
+  {
     name: 'java JUnit 5 test in a deeper package of a sub-module',
     files: {
       'pom.xml': '<project xmlns="http://maven.apache.org/POM/4.0.0"><modelVersion>4.0.0</modelVersion><groupId>com.acme</groupId><artifactId>parent</artifactId><version>1.0.0</version><packaging>pom</packaging><modules><module>core</module></modules><properties><maven.compiler.release>17</maven.compiler.release><project.build.sourceEncoding>UTF-8</project.build.sourceEncoding></properties><build><pluginManagement><plugins><plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-compiler-plugin</artifactId><version>3.13.0</version></plugin><plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-resources-plugin</artifactId><version>3.3.1</version></plugin><plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-surefire-plugin</artifactId><version>3.2.5</version></plugin></plugins></pluginManagement></build></project>\n',

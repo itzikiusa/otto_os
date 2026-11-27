@@ -150,6 +150,12 @@ pub(crate) fn validate_non_root_debug_request(
         return Ok(());
     }
     if req.launch.attach_port.is_some()
+        || req.launch.attach_pid.is_some()
+        || req
+            .launch
+            .attach_process_name
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty())
         || env.contains_key("DLV_ATTACH_PID")
         || req.launch.env.contains_key("DLV_ATTACH_PID")
         || env.contains_key("OTTO_JAVA_DEBUG_DAP_PORT")
@@ -175,6 +181,15 @@ pub(crate) fn validate_non_root_debug_request(
     };
 
     check_within_roots("cwd", effective_cwd)?;
+    if let Some(cf) = req
+        .launch
+        .core_file
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        check_within_roots("core_file", cf)?;
+    }
     let prog = req.launch.program.trim();
     if !prog.is_empty() && !(req.language.eq_ignore_ascii_case("java") && is_bare_java_fqcn(prog)) {
         check_within_roots("program", prog)?;
@@ -453,6 +468,8 @@ pub(crate) fn build_effective_env_with_manager(
             "rust/bin",
             "zig/current",
             "zig/bin",
+            "cpp/current/bin",
+            "cpp/bin",
             "node/current/bin",
             "python/current/bin",
             "python/bin",

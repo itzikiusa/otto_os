@@ -16,9 +16,20 @@ use super::{default_true, IdeRunnerKind, IdeTargetKind, IdeTargetSpec};
 #[serde(rename_all = "snake_case")]
 pub enum IdeEcosystemKind {
     Java,
+    #[serde(alias = "kt", alias = "kts")]
+    Kotlin,
     Go,
     Rust,
     Zig,
+    #[serde(
+        alias = "c",
+        alias = "c++",
+        alias = "cxx",
+        alias = "clang",
+        alias = "gcc",
+        alias = "llvm"
+    )]
+    Cpp,
     #[serde(alias = "javascript", alias = "typescript", alias = "js", alias = "ts")]
     Node,
     Python,
@@ -37,9 +48,11 @@ impl IdeEcosystemKind {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Java => "java",
+            Self::Kotlin => "kotlin",
             Self::Go => "go",
             Self::Rust => "rust",
             Self::Zig => "zig",
+            Self::Cpp => "cpp",
             Self::Node => "node",
             Self::Python => "python",
             Self::Shell => "shell",
@@ -53,9 +66,11 @@ impl IdeEcosystemKind {
     pub fn display_name(&self) -> &'static str {
         match self {
             Self::Java => "Java (Temurin JDK)",
+            Self::Kotlin => "Kotlin (kotlinc / JVM)",
             Self::Go => "Go SDK",
             Self::Rust => "Rust (rustup)",
             Self::Zig => "Zig",
+            Self::Cpp => "C / C++ (Clang / GCC)",
             Self::Node => "Node.js / TypeScript",
             Self::Python => "Python (uv)",
             Self::Shell => "Shell (Bash / Zsh)",
@@ -368,6 +383,10 @@ pub struct IdeProjectEnvironment {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub zig_home: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpp_toolchain: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kotlin_home: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_home: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub python_interpreter: Option<String>,
@@ -404,6 +423,8 @@ impl Default for IdeProjectEnvironment {
             go_root: None,
             rust_toolchain: None,
             zig_home: None,
+            cpp_toolchain: None,
+            kotlin_home: None,
             node_home: None,
             python_interpreter: None,
             android_home: None,
@@ -433,6 +454,10 @@ pub struct IdeUpdateEnvironmentReq {
     pub rust_toolchain: Option<String>,
     #[serde(default)]
     pub zig_home: Option<String>,
+    #[serde(default)]
+    pub cpp_toolchain: Option<String>,
+    #[serde(default)]
+    pub kotlin_home: Option<String>,
     #[serde(default)]
     pub node_home: Option<String>,
     #[serde(default)]

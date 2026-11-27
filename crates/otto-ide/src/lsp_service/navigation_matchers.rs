@@ -39,6 +39,9 @@ impl CompiledDefMatcher {
             "zig" => format!(
                 r#"^(?:pub\s+)?(?:export\s+|extern(?:\s+"[^"]*")?\s+|inline\s+|noinline\s+)?fn\s+{escaped}\s*\(|^(?:pub\s+)?(?:threadlocal\s+)?(?:const|var)\s+{escaped}\b"#
             ),
+            "c" | "cpp" => format!(
+                r"^(?:template\s*<[^>]*>\s*)?(?:class|struct|enum(?:\s+class)?|union|namespace|typedef|using)\s+(?:[A-Z0-9_]+_API\s+)?{escaped}\b|^#define\s+{escaped}\b|^(?:(?:static|inline|virtual|constexpr|extern|const|unsigned|signed)\s+)*[A-Za-z_][A-Za-z0-9_:<>*,&\s]+\b(?:[A-Za-z_][A-Za-z0-9_]*::)*{escaped}\s*\("
+            ),
             "python" => {
                 format!(r"^(?:async\s+)?(?:def|class)\s+{escaped}\b|^{escaped}\s*(?::[^=]+)?=")
             }
@@ -278,6 +281,9 @@ pub(super) fn find_implementations_in_content(
         ),
         "zig" => format!(
             r#"^\s*(?:pub\s+)?(?:export\s+|extern(?:\s+"[^"]*")?\s+|inline\s+|noinline\s+)?fn\s+{escaped}\s*\("#
+        ),
+        "c" | "cpp" => format!(
+            r"\b(?:class|struct)\s+[A-Za-z_][A-Za-z0-9_]*\s*:\s*(?:public|protected|private)?\s*[^{{]*\b{escaped}\b|\b[A-Za-z_][A-Za-z0-9_]*::{escaped}\s*\("
         ),
         "java" | "kotlin" => format!(
             r"\b(?:implements|extends)\s+[^{{]*\b{escaped}\b|^(?:(?:public|protected|private|override|open)\s+)+[A-Za-z0-9_<>,.\[\]?\s]+\b{escaped}\s*\("

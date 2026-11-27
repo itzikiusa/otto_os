@@ -166,8 +166,60 @@ pub(crate) fn apply_language_memory_caps(
         "python" if cmd_name.contains("pyright") => {
             set_node_heap_cap(command, inherited);
         }
+        "cpp" => {
+            if !existing_args.iter().any(|a| a.starts_with("--pch-storage")) {
+                command.arg("--pch-storage=disk");
+            }
+            if !existing_args
+                .iter()
+                .any(|a| a == "-j" || a.starts_with("-j"))
+            {
+                command.arg("-j=4");
+            }
+            if !existing_args
+                .iter()
+                .any(|a| a.starts_with("--compile-commands-dir"))
+            {
+                if let Some(cdb_dir) = discover_compile_commands_dir(root) {
+                    command.arg(format!("--compile-commands-dir={}", cdb_dir.display()));
+                }
+            }
+        }
         _ => {}
     }
+}
+
+/// Locate the directory holding `compile_commands.json` (root, CMake/Meson build
+/// dirs, or Unreal Engine `Intermediate/ProjectFiles`).
+#[allow(clippy::disallowed_methods)]
+pub(crate) fn discover_compile_commands_dir(root: &str) -> Option<PathBuf> {
+    let base = std::path::Path::new(root);
+    if !base.is_dir() {
+        return None;
+    }
+    for rel in [
+        "",
+        "build",
+        "cmake-build-debug",
+        "cmake-build-release",
+        "out/build",
+        "out/build/debug",
+        "builddir",
+        "build/debug",
+        "build/Debug",
+        ".vscode",
+        "Intermediate/ProjectFiles",
+    ] {
+        let dir = if rel.is_empty() {
+            base.to_path_buf()
+        } else {
+            base.join(rel)
+        };
+        if dir.join("compile_commands.json").is_file() {
+            return Some(dir);
+        }
+    }
+    None
 }
 
 fn set_node_heap_cap(command: &mut tokio::process::Command, inherited: &BTreeMap<String, String>) {
