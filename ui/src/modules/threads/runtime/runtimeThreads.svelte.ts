@@ -241,13 +241,12 @@ class RuntimeThreads {
     try {
       const rows = await api.get<RuntimeSession[]>(`/workspaces/${workspaceId}/runtime-sessions`);
       const next = { ...this.byId };
-      const routed = router.module === 'threads' ? (router.parts[1] ?? null) : null;
       for (const id of Object.keys(next)) {
         const cur = next[id];
         if (cur.workspace_id !== workspaceId) continue;
         // Engine threads aren't returned by `/workspaces/{id}/runtime-sessions`:
-        // keep ones actively viewed (in Threads panes, routed, or embedded).
-        if (isEngineThread(cur.meta) && (this.embedded.has(id) || threads.paneIds.includes(id) || routed === id)) continue;
+        // keep ones actively viewed in an embed.
+        if (isEngineThread(cur.meta) && this.embedded.has(id)) continue;
         delete next[id];
       }
       for (const r of rows) {

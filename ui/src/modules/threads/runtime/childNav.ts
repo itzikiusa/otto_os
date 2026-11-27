@@ -31,7 +31,7 @@ export function openChildThread(id: string, modifier = false): void {
 /** Context key: a getter, true while the thread view is read-only (a workflow step's embed). */
 export const READ_ONLY_CTX = 'runtimeReadOnly';
 
-/** Context key: host handler `(id, modifier) => void` when a child card is clicked inside an embed. */
+/** Context key: getter for an opt-in host handler `(id) => void` when a child card is clicked inside an embed. */
 export const OPEN_CHILD_CTX = 'runtimeOpenChild';
 
 export const mainViewKey = (e: MouseEvent | KeyboardEvent): boolean => e.metaKey || e.ctrlKey;

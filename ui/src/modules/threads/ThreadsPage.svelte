@@ -217,12 +217,8 @@
         void (async () => {
           if (!runtimeThreads.get(routeSessionId) && !(await prepareDeepLink(ws, routeSessionId, 'thread', forget))) return;
           const s = await ws.ensureSession(routeSessionId);
-          // An engine thread (workflow / review) is not in the workspace list: read it directly by id.
-          if (!s && !runtimeThreads.get(routeSessionId)) await runtimeThreads.loadOne(routeSessionId).catch(() => {});
           if (!s && !runtimeThreads.get(routeSessionId) && ws.currentId) await runtimeThreads.load(ws.currentId).catch(() => {});
-          const rt = runtimeThreads.get(routeSessionId);
-          if (rt) void runtimeThreads.loadLinked(rt.id, 2000).catch(() => {});
-          const id = s?.id ?? rt?.id;
+          const id = s?.id ?? runtimeThreads.get(routeSessionId)?.id;
           if (id && lastRoutedId === routeSessionId) threads.selectThread(id, { syncRoute: false });
         })();
       });

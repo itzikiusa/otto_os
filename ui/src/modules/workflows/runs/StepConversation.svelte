@@ -119,7 +119,6 @@
       {workspaceId}
       readOnly
       showHeader
-      showOpenInThreads
       expandWork
       {onselectthread}
       onunavailable={(reason) => (gone = reason)}

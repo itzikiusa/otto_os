@@ -48,7 +48,6 @@
     onaccessmodechange,
     hideEmbedBarWhenUnlinked = false,
     showHeader = false,
-    showOpenInThreads = false,
     expandWork = false,
     onselectthread,
     readOnly = false,
@@ -233,7 +232,7 @@
         <button type="button" class="icon-btn" aria-label="Detach the thread" title="Detach" data-testid="embedded-thread-detach" onclick={detach}>
           <Icon name="external" size={13} />
         </button>
-      {:else if showOpenInThreads || !readOnly}
+      {:else if !readOnly}
         <button type="button" class="btn small" aria-label="Open in Threads" title="Open this thread in Threads" data-testid="embedded-thread-open" onclick={detach}>
           <Icon name="external" size={12} />{#if !compact} Open in Threads{/if}
         </button>
@@ -262,7 +261,6 @@
           {compact}
           {readOnly}
           {expandWork}
-          allowOpenInThreads={showOpenInThreads}
           {hostCommands}
           {accessModeOverride}
           {onaccessmodechange}
@@ -279,6 +277,7 @@
           {testIds}
           agentChat={shown === sessionId ? agentName : undefined}
           onswitch={switchTo}
+          onopenchild={onselectthread}
         />
       {/key}
     {/if}
