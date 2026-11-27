@@ -345,7 +345,8 @@ items directly into the editor gutter:
 
 - **Rust:** `fn main()`, `#[test]`, `#[tokio::test]`, `mod tests`
 - **Zig:** `pub fn main()`, `test "name" { ... }`, `test Decl { ... }`
-- **C / C++:** `int main(...)`, GoogleTest `TEST(...)` / `TEST_F(...)` / `TEST_P(...)` / `TYPED_TEST(...)` (plus suite gutter), Catch2 `TEST_CASE("...")` / `SCENARIO("...")`
+- **C / C++:** `int main(...)`, GoogleTest `TEST(...)` / `TEST_F(...)` / `TEST_P(...)` / `TYPED_TEST(...)` (plus suite gutter), Catch2 `TEST_CASE("...")` / `SCENARIO("...")`.
+  Run and Debug of a file in a CMake project build the executable target that compiles it (by exact source path, or the configured build's `compile_commands.json`). A source inside a CMake or Meson project that maps to no executable (a library file, a never-configured project's variable or glob sources, any Meson source, any project source over SSH) fails with the reason and what to run instead; only a file outside any build project compiles on its own.
 - **Go:** `func main()`, `func TestXxx(t *testing.T)`, `func BenchmarkXxx(b *testing.B)`
 - **Python:** `if __name__ == "__main__":`, `def test_*`, `class Test*`
 - **Java:** `public static void main`, `@Test`, `@ParameterizedTest`
