@@ -1244,13 +1244,21 @@ mod root_tests {
         assert_eq!(err_local.status, StatusCode::FORBIDDEN);
         assert_eq!(err_local.code, "zig_lsp_requires_trust");
 
-        // 2. SEC-2: Trusting parent + pinning Zig 0.13 on parent permits opening sub-pkg
-        //    AS A MODULE OF parent (and inherits 0.13 ZLS + project_root), while opening
-        //    independent_nested AS ITS OWN PROJECT is still denied with 403!
+        // 2. SEC-2: Trusting parent + pinning Zig 0.13 + configuring a `module_sdks` entry
+        //    for `independent_nested` on parent creates a synthetic child snapshot for
+        //    `local:<canon_ind>`. Opening `sub_pkg` AS A MODULE OF `parent` succeeds (and
+        //    inherits 0.13 ZLS + project_root), while opening `independent_nested` AS ITS OWN
+        //    PROJECT must STILL be denied with 403 (ignoring the synthetic child snapshot)!
+        let mut module_sdks = std::collections::BTreeMap::new();
+        module_sdks.insert(
+            canon_ind.to_string_lossy().into_owned(),
+            pinned_zig_13.to_string_lossy().into_owned(),
+        );
         ide.environments.seed_snapshot(
-            &canon_parent.to_string_lossy(),
+            &format!("local:{}", canon_parent.to_string_lossy()),
             crate::types::IdeProjectEnvironment {
                 zig_home: Some(pinned_zig_13.to_string_lossy().into_owned()),
+                module_sdks,
                 env_vars: vec![crate::types::IdeEnvVarEntry {
                     key: TRUST_ZIG_LSP_ENV.into(),
                     value: Some("1".into()),
