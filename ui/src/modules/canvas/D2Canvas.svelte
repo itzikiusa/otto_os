@@ -297,7 +297,7 @@
 <div class="board">
   <div class="lanes">
     {#if codeOpen && !readonly}
-      <aside class="code-pane">
+      <section class="code-pane" aria-label="D2 source">
         <div class="code-head">
           <span><Icon name="layers" size={13} /> D2 source</span>
           <span class="code-hint">edits save + render live</span>
@@ -312,7 +312,7 @@
             onchange={onCode}
           />
         </div>
-      </aside>
+      </section>
     {/if}
 
     <div class="preview-wrap">

@@ -19,11 +19,12 @@
   import { toasts } from '../../lib/toast.svelte';
   import { interruptSession } from '../../lib/api/interrupt';
 
+  // The body of the Canvas Detail pane (CanvasPage: DetailPane "Assistant",
+  // which owns the title and Close): the agent row, the shell, the composer.
   interface Props {
     editor: { generate: (p: string) => Promise<boolean>; isGenerating: () => boolean } | undefined;
-    onclose: () => void;
   }
-  let { editor, onclose }: Props = $props();
+  let { editor }: Props = $props();
 
   let draft = $state('');
   let busy = $state(false);
@@ -144,13 +145,8 @@
   }
 </script>
 
-<aside class="assistant">
-  <header class="head">
-    <span class="title"><Icon name="terminal" size={14} /> Assistant</span>
-    <button class="close" onclick={onclose} aria-label="Close assistant" title="Close assistant">
-      <Icon name="x" size={14} />
-    </button>
-    <div class="head-controls">
+<div class="assistant">
+  <div class="head">
     {#if providers.length > 1}
       <select
         class="provider"
@@ -179,8 +175,7 @@
     >
       <Icon name="undo" size={14} />
     </button>
-    </div>
-  </header>
+  </div>
 
   <div class="shell">
     {#if canvas.sessionId}
@@ -209,16 +204,15 @@
       <Icon name="arrowUp" size={16} />
     </button>
   </div>
-</aside>
+</div>
 
 <style>
   .assistant {
-    width: 100%;
+    flex: 1;
     min-width: 0;
     display: flex;
     flex-direction: column;
     min-height: 0;
-    background: var(--surface);
     color: var(--text);
   }
   .head {
@@ -226,29 +220,10 @@
     flex-wrap: wrap;
     align-items: center;
     gap: 8px;
-    padding: 10px 12px;
-    border-bottom: 1px solid var(--border);
+    padding-block: 6px;
+    padding-inline: 16px 12px;
+    border-block-end: 1px solid var(--separator);
     flex: none;
-  }
-  .title {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    font-size: var(--fs-m);
-    font-weight: 600;
-  }
-  .head-controls { display: contents; }
-  .head > .close { order: 2; }
-  @media (max-width: 640px) {
-    .head > .close { order: 0; }
-    .head-controls {
-      display: flex;
-      flex: 1 0 100%;
-      min-width: 0;
-      align-items: center;
-      flex-wrap: wrap;
-      gap: 8px;
-    }
   }
   .provider {
     min-width: 0;
@@ -268,19 +243,6 @@
     gap: 4px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
-  }
-  .close {
-    margin-inline-start: auto;
-    display: inline-flex;
-    border: none;
-    background: none;
-    color: var(--text-dim);
-    cursor: pointer;
-    padding: 4px;
-    border-radius: var(--radius-s);
-  }
-  .close:hover {
-    background: var(--hover);
   }
   .hist-btn {
     display: inline-flex;
@@ -373,6 +335,6 @@
     cursor: default;
   }
   @media (pointer: coarse), (max-width: 640px) {
-    .hist-btn, .close, .send { min-inline-size: var(--hit-min); min-block-size: var(--hit-min); }
+    .hist-btn, .send { min-inline-size: var(--hit-min); min-block-size: var(--hit-min); }
   }
 </style>

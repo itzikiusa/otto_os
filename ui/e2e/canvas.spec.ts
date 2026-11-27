@@ -101,11 +101,11 @@ async function seedScene(
 
 async function openCanvas(page: Page): Promise<void> {
   await page.goto('/#/canvas');
-  await expect(page.locator('.canvas-page')).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId('canvas-page').or(page.locator('.canvas-page'))).toBeVisible({ timeout: 30_000 });
 }
 async function openScene(page: Page, title: string): Promise<void> {
   await openCanvas(page);
-  await page.locator('.scene-list .row', { hasText: title }).first().click();
+  await page.locator('.scene-list .side-row', { hasText: title }).first().click();
 }
 
 async function askAi(page: Page, prompt: string): Promise<void> {
@@ -431,11 +431,11 @@ test('D2: export buttons (PNG + SVG) render; Duplicate creates a "(copy)" scene'
 
   // Duplicate from the scene list row's action menu.
   await openCanvas(page);
-  const row = page.locator('.scene-list .row', { hasText: 'D2 Export' }).first();
+  const row = page.locator('.scene-list .side-row', { hasText: 'D2 Export' }).first();
   await row.hover();
-  await row.locator('.row-more').click();
+  await row.locator('.side-row-more').click();
   await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Duplicate' }).click();
-  await expect(page.locator('.scene-list .row', { hasText: 'D2 Export (copy)' })).toBeVisible({
+  await expect(page.locator('.scene-list .side-row', { hasText: 'D2 Export (copy)' })).toBeVisible({
     timeout: 15_000,
   });
 });
@@ -453,7 +453,7 @@ test('handles multiple scenes — list + switch', async ({ page }) => {
 
   await openScene(page, 'Multi B');
   await expect(page.locator('.board svg').first()).toBeVisible({ timeout: 25_000 });
-  await page.locator('.scene-list .row', { hasText: 'Multi A' }).first().click();
+  await page.locator('.scene-list .side-row', { hasText: 'Multi A' }).first().click();
   await expect(page.locator('.excali .excalidraw').first()).toBeVisible({ timeout: 30_000 });
 });
 
@@ -466,16 +466,16 @@ test('deleting the OPEN scene opens another (no endless loading pane)', async ({
   await ctx.dispose();
 
   await openScene(page, title);
-  const row = page.locator('.scene-list .row.active', { hasText: title });
+  const row = page.locator('.scene-list .side-row.selected', { hasText: title });
   await expect(row).toBeVisible({ timeout: 20_000 });
   await row.hover();
-  await row.locator('.row-more').click();
+  await row.locator('.side-row-more').click();
   await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Delete…' }).click();
   await page.locator('.sheet button.btn.danger-solid', { hasText: 'Delete' }).click();
-  await expect(page.locator('.scene-list .row', { hasText: title })).toHaveCount(0, { timeout: 10_000 });
+  await expect(page.locator('.scene-list .side-row', { hasText: title })).toHaveCount(0, { timeout: 10_000 });
   // The auto-pick re-opens a remaining scene instead of a skeleton forever.
-  await expect(page.locator('.editor-split')).toBeVisible({ timeout: 15_000 });
-  await expect(page.locator('.scene-list .row.active')).toHaveCount(1);
+  await expect(page.locator('.editor-host')).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('.scene-list .side-row.selected')).toHaveCount(1);
 });
 
 // ---------------------------------------------------------------------------
@@ -493,11 +493,11 @@ test('sections: scenes group under a collapsible section header', async ({ page 
 
   await openCanvas(page);
   // The section header renders with the path ("Platform / Staging").
-  await expect(page.locator('.scene-list .section-head', { hasText: /Platform \/ Staging/ })).toBeVisible(
+  await expect(page.locator('.scene-list .side-section-head', { hasText: /Platform \/ Staging/ })).toBeVisible(
     { timeout: 20_000 },
   );
   // The sectioned scene is nested.
-  await expect(page.locator('.scene-list .row.nested', { hasText: 'In Lane' })).toBeVisible();
+  await expect(page.locator('.scene-list .side-section .side-row', { hasText: 'In Lane' })).toBeVisible();
 });
 
 test('rename: inline rename updates the scene title', async ({ page }) => {
@@ -507,15 +507,15 @@ test('rename: inline rename updates the scene title', async ({ page }) => {
   await ctx.dispose();
 
   await openCanvas(page);
-  const row = page.locator('.scene-list .row', { hasText: 'Before Rename' }).first();
+  const row = page.locator('.scene-list .side-row', { hasText: 'Before Rename' }).first();
   await row.hover();
-  await row.locator('.row-more').click();
+  await row.locator('.side-row-more').click();
   await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Rename…' }).click();
   // The shared prompt dialog appears — type the new name + confirm.
   const input = page.locator('.cf-input, dialog input, [role="dialog"] input').first();
   await input.fill('After Rename');
   await page.getByRole('button', { name: 'Rename', exact: true }).last().click();
-  await expect(page.locator('.scene-list .row', { hasText: 'After Rename' })).toBeVisible({
+  await expect(page.locator('.scene-list .side-row', { hasText: 'After Rename' })).toBeVisible({
     timeout: 15_000,
   });
 });
@@ -697,7 +697,7 @@ test('switching Excalidraw → Mermaid does NOT corrupt the Mermaid scene', asyn
 
   // Switch to the Mermaid scene — the OLD Excalidraw editor's onDestroy save must
   // target ITS OWN scene, never this Mermaid one.
-  await page.locator('.scene-list .row', { hasText: 'StayMermaid' }).first().click();
+  await page.locator('.scene-list .side-row', { hasText: 'StayMermaid' }).first().click();
   await expect(page.locator('.board svg').first()).toBeVisible({ timeout: 25_000 });
   await expect(page.getByText(/holds Excalidraw content/i)).toBeHidden();
   await expect(page.getByText(/Diagram error/i)).toBeHidden();
@@ -713,7 +713,7 @@ test('switching Excalidraw → Mermaid does NOT corrupt the Mermaid scene', asyn
 });
 
 test.describe('canvas on a phone', () => {
-  test.use({ viewport: { width: 390, height: 844 } });
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true });
 
   test('an Excalidraw board mounts on a phone', async ({ page }) => {
     test.setTimeout(60_000);
@@ -722,9 +722,14 @@ test.describe('canvas on a phone', () => {
     await ctx.dispose();
     await openScene(page, 'Phone Ex');
     await expect(page.locator('.excali .excalidraw').first()).toBeVisible({ timeout: 30_000 });
-    // Push navigation: Back returns to the full-width scene list (no dead end).
-    await page.getByRole('button', { name: 'Back to scenes' }).click();
-    await expect(page.locator('.scene-list .row', { hasText: 'Phone Ex' }).first()).toBeVisible();
-    await expect(page.locator('.excali .excalidraw')).toHaveCount(0);
+    // Push navigation: the standard ‹ Scenes Back returns to the full-width
+    // scene list (no dead end) with the scene still marked; the board stays
+    // mounted behind it, so tapping the marked row returns to it unchanged.
+    await page.getByRole('button', { name: 'Back to Scenes' }).tap();
+    const row = page.locator('.scene-list .side-row.selected', { hasText: 'Phone Ex' });
+    await expect(row).toBeVisible();
+    await expect(page.locator('.excali .excalidraw')).toBeHidden();
+    await row.locator('.side-row-main').tap();
+    await expect(page.locator('.excali .excalidraw').first()).toBeVisible();
   });
 });

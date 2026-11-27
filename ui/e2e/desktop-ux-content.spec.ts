@@ -43,10 +43,10 @@ for (const scheme of ['light', 'dark'] as const) {
     await page.setViewportSize({ width: 375, height: 812 });
     await page.addInitScript((s) => localStorage.setItem('otto_scheme', s), scheme);
     await openPage(page, 'canvas');
-    await page.locator('.scene-list .row', { hasText: sceneTitle }).getByRole('button').first().click();
+    await page.locator('.scene-list .side-row', { hasText: sceneTitle }).getByRole('button').first().click();
     await expect(page.locator('.board svg').first()).toBeVisible();
     await page.locator('.ai-fab').click();
-    const panel = page.locator('.convo-panel');
+    const panel = page.getByTestId('canvas-assistant');
     await expectFullyInViewport(page, panel, 'Canvas assistant');
     await expectFullyInViewport(page, panel.getByRole('button', { name: 'Close assistant' }));
     await page.screenshot({ path: `/tmp/otto-ux-content-canvas-${scheme}.png` });

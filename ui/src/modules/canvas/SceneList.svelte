@@ -1,11 +1,14 @@
 <script lang="ts">
   import { rowMenu as rowMenuKeys } from '../../lib/rowMenu';
   import { toastError } from '../../lib/toastError';
-  // Scene list — the workspace's canvas scenes grouped into collapsible SECTIONS
-  // (a folder path like "Platform/Staging" → sections + sub-sections), with
-  // search, New, click-to-open, inline RENAME, MOVE-to-section, and delete.
+  // The Canvas list pane (a ListPane, design.md §3): "Scenes N · ＋ · ⋯" with
+  // a filter row; scenes grouped into folding SECTIONS (a folder path like
+  // "Platform/Staging"), rows on the shared row look (F2 / double-click
+  // rename, ⋯ / right-click / long-press: rename, move, duplicate, delete).
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import ListPane from '../../lib/components/side/ListPane.svelte';
+  import SideSection from '../../lib/components/side/SideSection.svelte';
   import { canvas } from '../../lib/stores/canvas.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -14,10 +17,23 @@
   import { rel } from '../../lib/stores/now.svelte';
   import type { CanvasSceneSummary, CanvasScene } from '../../lib/canvas/types';
 
+  interface Props {
+    /** The pane's one primary: "New scene" (the format menu, anchored to it). */
+    onnew: (anchor: Element | null) => void;
+    /** A row was chosen (a phone pushes the board). */
+    onpick: () => void;
+  }
+  let { onnew, onpick }: Props = $props();
+
 
   let filter = $state('');
   let filterEl = $state<HTMLInputElement | null>(null);
   let collapsed = $state<Record<string, boolean>>({});
+  function pick(s: CanvasSceneSummary): void {
+    onpick();
+    // The open scene stays as it is (a phone's Back keeps it): no reload.
+    if (canvas.currentId !== s.id) void canvas.open(s.id).catch(() => {});
+  }
   function clearFilter(): void {
     filter = '';
     filterEl?.focus();
@@ -138,149 +154,126 @@
   }
 </script>
 
-<div class="scene-list">
-  <div class="search">
-    <Icon name="search" size={13} />
-    <input dir="auto" bind:this={filterEl} type="search" placeholder="Filter scenes…" aria-label="Filter scenes" bind:value={filter} spellcheck="false" />
-    {#if filter}
-      <button class="clear" onclick={clearFilter} aria-label="Clear the filter" title="Clear the filter">
-        <Icon name="x" size={12} />
-      </button>
-    {/if}
-  </div>
+<ListPane
+  count={canvas.scenes.length}
+  primary={{ icon: 'plus', label: 'New scene', onclick: () => onnew(document.querySelector('[data-testid="canvas-new-scene"]')), testid: 'canvas-new-scene' }}
+  menu={() => [{ label: 'Refresh', icon: 'refresh', action: () => void canvas.loadScenes().catch(() => {}) }]}
+  loading={canvas.listLoading && !canvas.scenes.length}
+  testid="canvas-scenes"
+>
+  {#snippet searchRow()}
+    <div class="cv-search">
+      <Icon name="search" size={14} />
+      <input dir="auto" bind:this={filterEl} type="search" placeholder="Filter scenes…" aria-label="Filter scenes" bind:value={filter} spellcheck="false" />
+      {#if filter}
+        <button type="button" class="icon-btn" onclick={clearFilter} aria-label="Clear the filter" title="Clear the filter">
+          <Icon name="x" size={12} />
+        </button>
+      {/if}
+    </div>
+  {/snippet}
 
-  <div class="rows">
+  <div class="scene-list">
     {#if canvas.listError}
-      <!-- Inline error (nothing loaded) or a stale bar over the last good list. -->
-      <LoadState
-        what="scenes"
-        variant="compact"
-        loading={canvas.listLoading}
-        error={canvas.listError}
-        empty={!canvas.scenes.length}
-        onretry={() => void canvas.loadScenes().catch(() => {})}
-      />
+      <!-- A refresh failed: a stale bar over the last good list (nothing
+           loaded at all → the page owns the error, the pane is not shown). -->
+      <LoadState what="scenes" variant="compact" loading={canvas.listLoading} error={canvas.listError} onretry={() => void canvas.loadScenes().catch(() => {})} />
     {/if}
-    {#if canvas.listError && !canvas.scenes.length}
-      <!-- rendered above -->
-    {:else if canvas.listLoading && !canvas.scenes.length}
-      <LoadState what="scenes" variant="compact" loading empty />
-    {:else if !rows.length}
+    {#if !rows.length}
       <div class="hint">
-        {#if filter}
-          No scenes match “{filter.trim()}”.
-          <button class="btn small" onclick={clearFilter}>Clear search</button>
-        {:else}
-          No scenes yet.
-        {/if}
+        No scenes match “{filter.trim()}”.
+        <button type="button" class="btn small" onclick={clearFilter}>Clear search</button>
       </div>
     {:else}
       {#each groups as [section, items] (section)}
-        {#if section !== ''}
-          <button
-            class="section-head"
-            aria-expanded={!collapsed[section]}
-            title={section}
-            onclick={() => (collapsed = { ...collapsed, [section]: !collapsed[section] })}
+        {#if section === ''}
+          {#each items as s (s.id)}{@render row(s)}{/each}
+        {:else}
+          <SideSection
+            title={section.replace(/\//g, ' / ')}
+            count={items.length}
+            bind:open={() => !collapsed[section], (v) => (collapsed = { ...collapsed, [section]: !v })}
           >
-            <Icon name={collapsed[section] ? 'chevronRight' : 'chevronDown'} size={12} />
-            <Icon name="folder" size={13} />
-            <span class="section-label">{section.replace(/\//g, ' / ')}</span>
-            <span class="section-count">{items.length}</span>
-          </button>
-        {/if}
-        {#if section === '' || !collapsed[section]}
-          {#each items as s (s.id)}
-            <!-- The row is a real button (open) plus a sibling ⋯ button (the
-                 row menu, also on right-click / ⇧F10) — no role=button div. -->
-            <div use:rowMenuKeys
-              class="row"
-              class:active={canvas.currentId === s.id}
-              class:nested={section !== ''}
-              role="group"
-              aria-label={s.title}
-              oncontextmenu={(e) => rowMenu(e, s)}
-            >
-              <button
-                class="row-open"
-                aria-current={canvas.currentId === s.id ? 'true' : undefined}
-                onclick={() => void canvas.open(s.id).catch(() => {})}
-                ondblclick={(e) => rename(e, s)}
-                onkeydown={(e) => {
-                  if (e.key === 'F2') { e.preventDefault(); void rename(null, s); }
-                  else if (e.key === 'F10' && e.shiftKey) rowMenu(e, s);
-                }}
-                title={s.title}
-              >
-                <span class="title">{s.title}</span>
-                <span class="when">edited {rel(s.updated_at)}</span>
-              </button>
-              <button
-                class="icon-btn row-more"
-                class:shown={canvas.currentId === s.id}
-                onclick={(e) => rowMenu(e, s)}
-                aria-label="Actions for {s.title}"
-                aria-haspopup="menu"
-                title="Rename, move, duplicate or delete"
-              >
-                <Icon name="more" size={14} />
-              </button>
-            </div>
-          {/each}
+            {#each items as s (s.id)}{@render row(s)}{/each}
+          </SideSection>
         {/if}
       {/each}
     {/if}
   </div>
-</div>
+</ListPane>
+
+{#snippet row(s: CanvasSceneSummary)}
+  <!-- The shared row look (app.css .side-row), drawn here for F2 / double-click rename. -->
+  <div class="side-row two-line" class:selected={canvas.currentId === s.id} data-testid="canvas-scene-row">
+    <button
+      type="button"
+      class="side-row-main"
+      data-side-row
+      aria-current={canvas.currentId === s.id ? 'true' : undefined}
+      title={s.title}
+      onclick={() => pick(s)}
+      ondblclick={(e) => rename(e, s)}
+      onkeydown={(e) => {
+        if (e.key === 'F2') { e.preventDefault(); void rename(null, s); }
+      }}
+      oncontextmenu={(e) => rowMenu(e, s)}
+      use:rowMenuKeys
+    >
+      <span class="side-row-text">
+        <span class="side-row-title" dir="auto">{s.title}</span>
+        <span class="side-row-meta">edited {rel(s.updated_at)}</span>
+      </span>
+    </button>
+    <button
+      type="button"
+      class="icon-btn side-row-more"
+      tabindex="-1"
+      onclick={(e) => rowMenu(e, s)}
+      aria-label="Actions for {s.title}"
+      aria-haspopup="menu"
+      title="Rename, move, duplicate or delete"
+    >
+      <Icon name="more" size={14} />
+    </button>
+  </div>
+{/snippet}
 
 <style>
-  .scene-list {
-    display: flex;
-    flex-direction: column;
-    height: 100%;
-    min-height: 0;
-  }
-  .search {
+  /* The pane's one search row (the Threads look): one clear control. */
+  .cv-search {
     display: flex;
     align-items: center;
     gap: 6px;
-    margin: 10px 10px 8px;
-    padding: 4px 8px;
-    background: var(--surface-2);
-    border: 1px solid var(--border);
+    block-size: 28px;
+    padding-inline: 8px 2px;
+    border: 1px solid var(--control-border);
     border-radius: var(--radius-s);
+    background: var(--surface);
     color: var(--text-dim);
   }
-  /* The field itself is borderless; the box carries the focus ring. */
-  .search:focus-within {
+  .cv-search:focus-within {
+    color: var(--text);
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 1px var(--accent);
   }
-  .search input {
-    flex: 1 1 auto;
-    border: none;
-    outline: none;
+  .cv-search input {
+    flex: 1;
+    min-width: 0;
+    block-size: 100%;
+    border: 0;
+    padding: 0;
     background: transparent;
     color: var(--text);
+    font: inherit;
     font-size: var(--fs-m);
-    min-width: 0;
+    outline: none;
   }
-  .search input::-webkit-search-cancel-button {
+  .cv-search input::-webkit-search-cancel-button {
     display: none;
   }
-  .clear {
-    border: none;
-    background: none;
-    color: var(--text-dim);
-    cursor: pointer;
-    padding: 0;
-    display: inline-flex;
-  }
-  .rows {
-    flex: 1 1 auto;
-    overflow-y: auto;
-    min-height: 0;
-    padding: 0 6px 8px;
+  @media (pointer: coarse) {
+    .cv-search {
+      block-size: 36px;
+    }
   }
   .hint {
     display: flex;
@@ -291,96 +284,5 @@
     color: var(--text-dim);
     font-size: var(--fs-s);
     text-align: center;
-  }
-  .section-head {
-    width: 100%;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 8px 8px 4px;
-    border: none;
-    background: none;
-    color: var(--text-dim);
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    letter-spacing: .06em;
-    cursor: pointer;
-    text-transform: uppercase;
-  }
-  .section-head:hover {
-    color: var(--text);
-  }
-  .section-label {
-    flex: 1 1 auto;
-    min-width: 0;
-    text-align: start;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .section-count {
-    font-weight: 400;
-  }
-  .row {
-    display: flex;
-    align-items: center;
-    gap: 2px;
-    padding-inline-end: 4px;
-    border-radius: var(--radius-s);
-  }
-  .row.nested {
-    margin-inline-start: 10px;
-  }
-  .row:hover {
-    background: var(--hover);
-  }
-  .row.active {
-    background: var(--accent-soft);
-  }
-  .row-open {
-    flex: 1 1 auto;
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 2px;
-    padding: 6px 8px;
-    border: none;
-    background: none;
-    color: inherit;
-    font: inherit;
-    text-align: start;
-    cursor: pointer;
-    border-radius: var(--radius-s);
-  }
-  .title {
-    max-width: 100%;
-    font-size: var(--fs-m);
-    color: var(--text);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .when {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-  }
-  .row-more {
-    flex: none;
-    width: 24px;
-    height: 24px;
-    opacity: 0;
-  }
-  /* Shown on hover, on keyboard focus, on the open scene, and wherever there
-     is no hover (touch) — never a hover-only dead control. */
-  .row:hover .row-more,
-  .row-more:focus-visible,
-  .row-more.shown {
-    opacity: 1;
-  }
-  @media (hover: none) {
-    .row-more {
-      opacity: 1;
-    }
   }
 </style>

@@ -281,7 +281,7 @@
 <div class="board">
   <div class="lanes">
     {#if codeOpen && !readonly}
-      <aside class="code-pane">
+      <section class="code-pane" aria-label="Mermaid source">
         <div class="code-head">
           <span><Icon name="branch" size={13} /> Mermaid source</span>
           <span class="code-hint">edits save + render live</span>
@@ -296,7 +296,7 @@
             onchange={onCode}
           />
         </div>
-      </aside>
+      </section>
     {/if}
 
     <div class="preview-wrap">

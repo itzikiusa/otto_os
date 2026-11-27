@@ -31,7 +31,7 @@ for (const format of ['mermaid', 'd2', 'excalidraw'] as const) {
       return route.fulfill({json: {...result, note: 'Accepted request'}});
     });
     await page.goto('/#/canvas');
-    await page.locator('.scene-list .row', {hasText: `Recovery ${format}`}).getByRole('button').first().click();
+    await page.locator('.scene-list .side-row', {hasText: `Recovery ${format}`}).getByRole('button').first().click();
     await page.locator('.ai-fab').click();
     const prompt = page.getByRole('textbox', {name: 'Ask the canvas assistant'});
     await prompt.fill('Keep this exact request until accepted');
