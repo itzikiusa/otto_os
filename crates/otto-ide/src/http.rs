@@ -57,8 +57,8 @@ use self::intelligence::{
     lsp_rename, lsp_status, lsp_symbols,
 };
 use self::notebooks::{
-    notebook_execute, notebook_interrupt, notebook_kernels, notebook_restart, notebook_shutdown,
-    notebook_variables,
+    notebook_execute, notebook_input, notebook_interrupt, notebook_kernels, notebook_restart,
+    notebook_shutdown, notebook_stream, notebook_variables,
 };
 use self::projects_deps::{
     add_project_folders_bulk, build_tools_model, delete_project, deps_action, deps_inspect,
@@ -273,6 +273,8 @@ pub fn api_router<S: IdeCtx>() -> Router<S> {
             .route("/ide/notebooks/restart", post(notebook_restart::<S>))
             .route("/ide/notebooks/variables", post(notebook_variables::<S>))
             .route("/ide/notebooks/shutdown", post(notebook_shutdown::<S>))
+            .route("/ide/notebooks/input", post(notebook_input::<S>))
+            .route("/ide/notebooks/stream", get(notebook_stream::<S>))
             // D. Full DAP Debugger Engine
             .route(
                 "/ide/debug/sessions",

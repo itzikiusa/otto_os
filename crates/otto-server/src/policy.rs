@@ -1670,6 +1670,7 @@ pub fn route_class(method: &Method, matched_path: &str) -> Option<RouteClass> {
                     | "/ide/debug/sessions"
                     | "/ide/spring/devtools-restart"
                     | "/ide/notebooks/execute"
+                    | "/ide/notebooks/input"
                     | "/ide/notebooks/interrupt"
                     | "/ide/notebooks/restart"
                     | "/ide/notebooks/shutdown"

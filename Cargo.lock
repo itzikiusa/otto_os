@@ -4567,6 +4567,7 @@ dependencies = [
  "tower",
  "tracing",
  "uuid",
+ "zeromq",
 ]
 
 [[package]]

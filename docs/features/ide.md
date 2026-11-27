@@ -27,7 +27,7 @@ zero-rebuild **runtime IDE plugins**.
     (`GET/PUT /ide/environments`) and minting a collab share room
     (`POST /ide/collab/rooms`) carry `RouteClass::Secret` (human credentials only);
     and subprocess-spawning workspace mutations (`python-venv`, `deps/action`,
-    `POST /ide/runs`, `POST /ide/debug/sessions`, `POST /ide/notebooks/{execute,interrupt,restart,shutdown}`) carry `RouteClass::Admin`
+    `POST /ide/runs`, `POST /ide/debug/sessions`, `POST /ide/notebooks/{execute,input,interrupt,restart,shutdown}`) carry `RouteClass::Admin`
     (human credentials only; local execution/restart also requires root authority).
   - Public guest routes (`/api/v1/ide/collab/guest/*`) sit outside the bearer
     chokepoint and authenticate each request with the room's capability share
@@ -852,6 +852,42 @@ IDE and `⌘K` opens the app's command bar, so a `⌘K V` chord can't exist.
 - Code: `ui/src/lib/components/cm-md-assist.ts`,
   `ui/src/modules/ide/editor/IdeMarkdownBar.svelte`. Headings are in Structure;
   Split and Preview are section 12.
+
+### 14. Jupyter notebooks
+
+Open a `.ipynb` file: the notebook view runs its cells on a real Jupyter kernel
+over the Jupyter messaging protocol (Otto's own Rust client, no `jupyter`
+install needed).
+
+1. **Pick the kernel** in the toolbar select. *Jupyter kernels* lists every
+   kernelspec found by reading `kernel.json` files (the user dir
+   `~/Library/Jupyter/kernels`, each Python env's `share/jupyter/kernels`,
+   `/usr/local/share` and `/usr/share/jupyter/kernels`, `JUPYTER_PATH` from the
+   project environment) plus ipykernel for any Python env that has it. *Built-in*
+   lists Otto's zero-install Python kernel, only for envs without ipykernel (no
+   IPython; **⋯ → Install ipykernel…** installs it with pip, or `uv pip` in a uv env,
+   in the Run panel). The notebook's `metadata.kernelspec` picks the default (same
+   name, else the same language); a choice is written back to the metadata. The
+   select's tooltip shows the kernel's full command.
+2. **Run** a cell (⇧⏎ / ⌘⏎) or **Run All**. Outputs stream while the cell runs;
+   `%matplotlib inline`, `%timeit`, `!cmd` and `?obj` work because the kernel does
+   them. `input()` shows a field under the cell (a password field for `getpass`).
+   The chip next to the select shows starting / idle / busy / dead.
+3. **Interrupt** stops the running cell (`SIGINT` to the kernel's process group,
+   or `interrupt_request` for `interrupt_mode: message` kernels). **Restart** starts
+   a fresh kernel and keeps the outputs; **⋯ → Restart & Run All** reruns everything.
+4. A kernelspec stored **inside the project** asks once before its first start
+   ("Start kernel 'x' from this project? It runs: …"); the answer is remembered for
+   that project and spec contents. Specs outside the project and the project venv's
+   own ipykernel don't ask.
+
+Limits: local workspaces only (no Jupyter Server URLs, no SSH kernels); one
+kernel per open notebook, 12 at most, stopped when the tab closes or the daemon
+stops; widgets and JavaScript outputs are never run (their text form shows);
+HTML outputs render in a script-less sandboxed iframe. **Debug Cell** runs the cell
+in an isolated Python process on the built-in kernel; on Jupyter kernels it is
+not available yet. The kernel env is the project's run environment only (the
+spec's `env` expands `${VAR}` from it, never from the daemon).
 
 ## API & WebSocket summary
 

@@ -1,19 +1,26 @@
-//! HTTP handlers for Jupyter / Python Notebook kernels (`/ide/notebooks/*`).
+//! HTTP handlers for notebook kernels (`/ide/notebooks/*`): Jupyter kernels
+//! plus the built-in Python fallback, streamed outputs (SSE), stdin and lifecycle.
 
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
-use axum::extract::State;
+use axum::extract::{Query, State};
+use axum::response::Response;
 use axum::{Extension, Json};
 use otto_core::auth::AuthUser;
-use otto_core::{Error, Result};
+use otto_core::{Error, Id, Result};
+use serde::Deserialize;
 
+use super::sse_framing::build_notebook_sse_response;
 use super::ApiResult;
+use crate::notebooks::kernelspecs::KernelLaunch;
 use crate::notebooks::{
-    default_cell_timeout, detect_local_accelerators, discover_notebook_kernels,
-    IdeNotebookExecuteReq, IdeNotebookExecuteResp, IdeNotebookKernelsReq, IdeNotebookKernelsResp,
-    IdeNotebookOkResp, IdeNotebookSessionReq, IdeNotebookVariablesResp,
+    default_cell_timeout, detect_local_accelerators, discover_kernels, record_kernel_trust,
+    DiscoveredKernel, IdeNotebookExecuteReq, IdeNotebookExecuteResp, IdeNotebookInputReq,
+    IdeNotebookKernelsReq, IdeNotebookKernelsResp, IdeNotebookOkResp, IdeNotebookSessionReq,
+    IdeNotebookVariablesResp, NotebookKernelCtx,
 };
-use crate::types::{IdeTargetKind, IdeTargetSpec};
+use crate::types::{IdeTargetKind, IdeTargetQuery, IdeTargetSpec};
 use crate::IdeCtx;
 
 async fn authorize_notebook_target<S: IdeCtx>(
@@ -38,62 +45,117 @@ fn require_notebook_exec_authority(user: &otto_core::domain::User) -> Result<()>
     super::require_root_user(user)
 }
 
-async fn resolve_notebook_interpreter_and_env<S: IdeCtx>(
+async fn list_kernels<S: IdeCtx>(ctx: &S, target: &IdeTargetSpec) -> Vec<DiscoveredKernel> {
+    let proj_env = ctx
+        .ide()
+        .environments
+        .get_project_env(&ctx.pool(), target)
+        .await
+        .ok();
+    discover_kernels(
+        Path::new(&target.root),
+        ctx.data_dir(),
+        &target.project_key(),
+        proj_env.as_ref(),
+    )
+    .await
+}
+
+/// The kernel a request runs on, and the env it runs with. `kernel_id` picks
+/// from discovery (a client never supplies a command); without it, a matching
+/// `interpreter`, then the project's `VIRTUAL_ENV`, then the active kernel.
+/// A workspace kernelspec runs only once the person accepted it (`trust_kernel`).
+async fn resolve_kernel<S: IdeCtx>(
     ctx: &S,
     target: &IdeTargetSpec,
-    requested_interpreter: Option<&str>,
-    caller_is_root: bool,
-) -> Result<(String, std::collections::BTreeMap<String, String>)> {
-    let pool = ctx.pool();
-    let secrets = ctx.secrets();
+    kernel_id: Option<&str>,
+    interpreter: Option<&str>,
+    trust_kernel: bool,
+) -> Result<(DiscoveredKernel, BTreeMap<String, String>)> {
     let env_map = ctx
         .ide()
         .environments
-        .build_effective_env_for_run_as(&pool, secrets.as_ref(), target, None, caller_is_root)
+        .build_effective_env_for_run_as(&ctx.pool(), ctx.secrets().as_ref(), target, None, true)
         .await?;
-
-    let req_interp = requested_interpreter
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-
-    let interp = if let Some(explicit) = req_interp {
-        if !caller_is_root {
-            let root = PathBuf::from(&target.root);
-            let data_dir = ctx.data_dir().to_path_buf();
-            let allowed = tokio::task::spawn_blocking(move || {
-                discover_notebook_kernels(&root, &data_dir, None)
-            })
-            .await
-            .map_err(|e| Error::Internal(format!("kernel lookup: {e}")))?;
-            if !allowed.iter().any(|k| k.interpreter == explicit) {
-                return Err(Error::Forbidden(
-                    "non-root users must pick a discovered Python kernel".into(),
-                ));
+    let kernels = list_kernels(ctx, target).await;
+    let nonempty = |s: Option<&str>| {
+        s.map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let venv_python = env_map
+        .get("VIRTUAL_ENV")
+        .filter(|s| !s.trim().is_empty())
+        .map(|v| format!("{}/bin/python", v.trim_end_matches('/')));
+    let chosen = if let Some(id) = nonempty(kernel_id) {
+        kernels
+            .into_iter()
+            .find(|k| k.info.id == id)
+            .ok_or_else(|| Error::NotFound(format!("kernel '{id}' is no longer available")))?
+    } else if let Some(interp) = nonempty(interpreter).or(venv_python) {
+        match kernels.iter().position(|k| k.info.interpreter == interp) {
+            Some(i) => kernels.into_iter().nth(i).expect("index in range"),
+            None if Path::new(&interp).is_file() => DiscoveredKernel {
+                info: crate::notebooks::IdeNotebookKernelInfo {
+                    id: format!("builtin:{interp}"),
+                    display_name: interp.clone(),
+                    language: "python".into(),
+                    interpreter: interp.clone(),
+                    kind: "builtin".into(),
+                    version: None,
+                    active: true,
+                    spec_name: None,
+                    origin: None,
+                    argv_preview: None,
+                    needs_trust: false,
+                    debugger: false,
+                    env_kind: None,
+                },
+                launch: KernelLaunch::Builtin {
+                    interpreter: interp,
+                },
+                trust_key: None,
+            },
+            None => {
+                return Err(Error::NotFound(format!(
+                    "interpreter '{interp}' wasn't found"
+                )));
             }
         }
-        explicit.to_string()
-    } else if let Some(venv) = env_map.get("VIRTUAL_ENV").filter(|s| !s.trim().is_empty()) {
-        let py = format!("{}/bin/python", venv.trim_end_matches('/'));
-        if std::path::Path::new(&py).is_file() {
-            py
-        } else {
-            "python3".into()
-        }
     } else {
-        let root = PathBuf::from(&target.root);
-        let data_dir = ctx.data_dir().to_path_buf();
-        let discovered =
-            tokio::task::spawn_blocking(move || discover_notebook_kernels(&root, &data_dir, None))
-                .await
-                .map_err(|e| Error::Internal(format!("kernel lookup: {e}")))?;
-        discovered
-            .into_iter()
-            .next()
-            .map(|k| k.interpreter)
-            .unwrap_or_else(|| "python3".into())
+        kernels.into_iter().find(|k| k.info.active).ok_or_else(|| {
+            Error::NotFound(
+                "No kernel found. Create a Python environment or install a Jupyter kernel.".into(),
+            )
+        })?
     };
+    if let Some(key) = chosen
+        .trust_key
+        .as_deref()
+        .filter(|_| chosen.info.needs_trust)
+    {
+        if !trust_kernel {
+            return Err(Error::Forbidden(format!(
+                "kernel_requires_trust: Start kernel '{}' from this project? It runs: {}",
+                chosen.info.display_name,
+                chosen.info.argv_preview.as_deref().unwrap_or("")
+            )));
+        }
+        record_kernel_trust(ctx.data_dir(), key)?;
+    }
+    Ok((chosen, env_map))
+}
 
-    Ok((interp, env_map))
+fn notebook_cwd(notebook_path: &str, target: &IdeTargetSpec) -> String {
+    Path::new(notebook_path)
+        .parent()
+        .filter(|p| p.is_dir())
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| target.root.clone())
+}
+
+fn runtime_dir<S: IdeCtx>(ctx: &S) -> PathBuf {
+    ctx.data_dir().join("jupyter-runtime")
 }
 
 pub(super) async fn notebook_kernels<S: IdeCtx>(
@@ -102,41 +164,26 @@ pub(super) async fn notebook_kernels<S: IdeCtx>(
     Json(req): Json<IdeNotebookKernelsReq>,
 ) -> ApiResult<Json<IdeNotebookKernelsResp>> {
     authorize_notebook_target(&ctx, &auth, &req.target, false).await?;
-    let pool = ctx.pool();
     let project_key = req.target.project_key();
-    let proj_env = ctx
-        .ide()
-        .environments
-        .get_project_env(&pool, &req.target)
+    let kernels = list_kernels(&ctx, &req.target).await;
+    let accelerators = tokio::task::spawn_blocking(detect_local_accelerators)
         .await
-        .ok();
-    let root = PathBuf::from(&req.target.root);
-    let data_dir = ctx.data_dir().to_path_buf();
-    let (kernels, accelerators) = tokio::task::spawn_blocking(move || {
-        (
-            discover_notebook_kernels(&root, &data_dir, proj_env.as_ref()),
-            detect_local_accelerators(),
-        )
-    })
-    .await
-    .map_err(|e| Error::Internal(format!("notebook kernel probe: {e}")))?;
-
-    let summary = req.notebook_path.as_deref().and_then(|p| {
-        ctx.ide()
-            .notebooks
-            .active_session_summary(&auth.0.id, &project_key, p)
-    });
+        .map_err(|e| Error::Internal(format!("notebook accelerator probe: {e}")))?;
+    let notebooks = &ctx.ide().notebooks;
+    let path = req.notebook_path.as_deref();
+    let summary = path.and_then(|p| notebooks.active_session_summary(&auth.0.id, &project_key, p));
+    let kernel_status = path.and_then(|p| notebooks.kernel_status(&auth.0.id, &project_key, p));
     let (active_session_id, active_interpreter, execution_count) = match summary {
         Some((sid, interp, cnt)) => (Some(sid), Some(interp), cnt),
         None => (None, None, 0),
     };
-
     Ok(Json(IdeNotebookKernelsResp {
-        kernels,
+        kernels: kernels.into_iter().map(|k| k.info).collect(),
         accelerators,
         active_session_id,
         active_interpreter,
         execution_count,
+        kernel_status,
     }))
 }
 
@@ -146,31 +193,37 @@ pub(super) async fn notebook_execute<S: IdeCtx>(
     Json(req): Json<IdeNotebookExecuteReq>,
 ) -> ApiResult<Json<IdeNotebookExecuteResp>> {
     authorize_notebook_target(&ctx, &auth, &req.target, true).await?;
-    let is_root = otto_core::auth::root_authority(&auth.0);
-    let (interp, env_map) = resolve_notebook_interpreter_and_env(
+    let (kernel, env_map) = resolve_kernel(
         &ctx,
         &req.target,
+        req.kernel_id.as_deref(),
         req.interpreter.as_deref(),
-        is_root,
+        req.trust_kernel,
     )
     .await?;
-    let cwd = std::path::Path::new(&req.notebook_path)
-        .parent()
-        .filter(|p| p.is_dir())
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| req.target.root.clone());
+    let cwd = notebook_cwd(&req.notebook_path, &req.target);
+    let runtime = runtime_dir(&ctx);
+    let project_key = req.target.project_key();
+    let kctx = NotebookKernelCtx {
+        owner: &auth.0.id,
+        project_key: &project_key,
+        notebook_path: &req.notebook_path,
+        cwd: &cwd,
+        env: &env_map,
+        runtime_dir: &runtime,
+    };
+    let timeout = req.timeout_secs.map(|s| default_cell_timeout(Some(s)));
+    let run_id = req.run_id.clone().unwrap_or_default();
     let resp = ctx
         .ide()
         .notebooks
-        .execute_cell(
-            &auth.0.id,
-            &req.target.project_key(),
-            &req.notebook_path,
-            &cwd,
-            &interp,
-            &env_map,
+        .execute(
+            &kctx,
+            &kernel.info.id,
+            &kernel.launch,
             &req.code,
-            default_cell_timeout(req.timeout_secs),
+            &run_id,
+            timeout,
         )
         .await?;
     Ok(Json(resp))
@@ -182,17 +235,14 @@ pub(super) async fn notebook_interrupt<S: IdeCtx>(
     Json(req): Json<IdeNotebookSessionReq>,
 ) -> ApiResult<Json<IdeNotebookOkResp>> {
     authorize_notebook_target(&ctx, &auth, &req.target, true).await?;
-    let ok =
-        ctx.ide()
-            .notebooks
-            .interrupt(&auth.0.id, &req.target.project_key(), &req.notebook_path);
+    let (ok, message) = ctx
+        .ide()
+        .notebooks
+        .interrupt_kernel(&auth.0.id, &req.target.project_key(), &req.notebook_path)
+        .await;
     Ok(Json(IdeNotebookOkResp {
         ok,
-        message: Some(if ok {
-            "Interrupt signal sent to kernel".into()
-        } else {
-            "No active kernel for this notebook".into()
-        }),
+        message: Some(message),
     }))
 }
 
@@ -202,35 +252,89 @@ pub(super) async fn notebook_restart<S: IdeCtx>(
     Json(req): Json<IdeNotebookSessionReq>,
 ) -> ApiResult<Json<IdeNotebookOkResp>> {
     authorize_notebook_target(&ctx, &auth, &req.target, true).await?;
-    let is_root = otto_core::auth::root_authority(&auth.0);
-    let (interp, env_map) = resolve_notebook_interpreter_and_env(
+    let (kernel, env_map) = resolve_kernel(
         &ctx,
         &req.target,
+        req.kernel_id.as_deref(),
         req.interpreter.as_deref(),
-        is_root,
+        req.trust_kernel,
     )
     .await?;
-    let cwd = std::path::Path::new(&req.notebook_path)
-        .parent()
-        .filter(|p| p.is_dir())
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| req.target.root.clone());
+    let cwd = notebook_cwd(&req.notebook_path, &req.target);
+    let runtime = runtime_dir(&ctx);
+    let project_key = req.target.project_key();
+    let kctx = NotebookKernelCtx {
+        owner: &auth.0.id,
+        project_key: &project_key,
+        notebook_path: &req.notebook_path,
+        cwd: &cwd,
+        env: &env_map,
+        runtime_dir: &runtime,
+    };
     let sid = ctx
         .ide()
         .notebooks
-        .restart(
-            &auth.0.id,
-            &req.target.project_key(),
-            &req.notebook_path,
-            &cwd,
-            &interp,
-            &env_map,
-        )
+        .restart_kernel(&kctx, &kernel.info.id, &kernel.launch)
         .await?;
     Ok(Json(IdeNotebookOkResp {
         ok: true,
         message: Some(format!("Kernel restarted ({sid})")),
     }))
+}
+
+pub(super) async fn notebook_input<S: IdeCtx>(
+    State(ctx): State<S>,
+    Extension(auth): Extension<AuthUser>,
+    Json(req): Json<IdeNotebookInputReq>,
+) -> ApiResult<Json<IdeNotebookOkResp>> {
+    authorize_notebook_target(&ctx, &auth, &req.target, true).await?;
+    let ok = ctx
+        .ide()
+        .notebooks
+        .send_input(
+            &auth.0.id,
+            &req.target.project_key(),
+            &req.notebook_path,
+            &req.value,
+        )
+        .await?;
+    Ok(Json(IdeNotebookOkResp {
+        ok,
+        message: (!ok).then(|| "No cell is waiting for input".into()),
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct NotebookStreamQuery {
+    #[serde(default)]
+    kind: Option<IdeTargetKind>,
+    #[serde(default)]
+    workspace_id: Option<Id>,
+    root: String,
+    notebook_path: String,
+}
+
+/// `GET /ide/notebooks/stream`: the notebook's live kernel events (`status`,
+/// `output`, `clear_output`, `input_request`, `input_done`) as SSE.
+pub(super) async fn notebook_stream<S: IdeCtx>(
+    State(ctx): State<S>,
+    Extension(auth): Extension<AuthUser>,
+    Query(q): Query<NotebookStreamQuery>,
+) -> ApiResult<Response> {
+    let target = IdeTargetQuery {
+        kind: q.kind,
+        workspace_id: q.workspace_id,
+        root: Some(q.root),
+        connection_id: None,
+        include_catalog: false,
+    }
+    .into_target_spec()?;
+    authorize_notebook_target(&ctx, &auth, &target, false).await?;
+    let (initial, rx) =
+        ctx.ide()
+            .notebooks
+            .subscribe(&auth.0.id, &target.project_key(), &q.notebook_path);
+    Ok(build_notebook_sse_response(initial, rx))
 }
 
 pub(super) async fn notebook_variables<S: IdeCtx>(
@@ -451,7 +555,7 @@ mod tests {
             .extension(non_root)
             .body(Body::from(restart_body.to_string()))
             .unwrap();
-        let interrupt_resp = app.oneshot(interrupt_req).await.unwrap();
+        let interrupt_resp = app.clone().oneshot(interrupt_req).await.unwrap();
         assert_eq!(
             interrupt_resp.status(),
             StatusCode::FORBIDDEN,
@@ -466,6 +570,26 @@ mod tests {
         assert!(
             interrupt_err_text.contains("root"),
             "SEC-8: interrupt 403 must come from the root host-execution gate, got: {interrupt_err_text}"
+        );
+
+        // J13: stdin answers execute code paths too: same root gate.
+        let input_body = serde_json::json!({
+            "target": { "kind": "local", "root": ws.to_string_lossy() },
+            "notebook_path": ws.join("demo.ipynb").to_string_lossy(),
+            "value": "ada"
+        });
+        let input_req = Request::builder()
+            .method("POST")
+            .uri("/ide/notebooks/input")
+            .header("content-type", "application/json")
+            .extension(AuthUser(make_user(false)))
+            .body(Body::from(input_body.to_string()))
+            .unwrap();
+        let input_resp = app.clone().oneshot(input_req).await.unwrap();
+        assert_eq!(
+            input_resp.status(),
+            StatusCode::FORBIDDEN,
+            "routed /ide/notebooks/input must reject a non-root editor with 403"
         );
 
         assert!(require_notebook_exec_authority(&make_user(true)).is_ok());

@@ -126,6 +126,16 @@ where
     })
 }
 
+/// A notebook's kernel events: never ends on its own (the kernel restarts
+/// under the same stream); a lagged reader gets `event: lagged` and continues
+/// (the final `/ide/notebooks/execute` response still carries every output).
+pub(super) fn build_notebook_sse_response(
+    initial: Value,
+    rx: broadcast::Receiver<Value>,
+) -> Response {
+    build_json_sse_response(initial, rx, || Some(json!({ "kind": "lagged" })), |_| false)
+}
+
 pub(super) fn build_run_sse_response<F>(
     initial: IdeRunState,
     rx: broadcast::Receiver<IdeRunState>,

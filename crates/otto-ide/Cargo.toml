@@ -39,6 +39,7 @@ tempfile = { workspace = true }
 # Native Jupyter client (BSD-3-Clause, runtimed): kernelspecs, signed ZeroMQ channels.
 jupyter-zmq-client = { version = "3.0.1", default-features = false, features = ["tokio-runtime", "ring"] }
 jupyter-protocol = "2.0.4"
+zeromq = { version = "0.7.0", default-features = false, features = ["tokio-runtime", "tcp-transport"] }
 
 [dev-dependencies]
 otto-rbac = { workspace = true }
