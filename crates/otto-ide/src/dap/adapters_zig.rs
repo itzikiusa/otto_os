@@ -159,7 +159,8 @@ pub(super) async fn resolve_zig_adapter(
 ) -> Result<ResolvedDapAdapter> {
     let mut initial_output = Vec::new();
     let raw_prog = normalize_target_path(&req.target, &req.launch.program);
-    let want_test = req.launch.test_name.is_some()
+    let want_test = req.launch.is_test
+        || req.launch.test_name.is_some()
         || ctx
             .run_config
             .as_ref()
@@ -388,6 +389,79 @@ async fn compile_zig_debug_artifact(
     let is_zig_file = raw_prog.ends_with(".zig") && !raw_prog.ends_with("/build.zig");
 
     if want_test {
+        let build_modules = if has_build_zig {
+            std::fs::read_to_string(Path::new(&zig_cwd).join("build.zig"))
+                .ok()
+                .map(|src| parse_build_zig_modules(&src, Path::new(&zig_cwd)))
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        // Project-wide Debug All Tests (`!is_zig_file`) on a `build.zig` project:
+        // compile via `zig build test` and launch the compiled test artifact from
+        // `.zig-cache/o/*/test` (never the app binary from `zig-out/bin/`).
+        if !is_zig_file && has_build_zig {
+            let before =
+                std::time::SystemTime::now().checked_sub(std::time::Duration::from_secs(2));
+            let mut build_args = vec!["build".to_string(), "test".to_string()];
+            build_args.extend(extra_flags.clone());
+            let _ = run_zig_build_with_macos_fallback(
+                req,
+                ctx,
+                &zig_bin,
+                build_args,
+                &zig_cwd,
+                env,
+                true,
+                initial_output,
+            )
+            .await;
+            if let Some(cached_test_bin) = find_zig_cache_test_executable(&zig_cwd, before) {
+                return Ok(cached_test_bin);
+            }
+        }
+
+        // SSH project-wide Debug All Tests (`!is_zig_file`): run `zig build test`
+        // remotely and pick the newest compiled test binary under `.zig-cache/o`.
+        if !is_zig_file && req.target.kind == IdeTargetKind::Ssh {
+            let mut build_args = vec!["build".to_string(), "test".to_string()];
+            build_args.extend(extra_flags.clone());
+            let _ = run_zig_build_with_macos_fallback(
+                req,
+                ctx,
+                &zig_bin,
+                build_args,
+                &zig_cwd,
+                env,
+                true,
+                initial_output,
+            )
+            .await;
+            let find_out = run_target_command(
+                &req.target,
+                ctx.ssh.as_ref(),
+                "sh",
+                &[
+                    "-c".into(),
+                    "find .zig-cache/o -maxdepth 2 -type f -name test -perm -111 2>/dev/null | head -n 1".into(),
+                ],
+                &zig_cwd,
+                env,
+                crate::proc_group::BUILD_STEP_TIMEOUT,
+            )
+            .await?;
+            let found = String::from_utf8_lossy(&find_out.stdout).trim().to_string();
+            if !found.is_empty() {
+                let full = if found.starts_with('/') {
+                    found
+                } else {
+                    format!("{}/{}", zig_cwd.trim_end_matches('/'), found)
+                };
+                return Ok(full);
+            }
+        }
+
         let test_file = if is_zig_file {
             raw_prog.to_string()
         } else if req.target.kind == IdeTargetKind::Local {
@@ -399,12 +473,14 @@ async fn compile_zig_debug_artifact(
                 .map(|p| p.to_string_lossy().into_owned())
                 .ok_or_else(|| {
                     Error::Invalid(
-                        "Zig test debugging requires a .zig file (or src/main.zig / src/root.zig)"
+                        "Zig test debugging requires a build.zig test step or a .zig file (src/main.zig / src/root.zig)"
                             .into(),
                     )
                 })?
         } else {
-            raw_prog.to_string()
+            return Err(Error::Invalid(
+                "Zig SSH test debugging could not locate a compiled test executable under .zig-cache/o".into(),
+            ));
         };
         let out_bin =
             zig_debug_cache_bin_path(data_dir, req.target.kind, &zig_cwd, &test_file, true)?;
@@ -418,9 +494,9 @@ async fn compile_zig_debug_artifact(
             args.push(tname.to_string());
         }
         args.extend(extra_flags);
-        args.push(test_file);
+        append_zig_source_and_modules(&mut args, &test_file, &build_modules);
 
-        run_zig_build_with_macos_fallback(
+        let direct_res = run_zig_build_with_macos_fallback(
             req,
             ctx,
             &zig_bin,
@@ -430,7 +506,30 @@ async fn compile_zig_debug_artifact(
             false,
             initial_output,
         )
-        .await?;
+        .await;
+        if let Err(err) = direct_res {
+            // If direct `zig test` failed on a `build.zig` project (e.g. external package
+            // dependencies in `build.zig.zon`), fall back to `zig build test` cache binary.
+            if has_build_zig {
+                let before =
+                    std::time::SystemTime::now().checked_sub(std::time::Duration::from_secs(2));
+                let _ = run_zig_build_with_macos_fallback(
+                    req,
+                    ctx,
+                    &zig_bin,
+                    vec!["build".to_string(), "test".to_string()],
+                    &zig_cwd,
+                    env,
+                    true,
+                    initial_output,
+                )
+                .await;
+                if let Some(cached_test_bin) = find_zig_cache_test_executable(&zig_cwd, before) {
+                    return Ok(cached_test_bin);
+                }
+            }
+            return Err(err);
+        }
         return Ok(out_bin);
     }
 
@@ -609,6 +708,10 @@ async fn resolve_zig_binary(
             candidates.push(format!("{trimmed}/zig"));
         }
     }
+    if req.target.kind == IdeTargetKind::Ssh {
+        candidates.push("$HOME/.otto/toolchains/zig/current/zig".to_string());
+        candidates.push("$HOME/.otto/toolchains/zig/current/bin/zig".to_string());
+    }
     candidates.push("zig".to_string());
     locate_binary(&req.target, ctx, env, &candidates)
         .await
@@ -720,6 +823,114 @@ fn find_zig_out_executable(zig_cwd: &str, raw_prog: &str) -> Option<String> {
         .map(|(_, _, p)| p.to_string_lossy().into_owned())
 }
 
+/// Extract named local Zig modules declared in `build.zig` via `b.createModule` +
+/// `addImport("name", var)` or `b.addModule("name", ...)` so single-file `zig test`
+/// debug builds preserve the project's module graph (BUG-35).
+#[allow(clippy::disallowed_methods)]
+pub(crate) fn parse_build_zig_modules(build_zig: &str, zig_cwd: &Path) -> Vec<(String, String)> {
+    use regex::Regex;
+    use std::sync::OnceLock;
+    static RE_CREATE: OnceLock<Regex> = OnceLock::new();
+    static RE_ADD_MOD: OnceLock<Regex> = OnceLock::new();
+    static RE_ADD_IMPORT: OnceLock<Regex> = OnceLock::new();
+
+    let re_create = RE_CREATE.get_or_init(|| {
+        Regex::new(r#"(?s)const\s+([A-Za-z_]\w*)\s*=\s*b\.createModule\s*\(\.\{[^}]*?\.root_source_file\s*=\s*b\.path\(\s*"([^"]+)"\s*\)"#).unwrap()
+    });
+    let re_add_mod = RE_ADD_MOD.get_or_init(|| {
+        Regex::new(r#"(?s)b\.addModule\(\s*"([^"]+)"\s*,\s*\.\{[^}]*?\.root_source_file\s*=\s*b\.path\(\s*"([^"]+)"\s*\)"#).unwrap()
+    });
+    let re_add_import = RE_ADD_IMPORT.get_or_init(|| {
+        Regex::new(r#"\.addImport\(\s*"([^"]+)"\s*,\s*([A-Za-z_]\w*)\s*\)"#).unwrap()
+    });
+
+    let mut vars: BTreeMap<String, String> = BTreeMap::new();
+    for cap in re_create.captures_iter(build_zig) {
+        vars.insert(cap[1].to_string(), cap[2].to_string());
+    }
+
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut push_mod = |name: &str, rel: &str| {
+        if name.is_empty() || out.iter().any(|(n, _)| n == name) {
+            return;
+        }
+        let abs = zig_cwd.join(rel);
+        if abs.is_file() {
+            out.push((name.to_string(), abs.to_string_lossy().into_owned()));
+        }
+    };
+    for cap in re_add_mod.captures_iter(build_zig) {
+        push_mod(&cap[1], &cap[2]);
+    }
+    for cap in re_add_import.captures_iter(build_zig) {
+        if let Some(rel) = vars.get(&cap[2]) {
+            push_mod(&cap[1], rel);
+        }
+    }
+    out
+}
+
+fn append_zig_source_and_modules(
+    args: &mut Vec<String>,
+    root_file: &str,
+    modules: &[(String, String)],
+) {
+    if modules.is_empty() {
+        args.push(root_file.to_string());
+        return;
+    }
+    for (name, _) in modules {
+        args.push("--dep".into());
+        args.push(name.clone());
+    }
+    args.push(format!("-Mroot={root_file}"));
+    for (name, path) in modules {
+        args.push(format!("-M{name}={path}"));
+    }
+}
+
+/// Locate the newest compiled Zig test executable under `<zig_cwd>/.zig-cache/o/*/test`
+/// (never an application binary from `zig-out/bin/`).
+#[allow(clippy::disallowed_methods)]
+pub(crate) fn find_zig_cache_test_executable(
+    zig_cwd: &str,
+    min_mtime: Option<std::time::SystemTime>,
+) -> Option<String> {
+    let cache_o = Path::new(zig_cwd).join(".zig-cache").join("o");
+    let entries = std::fs::read_dir(&cache_o).ok()?;
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let cand = dir.join("test");
+        if !cand.is_file() {
+            continue;
+        }
+        let Ok(meta) = std::fs::metadata(&cand) else {
+            continue;
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if meta.permissions().mode() & 0o111 == 0 {
+                continue;
+            }
+        }
+        let mtime = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        if let Some(min) = min_mtime {
+            if mtime < min {
+                continue;
+            }
+        }
+        if best.as_ref().is_none_or(|(prev, _)| mtime > *prev) {
+            best = Some((mtime, cand));
+        }
+    }
+    best.map(|(_, p)| p.to_string_lossy().into_owned())
+}
+
 #[allow(clippy::disallowed_methods)]
 fn find_zig_dir(
     target: &IdeTargetSpec,
@@ -774,6 +985,8 @@ mod zig_support_tests {
         assert_eq!(zls.cmd, "zls");
         assert!(zls.extensions.contains(&".zig"));
         assert!(zls.extensions.contains(&".zon"));
+        // BUG-1: Must not recommend `brew install zls` (installs incompatible 0.17.x).
+        assert_eq!(zls.install_command, None);
         assert_eq!(EcosystemKind::parse("zig"), Some(EcosystemKind::Zig));
         assert_eq!(EcosystemKind::Zig.lsp_name(), "zls");
         assert_eq!(EcosystemKind::Zig.dap_name(), "codelldb");
@@ -911,5 +1124,130 @@ test "point sum" {
         )
         .unwrap();
         assert_eq!(root_dep, ws.to_string_lossy());
+    }
+
+    #[test]
+    fn zig_bug5_bug35_bug36_bug7_regression_suite() {
+        use std::collections::BTreeMap;
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("my_zig_app");
+        std::fs::create_dir_all(proj.join("src")).unwrap();
+        std::fs::create_dir_all(proj.join("zig-out/bin")).unwrap();
+        std::fs::create_dir_all(proj.join(".zig-cache/o/abc123")).unwrap();
+
+        let build_zig = r#"
+const std = @import("std");
+pub fn build(b: *std.Build) void {
+    const helper_mod = b.createModule(.{
+        .root_source_file = b.path("src/helper.zig"),
+    });
+    const exe = b.addExecutable(.{ .name = "my_zig_app", .root_source_file = b.path("src/main.zig") });
+    exe.root_module.addImport("helper", helper_mod);
+    const run_step = b.step("run", "Run the app");
+    const test_step = b.step("test", "Run unit tests");
+    _ = .{ run_step, test_step };
+}
+"#;
+        std::fs::write(proj.join("build.zig"), build_zig).unwrap();
+        std::fs::write(
+            proj.join("src/helper.zig"),
+            "pub fn val() i32 { return 42; }\n",
+        )
+        .unwrap();
+        let main_src = r#"const std = @import("std");
+const helper = @import("helper");
+pub fn main() void { _ = helper.val(); }
+test "uses helper" { try std.testing.expectEqual(@as(i32, 42), helper.val()); }
+"#;
+        let main_path = proj.join("src/main.zig");
+        std::fs::write(&main_path, main_src).unwrap();
+
+        // BUG-5: Cache test binary finder locates `.zig-cache/o/*/test`, never `zig-out/bin` app.
+        let app_bin = proj.join("zig-out/bin/my_zig_app");
+        let test_bin = proj.join(".zig-cache/o/abc123/test");
+        for p in [&app_bin, &test_bin] {
+            std::fs::write(p, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let found = super::find_zig_cache_test_executable(&proj.to_string_lossy(), None)
+            .expect("cached test binary");
+        assert_eq!(found, test_bin.to_string_lossy());
+        assert_ne!(found, app_bin.to_string_lossy());
+
+        // BUG-35: Gutter actions inside a build.zig project use `zig build run` / `zig build test`
+        // (preserving module graph), while standalone files retain direct `zig run` / `zig test`.
+        let proj_gutters =
+            crate::gutter::detect_gutter_items(&main_path.to_string_lossy(), main_src, &[]);
+        let main_g = proj_gutters.iter().find(|g| g.label == "main").unwrap();
+        assert_eq!(
+            main_g.run_spec.runner,
+            crate::types::IdeRunnerKind::ZigBuild
+        );
+        assert_eq!(main_g.run_spec.args, vec!["build", "run"]);
+        let test_g = proj_gutters
+            .iter()
+            .find(|g| g.label == "uses helper")
+            .unwrap();
+        assert_eq!(test_g.run_spec.runner, crate::types::IdeRunnerKind::ZigTest);
+        assert_eq!(test_g.run_spec.args, vec!["build", "test"]);
+
+        let solo_dir = tmp.path().join("standalone");
+        std::fs::create_dir_all(&solo_dir).unwrap();
+        let solo_path = solo_dir.join("solo.zig");
+        std::fs::write(&solo_path, main_src).unwrap();
+        let solo_gutters =
+            crate::gutter::detect_gutter_items(&solo_path.to_string_lossy(), main_src, &[]);
+        let solo_main = solo_gutters.iter().find(|g| g.label == "main").unwrap();
+        assert_eq!(
+            solo_main.run_spec.runner,
+            crate::types::IdeRunnerKind::ZigRun
+        );
+        assert_eq!(solo_main.run_spec.args[0], "run");
+
+        // BUG-35: Named build.zig modules are extracted and converted to `--dep` / `-M` flags.
+        let mods = super::parse_build_zig_modules(build_zig, &proj);
+        assert_eq!(mods.len(), 1);
+        assert_eq!(mods[0].0, "helper");
+        let mut argv = vec!["test".to_string(), "--test-no-exec".to_string()];
+        super::append_zig_source_and_modules(&mut argv, &main_path.to_string_lossy(), &mods);
+        assert!(argv.contains(&"--dep".to_string()));
+        assert!(argv.contains(&"helper".to_string()));
+        assert!(argv.iter().any(|a| a.starts_with("-Mroot=")));
+        assert!(argv.iter().any(|a| a.starts_with("-Mhelper=")));
+
+        // BUG-36: SSH Run All Tests (remote cwd absent on local disk, no `.zig` file) must
+        // emit `zig build test` rather than bare `zig test`.
+        let cfg = crate::types::IdeRunConfig {
+            id: "ssh-zig-test".into(),
+            name: "Test All".into(),
+            runner: crate::types::IdeRunnerKind::ZigTest,
+            cwd: Some("/nonexistent/remote/zig-project".into()),
+            ..Default::default()
+        };
+        let (prog, cmd_args) = crate::environments::runner_cmd::build_zig_runner_cmd(
+            crate::types::IdeRunnerKind::ZigTest,
+            &cfg,
+            "/nonexistent/remote/zig-project",
+            None,
+            vec![],
+            vec![],
+            None,
+        );
+        assert_eq!(prog, "zig");
+        assert_eq!(cmd_args, vec!["build", "test"]);
+
+        // BUG-7: Shared SSH exec wrapper exposes managed Zig toolchain dirs on PATH.
+        let ssh_cmd = crate::target::ssh_exec::build_remote_exec_line(
+            "/remote/zig",
+            "zig",
+            &["version".into()],
+            &BTreeMap::new(),
+        );
+        assert!(
+            ssh_cmd.contains("\"$HOME\"/.otto/toolchains/zig/current"),
+            "SSH exec script missing managed zig/current PATH: {ssh_cmd}"
+        );
     }
 }

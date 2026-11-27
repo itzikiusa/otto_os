@@ -422,3 +422,107 @@ fn a_delve_built_with_an_older_go_than_the_project_is_outdated() {
         "no project Go: nothing to compare"
     );
 }
+
+#[test]
+fn versioned_managed_zls_resolves_per_project_zig_minor_without_clobbering() {
+    let tmp = tempfile::tempdir().unwrap();
+    let tc_root = tmp.path().join("toolchains");
+    let zls_013 = tc_root.join("zig/zls/0.13/zls");
+    let zls_014 = tc_root.join("zig/zls/0.14/zls");
+    let global_bin = tc_root.join("zig/bin/zls");
+    for (p, ver) in [(&zls_013, "0.13.0"), (&zls_014, "0.14.0")] {
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, format!("#!/bin/sh\necho \"{ver}\"\n")).unwrap();
+        make_executable(p).unwrap();
+    }
+    std::fs::create_dir_all(global_bin.parent().unwrap()).unwrap();
+    // Simulate project 2 (0.14) having most recently updated the global symlink.
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&zls_014, &global_bin).unwrap();
+
+    let roots = vec![tc_root];
+    let pick_013 =
+        discovery::resolve_managed_zls_for_zig_version(&roots, Some("0.13.0")).expect("0.13 zls");
+    assert_eq!(pick_013, zls_013);
+    let mut st_013 = crate::types::IdeToolBinaryStatus {
+        name: "zls".into(),
+        available: true,
+        path: Some(pick_013.to_string_lossy().into_owned()),
+        version: None,
+        outdated: None,
+    };
+    discovery::mark_zig_tool_outdated(&mut st_013, None, Some("0.13.0"));
+    assert_eq!(st_013.version.as_deref(), Some("0.13.0"));
+    assert_eq!(st_013.outdated, None);
+
+    let pick_014 =
+        discovery::resolve_managed_zls_for_zig_version(&roots, Some("0.14.1")).expect("0.14 zls");
+    assert_eq!(pick_014, zls_014);
+    let mut st_014 = crate::types::IdeToolBinaryStatus {
+        name: "zls".into(),
+        available: true,
+        path: Some(pick_014.to_string_lossy().into_owned()),
+        version: None,
+        outdated: None,
+    };
+    discovery::mark_zig_tool_outdated(&mut st_014, None, Some("0.14.1"));
+    assert_eq!(st_014.version.as_deref(), Some("0.14.0"));
+    assert_eq!(st_014.outdated, None);
+}
+
+#[tokio::test]
+async fn zig_local_lsp_install_refuses_unverified_fallback_when_selector_unavailable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let tc_root = tmp.path().join("toolchains");
+    let mgr = ToolchainManager::new(tmp.path().to_path_buf());
+    // Using a version with no matching upstream release (or offline catalog) must fail
+    // rather than falling back to an unverified GitHub download with no SHA-256.
+    let fake_zig_dir = tmp.path().join("zig-fake");
+    std::fs::create_dir_all(&fake_zig_dir).unwrap();
+    let fake_zig = fake_zig_dir.join("zig");
+    std::fs::write(&fake_zig, "#!/bin/sh\necho \"0.0.0-nonexistent\"\n").unwrap();
+    make_executable(&fake_zig).unwrap();
+
+    let err = super::installer_tools::install_local_lsp(
+        &mgr,
+        "job_unverified",
+        &tc_root,
+        EcosystemKind::Zig,
+        TargetPlatform::host(),
+        None,
+        Some(&fake_zig_dir),
+        None,
+    )
+    .await
+    .expect_err("must fail without verified ZLS release metadata and SHA-256");
+    assert!(
+        err.contains("verified ZLS release checksum"),
+        "unexpected error: {err}"
+    );
+    assert!(!tc_root.join("zig/bin/zls").exists());
+}
+
+#[test]
+fn zig_install_all_uses_newly_installed_sdk_and_job_scoped_zls_staging() {
+    // BUG-3: Newly installed Zig 0.13 SDK path must override stale/old zig_home for ZLS selection.
+    let picked = super::jobs::resolve_lsp_zig_home(
+        Some("/data/toolchains/zig/sdks/0.13.0"),
+        Some("/opt/homebrew/opt/zig"),
+    );
+    assert_eq!(
+        picked.as_deref(),
+        Some(std::path::Path::new("/data/toolchains/zig/sdks/0.13.0"))
+    );
+    let fallback = super::jobs::resolve_lsp_zig_home(None, Some("/opt/homebrew/opt/zig"));
+    assert_eq!(
+        fallback.as_deref(),
+        Some(std::path::Path::new("/opt/homebrew/opt/zig"))
+    );
+
+    // CONC-3: Concurrent LSP-only and Full Setup jobs must get disjoint staging directories.
+    let tmp = std::path::Path::new("/tmp/tc/.downloads");
+    let stage_a = super::installer_tools::zls_stage_dir(tmp, "tcjob_lsp");
+    let stage_b = super::installer_tools::zls_stage_dir(tmp, "tcjob_all");
+    assert_ne!(stage_a, stage_b);
+    assert!(stage_a.starts_with(tmp) && stage_b.starts_with(tmp));
+}
