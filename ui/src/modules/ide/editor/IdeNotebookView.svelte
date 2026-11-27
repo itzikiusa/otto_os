@@ -19,6 +19,8 @@
     IdeNotebookVariablesResp,
   } from '../../../lib/api/types';
   import Badge from '../../../lib/components/Badge.svelte';
+  import EmptyState from '../../../lib/components/EmptyState.svelte';
+  import DetailPane from '../../../lib/components/side/DetailPane.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
   import { confirmer } from '../../../lib/confirm.svelte';
@@ -631,16 +633,11 @@
       </div>
     </div>
 
-    {#if varsOpen}
-      <aside class="nb-vars" aria-label="Kernel variables" data-testid="ide-nb-vars-pane">
-        <div class="nb-vars-head">
-          <span class="nb-vars-title">Kernel Variables</span>
-          <button type="button" class="icon-btn" onclick={() => (varsOpen = false)} aria-label="Close variables" title="Close variables">
-            <Icon name="x" size={12} />
-          </button>
-        </div>
+    <!-- The notebook's Detail pane (design.md §3): inline beside the cells, a
+         right sheet when there is no room, full width on a phone. -->
+    <DetailPane module="ide" pane="notebookVars" title="Kernel variables" open={varsOpen} onclose={() => (varsOpen = false)} testid="ide-nb-vars-pane">
         {#if variables.length === 0}
-          <p class="nb-vars-empty">Run a cell to inspect live Python variables, DataFrame shapes, and tensor sizes.</p>
+          <EmptyState headingLevel={3} icon="code" title="No variables yet" body="Run a cell to inspect live Python variables, DataFrame shapes and tensor sizes." />
         {:else}
           <div class="nb-vars-list">
             {#each variables as v (v.name)}
@@ -654,8 +651,7 @@
             {/each}
           </div>
         {/if}
-      </aside>
-    {/if}
+    </DetailPane>
   </div>
 </div>
 
@@ -695,16 +691,6 @@
   .nb-editor.is-md { font-family: var(--font-ui); }
   .nb-editor:focus { outline: none; background: var(--surface-2); }
   .nb-add-row { display: flex; gap: 8px; justify-content: center; padding-block: 6px; }
-  .nb-vars {
-    inline-size: 280px; flex-shrink: 0; border-inline-start: 1px solid var(--border);
-    background: var(--surface-2); display: flex; flex-direction: column; overflow: hidden;
-  }
-  .nb-vars-head {
-    display: flex; align-items: center; justify-content: space-between; padding: 8px 10px;
-    border-block-end: 1px solid var(--border);
-  }
-  .nb-vars-title { font-size: var(--fs-xs); font-weight: 600; color: var(--text); }
-  .nb-vars-empty { margin: 0; padding: 12px 10px; font-size: var(--fs-xs); color: var(--text-dim); line-height: 1.5; }
   .nb-vars-list { flex: 1; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 6px; }
   .nb-var-row {
     padding: 6px 8px; border-radius: var(--radius-s); border: 1px solid var(--border); background: var(--surface);

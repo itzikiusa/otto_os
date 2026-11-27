@@ -6,8 +6,10 @@
   import Icon from '../../../lib/components/Icon.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
   import PaneDivider from '../../../lib/components/PaneDivider.svelte';
+  import SideRow from '../../../lib/components/side/SideRow.svelte';
+  import { listNav } from '../../../lib/components/side/listNav';
+  import { LIST_PANE, loadPaneW, paneKey, paneStorage } from '../../../lib/components/side/paneKeys';
   import { copyWithToast } from '../../../lib/clipboard';
-  import { loadPaneWidth } from '../../../lib/paneResizer';
   import { plural } from '../../../lib/plural';
   import { viewport } from '../../../lib/stores/viewport.svelte';
   import { ide, ideBasename, type IdeReferenceLocation } from '../ideStore.svelte';
@@ -18,8 +20,8 @@
     items: IdeReferenceLocation[];
   }
 
-  const LS_USG_W = 'otto.ide.usagesFilesW';
-  let filesW = $state(loadPaneWidth(LS_USG_W, 240, 160, 480));
+  // The files list is a list pane inside the tool window (shared range and key; the old key is read once).
+  let filesW = $state(loadPaneW(paneStorage(), 'ide', 'usages', LIST_PANE, { w: 'otto.ide.usagesFilesW' }, 240));
   let usagesQuery = $state('');
   let selectedFile = $state<string | null>(null);
 
@@ -97,18 +99,22 @@
       {:else}
         <div class="usg-split">
           {#if usageGroups.length > 1 && !viewport.isPhone}
-            <aside class="usg-files" style:inline-size={`${filesW}px`} aria-label="Files with usages">
-              <button type="button" class="usg-file-btn" class:active={selectedFile === null} onclick={() => (selectedFile = null)}>
-                <span>All files</span><Badge tone="neutral" variant="outline" label={String(filteredUsages.length)} />
-              </button>
-              {#each usageGroups as g (g.path)}
-                <button type="button" class="usg-file-btn mono" class:active={selectedFile === g.path} dir="ltr" onclick={() => (selectedFile = g.path)} title={g.path}>
-                  <span class="ellipsis">{g.relPath}</span>
-                  <Badge tone="neutral" variant="outline" label={String(g.items.length)} />
-                </button>
-              {/each}
+            <!-- A list pane inside the tool window: the shared look (app.css .side-list),
+                 not ListPane — that one binds to the page's ListDetail (the explorer). -->
+            <aside class="side-list usg-files" style:inline-size={`${filesW}px`} aria-label="Files with usages">
+              <header class="side-pane-head"><h2 class="sph-title">Files</h2><span class="sph-count">{usageGroups.length}</span></header>
+              <div class="side-pane-body" use:listNav>
+                <SideRow title="All files" icon="layers" selected={selectedFile === null} onclick={() => (selectedFile = null)}>
+                  {#snippet trailing()}{filteredUsages.length}{/snippet}
+                </SideRow>
+                {#each usageGroups as g (g.path)}
+                  <SideRow title={g.relPath} icon="file" tip={g.path} selected={selectedFile === g.path} onclick={() => (selectedFile = g.path)}>
+                    {#snippet trailing()}{g.items.length}{/snippet}
+                  </SideRow>
+                {/each}
+              </div>
             </aside>
-            <PaneDivider bind:width={filesW} storageKey={LS_USG_W} min={160} max={480} defaultWidth={240} label="Resize usages file list" />
+            <PaneDivider bind:width={filesW} storageKey={paneKey('ide', 'usages', 'w')} min={LIST_PANE.min} max={LIST_PANE.max} defaultWidth={240} label="Resize files with usages" />
           {/if}
 
           <div class="usg-list">
@@ -146,10 +152,7 @@
   .usg-search { block-size: 22px; inline-size: 180px; font-size: var(--fs-xs); }
   .usg-body { flex: 1; min-block-size: 0; display: flex; flex-direction: column; overflow: hidden; }
   .usg-split { flex: 1; min-block-size: 0; display: flex; overflow: hidden; }
-  .usg-files { flex-shrink: 0; overflow-y: auto; border-inline-end: 1px solid var(--border); padding-block: 4px; }
-  .usg-file-btn { inline-size: 100%; display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 4px 10px; border: 0; background: transparent; color: var(--text); font-size: var(--fs-xs); text-align: start; cursor: pointer; }
-  .usg-file-btn:hover { background: var(--hover); }
-  .usg-file-btn.active { background: var(--accent-soft); color: var(--accent-text); }
+  .usg-files { flex-shrink: 0; display: flex; flex-direction: column; min-block-size: 0; }
   .usg-list { flex: 1; min-inline-size: 0; overflow-y: auto; }
   .usg-group { border-block-end: 1px solid var(--separator); }
   .usg-file-head { display: flex; align-items: center; gap: 6px; padding: 6px 10px; background: var(--surface-2); font-size: var(--fs-xs); font-weight: 600; }
