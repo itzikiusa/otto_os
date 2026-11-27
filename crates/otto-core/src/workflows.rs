@@ -757,6 +757,67 @@ pub struct RunOverview {
     pub hold: Option<RunHold>,
 }
 
+/// Hard serialized byte ceiling for `overview` on `workflow_run_updated` WS
+/// events (`docs/contracts/ws.md`).
+pub const WS_OVERVIEW_MAX_BYTES: usize = 4_096;
+/// Max per-criterion history points kept on the WS event projection (the trend
+/// window shown inline; full 50-round history stays on HTTP detail reads).
+const MAX_WS_CRITERION_HISTORY: usize = 3;
+
+impl RunOverview {
+    /// Return a bounded projection of this overview suitable for
+    /// `Event::WorkflowRunUpdated` (≤ 4 KiB). Full 50-round history and
+    /// `progress.values` remain on HTTP detail / progress reads.
+    pub fn ws_projected(&self) -> Self {
+        let mut out = self.clone();
+        let Some(goal) = out.goal.as_mut() else {
+            return out;
+        };
+        for c in &mut goal.criteria {
+            c.text = crate::agent_runtime::clip(&c.text, 80);
+            if let Some(p) = c.progress.as_mut() {
+                p.values.clear();
+            }
+            if c.history.len() > MAX_WS_CRITERION_HISTORY {
+                let drop = c.history.len() - MAX_WS_CRITERION_HISTORY;
+                c.history.drain(..drop);
+            }
+        }
+        if ws_overview_json_len(&out) <= WS_OVERVIEW_MAX_BYTES {
+            return out;
+        }
+        if let Some(goal) = out.goal.as_mut() {
+            for c in &mut goal.criteria {
+                c.history.clear();
+            }
+        }
+        if ws_overview_json_len(&out) <= WS_OVERVIEW_MAX_BYTES {
+            return out;
+        }
+        if let Some(goal) = out.goal.as_mut() {
+            for c in &mut goal.criteria {
+                c.text.clear();
+                if let Some(p) = c.progress.as_mut() {
+                    p.label = None;
+                }
+            }
+        }
+        while ws_overview_json_len(&out) > WS_OVERVIEW_MAX_BYTES {
+            let Some(goal) = out.goal.as_mut() else {
+                break;
+            };
+            if goal.criteria.pop().is_none() {
+                break;
+            }
+        }
+        out
+    }
+}
+
+fn ws_overview_json_len(o: &RunOverview) -> usize {
+    serde_json::to_vec(o).map_or(0, |v| v.len())
+}
+
 /// How a `check` criterion is verified (wire values `command` | `agent` |
 /// `human` | `expr`; the UI calls `expr` "Rule").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

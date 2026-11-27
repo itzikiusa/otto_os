@@ -217,8 +217,13 @@ pub enum Event {
         waiting_approval: bool,
         /// The run's computed overview (≤ 4 KiB), so attention, queue,
         /// phase and wait show without a GET. `None` from emitters that
-        /// do not compute it.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        /// do not compute it. Serialized through `RunOverview::ws_projected`
+        /// so large goal histories never break the 4 KiB WS frame budget.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            serialize_with = "serialize_ws_overview"
+        )]
         overview: Option<Box<crate::workflows::RunOverview>>,
     },
     /// A skill-evaluation run advanced. Lets the Skill-Eval UI switch from
@@ -825,6 +830,19 @@ impl Event {
     }
 }
 
+fn serialize_ws_overview<S>(
+    overview: &Option<Box<crate::workflows::RunOverview>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match overview {
+        Some(o) => serde::Serialize::serialize(&o.ws_projected(), serializer),
+        None => serializer.serialize_none(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1046,6 +1064,81 @@ mod tests {
         let v: serde_json::Value = serde_json::to_value(&ev).unwrap();
         assert!(v.get("node").is_none());
         assert!(v.get("overview").is_none(), "absent overview is omitted");
+    }
+
+    #[test]
+    fn workflow_run_updated_projects_overview_within_4_kib() {
+        let mut criteria = Vec::new();
+        for i in 0..4 {
+            let mut values = std::collections::BTreeMap::new();
+            values.insert("score".into(), serde_json::json!(80));
+            values.insert("threshold".into(), serde_json::json!(95));
+            let history = (1..=30)
+                .map(|iteration| crate::workflows::CriterionPoint {
+                    iteration,
+                    met: false,
+                    value: Some(50.0 + iteration as f64),
+                })
+                .collect();
+            criteria.push(crate::workflows::GoalCriterion {
+                step_id: format!("loop_{i}.1"),
+                step_name: format!("Component {i}"),
+                id: format!("review-passes-{i}"),
+                text: format!("A fresh independent review passes for component {i}"),
+                met: Some(false),
+                awaiting: false,
+                progress: Some(crate::workflows::CriterionProgress {
+                    value: Some(80.0),
+                    target: Some(95.0),
+                    unit: None,
+                    label: Some("2 must-fix findings left".into()),
+                    values,
+                }),
+                history,
+            });
+        }
+        let full = crate::workflows::RunOverview {
+            rev: 42,
+            state: crate::workflows::RunState::Running,
+            headline: "Round 30 of 50 — Component 0 80 / 95".into(),
+            goal: Some(crate::workflows::GoalProgress {
+                iteration: 30,
+                max_iterations: 50,
+                criteria_met: 0,
+                criteria_total: 4,
+                verdict: Some("continue".into()),
+                criteria,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(
+            serde_json::to_vec(&full).unwrap().len() > crate::workflows::WS_OVERVIEW_MAX_BYTES,
+            "full HTTP overview fixture must exceed 4 KiB"
+        );
+        let ev = Event::WorkflowRunUpdated {
+            workspace_id: "ws1".into(),
+            run_id: "r1".into(),
+            status: "running".into(),
+            node_id: Some("loop_0".into()),
+            rev: 42,
+            node: None,
+            nodes_done: 1,
+            nodes_total: 4,
+            waiting_approval: false,
+            overview: Some(Box::new(full)),
+        };
+        let wire: serde_json::Value = serde_json::to_value(&ev).unwrap();
+        let ov_bytes = serde_json::to_vec(&wire["overview"]).unwrap().len();
+        assert!(
+            ov_bytes <= crate::workflows::WS_OVERVIEW_MAX_BYTES,
+            "WS overview must stay within 4 KiB (got {ov_bytes})"
+        );
+        let h0 = wire["overview"]["goal"]["criteria"][0]["history"]
+            .as_array()
+            .map(Vec::len)
+            .unwrap_or(0);
+        assert!(h0 <= 3);
     }
 
     /// `session_removed` keeps the fields the SPA reads and adds the owner
