@@ -70,6 +70,9 @@ pub struct IdeDebugLaunchSpec {
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test_name: Option<String>,
+    /// The line of the test's `test(` call (Playwright selects `file:line`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_line: Option<u32>,
     #[serde(default)]
     pub is_test: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -17,6 +17,7 @@ impl fmt::Debug for IdeDebugLaunchSpec {
             .field("build_flags", &self.build_flags)
             .field("cwd", &self.cwd)
             .field("test_name", &self.test_name)
+            .field("test_line", &self.test_line)
             .field("attach_port", &self.attach_port)
             .field("env_keys", &env_keys)
             .field("env_file", &self.env_file)

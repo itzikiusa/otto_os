@@ -64,6 +64,16 @@ pub enum DapAdapterTransport {
         cwd: String,
         env: BTreeMap<String, String>,
     },
+    /// Microsoft js-debug's DAP server (`dapDebugServer.js 0 127.0.0.1`, a
+    /// [`Self::TcpListen`]) that debugs each process as a child target, after an
+    /// optional companion started first (`ng test` serving Karma).
+    JsDebug {
+        command: String,
+        args: Vec<String>,
+        cwd: String,
+        env: BTreeMap<String, String>,
+        companion: Option<std::sync::Arc<super::BridgeGuard>>,
+    },
     /// Connect directly to an already-listening DAP TCP server (`host:port`).
     DirectTcpAttach { host: String, port: u16 },
     /// Built-in Node.js / V8 Inspector-to-DAP bridge (`node --inspect-brk=127.0.0.1:0`).
@@ -158,6 +168,21 @@ impl std::fmt::Debug for DapAdapterTransport {
             } => {
                 let env_keys: Vec<&str> = env.keys().map(String::as_str).collect();
                 f.debug_struct("TcpListen")
+                    .field("command", command)
+                    .field("args", args)
+                    .field("cwd", cwd)
+                    .field("env_keys", &env_keys)
+                    .finish()
+            }
+            Self::JsDebug {
+                command,
+                args,
+                cwd,
+                env,
+                ..
+            } => {
+                let env_keys: Vec<&str> = env.keys().map(String::as_str).collect();
+                f.debug_struct("JsDebug")
                     .field("command", command)
                     .field("args", args)
                     .field("cwd", cwd)

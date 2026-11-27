@@ -83,6 +83,9 @@ pub(super) async fn sync_all_breakpoints(
 
     let mut adapter_bp_locs: std::collections::HashMap<i64, (String, u32)> =
         std::collections::HashMap::new();
+    // js-debug: every child target binds the breakpoint on its own, so one
+    // connection's "not bound (yet)" never unverifies another's binding.
+    let keep_verified = entry.targets.enabled();
     let mut active_files = BTreeSet::new();
     let can_parallel =
         !need_halt_resume && snap_before.state == IdeDebugState::Starting && by_file.len() > 1;
@@ -105,7 +108,13 @@ pub(super) async fn sync_all_breakpoints(
             });
         }
         for (indexed_bps, resp_res) in join_all(tasks).await {
-            apply_set_breakpoints_result(&mut bps, &mut adapter_bp_locs, &indexed_bps, resp_res);
+            apply_set_breakpoints_result(
+                &mut bps,
+                &mut adapter_bp_locs,
+                &indexed_bps,
+                resp_res,
+                keep_verified,
+            );
         }
     } else {
         for (path, indexed_bps) in by_file {
@@ -146,7 +155,13 @@ pub(super) async fn sync_all_breakpoints(
                         .await;
                 }
             }
-            apply_set_breakpoints_result(&mut bps, &mut adapter_bp_locs, &indexed_bps, resp_res);
+            apply_set_breakpoints_result(
+                &mut bps,
+                &mut adapter_bp_locs,
+                &indexed_bps,
+                resp_res,
+                keep_verified,
+            );
         }
     }
 
@@ -162,7 +177,7 @@ pub(super) async fn sync_all_breakpoints(
     if let Ok(mut prev_files) = entry.configured_bp_files.lock() {
         *prev_files = active_files;
     }
-    if let Ok(mut locs) = entry.bp_locs_by_adapter_id.lock() {
+    if let Ok(mut locs) = conn.wire.bp_ids.lock() {
         *locs = adapter_bp_locs;
     }
     entry.mutate_and_broadcast(|snap| {
@@ -228,11 +243,25 @@ pub(super) async fn sync_all_breakpoints(
     Ok(())
 }
 
+/// Send the breakpoints to the session's connection and to each js-debug child
+/// target. A child's failure (its process just exited) leaves the others alone.
+pub(super) async fn sync_breakpoints_everywhere(entry: &SessionEntry) -> Result<()> {
+    let root = entry.active_root();
+    for child in entry.targets.connections() {
+        let _ = sync_all_breakpoints(entry, &child).await;
+    }
+    match root {
+        Ok(conn) => sync_all_breakpoints(entry, &conn).await,
+        Err(_) => Ok(()),
+    }
+}
+
 fn apply_set_breakpoints_result(
     bps: &mut [IdeBreakpoint],
     adapter_bp_locs: &mut std::collections::HashMap<i64, (String, u32)>,
     indexed_bps: &[(Option<usize>, Value)],
     resp_res: Result<super::wire::DapResponse>,
+    keep_verified: bool,
 ) {
     match resp_res {
         Ok(resp) => {
@@ -249,12 +278,23 @@ fn apply_set_breakpoints_result(
                 };
                 if let Some(ack) = ack_list.get(pos) {
                     let verified = ack.get("verified").and_then(Value::as_bool).unwrap_or(true);
+                    if keep_verified && !verified && bps[bp_idx].verified == Some(true) {
+                        if let Some(bp_id) = ack.get("id").and_then(Value::as_i64) {
+                            adapter_bp_locs
+                                .insert(bp_id, (bps[bp_idx].path.clone(), bps[bp_idx].line));
+                        }
+                        continue;
+                    }
                     bps[bp_idx].verified = Some(verified);
                     bps[bp_idx].message = ack
                         .get("message")
                         .and_then(Value::as_str)
                         .filter(|s| !s.is_empty())
-                        .map(String::from);
+                        // js-debug's standalone server sends its untranslated key.
+                        .map(|s| match s {
+                            "breakpoint.provisionalBreakpoint" => "Unbound breakpoint".into(),
+                            other => other.to_string(),
+                        });
                     if verified {
                         if let Some(adj_ln) =
                             ack.get("line").and_then(Value::as_u64).filter(|&l| l > 0)
@@ -274,6 +314,9 @@ fn apply_set_breakpoints_result(
             let msg = err.to_string();
             for (maybe_idx, _) in indexed_bps {
                 if let Some(bp_idx) = *maybe_idx {
+                    if keep_verified && bps[bp_idx].verified == Some(true) {
+                        continue;
+                    }
                     bps[bp_idx].verified = Some(false);
                     bps[bp_idx].message = Some(msg.clone());
                 }
@@ -283,7 +326,11 @@ fn apply_set_breakpoints_result(
 }
 
 /// Apply asynchronous `"breakpoint"` DAP events (e.g. deferred verification in Go/JVM/JS).
-pub(super) fn apply_breakpoint_event(entry: &SessionEntry, body: &Value) {
+pub(super) fn apply_breakpoint_event(
+    entry: &SessionEntry,
+    bp_ids: &std::sync::Mutex<std::collections::HashMap<i64, (String, u32)>>,
+    body: &Value,
+) {
     let Some(bp_obj) = body.get("breakpoint") else {
         return;
     };
@@ -313,13 +360,8 @@ pub(super) fn apply_breakpoint_event(entry: &SessionEntry, body: &Value) {
         .clone();
     let norm_path = raw_path.map(|p| normalize_target_path(&target, p));
     let disp_path = raw_path.map(|p| display_target_path(&target, p));
-    let tracked_loc = bp_id.and_then(|id| {
-        entry
-            .bp_locs_by_adapter_id
-            .lock()
-            .ok()
-            .and_then(|m| m.get(&id).cloned())
-    });
+    let tracked_loc = bp_id.and_then(|id| bp_ids.lock().ok().and_then(|m| m.get(&id).cloned()));
+    let keep_verified = entry.targets.enabled();
 
     let mut updated_loc: Option<(String, u32)> = None;
     entry.mutate_and_broadcast(|snap| {
@@ -338,6 +380,9 @@ pub(super) fn apply_breakpoint_event(entry: &SessionEntry, body: &Value) {
             let line_matches =
                 line.is_some_and(|ln| bp.line == ln) || orig_line.is_some_and(|ol| bp.line == ol);
             if matched_by_id || (path_matches && line_matches) {
+                if keep_verified && !verified && bp.verified == Some(true) {
+                    continue;
+                }
                 bp.path = display_target_path(&target, &bp.path);
                 bp.verified = Some(verified);
                 if verified {
@@ -353,7 +398,7 @@ pub(super) fn apply_breakpoint_event(entry: &SessionEntry, body: &Value) {
         }
     });
     if let (Some(id), Some(loc)) = (bp_id, updated_loc) {
-        if let Ok(mut locs) = entry.bp_locs_by_adapter_id.lock() {
+        if let Ok(mut locs) = bp_ids.lock() {
             locs.insert(id, loc);
         }
     }
@@ -690,15 +735,16 @@ mod breakpoint_relocation_tests {
                 }]
             })),
         };
-        apply_set_breakpoints_result(&mut bps, &mut locs, &indexed, Ok(unbound_resp));
+        apply_set_breakpoints_result(&mut bps, &mut locs, &indexed, Ok(unbound_resp), false);
         assert_eq!(bps[0].verified, Some(false));
         assert_eq!(locs.get(&42), Some(&(bp_path.clone(), 10)));
         entry.mutate_and_broadcast(|snap| snap.breakpoints = bps);
-        *entry.bp_locs_by_adapter_id.lock().unwrap() = locs;
+        let locs = std::sync::Mutex::new(locs);
 
         // BUG3-10: Deferred CDP relocation to line 15 arrives with id=42 (no match on line 10!).
         apply_breakpoint_event(
             &entry,
+            &locs,
             &json!({
                 "reason": "changed",
                 "breakpoint": {

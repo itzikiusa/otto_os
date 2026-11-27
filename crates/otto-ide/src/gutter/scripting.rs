@@ -182,30 +182,39 @@ pub(super) fn detect_js_ts(
             .map(|m| m.as_str().to_string())
     };
 
+    // Enclosing suites by indentation: Jasmine names a spec by its suites' titles
+    // and its own, joined by spaces (Karma's `debug.html?spec=`).
+    let mut suites: Vec<(usize, String)> = Vec::new();
     for (idx, line) in content.lines().enumerate() {
         let line_no = (idx + 1) as u32;
-        if let Some(title) = re_suite.captures(line).and_then(|c| extract_title(&c)) {
-            out.push(build_js_test_item(
-                path,
-                dir,
-                lang,
-                line_no,
-                IdeGutterKind::Suite,
-                &title,
-                uses_node_test,
-                uses_playwright,
-            ));
-        } else if let Some(title) = re_test.captures(line).and_then(|c| extract_title(&c)) {
-            out.push(build_js_test_item(
-                path,
-                dir,
-                lang,
-                line_no,
-                IdeGutterKind::Test,
-                &title,
-                uses_node_test,
-                uses_playwright,
-            ));
+        let (kind, title) =
+            if let Some(title) = re_suite.captures(line).and_then(|c| extract_title(&c)) {
+                (IdeGutterKind::Suite, title)
+            } else if let Some(title) = re_test.captures(line).and_then(|c| extract_title(&c)) {
+                (IdeGutterKind::Test, title)
+            } else {
+                continue;
+            };
+        let indent = line.len() - line.trim_start().len();
+        suites.retain(|(i, _)| *i < indent);
+        let full_name = suites
+            .iter()
+            .map(|(_, t)| t.as_str())
+            .chain(std::iter::once(title.as_str()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        out.push(build_js_test_item(
+            path,
+            dir,
+            lang,
+            line_no,
+            kind,
+            (&title, &full_name),
+            uses_node_test,
+            uses_playwright,
+        ));
+        if kind == IdeGutterKind::Suite {
+            suites.push((indent, title));
         }
     }
 }
@@ -290,7 +299,7 @@ fn build_js_test_item(
     lang: &str,
     line_no: u32,
     kind: IdeGutterKind,
-    title: &str,
+    (title, full_name): (&str, &str),
     uses_node_test: bool,
     uses_playwright: bool,
 ) -> IdeGutterItem {
@@ -386,7 +395,17 @@ fn build_js_test_item(
             ],
         )
     };
-    let supports_node_debug = !matches!(runner, IdeRunnerKind::Playwright | IdeRunnerKind::Karma);
+    // Playwright and Angular Karma debug through js-debug; plain Karma stays Run-only.
+    let angular = package
+        .as_ref()
+        .is_some_and(|p| p.dir.ancestors().any(|d| d.join("angular.json").is_file()));
+    let supports_debug = runner != IdeRunnerKind::Karma || angular;
+    // Karma (Jasmine) selects a spec by its full name; the others by its own title.
+    let debug_name = if runner == IdeRunnerKind::Karma {
+        full_name
+    } else {
+        title
+    };
     IdeGutterItem {
         line: line_no,
         kind,
@@ -399,8 +418,8 @@ fn build_js_test_item(
             cwd: Some(cwd),
             target_path: Some(path.to_string()),
             test_filter: Some(title.to_string()),
-            debug_program: supports_node_debug.then(|| path.to_string()),
-            debug_test_name: supports_node_debug.then(|| title.to_string()),
+            debug_program: supports_debug.then(|| path.to_string()),
+            debug_test_name: supports_debug.then(|| debug_name.to_string()),
         },
     }
 }

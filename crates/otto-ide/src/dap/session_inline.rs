@@ -503,6 +503,8 @@ pub(super) fn mark_resumed(entry: &SessionEntry) {
 }
 
 async fn teardown_connection(entry: &SessionEntry) {
+    // js-debug ends its child targets (and their browser) with the session.
+    entry.targets.clear();
     let old = entry.conn.write().unwrap_or_else(|e| e.into_inner()).take();
     if let Some(conn) = old {
         teardown_conn(&conn).await;
@@ -562,6 +564,7 @@ pub(super) async fn shutdown_entry(entry: &SessionEntry) {
 }
 
 fn force_disconnect(entry: &SessionEntry) {
+    entry.targets.clear();
     let conn = entry.conn.write().unwrap_or_else(|e| e.into_inner()).take();
     if let Some(conn) = conn {
         conn.shutdown_immediately();

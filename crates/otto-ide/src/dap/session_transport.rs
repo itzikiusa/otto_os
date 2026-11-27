@@ -19,6 +19,7 @@ use super::session::{
     mark_resumed, ActiveConnection, BoxRead, BoxWrite, DapStartContext, DapWireClient,
     SessionEntry, MAX_TERMINATED_DEBUG_SESSIONS,
 };
+use super::session_children::on_start_debugging;
 use super::session_inspect::{apply_breakpoint_event, handle_stopped_event, sync_all_breakpoints};
 use super::session_steps::on_step_end;
 use super::shell_bridge::spawn_shell_dap_bridge;
@@ -194,7 +195,41 @@ async fn connect_adapter_transport(
             env,
         } => {
             let cmd_spec = (command.as_str(), args.as_slice(), cwd.as_str(), &env);
-            spawn_tcp_listen_adapter(entry, adapter_name, cmd_spec, req, ctx, guard).await
+            spawn_tcp_listen_adapter(entry, adapter_name, cmd_spec, req, ctx, guard)
+                .await
+                .map(|(io, _)| io)
+        }
+        DapAdapterTransport::JsDebug {
+            command,
+            args,
+            cwd,
+            env,
+            companion,
+        } => {
+            if let Some(companion) = companion {
+                if let Some(mut lines) = companion.take_output() {
+                    let entry_out = entry.clone();
+                    tokio::spawn(async move {
+                        while let Some(line) = lines.recv().await {
+                            entry_out.append_output("stdout", format!("{line}\n"));
+                        }
+                    });
+                }
+                guard.push_companion(companion);
+            }
+            let cmd_spec = (command.as_str(), args.as_slice(), cwd.as_str(), &env);
+            let (io, (host, port)) =
+                spawn_tcp_listen_adapter(entry, adapter_name, cmd_spec, req, ctx, guard).await?;
+            // Each process js-debug debugs gets its own connection to this endpoint;
+            // a breakpoint's state is rebuilt from those connections.
+            entry.targets.enable(host, port);
+            entry.mutate_and_broadcast(|snap| {
+                for bp in &mut snap.breakpoints {
+                    bp.verified = None;
+                    bp.message = None;
+                }
+            });
+            Ok(io)
         }
         DapAdapterTransport::DirectTcpAttach { host, port } => {
             let (connect_host, connect_port) =
@@ -236,7 +271,7 @@ async fn spawn_tcp_listen_adapter(
     req: &IdeStartDebugReq,
     ctx: &DapStartContext,
     guard: Arc<BridgeGuard>,
-) -> Result<(BoxRead, BoxWrite, Arc<BridgeGuard>)> {
+) -> Result<((BoxRead, BoxWrite, Arc<BridgeGuard>), (String, u16))> {
     let mut child =
         spawn_target_process(&req.target, ctx.ssh.as_ref(), command, args, cwd, env).await?;
     let (port_tx, mut port_rx) = mpsc::unbounded_channel::<(String, String)>();
@@ -295,7 +330,10 @@ async fn spawn_tcp_listen_adapter(
         .map_err(|e| Error::Upstream(format!("connect DAP {connect_host}:{connect_port}: {e}")))?;
     let _ = tcp.set_nodelay(true);
     let (r, w) = tcp.into_split();
-    Ok((Box::new(r), Box::new(w), guard))
+    Ok((
+        (Box::new(r), Box::new(w), guard),
+        (connect_host, connect_port),
+    ))
 }
 
 pub(super) async fn handshake_and_run(
@@ -444,9 +482,10 @@ fn spawn_event_driver(
                 "initialized" => {
                     entry.initialized_notify.notify_one();
                 }
+                "__startDebugging__" => on_start_debugging(&entry, wire.clone(), ev),
                 "breakpoint" => {
                     if let Some(body) = &ev.body {
-                        apply_breakpoint_event(&entry, body);
+                        apply_breakpoint_event(&entry, &wire.bp_ids, body);
                     }
                 }
                 "output" => {

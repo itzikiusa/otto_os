@@ -24,7 +24,9 @@ pub(super) use super::session_entry::{
 pub use super::session_inline::compute_inline_values;
 pub(super) use super::session_inline::mark_resumed;
 use super::session_inline::{build_session_title, shutdown_entry, stop_entry};
-use super::session_inspect::{select_frame_and_refresh, sync_all_breakpoints};
+use super::session_inspect::{
+    select_frame_and_refresh, sync_all_breakpoints, sync_breakpoints_everywhere,
+};
 use super::session_steps::{install_plan, skip_step, start_next_step, AdapterResolver};
 pub(crate) use super::session_steps::{DebugPlan, DebugResolver, PlannedStep, StepKind};
 use super::session_transport::{
@@ -733,9 +735,7 @@ impl DapManager {
         entry.mutate_and_broadcast(|snap| {
             snap.breakpoints = req.breakpoints.clone();
         });
-        if let Ok(conn) = entry.active_conn() {
-            sync_all_breakpoints(&entry, &conn).await?;
-        }
+        sync_breakpoints_everywhere(&entry).await?;
         Ok(entry.read_snapshot())
     }
 

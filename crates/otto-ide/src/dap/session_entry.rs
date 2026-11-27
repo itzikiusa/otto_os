@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use dashmap::DashMap;
 use otto_core::{Error, Result};
-use serde_json::{json, Value};
+use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{broadcast, mpsc, oneshot, watch, Notify};
 
@@ -36,6 +36,11 @@ pub(super) struct DapWireClient {
     writer: tokio::sync::Mutex<DapWriter<BoxWrite>>,
     pending: Mutex<HashMap<i64, oneshot::Sender<DapResponse>>>,
     retired: AtomicBool,
+    /// This connection's adapter `breakpoint.id` -> `(display_path, current_1based_line)`,
+    /// so asynchronous `breakpoint` changed events that relocate an initially unbound
+    /// breakpoint update the matching entry in `snapshot.breakpoints` (BUG3-10). Ids
+    /// are per connection: each js-debug child numbers its own.
+    pub(super) bp_ids: Mutex<HashMap<i64, (String, u32)>>,
 }
 
 impl DapWireClient {
@@ -48,6 +53,7 @@ impl DapWireClient {
             writer: tokio::sync::Mutex::new(DapWriter::new(writer_io)),
             pending: Mutex::new(HashMap::new()),
             retired: AtomicBool::new(false),
+            bp_ids: Mutex::new(HashMap::new()),
         });
         let client_ref = client.clone();
         tokio::spawn(async move {
@@ -103,10 +109,21 @@ impl DapWireClient {
                             let _ = event_tx.send(ev);
                         }
                     }
+                    // js-debug announces each process it debugs with `startDebugging`;
+                    // the event driver attaches it and answers. Nothing else is supported
+                    // (`runInTerminal` never comes: Otto uses the internal console).
+                    DapMessage::Request(rev_req) if rev_req.command == "startDebugging" => {
+                        if !client_ref.retired.load(Ordering::SeqCst) {
+                            let _ = event_tx.send(DapEvent::new(
+                                rev_req.seq,
+                                "__startDebugging__",
+                                rev_req.arguments,
+                            ));
+                        }
+                    }
                     DapMessage::Request(rev_req) => {
-                        let mut w = client_ref.writer.lock().await;
-                        let _ = w
-                            .send_response(rev_req.seq, &rev_req.command, Ok(Some(json!({}))))
+                        let _ = client_ref
+                            .respond(rev_req.seq, &rev_req.command, Err("not supported".into()))
                             .await;
                     }
                 }
@@ -123,6 +140,20 @@ impl DapWireClient {
 
     pub(super) fn retire(&self) {
         self.retired.store(true, Ordering::SeqCst);
+    }
+
+    /// Answer a reverse (adapter-to-client) request.
+    pub(super) async fn respond(
+        &self,
+        request_seq: i64,
+        command: &str,
+        result: std::result::Result<Option<Value>, String>,
+    ) -> Result<()> {
+        let mut w = self.writer.lock().await;
+        w.send_response(request_seq, command, result)
+            .await
+            .map(drop)
+            .map_err(|e| Error::Upstream(format!("DAP write '{command}' response failed: {e}")))
     }
 
     pub(super) fn is_retired(&self) -> bool {
@@ -219,10 +250,6 @@ pub(super) struct SessionEntry {
     pub(super) snapshot: RwLock<IdeDebugSessionSnapshot>,
     pub(super) output_buf: Mutex<VecDeque<IdeDebugOutputEntry>>,
     pub(super) configured_bp_files: Mutex<BTreeSet<String>>,
-    /// Maps DAP adapter `breakpoint.id` -> `(display_path, current_1based_line)` so
-    /// asynchronous `breakpoint` changed events that relocate an initially unbound
-    /// breakpoint update the matching entry in `snapshot.breakpoints` (BUG3-10).
-    pub(super) bp_locs_by_adapter_id: Mutex<HashMap<i64, (String, u32)>>,
     pub(super) temp_run_to_cursor: Mutex<Option<(String, u32)>>,
     /// The last breakpoint stop: where it was and its instruction pointer
     /// (see `is_same_line_relocation`).
@@ -248,6 +275,8 @@ pub(super) struct SessionEntry {
     output_seq: AtomicU64,
     /// A Debug All run's remaining plan and live step (`None` for one process).
     pub(super) steps: Mutex<Option<super::session_steps::StepRun>>,
+    /// js-debug's child targets (one per debugged process) and which is in focus.
+    pub(super) targets: super::session_children::ChildTargets,
 }
 
 impl SessionEntry {
@@ -300,6 +329,7 @@ impl SessionEntry {
             supports_set_variable: false,
             steps: Vec::new(),
             current_step: None,
+            targets: Vec::new(),
         };
         let initial_break_exc = req.break_on_exceptions;
         Arc::new(Self {
@@ -310,7 +340,6 @@ impl SessionEntry {
             snapshot: RwLock::new(initial_snap),
             output_buf: Mutex::new(output_buf),
             configured_bp_files: Mutex::new(BTreeSet::new()),
-            bp_locs_by_adapter_id: Mutex::new(HashMap::new()),
             temp_run_to_cursor: Mutex::new(None),
             last_bp_stop: Mutex::new(None),
             break_on_exceptions: Mutex::new(initial_break_exc),
@@ -327,6 +356,7 @@ impl SessionEntry {
             output_flush_pending: AtomicBool::new(false),
             output_seq: AtomicU64::new(last_seq),
             steps: Mutex::new(None),
+            targets: Default::default(),
         })
     }
 
@@ -394,6 +424,7 @@ impl SessionEntry {
             return;
         }
         self.release_active_netbridge();
+        self.targets.clear();
         if let Some(conn) = self.conn.write().unwrap_or_else(|e| e.into_inner()).take() {
             conn.shutdown_immediately();
         }
@@ -583,7 +614,17 @@ impl SessionEntry {
         });
     }
 
+    /// The connection commands and inspection use: the js-debug child target in
+    /// focus, else the session's own connection.
     pub(super) fn active_conn(&self) -> Result<Arc<ActiveConnection>> {
+        match self.targets.focused() {
+            Some(conn) => Ok(conn),
+            None => self.active_root(),
+        }
+    }
+
+    /// The session's own connection (for js-debug, the parent of every child target).
+    pub(super) fn active_root(&self) -> Result<Arc<ActiveConnection>> {
         self.conn
             .read()
             .unwrap_or_else(|e| e.into_inner())

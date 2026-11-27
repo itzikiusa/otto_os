@@ -279,6 +279,7 @@ async fn full_room_lifecycle_roles_cursors_buffers_and_shared_debug() {
         supports_set_variable: false,
         steps: vec![],
         current_step: None,
+        targets: vec![],
     };
     hub.publish_debug_snapshot(
         Some(&IdeTargetSpec::local("/tmp/shared-repo")),
@@ -323,6 +324,7 @@ async fn full_room_lifecycle_roles_cursors_buffers_and_shared_debug() {
         supports_set_variable: false,
         steps: vec![],
         current_step: None,
+        targets: vec![],
     };
     hub.publish_debug_snapshot(
         Some(&IdeTargetSpec::local("/tmp/shared-repo")),
