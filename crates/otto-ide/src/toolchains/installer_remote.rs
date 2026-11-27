@@ -10,11 +10,11 @@ use tokio::process::Command;
 const REMOTE_INSTALL_TIMEOUT: Duration = Duration::from_secs(900);
 
 use crate::toolchains_catalog::{
-    clangd_download_url, codelldb_vsix_url, csharp_ls_version_for_dotnet_sdk, jq_binary_url,
-    kotlin_lsp_zip_url, netcoredbg_download_asset, rust_analyzer_gz_url, shfmt_binary_url,
-    CatalogSdkEntry, EcosystemKind, TargetPlatform, CSHARP_LS_TOOL, DEBUGPY_PKG, DLV_PKG,
-    FSAUTOCOMPLETE_TOOL, FSAUTOCOMPLETE_VERSION, GOPLS_PKG, JAVA_DEBUG_JAR_NAME,
-    JAVA_DEBUG_JAR_URL, JDTLS_TARBALL_URL, JS_DEBUG_TARBALL_URL, PYRIGHT_PKG,
+    clangd_download_url, codelldb_vsix_url, csharp_ls_version_for_dotnet_sdk,
+    dotnet_sdk_major_slot, jq_binary_url, kotlin_lsp_zip_url, netcoredbg_download_asset,
+    rust_analyzer_gz_url, shfmt_binary_url, CatalogSdkEntry, EcosystemKind, TargetPlatform,
+    CSHARP_LS_TOOL, DEBUGPY_PKG, DLV_PKG, FSAUTOCOMPLETE_TOOL, FSAUTOCOMPLETE_VERSION, GOPLS_PKG,
+    JAVA_DEBUG_JAR_NAME, JAVA_DEBUG_JAR_URL, JDTLS_TARBALL_URL, JS_DEBUG_TARBALL_URL, PYRIGHT_PKG,
 };
 use crate::types::{IdeInstallComponent, IdeSshSpec};
 
@@ -196,7 +196,12 @@ pub(super) fn build_remote_install_script_with_zls(
             EcosystemKind::Go => s.push_str(&format!("DEST=\"$TC/go/sdks/{0}\"\nARCH=\"$TC/.downloads/go-{0}.tar.gz\"\nrm -rf \"$DEST\" && mkdir -p \"$DEST\"\ndownload_and_verify {u} \"$ARCH\" '{exp_sha}'\ntar -xzf \"$ARCH\" -C \"$DEST\"\nrm -f \"$ARCH\"\n\"$DEST/go/bin/go\" version\nln -sfn \"$DEST/go\" \"$TC/go/current\"\nexport PATH=\"$TC/go/current/bin:$PATH\"\necho \"INSTALLED_PATH:$DEST/go\"\n", entry.version)),
             EcosystemKind::Rust => s.push_str(&format!("INIT=\"$TC/.downloads/rustup-init\"\ndownload_and_verify {u} \"$INIT\" '{exp_sha}'\nchmod +x \"$INIT\"\nRUSTUP_HOME=\"$TC/rust/rustup\" CARGO_HOME=\"$TC/rust/cargo\" \"$INIT\" -y --no-modify-path --default-toolchain {v}\nrm -f \"$INIT\"\necho \"INSTALLED_PATH:$TC/rust/cargo\"\n")),
             EcosystemKind::Zig => s.push_str(&format!("DEST=\"$TC/zig/sdks/{0}\"\nSTAGE=\"$TC/.downloads/zig-stage-{0}-$$\"\nARCH=\"$STAGE/zig.tar.xz\"\nrm -rf \"$STAGE\" && mkdir -p \"$STAGE/sdk\" \"$TC/zig/sdks\"\ndownload_and_verify {u} \"$ARCH\" '{exp_sha}'\ntar -xJf \"$ARCH\" --strip-components=1 -C \"$STAGE/sdk\"\nrm -f \"$ARCH\"\n\"$STAGE/sdk/zig\" version\nrm -rf \"$DEST\" && mv \"$STAGE/sdk\" \"$DEST\" && rm -rf \"$STAGE\"\nln -sfn \"$DEST\" \"$TC/zig/current\"\nexport PATH=\"$TC/zig/current:$PATH\"\necho \"INSTALLED_PATH:$DEST\"\n", entry.version)),
-            EcosystemKind::Cpp => s.push_str(&format!("DEST=\"$TC/cpp/sdks/{0}\"\nARCH=\"$TC/.downloads/llvm-{0}.tar.xz\"\nrm -rf \"$DEST\" && mkdir -p \"$DEST\"\ndownload_and_verify {u} \"$ARCH\" '{exp_sha}'\ntar -xJf \"$ARCH\" --strip-components=1 -C \"$DEST\"\nrm -f \"$ARCH\"\n\"$DEST/bin/clang++\" --version\nln -sfn \"$DEST\" \"$TC/cpp/current\"\nexport PATH=\"$TC/cpp/current/bin:$PATH\"\necho \"INSTALLED_PATH:$DEST\"\n", entry.version)),
+            EcosystemKind::Cpp => {
+                return Err(
+                    "C/C++ compiler toolchains (Clang / GCC / LLVM) are installed via system packages (`apt install clang` / `dnf install clang` / Homebrew), not remote archive scripts"
+                        .into(),
+                );
+            }
             EcosystemKind::Kotlin => s.push_str(&format!("DEST=\"$TC/kotlin/sdks/{0}\"\nARCH=\"$TC/.downloads/kotlin-compiler-{0}.zip\"\nrm -rf \"$DEST\" && mkdir -p \"$DEST\"\ndownload_and_verify {u} \"$ARCH\" '{exp_sha}'\nunzip -q -o \"$ARCH\" -d \"$DEST\"\nrm -f \"$ARCH\"\nKH=\"$DEST\"; [ -x \"$DEST/kotlinc/bin/kotlinc\" ] && KH=\"$DEST/kotlinc\"\nchmod +x \"$KH/bin/kotlinc\"\nln -sfn \"$KH\" \"$TC/kotlin/current\"\nexport PATH=\"$TC/kotlin/current/bin:$PATH\"\necho \"INSTALLED_PATH:$KH\"\n", entry.version)),
             EcosystemKind::Dotnet => s.push_str(&format!("DEST=\"$TC/dotnet/sdks/{0}\"\nARCH=\"$TC/.downloads/dotnet-sdk-{0}.tar.gz\"\nrm -rf \"$DEST\" && mkdir -p \"$DEST\"\ndownload_and_verify {u} \"$ARCH\" '{exp_sha}'\ntar -xzf \"$ARCH\" -C \"$DEST\"\nrm -f \"$ARCH\"\nDOTNET_ROOT=\"$DEST\" \"$DEST/dotnet\" --version\nln -sfn \"$DEST\" \"$TC/dotnet/current\"\nexport DOTNET_ROOT=\"$TC/dotnet/current\"\nexport PATH=\"$TC/dotnet/current:$PATH\"\necho \"INSTALLED_PATH:$DEST\"\n", entry.version)),
             EcosystemKind::Node => s.push_str(&format!("DEST=\"$TC/node/sdks/{0}\"\nARCH=\"$TC/.downloads/node-{0}.tar.gz\"\nrm -rf \"$DEST\" && mkdir -p \"$DEST\"\ndownload_and_verify {u} \"$ARCH\" '{exp_sha}'\ntar -xzf \"$ARCH\" --strip-components=1 -C \"$DEST\"\nrm -f \"$ARCH\"\n\"$DEST/bin/node\" --version\nln -sfn \"$DEST\" \"$TC/node/current\"\nexport PATH=\"$TC/node/current/bin:$PATH\"\necho \"INSTALLED_PATH:$DEST\"\n", entry.version)),
@@ -239,34 +244,54 @@ pub(super) fn build_remote_install_script_with_zls(
             }
             EcosystemKind::Kotlin => s.push_str(&format!("rm -rf \"$TC/kotlin/lsp\" && mkdir -p \"$TC/kotlin/lsp\" \"$TC/kotlin/bin\"\nARCH=\"$TC/.downloads/kotlin-language-server.zip\"\ndownload_and_verify '{}' \"$ARCH\"\nunzip -q -o \"$ARCH\" -d \"$TC/kotlin/lsp\" && rm -f \"$ARCH\"\nKLS_BIN=\"$TC/kotlin/lsp/server/bin/kotlin-language-server\"\n[ -f \"$KLS_BIN\" ] || KLS_BIN=\"$TC/kotlin/lsp/bin/kotlin-language-server\"\nchmod +x \"$KLS_BIN\" && ln -sfn \"$KLS_BIN\" \"$TC/kotlin/bin/kotlin-language-server\"\necho \"INSTALLED_PATH:$KLS_BIN\"\n", kotlin_lsp_zip_url())),
             EcosystemKind::Dotnet => {
-                let pinned_ver = sdk.map(|e| csharp_ls_version_for_dotnet_sdk(Some(&e.version)));
-                let ver_block = match pinned_ver {
-                    Some(v) => format!("CSHARP_LS_VER='{v}'\n"),
+                let pinned = sdk.map(|e| {
+                    (
+                        csharp_ls_version_for_dotnet_sdk(Some(&e.version)),
+                        dotnet_sdk_major_slot(Some(&e.version)),
+                    )
+                });
+                let ver_block = match pinned {
+                    Some((v, slot)) => format!("CSHARP_LS_VER='{v}'\nCSHARP_SLOT='{slot}'\n"),
                     None => concat!(
                         "SDK_MAJOR=$(dotnet --version 2>/dev/null | cut -d. -f1 || true)\n",
                         "case \"$SDK_MAJOR\" in\n",
-                        "  6|7|8) CSHARP_LS_VER='0.16.0' ;;\n",
-                        "  9) CSHARP_LS_VER='0.20.0' ;;\n",
-                        "  10) CSHARP_LS_VER='0.26.0' ;;\n",
-                        "  11|12|13) CSHARP_LS_VER='0.29.0' ;;\n",
-                        "  *) CSHARP_LS_VER='0.20.0' ;;\n",
+                        "  6|7|8) CSHARP_LS_VER='0.16.0'; CSHARP_SLOT='net8' ;;\n",
+                        "  9) CSHARP_LS_VER='0.20.0'; CSHARP_SLOT='net9' ;;\n",
+                        "  10) CSHARP_LS_VER='0.26.0'; CSHARP_SLOT='net10' ;;\n",
+                        "  11|12|13) CSHARP_LS_VER='0.29.0'; CSHARP_SLOT='net11' ;;\n",
+                        "  *) CSHARP_LS_VER='0.20.0'; CSHARP_SLOT='net9' ;;\n",
                         "esac\n"
                     )
                     .to_string(),
                 };
+                // BUG-22 + DATA2-1 + RED-3: Stage each tool into a private PID-scoped directory
+                // and swap into per-SDK-major slot (`$TC/dotnet/tools/$CSHARP_SLOT`) ONLY after
+                // `dotnet tool install` succeeds, preserving working servers if NuGet fails and
+                // keeping .NET 8/9/10 csharp-ls slots side by side.
                 s.push_str(&format!(
                     "export PATH=\"$TC/dotnet/current:$HOME/.dotnet:$PATH\"\n\
                      if [ -z \"${{DOTNET_ROOT:-}}\" ] && [ -x \"$TC/dotnet/current/dotnet\" ]; then export DOTNET_ROOT=\"$TC/dotnet/current\"; fi\n\
                      mkdir -p \"$TC/dotnet/tools\"\n\
                      {ver_block}\
-                     dotnet tool uninstall --tool-path \"$TC/dotnet/tools\" '{CSHARP_LS_TOOL}' >/dev/null 2>&1 || true\n\
-                     dotnet tool install --tool-path \"$TC/dotnet/tools\" --version \"$CSHARP_LS_VER\" '{CSHARP_LS_TOOL}'\n\
-                     dotnet tool uninstall --tool-path \"$TC/dotnet/tools\" '{FSAUTOCOMPLETE_TOOL}' >/dev/null 2>&1 || true\n\
-                     dotnet tool install --tool-path \"$TC/dotnet/tools\" --version '{FSAUTOCOMPLETE_VERSION}' '{FSAUTOCOMPLETE_TOOL}'\n\
-                     echo \"INSTALLED_PATH:$TC/dotnet/tools/{CSHARP_LS_TOOL}\"\n"
+                     CS_STAGE=\"$TC/.downloads/dotnet-csharp-$$\"\n\
+                     rm -rf \"$CS_STAGE\" && mkdir -p \"$CS_STAGE\"\n\
+                     dotnet tool install --tool-path \"$CS_STAGE\" --version \"$CSHARP_LS_VER\" '{CSHARP_LS_TOOL}'\n\
+                     rm -rf \"$TC/dotnet/tools/$CSHARP_SLOT\" && mv \"$CS_STAGE\" \"$TC/dotnet/tools/$CSHARP_SLOT\"\n\
+                     ln -sfn \"$TC/dotnet/tools/$CSHARP_SLOT/{CSHARP_LS_TOOL}\" \"$TC/dotnet/tools/{CSHARP_LS_TOOL}\"\n\
+                     FS_STAGE=\"$TC/.downloads/dotnet-fs-$$\"\n\
+                     rm -rf \"$FS_STAGE\" && mkdir -p \"$FS_STAGE\"\n\
+                     dotnet tool install --tool-path \"$FS_STAGE\" --version '{FSAUTOCOMPLETE_VERSION}' '{FSAUTOCOMPLETE_TOOL}'\n\
+                     rm -rf \"$TC/dotnet/tools/fsautocomplete-pkg\" && mv \"$FS_STAGE\" \"$TC/dotnet/tools/fsautocomplete-pkg\"\n\
+                     ln -sfn \"$TC/dotnet/tools/fsautocomplete-pkg/{FSAUTOCOMPLETE_TOOL}\" \"$TC/dotnet/tools/{FSAUTOCOMPLETE_TOOL}\"\n\
+                     echo \"INSTALLED_PATH:$TC/dotnet/tools/$CSHARP_SLOT/{CSHARP_LS_TOOL}\"\n"
                 ));
             }
-            EcosystemKind::Node => s.push_str("export PATH=\"$TC/node/current/bin:$PATH\"\nmkdir -p \"$TC/node/lsp\"\nnpm install --prefix \"$TC/node/lsp\" typescript typescript-language-server\necho \"INSTALLED_PATH:$TC/node/lsp/node_modules/.bin/typescript-language-server\"\n"),
+            EcosystemKind::Node => {
+                let pkgs = crate::toolchains_catalog::TS_LSP_NPM_PACKAGES.join(" ");
+                s.push_str(&format!(
+                    "export PATH=\"$TC/node/current/bin:$PATH\"\nmkdir -p \"$TC/node/lsp\"\nnpm install --prefix \"$TC/node/lsp\" {pkgs}\necho \"INSTALLED_PATH:$TC/node/lsp/node_modules/.bin/typescript-language-server\"\n"
+                ));
+            }
             EcosystemKind::Python => s.push_str(&format!("UV_TOOL_DIR=\"$TC/python/tools\" UV_TOOL_BIN_DIR=\"$TC/python/bin\" \"$TC/python/bin/uv\" tool install --force '{PYRIGHT_PKG}'\necho \"INSTALLED_PATH:$TC/python/bin/pyright-langserver\"\n")),
             EcosystemKind::Shell => s.push_str("export PATH=\"$TC/node/current/bin:$PATH\"\nmkdir -p \"$TC/shell/lsp\"\nnpm install --prefix \"$TC/shell/lsp\" bash-language-server\necho \"INSTALLED_PATH:$TC/shell/lsp/node_modules/.bin/bash-language-server\"\n"),
             EcosystemKind::Json => s.push_str("export PATH=\"$TC/node/current/bin:$PATH\"\nmkdir -p \"$TC/json/lsp\"\nnpm install --prefix \"$TC/json/lsp\" vscode-langservers-extracted\necho \"INSTALLED_PATH:$TC/json/lsp/node_modules/.bin/vscode-json-language-server\"\n"),
@@ -282,7 +307,29 @@ pub(super) fn build_remote_install_script_with_zls(
         match eco {
             EcosystemKind::Java | EcosystemKind::Kotlin => s.push_str(&format!("mkdir -p \"$TC/java/dap\"\nJAR_TMP=\"$TC/.downloads/{JAVA_DEBUG_JAR_NAME}\"\ndownload_and_verify '{JAVA_DEBUG_JAR_URL}' \"$JAR_TMP\"\nmv \"$JAR_TMP\" \"$TC/java/dap/{JAVA_DEBUG_JAR_NAME}\"\necho \"INSTALLED_PATH:$TC/java/dap/{JAVA_DEBUG_JAR_NAME}\"\n")),
             EcosystemKind::Go => s.push_str(&format!("export PATH=\"$TC/go/current/bin:$PATH\"\nmkdir -p \"$TC/go/bin\"\nGOBIN=\"$TC/go/bin\" GOPATH=\"$TC/go/gopath\" go install '{DLV_PKG}'\necho \"INSTALLED_PATH:$TC/go/bin/dlv\"\n")),
-            EcosystemKind::Rust | EcosystemKind::Zig | EcosystemKind::Cpp => s.push_str(&format!("STAGE=\"$TC/.downloads/codelldb-stage-$$\"\nVSIX=\"$STAGE/codelldb.vsix\"\nrm -rf \"$STAGE\" && mkdir -p \"$STAGE/extract\" \"$TC/rust\"\ndownload_and_verify '{}' \"$VSIX\"\nunzip -q -o \"$VSIX\" -d \"$STAGE/extract\" && rm -f \"$VSIX\"\nchmod +x \"$STAGE/extract/extension/adapter/codelldb\"\nrm -rf \"$TC/rust/dap\" && mv \"$STAGE/extract\" \"$TC/rust/dap\" && rm -rf \"$STAGE\"\nln -sfn \"$TC/rust/dap/extension\" \"$TC/rust/codelldb\"\necho \"INSTALLED_PATH:$TC/rust/dap/extension/adapter/codelldb\"\n", codelldb_vsix_url(platform))),
+            EcosystemKind::Rust | EcosystemKind::Zig | EcosystemKind::Cpp => s.push_str(&format!(
+                "STAGE=\"$TC/.downloads/codelldb-stage-$$\"\n\
+                 VSIX=\"$STAGE/codelldb.vsix\"\n\
+                 rm -rf \"$STAGE\" && mkdir -p \"$STAGE/extract\" \"$TC/rust\"\n\
+                 download_and_verify '{}' \"$VSIX\"\n\
+                 unzip -q -o \"$VSIX\" -d \"$STAGE/extract\" && rm -f \"$VSIX\"\n\
+                 chmod +x \"$STAGE/extract/extension/adapter/codelldb\"\n\
+                 LOCK=\"$TC/.downloads/codelldb.lock\"\n\
+                 _w=0\n\
+                 while ! mkdir \"$LOCK\" 2>/dev/null; do\n\
+                   _w=$((_w + 1))\n\
+                   [ \"$_w\" -le 300 ] || {{ rm -rf \"$STAGE\"; echo \"timed out waiting for codelldb install lock\" >&2; exit 1; }}\n\
+                   sleep 0.1\n\
+                 done\n\
+                 trap 'rmdir \"$LOCK\" 2>/dev/null || true' EXIT\n\
+                 rm -rf \"$TC/rust/dap\" && mv \"$STAGE/extract\" \"$TC/rust/dap\"\n\
+                 ln -sfn \"$TC/rust/dap/extension\" \"$TC/rust/codelldb\"\n\
+                 rmdir \"$LOCK\" 2>/dev/null || true\n\
+                 trap - EXIT\n\
+                 rm -rf \"$STAGE\"\n\
+                 echo \"INSTALLED_PATH:$TC/rust/dap/extension/adapter/codelldb\"\n",
+                codelldb_vsix_url(platform)
+            )),
             EcosystemKind::Dotnet => {
                 let asset = netcoredbg_download_asset(platform)?;
                 let (arch_name, extract_cmd) = if asset.is_zip {
@@ -632,6 +679,11 @@ mod tests {
         )
         .unwrap();
         assert!(lsp8.contains("CSHARP_LS_VER='0.16.0'"), "{lsp8}");
+        assert!(lsp8.contains("CSHARP_SLOT='net8'"), "{lsp8}");
+        assert!(
+            !lsp8.contains("dotnet tool uninstall"),
+            "DATA2-1: remote installer must stage and swap, never uninstall first:\n{lsp8}"
+        );
         assert!(
             lsp8.contains("--version \"$CSHARP_LS_VER\" 'csharp-ls'"),
             "{lsp8}"
@@ -639,6 +691,19 @@ mod tests {
         assert!(
             lsp8.contains("--version '0.85.4' 'fsautocomplete'"),
             "{lsp8}"
+        );
+
+        // RED-2: remote Node LSP installs @vue/language-server@2.2.10 (standalone hybridMode=false).
+        let node_lsp = build_remote_install_script(
+            EcosystemKind::Node,
+            IdeInstallComponent::Lsp,
+            lin_x64,
+            None,
+        )
+        .unwrap();
+        assert!(
+            node_lsp.contains("@vue/language-server@2.2.10"),
+            "RED-2: remote Node LSP must pin @vue/language-server@2.2.10, got:\n{node_lsp}"
         );
     }
 }

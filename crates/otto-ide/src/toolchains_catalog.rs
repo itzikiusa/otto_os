@@ -32,7 +32,7 @@ pub const TS_LSP_NPM_PACKAGES: &[&str] = &[
     "typescript",
     "typescript-language-server",
     "svelte-language-server",
-    "@vue/language-server",
+    "@vue/language-server@2.2.10",
     "@angular/language-server",
 ];
 pub const BASH_LSP_NPM_PACKAGES: &[&str] = &["bash-language-server"];
@@ -517,19 +517,6 @@ pub fn zls_tarball_url(version: &str, platform: TargetPlatform) -> String {
 /// versions because `clangd/clangd` only publishes specific release tags).
 pub const CLANGD_RELEASE_VERSION: &str = "19.1.2";
 
-pub fn llvm_tarball_url(version: &str, platform: TargetPlatform) -> String {
-    let clean = version.trim().trim_start_matches("llvmorg-");
-    let slug = match (platform.os, platform.arch) {
-        (TargetOs::Macos, TargetArch::Aarch64) => "macOS-ARM64",
-        (TargetOs::Macos, TargetArch::X86_64) => "macOS-X64",
-        (TargetOs::Linux, TargetArch::Aarch64) => "Linux-ARM64",
-        (TargetOs::Linux, TargetArch::X86_64) => "Linux-X64",
-    };
-    format!(
-        "https://github.com/llvm/llvm-project/releases/download/llvmorg-{clean}/LLVM-{clean}-{slug}.tar.xz"
-    )
-}
-
 pub fn clangd_zip_url(version: &str, platform: TargetPlatform) -> String {
     let clean = version.trim().trim_start_matches('v');
     let slug = match platform.os {
@@ -614,6 +601,23 @@ pub fn csharp_ls_version_for_dotnet_sdk(sdk_version: Option<&str>) -> &'static s
         Some(10) => "0.26.0",
         Some(11..) => "0.29.0",
         None => "0.20.0",
+    }
+}
+
+/// Version slot folder name under `toolchains/dotnet/tools/` matching the active
+/// `.NET` SDK major version (`net8`, `net9`, `net10`, `net11`) so installing for a
+/// newer SDK never overwrites an older project's compatible `csharp-ls` (BUG-22).
+pub fn dotnet_sdk_major_slot(sdk_version: Option<&str>) -> &'static str {
+    let major = sdk_version
+        .map(str::trim)
+        .and_then(|s| s.trim_start_matches('v').split(['.', '-', '+']).next())
+        .and_then(|m| m.parse::<u32>().ok());
+    match major {
+        Some(0..=8) => "net8",
+        Some(9) => "net9",
+        Some(10) => "net10",
+        Some(11..) => "net11",
+        None => "net9",
     }
 }
 

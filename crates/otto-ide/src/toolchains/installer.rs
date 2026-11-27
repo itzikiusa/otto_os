@@ -411,39 +411,9 @@ pub(super) async fn install_local_sdk(
             run_local_cmd(mgr, job_id, 58, &zig_bin, &["version"], &[]).await?;
             Ok(dest.to_string_lossy().into_owned())
         }
-        EcosystemKind::Cpp => {
-            let archive = tmp.join(format!("llvm-{}.tar.xz", entry.version));
-            download_https_to_file(mgr, job_id, &entry.url, &archive, exp_sha, 15).await?;
-            let dest = root.join("cpp/sdks").join(&entry.version);
-            let _ = tokio::fs::remove_dir_all(&dest).await;
-            tokio::fs::create_dir_all(&dest)
-                .await
-                .map_err(|e| e.to_string())?;
-            run_local_cmd(
-                mgr,
-                job_id,
-                50,
-                Path::new("tar"),
-                &[
-                    "-xJf",
-                    &archive.to_string_lossy(),
-                    "--strip-components=1",
-                    "-C",
-                    &dest.to_string_lossy(),
-                ],
-                &[],
-            )
-            .await?;
-            let _ = tokio::fs::remove_file(&archive).await;
-            let clangxx = dest.join("bin/clang++");
-            if !clangxx.is_file() {
-                return Err("LLVM archive missing bin/clang++".into());
-            }
-            make_executable(&clangxx)?;
-            relink_current(&root.join("cpp/current"), &dest);
-            run_local_cmd(mgr, job_id, 58, &clangxx, &["--version"], &[]).await?;
-            Ok(dest.to_string_lossy().into_owned())
-        }
+        EcosystemKind::Cpp => Err(
+            "C/C++ compiler toolchains (Clang / GCC / LLVM) are installed via Xcode Command Line Tools (`xcode-select --install`), Homebrew (`brew install llvm`), or your Linux package manager (`apt install clang` / `dnf install clang`), then auto-detected or added via 'Add Local SDK'.".into(),
+        ),
         EcosystemKind::Kotlin => {
             let archive = tmp.join(format!("kotlin-compiler-{}.zip", entry.version));
             download_https_to_file(mgr, job_id, &entry.url, &archive, exp_sha, 15).await?;
