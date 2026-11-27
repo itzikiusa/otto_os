@@ -7375,6 +7375,11 @@ Full multi-language IDE over Local (`kind: "local"`) and Remote SSH (`kind: "ssh
 | POST /ide/projects/folders | Agents: Edit | `IdeProjectFolderReq` (`target`, `folder_path`) | `IdeEnvironmentResp` (attaches `folder_path` to `env.additional_roots`) |
 | DELETE /ide/projects/folders?kind=&root=&workspace_id=&connection_id=&folder_path= | Agents: Edit | query `IdeDeleteProjectFolderQuery` | `IdeEnvironmentResp` (detaches `folder_path` from `env.additional_roots`) |
 | POST /ide/projects/folders/bulk | Agents: Edit | `IdeBulkFoldersReq` (`target`, `folder_paths`) | `IdeBulkFoldersResp` (`additional_roots`) |
+| GET /ide/projects/{id}/security | Agents: Edit | — | `ProjectScans` with settings, installed Trivy version and timestamps, and the 30 most recent scan summaries |
+| PUT /ide/projects/{id}/security | Agents: Edit | `ScanSettings` | saved `ScanSettings` |
+| POST /ide/projects/{id}/security/scans | Agents: Edit | — | HTTP 202 with a queued `ScanSummary`. HTTP 409 if the project already has a scan queued or running |
+| GET /ide/projects/{id}/security/scans/{scan_id} | Agents: Edit | — | `ScanDetail` (summary and normalized findings) |
+| DELETE /ide/projects/{id}/security/scans/{scan_id} | Agents: Edit | — | `ScanSummary` after cancellation, or the pre-existing terminal result if the scan already finished |
 | POST /ide/deps/inspect | Agents: Edit | `IdeDepsInspectReq` (`target?`, `path`, `content?`) | `IdeDepsInspectResp` (`ecosystem`, `items` across `go.mod`, `pom.xml`, `build.gradle*`, `Cargo.toml`, `package.json` (parsed as JSON, so a minified file works), `pyproject.toml` (PEP 621 arrays incl. optional-dependencies, Poetry tables)/`requirements.txt` with `latest_version`, `latest_patch`, `deprecated`, `vulnerabilities`, line offsets; `range: true` when `current_version` is only the floor of a range (`^1.0.0`, `>=1.0`) — such items get no OSV lookup) |
 | POST /ide/deps/action | human + Agents: Edit | `IdeDepsActionReq` (`target?`, `path`, `action` [`tidy` \| `vendor` \| `sync` \| `why` \| `merge_directives` \| `maven_sync` \| `maven_tree` \| `gradle_sync` \| `vuln_scan` \| `update_one` \| `update_direct_latest` \| `update_direct_patch` \| `update_all_latest` \| `update_all_patch`], `module?`, `version?`) | `IdeDepsActionResp` (`ok`, `updated_content`, `output`) |
 | POST /ide/build-tools/model | Agents: Edit | `IdeBuildToolsModelReq` (`roots`, `target?`) | `IdeBuildToolsModelResp` (`has_maven`, `has_gradle`, `has_xcode`, `has_android`, `has_flutter`, `has_react_native`, `has_capacitor`, `profiles`, `projects`, `mobile_projects`) |
@@ -7423,6 +7428,14 @@ Full multi-language IDE over Local (`kind: "local"`) and Remote SSH (`kind: "ssh
 | DELETE /ide/db-watch/watches/{id} | Agents: Edit (owner only) | — | `IdeOkResp`. A bound watch also goes 10 min after its debug session / run ended (one last `session_end` checkpoint first, if the target is still up) |
 
 ---
+
+### IDE project security scans
+
+These routes accept named local project IDs. The caller needs access to the project and each of its current roots. A scan ID is scoped to its project.
+
+- `ScanSettings` has `checks` (`vulnerability`, `secret`, `misconfiguration`, `license`), `excludes` (root-relative globs), `parallelism` (1–2), `memory_mib` (256–4096) and `timeout_secs` (10–900). Defaults enable vulnerabilities, secrets and misconfiguration, with one worker, 1024 MiB and 180 seconds per engine invocation. Include at least one check.
+- `ScanSummary` has `id`, `status` (`queued`, `running`, `completed`, `failed`, `cancelled`), `created_at`, nullable `started_at`, `finished_at`, `engine`, `metrics`, `error`, and `count`. Timestamps are UTC RFC 3339. Engine metadata includes `version`, `updated_at`, and `checked_at`. Metrics are `wall_ms`, `peak_cpu_percent` relative to one core, and `peak_rss_bytes`.
+- Findings have a `fingerprint`, `engine`, `check`, `severity` (`critical`, `high`, `medium`, `low`, `unknown`), `root`, project-relative `path`, optional one-based `line`, `rule`, `title`, `description`, and `fix`. Secret matches and source snippets are discarded before persistence.
 
 ## Mobile Simulators & Emulators (`otto-simulators`, `/api/v1/simulators/*`)
 

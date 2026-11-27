@@ -48,6 +48,7 @@ members = [
     "crates/otto-rooms",
     "crates/otto-phone",
     "crates/otto-ide",
+    "crates/otto-security",
     "crates/otto-simulators",
     "crates/otto-containers",
     "crates/otto-media",
@@ -109,6 +110,7 @@ otto-transcript = { path = "crates/otto-transcript" }
 otto-workflows = { path = "crates/otto-workflows" }
 otto-rooms = { path = "crates/otto-rooms" }
 otto-ide = { path = "crates/otto-ide" }
+otto-security = { path = "crates/otto-security" }
 otto-simulators = { path = "crates/otto-simulators" }
 otto-media = { path = "crates/otto-media" }
 

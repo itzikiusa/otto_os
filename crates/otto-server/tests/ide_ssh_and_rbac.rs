@@ -830,3 +830,99 @@ async fn ws_lsp_remote_ssh_guards_and_upgrade_paths() {
     assert_eq!(attached_json["params"]["lang"], "rust");
     assert_eq!(attached_json["params"]["root"], "/srv/repo");
 }
+
+#[tokio::test]
+async fn security_routes_scope_settings_and_history_to_the_named_project() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    let pool = otto_server::test_support::mem_pool().await;
+    let owner = seed_user(&pool, "owner", true).await;
+    let editor = seed_user(&pool, "editor", false).await;
+    seed_workspace(&pool, "proj-workspace", &project).await;
+    add_member(&pool, "proj-workspace", &editor.id, "editor").await;
+    GrantsRepo::new(pool.clone())
+        .set_grants(&editor.id, &[(Feature::Agents, Capability::Edit)])
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO ide_named_projects (id, owner_user_id, name, primary_root)
+         VALUES ('security-project', ?, 'Security project', ?)",
+    )
+    .bind(&owner.id)
+    .bind(project.to_string_lossy().as_ref())
+    .execute(&pool)
+    .await
+    .unwrap();
+    let auth = AuthRepo::new(pool.clone());
+    let owner_token = auth
+        .issue_api_token(&owner.id, Some("test"))
+        .await
+        .unwrap()
+        .0;
+    let editor_token = auth
+        .issue_api_token(&editor.id, Some("test"))
+        .await
+        .unwrap()
+        .0;
+    let ctx = ServerCtx::for_tests(&pool, dir.path().join("data")).await;
+    let (api, root) = otto_server::modules::module_routers(&ctx);
+    let app = otto_server::build_router(ctx, api, root);
+    let path = "/api/v1/ide/projects/security-project/security";
+    let call = |method: &str, path: &str, token: &str, body: &'static str| {
+        let request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let app = app.clone();
+        async move {
+            let response = app.oneshot(request).await.unwrap();
+            let status = response.status();
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            let value = serde_json::from_slice::<Value>(&body).unwrap_or_default();
+            (status, value)
+        }
+    };
+
+    let (status, initial) = call("GET", path, &owner_token, "").await;
+    assert_eq!(status, StatusCode::OK, "{initial}");
+    assert_eq!(initial["settings"]["parallelism"], 1);
+    let (status, _) = call("GET", path, &editor_token, "").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = call("PUT", path, &owner_token, r#"{"parallelism":12}"#).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, saved) = call(
+        "PUT",
+        path,
+        &owner_token,
+        r#"{"checks":["secret"],"parallelism":2}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["checks"], json!(["secret"]));
+
+    sqlx::query(
+        "INSERT INTO ide_security_scans (id, project_id, status, created_at)
+         VALUES ('scan-id', 'security-project', 'queued', '2026-11-27T00:00:00Z')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let scan_path = format!("{path}/scans/scan-id");
+    let (status, read) = call("GET", &scan_path, &owner_token, "").await;
+    assert_eq!(status, StatusCode::OK, "{read}");
+    assert_eq!(read["scan"]["status"], "queued");
+    let (status, _) = call("DELETE", &scan_path, &editor_token, "").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, stopped) = call("DELETE", &scan_path, &owner_token, "").await;
+    assert_eq!(status, StatusCode::OK, "{stopped}");
+    assert_eq!(stopped["status"], "cancelled");
+}

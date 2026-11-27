@@ -273,6 +273,8 @@ rounds over the last three releases.
   configurations (DAP), language servers, refactorings, a git gutter, local
   history, dependency and vulnerability views, live shared editing and IDE
   plugins. Chat with an agent about the open project from the IDE itself.
+- **Project security scans.** Run local Trivy checks against named IDE projects
+  with managed updates, resource limits and scan history. [Security scans](docs/features/security-scans.md).
 - **Threads: every agent, fully.** Claude, Codex, Antigravity, Gemini, Grok,
   OpenCode, pi and Muse run as structured agents. Each one reports what it
   can do (images, files, plan mode, effort, steering) and Threads offers
