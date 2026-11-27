@@ -315,6 +315,7 @@
     flex-direction: column;
     height: 100%;
     min-height: 0;
+    container-type: inline-size;
   }
   .grow {
     flex: 1;
@@ -358,6 +359,13 @@
   }
   .foot-hint {
     font-size: var(--fs-xs);
+  }
+  /* Narrow: the hint takes its own line above the two buttons. */
+  @container (max-width: 600px) {
+    .foot-hint {
+      flex-basis: 100%;
+      order: -1;
+    }
   }
   .dim {
     color: var(--text-dim);

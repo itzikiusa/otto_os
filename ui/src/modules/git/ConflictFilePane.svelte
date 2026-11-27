@@ -403,6 +403,11 @@
     flex-direction: column;
     gap: 10px;
   }
+  /* The body scrolls; its blocks never shrink (a short phone pane squeezed
+     the overflow-x context lines to nothing). */
+  .pane-body > * {
+    flex-shrink: 0;
+  }
   .hunk-anchor {
     scroll-margin: 12px;
   }
