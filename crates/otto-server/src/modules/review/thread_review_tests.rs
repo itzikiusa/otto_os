@@ -22,11 +22,42 @@ async fn rig() -> Rig {
     rig_with(&[]).await
 }
 
+async fn ctx_on_pool(
+    pool: &otto_state::DbPool,
+    root: &std::path::Path,
+    fakes: &std::path::Path,
+) -> ServerCtx {
+    let mut ctx = ServerCtx::for_tests(pool, root.join("data")).await;
+    let host = SessionManagerHost {
+        manager: Arc::clone(&ctx.manager),
+        workspaces: otto_state::WorkspacesRepo::new(pool.clone()),
+        publish: Box::new(|_| {}),
+        notices: otto_agent_protocol::attention::AttentionNotices::new(
+            otto_state::NotificationsRepo::new(pool.clone()),
+            Arc::new(|_| {}),
+        ),
+    };
+    let env = vec![(
+        "OTTO_FAKE_REVIEW_DIR".to_string(),
+        fakes.to_string_lossy().into_owned(),
+    )];
+    ctx.agent_runtime = AgentRuntime::new(
+        otto_state::AgentRuntimeRepo::new(pool.clone()),
+        Arc::new(host),
+        scripted::drivers(),
+        RuntimeConfig {
+            attachments_dir: root.join("attachments"),
+            transport: Some(scripted::transport(env)),
+            ..RuntimeConfig::default()
+        },
+    );
+    ctx
+}
+
 /// `extra`: lenses the scope agent adds beyond the declared ones.
 async fn rig_with(extra: &[&str]) -> Rig {
     let tmp = tempfile::tempdir().unwrap();
     let pool = otto_state::db::test_pool().await;
-    let mut ctx = ServerCtx::for_tests(&pool, tmp.path().join("data")).await;
     let fakes = tmp.path().join("fakes");
     std::fs::create_dir_all(&fakes).unwrap();
     let names = (1..=LENSES)
@@ -49,29 +80,7 @@ async fn rig_with(extra: &[&str]) -> Rig {
         "body": "add subtracts", "category": "correctness", "disposition": "verified",
         "evidence": "src/lib.rs:1 returns a - b"}]);
     std::fs::write(fakes.join("summarizer.json"), drafts.to_string()).unwrap();
-    let host = SessionManagerHost {
-        manager: Arc::clone(&ctx.manager),
-        workspaces: otto_state::WorkspacesRepo::new(pool.clone()),
-        publish: Box::new(|_| {}),
-        notices: otto_agent_protocol::attention::AttentionNotices::new(
-            otto_state::NotificationsRepo::new(pool.clone()),
-            Arc::new(|_| {}),
-        ),
-    };
-    let env = vec![(
-        "OTTO_FAKE_REVIEW_DIR".to_string(),
-        fakes.to_string_lossy().into_owned(),
-    )];
-    ctx.agent_runtime = AgentRuntime::new(
-        otto_state::AgentRuntimeRepo::new(pool.clone()),
-        Arc::new(host),
-        scripted::drivers(),
-        RuntimeConfig {
-            attachments_dir: tmp.path().join("attachments"),
-            transport: Some(scripted::transport(env)),
-            ..RuntimeConfig::default()
-        },
-    );
+    let ctx = ctx_on_pool(&pool, tmp.path(), &fakes).await;
     let settings = otto_state::SettingsRepo::new(pool.clone());
     settings
         .put("agent_admission_enabled", &json!(false))
@@ -578,31 +587,54 @@ async fn a_held_review_whose_repo_is_gone_stops_its_threads_and_ends() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_held_summarizer_thread_is_awaited_on_restart_without_spawning_a_second() {
-    let (_tmp, ctx, ws, repo) = rig().await;
-    let review = ctx
-        .reviews_store
-        .create_review(&repo.id, LOCAL_REVIEW_PR_NUMBER)
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("state.db");
+    let fakes = tmp.path().join("fakes");
+    std::fs::create_dir_all(&fakes).unwrap();
+    let pool1 = otto_state::open(&db).await.unwrap();
+    let ctx1 = ctx_on_pool(&pool1, tmp.path(), &fakes).await;
+    otto_state::SettingsRepo::new(pool1.clone())
+        .put("agent_admission_enabled", &json!(false))
         .await
         .unwrap();
-    let owner: String = sqlx::query_scalar("SELECT id FROM users LIMIT 1")
-        .fetch_one(&ctx.pool)
+    let owner = otto_state::UsersRepo::new(pool1.clone())
+        .create("owner", "unused", "Owner", true)
+        .await
+        .unwrap()
+        .id;
+    let checkout = tmp.path().join("repo");
+    std::fs::create_dir_all(checkout.join("src")).unwrap();
+    std::fs::write(
+        checkout.join("src/lib.rs"),
+        "pub fn add(a: i32, b: i32) -> i32 { a - b }\n",
+    )
+    .unwrap();
+    let ws = ctx1
+        .workspaces
+        .create("Review", tmp.path().to_str().unwrap(), &owner)
+        .await
+        .unwrap();
+    let repo = ctx1
+        .git_store
+        .create_repo(otto_state::NewRepo {
+            workspace_id: ws.id.clone(),
+            name: "app".into(),
+            path: checkout.to_string_lossy().into_owned(),
+            remote_url: None,
+            provider: None,
+            git_account_id: None,
+        })
+        .await
+        .unwrap();
+    let review = ctx1
+        .reviews_store
+        .create_review(&repo.id, LOCAL_REVIEW_PR_NUMBER)
         .await
         .unwrap();
     let mut attempt = crate::review_summarizer::Attempt::new("codex", "gpt-5").unwrap();
     attempt.persist_for_restart();
     let result_path = attempt.result_path();
-    let drafts = json!([{
-        "source_ids": [otto_review::engine::raw_claim_id(0, 0)],
-        "path": "src/lib.rs",
-        "line": 1,
-        "severity": "bug",
-        "body": "add subtracts",
-        "category": "correctness",
-        "disposition": "verified",
-        "evidence": "src/lib.rs:1 returns a - b"
-    }]);
-    std::fs::write(&result_path, drafts.to_string()).unwrap();
-    let sum_thread = ctx
+    let sum_thread = ctx1
         .agent_runtime
         .create(
             &owner,
@@ -621,13 +653,12 @@ async fn a_held_summarizer_thread_is_awaited_on_restart_without_spawning_a_secon
         )
         .await
         .unwrap();
-    ctx.agent_runtime
+    ctx1.agent_runtime
         .prompt(&sum_thread.id, "summarize")
         .await
         .unwrap();
-    // Wait briefly so the scripted agent finishes turn 1 on the held thread.
     for _ in 0..40 {
-        let s = ctx.agent_runtime.get(&sum_thread.id).await.unwrap();
+        let s = ctx1.agent_runtime.get(&sum_thread.id).await.unwrap();
         if s.status == otto_core::agent_runtime::RuntimeSessionStatus::Idle {
             break;
         }
@@ -658,17 +689,38 @@ async fn a_held_summarizer_thread_is_awaited_on_restart_without_spawning_a_secon
             ..Default::default()
         },
     ];
-    ctx.reviews_store
+    ctx1.reviews_store
         .set_agents(&review.id, &rows)
         .await
         .unwrap();
-    let live = ctx.review_cancels.register(&review.id);
-    resume_held_review(ctx.clone(), review.id.clone(), live).await;
-    let done = ctx.reviews_store.get_review(&review.id).await.unwrap();
+    // Shut down and drop the first daemon runtime before the handoff is written,
+    // then open a fresh ServerCtx + AgentRuntime on the same SQLite DB.
+    assert!(!result_path.exists(), "handoff not written before restart");
+    ctx1.agent_runtime.shutdown_for_restart().await;
+    drop(ctx1);
+    drop(pool1);
+    let drafts = json!([{
+        "source_ids": [otto_review::engine::raw_claim_id(0, 0)],
+        "path": "src/lib.rs",
+        "line": 1,
+        "severity": "bug",
+        "body": "add subtracts",
+        "category": "correctness",
+        "disposition": "verified",
+        "evidence": "src/lib.rs:1 returns a - b"
+    }]);
+    std::fs::write(&result_path, drafts.to_string()).unwrap();
+
+    let pool2 = otto_state::open(&db).await.unwrap();
+    let ctx2 = ctx_on_pool(&pool2, tmp.path(), &fakes).await;
+    ctx2.agent_runtime.recover_and_adopt().await.unwrap();
+    let live = ctx2.review_cancels.register(&review.id);
+    resume_held_review(ctx2.clone(), review.id.clone(), live).await;
+    let done = ctx2.reviews_store.get_review(&review.id).await.unwrap();
     assert_eq!(done.status, ReviewStatus::Done, "{:?}", done.error);
     assert_eq!(done.comments.len(), 1);
     assert_eq!(done.comments[0].body, "add subtracts");
-    let sum_threads = ctx
+    let sum_threads = ctx2
         .agent_runtime
         .list_filtered(&ws.id, None, Some("review_summarizer"), None)
         .await
@@ -676,7 +728,7 @@ async fn a_held_summarizer_thread_is_awaited_on_restart_without_spawning_a_secon
     assert_eq!(
         sum_threads.len(),
         1,
-        "held summarizer must be awaited, not replaced by a second summarizer thread"
+        "held summarizer must be awaited on fresh runtime, not replaced by a second thread"
     );
     assert!(
         !result_path.parent().unwrap().exists(),
