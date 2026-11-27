@@ -55,7 +55,7 @@ test('C-11: findContainingRoot picks longest-prefix multi-repo root for FilePrev
       '../../../lib/loadError': { loadErrorText: (e: unknown) => String(e) },
       '../../../lib/toastError': { toastError: () => {} },
       '../store/ideTreeDirErrors.svelte': { ideTreeDirErrors: { clear: () => {}, set: () => {} } },
-      '../store/ideBufferPerf': { loadWorkspaceOpenTabs: () => null },
+      './ideTabRestore': { ideTabRestore: { active: false }, prefetchSavedTabs: async () => {}, reopenSavedTabs: async () => {}, restoreWorkspaceTabsOrInitial: async () => {} },
       '../store/ideTypes': {
         autoOpenInitialEntry: () => null,
         buildNewFileTemplate: () => '',
