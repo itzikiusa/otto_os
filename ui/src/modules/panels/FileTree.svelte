@@ -569,21 +569,21 @@
           {#if treeRange.top > 0}<div style="height:{treeRange.top}px" aria-hidden="true"></div>{/if}
           {#each visibleNodes.slice(treeRange.start, treeRange.end) as node (node.entry.path)}
             {@const place = positions.get(node.entry.path)}
-            <div class="tree-item" role="none">
+            {@const selected = viewerFile?.path === node.entry.path}
+            <div class="tree-item side-row" class:selected style:--side-depth={node.depth} role="none">
             <button
-              class="tree-row"
+              class="tree-row side-row-main"
               role="treeitem"
               aria-level={node.depth + 1}
               aria-setsize={place?.size}
               aria-posinset={place?.pos}
-              aria-selected={viewerFile?.path === node.entry.path}
+              aria-selected={selected}
               tabindex={node.entry.path === tabRow ? 0 : -1}
               onfocus={() => (activeRow = node.entry.path)}
               oncontextmenu={(e) => rowMenu(e, node)}
               class:is-dir={node.entry.is_dir}
               class:is-open={node.open}
               class:is-file={!node.entry.is_dir}
-              style="padding-inline-start: {8 + node.depth * 14}px"
               aria-expanded={node.entry.is_dir ? node.open : undefined}
               onclick={() => node.entry.is_dir ? toggleDir(node) : openFile(node.entry)}
               ondblclick={() => navigation && node.entry.is_dir && navigate(node.entry.path)}
@@ -603,7 +603,7 @@
                 <span class="file-spacer"></span>
                 <Icon name="file" size={12} />
               {/if}
-              <span class="row-name">{node.entry.name}</span>
+              <span class="row-name side-row-title">{node.entry.name}</span>
               {#if node.entry.is_git_repo}
                 <span class="git-badge dim"><Icon name="branch" size={12} /></span>
               {/if}
@@ -804,17 +804,10 @@
     border-bottom: 1px solid var(--border);
   }
 
+  /* Rows: the shared side-row look (app.css: accent tint + bold title when
+     selected, --side-depth indent); the keys stay the APG tree's (treeKeys). */
   .tree-list {
-    padding: 2px 0;
-  }
-
-  .tree-item {
-    display: flex;
-    align-items: center;
-    min-width: 0;
-  }
-  .tree-item:hover {
-    background: var(--hover);
+    padding: 2px 8px;
   }
   /* "Open this folder": shown on row hover / keyboard focus. */
   .enter-btn {
@@ -834,34 +827,9 @@
     }
   }
   .tree-row {
-    display: flex;
-    align-items: center;
     gap: 4px;
-    flex: 1;
-    min-width: 0;
-    height: 22px;
-    border: none;
-    background: transparent;
-    color: var(--text);
-    font-size: var(--fs-s);
-    cursor: pointer;
-    text-align: start;
     white-space: nowrap;
     overflow: hidden;
-    padding-inline-end: 6px;
-    transition: background var(--dur-fast) ease-out;
-  }
-  .tree-row:hover {
-    background: var(--hover);
-  }
-  .tree-row.is-dir {
-    color: var(--text);
-  }
-  .tree-row.is-file {
-    color: var(--text-dim);
-  }
-  .tree-row.is-file:hover {
-    color: var(--text);
   }
 
   .chevron {
@@ -879,8 +847,6 @@
   }
   .row-name {
     flex: 1;
-    overflow: hidden;
-    text-overflow: ellipsis;
   }
   .git-badge {
     flex-shrink: 0;
