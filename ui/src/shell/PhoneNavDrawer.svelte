@@ -106,8 +106,24 @@
     color: var(--text-dim);
   }
   .pnd-machine {
+    position: relative;
     cursor: default;
     color: var(--text-dim);
+  }
+  /* The chip's button covers the whole row (one tap target), and its status
+     text shows here even at phone width, where the status bar hides it. */
+  .pnd-machine :global(.machine-chip) {
+    position: static;
+    font-size: var(--fs-s);
+  }
+  .pnd-machine :global(.machine-chip)::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: var(--radius-s);
+  }
+  .pnd-machine :global(.mc-text) {
+    display: inline;
   }
   /* Hidden until the machine status has loaded (MachineChip renders nothing). */
   .pnd-machine:not(:has(:global(.machine-chip))) {

@@ -68,7 +68,8 @@
   let hidden = $state(loadPaneHidden(store, module, pane, legacy));
   let rowW = $state(0);
 
-  const phone = $derived(viewport.isPhone);
+  // A phone, or a phone on its side (viewport.navDrawer): the list pushes.
+  const phone = $derived(viewport.navDrawer);
   const max = $derived(fitPaneMax(rowW, range));
   const listShown = $derived(!empty && (phone ? !open : !hidden));
   const contentShown = $derived(empty || !phone || open);

@@ -23,7 +23,7 @@
   import ThreadDetailsCard from './ThreadDetailsCard.svelte';
   import DetailPane from '../../lib/components/side/DetailPane.svelte';
   import { DETAIL_PANE } from '../../lib/components/side/paneKeys';
-  import { MIN_CONVERSATION_BESIDE_SURFACE_W, MIN_CONVERSATION_W, SURFACE_W } from './threadsLayout';
+  import { MIN_CONVERSATION_W, SURFACE_W } from './threadsLayout';
   import ThreadAgentsTasks from './runtime/ThreadAgentsTasks.svelte';
   import RuntimeSubagentPane from './runtime/RuntimeSubagentPane.svelte';
   import { PrSurfaceView, SideChatView } from './threadLazy.svelte';
@@ -193,7 +193,7 @@
   onclose={() => threads.setInspectorOpen(false)}
   ontoggle={() => threads.toggleInspector()}
   range={surfaceOpen ? SURFACE_RANGE : DETAIL_PANE}
-  minContent={surfaceOpen ? MIN_CONVERSATION_BESIDE_SURFACE_W : MIN_CONVERSATION_W}
+  minContent={MIN_CONVERSATION_W}
   maximized={threadsChrome.maximized}
   bind:sheet
   menu={active || !sheet ? paneMenu : undefined}

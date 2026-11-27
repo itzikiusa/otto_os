@@ -17,7 +17,7 @@ import {
 } from '../src/modules/threads/newThreadDefaults.ts';
 import { closeWithChildrenDialog, openDescendants } from '../src/modules/threads/threadClosePlan.ts';
 import { threadsPageMenu, RELATED_LABEL, TERMINAL_LABEL } from '../src/modules/threads/threadsPageMenu.ts';
-import { MIN_CONVERSATION_BESIDE_SURFACE_W, MIN_CONVERSATION_W, SURFACE_W } from '../src/modules/threads/threadsLayout.ts';
+import { MIN_CONVERSATION_W, SURFACE_W } from '../src/modules/threads/threadsLayout.ts';
 import { DETAIL_PANE, detailFit } from '../src/lib/components/side/paneKeys.ts';
 
 const HOME = '/Users/me';
@@ -162,13 +162,15 @@ test('toolbar ⋯ on a phone: no Split / Grid, no hand-off to the phone, New thr
   assert.ok(!labels(ipad).includes('View'));
 });
 
-test('the inspector (a DetailPane) gives way to keep the conversation, else becomes a sheet', () => {
-  // 1236 px stage (1280 minus the rail), 280 list: the content row is 956.
-  assert.deepEqual(detailFit(956, 380, DETAIL_PANE, MIN_CONVERSATION_W), { sheet: false, shown: 316 });
-  assert.deepEqual(detailFit(1236, 380, DETAIL_PANE, MIN_CONVERSATION_W), { sheet: false, shown: 380 }, 'list hidden');
-  assert.equal(detailFit(720, 380, DETAIL_PANE, MIN_CONVERSATION_W).sheet, true, 'no room for 640 + 300: a sheet, never an overlap');
-  // Beside an open surface at 1440 with the list open (row 1116): ≥ 480 for Changes.
-  assert.ok(detailFit(1116, SURFACE_W, { default: SURFACE_W, min: 300, max: 1200 }, MIN_CONVERSATION_BESIDE_SURFACE_W).shown >= 480);
+test('the inspector (a DetailPane) keeps the conversation 600 px, else becomes a sheet — one floor, no flip-flop', () => {
+  // 1280: 44 rail + 280 list + 36 Side panel rail → a 920 px content row.
+  assert.deepEqual(detailFit(920, 380, DETAIL_PANE, MIN_CONVERSATION_W), { sheet: false, shown: 320 });
+  // Opening a surface there keeps it inline too (the same floor decides).
+  assert.equal(detailFit(920, SURFACE_W, { default: SURFACE_W, min: 300, max: 1200 }, MIN_CONVERSATION_W).sheet, false);
+  assert.deepEqual(detailFit(1200, 380, DETAIL_PANE, MIN_CONVERSATION_W), { sheet: false, shown: 380 }, 'list hidden');
+  assert.equal(detailFit(840, 380, DETAIL_PANE, MIN_CONVERSATION_W).sheet, true, 'no room for 600 + 300: a sheet, never an overlap');
+  // 1440 with the list open (row 1080): ≥ 480 for Changes.
+  assert.ok(detailFit(1080, SURFACE_W, { default: SURFACE_W, min: 300, max: 1200 }, MIN_CONVERSATION_W).shown >= 480);
   // "Wide": everything but the conversation's floor.
-  assert.equal(detailFit(1116, 380, DETAIL_PANE, MIN_CONVERSATION_W, true).shown, 1116 - 640);
+  assert.equal(detailFit(1080, 380, DETAIL_PANE, MIN_CONVERSATION_W, true).shown, 1080 - 600);
 });

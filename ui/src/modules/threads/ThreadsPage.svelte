@@ -398,7 +398,14 @@
 
   // Phone (design.md §2): `#/threads` is the list; a thread, the new-thread
   // composer or Pull requests is pushed over it, with "‹ Threads" in the header.
-  const phoneOpen = $derived(!!router.parts[1] || threads.newDraftMode || !!threadsChrome.stageView);
+  // The new-thread stage counts as pushed only when the person started it from
+  // a list that has threads (the stage shown because there are none is the page).
+  let draftPushed = $state(false);
+  $effect(() => {
+    const on = threads.newDraftMode;
+    untrack(() => (draftPushed = on && (draftPushed || liveThreadIds.length > 0)));
+  });
+  const phoneOpen = $derived(!!router.parts[1] || draftPushed || !!threadsChrome.stageView);
   function backToList(): void {
     threadsChrome.stageView = null;
     if (threads.newDraftMode && liveThreadIds.length > 0) threads.newDraftMode = false;

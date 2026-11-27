@@ -141,7 +141,7 @@
   const listPage = $derived(phoneRow ? pageNav.listPage : null);
   const moreItems = $derived(listPage ? listPage.menu : more);
   // Desktop / tablet: a hidden list pane's "Show <name>" (design.md §7.3).
-  const showPane = $derived(pageTop && !viewport.isPhone ? pageNav.show : null);
+  const showPane = $derived(pageTop && !viewport.navDrawer ? pageNav.show : null);
   // A pop-out window's traffic lights live in its own title strip (shell).
   // In a side-by-side split they sit over whichever pane leads: the main
   // pane's header when the side pane trails, the side pane's when it leads.
@@ -743,10 +743,13 @@
     overflow-x: auto;
     scrollbar-width: none;
   }
-  .ph-row :global(.ph-phone-btn) {
+  /* 44 px targets, never taller than the row (38 px on a phone on its side). */
+  .ph-row :global(:is(.ph-phone-btn, .phone-back)) {
     flex: none;
+    block-size: min(44px, var(--ph-h));
+  }
+  .ph-row :global(.ph-phone-btn) {
     inline-size: 38px;
-    block-size: 44px;
   }
   .ph-phone-btn.on {
     color: var(--accent-text);
