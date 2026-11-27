@@ -396,7 +396,7 @@ z-index literals outside the in-pane range (−1…10).
 |---|---|---|
 | In-pane stacking | literal 1–10, `--z-sticky` (10) | sticky headers, resize handles, the right-panel edge (5); in the agents grid: pane chrome ≤ 5, split/tile dividers 8, corner grip and pane close 9, the drag-drop veil 10 |
 | Floating bar | `--z-floating-bar` (40) | `FloatingBar` over the content column (below every sheet and menu) |
-| Mobile chrome | `--z-mobile-nav` (60), `--z-drawer` (90, +1) | `BottomNav`, `Drawer` (90–91; also the phone "More" overflow and `DockedDrawer` sheets) |
+| Mobile chrome | `--z-mobile-nav` (60), `--z-drawer` (90, +1) | `BottomNav`, `Drawer` (90–91; the phone's one Navigator drawer, the Side panel sheet and `DetailPane` sheets) |
 | Command surfaces | `--z-command` (150) | `Palette`, `ShortcutsOverlay` |
 | Sheets | `--z-modal` (200) | `Modal` (and so `ConfirmDialog`) |
 | Toasts | `--z-toast` (300) | `Toasts` |
