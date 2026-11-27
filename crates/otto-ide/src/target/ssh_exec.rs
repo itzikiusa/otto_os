@@ -817,6 +817,7 @@ mod tests {
         assert!(start.elapsed() < Duration::from_secs(3));
     }
 
+    #[allow(clippy::disallowed_methods)]
     #[tokio::test]
     async fn stdio_eof_kill_fifo_lives_in_a_private_mktemp_dir() {
         use tokio::io::AsyncWriteExt;
