@@ -1,7 +1,11 @@
 <script module lang="ts">
+  import type { Component } from 'svelte';
   import { api } from '../../../lib/api/client';
+  import type { RuntimeThreadViewProps } from '../../../lib/runtimeThreadPort';
   // The two retention settings, read once (root only; anyone else sees the defaults).
   let retention: Promise<{ success: number; failed: number }> | null = null;
+  let cachedView: Component<RuntimeThreadViewProps> | null = null;
+  const EMPTY_IDS: readonly string[] = [];
   const hours = (v: unknown, d: number): number => (Number.isFinite(Number(v)) && v !== null && v !== '' ? Number(v) : d);
   function retentionHours(): Promise<{ success: number; failed: number }> {
     retention ??= api.bg.get<Record<string, unknown>>('/settings').then(
@@ -19,12 +23,11 @@
   // thread, or the embed reports it gone or forbidden — the digest the run
   // kept. A step run on the PTY runner (an older run) lists its sessions,
   // which open in Agents.
-  import type { Component } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
   import { readRunContext } from '../../../lib/api/workflows';
   import { loadErrorText } from '../../../lib/loadError';
-  import { loadRuntimeThreadView, type RuntimeThreadViewProps } from '../../../lib/runtimeThreadPort';
+  import { loadRuntimeThreadView } from '../../../lib/runtimeThreadPort';
   import { ws } from '../../../lib/stores/workspace.svelte';
   import type { DigestItem, StepThread, TranscriptDigest } from '../../../lib/api/types';
   import { retentionNote } from './runWords';
@@ -42,10 +45,16 @@
     attempt: number;
     /** Switch to another thread (a sub-thread card or Back to parent) in the same pane. */
     onselectthread?: (threadId: string) => void;
+    /** Notifies the host pane when the live thread is gone or forbidden so it can load the digest and unlock scroll. */
+    onunavailable?: (reason: 'deleted' | 'forbidden') => void;
   }
-  let { thread = null, sessions = [], digest = null, workspaceId, runId, nodeId, attempt, onselectthread }: Props = $props();
+  let { thread = null, sessions = EMPTY_IDS, digest = null, workspaceId, runId, nodeId, attempt, onselectthread, onunavailable }: Props = $props();
 
   let gone = $state<'deleted' | 'forbidden' | null>(null);
+  function handleUnavailable(reason: 'deleted' | 'forbidden'): void {
+    gone = reason;
+    onunavailable?.(reason);
+  }
   // Another step (or attempt) in the same pane starts over: the last one's
   // "removed" state and digest never show for it. Derived primitives keep a
   // re-created `thread` or parent selection object from wiping local state.
@@ -67,20 +76,26 @@
   const live = $derived(thread?.runner === 'threads' && thread.available !== false && !gone);
 
   // An older step's terminal sessions: only the ones that still exist open.
-  const ptyIds = $derived(sessions.length ? [...sessions] : thread?.runner === 'pty' ? [thread.thread_id] : []);
+  const ptyIds = $derived(sessions.length ? [...sessions] : thread?.runner === 'pty' ? [thread.thread_id] : EMPTY_IDS);
   let kept = $state<Record<string, boolean>>({});
   $effect(() => {
     for (const id of ptyIds) void ws.ensureSession(id).then((s) => (kept[id] = !!s));
   });
   const pty = $derived(keptSessions(ptyIds, kept));
 
-  let View = $state<Component<RuntimeThreadViewProps> | null>(null);
+  let View = $state<Component<RuntimeThreadViewProps> | null>(cachedView);
   let viewError = $state<string | null>(null);
   let viewRetry = $state(0);
   $effect(() => {
     void viewRetry;
     if (!live || View) return;
-    loadRuntimeThreadView().then((m) => (View = m.default), (e) => (viewError = loadErrorText(e)));
+    loadRuntimeThreadView().then(
+      (m) => {
+        cachedView = m.default;
+        View = m.default;
+      },
+      (e) => (viewError = loadErrorText(e)),
+    );
   });
 
   // The digest's timeline, kept beside the run's files.
@@ -119,9 +134,8 @@
       {workspaceId}
       readOnly
       showHeader
-      expandWork
       {onselectthread}
-      onunavailable={(reason) => (gone = reason)}
+      onunavailable={handleUnavailable}
     />
   </div>
   <p class="note"><Icon name="lock" size={12} />{note}</p>
@@ -168,13 +182,13 @@
     display: flex;
     flex-direction: column;
     flex: 1;
-    min-block-size: 420px;
-    block-size: 100%;
+    min-block-size: 0;
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     overflow: hidden;
   }
   .note {
+    flex: none;
     display: flex;
     align-items: center;
     gap: var(--sp-3);

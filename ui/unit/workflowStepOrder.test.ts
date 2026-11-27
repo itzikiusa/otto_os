@@ -3,7 +3,7 @@
 // selection — runs/stepOrder.ts.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { childCrumb, childNoun, childTrail, defaultSelection, doneFold, entrySteps, loopChildren, mergeStepChildren, orderChildren, orderChildTree, orderSteps, resolveThreadSelection, RESULT, runtimeChildStatus, settledNodes, stepNumber, timeBar, topoOrder } from '../src/modules/workflows/runs/stepOrder.ts';
+import { childCrumb, childNoun, childTrail, defaultSelection, doneFold, entrySteps, loopChildren, mergeStepChildren, orderChildren, orderChildTree, orderSteps, resolveThreadSelection, RESULT, runtimeChildStatus, sameStepChildren, settledNodes, stepNumber, timeBar, topoOrder } from '../src/modules/workflows/runs/stepOrder.ts';
 import { paneTabs } from '../src/modules/workflows/runs/stepTabs.ts';
 import { at, fanoutNodes, node, PR_GRAPH, reviewers, T0 } from './workflowRunFixtures.ts';
 import { stepWord } from '../src/modules/workflows/runs/runWords.ts';
@@ -346,4 +346,26 @@ test('goal-loop helper keeps its iteration row as parent and Open parent selects
   assert.equal(paneTabs({ goal: true, child: !!target, kind: 'loop' })[0], 'conversation');
   // Ordinary agent step whose root thread is NOT a child row still resolves back to `null` (the step root).
   assert.equal(resolveThreadSelection([], 'th-step', 'th-step'), null);
+});
+
+test('orderSteps without now keeps running steps clock-independent and timeBar resolves them from clock.end', () => {
+  const nodes = [node('n3', 'success', 0, 1000), node('n4', 'running', 1, null), node('n5', 'running', 2, null)];
+  const entries = orderSteps(nodes, PR_GRAPH);
+  assert.deepEqual(shape(entries), ['n3', ['n4', 'n5']]);
+  const running = entries.flatMap(entrySteps).find((s) => s.id === 'n4')!;
+  assert.equal(running.end, Number.POSITIVE_INFINITY);
+  const clock = { start: T0, end: T0 + 10 * 60_000 };
+  const bar = timeBar(running, clock)!;
+  assert.ok(bar.at > 0 && bar.w > 0 && bar.at + bar.w <= 100 + 1e-9, JSON.stringify(bar));
+});
+
+test('sameStepChildren matches structurally identical child arrays and detects status or nesting changes', () => {
+  const base = [
+    { id: 'c1', label: 'Helper', provider: 'codex', status: 'running' as const, thread_id: 'th-1', depth: 0, parent_child_id: null },
+  ];
+  const clone = base.map((c) => ({ ...c }));
+  assert.equal(sameStepChildren(base, clone), true);
+  assert.equal(sameStepChildren(base, [{ ...base[0], status: 'success' as const }]), false);
+  assert.equal(sameStepChildren(base, [{ ...base[0], depth: 1 }]), false);
+  assert.equal(sameStepChildren(base, []), false);
 });

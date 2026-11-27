@@ -57,6 +57,7 @@
   }
   let { run, sync, workspaceId, runState, step, childId, stepNo = null, stepCount, now, tab: asked = null, criteria = [], cardNode = null, maximized = false, onmaximize, onselectchild }: Props = $props();
 
+  const EMPTY_SESSIONS: readonly string[] = [];
   const node = $derived(step?.node ?? null);
   const stepChildren = $derived((node?.children ?? []) as StepChild[]);
   const child = $derived<StepChild | null>(stepChildren.find((c) => c.id === childId || (!!c.thread_id && c.thread_id === childId)) ?? null);
@@ -68,6 +69,9 @@
   }
   const tabs = $derived(paneTabs({ result: !step, goal: !!run.overview?.goal, child: !!child, kind: step?.kind, node: node ?? undefined }));
   let picked = $state<PaneTab | null>(null);
+  function pickTab(id: PaneTab): void {
+    picked = id;
+  }
   // Another step, child or asked-for tab starts over; a live update of the
   // same step (a new `step` object, a new `tabs` array) keeps the tab the
   // person picked. An asked tab the step does not offer yet falls back to the
@@ -83,6 +87,8 @@
   const tab = $derived(picked && tabs.includes(picked) ? picked : tabs[0]);
 
   // The full node (output, logs, digest): on demand, at most once a second.
+  // A live conversation reads directly from Threads (`runtimeViews`), so skip
+  // node-detail fetches unless the step errored or fell back to its digest.
   let detail = $state<NodeRunState | null>(null);
   let detailError = $state<string | null>(null);
   let retry = $state(0);
@@ -91,7 +97,31 @@
   const nodeAttempts = $derived(node?.attempts ?? 0);
   const nodeStartedAt = $derived(node?.started_at ?? null);
   const detailVersion = $derived(node?.detail_version);
-  const needsBody = $derived(!!node && !child && (['output', 'log', 'summary', 'preview', 'conversation'].includes(tab) || (tab === 'criteria' && step?.kind === 'check')));
+
+  // Tracks when the embedded thread reports itself gone/forbidden so the pane
+  // releases its `.conv` viewport lock (allowing digest scroll) and fetches the
+  // node detail body on demand for the kept digest.
+  let convGone = $state(false);
+  const activeThreadId = $derived(child ? (child.thread_id ?? null) : (node?.thread?.thread_id ?? null));
+  $effect(() => {
+    void activeThreadId;
+    void nodeId;
+    void nodeAttempts;
+    void tab;
+    convGone = false;
+  });
+  function onConversationUnavailable(): void {
+    convGone = true;
+  }
+
+  const liveConversation = $derived(tab === 'conversation' && node?.thread?.runner === 'threads' && node.thread.available !== false && !convGone);
+  const needsBody = $derived(
+    !!node &&
+      !child &&
+      (['output', 'log', 'summary', 'preview'].includes(tab) ||
+        (tab === 'conversation' && (!liveConversation || node.status === 'error')) ||
+        (tab === 'criteria' && step?.kind === 'check')),
+  );
   $effect(() => {
     const id = nodeId;
     const att = nodeAttempts;
@@ -147,10 +177,16 @@
   const segs = $derived(!child && node?.phases?.length ? phaseSegments(node.phases, node.status === 'running' ? now : Date.parse(node.started_at ?? '') + (node.duration_ms ?? 0)) : []);
   const segTotal = $derived(Math.max(1, segs.reduce((s, x) => s + x.ms, 0)));
   const summarizer = $derived(node?.children?.find((c) => /^summar/i.test(c.label) || c.id === 'summarizer') ?? null);
+  const summarizerThread = $derived<StepThread | null>(
+    summarizer?.thread_id
+      ? { thread_id: summarizer.thread_id, runner: 'threads', provider: summarizer.provider, turns: 0, usage: {} as StepThread['usage'] }
+      : null,
+  );
   /** The conversation tab mounts Threads' own header (provider · model · tokens), so don't repeat the model chip above it. */
   const showingThread = $derived(
-    (tab === 'conversation' && thread?.runner === 'threads' && thread.available !== false) ||
-    (tab === 'summarizer' && !!summarizer?.thread_id),
+    !convGone &&
+      ((tab === 'conversation' && thread?.runner === 'threads' && thread.available !== false) ||
+        (tab === 'summarizer' && !!summarizer?.thread_id)),
   );
   const output = $derived(body?.output);
   const reviewOut = $derived((output ?? {}) as { score_text?: string; outcome?: string; blocking?: unknown[]; advisory?: unknown[]; findings?: unknown[] });
@@ -160,6 +196,9 @@
   $effect(() => runReviews.watch(reviewKey ? reviewKey.split(',') : []));
   const agent = $derived(child ? reviews.flatMap((id) => runReviews.reviews[id]?.agents ?? []).find((a) => a.name === child.id || a.name === child.label || (!!child.thread_id && a.session_id === child.thread_id)) ?? null : null);
   const findings = $derived(agent?.findings ?? []);
+  const tabItems = $derived(
+    tabs.map((id) => ({ id, label: TAB_LABEL[id], testid: `wf-step-tab-${id}`, count: id === 'findings' && findings.length ? findings.length : undefined })),
+  );
   /** The summary came from the deterministic fallback, not a verified summarizer. */
   const fallback = $derived(reviews.some((id) => runReviews.reviews[id]?.agents.some((a) => a.fallback)));
   const repoOf = (out: unknown): string | null => {
@@ -257,16 +296,16 @@
   </header>
 
   {#if tabs.length > 1}
-    <Tabs label="Step details" tabs={tabs.map((id) => ({ id, label: TAB_LABEL[id], testid: `wf-step-tab-${id}`, count: id === 'findings' && findings.length ? findings.length : undefined }))} value={tab} onchange={(id) => (picked = id)} idBase="wf-step" />
+    <Tabs label="Step details" tabs={tabItems} value={tab} onchange={pickTab} idBase="wf-step" />
   {/if}
 
-  <div class="body" class:conv={showingThread} role="tabpanel" id="wf-step-panel-{tab}" aria-labelledby="wf-step-tab-{tab}">
+  <div class="body" class:conv={showingThread} data-conv-thread={showingThread ? '1' : undefined} role="tabpanel" id="wf-step-panel-{tab}" aria-labelledby="wf-step-tab-{tab}">
     {#if tab === 'conversation'}
       <!-- A reviewer keeps no digest file of its own: no nodeId, so it never reads the step's. -->
-      <StepConversation {thread} sessions={child ? [] : (node?.sessions ?? [])} digest={child ? null : (body?.thread?.digest ?? null)} {workspaceId} runId={run.id} nodeId={child ? '' : (node?.node_id ?? '')} attempt={node?.attempts ?? 1} onselectthread={onselectchild ? selectThread : undefined} />
+      <StepConversation {thread} sessions={child ? EMPTY_SESSIONS : (node?.sessions ?? EMPTY_SESSIONS)} digest={child ? null : (body?.thread?.digest ?? null)} {workspaceId} runId={run.id} nodeId={child ? '' : (node?.node_id ?? '')} attempt={node?.attempts ?? 1} onselectthread={onselectchild ? selectThread : undefined} onunavailable={onConversationUnavailable} />
     {:else if tab === 'summarizer'}
-      {#if summarizer?.thread_id}
-        <StepConversation thread={{ thread_id: summarizer.thread_id, runner: 'threads', provider: summarizer.provider, turns: 0, usage: {} as StepThread['usage'] }} {workspaceId} runId={run.id} nodeId="" attempt={node?.attempts ?? 1} onselectthread={onselectchild ? selectThread : undefined} />
+      {#if summarizerThread}
+        <StepConversation thread={summarizerThread} {workspaceId} runId={run.id} nodeId="" attempt={node?.attempts ?? 1} onselectthread={onselectchild ? selectThread : undefined} onunavailable={onConversationUnavailable} />
       {:else}
         <p class="none">The summarizer starts after the reviewers.</p>
       {/if}
@@ -468,6 +507,8 @@
     display: flex;
     flex-direction: column;
     flex: 1;
+    min-block-size: 0;
+    overflow: hidden;
   }
   .none,
   .dim {

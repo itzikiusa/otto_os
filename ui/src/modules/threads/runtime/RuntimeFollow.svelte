@@ -69,6 +69,11 @@
     const el = scroller;
     if (!el) return;
     el.dataset.atBottom = untrack(() => (atBottom ? '1' : '0'));
+    // If the thread already had rows rendered on mount (cached/shared projection),
+    // start on the newest line right away instead of flashing at scrollTop = 0.
+    if (untrack(() => atBottom) && el.scrollHeight > el.clientHeight) {
+      el.scrollTop = el.scrollHeight;
+    }
     // The reader's input; a scroll within this window of it is theirs
     // (iOS momentum keeps scrolling after the finger lifts).
     let gestureAt = -Infinity;

@@ -20,7 +20,7 @@
   import { loadIdeRuntimeSessionPort, type RuntimeSessionPort } from '../../../lib/runtimeThreadPort';
   import { now as clockNow } from '../../../lib/stores/now.svelte';
   import { viewport } from '../../../lib/stores/viewport.svelte';
-  import type { Workflow, WorkflowGraph, WorkflowRun, WorkflowVersion } from '../../../lib/api/types';
+  import type { NodeRunState, Workflow, WorkflowGraph, WorkflowRun, WorkflowVersion } from '../../../lib/api/types';
   import { runDeepLink } from '../runRoute';
   import { RunSync } from '../runSync.svelte';
   import { graphCriteria } from '../goal/goalCheck';
@@ -29,7 +29,7 @@
   import StepPane from './StepPane.svelte';
   import { cancelQueued, pauseRun, rereview, resumeRun, retryStep, steerRun, stopRun } from './runActions';
   import { fallbackState, runTitle, runWord } from './runWords';
-  import { defaultSelection, entrySteps, loopChildren, mergeStepChildren, orderSteps, RESULT, settledNodes, stepNumber } from './stepOrder';
+  import { defaultSelection, entrySteps, loopChildren, mergeStepChildren, orderSteps, RESULT, sameStepChildren, settledNodes, stepNumber, type StepChild } from './stepOrder';
   import { markRunOpened } from './seenRuns';
   import { registry } from '../../../lib/commands.svelte';
   import { workflowsUi } from '../workflowsUiState.svelte';
@@ -173,21 +173,46 @@
 
   // A loop step's iterations are its child rows (from the run's checkpoints),
   // merged with every live/known agent-opened sub-thread in each step's group.
+  // Keep previous node/array references when children are structurally unchanged
+  // so streaming `last_active_at` updates don't churn the step pane.
   const rtSessions = $derived(rtPort ? Object.values(rtPort.runtimeThreads.byId) : []);
-  const nodes = $derived(
-    run
-      ? settledNodes(run.nodes, live).map((n) => {
-          const baseChildren =
-            !n.children?.length && run.checkpoints?.some((c) => c.loop_id === n.node_id)
-              ? loopChildren(run.checkpoints, n.node_id)
-              : (n.children ?? []);
-          const rootTid = n.thread?.runner === 'threads' ? n.thread.thread_id : null;
-          const merged = rootTid || baseChildren.some((c) => c.thread_id) ? mergeStepChildren(baseChildren, rootTid, rtSessions) : baseChildren;
-          return merged !== n.children ? { ...n, children: merged } : n;
-        })
-      : [],
-  );
-  const entries = $derived(run ? orderSteps(nodes, graph, now) : []);
+  let prevMerged = new Map<string, { base: NodeRunState; children: StepChild[]; node: NodeRunState }>();
+  let prevNodeList: NodeRunState[] = [];
+  const nodes = $derived.by(() => {
+    if (!run) {
+      prevMerged = new Map();
+      return (prevNodeList = []);
+    }
+    const next = new Map<string, { base: NodeRunState; children: StepChild[]; node: NodeRunState }>();
+    const out = settledNodes(run.nodes, live).map((n) => {
+      const baseChildren =
+        !n.children?.length && run.checkpoints?.some((c) => c.loop_id === n.node_id)
+          ? loopChildren(run.checkpoints, n.node_id)
+          : (n.children ?? []);
+      const rootTid = n.thread?.runner === 'threads' ? n.thread.thread_id : null;
+      const merged = rootTid || baseChildren.some((c) => c.thread_id)
+        ? mergeStepChildren(baseChildren, rootTid, rtSessions)
+        : (baseChildren as StepChild[]);
+      if (merged.length === 0 && !n.children?.length) {
+        next.set(n.node_id, { base: n, children: merged, node: n });
+        return n;
+      }
+      const prev = prevMerged.get(n.node_id);
+      if (prev && prev.base === n && sameStepChildren(prev.children, merged)) {
+        next.set(n.node_id, prev);
+        return prev.node;
+      }
+      const wrapped = merged !== n.children ? { ...n, children: merged } : n;
+      next.set(n.node_id, { base: n, children: merged, node: wrapped });
+      return wrapped;
+    });
+    prevMerged = next;
+    if (prevNodeList.length === out.length && prevNodeList.every((x, i) => x === out[i])) return prevNodeList;
+    return (prevNodeList = out);
+  });
+  // `orderSteps` does not depend on `now`, so 1s clock ticks don't rebuild
+  // entries/openStep or churn StepPane's props while reading a live conversation.
+  const entries = $derived(run ? orderSteps(nodes, graph) : []);
   const steps = $derived(entries.flatMap(entrySteps));
   const selected = $derived(nodeId ? { node: nodeId, child: childId } : defaultSelection(runState, entries, run?.overview?.failed_step?.node_id));
   const openStep = $derived(selected.node === RESULT ? null : (steps.find((s) => s.id === selected.node) ?? null));
@@ -201,6 +226,12 @@
   function select(node: string, child: string | null): void {
     askedTab = null;
     onselect(node, child);
+  }
+  function selectChild(cid: string | null): void {
+    if (openStep) select(openStep.id, cid);
+  }
+  function toggleMaximize(): void {
+    maximized = !maximized;
   }
   function openStepTab(node: string, tab?: string): void {
     onselect(node, null);
@@ -304,7 +335,7 @@
           {#if wide && maximized}
             <button type="button" class="btn small runback" onclick={() => (maximized = false)}><Icon name="chevronLeft" size={12} />Run</button>
           {/if}
-          <StepPane {run} {sync} {workspaceId} {runState} cardNode={pushed || (wide && maximized) || runState !== 'failed' ? null : failedNode} step={openStep} childId={selected.child} stepNo={openStep ? stepNumber(steps, openStep) : null} stepCount={steps.length} {now} tab={askedTab} {criteria} {maximized} onmaximize={wide ? () => (maximized = !maximized) : undefined} onselectchild={openStep ? (cid) => select(openStep.id, cid) : undefined} />
+          <StepPane {run} {sync} {workspaceId} {runState} cardNode={pushed || (wide && maximized) || runState !== 'failed' ? null : failedNode} step={openStep} childId={selected.child} stepNo={openStep ? stepNumber(steps, openStep) : null} stepCount={steps.length} {now} tab={askedTab} {criteria} {maximized} onmaximize={wide ? toggleMaximize : undefined} onselectchild={openStep ? selectChild : undefined} />
         </div>
       {/if}
     {/if}
@@ -338,6 +369,11 @@
   .pane-col {
     flex: 1;
     min-inline-size: 0;
+  }
+  /* When the open tab is a live Threads conversation, lock the outer column so
+     ONLY Threads' own `.rt-scroll` scrolls — no nested scroller fighting it. */
+  .pane-col:has(:global([data-conv-thread='1'])) {
+    overflow: hidden;
   }
   .runback {
     align-self: flex-start;

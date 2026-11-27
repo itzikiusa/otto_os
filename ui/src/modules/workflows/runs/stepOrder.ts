@@ -12,9 +12,10 @@ import type { ChildThread, ChildThreadStatus, NodeRunState, RunState, RuntimeSes
  *  that ran past the clock or a skewed start never leaves the track. */
 export function timeBar(s: StepItem, clock: { start: number; end: number }): { at: number; w: number } | null {
   if (s.start === null || s.end === null) return null;
+  const end = Number.isFinite(s.end) ? s.end : clock.end;
   const span = Math.max(1, clock.end - clock.start);
   const at = Math.min(99.4, Math.max(0, ((s.start - clock.start) / span) * 100));
-  return { at, w: Math.min(100 - at, Math.max(0.6, ((s.end - s.start) / span) * 100)) };
+  return { at, w: Math.min(100 - at, Math.max(0.6, ((end - s.start) / span) * 100)) };
 }
 
 /** The pseudo-rows the pane can open besides a step. */
@@ -95,8 +96,10 @@ export function settledNodes(nodes: readonly NodeRunState[], live: boolean): rea
   return nodes.map((n): NodeRunState => (n.status === 'running' ? { ...n, status: 'skipped', error_class: 'canceled', phase: undefined, wait: undefined, attention: undefined, activity: undefined } : n));
 }
 
-/** The run's steps as display entries (§4.2). */
-export function orderSteps(nodes: readonly NodeRunState[], graph: WorkflowGraph, now: number): StepEntry[] {
+/** The run's steps as display entries (§4.2). `now` defaults to Infinity so a
+ *  running step overlaps any later sibling without re-running on every 1s clock tick;
+ *  `timeBar` resolves non-finite ends against the run's live clock. */
+export function orderSteps(nodes: readonly NodeRunState[], graph: WorkflowGraph, now = Number.POSITIVE_INFINITY): StepEntry[] {
   const gnodes = new Map(graph.nodes.map((n) => [n.id, n]));
   const topo = topoOrder(graph);
   const rank = (id: string) => (topo.indexOf(id) + 1 || topo.length + 1);
@@ -380,6 +383,35 @@ export function mergeStepChildren(
     c.depth = depth;
   }
   return out;
+}
+
+/** Structural equality for merged step children so unrelated runtime-session
+ *  ticks (e.g. `last_active_at` on the step's own thread) don't churn node
+ *  references and re-render the step pane. */
+export function sameStepChildren(a: readonly StepChild[], b: readonly StepChild[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i];
+    const y = b[i];
+    if (
+      x.id !== y.id ||
+      x.label !== y.label ||
+      x.provider !== y.provider ||
+      x.status !== y.status ||
+      x.note !== y.note ||
+      x.thread_id !== y.thread_id ||
+      x.model !== y.model ||
+      x.effort !== y.effort ||
+      x.started_at !== y.started_at ||
+      x.ended_at !== y.ended_at ||
+      x.depth !== y.depth ||
+      x.parent_child_id !== y.parent_child_id
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 export interface NestedChildEntry {

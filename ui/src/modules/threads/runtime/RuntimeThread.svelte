@@ -98,8 +98,6 @@
     compact?: boolean;
     /** No composer: another feature drives this thread (its cards stay answerable). */
     readOnly?: boolean;
-    /** Keep every work step unfolded (no "N earlier steps" / "Worked for …" collapse). */
-    expandWork?: boolean;
     accessModeOverride?: RuntimeAccessMode | null;
     onaccessmodechange?: (mode: RuntimeAccessMode) => void;
     fallbackCwd?: string | null;
@@ -117,7 +115,7 @@
   }
 
   let {
-    sessionId, focused, onswitch, onopenchild, agentChat, hostCommands, compact = false, readOnly = false, expandWork = false, accessModeOverride = null,
+    sessionId, focused, onswitch, onopenchild, agentChat, hostCommands, compact = false, readOnly = false, accessModeOverride = null,
     onaccessmodechange, fallbackCwd = null, hasExternalContext = false, transformOutgoingText,
     transformRestoredQueuedText, onExternalContextConsumed, onopenpath, formatAssistantText,
     assistantFooter, composerTopSlot, composerFootLeadSlot, testIds,
@@ -477,6 +475,7 @@
               {scroller}
               {streamEl}
               onreleasebottom={() => followRef?.releaseBottom()}
+              onprepended={() => { if (holdFrom !== null && visibleRows[0]) holdFrom = timelineRowKey(visibleRows[0]); }}
               bind:rowCap
             />
             <RuntimeTimelineRows
@@ -494,7 +493,6 @@
               onopendiff={hostCommands?.openDiff ? (path) => hostCommands.openDiff!(sessionId, path) : undefined}
               {formatAssistantText}
               {assistantFooter}
-              {expandWork}
             />
           {/if}
           <RuntimeTurnStatus
