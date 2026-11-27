@@ -913,4 +913,155 @@ printf '%s\n' '{"template-id":"nuclei-ran","matched-at":"'"$TARGET"'/nuclei","in
             "scheduled scan must never send active non-HEAD probes to the target"
         );
     }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn revoking_through_the_route_during_template_refresh_blocks_the_active_nuclei_probe() {
+        // RC5-006 / CONC-1 end to end: a human starts an active scan for the
+        // exact confirmed live target, then revokes it through DELETE
+        // /security/dast while the queued job is refreshing templates. The
+        // handler's probe-boundary consent check must stop Nuclei from
+        // spawning its probe: the scan fails with the consent error and the
+        // target sees no request.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        let (_tmp, ws, ctx, app, user) = setup_fixture().await;
+        let toolchains = ctx.data_dir().join("toolchains");
+        seed_stub_scanners(&toolchains);
+        let nuclei_dir = toolchains.join("security-nuclei");
+        let templates = nuclei_dir.join("templates");
+        let prep_started = templates.join("prep-started");
+        let prep_release = templates.join("prep-release");
+        // A stale template marker makes the job refresh (-ut) first; the stub
+        // holds the refresh open until the test has revoked consent.
+        std::fs::remove_file(nuclei_dir.join("templates.json")).unwrap();
+        std::fs::write(
+            nuclei_dir.join("releases/3.11.1/nuclei"),
+            format!(
+                r#"#!/bin/sh
+case " $* " in *" -ut "*)
+  touch '{started}'
+  i=0
+  while [ ! -f '{release}' ] && [ "$i" -lt 500 ]; do sleep 0.02; i=$((i+1)); done
+  exit 0 ;;
+esac
+TARGET=""
+PROXY=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -u) TARGET="$2"; shift 2 ;;
+    -proxy) PROXY="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf 'GET %s HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n' "$TARGET" | nc -w 2 127.0.0.1 "${{PROXY##*:}}" >/dev/null 2>&1 || true
+printf '%s\n' '{{"template-id":"nuclei-ran","matched-at":"'"$TARGET"'/nuclei","info":{{"name":"Nuclei Ran","severity":"low","description":"stub"}}}}'
+"#,
+                started = prep_started.display(),
+                release = prep_release.display(),
+            ),
+        )
+        .unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let server = {
+            let hits = hits.clone();
+            tokio::spawn(async move {
+                while let Ok((_stream, _)) = listener.accept().await {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                }
+            })
+        };
+
+        let url = format!("http://{addr}/app");
+        let (project_id, config_id, run_id) =
+            create_project_and_live_run(&app, &user, &ws, None, "Active Target", &url).await;
+        let dast_uri = format!("/ide/projects/{project_id}/security/dast");
+        let (status, body) = send_json(
+            &app,
+            &user,
+            Method::PUT,
+            &dast_uri,
+            Some(json!({
+                "run_config_id": config_id,
+                "url": url,
+                "allow_public": false,
+                "scheduled": false,
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "confirm failed: {body}");
+        let target: Target = serde_json::from_value(body).unwrap();
+
+        let (status, body) = send_json(
+            &app,
+            &user,
+            Method::POST,
+            &format!("{dast_uri}/run"),
+            Some(json!({
+                "active": true,
+                "run_config_id": target.run_config_id,
+                "url": target.url,
+                "confirmed_at": target.confirmed_at,
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "start failed: {body}");
+        let scan_id = body["id"].as_str().unwrap().to_string();
+
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while !prep_started.exists() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the queued active job never started its template refresh");
+        let (status, body) = send_json(&app, &user, Method::DELETE, &dast_uri, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "revoke failed: {body}");
+        std::fs::write(&prep_release, b"go").unwrap();
+
+        let detail = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let detail = ctx
+                    .ide()
+                    .security
+                    .detail(&ctx.pool(), &project_id, &scan_id)
+                    .await
+                    .unwrap();
+                if detail.scan.status != otto_security::ScanStatus::Queued
+                    && detail.scan.status != otto_security::ScanStatus::Running
+                {
+                    return detail;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("active scan did not finish within 15s");
+        let _ = ctx
+            .ide()
+            .environments
+            .stop_run_for_user(&user, &run_id)
+            .await;
+        server.abort();
+
+        assert_eq!(detail.scan.status, otto_security::ScanStatus::Failed);
+        assert!(
+            detail
+                .scan
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("Confirm this URL")),
+            "the scan must stop at the consent check, got: {:?}",
+            detail.scan.error
+        );
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "a revoked target must receive no active probe"
+        );
+    }
 }
