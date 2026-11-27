@@ -182,6 +182,7 @@ function loadThreads() {
     '../../../lib/stores/uiControl.svelte': { uiControl: { addSource: () => {} } },
     '../threadsStore.svelte': { threads: { focusedSessionId: null } },
     '../../../lib/stores/runtimeDrafts.svelte': { runtimeDrafts: { forget: () => () => {} } },
+    './childThreads': { inWatchedFamily: ct.inWatchedFamily, isEngineThread: ct.isEngineThread },
     '../../../lib/providers': { isRuntimeProvider: () => true, RUNTIME_PROVIDERS: ['codex'], sessionProviderSlug: (r: { provider: string }) => r.provider },
   });
   return { runtimeThreads, asThreadSession, turnOutcomeOf, keepOutcome, noted, synced };

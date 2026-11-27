@@ -121,3 +121,26 @@ test('the sidebar nests children under their parent, folds them, and marks orpha
   assert.deepEqual(folded.map((r) => r.session.id), ['orphan', 'lead']);
   assert.deepEqual(folded[1].kids, ['kid1', 'kid2'], 'a folded parent still counts its children');
 });
+
+test('inWatchedFamily retains watched roots, direct children, and multi-hop descendants on reload', () => {
+  const root = row({ id: 'root', meta: { source: 'workflow' } });
+  const kid = row({ id: 'kid', parent_id: 'root', meta: { source: 'workflow', child_of: { id: 'root', by: 'agent' } } });
+  const grand = row({ id: 'grand', meta: { source: 'workflow', child_of: { id: 'kid', by: 'agent' } } });
+  const unrelated = row({ id: 'other', parent_id: 'elsewhere', meta: { source: 'workflow' } });
+  const cycleA = row({ id: 'cyc-a', meta: { child_of: { id: 'cyc-b', by: 'agent' } } });
+  const cycleB = row({ id: 'cyc-b', meta: { child_of: { id: 'cyc-a', by: 'agent' } } });
+  const byId = { root, kid, grand, other: unrelated, 'cyc-a': cycleA, 'cyc-b': cycleB };
+  const watched = new Set(['root']);
+
+  assert.equal(ct.inWatchedFamily(root, byId, watched), true);
+  assert.equal(ct.inWatchedFamily(kid, byId, watched), true);
+  assert.equal(ct.inWatchedFamily(grand, byId, watched), true);
+  assert.equal(ct.inWatchedFamily(unrelated, byId, watched), false);
+  assert.equal(ct.inWatchedFamily(cycleA, byId, watched), false, 'cycles terminate safely');
+  assert.equal(ct.inWatchedFamily(root, byId, new Set()), false);
+  assert.equal(ct.isEngineThread({ source: 'workflow' }), true);
+  assert.equal(ct.isEngineThread({ source: 'review' }), true);
+  assert.equal(ct.isEngineThread({ source: 'review_summarizer' }), true);
+  assert.equal(ct.isEngineThread({ source: 'pr' }), false);
+  assert.equal(ct.isEngineThread(null), false);
+});

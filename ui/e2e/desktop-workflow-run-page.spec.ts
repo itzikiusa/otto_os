@@ -125,7 +125,7 @@ test('a failed step under another card says its failure in the pane (CR1-047)', 
   await expect(stepPane(page).getByTestId('wf-step-error')).toContainText('API Error: 500');
 });
 
-test('a live step thread offers no agent restart, shows the Threads composer + notice, and opens in Threads (CR2-009)', async ({ page }) => {
+test('a live step thread is read-only and offers neither an agent restart nor Open in Threads (CR2-009)', async ({ page }) => {
   const wf = await createWorkflow(api, 'E2E Live step thread', chain(agentStep('slow', 'Slow step', ['sleep 60000'])));
   const run = await startRun(api, wf);
   const live = await waitRun(api, run, (r) => !!r.nodes.find((n) => n.node_id === 'slow')?.thread?.thread_id);
@@ -137,17 +137,14 @@ test('a live step thread offers no agent restart, shows the Threads composer + n
   await openRun(page, wf, run, 'slow');
   const conv = page.getByTestId('wf-step-conversation');
   await expect(conv.getByTestId('embedded-thread-header')).toBeVisible({ timeout: 20_000 });
-  await expect(conv.getByTestId('wf-step-live-note')).toContainText('This conversation belongs to the run. What you send is added to this step.');
-  await expect(conv.getByTestId('runtime-composer')).toBeVisible();
+  await expect(conv.getByTestId('runtime-composer')).toHaveCount(0);
+  await expect(conv.getByTestId('embedded-thread-open')).toHaveCount(0);
   await conv.getByTestId('runtime-linked').click({ timeout: 20_000 });
   const list = page.getByRole('list', { name: 'Subagents' });
   await expect(list).toContainText('Step subagent');
+  await expect(list.getByRole('button', { name: /in Threads/i })).toHaveCount(0);
   await page.keyboard.press('Escape');
   await expect(conv.getByTestId('runtime-mcp-changed')).toHaveCount(0);
-  // Open in Threads routes directly to the workflow thread even though it is not in Threads' lists.
-  await conv.getByTestId('embedded-thread-open').click();
-  await expect(page).toHaveURL(new RegExp(`#/threads/${thread}$`), { timeout: 15_000 });
-  await expect(page.getByTestId(`runtime-thread-${thread}`)).toBeVisible({ timeout: 20_000 });
 });
 
 test('full timeline without a fold, live agent-opened sub-thread row, and opening its card in the pane', async ({ page }) => {
@@ -158,15 +155,20 @@ test('full timeline without a fold, live agent-opened sub-thread row, and openin
 
   const conv = page.getByTestId('wf-step-conversation');
   await expect(conv).toBeVisible({ timeout: 20_000 });
+  // Workflow conversations stay strictly read-only with no Open in Threads button.
+  await expect(conv.getByTestId('runtime-composer')).toHaveCount(0);
+  await expect(conv.getByTestId('embedded-thread-open')).toHaveCount(0);
   // The sub-thread appears as a live row under the step while both are still running.
   const childRow = page.getByTestId('wf-step-child').first();
   await expect(childRow).toBeVisible({ timeout: 25_000 });
   await expect(childRow).toHaveAttribute('data-status', 'running');
   await expect(page.getByTestId('wf-run-page')).toHaveAttribute('data-state', 'running');
 
-  // Full timeline stays unfolded (no "N earlier steps" or "Worked for …" folds).
+  // Full timeline stays unfolded (no "N earlier steps", "Worked for …", parallel groups, or subagent group toggles).
   await expect(conv.getByTestId('runtime-earlier-steps')).toHaveCount(0);
   await expect(conv.locator('[data-testid^="runtime-fold-"]')).toHaveCount(0);
+  await expect(conv.locator('[data-testid^="runtime-group-"]')).toHaveCount(0);
+  await expect(conv.getByTestId('runtime-child-group')).toHaveCount(0);
 
   // Clicking the sub-thread card inside the conversation opens it in the same pane and selects its row.
   const childCardOpen = conv.locator('[data-testid^="runtime-child-"] [data-testid="runtime-item-open"]').first();
