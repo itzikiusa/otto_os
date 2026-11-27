@@ -497,20 +497,19 @@ test('review: local-review panel renders and fits', async ({ page }) => {
 });
 
 // ────────────────────────────────────────────────────────────────────────────
-// CONFLICT RESOLVER — a repo left mid-merge (seedConflictRepo). On mobile the
-// 3-pane resolver collapses to a single column, the conflicted-files strip is a
-// collapsible accordion, the hunk renders STACKED (not side-by-side), and the
-// long conflicting lines wrap so the code stays reachable.
+// CONFLICT RESOLVER — a repo left mid-merge (seedConflictRepo). It is a list /
+// detail page (the "Conflicts" list pane): on a phone the list is the page and
+// a file is pushed ("‹ Conflicts"); a narrow conflict card stacks A over B
+// (container query), and the long conflicting lines wrap so the code stays
+// reachable.
 // ────────────────────────────────────────────────────────────────────────────
 
-/** The conflict hunk's own code cells (stacked ours/theirs, base, editor) must
- *  all be reachable within the viewport — i.e. long lines wrap, not clip. */
+/** The conflict hunk's own code cells (picked lines, base, editor, context)
+ *  must all be reachable within the viewport — i.e. long lines wrap, not clip. */
 async function expectConflictCodeReachable(page: Page): Promise<void> {
   const m = await page.evaluate(() => {
     const cells = Array.from(
-      document.querySelectorAll(
-        '.resolver .stack-code, .resolver .base-code, .resolver .split-table .code, .resolver .edit-editor, .resolver .context',
-      ),
+      document.querySelectorAll('.resolver .pick-code, .resolver .base-code, .resolver .edit-editor, .resolver .context'),
     ) as HTMLElement[];
     let maxRight = 0;
     let count = 0;
@@ -540,32 +539,46 @@ async function openResolver(page: Page): Promise<void> {
   await expect(page.locator('.resolver')).toBeVisible({ timeout: 15_000 });
 }
 
-test('conflict: resolver renders, stacks to one column, and fits', async ({ page }) => {
-  await openResolver(page);
-  await expect(page.locator('.resolver.mobile')).toBeVisible();
-  // The body stacks vertically on mobile (no side-by-side panes).
-  const dir = await page.locator('.resolver .resolver-body').evaluate(
-    (el) => getComputedStyle(el).flexDirection,
-  );
-  expect(dir, 'resolver must stack to a single column on mobile').toBe('column');
-  // The conflicted file is auto-selected; its pane + a stacked hunk render.
-  await expect(page.locator('.resolver .file-row').first()).toBeVisible({ timeout: 10_000 });
+/** The selected file's pane: beside the list on a tablet, pushed (one tap) on a phone. */
+async function openConflictFile(page: Page): Promise<void> {
+  const row = page.getByTestId('conflict-file').first();
+  await expect(row).toBeVisible({ timeout: 10_000 });
+  if (await page.locator('.resolver .file-detail').isHidden()) await row.tap();
   await expect(page.locator('.resolver .file-detail .pane').first()).toBeVisible({ timeout: 15_000 });
-  await expect(page.locator('.resolver .stack-sides').first()).toBeVisible({ timeout: 15_000 });
-  // Side-by-side table must NOT be used on mobile (it would overflow).
-  expect(await page.locator('.resolver .split-table').count()).toBe(0);
+}
+
+/** A conflict card narrower than 600 px stacks its sides (one grid column). */
+async function expectHunkLayout(page: Page): Promise<void> {
+  const sides = page.locator('.resolver .hunk .sides').first();
+  await expect(sides).toBeVisible({ timeout: 15_000 });
+  const { w, cols } = await sides.evaluate((el) => ({
+    w: (el.closest('.hunk') as HTMLElement).clientWidth,
+    cols: getComputedStyle(el).gridTemplateColumns.split(' ').length,
+  }));
+  expect(cols, `a ${w}px card shows ${w <= 600 ? 'one column' : 'two columns'}`).toBe(w <= 600 ? 1 : 2);
+}
+
+test('conflict: resolver renders, the card stacks when narrow, and fits', async ({ page }) => {
+  await openResolver(page);
+  await openConflictFile(page);
+  await expectHunkLayout(page);
   await expectFitsWidth(page);
   await expectConflictCodeReachable(page);
 });
 
-test('conflict: conflicted-files strip is a collapsible accordion', async ({ page }) => {
+test('conflict: on a phone the files list is the page and a file is pushed', async ({ page }, info) => {
+  test.skip(!isPhone(info), 'a tablet shows the list beside the file');
   await openResolver(page);
-  const head = page.locator('.resolver.mobile .mob-sec-head').first();
-  await expect(head).toBeVisible({ timeout: 10_000 });
-  // Files strip starts open; tapping the header collapses it.
-  await expect(page.locator('.resolver .files-panel')).toBeVisible();
-  await head.click();
-  await expect(page.locator('.resolver .files-panel.mob-collapsed')).toHaveCount(1);
+  const row = page.getByTestId('conflict-file').first();
+  await expect(row).toBeVisible({ timeout: 10_000 });
+  await expect(row).toContainText('Conflict');
+  await expect(page.locator('.resolver .file-detail')).toBeHidden();
+  await row.tap();
+  await expect(page.locator('.resolver .file-detail .pane')).toBeVisible({ timeout: 15_000 });
+  await expect(row).toBeHidden();
+  await page.getByRole('button', { name: 'Back to Conflicts' }).tap();
+  await expect(row).toBeVisible();
+  await expect(row.locator('[aria-current="true"]')).toBeVisible();
   await expectFitsWidth(page);
 });
 
@@ -616,9 +629,8 @@ test('320px: commit diff code is reachable + conflict resolver fits', async ({ p
 
   // Conflict resolver still stacks + fits at 320.
   await openResolver(page);
-  await expect(page.locator('.resolver.mobile')).toBeVisible();
-  await expect(page.locator('.resolver .stack-sides').first()).toBeVisible({ timeout: 15_000 });
-  await expect(page.locator('.resolver .split-table')).toHaveCount(0);
+  await openConflictFile(page);
+  await expectHunkLayout(page);
   await expectFitsWidth(page);
   await expectConflictCodeReachable(page);
 });

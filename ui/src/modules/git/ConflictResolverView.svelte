@@ -1,8 +1,11 @@
 <script lang="ts">
-  // Merge-conflict resolver. LEFT: the conflicted files with a resolved /
-  // unresolved indicator; RIGHT: the ConflictFilePane for the selected file.
-  // Footer: Abort merge (confirm) and Complete merge (enabled once every file
-  // is resolved). Leaving the view (abort/complete) is reported via `onleave`.
+  // Merge-conflict resolver: a list / detail page (ListDetail). The list pane
+  // "Conflicts" holds the conflicted files, each with its state as a word
+  // (Conflict / Resolved), and the r of n progress in its footer; the content
+  // is the ConflictFilePane of the selected file. On a phone the list is the
+  // page and a file is pushed ("‹ Conflicts"). Under both: Abort (confirm)
+  // and Complete (enabled once every file is resolved). Leaving the view
+  // (abort/complete) is reported via `onleave`.
   import { onDestroy } from 'svelte';
   import type { GitOpInProgress, MergeConflictStatus } from '../../lib/api/types';
   import { toastError } from '../../lib/toastError';
@@ -14,8 +17,12 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import Icon from '../../lib/components/Icon.svelte';
-  import Badge from '../../lib/components/Badge.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
+  import ListDetail from '../../lib/components/side/ListDetail.svelte';
+  import ListPane from '../../lib/components/side/ListPane.svelte';
+  import SideRow from '../../lib/components/side/SideRow.svelte';
   import ConflictFilePane from './ConflictFilePane.svelte';
+  import { gitPhoneMenu } from './gitPhoneMenu.svelte';
   import { canCompleteOperation } from './operationState';
 
   interface Props {
@@ -57,25 +64,15 @@
 
   let busy = $state<'' | 'abort' | 'complete'>('');
 
-  // ── Mobile (phone + tablet) ───────────────────────────────────────────────
-  // The desktop two-pane (files rail | detail) doesn't fit a narrow viewport,
-  // so ≤1024 stacks the conflicted-files list as a collapsible strip above the
-  // detail pane. Picking a file collapses the list so the resolver gets the
-  // screen.
-  let isMobile = $state(false);
-  $effect(() => {
-    const mq = window.matchMedia('(max-width: 1024px)');
-    const sync = () => (isMobile = mq.matches);
-    sync();
-    mq.addEventListener('change', sync);
-    return () => mq.removeEventListener('change', sync);
-  });
-  let secFilesOpen = $state(true);
+  // Phone: a picked file is pushed over the list (ListDetail ignores it elsewhere).
+  let phoneOpen = $state(false);
 
   function selectFile(f: string): void {
     selected = f;
-    if (isMobile) secFilesOpen = false;
+    phoneOpen = true;
   }
+  const baseName = (p: string): string => p.split('/').pop() ?? p;
+  const dirName = (p: string): string | undefined => (p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : undefined);
 
   // A failed merge-status read with no seed to fall back on: shown with Retry
   // instead of a neutral "No conflicted files." while the repo is mid-merge.
@@ -236,99 +233,46 @@
   }
 </script>
 
-<div class="resolver" class:mobile={isMobile}>
-  <header class="resolver-head">
-    <Icon name="merge" size={14} />
-    <span class="head-title">Resolve {opName ?? 'file'} conflicts</span>
-    {#if sourceLabel}
-      <span class="head-source">{opName === 'merge' ? 'merging' : opName === 'rebase' ? 'rebasing' : 'from'} <span class="mono"><Badge tone="accent" label={sourceLabel} /></span></span>
-    {:else if op === null}
-      <span class="head-source">from a stash pop or squash — resolutions are staged as you go</span>
-    {/if}
-    <span class="grow"></span>
-    {#if allFiles.length > 0}
-      <span class="head-count" class:done={allResolved}>
-        {resolved.size}/{allFiles.length} files resolved
-      </span>
-    {/if}
-  </header>
-
-  <div class="resolver-body">
-    {#if loading}
-      <div style="padding: 16px; flex: 1"><Skeleton rows={6} height={28} /></div>
-    {:else if loadError && allFiles.length === 0}
-      <!-- The seed is empty, so there is nothing to fall back on: the repo
-           may still be mid-merge, so this must not read as "nothing to do". -->
-      <div class="load-fail">
-        <LoadState what="the merge status" error={loadError} empty variant="page" onretry={() => reloadKey++} />
-      </div>
-    {:else}
-      {#if isMobile}
-        <!-- Mobile: collapsible files strip above the detail pane. -->
-        <button
-          class="mob-sec-head"
-          onclick={() => (secFilesOpen = !secFilesOpen)}
-          aria-expanded={secFilesOpen}
-        >
-          <Icon name={secFilesOpen ? 'chevronDown' : 'chevronRight'} size={13} />
-          <Icon name="merge" size={13} />
-          <span>Conflicted files</span>
-          <span class="grow"></span>
-          <span class="mob-sec-count">{resolved.size}/{allFiles.length}</span>
-        </button>
-      {/if}
-      <!-- LEFT: conflicted files -->
-      <aside class="files-panel" class:mob-collapsed={isMobile && !secFilesOpen}>
-        {#if !isMobile}
-          <div class="files-head">Conflicted files</div>
-        {/if}
-        {#if allFiles.length === 0}
-          <div class="dim files-empty">No conflicted files.</div>
-        {:else}
+<div class="resolver">
+  {#if loading}
+    <div style="padding: 16px; flex: 1"><Skeleton rows={6} height={28} /></div>
+  {:else if loadError && allFiles.length === 0}
+    <!-- The seed is empty, so there is nothing to fall back on: the repo
+         may still be mid-merge, so this must not read as "nothing to do". -->
+    <div class="load-fail">
+      <LoadState what="the merge status" error={loadError} empty variant="page" onretry={() => reloadKey++} />
+    </div>
+  {:else}
+    <ListDetail module="git" pane="conflicts" name="Conflicts" open={phoneOpen} onback={() => (phoneOpen = false)} empty={allFiles.length === 0}>
+      {#snippet list()}
+        <ListPane count={allFiles.length} menu={() => gitPhoneMenu.items()} testid="conflict-files">
           {#each allFiles as f (f)}
-            <button
-              class="file-row"
-              class:active={selected === f}
-              class:is-resolved={isResolved(f)}
-              onclick={() => selectFile(f)}
-              title={f}
-            >
-              <span class="file-status">
-                {#if isResolved(f)}
-                  <Icon name="check" size={12} />
-                {:else}
-                  <Icon name="dot" size={12} />
-                {/if}
-              </span>
-              <span class="mono file-name">{f}</span>
-            </button>
+            <SideRow icon="file" title={baseName(f)} meta={dirName(f)} tip={f} selected={selected === f} testid="conflict-file" onclick={() => selectFile(f)}>
+              {#snippet trailing()}
+                <span class="file-state" class:resolved={isResolved(f)}>{isResolved(f) ? 'Resolved' : 'Conflict'}</span>
+              {/snippet}
+            </SideRow>
           {/each}
-        {/if}
-      </aside>
-
-      {#if isMobile && selected}
-        <!-- Mobile: header for the detail pane that reopens the files strip. -->
-        <button
-          class="mob-sec-head mob-detail-head"
-          onclick={() => (secFilesOpen = true)}
-          aria-expanded="true"
-        >
-          <Icon name="file" size={13} />
-          <span class="mob-detail-title">{selected.split('/').pop()}</span>
-          <span class="grow"></span>
-          <span class="mob-back"><Icon name="chevronUp" size={12} /> Files</span>
-        </button>
-      {/if}
-
-      <!-- RIGHT: selected file -->
+          {#snippet footer()}
+            <span class="progress" class:done={allResolved}>{resolved.size} of {allFiles.length} resolved</span>
+            {#if sourceLabel}
+              <span class="ellipsis" title={sourceLabel}>· {opName === 'merge' ? 'merging' : opName === 'rebase' ? 'rebasing' : 'from'} <span class="mono">{sourceLabel}</span></span>
+            {:else if op === null}
+              <span class="ellipsis" title="From a stash pop or squash — resolutions are staged as you go">· from a stash pop</span>
+            {/if}
+          {/snippet}
+        </ListPane>
+      {/snippet}
       <div class="file-detail">
-        {#if selected && isResolved(selected)}
+        {#if allFiles.length === 0}
+          <EmptyState variant="page" icon="merge" title="No conflicted files" body="Nothing is left to resolve: finish or abort below." />
+        {:else if selected && isResolved(selected)}
           <!-- Re-opening a resolved file: the daemon no longer serves it as a
                conflict (409), so a load error with a Retry that always fails
                was all this pane could show. -->
-          <div class="detail-empty dim" use:announceShown={`${selected.split('/').pop()} is resolved.`}>
+          <div class="detail-empty dim" use:announceShown={`${baseName(selected)} is resolved.`}>
             <Icon name="check" size={14} />
-            <span>{selected.split('/').pop()} is resolved.</span>
+            <span>{baseName(selected)} is resolved.</span>
           </div>
         {:else if selected}
           {#key selected}
@@ -342,12 +286,12 @@
           {/key}
         {:else}
           <div class="detail-empty dim">
-            <span>{allFiles.length > 0 && allFiles.every(isResolved) ? 'All files resolved — continue the operation below.' : 'Select a file to resolve its conflicts.'}</span>
+            <span>{allFiles.every(isResolved) ? 'All files resolved — continue the operation below.' : 'Select a file to resolve its conflicts.'}</span>
           </div>
         {/if}
       </div>
-    {/if}
-  </div>
+    </ListDetail>
+  {/if}
 
   <footer class="resolver-foot">
     {#if op !== null}
@@ -372,112 +316,23 @@
     height: 100%;
     min-height: 0;
   }
-  .resolver-head {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 10px 14px;
-    border-bottom: 1px solid var(--border);
-    flex-shrink: 0;
-  }
-  .head-title {
-    font-size: var(--fs-m);
-    font-weight: 600;
-  }
-  .head-source {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-  }
-  .head-count {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    color: var(--text-dim);
-    padding: 2px 8px;
-    border-radius: 999px;
-    background: var(--surface-2);
-  }
-  .head-count.done {
-    color: var(--accent-text);
-    background: var(--accent-soft);
-  }
   .grow {
     flex: 1;
-  }
-
-  .resolver-body {
-    flex: 1;
-    min-height: 0;
-    display: flex;
-  }
-  .files-panel {
-    width: 240px;
-    flex-shrink: 0;
-    border-inline-end: 1px solid var(--border);
-    overflow-y: auto;
-    padding: 6px 0;
-  }
-  .files-head {
-    padding: 4px 12px;
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    color: var(--text-dim);
   }
   .load-fail {
     flex: 1;
     min-width: 0;
     overflow-y: auto;
   }
-  .files-empty {
-    padding: 6px 12px;
-    font-size: var(--fs-xs);
-  }
-  .file-row {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    width: 100%;
-    padding: 4px 12px;
-    border: none;
-    background: transparent;
-    color: var(--text-dim);
-    font-size: var(--fs-s);
-    cursor: pointer;
-    text-align: start;
-    transition: background var(--dur-fast), color var(--dur-fast);
-  }
-  .file-row:hover {
-    background: var(--hover);
-    color: var(--text);
-  }
-  .file-row.active {
-    background: var(--accent-soft);
-    color: var(--text);
-    box-shadow: inset 2px 0 0 0 var(--accent);
-  }
-  /* Mirror the active rail to the reading-start edge in RTL. */
-  :global([dir='rtl']) .file-row.active {
-    box-shadow: inset -2px 0 0 0 var(--accent);
-  }
-  .file-row.is-resolved .file-status {
-    color: var(--accent-text);
-  }
-  .file-status {
-    flex-shrink: 0;
-    display: inline-flex;
+  .file-state {
     color: var(--danger);
   }
-  .file-name {
-    flex: 1;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    /* Logical alignment — don't hard-set direction:rtl (it bidi-reorders the
-       path and breaks the RTL layout); the row title shows the full path on
-       hover/tap anyway. */
-    text-align: start;
-    font-size: var(--fs-xs);
+  .file-state.resolved {
+    color: var(--success);
+  }
+  .progress.done {
+    color: var(--success);
+    font-weight: 600;
   }
   .file-detail {
     flex: 1;
@@ -494,8 +349,9 @@
 
   .resolver-foot {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
-    gap: 10px;
+    gap: 8px 10px;
     padding: 10px 14px;
     border-top: 1px solid var(--border);
     flex-shrink: 0;
@@ -509,108 +365,9 @@
   .mono {
     font-family: var(--font-mono);
   }
-
-  /* ── Mobile accordion section headers (hidden on desktop) ── */
-  .mob-sec-head {
-    display: none;
-    align-items: center;
-    gap: 8px;
-    width: 100%;
-    padding: 10px 14px;
-    border: none;
-    border-bottom: 1px solid var(--border);
-    background: var(--surface-2);
-    color: var(--text);
-    font-size: var(--fs-l);
-    font-weight: 600;
-    cursor: pointer;
-    text-align: start;
-    flex-shrink: 0;
-    -webkit-tap-highlight-color: transparent;
-  }
-  .mob-sec-head:active {
-    background: color-mix(in srgb, var(--accent) 10%, var(--surface-2));
-  }
-  .mob-sec-count {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    padding: 1px 6px;
-    border-radius: 999px;
-    background: var(--surface);
-    color: var(--text-dim);
-  }
-  .mob-detail-head {
-    background: color-mix(in srgb, var(--accent) 12%, var(--surface-2));
-  }
-  .mob-detail-title {
-    font-size: var(--fs-m);
-    color: var(--accent-text);
-    font-weight: 600;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    min-width: 0;
-  }
-  .mob-back {
-    display: inline-flex;
-    align-items: center;
-    gap: 2px;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-    flex-shrink: 0;
-  }
-
-  /* ── Mobile + tablet (≤1024px): stack files strip over the detail pane.
-     The body switches from a horizontal split to a vertical column; the files
-     list scrolls in a capped strip and the detail pane takes the rest. ── */
-  @media (max-width: 1024px) {
-    .resolver.mobile .resolver-head {
-      flex-wrap: wrap;
-      gap: 6px 8px;
-    }
-    .resolver.mobile .resolver-body {
-      flex-direction: column;
-      overflow-y: auto;
-      -webkit-overflow-scrolling: touch;
-      overscroll-behavior: contain;
-    }
-    .mobile .mob-sec-head {
-      display: flex;
-    }
-    .mobile .files-panel {
-      width: 100%;
-      flex: 0 0 auto;
-      max-height: 32vh;
-      overscroll-behavior: contain;
-      border-inline-end: none;
-      border-bottom: 1px solid var(--border);
-    }
-    .mobile .files-panel.mob-collapsed {
-      display: none;
-    }
-    .mobile .file-row {
-      font-size: var(--fs-m);
-      padding: 8px 12px;
+  @media (pointer: coarse) {
+    .resolver-foot .btn {
       min-height: 40px;
-    }
-    .mobile .file-name {
-      font-size: var(--fs-m);
-    }
-    .mobile .file-detail {
-      flex: 1 1 auto;
-      min-height: 50vh;
-    }
-    /* Footer can wrap so both actions stay reachable; hint drops to its own row. */
-    .resolver.mobile .resolver-foot {
-      flex-wrap: wrap;
-      gap: 8px 10px;
-    }
-    .resolver.mobile .resolver-foot .btn {
-      min-height: 40px;
-    }
-    .resolver.mobile .foot-hint {
-      flex-basis: 100%;
-      order: -1;
     }
   }
 </style>

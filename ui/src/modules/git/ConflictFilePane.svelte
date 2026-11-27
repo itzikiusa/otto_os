@@ -357,6 +357,7 @@
     flex-direction: column;
     height: 100%;
     min-height: 0;
+    container-type: inline-size;
   }
   .pane-head {
     display: flex;
@@ -537,8 +538,9 @@
     text-align: start;
   }
 
-  /* ── Mobile + tablet (≤1024px) ── */
-  @media (max-width: 1024px) {
+  /* ── A narrow pane (a phone, a tablet beside the list): the path takes its
+     own line and long lines wrap. ── */
+  @container (max-width: 600px) {
     .pane-head {
       flex-wrap: wrap;
       gap: 6px 10px;
@@ -547,21 +549,25 @@
       flex-basis: 100%;
       font-size: var(--fs-m);
     }
-    .pane-head .btn {
-      min-height: 40px;
-    }
     .pane-body {
       padding: 10px;
-      -webkit-overflow-scrolling: touch;
     }
     .context {
-      font-size: var(--fs-s);
       word-break: break-word;
       overflow-wrap: anywhere;
     }
     .output.open {
       flex-basis: 40%;
       max-height: 45%;
+    }
+  }
+  /* ── Touch: real targets. ── */
+  @media (pointer: coarse) {
+    .pane-head .btn {
+      min-height: 40px;
+    }
+    .context {
+      font-size: var(--fs-s);
     }
     .nav-btn {
       width: 32px;

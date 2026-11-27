@@ -76,7 +76,10 @@ test('pick parts of A and B, preview the output, complete the merge', async ({ p
   await page.locator('.merge-banner .btn', { hasText: 'Resolve conflicts' }).click();
   const resolver = page.locator('.resolver');
   await expect(resolver).toBeVisible();
-  await expect(resolver.locator('.file-row', { hasText: 'team.html' })).toBeVisible();
+  const fileRow = resolver.getByTestId('conflict-file').filter({ hasText: 'team.html' });
+  await expect(fileRow).toBeVisible();
+  await expect(fileRow).toContainText('Conflict');
+  await expect(fileRow.locator('[aria-current="true"]')).toBeVisible();
 
   // One conflict card, with the A/B side headers and per-line checkboxes.
   const hunk = page.locator('.hunk');
@@ -112,6 +115,8 @@ test('pick parts of A and B, preview the output, complete the merge', async ({ p
   await markBtn.click();
   const completeBtn = resolver.locator('.resolver-foot .btn.primary');
   await expect(completeBtn).toBeEnabled({ timeout: 10_000 });
+  await expect(fileRow).toContainText('Resolved');
+  await expect(resolver.getByTestId('conflict-files')).toContainText('1 of 1 resolved');
   await completeBtn.click();
 
   // Back on the graph, no merge banner — and the merge commit is in the log.

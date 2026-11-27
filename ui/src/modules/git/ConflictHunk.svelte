@@ -79,16 +79,6 @@
   // Whether the diff3 merge base is currently expanded.
   let showBase = $state(false);
 
-  // ≤1024 (phone + tablet): the A/B side-by-side columns are too narrow to
-  // read, so the table stacks vertically (A block over B block).
-  let isMobile = $state(false);
-  $effect(() => {
-    const mq = window.matchMedia('(max-width: 1024px)');
-    const sync = () => (isMobile = mq.matches);
-    sync();
-    mq.addEventListener('change', sync);
-    return () => mq.removeEventListener('change', sync);
-  });
   // True when the parser populated a merge base (diff3 conflict style).
   const hasBase = $derived(base.length > 0);
 
@@ -96,6 +86,10 @@
   const theirsPicked = $derived(theirsSel.filter(Boolean).length);
   const oursAll = $derived(ours.length > 0 ? oursPicked === ours.length : emptyTaken.ours);
   const theirsAll = $derived(theirs.length > 0 ? theirsPicked === theirs.length : emptyTaken.theirs);
+  const sides = $derived([
+    { side: 'ours' as const, tag: 'A', tagClass: 'tag-a', label: oursLabel, lines: ours, sel: oursSel, picked: oursPicked, all: oursAll },
+    { side: 'theirs' as const, tag: 'B', tagClass: 'tag-b', label: theirsLabel, lines: theirs, sel: theirsSel, picked: theirsPicked, all: theirsAll },
+  ]);
   // CodeMirror drops `\r`; a CRLF block gets it re-appended on the way out.
   // The file's verdict wins when given — the block alone is often too small.
   const crlf = $derived(fileCrlf ?? isCrlfBlock(ours, theirs, base));
@@ -233,101 +227,38 @@
       </div>
     {/if}
 
-    <!-- Side headers: A / B with take-the-whole-side checkboxes. -->
-    <div class="side-heads" class:stacked={isMobile}>
-      <label class="side-head ours" title="Take all of {oursLabel}">
-        <input
-          type="checkbox"
-          checked={oursAll}
-          onchange={() => toggleSide('ours')}
-          aria-label="Take all of {oursLabel} for conflict {index}"
-        />
-        <span class="side-tag tag-a">A</span>
-        <span class="side-name">{oursLabel}</span>
-        {#if oursPicked > 0 && !oursAll}<span class="side-partial">{oursPicked}/{ours.length}</span>{/if}
-      </label>
-      {#if !isMobile}
-        <label class="side-head theirs" title="Take all of {theirsLabel}">
+    <!-- A / B: each side's take-it-all header over its pickable lines. Side
+         by side while the card has room; a narrow card (container query)
+         stacks them A over B — the DOM order (A head, A lines, B head, B
+         lines) is the reading and tab order either way. -->
+    <div class="sides">
+      {#each sides as s (s.side)}
+        {@const side = s.side}
+        <label class="side-head {side}" title="Take all of {s.label}">
           <input
             type="checkbox"
-            checked={theirsAll}
-            onchange={() => toggleSide('theirs')}
-            aria-label="Take all of {theirsLabel} for conflict {index}"
+            checked={s.all}
+            onchange={() => toggleSide(side)}
+            aria-label="Take all of {s.label} for conflict {index}"
           />
-          <span class="side-tag tag-b">B</span>
-          <span class="side-name">{theirsLabel}</span>
-          {#if theirsPicked > 0 && !theirsAll}<span class="side-partial">{theirsPicked}/{theirs.length}</span>{/if}
+          <span class="side-tag {s.tagClass}">{s.tag}</span>
+          <span class="side-name">{s.label}</span>
+          {#if s.picked > 0 && !s.all}<span class="side-partial">{s.picked}/{s.lines.length}</span>{/if}
         </label>
-      {/if}
+        <div class="split-col {side}">
+          {#if s.lines.length === 0}
+            <div class="empty-side dim mono">(empty — taking {s.tag} deletes the block)</div>
+          {:else}
+            {#each s.lines.slice(0, shown) as line, i (i)}
+              <button class="pick-line {side}" class:picked={s.sel[i]} aria-pressed={s.sel[i] === true} onclick={() => toggleLine(side, i)}>
+                <span class="pick-box">{#if s.sel[i]}<Icon name="check" size={12} />{/if}</span>
+                <span class="mono pick-code">{line}</span>
+              </button>
+            {/each}
+          {/if}
+        </div>
+      {/each}
     </div>
-
-    {#if isMobile}
-      <!-- Stacked A block over B block (each with its own header + line picks). -->
-      <div class="stack-sides">
-        <div class="stack-side ours">
-          {#if ours.length === 0}
-            <div class="empty-side dim mono">(empty — taking A deletes the block)</div>
-          {:else}
-            {#each ours.slice(0, shown) as line, i (i)}
-              <button class="pick-line ours" class:picked={oursSel[i]} aria-pressed={oursSel[i] === true} onclick={() => toggleLine('ours', i)}>
-                <span class="pick-box">{#if oursSel[i]}<Icon name="check" size={12} />{/if}</span>
-                <span class="mono pick-code">{line}</span>
-              </button>
-            {/each}
-          {/if}
-        </div>
-        <label class="side-head theirs stacked-b" title="Take all of {theirsLabel}">
-          <input
-            type="checkbox"
-            checked={theirsAll}
-            onchange={() => toggleSide('theirs')}
-            aria-label="Take all of {theirsLabel} for conflict {index}"
-          />
-          <span class="side-tag tag-b">B</span>
-          <span class="side-name">{theirsLabel}</span>
-          {#if theirsPicked > 0 && !theirsAll}<span class="side-partial">{theirsPicked}/{theirs.length}</span>{/if}
-        </label>
-        <div class="stack-side theirs">
-          {#if theirs.length === 0}
-            <div class="empty-side dim mono">(empty — taking B deletes the block)</div>
-          {:else}
-            {#each theirs.slice(0, shown) as line, i (i)}
-              <button class="pick-line theirs" class:picked={theirsSel[i]} aria-pressed={theirsSel[i] === true} onclick={() => toggleLine('theirs', i)}>
-                <span class="pick-box">{#if theirsSel[i]}<Icon name="check" size={12} />{/if}</span>
-                <span class="mono pick-code">{line}</span>
-              </button>
-            {/each}
-          {/if}
-        </div>
-      </div>
-    {:else}
-      <div class="split-grid">
-        <div class="split-col ours">
-          {#if ours.length === 0}
-            <div class="empty-side dim mono">(empty — taking A deletes the block)</div>
-          {:else}
-            {#each ours.slice(0, shown) as line, i (i)}
-              <button class="pick-line ours" class:picked={oursSel[i]} aria-pressed={oursSel[i] === true} onclick={() => toggleLine('ours', i)}>
-                <span class="pick-box">{#if oursSel[i]}<Icon name="check" size={12} />{/if}</span>
-                <span class="mono pick-code">{line}</span>
-              </button>
-            {/each}
-          {/if}
-        </div>
-        <div class="split-col theirs">
-          {#if theirs.length === 0}
-            <div class="empty-side dim mono">(empty — taking B deletes the block)</div>
-          {:else}
-            {#each theirs.slice(0, shown) as line, i (i)}
-              <button class="pick-line theirs" class:picked={theirsSel[i]} aria-pressed={theirsSel[i] === true} onclick={() => toggleLine('theirs', i)}>
-                <span class="pick-box">{#if theirsSel[i]}<Icon name="check" size={12} />{/if}</span>
-                <span class="mono pick-code">{line}</span>
-              </button>
-            {/each}
-          {/if}
-        </div>
-      </div>
-    {/if}
     {#if hiddenLines > 0}
       <button class="more-lines" onclick={() => (shown += LINE_PAGE * 10)}>
         Show {plural(Math.min(hiddenLines, LINE_PAGE * 10), 'more line')} ({hiddenLines} hidden) — or take a whole side / Edit
@@ -361,6 +292,7 @@
   }
   .hunk-bar {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 8px;
     padding: 4px 10px;
@@ -410,16 +342,13 @@
     border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
   }
 
-  /* ── Side headers (A / B) ── */
-  /* minmax(0, 1fr): a long side label ellipsizes instead of widening its
-     column (a merge message split the header ~10/90, off the lines below). */
-  .side-heads {
+  /* ── A / B sides: two columns (A head, A lines | B head, B lines) while the
+     card has room, one column (A over B) when it is narrow. ── */
+  .sides {
     display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    border-bottom: 1px solid var(--border);
-  }
-  .side-heads.stacked {
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto 1fr;
+    grid-auto-flow: column;
   }
   .side-head {
     min-width: 0;
@@ -437,12 +366,12 @@
   .side-head input[type='checkbox'] {
     margin: 0;
   }
+  .side-head {
+    border-bottom: 1px solid var(--border);
+  }
   .side-head.ours {
     border-inline-end: 1px solid var(--border);
     background: color-mix(in srgb, var(--success) 7%, transparent);
-  }
-  .side-heads.stacked .side-head.ours {
-    border-inline-end: none;
   }
   .side-head.theirs {
     background: var(--accent-faint);
@@ -479,15 +408,7 @@
     padding: 0 6px;
     flex-shrink: 0;
   }
-  .stacked-b {
-    border-top: 1px solid var(--border);
-  }
-
   /* ── Pickable lines ── */
-  .split-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-  }
   .split-col {
     min-width: 0;
     display: flex;
@@ -610,22 +531,31 @@
     overflow-x: auto;
   }
 
-  /* ── Stacked sides (≤1024px) ── */
-  .stack-sides {
-    display: flex;
-    flex-direction: column;
+  .hunk {
+    container-type: inline-size;
   }
-  .stack-side.ours {
-    background: color-mix(in srgb, var(--success) 5%, transparent);
-  }
-  .stack-side.theirs {
-    background: var(--accent-faint);
+  @container (max-width: 600px) {
+    .sides {
+      grid-template-columns: minmax(0, 1fr);
+      grid-template-rows: none;
+      grid-auto-flow: row;
+    }
+    .side-head.ours,
+    .split-col.ours {
+      border-inline-end: none;
+    }
+    .side-head.theirs {
+      border-top: 1px solid var(--border);
+    }
+    .pick-code {
+      word-break: break-word;
+      overflow-wrap: anywhere;
+    }
   }
 
-  /* ── Mobile + tablet (≤1024px): real touch targets. ── */
-  @media (max-width: 1024px) {
+  /* ── Touch: real targets. ── */
+  @media (pointer: coarse) {
     .hunk-bar {
-      flex-wrap: wrap;
       gap: 6px 8px;
       padding: 6px 10px;
     }
@@ -650,8 +580,6 @@
     }
     .pick-code {
       font-size: var(--fs-s);
-      word-break: break-word;
-      overflow-wrap: anywhere;
     }
     .base-toggle {
       min-height: 36px;
