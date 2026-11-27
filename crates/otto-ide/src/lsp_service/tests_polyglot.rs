@@ -2488,7 +2488,7 @@ async fn gutter_debug_of_a_java_main_runs_on_main_sources_only() {
     );
     let call = std::fs::read_to_string(&seen).unwrap();
     assert!(
-        call.contains(" compile dependency:build-classpath -Dmdep.includeScope=runtime"),
+        call.starts_with("-q -B compile dependency:build-classpath dependency:list"),
         "{call}"
     );
 }

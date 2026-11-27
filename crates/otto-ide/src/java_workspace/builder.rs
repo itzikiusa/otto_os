@@ -379,7 +379,7 @@ fn first_lines(text: &str) -> String {
     out
 }
 
-/// Maven's own classpath for a module with a `pom.xml`: `target/classes:<runtime deps>`
+/// Maven's own classpath for a module with a `pom.xml`: `target/classes:<deps but test>`
 /// after `compile` for an app launch (BUG2-6), or
 /// `target/test-classes:target/classes:<test deps>` after `test-compile` for a test.
 /// Maven resolves parents, BOMs and transitive deps, which a
@@ -431,13 +431,21 @@ fn maven_module_classpath(
             cmd.arg("-pl").arg(rel).arg("-am");
         }
     }
-    let (phase, scope) = if include_tests {
-        ("test-compile", "test")
+    // An app launch gets every scope but test (provided too, as spring-boot:run does). The
+    // plugin can't exclude test scope alone, so `dependency:list` names the test JARs to drop.
+    let list_file = cp_file.with_extension("scopes");
+    let _ = fs::remove_file(&list_file);
+    let phase = if include_tests {
+        "test-compile"
     } else {
-        ("compile", "runtime")
+        "compile"
     };
     cmd.args(["-q", "-B", phase, "dependency:build-classpath"]);
-    cmd.arg(format!("-Dmdep.includeScope={scope}"));
+    if !include_tests {
+        cmd.arg("dependency:list");
+        cmd.arg(format!("-DoutputFile={}", list_file.display()));
+        cmd.arg("-DoutputAbsoluteArtifactFilename=true");
+    }
     cmd.arg(format!("-Dmdep.outputFile={}", cp_file.display()));
     // The javac fallback reads the same repo, so both resolve the same JARs.
     if let Some(repo) = super::explicit_m2_repo(env_map) {
@@ -452,6 +460,16 @@ fn maven_module_classpath(
             )));
         }
         let deps = fs::read_to_string(&cp_file).unwrap_or_default();
+        // `   g:a:jar:1.0:test:/m2/…/a-1.0.jar -- module a [auto]`
+        let scopes = fs::read_to_string(&list_file).unwrap_or_default();
+        let test_jars: HashSet<&str> = scopes
+            .lines()
+            .filter_map(|l| {
+                let l = l.split(" -- ").next()?.trim();
+                let (coords, path) = l.split_at(l.find(":/")?);
+                (coords.rsplit(':').next() == Some("test")).then_some(&path[1..])
+            })
+            .collect();
         let outputs: &[&str] = if include_tests {
             &["target/test-classes", "target/classes"]
         } else {
@@ -464,7 +482,7 @@ fn maven_module_classpath(
         cp.extend(
             deps.trim()
                 .split(if cfg!(windows) { ';' } else { ':' })
-                .filter(|s| !s.is_empty())
+                .filter(|s| !s.is_empty() && !test_jars.contains(s))
                 .map(str::to_string),
         );
         Ok(cp)
@@ -1606,12 +1624,13 @@ mod javac_process_tests {
         let (module, app) = maven_module(&root);
         let bin = root.join("bin");
         let seen = root.join("mvn-call");
-        // The fake mvn writes the classpath to -Dmdep.outputFile=… like the real plugin.
+        // The fake mvn writes the classpath to -Dmdep.outputFile=… and the scoped
+        // dependency list to -DoutputFile=… like the real plugin.
         fake_bin(
             &bin,
             "mvn",
             &format!(
-                r#"echo "$PWD $*" > {}; for a in "$@"; do case "$a" in -Dmdep.outputFile=*) printf '/m2/a.jar:/m2/b.jar' > "${{a#-Dmdep.outputFile=}}";; esac; done"#,
+                r#"echo "$PWD $*" > {}; for a in "$@"; do case "$a" in -Dmdep.outputFile=*) printf '/m2/a.jar:/m2/provided.jar:/m2/junit.jar' > "${{a#-Dmdep.outputFile=}}";; -DoutputFile=*) printf '%s\n' 'The following files have been resolved:' '   com.acme:a:jar:1:compile:/m2/a.jar' '   javax.servlet:provided:jar:4:provided:/m2/provided.jar' '   junit:junit:jar:4.13.2:test:/m2/junit.jar -- module junit [auto]' > "${{a#-DoutputFile=}}";; esac; done"#,
                 seen.display()
             ),
         );
@@ -1633,10 +1652,11 @@ mod javac_process_tests {
         .unwrap();
         assert_eq!(plan.main_class, "com.acme.App");
         let t = |d: &str| module.join(d).to_string_lossy().into_owned();
-        // An app launch builds and runs main sources only: no test classes or resources.
+        // An app launch builds and runs main sources on every scope but test: provided
+        // stays (a WAR app's embedded server), test classes and test JARs never.
         assert_eq!(
             plan.classpath,
-            format!("{}:/m2/a.jar:/m2/b.jar", t("target/classes"))
+            format!("{}:/m2/a.jar:/m2/provided.jar", t("target/classes"))
         );
         assert!(
             !javac_hit.exists(),
@@ -1645,7 +1665,7 @@ mod javac_process_tests {
         let call = fs::read_to_string(&seen).unwrap();
         assert!(
             call.starts_with(&format!(
-                "{} -pl svc -am -q -B compile dependency:build-classpath -Dmdep.includeScope=runtime",
+                "{} -pl svc -am -q -B compile dependency:build-classpath dependency:list",
                 root.display()
             )),
             "built from the reactor root: {call}"
@@ -1670,14 +1690,14 @@ mod javac_process_tests {
         assert_eq!(
             test_plan.classpath,
             format!(
-                "{}:{}:/m2/a.jar:/m2/b.jar",
+                "{}:{}:/m2/a.jar:/m2/provided.jar:/m2/junit.jar",
                 t("target/test-classes"),
                 t("target/classes")
             )
         );
         let call = fs::read_to_string(&seen).unwrap();
         assert!(
-            call.contains(" test-compile dependency:build-classpath -Dmdep.includeScope=test"),
+            call.contains(" -q -B test-compile dependency:build-classpath -Dmdep.outputFile="),
             "{call}"
         );
 
