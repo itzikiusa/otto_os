@@ -826,6 +826,12 @@ async fn jdtls_initialize_never_writes_eclipse_metadata_into_the_repo() {
             json!(false),
             "{p}"
         );
+        // jdtls never builds into the Maven/Gradle output Otto's Run/Debug use.
+        assert_eq!(
+            p["initializationOptions"]["settings"]["java"]["autobuild"]["enabled"],
+            json!(false),
+            "{p}"
+        );
     }
     // The root owner's own options survive the merge; a non-root owner's are dropped.
     assert_eq!(

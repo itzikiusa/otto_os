@@ -923,6 +923,10 @@ Full schemas and route tables live in [`docs/contracts/api.md`](../contracts/api
   `-javaagent:<newest lombok jar in ~/.m2>` when one is there, so Lombok
   members resolve, and with `java.import.generatesMetadataFilesAtProjectRoot=false`,
   so `.project`, `.classpath` and `.settings` go to its `-data` dir, not the repo.
+  It also runs with `java.autobuild.enabled=false`: Otto builds with Maven,
+  Gradle or javac itself, so jdtls never deletes and rewrites a module's
+  `target/classes` under a program that Run or Debug started (open files still
+  get jdtls's errors).
 - **Remote SSH target fails to connect:** Verify the SSH connection succeeds in
   **Connections** first (`BatchMode=yes` key auth is used for non-interactive
   LSP/DAP/command execution) and confirm your role grants `discover` and `shell`

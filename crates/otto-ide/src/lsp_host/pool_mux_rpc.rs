@@ -56,9 +56,17 @@ pub(crate) fn default_gopls_settings(go_build_tags: &[String]) -> Value {
 /// no proc macros, and no `cargo check` on save (which would run `build.rs`
 /// and any `.cargo/config.toml` `rustc-wrapper`).
 /// jdtls settings Otto always applies: keep Eclipse `.project` / `.classpath`
-/// / `.settings` out of the user's repo (they go to the `-data` dir instead).
+/// / `.settings` out of the user's repo (they go to the `-data` dir instead),
+/// and never build. jdtls compiles a Maven module into the `target/classes`
+/// Otto's Run and Debug start the JVM on, and its import-time full build first
+/// deletes every class there: a class loaded in that window is a
+/// `NoClassDefFoundError`. Otto builds with Maven / Gradle / javac itself, and
+/// open files still get jdtls's diagnostics (reconcile needs no build).
 fn jdtls_settings() -> Value {
-    json!({ "java": { "import": { "generatesMetadataFilesAtProjectRoot": false } } })
+    json!({ "java": {
+        "import": { "generatesMetadataFilesAtProjectRoot": false },
+        "autobuild": { "enabled": false }
+    } })
 }
 
 /// Merge `extra` into `base` object-by-object (`extra` wins on leaves).
