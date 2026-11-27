@@ -24,6 +24,7 @@ import {
   detectManifestEcosystem,
   executeIdeDepAction,
   inspectIdeDependencies,
+  isDepVersionEditable,
   isIdeManifestPath,
   isVersionOutdated,
   mergeDepItems,
@@ -44,6 +45,7 @@ export {
   detectManifestEcosystem,
   executeIdeDepAction,
   inspectIdeDependencies,
+  isDepVersionEditable,
   isIdeManifestPath,
   isVersionOutdated,
   mergeDepItems,
@@ -591,7 +593,7 @@ export function createIdeDepsExtension(opts: CreateIdeDepsExtensionOptions): Ext
             });
             foot.appendChild(b);
           };
-          if (targetVer && targetVer !== dep.current_version) {
+          if (isDepVersionEditable(dep) && targetVer && targetVer !== dep.current_version) {
             mkBtn(`Update to ${targetVer}`, () => triggerAction(view, 'update_one', dep, targetVer));
           }
           mkBtn('Update dependencies... ⌥⇧⏎', () => triggerAction(view, 'update_all_latest', dep));

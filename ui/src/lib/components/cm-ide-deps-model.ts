@@ -35,7 +35,21 @@ export interface IdeDepItem {
   end_line?: number;
   block_start_line?: number;
   block_end_line?: number;
+  version_col?: number;
+  version_end_col?: number;
   scope?: string | null;
+}
+
+/**
+ * True when a dependency has an inline editable version span in the manifest
+ * (false for plugin-managed `kotlin("stdlib")` or unversioned catalog/BOM entries).
+ */
+export function isDepVersionEditable(dep: IdeDepItem): boolean {
+  if (dep.version_col !== undefined) {
+    return dep.version_col > 0 && (dep.version_end_col ?? 0) > dep.version_col;
+  }
+  const v = dep.current_version.trim();
+  return Boolean(v && v !== 'plugin' && v !== 'managed' && v !== '*');
 }
 
 export type RawRemoteDepItem = Omit<IdeDepItem, 'deprecated'> & {

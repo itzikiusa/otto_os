@@ -207,6 +207,8 @@ fn scan_java_dir_recursive(
     let pom = dir.join("pom.xml");
     let gradle = dir.join("build.gradle");
     let gradle_kts = dir.join("build.gradle.kts");
+    let has_gradle_settings =
+        dir.join("settings.gradle").is_file() || dir.join("settings.gradle.kts").is_file();
 
     let mut subdirs_to_visit = Vec::new();
     if pom.is_file() {
@@ -218,17 +220,35 @@ fn scan_java_dir_recursive(
                 subdirs_to_visit.push(dir.join(sub));
             }
         }
-    } else if gradle.is_file() || gradle_kts.is_file() {
-        let gfile = if gradle.is_file() { gradle } else { gradle_kts };
-        if let Ok(raw) = fs::read_to_string(&gfile) {
-            let module = parse_gradle_module(dir, &raw);
-            register_module(graph, module);
+    } else if gradle.is_file() || gradle_kts.is_file() || has_gradle_settings {
+        if gradle.is_file() || gradle_kts.is_file() {
+            let gfile = if gradle.is_file() { gradle } else { gradle_kts };
+            if let Ok(raw) = fs::read_to_string(&gfile) {
+                let module = parse_gradle_module(dir, &raw);
+                register_module(graph, module);
+            }
         }
         for settings_name in ["settings.gradle", "settings.gradle.kts"] {
             let sp = dir.join(settings_name);
             if let Ok(sraw) = fs::read_to_string(&sp) {
+                let overrides = builder::parse_gradle_project_dir_overrides(&sraw);
                 for sub in parse_gradle_includes(&sraw) {
-                    subdirs_to_visit.push(dir.join(sub.replace(':', "/").trim_start_matches('/')));
+                    let norm_proj = format!(":{}", sub.trim_start_matches(':'));
+                    if let Some((_, custom_dir)) = overrides
+                        .iter()
+                        .find(|(p, _)| p.trim_end_matches(':') == norm_proj.trim_end_matches(':'))
+                    {
+                        subdirs_to_visit.push(dir.join(custom_dir));
+                    } else {
+                        subdirs_to_visit
+                            .push(dir.join(sub.replace(':', "/").trim_start_matches('/')));
+                    }
+                }
+                for (_, custom_dir) in overrides {
+                    let p = dir.join(custom_dir);
+                    if !subdirs_to_visit.contains(&p) {
+                        subdirs_to_visit.push(p);
+                    }
                 }
             }
         }

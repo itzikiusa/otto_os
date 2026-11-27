@@ -508,17 +508,29 @@ fn gradle_module_classpath(
         .to_string_lossy()
         .replace('\\', "\\\\")
         .replace('\'', "\\'");
+    // BUG2-6: select ONLY `main` sourceSet for application launches (`include_tests == false`)
+    // so `src/test/resources` never overrides production config; reserve `test` for test runs.
+    // BUG2-7: compute `cpValue` during configuration (never call `project.extensions` inside
+    // `doLast`) AND pass `--no-configuration-cache` so configuration-cache projects succeed.
+    let source_set_expr = if include_tests {
+        r#"ss.findByName("test") ?: ss.findByName("main")"#
+    } else {
+        r#"ss.findByName("main")"#
+    };
     let init_body = format!(
         r#"allprojects {{
     tasks.register("ottoPrintClasspath") {{
-        doLast {{
-            def ss = project.extensions.findByName("sourceSets")
-            if (ss != null) {{
-                def target = ss.findByName("test") ?: ss.findByName("main")
-                if (target != null) {{
-                    new File('{escaped_cp}').text = target.runtimeClasspath.asPath
-                }}
+        def outFile = new File('{escaped_cp}')
+        def ss = project.extensions.findByName("sourceSets")
+        def cpValue = ""
+        if (ss != null) {{
+            def target = {source_set_expr}
+            if (target != null) {{
+                cpValue = target.runtimeClasspath.asPath
             }}
+        }}
+        doLast {{
+            outFile.text = cpValue
         }}
     }}
 }}
@@ -530,20 +542,7 @@ fn gradle_module_classpath(
         ))));
     }
 
-    let task_prefix = match module_dir.strip_prefix(&gradle_root) {
-        Ok(rel) if !rel.as_os_str().is_empty() => {
-            let segs: Vec<String> = rel
-                .components()
-                .filter_map(|c| c.as_os_str().to_str().map(String::from))
-                .collect();
-            if segs.is_empty() {
-                String::new()
-            } else {
-                format!(":{}:", segs.join(":"))
-            }
-        }
-        _ => String::new(),
-    };
+    let task_prefix = resolve_gradle_project_path(&gradle_root, module_dir);
     let compile_task = if include_tests {
         format!("{task_prefix}testClasses")
     } else {
@@ -553,7 +552,12 @@ fn gradle_module_classpath(
 
     let mut cmd = Command::new(&gradle_bin);
     cmd.current_dir(&gradle_root);
-    cmd.args(["-q", "--console=plain", "--init-script"]);
+    cmd.args([
+        "-q",
+        "--console=plain",
+        "--no-configuration-cache",
+        "--init-script",
+    ]);
     cmd.arg(&init_script);
     cmd.arg(&compile_task);
     cmd.arg(&print_task);
@@ -568,14 +572,23 @@ fn gradle_module_classpath(
         }
         let deps = fs::read_to_string(&cp_file).unwrap_or_default();
         let mut cp: Vec<String> = Vec::new();
-        for rel in [
-            "build/classes/kotlin/test",
-            "build/classes/java/test",
-            "build/resources/test",
-            "build/classes/kotlin/main",
-            "build/classes/java/main",
-            "build/resources/main",
-        ] {
+        let output_rels: &[&str] = if include_tests {
+            &[
+                "build/classes/kotlin/test",
+                "build/classes/java/test",
+                "build/resources/test",
+                "build/classes/kotlin/main",
+                "build/classes/java/main",
+                "build/resources/main",
+            ]
+        } else {
+            &[
+                "build/classes/kotlin/main",
+                "build/classes/java/main",
+                "build/resources/main",
+            ]
+        };
+        for rel in output_rels {
             let d = module_dir.join(rel);
             if d.is_dir() {
                 cp.push(d.to_string_lossy().into_owned());
@@ -592,6 +605,61 @@ fn gradle_module_classpath(
         }
         Ok(cp)
     })())
+}
+
+/// Parse explicit `project(":api").projectDir = file("backend")` remappings from
+/// `settings.gradle` / `settings.gradle.kts`.
+pub(super) fn parse_gradle_project_dir_overrides(raw: &str) -> Vec<(String, String)> {
+    let Ok(re) = Regex::new(
+        r#"project\s*\(\s*['"](:[^'"]+)['"]\s*\)\s*\.projectDir\s*=\s*(?:file|File)\s*\(\s*['"]([^'"]+)['"]\s*\)"#,
+    ) else {
+        return Vec::new();
+    };
+    re.captures_iter(raw)
+        .map(|cap| (cap[1].trim().to_string(), cap[2].trim().to_string()))
+        .collect()
+}
+
+/// Resolve the Gradle task prefix (`""` for root project, `":api:"` for a subproject),
+/// honoring explicit `project(":api").projectDir = file("backend")` remappings in
+/// `settings.gradle.kts` / `settings.gradle` before falling back to relative directory paths.
+pub(crate) fn resolve_gradle_project_path(gradle_root: &Path, module_dir: &Path) -> String {
+    let canon_root = fs::canonicalize(gradle_root).unwrap_or_else(|_| gradle_root.to_path_buf());
+    let canon_mod = fs::canonicalize(module_dir).unwrap_or_else(|_| module_dir.to_path_buf());
+    if canon_mod == canon_root {
+        return String::new();
+    }
+    for fname in ["settings.gradle.kts", "settings.gradle"] {
+        let Ok(raw) = fs::read_to_string(gradle_root.join(fname)) else {
+            continue;
+        };
+        for (proj_path, raw_dir) in parse_gradle_project_dir_overrides(&raw) {
+            let cand = if Path::new(&raw_dir).is_absolute() {
+                PathBuf::from(&raw_dir)
+            } else {
+                gradle_root.join(&raw_dir)
+            };
+            let canon_cand = fs::canonicalize(&cand).unwrap_or(cand);
+            if canon_cand == canon_mod {
+                let clean = proj_path.trim_end_matches(':');
+                return format!("{clean}:");
+            }
+        }
+    }
+    match canon_mod.strip_prefix(&canon_root) {
+        Ok(rel) if !rel.as_os_str().is_empty() => {
+            let segs: Vec<String> = rel
+                .components()
+                .filter_map(|c| c.as_os_str().to_str().map(String::from))
+                .collect();
+            if segs.is_empty() {
+                String::new()
+            } else {
+                format!(":{}:", segs.join(":"))
+            }
+        }
+        _ => String::new(),
+    }
 }
 
 fn resolve_kotlinc_bin(env_map: &BTreeMap<String, String>) -> Option<String> {

@@ -90,14 +90,8 @@ pub async fn run_deps_action_scoped(
     }
 
     let (ok, output) = match (fname, action) {
-        ("go.mod", "tidy") => {
-            exec_cmd("go", &["mod", "tidy"], &dir, env_map, actor_is_root).await?
-        }
-        ("go.mod", "vendor") => {
-            exec_cmd("go", &["mod", "vendor"], &dir, env_map, actor_is_root).await?
-        }
-        ("go.mod", "sync") => {
-            exec_cmd("go", &["mod", "download"], &dir, env_map, actor_is_root).await?
+        ("go.mod", _) => {
+            run_go_mod_deps_action(action, manifest_path, &dir, req, env_map, actor_is_root).await?
         }
         ("build.zig.zon", "sync") => {
             exec_cmd("zig", &["build", "--fetch"], &dir, env_map, actor_is_root).await?
@@ -176,88 +170,6 @@ pub async fn run_deps_action_scoped(
                 }
             }
             exec_cmd("dotnet", &cmd_args, &dir, env_map, actor_is_root).await?
-        }
-        ("go.mod", "why") => {
-            let m = validate_dep_spec("module", req.module.as_deref().unwrap_or(""))?;
-            exec_cmd(
-                "go",
-                &["mod", "why", "-m", "--", m],
-                &dir,
-                env_map,
-                actor_is_root,
-            )
-            .await?
-        }
-        ("go.mod", "merge_directives") => {
-            let raw = fs::read_to_string(manifest_path)
-                .map_err(|e| Error::Internal(format!("read go.mod: {e}")))?;
-            let merged = merge_go_mod_requires(&raw);
-            fs::write(manifest_path, &merged)
-                .map_err(|e| Error::Internal(format!("write go.mod: {e}")))?;
-            (true, "Merged require directives".into())
-        }
-        ("go.mod", "update_one") => {
-            let m = validate_dep_spec("module", req.module.as_deref().unwrap_or(""))?;
-            let v = match req.version.as_deref().filter(|s| !s.trim().is_empty()) {
-                Some(rv) => validate_dep_spec("version", rv)?,
-                None => "latest",
-            };
-            if v != "latest" && v != "patch" {
-                let raw = fs::read_to_string(manifest_path)
-                    .map_err(|e| Error::Internal(format!("read go.mod: {e}")))?;
-                if let Some(updated) = bump_go_mod_in_place(&raw, m, v) {
-                    fs::write(manifest_path, updated)
-                        .map_err(|e| Error::Internal(format!("write go.mod: {e}")))?;
-                }
-            }
-            if !otto_core::e2e::isolated() {
-                let spec = format!("{m}@{v}");
-                let (cmd_ok, out) =
-                    exec_cmd("go", &["get", "--", &spec], &dir, env_map, actor_is_root).await?;
-                if !cmd_ok {
-                    (false, out)
-                } else {
-                    (true, format!("Updated {m} to {v}"))
-                }
-            } else {
-                (true, format!("Updated {m} to {v}"))
-            }
-        }
-        (
-            "go.mod",
-            "update_direct_latest"
-            | "update_direct_patch"
-            | "update_all_latest"
-            | "update_all_patch",
-        ) => {
-            let patch_only = action.ends_with("_patch");
-            let direct_only = action.contains("_direct_");
-            if direct_only {
-                let raw = fs::read_to_string(manifest_path).unwrap_or_default();
-                let direct_mods: Vec<String> = parse_go_mod(&raw)
-                    .into_iter()
-                    .filter(|d| !d.indirect && validate_dep_spec("module", &d.name).is_ok())
-                    .map(|d| {
-                        if patch_only {
-                            format!("{}@patch", d.name)
-                        } else {
-                            format!("{}@latest", d.name)
-                        }
-                    })
-                    .collect();
-                if direct_mods.is_empty() {
-                    (true, "No direct dependencies to update".into())
-                } else {
-                    let mut args: Vec<&str> = vec!["get", "--"];
-                    for dm in &direct_mods {
-                        args.push(dm.as_str());
-                    }
-                    exec_cmd("go", &args, &dir, env_map, actor_is_root).await?
-                }
-            } else {
-                let flag = if patch_only { "-u=patch" } else { "-u" };
-                exec_cmd("go", &["get", flag, "./..."], &dir, env_map, actor_is_root).await?
-            }
         }
         ("pom.xml", "maven_sync" | "sync") => {
             exec_cmd(
@@ -416,7 +328,15 @@ pub async fn run_deps_action_scoped(
                 allowed_roots,
                 actor_is_root,
             )
-            .ok_or_else(|| Error::Invalid(format!("dependency '{m}' not found in {fname}")))?;
+            .ok_or_else(|| {
+                if is_uneditable_manifest_dep(fname, &raw, m) {
+                    Error::Invalid(format!(
+                        "dependency '{m}' in {fname} has no inline editable version (plugin-managed or omitted) and cannot be bumped in place"
+                    ))
+                } else {
+                    Error::Invalid(format!("dependency '{m}' not found in {fname}"))
+                }
+            })?;
             fs::write(manifest_path, &updated)
                 .map_err(|e| Error::Internal(format!("write {}: {e}", manifest_path.display())))?;
             (true, format!("Updated {m} to {v}"))
@@ -447,6 +367,115 @@ pub async fn run_deps_action_scoped(
         updated_content,
         output,
     })
+}
+
+async fn run_go_mod_deps_action(
+    action: &str,
+    manifest_path: &Path,
+    dir: &Path,
+    req: &IdeDepsActionReq,
+    env_map: &BTreeMap<String, String>,
+    actor_is_root: bool,
+) -> Result<(bool, String)> {
+    match action {
+        "tidy" => exec_cmd("go", &["mod", "tidy"], dir, env_map, actor_is_root).await,
+        "vendor" => exec_cmd("go", &["mod", "vendor"], dir, env_map, actor_is_root).await,
+        "sync" => exec_cmd("go", &["mod", "download"], dir, env_map, actor_is_root).await,
+        "why" => {
+            let m = validate_dep_spec("module", req.module.as_deref().unwrap_or(""))?;
+            exec_cmd(
+                "go",
+                &["mod", "why", "-m", "--", m],
+                dir,
+                env_map,
+                actor_is_root,
+            )
+            .await
+        }
+        "merge_directives" => {
+            let raw = fs::read_to_string(manifest_path)
+                .map_err(|e| Error::Internal(format!("read go.mod: {e}")))?;
+            let merged = merge_go_mod_requires(&raw);
+            fs::write(manifest_path, &merged)
+                .map_err(|e| Error::Internal(format!("write go.mod: {e}")))?;
+            Ok((true, "Merged require directives".into()))
+        }
+        "update_one" => {
+            let m = validate_dep_spec("module", req.module.as_deref().unwrap_or(""))?;
+            let v = match req.version.as_deref().filter(|s| !s.trim().is_empty()) {
+                Some(rv) => validate_dep_spec("version", rv)?,
+                None => "latest",
+            };
+            if v != "latest" && v != "patch" {
+                let raw = fs::read_to_string(manifest_path)
+                    .map_err(|e| Error::Internal(format!("read go.mod: {e}")))?;
+                if let Some(updated) = bump_go_mod_in_place(&raw, m, v) {
+                    fs::write(manifest_path, updated)
+                        .map_err(|e| Error::Internal(format!("write go.mod: {e}")))?;
+                }
+            }
+            if !otto_core::e2e::isolated() {
+                let spec = format!("{m}@{v}");
+                let (cmd_ok, out) =
+                    exec_cmd("go", &["get", "--", &spec], dir, env_map, actor_is_root).await?;
+                if !cmd_ok {
+                    Ok((false, out))
+                } else {
+                    Ok((true, format!("Updated {m} to {v}")))
+                }
+            } else {
+                Ok((true, format!("Updated {m} to {v}")))
+            }
+        }
+        "update_direct_latest"
+        | "update_direct_patch"
+        | "update_all_latest"
+        | "update_all_patch" => {
+            let patch_only = action.ends_with("_patch");
+            let direct_only = action.contains("_direct_");
+            if direct_only {
+                let raw = fs::read_to_string(manifest_path).unwrap_or_default();
+                let direct_mods: Vec<String> = parse_go_mod(&raw)
+                    .into_iter()
+                    .filter(|d| !d.indirect && validate_dep_spec("module", &d.name).is_ok())
+                    .map(|d| {
+                        if patch_only {
+                            format!("{}@patch", d.name)
+                        } else {
+                            format!("{}@latest", d.name)
+                        }
+                    })
+                    .collect();
+                if direct_mods.is_empty() {
+                    Ok((true, "No direct dependencies to update".into()))
+                } else {
+                    let mut args: Vec<&str> = vec!["get", "--"];
+                    for dm in &direct_mods {
+                        args.push(dm.as_str());
+                    }
+                    exec_cmd("go", &args, dir, env_map, actor_is_root).await
+                }
+            } else {
+                let flag = if patch_only { "-u=patch" } else { "-u" };
+                exec_cmd("go", &["get", flag, "./..."], dir, env_map, actor_is_root).await
+            }
+        }
+        _ => Err(Error::Invalid(format!(
+            "unsupported dependency action '{action}' for 'go.mod'"
+        ))),
+    }
+}
+
+fn is_uneditable_manifest_dep(fname: &str, content: &str, module: &str) -> bool {
+    let items = match fname {
+        "build.gradle" | "build.gradle.kts" => parse_gradle_dependencies(content),
+        "libs.versions.toml" => parse_gradle_version_catalog(content),
+        _ => return false,
+    };
+    items
+        .iter()
+        .find(|i| i.name == module)
+        .is_some_and(|hit| hit.version_col == 0 || hit.version_end_col <= hit.version_col)
 }
 
 fn validate_dep_spec<'a>(label: &str, raw: &'a str) -> Result<&'a str> {

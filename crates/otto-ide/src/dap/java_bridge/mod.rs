@@ -109,32 +109,7 @@ pub(crate) fn infer_kotlin_class_stem(file_stem: &str, src: &str) -> String {
             }
         }
     }
-    // In Kotlin, any top-level `fun main(...)` (brace depth 0) ALWAYS compiles onto
-    // the file facade class `<CapFileStem>Kt` (or `@file:JvmName`), EVEN when the
-    // same file also declares `class <FileStem>` (e.g. Spring Boot `DemoApplication.kt`).
-    let mut brace_depth: i32 = 0;
-    let mut has_top_level_main = false;
-    for line in src.lines() {
-        let code = line.split_once("//").map_or(line, |(c, _)| c);
-        let trimmed = code.trim();
-        if brace_depth == 0
-            && (trimmed.starts_with("fun main(")
-                || trimmed.starts_with("suspend fun main(")
-                || trimmed.starts_with("fun main (")
-                || trimmed.starts_with("suspend fun main ("))
-        {
-            has_top_level_main = true;
-            break;
-        }
-        for ch in code.chars() {
-            match ch {
-                '{' => brace_depth += 1,
-                '}' => brace_depth = (brace_depth - 1).max(0),
-                _ => {}
-            }
-        }
-    }
-    if has_top_level_main {
+    if kotlin_has_top_level_main(src) {
         let mut chars = file_stem.chars();
         let cap = match chars.next() {
             Some(c) => format!("{}{}", c.to_ascii_uppercase(), chars.as_str()),
@@ -144,6 +119,150 @@ pub(crate) fn infer_kotlin_class_stem(file_stem: &str, src: &str) -> String {
     } else {
         file_stem.to_string()
     }
+}
+
+/// Lexical scanner for Kotlin source that skips `//` line comments, nested `/* ... */`
+/// block comments, `"""..."""` raw strings, `"..."` strings (respecting `\"` escapes),
+/// and `'...'` char literals before tracking `{`/`}` nesting and detecting top-level
+/// `fun main(` or `suspend fun main(`.
+fn kotlin_has_top_level_main(src: &str) -> bool {
+    let bytes = src.as_bytes();
+    let len = bytes.len();
+    let mut i = 0usize;
+    let mut brace_depth: i32 = 0;
+    let mut block_comment_depth: usize = 0;
+    let mut in_raw_string = false;
+    let mut in_string = false;
+    let mut in_char = false;
+    let mut top_level_buf = String::new();
+
+    while i < len {
+        let b = bytes[i];
+        if block_comment_depth > 0 {
+            if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
+                block_comment_depth += 1;
+                i += 2;
+            } else if b == b'*' && i + 1 < len && bytes[i + 1] == b'/' {
+                block_comment_depth -= 1;
+                i += 2;
+            } else {
+                if b == b'\n' {
+                    top_level_buf.push('\n');
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if in_raw_string {
+            if b == b'"' && i + 2 < len && bytes[i + 1] == b'"' && bytes[i + 2] == b'"' {
+                in_raw_string = false;
+                i += 3;
+            } else {
+                if b == b'\n' {
+                    top_level_buf.push('\n');
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if in_string {
+            if b == b'\\' && i + 1 < len {
+                i += 2;
+            } else if b == b'"' {
+                in_string = false;
+                i += 1;
+            } else if b == b'\n' {
+                in_string = false;
+                top_level_buf.push('\n');
+                i += 1;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        if in_char {
+            if b == b'\\' && i + 1 < len {
+                i += 2;
+            } else if b == b'\'' || b == b'\n' {
+                in_char = false;
+                if b == b'\n' {
+                    top_level_buf.push('\n');
+                }
+                i += 1;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+
+        // Line comment `// ...`
+        if b == b'/' && i + 1 < len && bytes[i + 1] == b'/' {
+            while i < len && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        // Block comment `/* ... */`
+        if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
+            block_comment_depth = 1;
+            i += 2;
+            continue;
+        }
+        // Raw triple-quoted string `"""..."""`
+        if b == b'"' && i + 2 < len && bytes[i + 1] == b'"' && bytes[i + 2] == b'"' {
+            in_raw_string = true;
+            i += 3;
+            continue;
+        }
+        if b == b'"' {
+            in_string = true;
+            i += 1;
+            continue;
+        }
+        if b == b'\'' {
+            in_char = true;
+            i += 1;
+            continue;
+        }
+        if b == b'{' {
+            if brace_depth == 0 {
+                top_level_buf.push(' ');
+            }
+            brace_depth += 1;
+            i += 1;
+            continue;
+        }
+        if b == b'}' {
+            brace_depth = (brace_depth - 1).max(0);
+            if brace_depth == 0 {
+                top_level_buf.push('\n');
+            }
+            i += 1;
+            continue;
+        }
+
+        if brace_depth == 0 {
+            let ch = src[i..].chars().next().unwrap_or(' ');
+            top_level_buf.push(ch);
+            i += ch.len_utf8();
+        } else {
+            if b == b'\n' {
+                top_level_buf.push('\n');
+            }
+            i += 1;
+        }
+    }
+
+    top_level_buf.lines().any(|line| {
+        let t = line.trim();
+        let rest = t
+            .strip_prefix("public ")
+            .or_else(|| t.strip_prefix("internal "))
+            .unwrap_or(t)
+            .trim_start();
+        let rest = rest.strip_prefix("suspend ").unwrap_or(rest).trim_start();
+        rest.starts_with("fun main(") || rest.starts_with("fun main (")
+    })
 }
 
 pub(crate) async fn spawn_java_jdwp_bridge(

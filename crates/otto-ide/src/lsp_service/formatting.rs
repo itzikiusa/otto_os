@@ -81,7 +81,7 @@ pub(super) fn formatter_candidates(
             (
                 "ktfmt",
                 "ktfmt".into(),
-                vec!["--stdin-name".into(), path.to_string(), "-".into()],
+                vec![format!("--stdin-name={path}"), "-".into()],
             ),
             (
                 "ktlint",

@@ -560,28 +560,26 @@ pub(super) fn detect_kotlin(path: &str, dir: &str, content: &str, out: &mut Vec<
                 },
             });
             pending_test_ann = false;
-        } else if pending_test_ann {
-            if !trimmed.starts_with('@') && !trimmed.is_empty() {
-                if let Some(cap) = re_fun.captures(line) {
-                    let method = cap
-                        .get(1)
-                        .or_else(|| cap.get(2))
-                        .map(|m| m.as_str())
-                        .unwrap_or("test");
-                    emit_kotlin_test(
-                        path,
-                        dir,
-                        &package_name,
-                        &current_class,
-                        method,
-                        line_no,
-                        &mut class_has_tests,
-                        &mut emitted_suite_line,
-                        out,
-                    );
-                }
-                pending_test_ann = false;
+        } else if pending_test_ann && !trimmed.starts_with('@') && !trimmed.is_empty() {
+            if let Some(cap) = re_fun.captures(line) {
+                let method = cap
+                    .get(1)
+                    .or_else(|| cap.get(2))
+                    .map(|m| m.as_str())
+                    .unwrap_or("test");
+                emit_kotlin_test(
+                    path,
+                    dir,
+                    &package_name,
+                    &current_class,
+                    method,
+                    line_no,
+                    &mut class_has_tests,
+                    &mut emitted_suite_line,
+                    out,
+                );
             }
+            pending_test_ann = false;
         }
 
         let code_only = strip_line_comment(line);

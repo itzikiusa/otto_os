@@ -237,16 +237,50 @@ fn is_kotlin_sdk_path(sdk: &str) -> bool {
         || s_low.ends_with("/kotlinc")
 }
 
+fn is_jdk_sdk_path(sdk: &str) -> bool {
+    if !sdk.starts_with('/') {
+        return false;
+    }
+    let sp = Path::new(sdk);
+    let s_low = sdk.to_ascii_lowercase();
+    sp.join("bin/javac").is_file()
+        || sp.join("bin/java").is_file()
+        || s_low.contains("jdk")
+        || s_low.contains("javavirtualmachines")
+        || s_low.contains("/java/")
+}
+
 fn infer_sdk_kind(
     sdk: &str,
     runner: Option<IdeRunnerKind>,
     lang_or_path_hint: Option<&str>,
     mod_root: &str,
+    registered_ecosystem: Option<crate::toolchains_catalog::EcosystemKind>,
 ) -> SdkKindHint {
+    if let Some(eco) = registered_ecosystem {
+        match eco {
+            crate::toolchains_catalog::EcosystemKind::Kotlin => return SdkKindHint::Kotlin,
+            crate::toolchains_catalog::EcosystemKind::Java => return SdkKindHint::Java,
+            crate::toolchains_catalog::EcosystemKind::Go => return SdkKindHint::Go,
+            crate::toolchains_catalog::EcosystemKind::Rust => return SdkKindHint::Rust,
+            crate::toolchains_catalog::EcosystemKind::Zig => return SdkKindHint::Zig,
+            crate::toolchains_catalog::EcosystemKind::Cpp => return SdkKindHint::Cpp,
+            crate::toolchains_catalog::EcosystemKind::Dotnet => return SdkKindHint::Dotnet,
+            crate::toolchains_catalog::EcosystemKind::Node => return SdkKindHint::Node,
+            crate::toolchains_catalog::EcosystemKind::Python => return SdkKindHint::Python,
+            _ => {}
+        }
+    }
     // Classify explicit Kotlin compiler homes (`kotlinc` without `javac`) before
     // falling back to JVM runner kinds (which otherwise map to `Java` / `JAVA_HOME`).
     if is_kotlin_sdk_path(sdk) {
         return SdkKindHint::Kotlin;
+    }
+    // BUG2-5: Identify an installed JDK by its Java binaries/path BEFORE consulting a
+    // `.kt` / Kotlin language hint so a module JDK override on a Kotlin file sets
+    // `JAVA_HOME` rather than `KOTLIN_HOME`.
+    if is_jdk_sdk_path(sdk) {
+        return SdkKindHint::Java;
     }
     if let Some(r) = runner {
         match r {
@@ -467,12 +501,36 @@ pub(crate) fn apply_module_sdk_to_project_env(
     runner: Option<IdeRunnerKind>,
     lang_or_path_hint: Option<&str>,
 ) {
+    apply_module_sdk_to_project_env_with_ecosystem(
+        proj,
+        mod_root,
+        sdk_path,
+        runner,
+        lang_or_path_hint,
+        None,
+    );
+}
+
+pub(crate) fn apply_module_sdk_to_project_env_with_ecosystem(
+    proj: &mut IdeProjectEnvironment,
+    mod_root: &str,
+    sdk_path: &str,
+    runner: Option<IdeRunnerKind>,
+    lang_or_path_hint: Option<&str>,
+    registered_ecosystem: Option<crate::toolchains_catalog::EcosystemKind>,
+) {
     let sdk = sdk_path.trim();
     if sdk.is_empty() {
         return;
     }
     let trimmed = sdk.trim_end_matches('/');
-    match infer_sdk_kind(trimmed, runner, lang_or_path_hint, mod_root) {
+    match infer_sdk_kind(
+        trimmed,
+        runner,
+        lang_or_path_hint,
+        mod_root,
+        registered_ecosystem,
+    ) {
         SdkKindHint::Go => {
             let root = trimmed
                 .strip_suffix("/bin/go")
@@ -695,12 +753,29 @@ pub(super) async fn layer_child_and_module_sdk_for_run(
         &candidates,
         target.kind == IdeTargetKind::Local,
     ) {
-        apply_module_sdk_to_project_env(
+        let host_key = match target.kind {
+            IdeTargetKind::Local => "local".to_string(),
+            IdeTargetKind::Ssh => target
+                .connection_id
+                .as_deref()
+                .map(|c| format!("ssh:{c}"))
+                .unwrap_or_else(|| "local".to_string()),
+        };
+        let registered =
+            crate::toolchains::load_registered_local_sdks_by_host(pool, &host_key).await;
+        let norm_sdk = sdk_val.trim().trim_end_matches('/');
+        let registered_eco = registered.iter().find_map(|(eco, sdks)| {
+            sdks.iter()
+                .any(|s| s.path.trim().trim_end_matches('/') == norm_sdk)
+                .then_some(*eco)
+        });
+        apply_module_sdk_to_project_env_with_ecosystem(
             proj,
             &mod_root,
             &sdk_val,
             Some(c.runner),
             resolved_tp.as_deref(),
+            registered_eco,
         );
     }
 }

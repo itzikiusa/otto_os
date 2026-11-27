@@ -452,10 +452,6 @@ pub fn parse_gradle_dependencies(content: &str) -> Vec<IdeDepItem> {
             let ver_m = cap.get(2);
             let name_col = (line[..mod_m.start()].chars().count() + 1) as u32;
             let name_end_col = (line[..mod_m.end()].chars().count() + 1) as u32;
-            let managed_in = ver_m.is_none().then(|| IdeDepManagedIn {
-                path: "kotlin-plugin".to_string(),
-                line: line_no,
-            });
             let ver = ver_m
                 .map(|m| m.as_str().to_string())
                 .unwrap_or_else(|| "plugin".into());
@@ -483,7 +479,7 @@ pub fn parse_gradle_dependencies(content: &str) -> Vec<IdeDepItem> {
                 block_start_line: line_no,
                 block_end_line: line_no,
                 property_name: None,
-                managed_in,
+                managed_in: None,
                 vulnerabilities: Vec::new(),
                 range: false,
             });
@@ -596,10 +592,6 @@ pub fn parse_gradle_version_catalog(content: &str) -> Vec<IdeDepItem> {
                     ver = Some(v);
                 }
             }
-            let managed_in = ver_span.is_none().then(|| IdeDepManagedIn {
-                path: "unversioned".to_string(),
-                line: line_no,
-            });
             let current_version = ver.unwrap_or_else(|| "*".into());
             let name_col = line
                 .find(&c)
@@ -623,7 +615,7 @@ pub fn parse_gradle_version_catalog(content: &str) -> Vec<IdeDepItem> {
                 block_start_line: line_no,
                 block_end_line: line_no,
                 property_name: prop_name,
-                managed_in,
+                managed_in: None,
                 vulnerabilities: Vec::new(),
                 range: false,
             });
