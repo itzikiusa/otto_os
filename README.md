@@ -38,9 +38,9 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
   dumps). Kotlin & Spring Boot get Kotlin highlighting,
   `kotlin-language-server`, mixed Java/Kotlin modules, JUnit 5 & Kotest gutter
   runs, Gradle `libs.versions.toml` inspection, JVM JDWP debugging,
-  `application.properties`/`application.yml` completion/hover/navigation/deprecation
-  quick fixes, a loopback-only Actuator inspector with secret redaction, and
-  DevTools `.reloadtrigger` restart. .NET (C# / F# / Unity / Unreal C#) gets
+  `application.properties`/`application.yml` completion, hover, and navigation
+  (plus `.properties` deprecation quick fixes), a loopback-only Actuator
+  inspector with secret redaction, and DevTools `.reloadtrigger` restart check. .NET (C# / F# / Unity / Unreal C#) gets
   highlighting, toolchain discovery/installer, `csharp-ls` / OmniSharp /
   `fsautocomplete`, xUnit/NUnit/MSTest gutter runs, NuGet inspection, and
   `netcoredbg` debugging (launch, VSTest test debugging, and explicit PID attach).
@@ -105,8 +105,8 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
   the IDE Security view with incremental caching, resource limits and macOS
   Seatbelt confinement. Review findings in Problems and the editor gutter,
   manage suppressions and baselines, import or export SARIF 2.1.0, and run
-  passive HTTP header audits against explicitly confirmed development run
-  targets ([Security scans](docs/features/security-scans.md)).
+  passive HTTP header audits or opt-in active Nuclei DAST checks against
+  explicitly confirmed development run targets ([Security scans](docs/features/security-scans.md)).
 - **Chat.** A run started from chat keeps one live status message in its
   thread instead of a message per step, and flushes pending chat progress
   updates before `channel_notify` sends its final message so delivery order

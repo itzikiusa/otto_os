@@ -38,8 +38,22 @@ pub(super) async fn spring_devtools_restart<S: IdeCtx>(
         .targets
         .resolve_write(&ctx, &user, &req.target)
         .await?;
-    let canon_root = match resolved {
-        ResolvedTarget::Local { root, .. } => root,
+    let writable_roots: Vec<std::path::PathBuf> = match resolved {
+        ResolvedTarget::Local {
+            root,
+            additional_roots,
+            readonly_roots,
+            ..
+        } => {
+            let mut roots = vec![root];
+            for extra in additional_roots {
+                if !readonly_roots.iter().any(|ro| extra.starts_with(ro)) && !roots.contains(&extra)
+                {
+                    roots.push(extra);
+                }
+            }
+            roots
+        }
         ResolvedTarget::Ssh { .. } => {
             return Err(Error::Invalid(
                 "DevTools restart trigger is supported on local workspaces".into(),
@@ -48,7 +62,7 @@ pub(super) async fn spring_devtools_restart<S: IdeCtx>(
         }
     };
     let resp = crate::spring_boot::actuator::trigger_devtools_restart(
-        &canon_root,
+        &writable_roots,
         req.trigger_file.as_deref(),
         req.module_root.as_deref(),
     )

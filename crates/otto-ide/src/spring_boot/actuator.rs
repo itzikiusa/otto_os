@@ -1,7 +1,7 @@
 //! Loopback-only Spring Boot Actuator client (Health, Endpoints/Mappings, Beans,
 //! redacted Env) and confined Spring Boot DevTools live restart trigger.
 
-use std::path::Path;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use chrono::Utc;
@@ -398,12 +398,16 @@ pub fn parse_actuator_env(val: &Value) -> (Vec<String>, Vec<IdeSpringEnvProp>) {
 }
 
 /// Touch (or create empty if absent) the Spring Boot DevTools restart trigger file strictly
-/// inside a compiled classpath output directory of `canon_root` (or confined `module_root`).
+/// inside a compiled classpath output directory of one of the authorized writable roots
+/// (`allowed_roots`), resolving optional `module_root_override` against all authorized roots.
 pub async fn trigger_devtools_restart(
-    canon_root: &Path,
+    allowed_roots: &[PathBuf],
     trigger_file_override: Option<&str>,
     module_root_override: Option<&str>,
 ) -> Result<IdeSpringDevtoolsRestartResp> {
+    let primary_root = allowed_roots
+        .first()
+        .ok_or_else(|| Error::Forbidden("no authorized writable workspace root".into()))?;
     let trigger_name = trigger_file_override
         .map(str::trim)
         .filter(|s| !s.is_empty())
@@ -422,7 +426,7 @@ pub async fn trigger_devtools_restart(
         )));
     }
 
-    let effective_root = match module_root_override
+    let (matched_root, effective_root) = match module_root_override
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
@@ -430,14 +434,21 @@ pub async fn trigger_devtools_restart(
             let cand = tokio::fs::canonicalize(mr).await.map_err(|_| {
                 Error::Invalid(format!("Spring Boot module root '{mr}' does not exist"))
             })?;
-            if !cand.is_dir() || !cand.starts_with(canon_root) {
-                return Err(Error::Forbidden(
-                    "Spring Boot module root escaped workspace root".into(),
-                ));
+            let owner = allowed_roots
+                .iter()
+                .find(|r| cand.starts_with(r))
+                .cloned()
+                .ok_or_else(|| {
+                    Error::Forbidden("Spring Boot module root escaped workspace roots".into())
+                })?;
+            if !cand.is_dir() {
+                return Err(Error::Invalid(format!(
+                    "Spring Boot module root '{mr}' is not a directory"
+                )));
             }
-            cand
+            (owner, cand)
         }
-        None => canon_root.to_path_buf(),
+        None => (primary_root.clone(), primary_root.clone()),
     };
 
     // Only touch inside an existing compiled classpath output directory so DevTools sees the
@@ -461,7 +472,7 @@ pub async fn trigger_devtools_restart(
     let canon_dir = tokio::fs::canonicalize(&target_dir)
         .await
         .map_err(|e| Error::Internal(format!("canonicalize DevTools trigger dir: {e}")))?;
-    if !canon_dir.starts_with(canon_root) {
+    if !canon_dir.starts_with(&matched_root) {
         return Err(Error::Forbidden(
             "DevTools trigger directory escaped workspace root".into(),
         ));
@@ -510,7 +521,8 @@ pub async fn trigger_devtools_restart(
     Ok(IdeSpringDevtoolsRestartResp {
         ok: true,
         trigger_path: trigger_path.to_string_lossy().into_owned(),
-        restarted_at: now,
+        requested_at: now,
+        restarted_at: None,
         message: format!(
             "Updated DevTools trigger file {} (restart check requested)",
             trigger_path.display()

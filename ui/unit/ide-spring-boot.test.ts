@@ -5,6 +5,7 @@ import {
   isSpringConfigPath,
   SPRING_BOOT_CONFIG_PROPS,
 } from '../src/lib/components/cm-spring-config.ts';
+import { isDepVersionEditable } from '../src/lib/components/cm-ide-deps-model.ts';
 
 describe('Spring Boot configuration intelligence', () => {
   it('recognizes Spring Boot application and bootstrap config filenames', () => {
@@ -56,5 +57,44 @@ describe('Spring Boot configuration intelligence', () => {
     const r2 = completeSpringConfigAt('application.yml', ymlValDoc, ymlValDoc.length, false);
     assert.ok(r2, 'expected nested YAML enum completion for server.shutdown');
     assert.ok(r2.options.some((o) => o.label === 'graceful'));
+  });
+
+  it('disables inline dependency upgrade actions when version span is missing or plugin-managed (DATA-1)', () => {
+    assert.equal(
+      isDepVersionEditable({
+        name: 'org.jetbrains.kotlin:kotlin-stdlib',
+        current_version: 'plugin',
+        line: 2,
+        version_col: 0,
+        version_end_col: 0,
+      }),
+      false,
+    );
+    assert.equal(
+      isDepVersionEditable({
+        name: 'org.jetbrains.kotlin:kotlin-stdlib',
+        current_version: 'plugin',
+        line: 2,
+      }),
+      false,
+    );
+    assert.equal(
+      isDepVersionEditable({
+        name: 'com.acme:foo',
+        current_version: '*',
+        line: 4,
+      }),
+      false,
+    );
+    assert.equal(
+      isDepVersionEditable({
+        name: 'org.jetbrains.kotlinx:kotlinx-coroutines-core',
+        current_version: '1.9.0',
+        line: 3,
+        version_col: 62,
+        version_end_col: 67,
+      }),
+      true,
+    );
   });
 });

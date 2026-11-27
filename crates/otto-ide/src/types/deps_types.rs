@@ -271,7 +271,9 @@ pub struct IdeSpringDevtoolsRestartReq {
 pub struct IdeSpringDevtoolsRestartResp {
     pub ok: bool,
     pub trigger_path: String,
-    pub restarted_at: String,
+    pub requested_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restarted_at: Option<String>,
     pub message: String,
 }
 
