@@ -50,8 +50,8 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
   JS/TS web frameworks (Angular, React, Next.js,
   Svelte/SvelteKit, Vue/Nuxt, Vite) get framework detection, `svelteserver` /
   `vue-language-server` (standalone mode) / `ngserver`, Vitest/Jest/Playwright/Karma runners, and
-  Node + Browser CDP debugging (Debug is refused for Playwright and Karma
-  runs: use Run). `zls`, `kotlin-language-server`, `vue-language-server` and
+  Node + Browser CDP debugging, plus Playwright and Angular Karma test
+  debugging through js-debug. `zls`, `kotlin-language-server`, `vue-language-server` and
   the .NET servers (`csharp-ls`, `fsautocomplete`) run code from the project
   (its build, the plugins its `tsconfig.json` names, or its MSBuild targets),
   so they do not start until you trust the project: **Trust project…** in the

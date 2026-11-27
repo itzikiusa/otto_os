@@ -441,10 +441,41 @@ no-exec build runner (Zig 0.14 and 0.16; other versions say which are supported,
 and Run works for every version), with `src/main.zig`'s suite last. Local and SSH
 targets work the same.
 
-Some starts are refused with a message instead of opening a session: Debug of
-a Playwright or Karma / Angular test run (Playwright runs tests in a separate
-worker process, Karma in a browser; use Run, `PWDEBUG=1` or a Chrome CDP
-attach), a .NET Debug of all tests (local or SSH) in a folder or solution with
+**Playwright and Karma / Angular tests** debug through Microsoft's js-debug
+(installed from Toolchains, 1.2 MB, its pinned SHA-256 checked; a Debug without
+it fails with "Debugging tests needs js-debug" and offers the install). js-debug
+debugs every process of the run as a child target: Otto opens one more DAP
+connection to js-debug per process it announces (`startDebugging`), sends it
+the breakpoints, and lists the processes above the Frames ("Playwright worker
+[pid]", "Karma: Chrome"). One process is in focus; a stop of another while the
+focus is paused waits and takes the focus when the focused one resumes or ends.
+A breakpoint turns solid once any process has bound it (through the TypeScript
+source maps); one that never binds stays hollow with js-debug's reason.
+
+- **Playwright** (gutter ▶ on a `test(` / `test.describe(` line, or toolbar Debug
+  on a Playwright configuration): js-debug runs
+  `node_modules/@playwright/test/cli.js test <file>:<line> --workers=1
+  --timeout=0 --reporter=list --headed` from the package root (the toolbar keeps
+  the configuration's files, `--project` and `-g`, and drops `--workers`,
+  `--timeout`, `--ui`, `--debug`). `PWDEBUG` is removed, Playwright's own
+  frames are skipped, and the reporter output goes to the Debug console.
+- **Karma in an Angular CLI project** (gutter ▶ on `describe(` / `it(`, or toolbar
+  Debug on "Karma / Angular Test"): Otto starts `ng test --watch
+  [--include=<spec>]`, waits up to 5 minutes for Karma's URL, then js-debug opens
+  `debug.html?spec=<Jasmine full name>` (the suites' titles and the spec's,
+  joined by spaces; none for a suite file or the toolbar) in Chrome with a
+  temporary profile and pipe debugging (no CDP port). Karma's `/base/` maps to
+  the `angular.json` folder, which binds breakpoints in the spec and in the code
+  it tests. With `@angular/build:karma` and `@angular-devkit/build-angular:karma`
+  Karma starts no browser (`--browsers=false`); `@angular/build:unit-test` with
+  `runner: "karma"` rejects that flag, so its configured browser runs the tests
+  too (the Debug console says so). Chrome is `CHROME_PATH`, else the installed
+  Google Chrome. **Stop** ends `ng test`, the debug browser and js-debug.
+- Not supported: plain Karma without `angular.json` (Run-only: "Debug supports
+  Karma in Angular CLI projects…"), and Playwright / Karma Debug on SSH targets
+  (use Run there).
+
+Some starts are refused with a message instead of opening a session: a .NET Debug of all tests (local or SSH) in a folder or solution with
 more than one test project (a session attaches to one test host; debug one test
 from the gutter, or a ".NET Test" configuration that targets one project; add it
 in Launch settings when discovery lists none, as for solutions of more than 6
