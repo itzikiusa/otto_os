@@ -47,30 +47,22 @@ pub async fn recover_before_serve(ctx: &ServerCtx, boot: &mut BootPhases) -> Res
             .fail_running()
             .await,
     );
-    warn_on_err(
-        "personal-agent recovery",
-        otto_state::PersonalAgentsRepo::new(ctx.pool.clone())
-            .reap_running()
-            .await,
-    );
-    // Stop adopted threads of reaped personal-agent runs (never chat or delegated threads).
-    for id in &adopted.handled_ids {
-        let meta = ctx.agent_runtime.get(id).await.ok().and_then(|s| s.meta);
-        let reaped = meta.as_ref().is_some_and(|m| {
-            m.get("source").and_then(|v| v.as_str()) == Some("personal_agent")
-                && m.get("run_id")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|r| !r.is_empty())
-                && m.get("personal_agent_chat").and_then(|v| v.as_bool()) != Some(true)
-                && m.get("delegated_by_agent").is_none()
-        });
-        if reaped {
-            let _ = ctx
-                .agent_runtime
-                .close_retained(id, chrono::Utc::now() + chrono::Duration::hours(168))
-                .await;
+    let reaped_pa_runs = match otto_state::PersonalAgentsRepo::new(ctx.pool.clone())
+        .reap_running_ids()
+        .await
+    {
+        Ok(ids) => ids,
+        Err(e) => {
+            tracing::warn!("personal-agent recovery: {e}");
+            Vec::new()
         }
-    }
+    };
+    otto_assistant::personal_agent_team::close_reaped_run_threads(
+        ctx,
+        &adopted.handled_ids,
+        &reaped_pa_runs,
+    )
+    .await;
     // Status flips only; the vault rescans it needs run in the background.
     warn_on_err(
         "vault-docs recovery",

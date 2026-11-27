@@ -249,14 +249,18 @@ impl WorkflowsRepo {
             .collect()
     }
 
-    /// Frozen `input` of the workflow checkpoint that launched `review_id`.
+    /// Frozen `input` of the synthetic workflow launch checkpoint (`#review.N`)
+    /// that started `review_id` (never the ordinary result checkpoint, which
+    /// shares `output.review_id` but lacks `input.config`).
     pub async fn review_checkpoint_input(
         &self,
         review_id: &str,
     ) -> Result<Option<serde_json::Value>> {
         let json: Option<String> = sqlx::query_scalar(
             "SELECT checkpoint_json FROM workflow_checkpoints \
-             WHERE json_extract(checkpoint_json, '$.output.review_id') = ? LIMIT 1",
+             WHERE json_extract(checkpoint_json, '$.output.review_id') = ? \
+               AND (node_id LIKE '%#review.%' OR json_extract(checkpoint_json, '$.input.config') IS NOT NULL) \
+             ORDER BY (node_id LIKE '%#review.%') DESC LIMIT 1",
         )
         .bind(review_id)
         .fetch_optional(&self.pool)
@@ -3556,5 +3560,66 @@ mod tests {
         // Deleting again is a no-op, not a second note.
         repo.delete(&doomed.id).await.unwrap();
         assert_eq!(tasks.list_runs(&hit.id, 10).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn review_checkpoint_input_prefers_synthetic_launch_over_result_checkpoint() {
+        let pool = mem_pool().await;
+        let repo = WorkflowsRepo::new(pool.clone());
+        let owner: Id = "owner".into();
+        let wf = repo
+            .create(
+                &"ws".into(),
+                "Review",
+                "",
+                "",
+                &WorkflowGraph::default(),
+                &owner,
+            )
+            .await
+            .unwrap();
+        let run = repo
+            .create_run(&wf.id, &"ws".into(), &serde_json::json!({}), None)
+            .await
+            .unwrap();
+        let rev_id = "rev-bug-12";
+        // Ordinary result checkpoint inserted FIRST — carries review_id in output
+        // but NO frozen `config` in input.
+        let ordinary = WorkflowCheckpoint {
+            node_id: "loop#1.0".into(),
+            loop_id: "loop".into(),
+            iteration: 1,
+            step_index: 0,
+            kind: "review_run".into(),
+            name: "Review".into(),
+            status: NodeStatus::Success,
+            attempts: 1,
+            input: serde_json::json!({"base": "main"}),
+            output: Some(serde_json::json!({"review_id": rev_id, "score": 0})),
+            error: None,
+            logs: vec![],
+            updated_at: Utc::now(),
+            active_ms: 0,
+            thread_id: None,
+            start_ordinal: None,
+        };
+        repo.save_checkpoint(&run.id, &ordinary).await.unwrap();
+        // Synthetic launch association inserted SECOND — carries frozen `config`.
+        let launch = WorkflowCheckpoint {
+            node_id: "loop#1.0#review.0".into(),
+            input: serde_json::json!({"config": {"summarizer": {"provider": "agy"}}}),
+            output: Some(serde_json::json!({"review_id": rev_id})),
+            ..ordinary
+        };
+        repo.save_checkpoint(&run.id, &launch).await.unwrap();
+        let got = repo
+            .review_checkpoint_input(rev_id)
+            .await
+            .unwrap()
+            .expect("synthetic launch checkpoint must be found");
+        assert!(
+            got.get("config").is_some(),
+            "must select synthetic launch checkpoint with frozen config, not ordinary result checkpoint: {got}"
+        );
     }
 }

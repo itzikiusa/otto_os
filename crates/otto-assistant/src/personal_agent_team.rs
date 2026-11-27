@@ -770,9 +770,62 @@ pub async fn recover_delegations<C: AssistantCtx>(
     Ok(n)
 }
 
+/// Whether an adopted runtime thread belongs to a personal-agent run that was
+/// actually reaped at boot (never chat, delegated, or reopened follow-up threads
+/// on already-completed runs).
+pub fn is_reaped_pa_run_thread(meta: Option<&serde_json::Value>, reaped_run_ids: &[Id]) -> bool {
+    if reaped_run_ids.is_empty() {
+        return false;
+    }
+    meta.is_some_and(|m| {
+        m.get("source").and_then(|v| v.as_str()) == Some("personal_agent")
+            && m.get("personal_agent_chat").and_then(|v| v.as_bool()) != Some(true)
+            && m.get("delegated_by_agent").is_none()
+            && m.get("run_id")
+                .and_then(|v| v.as_str())
+                .is_some_and(|r| reaped_run_ids.iter().any(|id| id == r))
+    })
+}
+
+/// Close adopted runtime threads belonging to the exact personal-agent runs
+/// reaped at boot.
+pub async fn close_reaped_run_threads<C: AssistantCtx>(
+    ctx: &C,
+    held_threads: &std::collections::HashSet<Id>,
+    reaped_run_ids: &[Id],
+) {
+    if reaped_run_ids.is_empty() {
+        return;
+    }
+    let until = chrono::Utc::now() + chrono::Duration::hours(168);
+    for id in held_threads {
+        let meta = ctx.agent_runtime().get(id).await.ok().and_then(|s| s.meta);
+        if is_reaped_pa_run_thread(meta.as_ref(), reaped_run_ids) {
+            let _ = ctx.agent_runtime().close_retained(id, until).await;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_reaped_pa_run_thread_matches_only_reaped_runs_not_completed_followups() {
+        let reaped = vec![Id::from("run-reaped")];
+        let reaped_meta = json!({"source": "personal_agent", "run_id": "run-reaped"});
+        let completed_followup = json!({"source": "personal_agent", "run_id": "run-done"});
+        let chat = json!({"source": "personal_agent", "run_id": "run-reaped", "personal_agent_chat": true});
+        let delegated = json!({"source": "personal_agent", "run_id": "run-reaped", "delegated_by_agent": "lead"});
+        assert!(is_reaped_pa_run_thread(Some(&reaped_meta), &reaped));
+        assert!(
+            !is_reaped_pa_run_thread(Some(&completed_followup), &reaped),
+            "reopened follow-up on a completed run must not be closed"
+        );
+        assert!(!is_reaped_pa_run_thread(Some(&completed_followup), &[]));
+        assert!(!is_reaped_pa_run_thread(Some(&chat), &reaped));
+        assert!(!is_reaped_pa_run_thread(Some(&delegated), &reaped));
+    }
 
     #[test]
     fn lead_section_names_the_tools_and_the_team() {
