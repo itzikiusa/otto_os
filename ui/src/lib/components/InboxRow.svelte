@@ -143,7 +143,7 @@
     display: flex;
     align-items: flex-start;
     min-width: 0;
-    border-radius: var(--radius-m);
+    border-radius: var(--radius-s);
     background: var(--tr-tint);
   }
   .tr-row.on-page {
@@ -155,9 +155,16 @@
   .tr-row.in-pane {
     --tr-tint: var(--accent-faint);
   }
-  /* Stronger than hover in light and dark alike. */
+  /* The one selection look of every list (design.md §7.10): the accent
+     tint and a bold title; keyboard focus is an inset ring, no fill. */
   .tr-row.selected {
-    --tr-tint: color-mix(in srgb, var(--text) 12%, transparent);
+    --tr-tint: var(--accent-soft);
+  }
+  .tr-row.selected .tr-title {
+    font-weight: 600;
+  }
+  .tr-main:focus-visible {
+    outline-offset: -2px;
   }
   .tr-row.child {
     margin-inline-start: var(--sp-6);
@@ -174,9 +181,10 @@
     gap: var(--sp-1);
     min-block-size: 64px;
     padding-block: var(--sp-3);
-    padding-inline: var(--sp-5);
+    /* 8 px: with the pane's 8 px inset, text starts 16 px in, as everywhere. */
+    padding-inline: var(--sp-4);
     border: 0;
-    border-radius: var(--radius-m);
+    border-radius: var(--radius-s);
     background: transparent;
     color: var(--text);
     font: inherit;
@@ -250,7 +258,7 @@
     display: flex;
     align-items: center;
     padding-inline-start: var(--sp-3);
-    border-radius: var(--radius-m);
+    border-radius: var(--radius-s);
     background: linear-gradient(var(--tr-tint), var(--tr-tint)), var(--tr-under);
   }
   /* Line 3's height, so they never reach the title above it. */

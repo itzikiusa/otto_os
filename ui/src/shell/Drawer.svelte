@@ -30,6 +30,8 @@
     onclose?: () => void;
     /** Richer header content in place of the plain `title` heading (titled drawers only). */
     head?: Snippet;
+    /** The children draw their own header and Close (DetailPane): no ✕ here. */
+    bare?: boolean;
     children: Snippet;
   }
 
@@ -42,6 +44,7 @@
     width = 'min(86vw, 320px)',
     onclose,
     head,
+    bare = false,
     children,
   }: Props = $props();
 
@@ -108,7 +111,7 @@
       </header>
       <div class="drawer-body">{@render children()}</div>
     {:else}
-      {#if !inline}
+      {#if !inline && !bare}
         <button class="icon-btn drawer-close" onclick={close} aria-label="Close {label}" title="Close {label}" aria-keyshortcuts="Escape">
           <Icon name="x" size={14} />
         </button>

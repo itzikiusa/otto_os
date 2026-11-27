@@ -53,11 +53,17 @@ export const keyContext: {
    *  API client's ⌘T new request tab / ⌘D duplicate). Return true when handled;
    *  the page clears it on unmount. */
   pageChords: ((e: KeyboardEvent) => boolean) | null;
+  /** ⌘B / ⌥⌘B: the page's list pane / Detail pane toggle, when it has one
+   *  (lib/components/side/pageNav.svelte.ts sets these). */
+  listPaneToggle: () => (() => void) | null;
+  detailPaneToggle: () => (() => void) | null;
 } = {
   terminalFocused: false,
   openFind: null,
   barFocused: false,
   pageChords: null,
+  listPaneToggle: () => null,
+  detailPaneToggle: () => null,
 };
 
 // ── ⌘F routing ────────────────────────────────────────────────────────────
@@ -338,6 +344,16 @@ export function installKeyMap(dispatch: KeyDispatcher): () => void {
     // ⌥⌘O / ⌥⌘S) win over the global map while that page is mounted — outside
     // a terminal, which owns its keys.
     if (!term && keyContext.pageChords?.(e)) return;
+    // ⌥⌘B → the page's Detail pane (lib/components/side/DetailPane). `code`:
+    // ⌥ turns the key into "∫" on a Mac.
+    if (!term && e.altKey && !e.shiftKey && e.code === 'KeyB') {
+      const toggle = keyContext.detailPaneToggle();
+      if (toggle) {
+        e.preventDefault();
+        toggle();
+      }
+      return;
+    }
     // No global chord uses ⌥ as a modifier — match exactly so an ⌥-augmented
     // combo never triggers the plain-⌘ action (e.g. ⌥⌘T must not fire ⌘T's
     // "new session"; the DB editor binds ⌥⌘T for a new query tab).
@@ -400,6 +416,15 @@ export function installKeyMap(dispatch: KeyDispatcher): () => void {
           e.preventDefault();
           dispatch('broadcast', e);
           return;
+        }
+        // ⌘B → hide / show the page's list pane (ListDetail); nothing on a
+        // page without one, so a field's own ⌘B is untouched there.
+        {
+          const toggle = term ? null : keyContext.listPaneToggle();
+          if (toggle) {
+            e.preventDefault();
+            toggle();
+          }
         }
         return;
       case 's':
@@ -528,6 +553,8 @@ export const KEYMAP: ShortcutGroup[] = [
       { keys: '⌘,', label: 'Open Settings' },
       { keys: '?', label: 'Show the keyboard shortcut sheet' },
       { keys: '⌘1', label: 'Show or hide the sidebar' },
+      { keys: '⌘B', label: 'Hide or show this page\'s list (Threads, Files, Tables …)' },
+      { keys: '⌥⌘B', label: 'Hide or show this page\'s details pane' },
       { keys: '⌘J', label: 'Show or hide the Side panel' },
       { keys: '⌘⇧← / ⌘⇧→', label: 'Go back / forward through the pages you visited (not while typing in a field)' },
       { keys: '⌘\\', label: 'Open or close the side-by-side pane' },
