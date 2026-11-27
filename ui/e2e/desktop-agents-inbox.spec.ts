@@ -71,14 +71,60 @@ test('one list with words; needs you first; the navigator folds to its rail and 
     if (SHOTS) await page.screenshot({ path: `${SHOTS}/agents-inbox-1440-${s}.png`, animations: 'disabled' });
   }
 
-  // Under "All workspaces" each row names its workspace.
-  await page.getByTestId('agents-sort-toggle').click();
-  await page.getByRole('menuitemcheckbox', { name: 'All workspaces' }).click();
-  await expect(rows(page).first().locator('.tr-proj')).toBeVisible();
-
   // Leaving Agents brings the navigator back.
   await page.goto('/#/settings');
   await expect(page.locator('.navigator')).toBeVisible({ timeout: 15_000 });
+});
+
+test('All workspaces groups sessions by default and remembers the view', async ({ page }) => {
+  const other = await seedWorkspace(ctx, base, 'Another inbox workspace');
+  const created = await ctx.post(`${base}/api/v1/workspaces/${other}/sessions`, {
+    data: { kind: 'agent', provider: 'shell', title: 'Other session', cwd: '/tmp', meta: { origin: 'e2e' } },
+  });
+  expect(created.ok(), await created.text()).toBeTruthy();
+  const otherId = (await created.json()).id as string;
+
+  await page.goto('/#/agents');
+  await expect(rows(page)).toHaveCount(3, { timeout: 20_000 });
+  const show = page.getByTestId('agents-sort-toggle');
+  async function allWorkspaces() {
+    await show.click();
+    await page.getByRole('menuitemcheckbox', { name: 'All workspaces' }).click();
+  }
+  async function groupBy(label: string) {
+    await show.click();
+    await page.getByRole('menuitemcheckbox', { name: `Group by ${label}` }).click();
+  }
+
+  await allWorkspaces();
+  const current = page.getByTestId(`agents-workspace-${wsId}`);
+  const another = page.getByRole('region', { name: 'Another inbox workspace', exact: true });
+  await expect(page.getByTestId('agents-list').getByRole('region').first().getByTestId(`agents-workspace-${wsId}`)).toBeVisible();
+  await expect(current).toHaveAccessibleName('E2E WS 3');
+  const otherRow = page.getByTestId(`agents-row-${otherId}`);
+  await expect(another.getByTestId(`agents-row-${otherId}`)).toBeVisible();
+  await expect(rows(page).locator('.tr-proj')).toHaveCount(0);
+
+  const fold = another.getByRole('button', { name: 'Another inbox workspace 1' });
+  await fold.focus();
+  await page.keyboard.press('Enter');
+  await expect(fold).toHaveAttribute('aria-expanded', 'false');
+  await expect(fold).toBeFocused();
+  await expect(otherRow).toHaveCount(0);
+
+  await groupBy('None');
+  await expect(otherRow.locator('.tr-proj')).toHaveText('Another inbox workspace');
+  await expect(page.getByTestId('agents-list').getByRole('region')).toHaveCount(0);
+
+  await page.reload();
+  await expect(rows(page)).toHaveCount(3, { timeout: 20_000 });
+  await allWorkspaces();
+  await expect(otherRow.locator('.tr-proj')).toHaveText('Another inbox workspace');
+  await groupBy('Status');
+  await expect(page.getByTestId('agents-list').getByRole('region', { name: 'Idle', exact: true }).getByTestId(`agents-row-${otherId}`)).toBeVisible();
+  await groupBy('Workspace');
+  await expect(fold).toHaveAttribute('aria-expanded', 'false');
+  await expect(otherRow).toHaveCount(0);
 });
 
 test('select mode: Tile lays the checked sessions out side by side', async ({ page }) => {

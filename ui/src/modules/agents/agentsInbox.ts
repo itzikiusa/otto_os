@@ -1,27 +1,80 @@
-// The Agents inbox (patterns.md §10, the Threads concept): PTY sessions and
-// structured threads in ONE list — needs you first, then Failed, then
-// finished unread (Done), then the working ones, then the rest in the order
-// the sort mode hands over (recent, manual or tokens) — all in the one list:
-// with six agents running the live sessions ARE the list, never a cramped
-// fold under an empty one. Pure (unit/agentsInbox.test.ts): the page passes
-// in each row's class (lib/statusWords.ts `inboxClass`).
 import type { Session } from '../../lib/api/types';
 import type { InboxClass } from '../../lib/statusWords';
 
-const RANK: Record<InboxClass, number> = { needs: 0, failed: 1, done: 2, working: 3, rest: 4 };
+export const SESSION_GROUPING_LABELS = { workspace: 'Workspace', status: 'Status', none: 'None' } as const;
+export type SessionGrouping = keyof typeof SESSION_GROUPING_LABELS;
 
-/** The inbox list. `list` comes in the sort mode's order ('recent' = newest
- *  activity first); urgency moves a row up, the incoming order breaks ties (stable). */
-export function agentsInbox(list: readonly Session[], classOf: (s: Session) => InboxClass): Session[] {
-  return list
-    .map((s, i) => ({ s, r: RANK[classOf(s)], i }))
-    .sort((a, b) => a.r - b.r || a.i - b.i)
-    .map((x) => x.s);
+export const SESSION_LIST_STATUS_LABELS = { needs: 'Needs you', working: 'Working', idle: 'Idle', done: 'Done' } as const;
+export type SessionListStatus = keyof typeof SESSION_LIST_STATUS_LABELS;
+const STATUS_ORDER = Object.keys(SESSION_LIST_STATUS_LABELS) as SessionListStatus[];
+type StatusBuckets = Record<SessionListStatus, Session[]>;
+
+export type InboxGroup =
+  | { kind: 'workspace'; key: string; sessions: readonly Session[] }
+  | { kind: 'status'; key: SessionListStatus; sessions: readonly Session[] }
+  | { kind: 'flat'; key: 'flat'; sessions: readonly Session[] };
+
+/** Keep the row's specific outcome word (e.g. Failed) in the Done group. */
+export function sessionListStatus(key: string, cls: InboxClass): SessionListStatus {
+  if (cls === 'needs' || cls === 'working') return cls;
+  if (cls === 'done' || cls === 'failed' || key === 'stopped' || key === 'ended') return 'done';
+  return 'idle';
 }
 
-/** Newest activity first (the 'recent' sort; ISO strings compare as text). */
-export function byRecent<T extends { last_active_at: string }>(list: readonly T[]): T[] {
-  return [...list].sort((a, b) => b.last_active_at.localeCompare(a.last_active_at));
+/** Compare activity timestamps once per row. Break ties by id so a refresh
+ *  that brings the same rows in a different order doesn't move them. */
+export function byRecent<T extends Pick<Session, 'id' | 'last_active_at'>>(list: readonly T[]): T[] {
+  return list
+    .map((row) => {
+      // Date.parse truncates the daemon's fractional seconds to milliseconds.
+      const fraction = /\.\d{3}(\d{1,6})/.exec(row.last_active_at)?.[1];
+      return { row, at: Date.parse(row.last_active_at) || 0, nanos: Number(fraction?.padEnd(6, '0') ?? 0) };
+    })
+    .sort((a, b) => b.at - a.at || b.nanos - a.nanos || a.row.id.localeCompare(b.row.id))
+    .map(({ row }) => row);
+}
+
+function statusBuckets(): StatusBuckets {
+  return { needs: [], working: [], idle: [], done: [] };
+}
+
+/** One recency sort followed by a stable bucket pass. In Workspace mode,
+ *  map insertion order records each workspace's newest session, even when
+ *  that session sorts below older ones inside the workspace. */
+export function groupAgentSessions(
+  list: readonly Session[],
+  statusOf: (s: Session) => SessionListStatus,
+  groupBy: SessionGrouping | 'single',
+  currentWorkspaceId: string | null,
+  keepInputOrder = false,
+): InboxGroup[] {
+  if (list.length === 0) return [];
+  const rows = groupBy === 'single' && keepInputOrder ? list : byRecent(list);
+  if (groupBy === 'none') return [{ kind: 'flat', key: 'flat', sessions: rows }];
+
+  if (groupBy === 'workspace') {
+    const workspaces = new Map<string, StatusBuckets>();
+    for (const row of rows) {
+      let buckets = workspaces.get(row.workspace_id);
+      if (!buckets) {
+        buckets = statusBuckets();
+        workspaces.set(row.workspace_id, buckets);
+      }
+      buckets[statusOf(row)].push(row);
+    }
+    const groups: InboxGroup[] = [];
+    for (const [key, buckets] of workspaces) {
+      const group = { kind: 'workspace' as const, key, sessions: STATUS_ORDER.flatMap((status) => buckets[status]) };
+      if (key === currentWorkspaceId) groups.unshift(group);
+      else groups.push(group);
+    }
+    return groups;
+  }
+
+  const buckets = statusBuckets();
+  for (const row of rows) buckets[statusOf(row)].push(row);
+  if (groupBy === 'single') return [{ kind: 'flat', key: 'flat', sessions: STATUS_ORDER.flatMap((status) => buckets[status]) }];
+  return STATUS_ORDER.filter((key) => buckets[key].length > 0).map((key) => ({ kind: 'status', key, sessions: buckets[key] }));
 }
 
 /** Search: title, provider, folder, branch or workspace name. */
