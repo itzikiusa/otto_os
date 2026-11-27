@@ -51,7 +51,7 @@ test('the toolbar keeps four controls; the rest is one ⋯ away', async ({ page 
   for (const gone of ['threads-back', 'threads-forward', 'threads-new-btn-top', 'threads-toggle-card', 'threads-layout-switch', 'threads-toggle-terminal', 'threads-continue-phone']) {
     await expect(page.getByTestId(gone)).toHaveCount(0);
   }
-  for (const kept of ['threads-toggle-sidebar', 'threads-breadcrumb', 'threads-toggle-inspector', 'threads-thread-menu']) {
+  for (const kept of ['threads-new-btn', 'threads-breadcrumb', 'threads-toggle-inspector', 'threads-thread-menu']) {
     await expect(page.getByTestId(kept)).toBeVisible();
   }
 
@@ -157,8 +157,10 @@ test('the composer is quiet: no "Saved" line while the draft is fine', async ({ 
 
 test('phone: the toolbar, ⋯ and the send-to popover fit with no sideways scroll', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  // At phone width the sidebar is a drawer: the page opens on the thread.
-  await openThreads(page, [LEAD, WORKER], 'runtime-thread-rt_lead');
+  // At phone width the list is the page: a tap pushes the thread over it.
+  await openThreads(page, [LEAD, WORKER], 'threads-sidebar');
+  await page.getByTestId('thread-row-rt_lead').locator('.tr-main').click();
+  await expect(page.getByTestId('runtime-thread-rt_lead')).toBeVisible();
   await expectNoHorizontalOverflow(page);
   await page.getByTestId('threads-thread-menu').click();
   await expectFullyInViewport(page, page.locator('.ctx-menu'), 'toolbar ⋯ menu (phone)');

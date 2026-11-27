@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apiCtx } from './seed';
 import { requireThreadMeta } from './daemonFeatures';
-import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
+import { expectFullyInViewport, expectNoHorizontalOverflow, showThreadList } from './helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // The Threads sidebar as an inbox (docs/features/threads.md "The sidebar"),
@@ -189,7 +189,7 @@ test('Working and History stay pinned above the footer while the list scrolls', 
   // Not part of the scrolling list: they sit between it and the footer.
   expect(await fold.evaluate((el) => !!el.closest('.th-scroll'))).toBe(false);
   expect(await history.evaluate((el) => !!el.closest('.th-scroll'))).toBe(false);
-  const foot = (await side.locator('.th-foot').boundingBox())!;
+  const foot = (await side.locator('.side-pane-foot').boundingBox())!;
   const h = (await history.boundingBox())!;
   expect(foot.y - (h.y + h.height)).toBeLessThan(60);
   // An open fold takes at most ~40 % of the sidebar and scrolls inside.
@@ -330,8 +330,8 @@ test('screenshots: the sidebar, light and dark, desktop and phone', async ({ pag
   const phone = await browser.newContext({ ...devices['iPhone 14'], storageState: info.project.use.storageState as string, baseURL: info.project.use.baseURL });
   const p = await phone.newPage();
   await open(p, ids.idle, true);
-  await p.getByTestId('threads-toggle-sidebar').click();
-  await expectFullyInViewport(p, p.getByTestId('threads-sidebar'), 'threads sidebar drawer');
+  await showThreadList(p);
+  await expectFullyInViewport(p, p.getByTestId('threads-sidebar'), 'threads list page');
   await expectNoHorizontalOverflow(p);
   for (const scheme of ['dark', 'light'] as const) {
     await p.emulateMedia({ colorScheme: scheme });

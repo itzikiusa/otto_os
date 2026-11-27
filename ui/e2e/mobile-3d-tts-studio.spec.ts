@@ -107,9 +107,9 @@ async function assertZeroCutOff(page: Page, step: string): Promise<void> {
 async function toggleMode(page: Page): Promise<void> {
   const { width: vw, height: vh } = page.viewportSize()!;
   if (vw <= 640) {
-    await page.locator('nav.bottomnav').getByRole('button', { name: /^More/ }).click();
-    const sheet = page.getByRole('dialog', { name: 'More' });
-    await expectFullyInViewport(page, sheet, 'More drawer');
+    await page.locator('nav.bottomnav').getByTestId('bottomnav-menu').click();
+    const sheet = page.locator('.drawer[aria-label="Navigator"]');
+    await expectFullyInViewport(page, sheet, 'Menu drawer');
     await sheet.getByTestId('light-toggle').click();
     await expect(sheet).toBeHidden();
     return;

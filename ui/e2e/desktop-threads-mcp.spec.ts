@@ -47,7 +47,7 @@ test('⌘K › MCP servers for this thread lists what the agent has, each with a
   // The details card's row says it in one line and opens the same list
   // (the card heads the right panel when it doesn't float).
   const detailsRow = page.getByTestId('details-mcp').first();
-  if (!(await detailsRow.isVisible())) await page.getByRole('button', { name: 'Right panel' }).click();
+  if (!(await detailsRow.isVisible())) await page.getByTestId('threads-toggle-inspector').click();
   await expect(detailsRow).toContainText(/MCP · \d+ servers · \d+ needs? attention/);
   await detailsRow.click();
   const sheet = page.getByTestId('runtime-mcp-servers');

@@ -431,3 +431,25 @@ export async function confirmDestructiveRun(page: Page): Promise<void> {
   await dialog.getByRole('button', { name: 'Run', exact: true }).click();
   await expect(dialog).toBeHidden();
 }
+
+/** Threads' list on screen: a phone shows it as the page (‹ Threads in the
+ *  header goes back to it); desktop / tablet show the column again if it was
+ *  hidden (the header's "Show Threads"). */
+export async function showThreadList(page: Page): Promise<void> {
+  const list = page.getByTestId('threads-sidebar');
+  const back = page.getByRole('button', { name: 'Back to Threads' });
+  const show = page.getByTestId('show-list-pane');
+  await expect(list.or(back).or(show).first()).toBeVisible({ timeout: 15_000 });
+  if (await list.isVisible()) return;
+  if (await back.isVisible()) await back.click();
+  else await show.click();
+  await expect(list).toBeVisible();
+}
+
+/** Hide Threads' list column (desktop / tablet): its ⋯ › Hide Threads. */
+export async function hideThreadList(page: Page): Promise<void> {
+  const list = page.getByTestId('threads-sidebar');
+  await list.getByRole('button', { name: 'Threads actions' }).click();
+  await page.getByRole('menuitem', { name: /^Hide Threads/ }).click();
+  await expect(list).toBeHidden();
+}

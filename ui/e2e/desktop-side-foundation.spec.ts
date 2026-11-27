@@ -28,7 +28,10 @@ test.beforeAll(async () => {
   for (const title of ['Fix flaky login test', 'Refund webhook retries']) {
     const t = await ctx.post(`${base}/api/v1/workspaces/${wsId}/runtime-sessions`, { data: { provider: 'codex', cwd: dir, title } });
     expect(t.ok(), await t.text()).toBeTruthy();
-    ids.push((await t.json()).id as string);
+    const id = (await t.json()).id as string;
+    ids.push(id);
+    // A first turn (the e2e fake agent echoes it), so the thread is a live inbox row.
+    await ctx.post(`${base}/api/v1/runtime-sessions/${id}/prompt`, { data: { text: 'hello' } });
   }
 });
 

@@ -63,12 +63,12 @@ test('Back closes the top-most sheet, drawer and menu, never the thread', async 
   const thread = page.getByTestId(`runtime-thread-${b}`);
   await expect(thread).toBeVisible({ timeout: 30_000 });
 
-  // The inbox sheet.
-  await page.getByTestId('threads-toggle-sidebar').click();
-  await expect(dialog(page, 'Threads')).toBeVisible();
+  // The list is a page now: ‹ Threads goes to it, the system Back returns to the thread.
+  await page.getByRole('button', { name: 'Back to Threads' }).click();
+  await expect(page.getByTestId('threads-sidebar')).toBeVisible();
   await page.goBack();
-  await expect(dialog(page, 'Threads')).toHaveCount(0);
   await expect(page).toHaveURL(new RegExp(`#/threads/${b}$`));
+  await expect(thread).toBeVisible();
 
   // The details drawer.
   await page.getByTestId('threads-toggle-inspector').click();
@@ -89,10 +89,10 @@ test('Back closes the top-most sheet, drawer and menu, never the thread', async 
   await expect(page).toHaveURL(new RegExp(`#/threads/${b}$`));
 
   // A normal close leaves no entry behind: the next Back is the previous thread.
-  await page.getByTestId('threads-toggle-sidebar').click();
-  await expect(dialog(page, 'Threads')).toBeVisible();
-  await dialog(page, 'Threads').getByRole('button', { name: 'Close' }).first().click();
-  await expect(dialog(page, 'Threads')).toHaveCount(0);
+  await page.getByTestId('threads-toggle-inspector').click();
+  await expect(dialog(page, 'Thread details')).toBeVisible();
+  await dialog(page, 'Thread details').getByRole('button', { name: 'Close Thread details' }).click();
+  await expect(dialog(page, 'Thread details')).toHaveCount(0);
   // The close steps its entry off one task later (a pick's navigation goes first).
   await expect.poll(() => page.evaluate(() => (history.state as { ottoSheet?: number } | null)?.ottoSheet ?? null)).toBeNull();
   await page.goBack();

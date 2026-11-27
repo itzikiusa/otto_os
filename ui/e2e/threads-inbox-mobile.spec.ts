@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apiCtx } from './seed';
 import { requireThreadMeta } from './daemonFeatures';
-import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
+import { expectFullyInViewport, expectNoHorizontalOverflow, showThreadList } from './helpers';
 
 // The Threads inbox on a phone / tablet, with touch (tap, long press):
 // the sheet lists rows that say their state in a word, each row is ONE tap
@@ -58,7 +58,7 @@ test('the inbox sheet on touch: words, one tap per row, Working fold, long press
   await expect(page.getByTestId(`runtime-thread-${ids.idle}`)).toBeVisible({ timeout: 30_000 });
   const side = page.getByTestId('threads-sidebar');
   const drawer = !(await side.isVisible());
-  if (drawer) await page.getByTestId('threads-toggle-sidebar').tap();
+  if (drawer) await showThreadList(page);
   await expectFullyInViewport(page, side, 'threads sidebar');
   await expectNoHorizontalOverflow(page);
 
@@ -89,14 +89,14 @@ test('the inbox sheet on touch: words, one tap per row, Working fold, long press
   await page.locator('.toast', { hasText: 'Pinned' }).locator('.toast-action').tap();
   await expect(side.getByTestId(`thread-pinned-${ids.idle}`)).toHaveCount(0);
 
-  // One tap on a row opens it; a phone's sheet closes on the pick.
+  // One tap on a row opens it; on a phone the thread replaces the list (push).
   await row('approval').locator('.tr-main').tap();
   await expect(page.getByTestId(`runtime-thread-${ids.approval}`)).toBeVisible();
   if (drawer) await expect(side).toBeHidden();
   await expectNoHorizontalOverflow(page);
   const shots = process.env.OTTO_SHOTS_DIR;
   if (shots && drawer) {
-    await page.getByTestId('threads-toggle-sidebar').tap();
+    await showThreadList(page);
     await expectFullyInViewport(page, side, 'threads sidebar');
     for (const scheme of ['light', 'dark'] as const) {
       await page.emulateMedia({ colorScheme: scheme });

@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apiCtx } from './seed';
 import { requireThreadMeta } from './daemonFeatures';
+import { showThreadList } from './helpers';
 
 // Pins, History and "seen" live on the thread (docs/contracts/api.md
 // PATCH /runtime-sessions/{id} `meta`), so a Mac and a phone on one daemon
@@ -71,7 +72,7 @@ test('a pin, History and "seen" made on one device show on the other at once', a
   const phoneCtx = await browser.newContext({ ...devices['iPhone 14'], storageState: info.project.use.storageState as string, baseURL: info.project.use.baseURL });
   const phone = await phoneCtx.newPage();
   await open(phone);
-  await phone.getByTestId('threads-toggle-sidebar').tap();
+  await showThreadList(phone);
   const sheet = phone.getByTestId('threads-sidebar');
   await expect(sheet).toBeVisible();
 

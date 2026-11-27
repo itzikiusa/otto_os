@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apiCtx } from './seed';
-import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
+import { expectFullyInViewport, expectNoHorizontalOverflow, showThreadList } from './helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Threads on a phone — the main surface once a phone is paired (Phone access,
@@ -120,11 +120,11 @@ test('a thread deep link from another workspace opens the thread at phone width'
   await expect(page.locator('.ctx-menu').getByRole('menuitem', { name: /Continue on phone/ })).toHaveCount(0);
   await page.keyboard.press('Escape');
 
-  // Sidebar + inspector are drawers over the stage, fully on screen.
-  await page.getByTestId('threads-toggle-sidebar').click();
+  // The list is the page (‹ Threads goes back to it); the inspector is a sheet over the stage.
+  await showThreadList(page);
   const sidebar = page.getByTestId('threads-sidebar');
-  await expectFullyInViewport(page, sidebar, 'threads sidebar drawer');
-  await page.getByRole('button', { name: 'Close Threads', exact: true }).click();
+  await expectFullyInViewport(page, sidebar, 'threads list page');
+  await sidebar.getByTestId(`thread-row-${threadId}`).locator('.tr-main').click();
   await expect(sidebar).toBeHidden();
   await page.getByTestId('threads-toggle-inspector').click();
   await expectNoHorizontalOverflow(page);
@@ -218,7 +218,7 @@ test('the phone lists every workspace’s threads under their folders, light and
   for (const scheme of ['light', 'dark'] as const) {
     await page.emulateMedia({ colorScheme: scheme });
     await page.goto('/#/threads');
-    await page.getByTestId('threads-toggle-sidebar').click();
+    await showThreadList(page);
     const sidebar = page.getByTestId('threads-sidebar');
     // The window has the home workspace open; both threads live elsewhere.
     for (const [title, dir] of [['Phone thread', 1], ['Desk terminal thread', 2]] as const) {

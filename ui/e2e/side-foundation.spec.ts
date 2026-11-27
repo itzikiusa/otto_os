@@ -36,7 +36,10 @@ test.beforeAll(async () => {
   for (const title of ['Fix flaky login test', 'Refund webhook retries']) {
     const t = await ctx.post(`${base}/api/v1/workspaces/${wsId}/runtime-sessions`, { data: { provider: 'codex', cwd: dir, title } });
     expect(t.ok(), await t.text()).toBeTruthy();
-    ids.push((await t.json()).id as string);
+    const id = (await t.json()).id as string;
+    ids.push(id);
+    // A first turn (the e2e fake agent echoes it), so the thread is a live inbox row.
+    await ctx.post(`${base}/api/v1/runtime-sessions/${id}/prompt`, { data: { text: 'hello' } });
   }
 });
 
@@ -86,6 +89,7 @@ test('phone: one header row, ☰ and Menu open the one drawer, a module from it'
   await drawer.locator('.nav-item', { hasText: 'Connections' }).first().tap();
   await expect(page).toHaveURL(/#\/connections/);
   await expect(drawer).toBeHidden();
+  await expect(page).toHaveTitle(/^Connections/);
 
   // The BottomNav tab is "Menu" and opens the same drawer.
   const menu = page.getByTestId('bottomnav-menu');
@@ -110,6 +114,8 @@ test('phone: Threads is a list page — thread, ‹ Threads, another thread; Sid
   await expect(page.locator('.mtopbar')).toHaveCount(0);
   await expect(page.getByTestId('threads-open-navigator')).toHaveCount(0);
   const row = (id: string) => page.getByTestId(`thread-row-${id}`).locator('.tr-main');
+  // Other specs' threads share the list: filter to this spec's folder.
+  await list.getByTestId('threads-search').fill(dir.split('/').pop()!);
   await expect(row(ids[0])).toBeVisible({ timeout: 20_000 });
   await expectNoHorizontalOverflow(page);
   await shot(page, 'phone-threads-list');

@@ -175,7 +175,8 @@ test('settings panel: theme grid renders, picking one activates it, custom theme
   // content; dismiss it so the settings panel is interactable. The click
   // auto-waits for the ✕ to appear and is a no-op on wider viewports.
   await page
-    .locator('.drawer.left .drawer-close')
+    .locator('.drawer.left')
+    .getByRole('button', { name: 'Close Navigator' })
     .click({ timeout: 5_000 })
     .catch(() => {});
   await expect(page.locator('.drawer-backdrop'))

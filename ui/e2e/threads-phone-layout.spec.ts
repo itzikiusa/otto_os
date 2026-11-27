@@ -15,9 +15,9 @@ import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 //   • the composer's Send is fully on screen and on top;
 //   • the timeline keeps ≥ 3 lines of conversation;
 //   • the BottomNav is gone; no horizontal page scroll;
-//   • landscape: one header row, no duplicated toggles;
+//   • one header row (Threads' PageHeader IS the phone top bar), no duplicated toggles;
 //   • code wraps on a phone, a diff is red/green;
-//   • iPad portrait: thread list and conversation side by side.
+//   • iPad portrait: thread list and conversation side by side (the Rail by default).
 // Screenshots (OTTO_E2E_SHOTS) → fix-T-PHONE/.
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -148,16 +148,15 @@ test('phone: with the keyboard up the composer is on screen and the conversation
   const { thread, composer } = await richThread(page);
   const landscape = info.project.name === 'iphone-landscape';
 
-  // Keyboard closed: one header row and no duplicated toggles.
+  // Keyboard closed: one header row and no duplicated toggles. A thread is
+  // pushed over the list: the row starts with ‹ Threads (no ☰ here; the Menu
+  // tab, or ☰ back on the list, opens the Navigator), and ends with the Side panel.
   await expect(page.locator('.mtopbar')).toHaveCount(0);
-  await expect(page.locator('[data-testid="threads-page"] > .page-header-bar')).toHaveCount(1);
+  const header = page.locator('[data-testid="threads-page"] > .page-header-bar');
+  await expect(header).toHaveCount(1);
   await expect(page.getByTestId('threads-toggle-inspector')).toHaveCount(1);
-  await expect(page.getByTestId('threads-toggle-sidebar')).toHaveCount(1);
-  // One Navigator button, in Threads' own header row: landscape always, and
-  // portrait in Full mode (the e2e default; Light mode's shell bar has its
-  // own), since the shell's top bar steps aside here (ThreadsPage.svelte).
-  await expect(page.locator('[aria-label="Open navigator"]')).toHaveCount(1);
-  await expectFullyInViewport(page, page.getByTestId('threads-open-navigator'), 'navigator button');
+  await expectFullyInViewport(page, header.getByRole('button', { name: 'Back to Threads' }), 'back to the list');
+  await expectFullyInViewport(page, header.getByRole('button', { name: 'Side panel', exact: true }), 'Side panel button');
   const closed = await timelineLines(thread);
   console.log(`[T-PHONE] ${info.project.name} keyboard closed: timeline ${Math.round(closed.height)} px`);
   await expectNoHorizontalOverflow(page);
@@ -234,24 +233,25 @@ test('phone: the ⋯ menu is an opaque surface over the conversation', async ({ 
   }
 });
 
-test('iPad: the thread list is a column beside the conversation; Otto folds to its rail', async ({ page }, info) => {
+test('iPad: the thread list is a column beside the conversation; Otto shows its rail', async ({ page }, info) => {
   test.skip(!/^ipad-(portrait|landscape)$/.test(info.project.name), 'iPad');
   test.setTimeout(120_000);
   const { thread } = await richThread(page);
-  const list = page.locator('.th-left-col');
+  const list = page.getByTestId('threads-sidebar');
   await expect(list).toBeVisible();
   const lb = (await list.boundingBox())!;
   const tb = (await thread.boundingBox())!;
   expect(lb.x + lb.width, 'list left of the conversation').toBeLessThanOrEqual(tb.x + 2);
   expect(tb.width, 'the conversation keeps a usable width').toBeGreaterThanOrEqual(480);
-  // One header row; the shell's own bar steps aside on Threads.
-  await expect(page.locator('.mtopbar')).toHaveCount(0);
+  // A tablet keeps two rows: the shell bar (Back / Forward, title, Side panel) and Threads' header.
+  await expect(page.locator('.mtopbar')).toHaveCount(1);
+  await expect(page.locator('.msidebar.mfolded .rail')).toBeVisible();
   await expect(page.getByTestId('threads-toggle-inspector')).toHaveCount(1);
   await expectNoHorizontalOverflow(page);
   await shot(page, 'side-by-side', ['light', 'dark']);
-  // Other pages keep the tablet Navigator column.
+  // Other pages keep the same Rail: no page folds it for the person.
   if (info.project.name === 'ipad-portrait') {
     await page.goto('/#/home');
-    await expect(page.locator('.msidebar:not(.mfolded)')).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator('.msidebar.mfolded')).toBeVisible({ timeout: 15_000 });
   }
 });

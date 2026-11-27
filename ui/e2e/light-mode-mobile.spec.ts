@@ -36,8 +36,8 @@ async function bootLight(page: Page, route: string, hidden: string[] = []): Prom
 }
 
 const bottomNav = (page: Page) => page.locator('nav.bottomnav');
-const more = (page: Page) => bottomNav(page).getByRole('button', { name: /^More/ });
-const sheet = (page: Page) => page.getByRole('dialog', { name: 'More' });
+const more = (page: Page) => bottomNav(page).getByTestId('bottomnav-menu');
+const sheet = (page: Page) => page.locator('.drawer[aria-label="Navigator"]');
 const navIds = (page: Page) =>
   bottomNav(page).locator('[data-nav-id]').evaluateAll((els) => els.map((e) => (e as HTMLElement).dataset.navId));
 
@@ -45,11 +45,11 @@ test('full app by default; one tap to the light version and one tap back', async
   await openPage(page, 'home');
   test.skip(!(await portrait(page)), 'the bottom nav is the phone-portrait shell');
 
-  // Default: the full app's bar (four tabs + a labelled More), unchanged.
-  await expect(more(page)).toContainText('More');
+  // Default: the full app's bar (four tabs + a labelled Menu).
+  await expect(more(page)).toContainText('Menu');
   expect((await navIds(page)).length).toBeGreaterThan(0);
 
-  // More → Light version (the first row): lands on Threads, five tabs, a compact ⋯.
+  // Menu → Light version: lands on Threads, five tabs, a compact Menu glyph.
   await more(page).click();
   const toggle = sheet(page).getByTestId('light-toggle');
   await expect(toggle).toContainText('Light version');
@@ -57,7 +57,7 @@ test('full app by default; one tap to the light version and one tap back', async
   await expect.poll(() => page.evaluate(() => location.hash)).toBe('#/threads');
   await expect(page.getByTestId('threads-page')).toBeVisible();
   await expect.poll(() => navIds(page)).toEqual(LIGHT_TABS);
-  await expect(more(page)).not.toContainText('More');
+  await expect(more(page)).not.toContainText('Menu');
   // Compact, still a 44 px target.
   expect(Math.round((await more(page).boundingBox())!.width)).toBeGreaterThanOrEqual(44);
   expect(await page.evaluate(() => localStorage.getItem('otto_phone_light'))).toBe('1');
@@ -68,17 +68,16 @@ test('full app by default; one tap to the light version and one tap back', async
   await expect.poll(() => page.evaluate(() => location.hash)).toBe('#/threads');
   await expect.poll(() => navIds(page)).toEqual(LIGHT_TABS);
 
-  // The ⋯ sheet: back to the full app, notifications, Commands, Usage, Settings, sign out.
+  // The one drawer: back to the full app, the bell, Commands, Usage, Settings, sign out.
   await more(page).click();
-  await expect(sheet(page).locator('[data-nav-id="usage"]')).toBeVisible();
+  await expect(sheet(page).locator('[data-nav-id="usage"]').first()).toBeAttached();
   await expect(sheet(page).getByTestId('light-toggle')).toContainText('Full app');
-  await expect(sheet(page).getByTestId('more-notifications').getByRole('button', { name: /^Notifications/ })).toBeVisible();
-  for (const name of ['Commands', 'Settings', 'Sign out']) {
-    await expect(sheet(page).getByRole('button', { name, exact: true })).toBeVisible();
+  await expect(sheet(page).getByRole('button', { name: /^Notifications/ }).first()).toBeVisible();
+  for (const name of [/^Commands/, /^Settings/, /^Sign out/]) {
+    await expect(sheet(page).getByRole('button', { name }).first()).toBeAttached();
   }
-  await expect(sheet(page).getByRole('button', { name: 'Help', exact: true })).toHaveCount(0);
   await sheet(page).getByTestId('light-toggle').click();
-  await expect(more(page)).toContainText('More');
+  await expect(more(page)).toContainText('Menu');
   await expect.poll(async () => (await navIds(page)).length).toBeLessThanOrEqual(4);
   expect(await page.evaluate(() => localStorage.getItem('otto_phone_light'))).toBe('0');
 });
@@ -141,9 +140,9 @@ test('the six pages open, fit the width and never pull in a hidden page', async 
 
 test('⌘K "Go to" lists only the six modules', async ({ page }) => {
   await bootLight(page, 'git');
-  test.skip(!(await portrait(page)), 'opened from the bottom nav’s ⋯');
+  test.skip(!(await portrait(page)), 'opened from the bottom nav’s Menu');
   await more(page).click();
-  await sheet(page).getByRole('button', { name: 'Commands', exact: true }).click();
+  await sheet(page).getByRole('button', { name: /^Commands/ }).click();
   const palette = page.getByRole('dialog', { name: 'Command palette' });
   const search = palette.getByLabel('Search commands');
   // A command whose title is exactly the module's Go-to: not the palette's

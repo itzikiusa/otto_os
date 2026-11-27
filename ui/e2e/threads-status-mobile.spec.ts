@@ -1,7 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { expectNoHorizontalOverflow } from './helpers';
+import { expectNoHorizontalOverflow, showThreadList } from './helpers';
 
 // The thread list on a phone (MOCK mode — mock-runtime.ts seeds the rows):
 // every row is one clear tap target at least 44 px tall, two lines — title
@@ -46,7 +46,7 @@ test('phone rows: two lines, ≥ 44 px, the state in words, one tap target; Next
   }, [T(1), T(20), T(10), T(30)]);
   await expect(page.getByTestId('runtime-thread-rt_done')).toBeVisible({ timeout: 15_000 });
 
-  await page.getByTestId('threads-toggle-sidebar').click();
+  await showThreadList(page);
   const side = page.getByTestId('threads-sidebar');
   await expect(side).toBeVisible();
   for (const id of ['rt_wait', 'rt_work', 'rt_fail', 'rt_done']) {
@@ -66,8 +66,8 @@ test('phone rows: two lines, ≥ 44 px, the state in words, one tap target; Next
   await expectNoHorizontalOverflow(page);
   await shot(page, 'list', ti.project.name);
 
-  // One move to it: its row opens it and closes the drawer.
+  // One move to it: its row opens it (pushed over the list on a phone).
   await side.getByTestId('thread-row-rt_wait').locator('.tr-main').click();
   await expect(page).toHaveURL(/#\/threads\/rt_wait$/);
-  await expect(side).toBeHidden();
+  if ((page.viewportSize()!.width <= 640 || page.viewportSize()!.height <= 500)) await expect(side).toBeHidden();
 });

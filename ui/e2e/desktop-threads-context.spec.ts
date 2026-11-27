@@ -1,6 +1,6 @@
 import { test, expect, type Locator, type Page, type Route } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
-import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
+import { expectFullyInViewport, expectNoHorizontalOverflow, showThreadList, hideThreadList } from './helpers';
 
 test.use({ serviceWorkers: 'block' });
 
@@ -124,17 +124,14 @@ test('thread drafts, attachments and permissions stay with their owner; mobile c
       // its toggle hides and shows that column.
       const column = page.getByTestId('threads-sidebar');
       await expect(column).toBeVisible();
-      await page.getByTestId('threads-toggle-sidebar').click();
-      await expect(column).toHaveCount(0);
+      await hideThreadList(page);
       await expect(sidebar).toHaveCount(0);
-      await page.getByTestId('threads-toggle-sidebar').click();
+      await showThreadList(page);
       await expect(column).toBeVisible();
     } else {
-      await page.getByTestId('threads-toggle-sidebar').click();
-      await expect(sidebar).toBeVisible();
-      await expectFullyInViewport(page, sidebar);
-      await page.keyboard.press('Escape');
-      await expect(sidebar).toHaveCount(0);
+      // A phone: the list is the page; ‹ Threads goes back to it.
+      await showThreadList(page);
+      await expectFullyInViewport(page, page.getByTestId('threads-sidebar'));
     }
     await expectNoHorizontalOverflow(page);
     await page.screenshot({ path: info.outputPath(`threads-context-${width}.png`) });
