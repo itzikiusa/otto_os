@@ -830,9 +830,7 @@ fn infer_cmake_target_for_source(cwd: &str, source_path: &str, want_test: bool) 
             .to_string_lossy()
             .replace('\\', "/")
     } else {
-        source_path
-            .trim_start_matches("./")
-            .replace('\\', "/")
+        source_path.trim_start_matches("./").replace('\\', "/")
     };
     let base = src_p.file_name().and_then(|s| s.to_str()).unwrap_or("");
     // 1a. Exact directory-relative source-file match so `app/main.cpp` matches `app/CMakeLists.txt`

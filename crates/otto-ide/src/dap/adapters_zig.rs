@@ -1703,6 +1703,7 @@ test "failing sibling" { try std.testing.expectEqual(@as(i32, 1), 2); }
             std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         // Make the cached test binary old (1 hour ago) — old 2s mtime scan would reject it!
+        #[allow(clippy::disallowed_methods)]
         let _ = std::process::Command::new("touch")
             .args(["-t", "202001010000", &warm_test_bin.to_string_lossy()])
             .status();

@@ -1136,8 +1136,10 @@ mod resource_metric_tests {
         // BUG-23: A nested .NET module inherits the umbrella project's pinned DOTNET_ROOT
         // through EnvironmentManager::cached_project_env_or_ancestor.
         let envs = EnvironmentManager::new(data_dir.clone());
-        let mut proj_env = crate::types::IdeProjectEnvironment::default();
-        proj_env.dotnet_root = Some(pinned_dotnet.to_string_lossy().into_owned());
+        let proj_env = crate::types::IdeProjectEnvironment {
+            dotnet_root: Some(pinned_dotnet.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
         envs.seed_snapshot(&format!("local:{ws_str}"), proj_env);
 
         let inherited_dirs =
@@ -1323,6 +1325,7 @@ mod resource_metric_tests {
             zig_home: Some(sdk_13.to_string_lossy().into_owned()),
         };
         let script = build_remote_lsp_script(&proj.to_string_lossy(), &launch);
+        #[allow(clippy::disallowed_methods)]
         let out = std::process::Command::new("sh")
             .arg("-c")
             .arg(&script)
@@ -1397,6 +1400,7 @@ mod resource_metric_tests {
             zig_home: None,
         };
         let script = build_remote_lsp_script(&proj.to_string_lossy(), &launch);
+        #[allow(clippy::disallowed_methods)]
         let out = std::process::Command::new("sh")
             .arg("-c")
             .arg(&script)

@@ -1289,8 +1289,10 @@ mod tests {
         std::fs::set_permissions(&fake_node, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let root_str = root.to_string_lossy().into_owned();
-        let mut ctx = DapStartContext::default();
-        ctx.caller_is_root = true;
+        let ctx = DapStartContext {
+            caller_is_root: true,
+            ..Default::default()
+        };
 
         // BUG-27: Even when OTTO_JS_ADAPTER=js-debug is selected, bare `vite` resolves
         // to `node_modules/vite/bin/vite.js` before returning the js-debug adapter.

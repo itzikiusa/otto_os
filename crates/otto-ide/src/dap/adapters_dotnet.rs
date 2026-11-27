@@ -1176,8 +1176,7 @@ public class MathTests
             BTreeMap::new(),
         )
         .await
-        .err()
-        .expect("unity://attach must error");
+        .expect_err("unity://attach must error");
         assert!(err.to_string().contains("Mono Soft Debugger"));
 
         // API-6: Direct TCP attach uses launch.attach_pid (or DOTNET_ATTACH_PID / --pid)

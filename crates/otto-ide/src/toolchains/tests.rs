@@ -547,6 +547,7 @@ fn ssh_zig_version_probe_resolves_bin_zig_layout_before_falling_back_to_current(
 
     let cmd =
         super::jobs::build_remote_zig_version_probe_cmd(Some(&selected_home.to_string_lossy()));
+    #[allow(clippy::disallowed_methods)]
     let out = std::process::Command::new("sh")
         .arg("-c")
         .arg(&cmd)
