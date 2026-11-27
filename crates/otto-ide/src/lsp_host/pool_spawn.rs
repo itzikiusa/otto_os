@@ -90,7 +90,8 @@ pub fn build_remote_lsp_script(root: &str, launch: &SpawnLaunch) -> String {
             .any(|a| a == "--tsProbeLocations" || a.starts_with("--tsProbeLocations="));
 
     // SEC2-1 + BUG-32: Probe ONLY trusted managed and global-installation node_modules
-    // (resolved through the real ngserver symlink target), never the checkout's $PWD/node_modules.
+    // (including package-private `<pkg>/node_modules` and outer global `node_modules`
+    // resolved through the real ngserver symlink target), never the checkout's $PWD/node_modules.
     let ng_probe_setup = if is_ngserver {
         "NG_PROBES=\"\"; \
          [ -d \"$HOME/.otto/toolchains/node/lsp/node_modules\" ] && NG_PROBES=\"$HOME/.otto/toolchains/node/lsp/node_modules\"; \
@@ -101,6 +102,11 @@ pub fn build_remote_lsp_script(root: &str, launch: &SpawnLaunch) -> String {
            while [ \"$NG_CUR\" != \"/\" ] && [ -n \"$NG_CUR\" ]; do \
              if [ \"$(basename \"$NG_CUR\")\" = \"node_modules\" ]; then \
                case \",$NG_PROBES,\" in *\",$NG_CUR,\"*) ;; *) NG_PROBES=\"${NG_PROBES:+$NG_PROBES,}$NG_CUR\" ;; esac; \
+               break; \
+             fi; \
+             if [ -d \"$NG_CUR/node_modules\" ] && { [ -d \"$NG_CUR/node_modules/typescript\" ] || [ -d \"$NG_CUR/node_modules/@angular/language-service\" ]; }; then \
+               NG_NM=\"$NG_CUR/node_modules\"; \
+               case \",$NG_PROBES,\" in *\",$NG_NM,\"*) ;; *) NG_PROBES=\"${NG_PROBES:+$NG_PROBES,}$NG_NM\" ;; esac; \
              fi; \
              NG_CUR=$(dirname \"$NG_CUR\"); \
            done; \
@@ -157,16 +163,18 @@ pub fn build_remote_lsp_script(root: &str, launch: &SpawnLaunch) -> String {
         .and_then(|n| n.to_str())
         .is_some_and(|n| n == "csharp-ls");
 
-    // BUG-22 (SSH): Select the per-SDK-major managed csharp-ls slot (`net8`/`net9`/`net10`)
-    // matching the remote active `dotnet --version` so .NET 8 and .NET 9 projects coexist.
+    // BUG-22 (SSH): Select the per-SDK-major managed csharp-ls slot (`net8`/`net9`/`net10`/`net11`)
+    // matching `installer_remote.rs` and the remote active `dotnet --version`.
     let csharp_slot_setup = if is_csharp_ls {
         "CS_BIN=\"\"; \
          if command -v dotnet >/dev/null 2>&1; then \
            DN_MAJ=$(dotnet --version 2>/dev/null | head -n 1 | cut -d. -f1); \
            case \"$DN_MAJ\" in \
-             8) CS_SLOT='net8' ;; \
+             6|7|8) CS_SLOT='net8' ;; \
              9) CS_SLOT='net9' ;; \
-             *) CS_SLOT='net10' ;; \
+             10) CS_SLOT='net10' ;; \
+             11|12|13) CS_SLOT='net11' ;; \
+             *) CS_SLOT='net9' ;; \
            esac; \
            if [ -x \"$HOME/.otto/toolchains/dotnet/tools/$CS_SLOT/csharp-ls\" ]; then \
              CS_BIN=\"$HOME/.otto/toolchains/dotnet/tools/$CS_SLOT/csharp-ls\"; \
@@ -217,6 +225,36 @@ pub fn build_remote_lsp_script(root: &str, launch: &SpawnLaunch) -> String {
         )
     };
     crate::target::ssh_exec::wrap_remote_stdio_with_eof_kill(&inner)
+}
+
+/// POSIX shell probe executed on an SSH host to locate a trusted `typescript/lib` (`tsdk`)
+/// directory for standalone `@vue/language-server@2.2.10` (`RED-2`) without ever touching
+/// workspace `$PWD/node_modules`.
+pub(crate) fn build_remote_vue_tsdk_probe_script() -> &'static str {
+    concat!(
+        "PATH=\"$HOME/.otto/toolchains/node/lsp/node_modules/.bin:$HOME/.otto/toolchains/node/current/bin:$HOME/.npm-global/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH\"; ",
+        "check_tsdk() { [ -f \"$1/tsserverlibrary.js\" ] || [ -f \"$1/typescript.js\" ]; }; ",
+        "for d in \"$HOME/.otto/toolchains/node/lsp/node_modules/typescript/lib\"; do ",
+        "  if check_tsdk \"$d\"; then printf '%s\\n' \"$d\"; exit 0; fi; ",
+        "done; ",
+        "VUE_BIN=$(command -v vue-language-server 2>/dev/null || true); ",
+        "if [ -n \"$VUE_BIN\" ]; then ",
+        "  VUE_REAL=$(readlink -f \"$VUE_BIN\" 2>/dev/null || realpath \"$VUE_BIN\" 2>/dev/null || printf '%s' \"$VUE_BIN\"); ",
+        "  CUR=$(dirname \"$VUE_REAL\"); ",
+        "  while [ \"$CUR\" != \"/\" ] && [ -n \"$CUR\" ]; do ",
+        "    if [ \"$(basename \"$CUR\")\" = \"node_modules\" ]; then ",
+        "      if check_tsdk \"$CUR/typescript/lib\"; then printf '%s\\n' \"$CUR/typescript/lib\"; exit 0; fi; ",
+        "      break; ",
+        "    fi; ",
+        "    if check_tsdk \"$CUR/node_modules/typescript/lib\"; then printf '%s\\n' \"$CUR/node_modules/typescript/lib\"; exit 0; fi; ",
+        "    CUR=$(dirname \"$CUR\"); ",
+        "  done; ",
+        "fi; ",
+        "for d in /usr/local/lib/node_modules/typescript/lib /usr/lib/node_modules/typescript/lib /opt/homebrew/lib/node_modules/typescript/lib; do ",
+        "  if check_tsdk \"$d\"; then printf '%s\\n' \"$d\"; exit 0; fi; ",
+        "done; ",
+        "exit 1"
+    )
 }
 
 /// The newest `lombok-<v>.jar` in the local Maven repository, if any.
@@ -523,12 +561,41 @@ pub(crate) fn resolve_local_lsp_dotnet_root(
     servers::detect_toolchain_dotnet_root(data_dir)
 }
 
+/// Read `sdk.version` from the nearest `global.json` at or above `project_root` (BUG-22).
+#[allow(clippy::disallowed_methods)]
+fn read_dotnet_global_json_version(project_root: &Path) -> Option<String> {
+    let mut cur = Some(project_root);
+    for _ in 0..8 {
+        let dir = cur?;
+        let gj = dir.join("global.json");
+        if gj.is_file() {
+            if let Ok(raw) = std::fs::read_to_string(&gj) {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
+                    if let Some(ver) = val
+                        .pointer("/sdk/version")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                    {
+                        return Some(ver.to_string());
+                    }
+                }
+            }
+            break;
+        }
+        cur = dir.parent();
+    }
+    None
+}
+
 /// Select the per-SDK-major managed `csharp-ls` slot binary (`toolchains/dotnet/tools/net<major>/csharp-ls`)
-/// matching `dotnet_root`'s active SDK version when installed, so .NET 8 and .NET 9 projects
-/// coexist without overwriting each other's language server (BUG-22).
+/// matching the active SDK for `project_root` under `dotnet_root` (honoring `global.json` and
+/// `dotnet --version` in `project_root` before falling back to `dotnet_dir_version`, BUG-22).
+#[allow(clippy::disallowed_methods)]
 pub(crate) fn resolve_local_csharp_ls_for_dotnet_root(
     data_dir: &Path,
     dotnet_root: &Path,
+    project_root: &Path,
     fallback_cmd: &str,
 ) -> String {
     let is_csharp_ls = Path::new(fallback_cmd)
@@ -538,18 +605,44 @@ pub(crate) fn resolve_local_csharp_ls_for_dotnet_root(
     if !is_csharp_ls {
         return fallback_cmd.to_string();
     }
-    let dir_ver = crate::toolchains::discovery::dotnet_dir_version(dotnet_root);
-    let bin_ver = (dir_ver == "system")
+    let global_ver = read_dotnet_global_json_version(project_root);
+    let active_bin_ver = global_ver
+        .is_none()
         .then(|| {
-            crate::toolchains::discovery::dotnet_bin_in_root(dotnet_root)
-                .and_then(|bin| crate::toolchains::discovery::read_dotnet_bin_version(&bin))
+            crate::toolchains::discovery::dotnet_bin_in_root(dotnet_root).and_then(|bin| {
+                let out = std::process::Command::new(&bin)
+                    .arg("--version")
+                    .current_dir(project_root)
+                    .env("DOTNET_ROOT", dotnet_root)
+                    .env("DOTNET_CLI_TELEMETRY_OPTOUT", "1")
+                    .env("DOTNET_NOLOGO", "1")
+                    .stdin(std::process::Stdio::null())
+                    .output()
+                    .ok()?;
+                if !out.status.success() {
+                    return None;
+                }
+                let first = String::from_utf8_lossy(&out.stdout)
+                    .lines()
+                    .next()
+                    .map(str::trim)
+                    .unwrap_or("")
+                    .to_string();
+                first
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_digit())
+                    .then_some(first)
+            })
         })
         .flatten();
-    let ver_opt = if dir_ver != "system" {
-        Some(dir_ver.as_str())
-    } else {
-        bin_ver.as_deref()
-    };
+    let dir_ver = (global_ver.is_none() && active_bin_ver.is_none())
+        .then(|| crate::toolchains::discovery::dotnet_dir_version(dotnet_root))
+        .filter(|v| v != "system");
+    let ver_opt = global_ver
+        .as_deref()
+        .or(active_bin_ver.as_deref())
+        .or(dir_ver.as_deref());
     let slot = crate::toolchains_catalog::dotnet_sdk_major_slot(ver_opt);
     let cand = data_dir
         .join("toolchains/dotnet/tools")
@@ -756,7 +849,12 @@ pub(crate) fn build_process_spawner(
                 };
             let spawn_cmd = if servers::normalize_lsp_lang(&key.lang) == "csharp" {
                 if let Some(ref dr) = resolved_dotnet_root {
-                    resolve_local_csharp_ls_for_dotnet_root(&data_dir, dr, &launch.cmd)
+                    resolve_local_csharp_ls_for_dotnet_root(
+                        &data_dir,
+                        dr,
+                        Path::new(&key.root),
+                        &launch.cmd,
+                    )
                 } else {
                     launch.cmd.clone()
                 }
@@ -1323,6 +1421,7 @@ mod resource_metric_tests {
             fallback_args: vec![],
             project_root: Some(proj.to_string_lossy().into_owned()),
             zig_home: Some(sdk_13.to_string_lossy().into_owned()),
+            ..Default::default()
         };
         let script = build_remote_lsp_script(&proj.to_string_lossy(), &launch);
         #[allow(clippy::disallowed_methods)]
@@ -1347,8 +1446,8 @@ mod resource_metric_tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn csharp_ls_selects_per_sdk_major_slot_locally_and_remotely() {
+    #[tokio::test]
+    async fn csharp_ls_selects_per_sdk_major_slot_locally_and_remotely() {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = tempfile::tempdir().unwrap();
@@ -1356,40 +1455,75 @@ mod resource_metric_tests {
         let tools = data_dir.join("toolchains/dotnet/tools");
         let net8_dir = tools.join("net8");
         let net9_dir = tools.join("net9");
-        let sdk8 = tmp.path().join("sdk8");
-        let sdk9 = tmp.path().join("sdk9");
-        for d in [&net8_dir, &net9_dir, &sdk8, &sdk9] {
+        let net11_dir = tools.join("net11");
+        let shared_root = tmp.path().join("shared-dotnet");
+        let sdk11 = tmp.path().join("sdk11");
+        let proj8_gj = tmp.path().join("proj-global-net8");
+        let proj9_def = tmp.path().join("proj-default-net9");
+        for d in [
+            &net8_dir,
+            &net9_dir,
+            &net11_dir,
+            &shared_root.join("sdk/8.0.408"),
+            &shared_root.join("sdk/9.0.200"),
+            &sdk11,
+            &proj8_gj,
+            &proj9_def,
+        ] {
             std::fs::create_dir_all(d).unwrap();
         }
         let write_exec = |p: &Path, body: &str| {
             std::fs::write(p, body).unwrap();
             std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
         };
-        write_exec(&sdk8.join("dotnet"), "#!/bin/sh\necho 8.0.408\n");
-        write_exec(&sdk9.join("dotnet"), "#!/bin/sh\necho 9.0.200\n");
+        write_exec(&shared_root.join("dotnet"), "#!/bin/sh\necho 9.0.200\n");
+        write_exec(&sdk11.join("dotnet"), "#!/bin/sh\necho 11.0.100\n");
         write_exec(&net8_dir.join("csharp-ls"), "#!/bin/sh\necho CSHARP_NET8\n");
         write_exec(&net9_dir.join("csharp-ls"), "#!/bin/sh\necho CSHARP_NET9\n");
+        write_exec(
+            &net11_dir.join("csharp-ls"),
+            "#!/bin/sh\necho CSHARP_NET11\n",
+        );
+        std::fs::write(
+            proj8_gj.join("global.json"),
+            r#"{"sdk":{"version":"8.0.408"}}"#,
+        )
+        .unwrap();
 
-        let picked8 = resolve_local_csharp_ls_for_dotnet_root(&data_dir, &sdk8, "csharp-ls");
-        let picked9 = resolve_local_csharp_ls_for_dotnet_root(&data_dir, &sdk9, "csharp-ls");
+        // BUG-22 (local): Even with a shared DOTNET_ROOT containing both 8.0 and 9.0 SDKs,
+        // a project pinning 8.0.408 via global.json gets net8/csharp-ls while an unpinned
+        // project gets net9/csharp-ls.
+        let picked8 = resolve_local_csharp_ls_for_dotnet_root(
+            &data_dir,
+            &shared_root,
+            &proj8_gj,
+            "csharp-ls",
+        );
+        let picked9 = resolve_local_csharp_ls_for_dotnet_root(
+            &data_dir,
+            &shared_root,
+            &proj9_def,
+            "csharp-ls",
+        );
         assert_eq!(picked8, net8_dir.join("csharp-ls").to_string_lossy());
         assert_eq!(picked9, net9_dir.join("csharp-ls").to_string_lossy());
 
-        // Remote SSH script also picks the net8 slot when active `dotnet --version` is 8.x.
+        // BUG-22 (SSH): Remote SSH script maps .NET 11 to net11 (matching installer_remote.rs)
+        // instead of misrouting .NET 11 to net10.
         let fake_home = tmp.path().join("remote-home");
-        let r_net8 = fake_home.join(".otto/toolchains/dotnet/tools/net8");
-        let r_net9 = fake_home.join(".otto/toolchains/dotnet/tools/net9");
-        let proj = tmp.path().join("proj8");
-        for d in [&r_net8, &r_net9, &proj] {
+        let r_net10 = fake_home.join(".otto/toolchains/dotnet/tools/net10");
+        let r_net11 = fake_home.join(".otto/toolchains/dotnet/tools/net11");
+        let proj = tmp.path().join("proj11");
+        for d in [&r_net10, &r_net11, &proj] {
             std::fs::create_dir_all(d).unwrap();
         }
         write_exec(
-            &r_net8.join("csharp-ls"),
-            "#!/bin/sh\necho REMOTE_CS_NET8\n",
+            &r_net10.join("csharp-ls"),
+            "#!/bin/sh\necho REMOTE_CS_NET10\n",
         );
         write_exec(
-            &r_net9.join("csharp-ls"),
-            "#!/bin/sh\necho REMOTE_CS_NET9\n",
+            &r_net11.join("csharp-ls"),
+            "#!/bin/sh\necho REMOTE_CS_NET11\n",
         );
         let launch = SpawnLaunch {
             cmd: "csharp-ls".into(),
@@ -1398,16 +1532,17 @@ mod resource_metric_tests {
             fallback_args: vec![],
             project_root: Some(proj.to_string_lossy().into_owned()),
             zig_home: None,
+            ..Default::default()
         };
         let script = build_remote_lsp_script(&proj.to_string_lossy(), &launch);
-        #[allow(clippy::disallowed_methods)]
-        let out = std::process::Command::new("sh")
+        let out = tokio::process::Command::new("sh")
             .arg("-c")
             .arg(&script)
             .env("HOME", &fake_home)
-            .env("PATH", format!("{}:/usr/bin:/bin", sdk8.display()))
+            .env("PATH", format!("{}:/usr/bin:/bin", sdk11.display()))
             .stdin(std::process::Stdio::null())
             .output()
+            .await
             .unwrap();
         assert!(
             out.status.success(),
@@ -1416,8 +1551,163 @@ mod resource_metric_tests {
         );
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(
-            stdout.contains("REMOTE_CS_NET8") && !stdout.contains("REMOTE_CS_NET9"),
-            "BUG-22: expected SSH launcher to pick net8 csharp-ls slot, got: {stdout}"
+            stdout.contains("REMOTE_CS_NET11") && !stdout.contains("REMOTE_CS_NET10"),
+            "BUG-22: expected SSH launcher to pick net11 csharp-ls slot for .NET 11, got: {stdout}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn remote_angular_probe_script_includes_package_private_and_outer_node_modules_never_workspace(
+    ) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fake_home = tmp.path().join("home");
+        let global_bin = tmp.path().join("global/bin");
+        let pkg_root = tmp
+            .path()
+            .join("global/lib/node_modules/@angular/language-server");
+        let pkg_bin = pkg_root.join("bin");
+        let pkg_private_nm = pkg_root.join("node_modules");
+        let ws = tmp.path().join("workspace-ng");
+        let ws_nm = ws.join("node_modules/@angular/language-service");
+        for d in [
+            &fake_home,
+            &global_bin,
+            &pkg_bin,
+            &pkg_private_nm.join("@angular/language-service"),
+            &pkg_private_nm.join("typescript"),
+            &ws_nm,
+        ] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let real_ng = pkg_bin.join("ngserver");
+        std::fs::write(&real_ng, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n").unwrap();
+        std::fs::set_permissions(&real_ng, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::os::unix::fs::symlink(
+            "../lib/node_modules/@angular/language-server/bin/ngserver",
+            global_bin.join("ngserver"),
+        )
+        .unwrap();
+
+        let launch = SpawnLaunch {
+            cmd: "ngserver".into(),
+            args: vec!["--stdio".into()],
+            fallback_cmd: Some("vscode-html-language-server".into()),
+            fallback_args: vec!["--stdio".into()],
+            ..Default::default()
+        };
+        let script = build_remote_lsp_script(&ws.to_string_lossy(), &launch);
+        let out = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .env("HOME", &fake_home)
+            .env("PATH", format!("{}:/usr/bin:/bin", global_bin.display()))
+            .stdin(std::process::Stdio::null())
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "remote ngserver script failed: {out:?}"
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let canon_priv = std::fs::canonicalize(&pkg_private_nm).unwrap();
+        let canon_outer =
+            std::fs::canonicalize(tmp.path().join("global/lib/node_modules")).unwrap();
+        assert!(
+            stdout.contains(canon_priv.to_str().unwrap()),
+            "BUG-32: SSH ngserver probes must include package-private node_modules ({}):\n{stdout}",
+            canon_priv.display()
+        );
+        assert!(
+            stdout.contains(canon_outer.to_str().unwrap()),
+            "BUG-32: SSH ngserver probes must include outer global node_modules ({}):\n{stdout}",
+            canon_outer.display()
+        );
+        assert!(
+            !stdout.contains(&ws.join("node_modules").to_string_lossy().to_string()),
+            "SEC2-1: SSH ngserver probes must NEVER include workspace node_modules:\n{stdout}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn remote_vue_tsdk_probe_script_resolves_managed_and_global_tsdk_never_workspace() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fake_home = tmp.path().join("home");
+        let ws = tmp.path().join("vue-repo");
+        let ws_tsdk = ws.join("node_modules/typescript/lib");
+        let global_bin = tmp.path().join("global/bin");
+        let vue_pkg_bin = tmp
+            .path()
+            .join("global/lib/node_modules/@vue/language-server/bin");
+        let global_tsdk = tmp.path().join("global/lib/node_modules/typescript/lib");
+        for d in [
+            &fake_home,
+            &ws_tsdk,
+            &global_bin,
+            &vue_pkg_bin,
+            &global_tsdk,
+        ] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(ws_tsdk.join("tsserverlibrary.js"), "// untrusted").unwrap();
+        std::fs::write(global_tsdk.join("tsserverlibrary.js"), "// global").unwrap();
+        let real_vue = vue_pkg_bin.join("vue-language-server.js");
+        std::fs::write(&real_vue, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&real_vue, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::os::unix::fs::symlink(
+            "../lib/node_modules/@vue/language-server/bin/vue-language-server.js",
+            global_bin.join("vue-language-server"),
+        )
+        .unwrap();
+
+        // Global symlinked vue-language-server finds outer global typescript/lib, never workspace.
+        let out_global = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(build_remote_vue_tsdk_probe_script())
+            .current_dir(&ws)
+            .env("HOME", &fake_home)
+            .env("PATH", format!("{}:/usr/bin:/bin", global_bin.display()))
+            .output()
+            .await
+            .unwrap();
+        assert!(out_global.status.success(), "{out_global:?}");
+        let picked_global = String::from_utf8_lossy(&out_global.stdout)
+            .trim()
+            .to_string();
+        assert_eq!(
+            std::fs::canonicalize(&picked_global).unwrap(),
+            std::fs::canonicalize(&global_tsdk).unwrap(),
+            "RED-2: remote probe must resolve global typescript/lib"
+        );
+        assert!(!picked_global.contains("vue-repo"));
+
+        // Managed ~/.otto/toolchains/node/lsp/node_modules/typescript/lib takes precedence.
+        let managed_tsdk = fake_home.join(".otto/toolchains/node/lsp/node_modules/typescript/lib");
+        std::fs::create_dir_all(&managed_tsdk).unwrap();
+        std::fs::write(managed_tsdk.join("tsserverlibrary.js"), "// managed").unwrap();
+        let out_managed = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(build_remote_vue_tsdk_probe_script())
+            .current_dir(&ws)
+            .env("HOME", &fake_home)
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .await
+            .unwrap();
+        assert!(out_managed.status.success(), "{out_managed:?}");
+        let picked_managed = String::from_utf8_lossy(&out_managed.stdout)
+            .trim()
+            .to_string();
+        assert_eq!(
+            std::fs::canonicalize(&picked_managed).unwrap(),
+            std::fs::canonicalize(&managed_tsdk).unwrap(),
+            "RED-2: remote probe must prefer managed ~/.otto typescript/lib"
         );
     }
 }
