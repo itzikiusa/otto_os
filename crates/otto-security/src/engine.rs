@@ -62,6 +62,42 @@ impl EngineKind {
     }
 }
 
+async fn run_preparation<T, F, Fut>(
+    timeout: Duration,
+    cancel: &CancellationToken,
+    prepare: F,
+) -> Result<T>
+where
+    F: FnOnce(CancellationToken) -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    let updates = cancel.child_token();
+    let prepared = prepare(updates.clone());
+    tokio::pin!(prepared);
+    let mut interrupted = None;
+    let result = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => {
+            interrupted = Some(cancelled());
+            None
+        }
+        _ = tokio::time::sleep(timeout) => {
+            updates.cancel();
+            interrupted = Some(Error::internal_public(
+                "Scanner preparation reached the time limit.",
+            ));
+            None
+        }
+        result = &mut prepared => Some(result),
+    };
+    if let Some(error) = interrupted {
+        // Let a started extraction observe cancellation and release its staging directory.
+        let _ = prepared.await;
+        return Err(error);
+    }
+    result.expect("preparation completed")
+}
+
 impl Engine {
     pub(crate) fn new(toolchains: &Path, kind: EngineKind) -> Self {
         Self {
@@ -87,28 +123,10 @@ impl Engine {
             .await
             .map_err(io_error)?;
         let client = download::client()?;
-        let updates = cancel.child_token();
-        let prepared = self.refresh_release(&client, &updates);
-        tokio::pin!(prepared);
-        let mut interrupted = None;
-        let result = tokio::select! {
-            biased;
-            _ = cancel.cancelled() => {
-                interrupted = Some(cancelled());
-                None
-            }
-            _ = tokio::time::sleep(timeout) => {
-                updates.cancel();
-                interrupted = Some(Error::internal_public("Scanner preparation reached the time limit."));
-                None
-            }
-            result = &mut prepared => Some(result),
-        };
-        if let Some(error) = interrupted {
-            let _ = prepared.await;
-            return Err(error);
-        }
-        let version = result.expect("preparation completed")?;
+        let version = run_preparation(timeout, cancel, |updates| async move {
+            self.refresh_release(&client, &updates).await
+        })
+        .await?;
         let program = self.binary(&version.version)?;
         Ok((version, program))
     }
@@ -134,8 +152,7 @@ impl Engine {
             .map_err(io_error)?;
         let client = download::client()?;
         let timeout = Duration::from_secs(u64::from(settings.timeout_secs));
-        let updates = cancel.child_token();
-        let prepared = async {
+        let (version, cache, rules) = run_preparation(timeout, cancel, |updates| async move {
             let version = self.refresh_release(&client, &updates).await?;
             let cache = if self.kind == EngineKind::Trivy
                 && settings.checks.contains(&Check::Vulnerability)
@@ -149,29 +166,9 @@ impl Engine {
             } else {
                 None
             };
-            Ok::<_, Error>((version, cache, rules))
-        };
-        tokio::pin!(prepared);
-        let mut interrupted = None;
-        let result = tokio::select! {
-            biased;
-            _ = cancel.cancelled() => {
-                interrupted = Some(cancelled());
-                None
-            }
-            _ = tokio::time::sleep(timeout) => {
-                updates.cancel();
-                interrupted = Some(Error::internal_public("Scanner preparation reached the time limit."));
-                None
-            }
-            result = &mut prepared => Some(result),
-        };
-        if let Some(error) = interrupted {
-            // Let a started extraction observe cancellation and release its staging directory.
-            let _ = prepared.await;
-            return Err(error);
-        }
-        let (version, cache, rules) = result.expect("preparation completed")?;
+            Ok((version, cache, rules))
+        })
+        .await?;
         tokio::fs::create_dir_all(&cache).await.map_err(io_error)?;
         let program = self.binary(&version.version)?;
         let mut engine_run = crate::EngineRun {
@@ -907,6 +904,52 @@ mod tests {
             assert_eq!(cached.mode, crate::ScanMode::Cached);
             print_metrics(&cached, start);
         }
+    }
+
+    #[tokio::test]
+    async fn run_preparation_drains_work_on_timeout_and_cancel() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+
+        // Timeout cancels the child token and waits for cleanup to finish.
+        let drained = Arc::new(AtomicBool::new(false));
+        let drained_timeout = drained.clone();
+        let err = run_preparation(
+            Duration::from_millis(30),
+            &CancellationToken::new(),
+            |updates| async move {
+                updates.cancelled().await;
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                drained_timeout.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("time limit"));
+        assert!(drained.load(Ordering::SeqCst));
+
+        // External cancellation propagates to child token and drains cleanup.
+        let cancel = CancellationToken::new();
+        let trigger = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            trigger.cancel();
+        });
+        let drained_cancel = Arc::new(AtomicBool::new(false));
+        let drained_flag = drained_cancel.clone();
+        let err = run_preparation(Duration::from_secs(5), &cancel, |updates| async move {
+            updates.cancelled().await;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            drained_flag.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(err.to_string(), cancelled().to_string());
+        assert!(drained_cancel.load(Ordering::SeqCst));
     }
 
     fn print_metrics(run: &crate::EngineRun, start: std::time::Instant) {

@@ -110,26 +110,37 @@ test('the Security overflow menu uses the selected scan and baseline state', () 
   assert.equal(state.securityMore()[2].label, 'Clear baseline');
 });
 
-test('active DAST asks for explicit confirmation before posting active: true and passive remains default', async () => {
+test('active DAST binds explicit confirmation to the displayed target identity and passive remains default', async () => {
   const posts: Array<{ path: string; body?: unknown }> = [];
+  const puts: Array<{ path: string; body?: unknown }> = [];
   const prompts: Array<{ message: string; title?: string }> = [];
   let accept = false;
-  const confirmed = {
+  let swapTargetDuringPrompt = false;
+  const confirmedA = {
     run_config_id: 'cfg-1',
     url: 'http://127.0.0.1:3000/app',
     allow_public: false,
     scheduled: false,
-    scheduled_active: false,
-    confirmed_at: '2026-11-27T12:00:00Z',
+    confirmed_at: '2026-11-27T12:00:00.000Z',
   };
-  const state = componentFunctions(security, ['runActiveDast', 'runPassive', 'securityMore', 'action'], {
+  const confirmedB = {
+    run_config_id: 'cfg-2',
+    url: 'http://127.0.0.1:4000/other',
+    allow_public: false,
+    scheduled: false,
+    confirmed_at: '2026-11-27T12:05:00.000Z',
+  };
+  const candidateA = { run_config_id: 'cfg-1', run_config_name: 'Dev', url: confirmedA.url, public: false };
+  const state = componentFunctions(security, ['runActiveDast', 'runPassive', 'confirmPassive', 'securityMore', 'action'], {
     base: '/security',
     acting: false,
     error: '',
     passiveLoading: false,
     active: undefined,
     passiveRunReady: true,
-    passive: { confirmed, candidates: [{ run_config_id: 'cfg-1', run_config_name: 'Dev', url: confirmed.url, public: false }] },
+    passiveScheduled: true,
+    passiveCandidate: candidateA,
+    passive: { confirmed: confirmedA, candidates: [candidateA] },
     overview: project(),
     detail: { scan: completed },
     importInput: { click() {} },
@@ -137,9 +148,14 @@ test('active DAST asks for explicit confirmation before posting active: true and
     selectBaseline() {},
     loadErrorText: String,
     refresh: async () => {},
+    refreshPassive: async () => {},
     confirmer: {
       async ask(message: string, opts?: { title?: string }) {
         prompts.push({ message, title: opts?.title });
+        if (swapTargetDuringPrompt) {
+          // Simulate another window updating confirmed target to B while the prompt for A is open.
+          state.passive = { confirmed: confirmedB, candidates: [candidateA] };
+        }
         return accept;
       },
     },
@@ -147,6 +163,10 @@ test('active DAST asks for explicit confirmation before posting active: true and
       async post(path: string, body?: unknown) {
         posts.push({ path, body });
         return { id: 'scan-active' };
+      },
+      async put(path: string, body?: unknown) {
+        puts.push({ path, body });
+        return confirmedA;
       },
     },
   });
@@ -160,12 +180,26 @@ test('active DAST asks for explicit confirmation before posting active: true and
   assert.match(prompts[0].message, /test HTTP requests/i);
   assert.equal(posts.length, 0);
 
-  // Accepting confirmation posts { active: true }.
+  // SEC-2: accepting confirmation posts target A's exact displayed identity
+  // even if state.passive.confirmed changed to B while the dialog was open.
   accept = true;
+  swapTargetDuringPrompt = true;
   await state.runActiveDast();
   assert.equal(posts.length, 1);
   assert.equal(posts[0].path, '/security/dast/run');
-  assert.equal(JSON.stringify(posts[0].body), '{"active":true}');
+  assert.deepEqual(JSON.parse(JSON.stringify(posts[0].body)), {
+    active: true,
+    run_config_id: confirmedA.run_config_id,
+    url: confirmedA.url,
+    confirmed_at: confirmedA.confirmed_at,
+  });
+
+  // SEC-1: confirming a scheduled target sends passive-only consent (no scheduled_active).
+  swapTargetDuringPrompt = false;
+  await state.confirmPassive();
+  assert.equal(puts.length, 1);
+  assert.equal(puts[0].path, '/security/dast');
+  assert.equal('scheduled_active' in (puts[0].body as Record<string, unknown>), false);
 
   // Passive run sends no active opt-in.
   state.runPassive();

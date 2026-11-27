@@ -98,7 +98,6 @@ export interface PassiveAuditTarget {
   url: string;
   allow_public: boolean;
   scheduled: boolean;
-  scheduled_active?: boolean;
   confirmed_at: string;
 }
 
@@ -111,4 +110,7 @@ export type ConfirmPassiveAudit = Omit<PassiveAuditTarget, 'confirmed_at'>;
 
 export interface RunDastRequest {
   active?: boolean;
+  run_config_id?: string;
+  url?: string;
+  confirmed_at?: string;
 }

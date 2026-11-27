@@ -50,7 +50,6 @@
   let passive = $state<ProjectPassiveAudit | null>(null);
   let passiveConfig = $state('');
   let passiveScheduled = $state(false);
-  let passiveScheduledActive = $state(false);
   let passiveError = $state('');
   let passiveLoading = $state(false);
   let importInput = $state<HTMLInputElement>();
@@ -158,7 +157,6 @@
       passive = result;
       passiveConfig = result.confirmed?.run_config_id ?? result.candidates[0]?.run_config_id ?? '';
       passiveScheduled = result.confirmed?.scheduled ?? false;
-      passiveScheduledActive = result.confirmed?.scheduled_active ?? false;
       passiveError = '';
     } catch (e) {
       if (alive) passiveError = loadErrorText(e);
@@ -171,15 +169,11 @@
     const candidate = passiveCandidate;
     if (!candidate) return;
     const scheduled = passiveScheduled;
-    const scheduledActive = scheduled && passiveScheduledActive;
     const accepted = await confirmer.ask([
       `Audit destination ${candidate.url}`,
       'Default audits are passive: Otto sends one HTTP HEAD request without credentials, cookies, or a request body. Redirects are disabled.',
       candidate.public ? 'This is a public destination.' : '',
       scheduled ? 'Also allow scheduled passive audits while the saved run configuration is running.' : '',
-      scheduledActive
-        ? 'Also allow scheduled active checks (Nuclei): Otto will send rate-limited test HTTP requests to this target (DoS and fuzzing templates excluded) while the saved run configuration is running.'
-        : '',
     ].filter(Boolean).join('\n\n'), {
       title: candidate.public ? 'Confirm public audit target' : 'Confirm audit target',
       confirmLabel: candidate.public ? 'Confirm public URL' : 'Confirm URL',
@@ -187,7 +181,7 @@
     if (!accepted) return;
     const command: ConfirmPassiveAudit = {
       run_config_id: candidate.run_config_id, url: candidate.url,
-      allow_public: candidate.public, scheduled, scheduled_active: scheduledActive,
+      allow_public: candidate.public, scheduled,
     };
     await action(async () => {
       await api.put<PassiveAuditTarget>(`${base}/dast`, command);
@@ -222,7 +216,12 @@
     });
     if (!accepted) return;
     await action(async () => {
-      const scan = await api.post<{ id: string }>(`${base}/dast/run`, { active: true });
+      const scan = await api.post<{ id: string }>(`${base}/dast/run`, {
+        active: true,
+        run_config_id: confirmed.run_config_id,
+        url: confirmed.url,
+        confirmed_at: confirmed.confirmed_at,
+      });
       await refresh(scan.id);
     });
   }
@@ -413,12 +412,8 @@
               <p class="audit-url" dir="ltr">{passiveCandidate.url}</p>
             {/if}
             <label class="audit-toggle">
-              <input type="checkbox" bind:checked={passiveScheduled} onchange={() => { if (!passiveScheduled) passiveScheduledActive = false; }} />
+              <input type="checkbox" bind:checked={passiveScheduled} />
               Include passive audit in scheduled scans
-            </label>
-            <label class="audit-toggle">
-              <input type="checkbox" bind:checked={passiveScheduledActive} disabled={!passiveScheduled} />
-              Include active Nuclei checks in scheduled scans (sends test requests)
             </label>
             <div class="actions">
               <button type="button" class="btn small" onclick={() => void confirmPassive()} disabled={acting || !passiveCandidate}>
@@ -434,7 +429,7 @@
               {/if}
             </div>
             {#if passive?.confirmed}
-              <p class="muted">Confirmed {passive.confirmed.url} · {when(passive.confirmed.confirmed_at)}{passive.confirmed.scheduled_active ? ' · scheduled active enabled' : ''}</p>
+              <p class="muted">Confirmed {passive.confirmed.url} · {when(passive.confirmed.confirmed_at)}</p>
             {/if}
           {:else}
             <p class="muted">Set OTTO_SECURITY_URL in a saved run configuration for this project.</p>

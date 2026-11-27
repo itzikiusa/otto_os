@@ -139,6 +139,32 @@ pub(super) async fn revoke<S: IdeCtx>(
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn verify_dast_consent<S: IdeCtx>(
+    ctx: &S,
+    user: &User,
+    project: &str,
+    request: &RunDastRequest,
+    expected: Option<&Target>,
+) -> Result<(Target, PathBuf)> {
+    let roots = project_roots(ctx, user, project).await?;
+    let (target, root) = eligible(ctx, user, project, &roots, false)
+        .await?
+        .ok_or_else(|| {
+            Error::Conflict(
+                "Confirm this URL and start its saved project run configuration.".into(),
+            )
+        })?;
+    request.verify_target(&target)?;
+    if let Some(expected) = expected {
+        if &target != expected {
+            return Err(Error::Conflict(
+                "The confirmed target or its running configuration changed.".into(),
+            ));
+        }
+    }
+    Ok((target, root))
+}
+
 pub(super) async fn start<S: IdeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
@@ -152,14 +178,7 @@ pub(super) async fn start<S: IdeCtx>(
             .map_err(|_| Error::Invalid("Invalid DAST run options.".into()))?
     };
     let active = request.active;
-    let roots = project_roots(&ctx, &user, &id).await?;
-    let (expected, _) = eligible(&ctx, &user, &id, &roots, false)
-        .await?
-        .ok_or_else(|| {
-            Error::Conflict(
-                "Confirm this URL and start its saved project run configuration.".into(),
-            )
-        })?;
+    let (expected, _) = verify_dast_consent(&ctx, &user, &id, &request, None).await?;
     let service = ctx.ide().security.clone();
     let runner = service.clone();
     let job_ctx = ctx.clone();
@@ -173,17 +192,41 @@ pub(super) async fn start<S: IdeCtx>(
                 async move { ctx.security_scan_busy().await }
             },
             move |settings, cancel, _| async move {
-                let roots = project_roots(&job_ctx, &user, &project).await?;
-                let (target, root) = eligible(&job_ctx, &user, &project, &roots, false)
-                    .await?
-                    .filter(|(target, _)| target == &expected)
-                    .ok_or_else(|| {
-                        Error::Conflict(
-                            "The confirmed target or its running configuration changed.".into(),
-                        )
-                    })?;
+                let (target, root) =
+                    verify_dast_consent(&job_ctx, &user, &project, &request, Some(&expected))
+                        .await?;
+                let verify_ctx = job_ctx.clone();
+                let verify_user = user.clone();
+                let verify_project = project.clone();
+                let verify_request = request.clone();
+                let verify_expected = expected.clone();
+                let verify_root = root.clone();
                 let (run, findings) = runner
-                    .run_dast(&target, &root, &settings, active, &cancel)
+                    .run_dast(&target, &root, &settings, active, &cancel, move || {
+                        let ctx = verify_ctx.clone();
+                        let user = verify_user.clone();
+                        let project = verify_project.clone();
+                        let request = verify_request.clone();
+                        let expected = verify_expected.clone();
+                        let expected_root = verify_root.clone();
+                        async move {
+                            let (_, current_root) = verify_dast_consent(
+                                &ctx,
+                                &user,
+                                &project,
+                                &request,
+                                Some(&expected),
+                            )
+                            .await?;
+                            if current_root != expected_root {
+                                return Err(Error::Conflict(
+                                    "The confirmed target or its running configuration changed."
+                                        .into(),
+                                ));
+                            }
+                            Ok(())
+                        }
+                    })
                     .await?;
                 Ok((vec![run], findings))
             },
@@ -192,6 +235,9 @@ pub(super) async fn start<S: IdeCtx>(
     Ok((StatusCode::ACCEPTED, Json(scan)))
 }
 
+/// Scheduled scans run source checks and, when explicitly opted in, passive
+/// HTTP header audits only. Active Nuclei checks are never scheduled — they
+/// require an explicit per-scan human request through `POST .../dast/run`.
 pub(super) async fn enqueue_scheduled<S: IdeCtx>(
     ctx: &S,
     user: User,
@@ -224,13 +270,9 @@ pub(super) async fn enqueue_scheduled<S: IdeCtx>(
                         .filter(|(target, _)| {
                             target.confirmed_at == expected.confirmed_at
                                 && target.url == expected.url
-                                && target.scheduled_active == expected.scheduled_active
                         })
                     {
-                        match worker
-                            .run_dast(&target, &root, &settings, false, &cancel)
-                            .await
-                        {
+                        match passive::run(&target, &root, &cancel).await {
                             Ok((run, mut extra)) => {
                                 runs.push(run);
                                 findings.append(&mut extra);
@@ -240,34 +282,6 @@ pub(super) async fn enqueue_scheduled<S: IdeCtx>(
                                     return Err(error);
                                 }
                                 tracing::warn!(%error, "scheduled passive audit did not complete")
-                            }
-                        }
-                        if target.scheduled_active {
-                            otto_security::wait_for_idle(&busy, &cancel).await?;
-                            if let Some((target, root)) =
-                                eligible(&job_ctx, &user, &project, &roots, true)
-                                    .await?
-                                    .filter(|(target, _)| {
-                                        target.confirmed_at == expected.confirmed_at
-                                            && target.url == expected.url
-                                            && target.scheduled_active
-                                    })
-                            {
-                                match worker
-                                    .run_dast(&target, &root, &settings, true, &cancel)
-                                    .await
-                                {
-                                    Ok((run, mut extra)) => {
-                                        runs.push(run);
-                                        findings.append(&mut extra);
-                                    }
-                                    Err(error) => {
-                                        if cancel.is_cancelled() {
-                                            return Err(error);
-                                        }
-                                        tracing::warn!(%error, "scheduled active DAST did not complete")
-                                    }
-                                }
                             }
                         }
                     }

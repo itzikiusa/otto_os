@@ -59,16 +59,32 @@ impl SecurityScans {
 
     /// Runs the confirmed DAST check. Passive HTTP header audit is the default
     /// (`active == false`), and Nuclei is only invoked when `active == true`.
-    pub async fn run_dast(
+    /// For active runs, `verify_before_spawn` is re-invoked after binary and
+    /// template preparation, immediately before starting the proxy and spawning
+    /// Nuclei.
+    pub async fn run_dast<V, Fut>(
         &self,
         target: &crate::passive::Target,
         root: &Path,
         settings: &ScanSettings,
         active: bool,
         cancel: &CancellationToken,
-    ) -> Result<(EngineRun, Vec<Finding>)> {
+        verify_before_spawn: V,
+    ) -> Result<(EngineRun, Vec<Finding>)>
+    where
+        V: Fn() -> Fut,
+        Fut: Future<Output = Result<()>>,
+    {
         if active {
-            crate::dast::run(&self.dast, target, root, settings, cancel).await
+            crate::dast::run(
+                &self.dast,
+                target,
+                root,
+                settings,
+                cancel,
+                verify_before_spawn,
+            )
+            .await
         } else {
             crate::passive::run(target, root, cancel).await
         }

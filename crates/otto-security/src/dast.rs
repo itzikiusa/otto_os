@@ -1,5 +1,7 @@
+use std::future::Future;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use otto_core::{Error, Result};
@@ -50,13 +52,18 @@ struct TemplatesState {
     checked_at: String,
 }
 
-pub(crate) async fn run(
+pub(crate) async fn run<V, Fut>(
     engine: &Engine,
     target: &Target,
     root: &Path,
     settings: &ScanSettings,
     cancel: &CancellationToken,
-) -> Result<(EngineRun, Vec<Finding>)> {
+    verify_before_spawn: V,
+) -> Result<(EngineRun, Vec<Finding>)>
+where
+    V: Fn() -> Fut,
+    Fut: Future<Output = Result<()>>,
+{
     if !cfg!(target_os = "macos") {
         return Err(Error::Invalid(
             "Active DAST scans require macOS Seatbelt.".into(),
@@ -69,7 +76,8 @@ pub(crate) async fn run(
     let port = url
         .port_or_known_default()
         .ok_or_else(|| Error::Invalid("Enter an HTTP or HTTPS URL.".into()))?;
-    let (host, addrs) = otto_netguard::resolve_checked_for(url.as_str(), !public)
+    // Fail fast on blocked/unreachable targets before initializing or downloading Nuclei.
+    let _ = otto_netguard::resolve_checked_for(url.as_str(), !public)
         .await
         .map_err(Error::Forbidden)?;
 
@@ -79,16 +87,31 @@ pub(crate) async fn run(
     let templates = tokio::fs::canonicalize(&templates)
         .await
         .map_err(io_error)?;
+    let template_dirs = allowlisted_template_dirs(&templates).await?;
+
+    // Single probe-boundary consent gate: re-verify that human consent for this
+    // exact target and its live run configuration still holds AFTER binary and
+    // template preparation, immediately before opening the proxy or spawning Nuclei.
+    if cancel.is_cancelled() {
+        return Err(cancelled());
+    }
+    verify_before_spawn().await?;
+    let (host, addrs) = otto_netguard::resolve_checked_for(url.as_str(), !public)
+        .await
+        .map_err(Error::Forbidden)?;
 
     let proxy = PinnedTargetProxy::start(host, port, addrs, cancel.child_token()).await?;
     let scratch = tempfile::tempdir_in(engine.dir()).map_err(io_error)?;
     let output = tokio::fs::canonicalize(scratch.path())
         .await
         .map_err(io_error)?;
-    let report = output.join("report.jsonl");
-    let args = nuclei_args(&url, &templates, &report, proxy.port(), settings);
+    let args = nuclei_args(&url, &template_dirs, proxy.port(), settings);
 
-    let run_result = governor::run_with_network(
+    let findings = Arc::new(Mutex::new(Vec::new()));
+    let sink = findings.clone();
+    let root_str = root.to_string_lossy().into_owned();
+    let fallback_url = url.clone();
+    let run_result = governor::run_with_network_lines(
         &program,
         &args,
         root,
@@ -97,22 +120,21 @@ pub(crate) async fn run(
         settings,
         NetworkScope::LoopbackPort(proxy.port()),
         cancel,
+        move |line| {
+            let mut guard = sink
+                .lock()
+                .map_err(|_| Error::Internal("security DAST report lock poisoned".into()))?;
+            parse_jsonl_line(line, &fallback_url, &root_str, &mut guard)
+        },
     )
     .await;
     drop(proxy);
     let metrics = run_result?;
 
-    let data = match tokio::fs::read(&report).await {
-        Ok(bytes) => bytes,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(err) => return Err(io_error(err)),
-    };
-    let root_buf = root.to_path_buf();
-    let fallback_url = url.clone();
-    let mut findings =
-        tokio::task::spawn_blocking(move || parse_jsonl(&data, &fallback_url, &root_buf))
-            .await
-            .map_err(|_| Error::Internal("security DAST report worker stopped".into()))??;
+    let mut findings = Arc::try_unwrap(findings)
+        .map_err(|_| Error::Internal("security DAST report sink still held".into()))?
+        .into_inner()
+        .map_err(|_| Error::Internal("security DAST report lock poisoned".into()))?;
     findings.sort_unstable_by(|a, b| {
         a.severity
             .cmp(&b.severity)
@@ -223,34 +245,70 @@ async fn refresh_templates(
 }
 
 async fn has_templates(dir: &Path) -> bool {
-    let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
-        return false;
-    };
-    entries.next_entry().await.ok().flatten().is_some()
+    allowlisted_template_dirs(dir).await.is_ok()
+}
+
+async fn dir_has_yaml(dir: &Path) -> bool {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        let Ok(mut entries) = tokio::fs::read_dir(&current).await else {
+            continue;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let Ok(file_type) = entry.file_type().await else {
+                continue;
+            };
+            if file_type.is_symlink() {
+                continue;
+            }
+            let path = entry.path();
+            if file_type.is_dir() {
+                stack.push(path);
+            } else if file_type.is_file()
+                && matches!(
+                    path.extension().and_then(|e| e.to_str()),
+                    Some(ext) if ext.eq_ignore_ascii_case("yaml") || ext.eq_ignore_ascii_case("yml")
+                )
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Validates that the cached Nuclei template tree contains every approved
+/// dev-safe exposure directory with at least one YAML template. Never falls
+/// back to the root template directory (prevents partial installs from
+/// widening the scan scope).
+async fn allowlisted_template_dirs(templates: &Path) -> Result<Vec<PathBuf>> {
+    let mut selected_dirs = Vec::with_capacity(DEV_TEMPLATE_SUBDIRS.len());
+    for subdir in DEV_TEMPLATE_SUBDIRS {
+        let candidate = templates.join(subdir);
+        if !tokio::fs::metadata(&candidate)
+            .await
+            .is_ok_and(|meta| meta.is_dir())
+            || !dir_has_yaml(&candidate).await
+        {
+            return Err(Error::Upstream(
+                "Nuclei template cache is missing the approved HTTP exposure templates. Retry the scan to refresh templates.".into(),
+            ));
+        }
+        selected_dirs.push(candidate);
+    }
+    Ok(selected_dirs)
 }
 
 fn nuclei_args(
     url: &Url,
-    templates: &Path,
-    report: &Path,
+    template_dirs: &[PathBuf],
     proxy_port: u16,
     settings: &ScanSettings,
 ) -> Vec<String> {
     let concurrency = u32::from(settings.parallelism).clamp(1, 2) * 4;
     let mut args = vec!["-u".into(), url.to_string()];
-    let mut selected_dirs = Vec::new();
-    for subdir in DEV_TEMPLATE_SUBDIRS {
-        let candidate = templates.join(subdir);
-        if candidate.is_dir() {
-            selected_dirs.push(candidate);
-        }
-    }
-    if selected_dirs.is_empty() {
-        args.extend(["-t".into(), templates.to_string_lossy().into_owned()]);
-    } else {
-        for dir in selected_dirs {
-            args.extend(["-t".into(), dir.to_string_lossy().into_owned()]);
-        }
+    for dir in template_dirs {
+        args.extend(["-t".into(), dir.to_string_lossy().into_owned()]);
     }
     args.extend([
         "-type".into(),
@@ -266,6 +324,7 @@ fn nuclei_args(
         "-no-stdin".into(),
         "-no-color".into(),
         "-silent".into(),
+        "-jsonl".into(),
         "-rate-limit".into(),
         RATE_LIMIT_PER_SEC.to_string(),
         "-concurrency".into(),
@@ -281,8 +340,6 @@ fn nuclei_args(
         "-proxy".into(),
         format!("http://127.0.0.1:{proxy_port}"),
         "-proxy-internal".into(),
-        "-jsonl-export".into(),
-        report.to_string_lossy().into_owned(),
     ]);
     args
 }
@@ -569,6 +626,7 @@ impl TagsField {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn parse_jsonl(data: &[u8], fallback_url: &Url, root: &Path) -> Result<Vec<Finding>> {
     if data.is_empty() {
         return Ok(Vec::new());
@@ -578,82 +636,92 @@ pub(crate) fn parse_jsonl(data: &[u8], fallback_url: &Url, root: &Path) -> Resul
     let root_str = root.to_string_lossy().into_owned();
     let mut findings = Vec::new();
     for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let event: NucleiEvent = serde_json::from_str(trimmed)
-            .map_err(|_| Error::internal_public("Nuclei returned an unreadable report."))?;
-        if event.template_id.trim().is_empty() {
-            continue;
-        }
-        if findings.len() == MAX_FINDINGS {
-            return Err(Error::internal_public(
-                "This scan produced too many findings. Narrow its scope and retry.",
-            ));
-        }
-        let path = sanitize_matched_url(&event.matched_at, &event.host, fallback_url);
-        let rule_raw = if event.matcher_name.trim().is_empty() {
-            event.template_id.trim().to_string()
-        } else {
-            format!("{}:{}", event.template_id.trim(), event.matcher_name.trim())
-        };
-        let rule = text(&rule_raw, 180);
-        let severity = match event.info.severity.trim().to_ascii_lowercase().as_str() {
-            "critical" => Severity::Critical,
-            "high" => Severity::High,
-            "medium" => Severity::Medium,
-            "low" => Severity::Low,
-            _ => Severity::Unknown,
-        };
-        let tags = event.info.tags.as_list();
-        let secret_like = is_secret_template(&event.template_id, &tags);
-        let title_src = if event.info.name.trim().is_empty() {
-            rule.clone()
-        } else {
-            otto_core::redact::redact_text(event.info.name.trim()).value
-        };
-        let title = text(&title_src, 240);
-        let description = if secret_like {
-            "Nuclei matched a sensitive exposure or credential template. Matched response content is omitted."
-                .into()
-        } else if event.info.description.trim().is_empty() {
-            title.clone()
-        } else {
-            text(
-                &otto_core::redact::redact_text(event.info.description.trim()).value,
-                900,
-            )
-        };
-        let fix = if event.info.remediation.trim().is_empty() {
-            if secret_like {
-                "Restrict access to this endpoint, remove exposed credentials, and rotate any leaked secrets."
-                    .into()
-            } else {
-                "Review the matched endpoint configuration and remediate the reported issue.".into()
-            }
-        } else {
-            text(
-                &otto_core::redact::redact_text(event.info.remediation.trim()).value,
-                600,
-            )
-        };
-        let identity = format!("nuclei\0{root_str}\0{path}\0{rule}");
-        findings.push(Finding {
-            fingerprint: hex::encode(Sha256::digest(identity.as_bytes())),
-            engine: "nuclei".into(),
-            check: Check::Dast,
-            severity,
-            root: root_str.clone(),
-            path,
-            line: None,
-            rule,
-            title,
-            description,
-            fix,
-        });
+        parse_jsonl_line(line, fallback_url, &root_str, &mut findings)?;
     }
     Ok(findings)
+}
+
+pub(crate) fn parse_jsonl_line(
+    line: &str,
+    fallback_url: &Url,
+    root_str: &str,
+    findings: &mut Vec<Finding>,
+) -> Result<()> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+    let event: NucleiEvent = serde_json::from_str(trimmed)
+        .map_err(|_| Error::internal_public("Nuclei returned an unreadable report."))?;
+    if event.template_id.trim().is_empty() {
+        return Ok(());
+    }
+    if findings.len() == MAX_FINDINGS {
+        return Err(Error::internal_public(
+            "This scan produced too many findings. Narrow its scope and retry.",
+        ));
+    }
+    let path = sanitize_matched_url(&event.matched_at, &event.host, fallback_url);
+    let rule_raw = if event.matcher_name.trim().is_empty() {
+        event.template_id.trim().to_string()
+    } else {
+        format!("{}:{}", event.template_id.trim(), event.matcher_name.trim())
+    };
+    let rule = text(&rule_raw, 180);
+    let severity = match event.info.severity.trim().to_ascii_lowercase().as_str() {
+        "critical" => Severity::Critical,
+        "high" => Severity::High,
+        "medium" => Severity::Medium,
+        "low" => Severity::Low,
+        _ => Severity::Unknown,
+    };
+    let tags = event.info.tags.as_list();
+    let secret_like = is_secret_template(&event.template_id, &tags);
+    let title_src = if event.info.name.trim().is_empty() {
+        rule.clone()
+    } else {
+        otto_core::redact::redact_text(event.info.name.trim()).value
+    };
+    let title = text(&title_src, 240);
+    let description = if secret_like {
+        "Nuclei matched a sensitive exposure or credential template. Matched response content is omitted."
+            .into()
+    } else if event.info.description.trim().is_empty() {
+        title.clone()
+    } else {
+        text(
+            &otto_core::redact::redact_text(event.info.description.trim()).value,
+            900,
+        )
+    };
+    let fix = if event.info.remediation.trim().is_empty() {
+        if secret_like {
+            "Restrict access to this endpoint, remove exposed credentials, and rotate any leaked secrets."
+                .into()
+        } else {
+            "Review the matched endpoint configuration and remediate the reported issue.".into()
+        }
+    } else {
+        text(
+            &otto_core::redact::redact_text(event.info.remediation.trim()).value,
+            600,
+        )
+    };
+    let identity = format!("nuclei\0{root_str}\0{path}\0{rule}");
+    findings.push(Finding {
+        fingerprint: hex::encode(Sha256::digest(identity.as_bytes())),
+        engine: "nuclei".into(),
+        check: Check::Dast,
+        severity,
+        root: root_str.to_owned(),
+        path,
+        line: None,
+        rule,
+        title,
+        description,
+        fix,
+    });
+    Ok(())
 }
 
 fn sanitize_matched_url(matched_at: &str, host: &str, fallback: &Url) -> String {
@@ -744,19 +812,68 @@ mod tests {
         }
     }
 
-    #[test]
-    fn nuclei_args_enforce_safe_dev_defaults_and_rate_limits() {
-        let dir = tempfile::tempdir().unwrap();
+    fn create_allowlisted_templates(templates: &Path) {
         for subdir in DEV_TEMPLATE_SUBDIRS {
-            std::fs::create_dir_all(dir.path().join(subdir)).unwrap();
+            let dir = templates.join(subdir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("stub.yaml"), "id: stub\n").unwrap();
         }
+    }
+
+    fn setup_cached_nuclei(
+        tools: &Path,
+        script: &str,
+        populate_allowlist: bool,
+    ) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let nuclei_dir = tools.join("security-nuclei");
+        let binary = nuclei_dir.join("releases/3.11.1/nuclei");
+        let templates = nuclei_dir.join("templates");
+        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&templates).unwrap();
+        if populate_allowlist {
+            create_allowlisted_templates(&templates);
+        }
+        std::fs::write(&binary, script).unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        (nuclei_dir, binary)
+    }
+
+    async fn write_fresh_nuclei_markers(nuclei_dir: &Path) {
+        let stamp = store::now();
+        write_json(
+            &nuclei_dir.join("engine.json"),
+            &crate::EngineVersion {
+                version: "3.11.1".into(),
+                checked_at: stamp.clone(),
+                updated_at: stamp.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        write_json(&nuclei_dir.join("release-attempt.json"), &stamp)
+            .await
+            .unwrap();
+        write_json(
+            &nuclei_dir.join("templates.json"),
+            &TemplatesState { checked_at: stamp },
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn nuclei_args_enforce_safe_dev_defaults_and_rate_limits() {
+        let dir = tempfile::tempdir().unwrap();
+        create_allowlisted_templates(dir.path());
+        let template_dirs = allowlisted_template_dirs(dir.path()).await.unwrap();
         let url = Url::parse("http://127.0.0.1:3000/app").unwrap();
-        let report = dir.path().join("report.jsonl");
         let settings = ScanSettings {
             parallelism: 1,
             ..Default::default()
         };
-        let args = nuclei_args(&url, dir.path(), &report, 41234, &settings);
+        let args = nuclei_args(&url, &template_dirs, 41234, &settings);
         let pair = |flag: &str| {
             args.windows(2)
                 .find(|w| w[0] == flag)
@@ -773,6 +890,11 @@ mod tests {
         assert!(args.iter().any(|a| a == "-disable-update-check"));
         assert!(args.iter().any(|a| a == "-omit-raw"));
         assert!(args.iter().any(|a| a == "-omit-template"));
+        assert!(args.iter().any(|a| a == "-jsonl"));
+        assert!(
+            !args.iter().any(|a| a == "-jsonl-export"),
+            "Nuclei must stream JSONL over stdout, never write -jsonl-export to disk"
+        );
         for subdir in DEV_TEMPLATE_SUBDIRS {
             assert!(args.iter().any(|a| a.ends_with(subdir)));
         }
@@ -881,13 +1003,19 @@ mod tests {
                 url: url.into(),
                 allow_public,
                 scheduled: false,
-                scheduled_active: false,
                 confirmed_at: store::now(),
             };
             assert!(
-                run(&engine, &target, Path::new("/project"), &settings, &cancel)
-                    .await
-                    .is_err(),
+                run(
+                    &engine,
+                    &target,
+                    Path::new("/project"),
+                    &settings,
+                    &cancel,
+                    || async { Ok(()) }
+                )
+                .await
+                .is_err(),
                 "expected refusal for {url} (allow_public={allow_public})"
             );
         }
@@ -899,6 +1027,283 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[tokio::test]
+    async fn partial_template_cache_without_allowlist_dirs_is_rejected_without_spawning_nuclei() {
+        // BUG-1: a cancelled first template extraction leaves non-allowlist files
+        // (e.g. http/cves/vuln.yaml) in templates/. Neither cache detection nor
+        // argument construction may fall back to the root template directory.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let tools = root.join("tools");
+        let probe_marker = root.join("nuclei-probed");
+        // Stub fails template refresh (-ut) and would write probe_marker if invoked for probing.
+        let script = format!(
+            "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = \"-ut\" ]; then exit 1; fi\ndone\ntouch '{}'\n",
+            probe_marker.display()
+        );
+        let (nuclei_dir, _) = setup_cached_nuclei(&tools, &script, false);
+        let cves = nuclei_dir.join("templates/http/cves");
+        std::fs::create_dir_all(&cves).unwrap();
+        std::fs::write(cves.join("vuln.yaml"), "id: cve-test\n").unwrap();
+        write_fresh_nuclei_markers(&nuclei_dir).await;
+
+        assert!(
+            !has_templates(&nuclei_dir.join("templates")).await,
+            "partial cache without approved exposure subdirs must not count as cached templates"
+        );
+        assert!(
+            allowlisted_template_dirs(&nuclei_dir.join("templates"))
+                .await
+                .is_err(),
+            "missing approved exposure dirs must return an error instead of falling back to root"
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let engine = Engine::new(&tools, EngineKind::Nuclei);
+        let target = Target {
+            run_config_id: "cfg".into(),
+            url: format!("http://{addr}/app"),
+            allow_public: false,
+            scheduled: false,
+            confirmed_at: store::now(),
+        };
+        let err = run(
+            &engine,
+            &target,
+            &root,
+            &ScanSettings::default(),
+            &CancellationToken::new(),
+            || async { Ok(()) },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, Error::Upstream(_)),
+            "expected template-cache Upstream error, got: {err:?}"
+        );
+        assert!(
+            !probe_marker.exists(),
+            "Nuclei probe must never spawn against a partial template cache"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn revoking_consent_during_preparation_blocks_nuclei_spawn() {
+        // CONC-1: consent is valid before preparation starts, then revoked before
+        // Nuclei is spawned. The probe-boundary verify callback must prevent
+        // Nuclei from spawning or touching the target.
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let tools = root.join("tools");
+        let spawn_marker = root.join("nuclei-spawned");
+        let script = format!("#!/bin/sh\ntouch '{}'\n", spawn_marker.display());
+        let (nuclei_dir, _) = setup_cached_nuclei(&tools, &script, true);
+        write_fresh_nuclei_markers(&nuclei_dir).await;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let engine = Engine::new(&tools, EngineKind::Nuclei);
+        let target = Target {
+            run_config_id: "cfg".into(),
+            url: format!("http://{addr}/app"),
+            allow_public: false,
+            scheduled: false,
+            confirmed_at: store::now(),
+        };
+
+        let revoked = Arc::new(AtomicBool::new(true));
+        let checks = Arc::new(AtomicUsize::new(0));
+        let revoked_flag = revoked.clone();
+        let checks_counter = checks.clone();
+        let err = run(
+            &engine,
+            &target,
+            &root,
+            &ScanSettings::default(),
+            &CancellationToken::new(),
+            move || {
+                let revoked = revoked_flag.clone();
+                let checks = checks_counter.clone();
+                async move {
+                    checks.fetch_add(1, Ordering::SeqCst);
+                    if revoked.load(Ordering::SeqCst) {
+                        Err(Error::Conflict(
+                            "The confirmed target or its running configuration changed.".into(),
+                        ))
+                    } else {
+                        Ok(())
+                    }
+                }
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, Error::Conflict(_)), "got {err:?}");
+        assert_eq!(checks.load(Ordering::SeqCst), 1);
+        assert!(
+            !spawn_marker.exists(),
+            "Nuclei must not spawn after consent is revoked during preparation"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(80), listener.accept())
+                .await
+                .is_err(),
+            "target must receive zero connections when spawn-boundary consent fails"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn nuclei_streams_jsonl_over_stdout_without_writing_extracted_credentials_to_disk() {
+        // SEC-3: Nuclei outputs JSONL containing extracted credentials via stdout
+        // (-jsonl). Otto drops extracted-results in memory and never writes a
+        // temporary report file to disk.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let tools = root.join("tools");
+        let secret = "SUPER_SECRET_GIT_CREDENTIAL_9999";
+        let script = format!(
+            r#"#!/bin/sh
+SAW_JSONL=0
+TARGET=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -u) TARGET="$2"; shift 2 ;;
+    -jsonl) SAW_JSONL=1; shift ;;
+    -jsonl-export) exit 99 ;;
+    *) shift ;;
+  esac
+done
+[ "$SAW_JSONL" -eq 1 ] || exit 98
+printf '%s\n' '{{"template-id":"git-config","matched-at":"'"$TARGET"'/.git/config?token={secret}","info":{{"name":"Git Config Exposure","severity":"medium","description":"Git config exposed","tags":["exposure","config"]}},"extracted-results":["https://user:{secret}@git.example.invalid/repo.git"]}}'
+"#
+        );
+        let (nuclei_dir, _) = setup_cached_nuclei(&tools, &script, true);
+        write_fresh_nuclei_markers(&nuclei_dir).await;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let service = crate::SecurityScans::new(&tools);
+        let target = Target {
+            run_config_id: "cfg".into(),
+            url: format!("http://{addr}/app"),
+            allow_public: false,
+            scheduled: false,
+            confirmed_at: store::now(),
+        };
+        let (run_info, findings) = service
+            .run_dast(
+                &target,
+                &root,
+                &ScanSettings::default(),
+                true,
+                &CancellationToken::new(),
+                || async { Ok(()) },
+            )
+            .await
+            .unwrap();
+        assert_eq!(run_info.name, "nuclei");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule, "git-config");
+        assert!(!serde_json::to_string(&findings).unwrap().contains(secret));
+
+        // Walk engine directory and verify no report file or leaked secret exists on disk.
+        let mut stack = vec![nuclei_dir];
+        while let Some(path) = stack.pop() {
+            let mut entries = tokio::fs::read_dir(&path).await.unwrap();
+            while let Some(entry) = entries.next_entry().await.unwrap() {
+                let p = entry.path();
+                if entry.file_type().await.unwrap().is_dir() {
+                    stack.push(p);
+                } else {
+                    assert_ne!(
+                        p.file_name().and_then(|n| n.to_str()),
+                        Some("report.jsonl"),
+                        "no temporary report.jsonl file may be written"
+                    );
+                    if p.file_name().and_then(|n| n.to_str()) != Some("nuclei") {
+                        let bytes = tokio::fs::read(&p).await.unwrap_or_default();
+                        assert!(
+                            !String::from_utf8_lossy(&bytes).contains(secret),
+                            "extracted credential found on disk at {}",
+                            p.display()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn active_dast_failure_persists_failed_scan_status_and_error() {
+        // OBS-1: active Nuclei failure must persist ScanStatus::Failed with an
+        // operator-visible error message rather than Completed with error: None.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let tools = root.join("tools");
+        let (nuclei_dir, _) = setup_cached_nuclei(&tools, "#!/bin/sh\nexit 1\n", true);
+        write_fresh_nuclei_markers(&nuclei_dir).await;
+
+        let pool = otto_state::db::test_pool().await;
+        sqlx::query("INSERT INTO ide_named_projects (id) VALUES ('obs-project')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let service = Arc::new(crate::SecurityScans::new(&tools));
+        let runner = service.clone();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let target = Target {
+            run_config_id: "cfg".into(),
+            url: format!("http://{addr}/app"),
+            allow_public: false,
+            scheduled: false,
+            confirmed_at: store::now(),
+        };
+        let root_clone = root.clone();
+        let scan = service
+            .enqueue_job(
+                pool.clone(),
+                "obs-project".into(),
+                || async { false },
+                move |settings, cancel, _| async move {
+                    let (run, findings) = runner
+                        .run_dast(&target, &root_clone, &settings, true, &cancel, || async {
+                            Ok(())
+                        })
+                        .await?;
+                    Ok((vec![run], findings))
+                },
+            )
+            .await
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let detail = store::detail(&pool, "obs-project", &scan.id).await.unwrap();
+                if detail.scan.status != crate::ScanStatus::Queued
+                    && detail.scan.status != crate::ScanStatus::Running
+                {
+                    assert_eq!(detail.scan.status, crate::ScanStatus::Failed);
+                    assert!(
+                        detail.scan.error.as_deref().is_some_and(|e| !e.is_empty()),
+                        "failed active DAST scan must persist a non-empty error"
+                    );
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
     async fn opt_in_off_never_spawns_nuclei_and_cancel_kills_nuclei_group() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -906,38 +1311,11 @@ mod tests {
         let root = dir.path().canonicalize().unwrap();
         let tools = root.join("tools");
         let service = crate::SecurityScans::new(&tools);
-        let nuclei_dir = tools.join("security-nuclei");
-        let binary = nuclei_dir.join("releases/3.11.1/nuclei");
-        let templates = nuclei_dir.join("templates");
-        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
-        std::fs::create_dir_all(&templates).unwrap();
-        std::fs::write(templates.join("stub.yaml"), "id: stub\n").unwrap();
-        let stamp = store::now();
-        write_json(
-            &nuclei_dir.join("engine.json"),
-            &crate::EngineVersion {
-                version: "3.11.1".into(),
-                checked_at: stamp.clone(),
-                updated_at: stamp.clone(),
-            },
-        )
-        .await
-        .unwrap();
-        write_json(&nuclei_dir.join("release-attempt.json"), &stamp)
-            .await
-            .unwrap();
-        write_json(
-            &nuclei_dir.join("templates.json"),
-            &TemplatesState { checked_at: stamp },
-        )
-        .await
-        .unwrap();
+        let (nuclei_dir, binary) = setup_cached_nuclei(&tools, "#!/bin/sh\nexit 42\n", true);
+        write_fresh_nuclei_markers(&nuclei_dir).await;
 
         // 1. Opt-in OFF -> passive HTTP audit runs, Nuclei is NEVER spawned
         //    (even if the nuclei binary is absent / fails immediately).
-        let fail_script = "#!/bin/sh\nexit 42\n";
-        std::fs::write(&binary, fail_script).unwrap();
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let passive_server = tokio::spawn(async move {
@@ -963,28 +1341,27 @@ mod tests {
             url: format!("http://{addr}/app"),
             allow_public: false,
             scheduled: false,
-            scheduled_active: false,
             confirmed_at: store::now(),
         };
         let settings = ScanSettings::default();
         let cancel = CancellationToken::new();
         let (passive_run, _) = service
-            .run_dast(&target, &root, &settings, false, &cancel)
+            .run_dast(&target, &root, &settings, false, &cancel, || async {
+                Ok(())
+            })
             .await
             .unwrap();
         passive_server.await.unwrap();
         assert_eq!(passive_run.name, "otto-passive-http");
 
-        // 2. Opt-in ON -> Nuclei runs under governor and parses JSONL into DAST findings.
+        // 2. Opt-in ON -> Nuclei runs under governor and streams JSONL over stdout.
         std::fs::write(
             &binary,
             r#"#!/bin/sh
 TARGET=""
-OUT=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -u) TARGET="$2"; shift 2 ;;
-    -jsonl-export) OUT="$2"; shift 2 ;;
     *) shift ;;
   esac
 done
@@ -994,7 +1371,7 @@ case "$TARGET" in
     wait
     ;;
   *)
-    printf '%s\n' '{"template-id":"dev-exposure","matched-at":"'"$TARGET"'/debug","info":{"name":"Debug Endpoint","severity":"medium","description":"Debug route enabled."}}' > "$OUT"
+    printf '%s\n' '{"template-id":"dev-exposure","matched-at":"'"$TARGET"'/debug","info":{"name":"Debug Endpoint","severity":"medium","description":"Debug route enabled."}}'
     ;;
 esac
 "#,
@@ -1002,7 +1379,9 @@ esac
         .unwrap();
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
         let (active_run, active_findings) = service
-            .run_dast(&target, &root, &settings, true, &cancel)
+            .run_dast(&target, &root, &settings, true, &cancel, || async {
+                Ok(())
+            })
             .await
             .unwrap();
         assert_eq!(active_run.name, "nuclei");
@@ -1023,7 +1402,14 @@ esac
             trigger.cancel();
         });
         let err = service
-            .run_dast(&hang_target, &root, &settings, true, &cancel_hang)
+            .run_dast(
+                &hang_target,
+                &root,
+                &settings,
+                true,
+                &cancel_hang,
+                || async { Ok(()) },
+            )
             .await
             .unwrap_err();
         assert_eq!(err.to_string(), cancelled().to_string());
@@ -1070,7 +1456,6 @@ esac
             url: format!("http://{addr}"),
             allow_public: false,
             scheduled: false,
-            scheduled_active: false,
             confirmed_at: store::now(),
         };
         let settings = ScanSettings {
@@ -1080,9 +1465,11 @@ esac
             ..Default::default()
         };
         let cancel = CancellationToken::new();
-        let (run_info, findings) = run(&engine, &target, &root, &settings, &cancel)
-            .await
-            .unwrap();
+        let (run_info, findings) = run(&engine, &target, &root, &settings, &cancel, || async {
+            Ok(())
+        })
+        .await
+        .unwrap();
         stop.cancel();
         let _ = server.await;
         println!(

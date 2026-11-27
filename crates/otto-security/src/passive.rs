@@ -20,8 +20,6 @@ pub struct Target {
     pub url: String,
     pub allow_public: bool,
     pub scheduled: bool,
-    #[serde(default)]
-    pub scheduled_active: bool,
     pub confirmed_at: String,
 }
 
@@ -46,14 +44,67 @@ pub struct ConfirmTarget {
     pub url: String,
     pub allow_public: bool,
     pub scheduled: bool,
-    #[serde(default)]
-    pub scheduled_active: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RunDastRequest {
     pub active: bool,
+    pub run_config_id: Option<String>,
+    pub url: Option<String>,
+    pub confirmed_at: Option<String>,
+}
+
+impl RunDastRequest {
+    /// Binds active DAST opt-in to the exact confirmation identity displayed to
+    /// the human in the prompt. Passive runs (`active == false`) may omit these
+    /// fields, preserving passive-by-default behavior; if supplied on a passive
+    /// run, they are still checked against `target`.
+    pub fn verify_target(&self, target: &Target) -> Result<()> {
+        if self.active {
+            let (Some(run_config_id), Some(url), Some(confirmed_at)) = (
+                self.run_config_id.as_deref().filter(|s| !s.is_empty()),
+                self.url.as_deref().filter(|s| !s.is_empty()),
+                self.confirmed_at.as_deref().filter(|s| !s.is_empty()),
+            ) else {
+                return Err(Error::Invalid(
+                    "Active DAST requires the confirmed target identity (run_config_id, url, confirmed_at).".into(),
+                ));
+            };
+            if run_config_id != target.run_config_id
+                || url != target.url
+                || confirmed_at != target.confirmed_at
+            {
+                return Err(Error::Conflict(
+                    "The confirmed target changed. Review the current target and confirm again."
+                        .into(),
+                ));
+            }
+            return Ok(());
+        }
+        if let Some(run_config_id) = self.run_config_id.as_deref() {
+            if run_config_id != target.run_config_id {
+                return Err(Error::Conflict(
+                    "The confirmed target or its running configuration changed.".into(),
+                ));
+            }
+        }
+        if let Some(url) = self.url.as_deref() {
+            if url != target.url {
+                return Err(Error::Conflict(
+                    "The confirmed target or its running configuration changed.".into(),
+                ));
+            }
+        }
+        if let Some(confirmed_at) = self.confirmed_at.as_deref() {
+            if confirmed_at != target.confirmed_at {
+                return Err(Error::Conflict(
+                    "The confirmed target or its running configuration changed.".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 pub fn parse_url(raw: &str) -> Result<(Url, bool)> {
@@ -99,7 +150,7 @@ pub fn parse_url(raw: &str) -> Result<(Url, bool)> {
 
 pub async fn get(pool: &DbPool, project: &str) -> Result<Option<Target>> {
     sqlx::query_as(
-        "SELECT run_config_id, url, allow_public, scheduled, scheduled_active, confirmed_at
+        "SELECT run_config_id, url, allow_public, scheduled, confirmed_at
                     FROM ide_security_passive_targets WHERE project_id = ?",
     )
     .bind(project)
@@ -124,31 +175,26 @@ pub async fn confirm(
             "Confirm this public destination explicitly.".into(),
         ));
     }
-    if request.scheduled_active && !request.scheduled {
-        return Err(Error::Invalid(
-            "Enable scheduled audits before enabling scheduled active checks.".into(),
-        ));
-    }
     let target = Target {
         url: candidate.url,
         run_config_id: candidate.run_config_id,
         allow_public: candidate.public,
         scheduled: request.scheduled,
-        scheduled_active: request.scheduled_active,
         confirmed_at: now(),
     };
+    // Scheduled active DAST is disabled; explicitly write 0 to the additive
+    // scheduled_active column so any prior value is cleared on reconfirmation.
     sqlx::query(
         "INSERT INTO ide_security_passive_targets (project_id, run_config_id, url, allow_public, scheduled, scheduled_active, confirmed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(project_id) DO UPDATE SET run_config_id = excluded.run_config_id,
+         VALUES (?, ?, ?, ?, ?, 0, ?) ON CONFLICT(project_id) DO UPDATE SET run_config_id = excluded.run_config_id,
          url = excluded.url, allow_public = excluded.allow_public, scheduled = excluded.scheduled,
-         scheduled_active = excluded.scheduled_active, confirmed_at = excluded.confirmed_at",
+         scheduled_active = 0, confirmed_at = excluded.confirmed_at",
     )
     .bind(project)
     .bind(&target.run_config_id)
     .bind(&target.url)
     .bind(target.allow_public)
     .bind(target.scheduled)
-    .bind(target.scheduled_active)
     .bind(&target.confirmed_at)
     .execute(pool)
     .await
@@ -380,7 +426,6 @@ mod tests {
             url: candidate.url.clone(),
             allow_public: false,
             scheduled: false,
-            scheduled_active: false,
         };
         assert!(matches!(
             confirm(&pool, "audit-project", candidate.clone(), request).await,
@@ -391,24 +436,143 @@ mod tests {
             url: "https://example.org/changed".into(),
             allow_public: true,
             scheduled: false,
-            scheduled_active: false,
-        };
-        assert!(matches!(
-            confirm(&pool, "audit-project", candidate.clone(), request).await,
-            Err(Error::Conflict(_))
-        ));
-        request = ConfirmTarget {
-            run_config_id: "cfg".into(),
-            url: candidate.url.clone(),
-            allow_public: true,
-            scheduled: false,
-            scheduled_active: true,
         };
         assert!(matches!(
             confirm(&pool, "audit-project", candidate, request).await,
-            Err(Error::Invalid(_))
+            Err(Error::Conflict(_))
         ));
         assert!(get(&pool, "audit-project").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn confirm_target_rejects_scheduled_active_and_clears_legacy_flag_across_rollback() {
+        // SEC-1: scheduled_active cannot be enabled via ConfirmTarget.
+        let payload = serde_json::json!({
+            "run_config_id": "cfg-a",
+            "url": "http://127.0.0.1:3000/a",
+            "allow_public": false,
+            "scheduled": true,
+            "scheduled_active": true,
+        });
+        assert!(
+            serde_json::from_value::<ConfirmTarget>(payload).is_err(),
+            "scheduled_active must be rejected when scheduled active DAST is disabled"
+        );
+
+        // DATA-1: simulate an older rc5 row with scheduled_active = 1 on target A,
+        // followed by a rollback legacy upsert for target B (which leaves the
+        // additive scheduled_active column at 1 in SQLite).
+        let pool = otto_state::db::test_pool().await;
+        sqlx::query("INSERT INTO ide_named_projects (id) VALUES ('rollback-project')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO ide_security_passive_targets
+             (project_id, run_config_id, url, allow_public, scheduled, scheduled_active, confirmed_at)
+             VALUES ('rollback-project', 'cfg-a', 'http://127.0.0.1:3000/a', 0, 1, 1, '2026-11-27T10:00:00.000Z')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        // Legacy pre-0241 upsert replaces url and run_config_id without touching scheduled_active.
+        sqlx::query(
+            "INSERT INTO ide_security_passive_targets
+             (project_id, run_config_id, url, allow_public, scheduled, confirmed_at)
+             VALUES ('rollback-project', 'cfg-b', 'http://127.0.0.1:4000/b', 0, 1, '2026-11-27T11:00:00.000Z')
+             ON CONFLICT(project_id) DO UPDATE SET run_config_id = excluded.run_config_id,
+             url = excluded.url, allow_public = excluded.allow_public, scheduled = excluded.scheduled,
+             confirmed_at = excluded.confirmed_at",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let loaded = get(&pool, "rollback-project").await.unwrap().unwrap();
+        assert_eq!(loaded.run_config_id, "cfg-b");
+        assert_eq!(loaded.url, "http://127.0.0.1:4000/b");
+        // Serialized Target exposes no scheduled_active consent to callers.
+        let json = serde_json::to_value(&loaded).unwrap();
+        assert!(json.get("scheduled_active").is_none());
+
+        // Reconfirming target B explicitly resets the additive column back to 0.
+        confirm(
+            &pool,
+            "rollback-project",
+            Candidate {
+                run_config_id: "cfg-b".into(),
+                run_config_name: "B".into(),
+                url: "http://127.0.0.1:4000/b".into(),
+                public: false,
+            },
+            ConfirmTarget {
+                run_config_id: "cfg-b".into(),
+                url: "http://127.0.0.1:4000/b".into(),
+                allow_public: false,
+                scheduled: true,
+            },
+        )
+        .await
+        .unwrap();
+        let stored_flag: i64 = sqlx::query_scalar(
+            "SELECT scheduled_active FROM ide_security_passive_targets WHERE project_id = 'rollback-project'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(stored_flag, 0);
+    }
+
+    #[test]
+    fn active_run_request_requires_exact_displayed_confirmation_identity() {
+        let target_a = Target {
+            run_config_id: "cfg-a".into(),
+            url: "http://127.0.0.1:3000/a".into(),
+            allow_public: false,
+            scheduled: false,
+            confirmed_at: "2026-11-27T12:00:00.000Z".into(),
+        };
+        let target_b = Target {
+            run_config_id: "cfg-b".into(),
+            url: "http://127.0.0.1:4000/b".into(),
+            allow_public: false,
+            scheduled: false,
+            confirmed_at: "2026-11-27T12:00:05.000Z".into(),
+        };
+
+        // Passive default (empty request) succeeds without target identity.
+        assert!(RunDastRequest::default().verify_target(&target_a).is_ok());
+
+        // Active request missing identity fails with Invalid.
+        let bare_active: RunDastRequest = serde_json::from_str(r#"{"active":true}"#).unwrap();
+        assert!(matches!(
+            bare_active.verify_target(&target_a),
+            Err(Error::Invalid(_))
+        ));
+
+        // Active request carrying target A's displayed confirmation succeeds on A...
+        let bound_to_a = RunDastRequest {
+            active: true,
+            run_config_id: Some(target_a.run_config_id.clone()),
+            url: Some(target_a.url.clone()),
+            confirmed_at: Some(target_a.confirmed_at.clone()),
+        };
+        assert!(bound_to_a.verify_target(&target_a).is_ok());
+
+        // ...but is rejected with Conflict if another window confirmed target B,
+        // or if A was reconfirmed with a new timestamp.
+        assert!(matches!(
+            bound_to_a.verify_target(&target_b),
+            Err(Error::Conflict(_))
+        ));
+        let reconfirmed_a = Target {
+            confirmed_at: "2026-11-27T12:00:09.000Z".into(),
+            ..target_a
+        };
+        assert!(matches!(
+            bound_to_a.verify_target(&reconfirmed_a),
+            Err(Error::Conflict(_))
+        ));
     }
 
     async fn fixture(response: String) -> (Target, tokio::task::JoinHandle<()>) {
@@ -431,7 +595,6 @@ mod tests {
             run_config_id: "test".into(),
             allow_public: false,
             scheduled: false,
-            scheduled_active: false,
             confirmed_at: now(),
         };
         (target, server)

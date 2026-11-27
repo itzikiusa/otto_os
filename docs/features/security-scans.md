@@ -47,28 +47,33 @@ status. If the URL redirects, confirm the final URL instead.
 
 **Run active scan (Nuclei)…** (available from the **⋯** menu and the HTTP audit
 settings panel once a target is confirmed and running) is an explicit per-scan
-opt-in. Before starting, Otto confirms what active scanning does (sending test
-HTTP requests to the confirmed target). On macOS, Otto installs the latest
-ProjectDiscovery Nuclei release into `<data_dir>/toolchains/security-nuclei/`,
-verifies its archive against GitHub's published SHA-256 digest, and has Nuclei
-fetch templates into that engine directory (never your home directory). Active
-scans run under the same resource governor (CPU, RSS, worker count, wall-time
-limit, and whole-process-group cancellation) and macOS Seatbelt with outbound
-traffic confined to an `otto-netguard`-pinned loopback proxy for the single
-confirmed host and port. Dev-safe defaults apply: HTTP exposure templates only
+human opt-in. Before starting, Otto confirms what active scanning does (sending
+test HTTP requests to the displayed target) and binds the request to that exact
+confirmation (`run_config_id`, `url`, `confirmed_at`), re-verifying consent and
+the live run configuration before enqueueing, on dequeue, and again immediately
+before spawning Nuclei after binary and template preparation. On macOS, Otto
+installs the latest ProjectDiscovery Nuclei release into
+`<data_dir>/toolchains/security-nuclei/`, verifies its archive against GitHub's
+published SHA-256 digest, and has Nuclei fetch templates into that engine
+directory (never your home directory). Active scans run under the same resource
+governor (CPU, RSS, worker count, wall-time limit, and whole-process-group
+cancellation) and macOS Seatbelt with outbound traffic confined to an
+`otto-netguard`-pinned loopback proxy for the single confirmed host and port.
+Dev-safe defaults apply: approved HTTP exposure template suites only
 (`http/exposures/configs`, `http/exposures/files`, `http/exposures/apis`, and
-`http/exposures/logs`), severities `low` through `critical`,
+`http/exposures/logs` — missing suites fail closed rather than falling back to
+the template root), severities `low` through `critical`,
 DoS/fuzzing/intrusive/brute-force tags excluded, Interactsh disabled,
-rate-limited to 20 req/s, and raw matched responses, extracted tokens, and URL
-query strings stripped or redacted before persistence.
+rate-limited to 20 req/s, and JSONL output streamed through an anonymous stdout
+pipe where raw matched responses, extracted tokens, and URL query strings are
+discarded in memory without writing a temporary report file to disk.
 
 Enable **Include passive audit in scheduled scans** when confirming the URL to
 allow future scheduled passive audits while the same configuration is running.
-Scheduled active checks (**Include active Nuclei checks in scheduled scans**)
-are off by default and require explicit opt-in alongside scheduled passive
-audits. A changed URL, changed live configuration, or revoked confirmation
-prevents the previous approval from being used. Scheduled source scans can
-proceed when the service is unavailable.
+Scheduled scans stay passive-only (active Nuclei checks are never scheduled and
+require an explicit manual opt-in). A changed URL, changed live configuration,
+or revoked confirmation prevents the previous approval from being used.
+Scheduled source scans can proceed when the service is unavailable.
 
 ## Coverage
 

@@ -17,7 +17,7 @@ pub(crate) enum NetworkScope {
 mod platform;
 
 #[cfg(target_os = "macos")]
-pub(crate) use platform::{run, run_with_network};
+pub(crate) use platform::{run, run_with_network, run_with_network_lines};
 
 #[cfg(not(target_os = "macos"))]
 pub(crate) async fn run(
@@ -54,6 +54,27 @@ pub(crate) async fn run_with_network(
     _network: NetworkScope,
     _cancel: &CancellationToken,
 ) -> Result<ScanMetrics> {
+    Err(Error::Invalid(
+        "Security scans require macOS Seatbelt.".into(),
+    ))
+}
+
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_with_network_lines<F>(
+    _program: &Path,
+    _args: &[String],
+    _project: &Path,
+    _cache: &Path,
+    _output: &Path,
+    _settings: &ScanSettings,
+    _network: NetworkScope,
+    _cancel: &CancellationToken,
+    _on_line: F,
+) -> Result<ScanMetrics>
+where
+    F: FnMut(&str) -> Result<()> + Send + 'static,
+{
     Err(Error::Invalid(
         "Security scans require macOS Seatbelt.".into(),
     ))
@@ -199,5 +220,99 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
         panic!("DAST engine descendant survived timeout");
+    }
+
+    #[tokio::test]
+    async fn piped_stdout_streams_lines_and_kills_group_when_output_exceeds_limit() {
+        use std::sync::{Arc, Mutex};
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let project = root.join("project");
+        let templates = root.join("templates");
+        let output = root.join("output");
+        for path in [&project, &templates, &output] {
+            std::fs::create_dir(path).unwrap();
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let token = CancellationToken::new();
+        let settings = ScanSettings {
+            timeout_secs: 10,
+            ..Default::default()
+        };
+
+        // Streams lines over the anonymous stdout pipe without creating any report files.
+        let collected = Arc::new(Mutex::new(Vec::<String>::new()));
+        let sink = collected.clone();
+        let args = vec!["-c".into(), "printf 'line-one\\nline-two\\n'".into()];
+        run_with_network_lines(
+            Path::new("/bin/sh"),
+            &args,
+            &project,
+            &templates,
+            &output,
+            &settings,
+            NetworkScope::LoopbackPort(port),
+            &token,
+            move |line| {
+                sink.lock().unwrap().push(line.to_string());
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(*collected.lock().unwrap(), vec!["line-one", "line-two"]);
+        assert!(tokio::fs::read_dir(&output)
+            .await
+            .unwrap()
+            .next_entry()
+            .await
+            .unwrap()
+            .is_none());
+
+        // A single line exceeding MAX_STDOUT_LINE_BYTES fails closed and kills the group.
+        let marker = output.join("pid");
+        let oversize_args = vec![
+            "-c".into(),
+            format!(
+                "sleep 60 & echo $! > '{}'; \
+                 s='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'; \
+                 s=\"$s$s$s$s$s$s$s$s$s$s$s$s$s$s$s$s\"; \
+                 s=\"$s$s$s$s$s$s$s$s$s$s$s$s$s$s$s$s\"; \
+                 i=0; while [ $i -lt 70 ]; do printf '%s' \"$s\"; i=$((i+1)); done; \
+                 wait",
+                marker.display()
+            ),
+        ];
+        let err = run_with_network_lines(
+            Path::new("/bin/sh"),
+            &oversize_args,
+            &project,
+            &templates,
+            &output,
+            &settings,
+            NetworkScope::LoopbackPort(port),
+            &token,
+            |_| Ok(()),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("maximum allowed size")
+                || err.to_string().contains("report limit"),
+            "unexpected error: {err}"
+        );
+        if let Ok(text) = tokio::fs::read_to_string(&marker).await {
+            if let Ok(pid) = text.trim().parse::<libc::pid_t>() {
+                for _ in 0..100 {
+                    if unsafe { libc::kill(pid, 0) } == -1 {
+                        return;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
+                panic!("child descendant survived stdout limit breach");
+            }
+        }
     }
 }
