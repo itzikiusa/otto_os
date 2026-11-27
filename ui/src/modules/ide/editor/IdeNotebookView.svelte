@@ -116,9 +116,14 @@
     lastSerialized = content;
   });
 
+  // Reset only when the notebook itself changes: the props object is rebuilt on
+  // every buffer edit (each committed output), which must not drop a running cell.
+  let effectPath = '';
   $effect(() => {
     const p = path;
     untrack(() => {
+      if (p === effectPath) return;
+      effectPath = p;
       viewToken += 1;
       runningCellId = null;
       runningAll = false;
