@@ -40,13 +40,10 @@
     runId: string;
     nodeId: string;
     attempt: number;
-    /** The step (or sub-thread) is still running or waiting on a person: show
-     *  the normal Threads composer so a person can queue/steer a follow-up. */
-    writable?: boolean;
     /** Switch to another thread (a sub-thread card or Back to parent) in the same pane. */
     onselectthread?: (threadId: string) => void;
   }
-  let { thread = null, sessions = [], digest = null, workspaceId, runId, nodeId, attempt, writable = false, onselectthread }: Props = $props();
+  let { thread = null, sessions = [], digest = null, workspaceId, runId, nodeId, attempt, onselectthread }: Props = $props();
 
   let gone = $state<'deleted' | 'forbidden' | null>(null);
   // Another step (or attempt) in the same pane starts over: the last one's
@@ -115,27 +112,20 @@
   });
 </script>
 
-{#snippet liveNotice()}
-  <p class="live-note" data-testid="wf-step-live-note">
-    <Icon name="info" size={12} />This conversation belongs to the run. What you send is added to this step.
-  </p>
-{/snippet}
-
 {#if live && View}
   <div class="embed" data-testid="wf-step-conversation">
     <View
       sessionId={thread!.thread_id}
       {workspaceId}
-      readOnly={!writable}
+      readOnly
       showHeader
       showOpenInThreads
       expandWork
-      composerTopSlot={writable ? liveNotice : undefined}
       {onselectthread}
       onunavailable={(reason) => (gone = reason)}
     />
   </div>
-  {#if !writable}<p class="note"><Icon name="lock" size={12} />{note}</p>{/if}
+  <p class="note"><Icon name="lock" size={12} />{note}</p>
 {:else if live}
   <LoadState what="the conversation" loading={!viewError} error={viewError} empty onretry={() => { viewError = null; viewRetry++; }} />
 {:else if thread?.runner === 'threads'}
@@ -185,21 +175,14 @@
     border-radius: var(--radius-m);
     overflow: hidden;
   }
-  .note,
-  .live-note {
+  .note {
     display: flex;
     align-items: center;
     gap: var(--sp-3);
     margin: 0;
+    padding-block: var(--sp-4);
     font-size: var(--fs-s);
     color: var(--text-dim);
-  }
-  .note {
-    padding-block: var(--sp-4);
-  }
-  .live-note {
-    padding-block: var(--sp-1);
-    padding-inline: var(--sp-2);
   }
   .items {
     display: flex;

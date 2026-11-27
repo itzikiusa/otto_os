@@ -93,10 +93,12 @@
   let retry = $state(0);
   let lastFetch = 0;
   const nodeId = $derived(node?.node_id ?? null);
+  const nodeAttempts = $derived(node?.attempts ?? 0);
   const detailVersion = $derived(node?.detail_version);
   const needsBody = $derived(!!node && !child && (['output', 'log', 'summary', 'preview', 'conversation'].includes(tab) || (tab === 'criteria' && step?.kind === 'check')));
   $effect(() => {
     const id = nodeId;
+    void nodeAttempts;
     void detailVersion;
     void retry;
     if (!id || !needsBody) return;
@@ -120,29 +122,19 @@
       ac.abort();
     };
   });
-  const body = $derived(detail?.node_id === node?.node_id ? detail : null);
+  // Match both node id and attempt so a Retry never flashes the previous attempt's body or thread.
+  const body = $derived(detail?.node_id === node?.node_id && detail?.attempts === node?.attempts ? detail : null);
 
   const word = $derived(child ? childWord(child, now) : node ? stepWord(node, { now, run: runState, kind: step?.kind }) : null);
   const thread = $derived<StepThread | null>(
     child
       ? child.thread_id ? { thread_id: child.thread_id, runner: 'threads', provider: child.provider, model: child.model, effort: child.effort, turns: 0, usage: {} as StepThread['usage'] } : null
-      : (body?.thread ?? node?.thread ?? null),
+      : (body?.thread && (!node?.thread || body.thread.thread_id === node.thread.thread_id) ? body.thread : node?.thread ?? null),
   );
   const modelChip = $derived(thread ? [thread.provider, thread.model || 'Default', thread.effort || 'Default'].join(' · ') : null);
   const segs = $derived(!child && node?.phases?.length ? phaseSegments(node.phases, node.status === 'running' ? now : Date.parse(node.started_at ?? '') + (node.duration_ms ?? 0)) : []);
   const segTotal = $derived(Math.max(1, segs.reduce((s, x) => s + x.ms, 0)));
   const summarizer = $derived(node?.children?.find((c) => /^summar/i.test(c.label) || c.id === 'summarizer') ?? null);
-  /** Live step (running or waiting on a person) — or a live sub-thread under
-   *  a live step: the daemon queues/steers prompts and `unattended.rs` waits
-   *  for queued turns before settling the step. Once settled, stay read-only. */
-  const canWrite = $derived(
-    child
-      ? node?.status === 'running' && (child.status === 'running' || child.status === 'needs_you')
-      : node?.status === 'running',
-  );
-  const summarizerLive = $derived(
-    node?.status === 'running' && (summarizer?.status === 'running' || summarizer?.status === 'needs_you'),
-  );
   /** The conversation tab mounts Threads' own header (provider · model · tokens), so don't repeat the model chip above it. */
   const showingThread = $derived(
     (tab === 'conversation' && thread?.runner === 'threads' && thread.available !== false) ||
@@ -259,10 +251,10 @@
   <div class="body" class:conv={showingThread} role="tabpanel" id="wf-step-panel-{tab}" aria-labelledby="wf-step-tab-{tab}">
     {#if tab === 'conversation'}
       <!-- A reviewer keeps no digest file of its own: no nodeId, so it never reads the step's. -->
-      <StepConversation {thread} sessions={child ? [] : (node?.sessions ?? [])} digest={child ? null : (body?.thread?.digest ?? null)} {workspaceId} runId={run.id} nodeId={child ? '' : (node?.node_id ?? '')} attempt={node?.attempts ?? 1} writable={canWrite} onselectthread={onselectchild ? selectThread : undefined} />
+      <StepConversation {thread} sessions={child ? [] : (node?.sessions ?? [])} digest={child ? null : (body?.thread?.digest ?? null)} {workspaceId} runId={run.id} nodeId={child ? '' : (node?.node_id ?? '')} attempt={node?.attempts ?? 1} onselectthread={onselectchild ? selectThread : undefined} />
     {:else if tab === 'summarizer'}
       {#if summarizer?.thread_id}
-        <StepConversation thread={{ thread_id: summarizer.thread_id, runner: 'threads', provider: summarizer.provider, turns: 0, usage: {} as StepThread['usage'] }} {workspaceId} runId={run.id} nodeId="" attempt={node?.attempts ?? 1} writable={summarizerLive} onselectthread={onselectchild ? selectThread : undefined} />
+        <StepConversation thread={{ thread_id: summarizer.thread_id, runner: 'threads', provider: summarizer.provider, turns: 0, usage: {} as StepThread['usage'] }} {workspaceId} runId={run.id} nodeId="" attempt={node?.attempts ?? 1} onselectthread={onselectchild ? selectThread : undefined} />
       {:else}
         <p class="none">The summarizer starts after the reviewers.</p>
       {/if}
