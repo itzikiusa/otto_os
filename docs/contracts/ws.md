@@ -470,6 +470,14 @@ credentials are refused with 403 (`RootRoute::Lsp`).
   `RA_LRU_CAP=128`, Node-based LSPs `--max-old-space-size=384`) in a dedicated
   Unix process group (`process_group(0)`). Missing binary → HTTP 503
   `server_unavailable`.
+- **Project trust (local and SSH):** `lang=zig`, `lang=kotlin` and `lang=vue` run
+  project code (`build.zig`, the Gradle / Maven build import, the Vue plugins
+  named by `tsconfig.json`), so they need a non-secret `OTTO_IDE_TRUST_ZIG_BUILD=1`,
+  `OTTO_IDE_TRUST_KOTLIN_LSP=1` or `OTTO_IDE_TRUST_VUE_LSP=1` (or
+  `OTTO_IDE_TRUST_PROJECT_EXECUTION=1`) in the opened root's project environment
+  (or a module inside it, never an ancestor); otherwise HTTP 403
+  `zig_lsp_requires_trust` / `kotlin_lsp_requires_trust` / `vue_lsp_requires_trust`
+  before the upgrade.
 - **Remote SSH target (`connection_id` set):** Resolves the saved SSH
   `Connection` (`ConnectionKind::Ssh`) through the caller's workspace/global
   `Connections` grants and resource access (`discover` + `shell`, plus

@@ -84,6 +84,20 @@ zero-rebuild **runtime IDE plugins**.
     (`pyvenv.cfg` present) that resolves under a known interpreter home
     (system, Xcode/CLT, python.org, Homebrew, pyenv/uv/mise/asdf/rye/conda,
     Otto toolchains).
+  - **Language servers that run project code.** `zls` (runs `build.zig`),
+    `kotlin-language-server` (imports the Gradle / Maven build) and the
+    standalone `vue-language-server` (loads the plugins the project's
+    `tsconfig.json` names) start only for a project that opted in with a
+    non-secret `OTTO_IDE_TRUST_ZIG_BUILD=1`, `OTTO_IDE_TRUST_KOTLIN_LSP=1` or
+    `OTTO_IDE_TRUST_VUE_LSP=1` (`OTTO_IDE_TRUST_PROJECT_EXECUTION=1` covers all
+    three) in its project environment (**Edit run configurations…** →
+    **Project environment** → *Environment variables & Keychain secrets*).
+    Local and SSH targets are gated alike. The opt-in is read from the opened
+    root or a module inside it, never from a parent folder, and a module
+    entry (`module_sdks`) does not copy it to a child checkout. Until then
+    `/ws/lsp` answers `403` (`zig_lsp_requires_trust`,
+    `kotlin_lsp_requires_trust`, `vue_lsp_requires_trust`) and the status
+    strip shows "<server> untrusted / unavailable".
   - **Network bridge host mappings** bind `127.0.0.1:<from_port>` without
     authentication, like `kubectl port-forward`: any local process (including
     a sandboxed agent session with loopback access) can reach the mapped
@@ -241,13 +255,13 @@ global system directories:
 | Ecosystem | Components |
 |-----------|------------|
 | **Java / JVM** | Adoptium Temurin JDK (17, 21 LTS), Maven, Gradle, Eclipse `jdtls`, `java-debug-adapter` |
-| **Kotlin** | Kotlin Compiler (`kotlinc` / `KOTLIN_HOME`, SDKMAN / Homebrew / official archive), `kotlin-language-server`, `ktfmt` / `ktlint`, Gradle Kotlin DSL (`build.gradle.kts`) & Version Catalog (`gradle/libs.versions.toml`), mixed Java/Kotlin Maven & Gradle modules, JUnit 5 (incl. backtick names) & Kotest gutter runs, JVM JDWP debugging via `java-debug` |
+| **Kotlin** | Kotlin Compiler (`kotlinc` / `KOTLIN_HOME`, SDKMAN / Homebrew / official archive), `kotlin-language-server`, `ktfmt` / `ktlint`, Gradle Kotlin DSL (`build.gradle.kts`) & Version Catalog (`gradle/libs.versions.toml`), mixed Java/Kotlin Maven & Gradle modules, JUnit 5 (incl. backtick names) gutter runs & Kotest spec-class gutter runs (one Suite item per spec; leaf DSL tests have no gutter item), JVM JDWP debugging via `java-debug` |
 | **Spring Boot** | Auto-detected from `@SpringBootApplication`, `pom.xml`, and `build.gradle*` (including multi-module sub-projects); Spring Boot run/debug configs & gutter icons with profile activation (`SPRING_PROFILES_ACTIVE` / `-Dspring-boot.run.profiles`), `application*.{properties,yml}` completion, hover, diagnostics (with deprecated-property Quick Fixes in `.properties`), bidirectional `@Value` / `@ConfigurationProperties` ↔ config navigation, loopback-only Actuator inspector (Health incl. 503 DOWN/OUT_OF_SERVICE, Endpoints/Mappings, Beans, redacted Env), and DevTools classpath trigger touch |
 | **Python** | `uv`, standalone CPython (3.11 / 3.12 / 3.13), `pyright`, `ruff`, `debugpy` |
 | **Rust** | `rustup` (`rustc` + `cargo`), `rust-analyzer`, `CodeLLDB` (`codelldb`) |
 | **Zig** | Official Zig SDK tarball (`ziglang.org/download/index.json`, SHA-256 verified), local SDK registration, `zls` (Zig-version-matched), `CodeLLDB` (`codelldb`) / `lldb-dap` / built-in `otto-lldb-dap` with Zig LLDB type formatters |
-| **C / C++ & Unreal Engine** | Clang / GCC / LLVM toolchain discovery & local registration, `clangd` (auto `--compile-commands-dir` including CMake/Meson/Unreal `Intermediate/ProjectFiles` + `textDocument/switchSourceHeader` `⌥O`), `clang-format`, CMake (Presets & CTest), Meson, Make, `vcpkg.json` / `conanfile.txt` / `.uproject` deps, `CodeLLDB` / `lldb-dap` / built-in `otto-lldb-dap` with C++ STL & Unreal pretty-printers, PID/process-name attach, and core-dump debugging |
-| **.NET (C# / F# / Unity / Unreal)** | Official .NET SDK tarball (`dotnetcli.azureedge.net` / `builds.dotnet.microsoft.com`, LTS 8.0 / 9.0), local SDK registration (`DOTNET_ROOT`), SDK-matched `csharp-ls` + `fsautocomplete` (with OmniSharp / Roslyn fallback), NuGet inspector & OSV vulnerabilities, `netcoredbg` (and `vsdbg` fallback) with `VSTEST_HOST_DEBUG` test debugging & explicit PID attach |
+| **C / C++ & Unreal Engine** | Clang / GCC / LLVM toolchain discovery & local registration (Otto does not download compilers: install them with Xcode Command Line Tools, Homebrew or `apt` / `dnf`), `clangd` (auto `--compile-commands-dir` including CMake/Meson/Unreal `Intermediate/ProjectFiles` + `textDocument/switchSourceHeader` `⌥O`), `clang-format`, CMake (Presets & CTest), Meson, Make, `vcpkg.json` / `conanfile.txt` / `.uproject` deps, `CodeLLDB` / `lldb-dap` / built-in `otto-lldb-dap` with C++ STL & Unreal pretty-printers, PID/process-name attach, and core-dump debugging |
+| **.NET (C# / F# / Unity / Unreal)** | Official .NET SDK tarball (`dotnetcli.azureedge.net` / `builds.dotnet.microsoft.com`, LTS 8.0 / 9.0), local SDK registration (`DOTNET_ROOT`), SDK-matched `csharp-ls` + `fsautocomplete` (with OmniSharp / Roslyn fallback), NuGet inspector & OSV vulnerabilities, `netcoredbg` (and `vsdbg` fallback) with `VSTEST_HOST_DEBUG` test debugging (one test project per session) & explicit PID attach (Unity Editor attach is not supported) |
 | **Go** | Official Go SDK tarball, local SDK registration (`POST /ide/toolchains/local`), `gopls`, Delve (`dlv`), `gofumpt` |
 | **Node / TypeScript & Web Frameworks** | Node LTS (22), `pnpm`, `typescript-language-server`, `svelteserver` (Svelte/SvelteKit, untrusted mode), `vue-language-server` (Vue/Nuxt standalone mode), `ngserver` (Angular with `--tsProbeLocations`/`--ngProbeLocations`), `vscode-langservers-extracted`, `prettier`, `js-debug` & built-in `otto-node-cdp` (Node + Browser CDP attach with Vite/webpack URL mapping) |
 | **Shell (Bash / Zsh)** | `bash-language-server`, `shellcheck`, `shfmt`, built-in `otto-sh-dap` (`DEBUG` trap DAP debugger) |
@@ -391,6 +405,15 @@ plus zero-install built-in bridges across every major ecosystem: `dlv dap` (Go),
 or built-in `otto-node-cdp` (`node --inspect-brk=0` CDP), `codelldb` /
 `lldb-dap` or built-in `otto-lldb-dap` (`/usr/bin/lldb` for Rust, Zig, and C/C++ / Unreal, with Zig, C++ STL, and Unreal LLDB pretty-printers, PID/process-name attach, post-mortem core-dump loading, `POST /ide/debug/sessions/{id}/set-variable`, and Zig panic / C++ `__cxa_throw` exception breakpoints), and
 `otto-sh-dap` (`DEBUG` trap for Bash/Zsh), plus a deterministic mock adapter.
+
+Some starts are refused with a message instead of opening a session: Debug of
+a Playwright or Karma / Angular test run (Playwright runs tests in a separate
+worker process, Karma in a browser; use Run, `PWDEBUG=1` or a Chrome CDP
+attach), a local .NET Debug of all tests in a folder or solution with more than
+one test project (a session attaches to one test host; pick that project's
+".NET Test" configuration or debug one test from the gutter), and
+`unity://attach`. Debug All Tests on a Zig project with several test suites
+debugs one suite and names the others.
 
 A Java Debug (or `java_main` Run) of a file in a Maven module takes the classpath
 from Maven itself: `mvn -q test-compile dependency:build-classpath` (run from the
@@ -871,6 +894,10 @@ Full schemas and route tables live in [`docs/contracts/api.md`](../contracts/api
   editor reconnects automatically once the install job finishes. A rustup
   `rust-analyzer` proxy only counts as installed once `rust-analyzer --version`
   succeeds (`rustup component add rust-analyzer`).
+- **"untrusted / unavailable" for `zls`, `kotlin-language-server` or
+  `vue-language-server`:** the project has not opted in to running its build
+  or plugins; add the trust variable described under *Language servers that
+  run project code* above, or install the server if it is missing.
 - **One language server per build:** `jdtls` is rooted at the Maven reactor
   (the parent `pom.xml` that lists the module in `<modules>`) or the Gradle
   `settings.gradle*` dir, and `rust-analyzer` at the Cargo `[workspace]`, so

@@ -28,7 +28,9 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
   (SHA-256 verified via zigtools' release selector) for completion and
   navigation, run configurations and gutter Run / Debug on `main` and on tests,
   and debugging with breakpoints, stepping, watch, set variable and stops on
-  `@panic`, with slices, optionals and error unions shown as values.
+  `@panic`, with slices, optionals and error unions shown as values. `zls`
+  runs the project's `build.zig`, so it starts only after you trust the
+  project (see the language-server note below).
 - **C / C++, Unreal Engine, Kotlin, Spring Boot, .NET and web frameworks in the
   IDE.** C / C++ & Unreal Engine get highlighting, `clangd` with auto
   `--compile-commands-dir` and `⌥O` header/source switch, CMake / Presets /
@@ -36,21 +38,30 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
   `vcpkg`/`conan`/CMake/`.uproject` inspection, and LLDB debugging (STL &
   Unreal formatters, exception breakpoints, PID/process-name attach and core
   dumps). Kotlin & Spring Boot get Kotlin highlighting,
-  `kotlin-language-server`, mixed Java/Kotlin modules, JUnit 5 & Kotest gutter
-  runs, Gradle `libs.versions.toml` inspection, JVM JDWP debugging,
+  `kotlin-language-server`, mixed Java/Kotlin modules, JUnit 5 gutter runs
+  and Kotest spec-level gutter runs, Gradle `libs.versions.toml` inspection, JVM JDWP debugging,
   `application.properties`/`application.yml` completion, hover, and navigation
   (plus `.properties` deprecation quick fixes), a loopback-only Actuator
   inspector with secret redaction, and DevTools `.reloadtrigger` restart check. .NET (C# / F# / Unity / Unreal C#) gets
   highlighting, toolchain discovery/installer, `csharp-ls` / OmniSharp /
   `fsautocomplete`, xUnit/NUnit/MSTest gutter runs, NuGet inspection, and
-  `netcoredbg` debugging (launch, VSTest test debugging, and explicit PID attach).
+  `netcoredbg` debugging (launch, VSTest test debugging of one test project
+  per session, and explicit PID attach; Unity Editor attach is not supported).
   JS/TS web frameworks (Angular, React, Next.js,
   Svelte/SvelteKit, Vue/Nuxt, Vite) get framework detection, `svelteserver` /
   `vue-language-server` (standalone mode) / `ngserver`, Vitest/Jest/Playwright/Karma runners, and
-  Node + Browser CDP debugging.
+  Node + Browser CDP debugging (Debug is refused for Playwright and Karma
+  runs: use Run). `zls`, `kotlin-language-server` and `vue-language-server`
+  run code from the project (its build or the plugins its `tsconfig.json`
+  names), so they do not start until the project is trusted: add
+  `OTTO_IDE_TRUST_ZIG_BUILD=1`, `OTTO_IDE_TRUST_KOTLIN_LSP=1` or
+  `OTTO_IDE_TRUST_VUE_LSP=1` (or `OTTO_IDE_TRUST_PROJECT_EXECUTION=1` for all
+  three) as a non-secret variable under *Edit run configurations… ▸ Project
+  environment*.
 - **Jupyter notebooks & ML workflow in the IDE.** Open, edit, run and save
   `.ipynb` notebooks directly in Otto with a built-in persistent Python kernel
-  (standard Python execution; IPython `%magic` is not supported), inline
+  (standard Python execution on the selected interpreter; IPython `%magic` and
+  other Jupyter kernels are not supported), inline
   matplotlib plots and `_repr_html_` tables, interpreter selection across
   `.venv` / `conda` / `uv` / Poetry / system Python, interrupt/restart, live
   Variables view, isolated cell DAP debugging, Apple Silicon MPS / GPU
@@ -104,9 +115,11 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
 - **Project security scans.** Run or schedule local Trivy and Opengrep checks in
   the IDE Security view with incremental caching, resource limits and macOS
   Seatbelt confinement. Review findings in Problems and the editor gutter,
-  manage suppressions and baselines, import or export SARIF 2.1.0, and run
-  passive HTTP header audits or opt-in active Nuclei DAST checks against
-  explicitly confirmed development run targets ([Security scans](docs/features/security-scans.md)).
+  manage suppressions and baselines, import or export SARIF 2.1.0, and audit
+  an explicitly confirmed development run target with passive HTTP header
+  checks. An active Nuclei DAST scan of that target runs only when a person
+  starts it by hand; schedules run the passive checks only
+  ([Security scans](docs/features/security-scans.md)).
 - **Chat.** A run started from chat keeps one live status message in its
   thread instead of a message per step, and flushes pending chat progress
   updates before `channel_notify` sends its final message so delivery order
