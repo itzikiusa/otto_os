@@ -6,8 +6,9 @@ import { apiCtx, seedWorkspace, seedGitRepo, seedConflictRepo, seedDirtyRepo, te
 
 // Durable mobile/tablet-layout coverage for the Git page. Asserts the REAL
 // workflow on a phone AND in the tablet/landscape range: the commit graph/list
-// shows commits, tapping a commit drills into its diff (changed files render),
-// the diff area scrolls independently, sections collapse, and — the headline fix
+// shows commits (behind the Branches list on a phone), tapping a commit opens
+// its diff in the Detail pane (changed files render), the diff area scrolls
+// independently, and — the headline fix
 // — the diff CODE is fully reachable inside the viewport (not clipped off-screen
 // right) at the landscape widths 814/834/932.
 //
@@ -73,7 +74,7 @@ test.beforeAll(async () => {
 });
 
 test.beforeEach(async ({ page }) => {
-  // Git's mobile/tablet layout (stacked accordion + wrapping diff) applies at
+  // Git's mobile/tablet layout (list push, Detail sheet + wrapping diff) applies at
   // ≤1024px. ipad-landscape (1194px) is the unchanged DESKTOP 3-pane layout,
   // whose render/overflow/a11y is covered by pages.spec — these mobile-flow
   // assertions don't apply there, so skip them on desktop widths.
@@ -135,8 +136,35 @@ async function expectDiffCodeReachable(page: Page): Promise<void> {
 async function openGraph(page: Page): Promise<void> {
   await page.goto(`/#/git/${repoId}/graph`);
   await expect(page.locator('.gitpage')).toBeVisible({ timeout: 30_000 });
-  await expect(page.locator('.graph-row').first()).toBeVisible({ timeout: 25_000 });
+  await showGraph(page);
 }
+
+/** History on a phone is its Branches list: tap the checked-out branch to push
+ *  the graph (a tablet shows the graph beside the list already). */
+async function showGraph(page: Page): Promise<void> {
+  const graph = page.locator('.graph-row').first();
+  const current = page.locator('.refs-panel .ref-row.current');
+  await expect(graph.or(current).first()).toBeVisible({ timeout: 25_000 });
+  if (await graph.isHidden()) await current.tap();
+  await expect(graph).toBeVisible({ timeout: 25_000 });
+}
+
+/** The WIP panel: History lands on it only where its Detail pane fits beside
+ *  the graph; on a phone or a narrow tablet tap the WIP row (a sheet opens). */
+async function openWip(page: Page): Promise<void> {
+  await page.goto(`/#/git/${dirtyRepoId}/graph`);
+  await expect(page.locator('.gitpage')).toBeVisible({ timeout: 30_000 });
+  await showGraph(page);
+  const wip = page.locator('.wip-row');
+  if ((await wip.getAttribute('aria-pressed')) !== 'true') await wip.tap();
+  await expect(page.locator('.wip-panel')).toBeVisible({ timeout: 15_000 });
+}
+
+/** A phone (or a phone on its side): the list pushes its content. */
+const pushes = (page: Page): boolean => {
+  const v = page.viewportSize()!;
+  return v.width <= 640 || v.height <= 500;
+};
 
 // ────────────────────────────────────────────────────────────────────────────
 // GRAPH
@@ -152,9 +180,7 @@ test('graph: lists commits and fits the viewport', async ({ page }) => {
 test('graph: commit drill shows a multi-file diff that scrolls and fits', async ({ page }) => {
   await openGraph(page);
   await page.locator('.graph-row').nth(1).click();
-  await expect(
-    page.locator('.detail-panel.mob-visible, .detail-panel.detail-visible'),
-  ).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('.detail-panel')).toBeVisible({ timeout: 15_000 });
 
   // The file list shows every changed file and opens the first one's diff.
   const fileRows = page.locator('.detail-diff .cf-row[data-path]');
@@ -187,28 +213,32 @@ test('graph: commit drill shows a multi-file diff that scrolls and fits', async 
   await expectDiffCodeReachable(page);
 });
 
-test('graph: sections are a collapsible accordion at mobile/tablet widths', async ({ page }) => {
-  await openGraph(page);
-  // The 3-pane desktop layout is replaced by the stacked accordion at ≤1024,
-  // which all of iphone-portrait/landscape + ipad-portrait now use.
-  const heads = page.locator('.graphview.mobile .mob-sec-head');
-  await expect(heads.first()).toBeVisible({ timeout: 10_000 });
-
-  // Expand Branches & Tags → refs panel visible; collapse → hidden.
-  const branchesHead = page.locator('.mob-sec-head', { hasText: 'Branches' });
-  await branchesHead.click();
-  await expect(page.locator('.refs-panel')).toBeVisible();
-  await branchesHead.click();
-  await expect(page.locator('.refs-panel')).toBeHidden();
-
-  // Tapping a commit auto-collapses the commit list and opens the diff.
-  await page.locator('.graph-row').nth(1).click();
-  await expect(page.locator('.detail-panel.mob-visible')).toBeVisible({ timeout: 15_000 });
-  await expect(page.locator('.graph-panel.mob-collapsed')).toHaveCount(1);
-
-  // Closing the diff (tap its header) re-opens the commit list.
-  await page.locator('.mob-diff-head').click();
-  await expect(page.locator('.graph-row').first()).toBeVisible();
+test('graph: Branches is a list pane — a phone pushes the graph, the detail is a sheet', async ({ page }) => {
+  await page.goto(`/#/git/${repoId}/graph`);
+  const current = page.locator('.refs-panel .ref-row.current');
+  await expect(current).toBeVisible({ timeout: 25_000 });
+  const graph = page.locator('.graph-row').first();
+  if (pushes(page)) {
+    // The list is the page (the checked-out branch marked); a tap pushes the
+    // graph with "‹ Branches", and Back keeps the picked branch marked.
+    await expect(graph).toBeHidden();
+    await current.tap();
+    await expect(graph).toBeVisible({ timeout: 15_000 });
+    await expect(current).toBeHidden();
+    await expect(page.getByTestId('git-detail')).toHaveCount(0); // the graph, not a sheet over it
+    await page.getByRole('button', { name: 'Back to Branches' }).tap();
+    await expect(current).toBeVisible();
+    await expect(current).toHaveAttribute('aria-selected', 'true');
+    await current.tap();
+  }
+  await expect(graph).toBeVisible();
+  // A commit's detail is a sheet over the graph; its Close returns to it.
+  await page.locator('.graph-row').nth(1).tap();
+  const sheet = page.getByRole('dialog', { name: 'Commit detail' });
+  await expect(sheet).toBeVisible({ timeout: 15_000 });
+  await sheet.getByRole('button', { name: 'Close Commit detail' }).tap();
+  await expect(sheet).toHaveCount(0);
+  await expect(graph).toBeVisible();
   await expectFitsWidth(page);
 });
 
@@ -222,11 +252,11 @@ test('changes/history deep links land on their views', async ({ page }) => {
   await expect(page.locator('.gitpage')).toBeVisible({ timeout: 30_000 });
   await expect(page.locator('.rv-tabs .rv-tab', { hasText: 'History' })).toHaveAttribute('aria-selected', 'true', { timeout: 25_000 });
   await expect(page.locator('.rv-tabs .rv-tab', { hasText: 'Changes' })).toHaveCount(0);
-  // A clean tree on a phone: the commit list, nothing selected.
-  await expect(page.locator('.graph-row').first()).toBeVisible({ timeout: 25_000 });
+  // A clean tree: the commit list (on a phone, behind its Branches list), nothing selected.
+  await showGraph(page);
   await expectFitsWidth(page);
   await page.goto(`/#/git/${repoId}/history`);
-  await expect(page.locator('.graph-row').first()).toBeVisible({ timeout: 25_000 });
+  await showGraph(page);
   await expect(page.locator('.rv-tabs .rv-tab', { hasText: 'History' })).toHaveAttribute('aria-selected', 'true');
   await expectFitsWidth(page);
 });
@@ -315,13 +345,9 @@ test('pull requests: detail route renders without overflow', async ({ page }) =>
 // ────────────────────────────────────────────────────────────────────────────
 
 test('diffviewer: a WIP file diff fits and its code is reachable', async ({ page }) => {
-  await page.goto(`/#/git/${dirtyRepoId}/graph`);
-  // History opens on the WIP row of a dirty tree.
-  await expect(page.locator('.wip-row')).toHaveAttribute('aria-pressed', 'true', { timeout: 25_000 });
+  await openWip(page);
   const panel = page.locator('.wip-panel');
-  await expect(panel).toBeVisible({ timeout: 15_000 });
-  // The commit card sits above the list: the panel scrolls as a whole, so the
-  // last file is reachable (its own scroller was 50 px tall on a phone).
+  // The commit card sits above the list: the last file is reachable.
   await panel.locator('.wp-name').last().scrollIntoViewIfNeeded();
   await expect(panel.locator('.wp-name').last()).toBeInViewport();
   await panel.locator('.wp-name').first().scrollIntoViewIfNeeded();
@@ -330,25 +356,13 @@ test('diffviewer: a WIP file diff fits and its code is reachable', async ({ page
   await expect(diff).toBeVisible({ timeout: 15_000 });
   // The diff renders after its fetch: measure once a code row is on screen.
   await expect(diff.locator('.dl-code, td.code, .vrow .code').first()).toBeVisible({ timeout: 15_000 });
-  const sheet = page.getByTestId('wip-diff-sheet');
-  const phone = page.viewportSize()!.width <= 640;
-  // A phone's sheet slides in from the side: measure once it has landed.
-  if (phone) await expect.poll(async () => Math.round((await diff.boundingBox())!.x)).toBeLessThanOrEqual(1);
   await expectFitsWidth(page);
   await expectDiffCodeReachable(page);
-  if (phone) {
-    // Phone: file → diff is a pushed full-height sheet; the system Back closes
-    // it (lib/backCloses) and leaves you on the WIP file list, same URL.
-    await expect(sheet).toBeVisible();
-    expect((await diff.boundingBox())!.height).toBeGreaterThan(page.viewportSize()!.height * 0.6);
-    const url = page.url();
-    await page.goBack();
-    await expect(sheet).toHaveCount(0);
-    await expect(panel.locator('.wp-name').first()).toBeVisible();
-    expect(page.url()).toBe(url);
-  } else {
-    await expect(sheet).toHaveCount(0); // tablets keep it under the list
-  }
+  // It stays in the Detail pane under the list (no second sheet); ✕ goes back.
+  await expect(page.getByTestId('wip-diff-sheet')).toHaveCount(0);
+  await diff.getByRole('button', { name: 'Close diff' }).click();
+  await expect(diff).toHaveCount(0);
+  await expect(panel.locator('.wp-name').first()).toBeVisible();
 });
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -363,9 +377,7 @@ for (const vw of [834, 932]) {
     await page.setViewportSize({ width: vw, height: 430 });
     await openGraph(page);
     await page.locator('.graph-row').nth(1).click();
-    await expect(
-      page.locator('.detail-panel.mob-visible, .detail-panel.detail-visible'),
-    ).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator('.detail-panel')).toBeVisible({ timeout: 15_000 });
     await expect(page.locator('.detail-diff .df-block').first()).toBeVisible({ timeout: 15_000 });
     await expectFitsWidth(page);
     await expectDiffCodeReachable(page);
@@ -465,11 +477,8 @@ test('shell: many open repo tabs scroll instead of overflowing the page', async 
 // ────────────────────────────────────────────────────────────────────────────
 
 test('WIP: dirty tree shows file rows + a touch-friendly commit composer', async ({ page }) => {
-  await page.goto(`/#/git/${dirtyRepoId}/graph`);
-  // History opens on the WIP row of a dirty tree.
-  await expect(page.locator('.wip-row')).toHaveAttribute('aria-pressed', 'true', { timeout: 25_000 });
+  await openWip(page);
   const panel = page.locator('.wip-panel');
-  await expect(panel).toBeVisible({ timeout: 15_000 });
   // The seeded dirty tree (1 modified + 1 untracked) yields real change rows.
   expect(await panel.locator('.wp-name').count()).toBeGreaterThanOrEqual(2);
   await expectFitsWidth(page);
@@ -597,9 +606,7 @@ test('320px: every core view fits with no horizontal overflow', async ({ page })
   await expectFitsWidth(page);
 
   // WIP panel (dirty tree → real rows).
-  await page.goto(`/#/git/${dirtyRepoId}/graph`);
-  // History opens on the WIP row of a dirty tree.
-  await expect(page.locator('.wip-row')).toHaveAttribute('aria-pressed', 'true', { timeout: 25_000 });
+  await openWip(page);
   await expect(page.locator('.wip-panel .wp-name').first()).toBeVisible({ timeout: 15_000 });
   await expectFitsWidth(page);
 
@@ -620,9 +627,7 @@ test('320px: commit diff code is reachable + conflict resolver fits', async ({ p
   // Commit diff: long lines wrap, code reachable.
   await openGraph(page);
   await page.locator('.graph-row').nth(1).click();
-  await expect(
-    page.locator('.detail-panel.mob-visible, .detail-panel.detail-visible'),
-  ).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('.detail-panel')).toBeVisible({ timeout: 15_000 });
   await expect(page.locator('.detail-diff .df-block').first()).toBeVisible({ timeout: 15_000 });
   await expectFitsWidth(page);
   await expectDiffCodeReachable(page);
