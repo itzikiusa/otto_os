@@ -109,7 +109,7 @@
   });
 
   const run = $derived(sync.run?.id === runId ? sync.run : null);
-  const checkpoints = $derived(sync.run?.id === runId ? (sync.checkpoints.length || sync.run.checkpoints?.length ? sync.checkpoints : []) : []);
+  const checkpoints = $derived(sync.run?.id === runId ? sync.checkpoints : []);
   const now = $derived(clockNow());
   const runState = $derived(run ? (run.overview?.state ?? fallbackState(run.status, run.waiting_approval)) : 'unknown');
   const live = $derived(run?.status === 'pending' || run?.status === 'running');

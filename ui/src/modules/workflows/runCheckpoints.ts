@@ -37,8 +37,6 @@ export function needsCheckpointRefresh(
   }
   if (loaded.generation !== gen) return true;
   if (loaded.rev !== rev) return true;
-  // A retry-cleared summary with checkpoints still missing on a goal/loop run.
-  if (run.summary && !hasCps && (rev > 0 || !!run.overview?.goal)) return true;
   return false;
 }
 

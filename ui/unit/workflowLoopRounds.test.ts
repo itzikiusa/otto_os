@@ -143,6 +143,14 @@ test('ARCH-1: shared checkpoint refresh detects rev advance, retry generation bu
     needsCheckpointRefresh({ ...initialRun, summary: true, checkpoint_rev: 0, checkpoint_generation: 1, checkpoints: [] }, stamp0),
     true,
   );
+  // Once the new generation's empty page is loaded at (rev 0, gen 1), no further refresh is needed (BUG-19).
+  assert.equal(
+    needsCheckpointRefresh(
+      { ...initialRun, summary: true, checkpoint_rev: 0, checkpoint_generation: 1, checkpoints: [] },
+      { runId: 'run-1', rev: 0, generation: 1 },
+    ),
+    false,
+  );
 
   // Selective detail fetch: only check (settled without CheckOutput) and review_run (null output) need detail;
   // agent_prompt/delay are skipped, and unchanged cached bodies are reused.
@@ -163,4 +171,42 @@ test('ARCH-1: shared checkpoint refresh detects rev advance, retry generation bu
   const { merged, toFetch } = mergeCheckpointDetails(paged, cached);
   assert.deepEqual(merged[0].output, { review_id: 'r1', score: 70, threshold: 95 });
   assert.deepEqual(toFetch.map((c) => c.node_id), ['lp#2.0', 'lp#2.1']);
+});
+
+test('BUG-20: two loop steps sharing the same name each keep their own thread via exact checkpoint thread_id', () => {
+  const graphNode: Pick<WorkflowNode, 'id' | 'kind' | 'params'> = {
+    id: 'lp',
+    kind: 'loop',
+    params: {
+      max_iterations: 3,
+      steps: [
+        { kind: 'agent_prompt', name: 'Work' },
+        { kind: 'check', name: 'check' },
+        { kind: 'agent_prompt', name: 'Work' },
+      ],
+    },
+  };
+  const checkpoints: WorkflowCheckpoint[] = [
+    cp({ node_id: 'lp#1.0', loop_id: 'lp', iteration: 1, step_index: 0, kind: 'agent_prompt', name: 'Work', thread_id: 'th-work-a' }),
+    cp({ node_id: 'lp#1.1', loop_id: 'lp', iteration: 1, step_index: 1, kind: 'check', name: 'check' }),
+    cp({ node_id: 'lp#1.2', loop_id: 'lp', iteration: 1, step_index: 2, kind: 'agent_prompt', name: 'Work', thread_id: 'th-work-b' }),
+  ];
+  const node: NodeRunState = {
+    node_id: 'lp',
+    status: 'running',
+    logs: ['🔁 iteration 1/3'],
+    children: [
+      { id: 'c-a', label: 'Work · iteration 1', provider: 'claude', status: 'success', thread_id: 'th-work-a' },
+      { id: 'c-b', label: 'Work · iteration 1', provider: 'codex', status: 'running', thread_id: 'th-work-b' },
+    ],
+  };
+
+  const view = groupLoopRounds({ id: 'lp', kind: 'loop', node }, { graphNode, checkpoints });
+  assert.ok(view);
+  const step0 = view.rounds[0].steps.find((s) => s.stepIndex === 0)!;
+  const step2 = view.rounds[0].steps.find((s) => s.stepIndex === 2)!;
+  assert.deepEqual(step0.allChildren.map((c) => c.id), ['c-a']);
+  assert.deepEqual(step2.allChildren.map((c) => c.id), ['c-b']);
+  assert.equal(step0.childId, 'c-a');
+  assert.equal(step2.childId, 'c-b');
 });

@@ -81,7 +81,10 @@ export class RunSync {
   /** Revision- and generation-aware loop checkpoints shared by StepList and GoalCard (ARCH-1). */
   checkpoints = $state.raw<WorkflowCheckpoint[]>([]);
   private cpStamp: CheckpointStamp | null = null;
+  private cpObservedGen: string | null = null;
   private cpCache = new Map<string, WorkflowCheckpoint>();
+  private cpPendingDetails = new Set<string>();
+  private cpHydrating = false;
   private cpLoadSeq = 0;
   private cpLoadingKey = '';
 
@@ -205,8 +208,9 @@ export class RunSync {
         untrack(() => this.resetCheckpoints());
         return;
       }
-      // Track checkpoint revision, generation, and goal changes so StepList and GoalCard share live checkpoints.
-      void [cur.id, cur.checkpoint_rev, cur.checkpoint_generation, cur.summary, cur.checkpoints?.length, cur.overview?.goal?.iteration, cur.overview?.goal?.criteria_met];
+      // Track run identity, revision, checkpoint revision/generation, and summary
+      // flag (never `cur.checkpoints` itself, so syncing never loops back into this effect).
+      void [cur.id, cur.rev, cur.checkpoint_rev, cur.checkpoint_generation, cur.summary];
       untrack(() => this.syncCheckpoints(cur));
     });
 
@@ -225,13 +229,29 @@ export class RunSync {
    *  mergeRunProgress). Object fields (output/logs/sessions) are only
    *  reassigned when they change, so unchanged step subtrees don't re-render. */
   applyRunSnapshot = (nr: WorkflowRun): void => {
-    if (this.run) mergeRunProgress(this.run, nr);
+    if (!this.run) return;
+    mergeRunProgress(this.run, nr);
+    if (this.cpPendingDetails.size > 0 && !this.cpHydrating && this.cpStamp?.runId === nr.id) {
+      void this.retryPendingCheckpointDetails(nr.id, this.cpStamp);
+    }
   };
+
+  /** Retry any checkpoint detail bodies that previously failed transiently (OBS-2). */
+  retryCheckpoints(): void {
+    const cur = this.run;
+    if (!cur || !this.cpStamp || this.cpStamp.runId !== cur.id) return;
+    if (this.cpPendingDetails.size > 0 && !this.cpHydrating) {
+      void this.retryPendingCheckpointDetails(cur.id, this.cpStamp);
+    }
+  }
 
   private resetCheckpoints(): void {
     this.cpLoadSeq++;
     this.cpStamp = null;
+    this.cpObservedGen = null;
     this.cpCache.clear();
+    this.cpPendingDetails.clear();
+    this.cpHydrating = false;
     this.cpLoadingKey = '';
     this.checkpoints = [];
   }
@@ -240,11 +260,18 @@ export class RunSync {
     const stamp = checkpointStamp(cur);
     const sameRun = this.cpStamp?.runId === stamp.runId;
     const genChanged = sameRun && this.cpStamp!.generation !== stamp.generation;
-    if (!sameRun || genChanged) {
+    const genKey = `${stamp.runId}:${stamp.generation}`;
+    // Clear cache and stale rows at most ONCE per observed (runId, generation)
+    // without mutating `cur.checkpoints` (mergeRunProgress already clears that once).
+    if (this.cpObservedGen !== genKey) {
+      const prevRunId = this.cpObservedGen?.split(':')[0] ?? null;
+      this.cpObservedGen = genKey;
       this.cpCache.clear();
-      if (genChanged) {
+      this.cpPendingDetails.clear();
+      this.cpHydrating = false;
+      this.cpLoadingKey = '';
+      if (prevRunId === stamp.runId || genChanged) {
         this.checkpoints = [];
-        cur.checkpoints = [];
       }
     }
     if (!cur.summary && (!sameRun || this.cpStamp!.rev !== stamp.rev || genChanged)) {
@@ -260,7 +287,12 @@ export class RunSync {
         return;
       }
     }
-    if (!needsCheckpointRefresh(cur, this.cpStamp)) return;
+    if (!needsCheckpointRefresh(cur, this.cpStamp)) {
+      if (this.cpPendingDetails.size > 0 && !this.cpHydrating && this.cpStamp) {
+        void this.retryPendingCheckpointDetails(cur.id, this.cpStamp);
+      }
+      return;
+    }
     const key = `${stamp.runId}:${stamp.generation}:${stamp.rev}`;
     if (this.cpLoadingKey === key) return;
     this.cpLoadingKey = key;
@@ -279,15 +311,21 @@ export class RunSync {
           all.push(...page.items);
           cursor = page.next_cursor ?? undefined;
         } while (cursor);
-        if (pageGen !== stamp.generation) this.cpCache.clear();
+        if (pageGen !== stamp.generation) {
+          this.cpCache.clear();
+          this.cpPendingDetails.clear();
+        }
         const { merged, toFetch } = mergeCheckpointDetails(all, this.cpCache);
         for (const cp of merged) {
-          if (cp.output != null) this.cpCache.set(cp.node_id, cp);
+          if (cp.output != null) {
+            this.cpCache.set(cp.node_id, cp);
+            this.cpPendingDetails.delete(cp.node_id);
+          }
         }
         const finalStamp: CheckpointStamp = { runId: cur.id, rev: pageRev, generation: pageGen };
         this.cpStamp = finalStamp;
+        this.cpObservedGen = `${cur.id}:${pageGen}`;
         this.checkpoints = merged;
-        if (this.run?.id === cur.id) this.run.checkpoints = merged;
         if (toFetch.length > 0) await this.hydrateCheckpointDetails(cur.id, finalStamp, merged, toFetch, seq);
       } catch {
         /* transient read error — next progress tick retries */
@@ -297,6 +335,17 @@ export class RunSync {
     })();
   }
 
+  private async retryPendingCheckpointDetails(runId: string, stamp: CheckpointStamp): Promise<void> {
+    if (this.cpHydrating || this.cpPendingDetails.size === 0) return;
+    const base = this.checkpoints;
+    const toFetch = base.filter((cp) => this.cpPendingDetails.has(cp.node_id) && needsCheckpointDetail(cp));
+    if (toFetch.length === 0) {
+      this.cpPendingDetails.clear();
+      return;
+    }
+    await this.hydrateCheckpointDetails(runId, stamp, base, toFetch, this.cpLoadSeq);
+  }
+
   private async hydrateCheckpointDetails(
     runId: string,
     stamp: CheckpointStamp,
@@ -304,26 +353,32 @@ export class RunSync {
     toFetch: WorkflowCheckpoint[],
     seq = ++this.cpLoadSeq,
   ): Promise<void> {
+    this.cpHydrating = true;
     const updated = base.slice();
     let changed = false;
-    for (const target of toFetch) {
-      if (this.destroyed || seq !== this.cpLoadSeq || this.run?.id !== runId) return;
-      try {
-        const detail = (await workflowCheckpointDetail(runId, target.node_id)).body;
+    try {
+      for (const target of toFetch) {
         if (this.destroyed || seq !== this.cpLoadSeq || this.run?.id !== runId) return;
-        this.cpCache.set(detail.node_id, detail);
-        const idx = updated.findIndex((c) => c.node_id === detail.node_id);
-        if (idx >= 0) {
-          updated[idx] = detail;
-          changed = true;
+        try {
+          const detail = (await workflowCheckpointDetail(runId, target.node_id)).body;
+          if (this.destroyed || seq !== this.cpLoadSeq || this.run?.id !== runId) return;
+          this.cpCache.set(detail.node_id, detail);
+          this.cpPendingDetails.delete(detail.node_id);
+          const idx = updated.findIndex((c) => c.node_id === detail.node_id);
+          if (idx >= 0) {
+            updated[idx] = detail;
+            changed = true;
+          }
+        } catch {
+          // Keep the summary row and mark this detail for retry on the next refresh (OBS-2).
+          this.cpPendingDetails.add(target.node_id);
         }
-      } catch {
-        /* keep summary row if detail fetch fails */
       }
-    }
-    if (changed && this.cpStamp?.runId === stamp.runId && this.cpStamp?.generation === stamp.generation) {
-      this.checkpoints = updated;
-      if (this.run?.id === runId) this.run.checkpoints = updated;
+      if (changed && this.cpStamp?.runId === stamp.runId && this.cpStamp?.generation === stamp.generation) {
+        this.checkpoints = updated;
+      }
+    } finally {
+      this.cpHydrating = false;
     }
   }
 

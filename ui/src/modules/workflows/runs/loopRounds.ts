@@ -317,6 +317,16 @@ export function groupLoopRounds(
     else childrenBySlot.set(k, [c]);
   };
 
+  const findStepIndexInRound = (iter: number, threadId: string | undefined, name: string | null): number => {
+    if (threadId) {
+      const exact = loopCps.find(
+        (cp) => cp.iteration === iter && !reviewAssocRe.test(cp.node_id) && cp.thread_id === threadId,
+      );
+      if (exact) return exact.step_index;
+    }
+    return name ? findStepIndexByName(iter, name) : 0;
+  };
+
   for (const c of children) {
     const root = rootOf(c);
     const rid = reviewPrefixOf(root.id);
@@ -328,14 +338,15 @@ export function groupLoopRounds(
     const m = iterLabelRe.exec(root.label.trim());
     if (m) {
       const iter = Number(m[2]);
-      const sidx = findStepIndexByName(iter, m[1].trim());
+      const sidx = findStepIndexInRound(iter, root.thread_id, m[1].trim());
       pushSlot(iter, sidx, c);
       continue;
     }
     const sm = synthIterRe.exec(root.label.trim());
     if (sm) {
       const iter = Number(sm[1]);
-      pushSlot(iter, 0, c);
+      const sidx = findStepIndexInRound(iter, root.thread_id, null);
+      pushSlot(iter, sidx, c);
       continue;
     }
     if (root.thread_id && threadToSlot.has(root.thread_id)) {

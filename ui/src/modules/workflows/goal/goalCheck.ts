@@ -401,8 +401,11 @@ export function formatRatio(p?: CriterionProgress): string {
  *  directional progress bar (e.g. `latency <= 200` at 300). */
 export function isCeilingOrEqualityRule(expr?: string): boolean {
   if (!expr) return false;
-  // `path <= 200`, `path < 5`, `path == 0`, or flipped `200 >= path`, `5 > path`.
-  return /(?:<=|<|==)\s*-?\d+(?:\.\d+)?\b/.test(expr) || /\b-?\d+(?:\.\d+)?\s*(?:>=|>)\s*[a-zA-Z_]/.test(expr);
+  // `path <= 200`, `path < 5`, `path == 0`, `path != 0`, or flipped `200 >= path`, `5 > path`, `200 == path`, `0 != path`.
+  return (
+    /(?:<=|<|==|!=)\s*-?\d+(?:\.\d+)?\b/.test(expr) ||
+    /\b-?\d+(?:\.\d+)?\s*(?:>=|>|==|!=)\s*[a-zA-Z_]/.test(expr)
+  );
 }
 
 /** Meter fill percentage (0..100) for a directional floor numeric target, or

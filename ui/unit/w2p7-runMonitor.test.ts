@@ -10,6 +10,10 @@ import assert from 'node:assert/strict';
 import { deferred, loadSource } from './sourceHarness.ts';
 
 const runProgress = loadSource(new URL('../src/modules/workflows/runProgress.ts', import.meta.url), {});
+const goalCheck = loadSource(new URL('../src/modules/workflows/goal/goalCheck.ts', import.meta.url), {});
+const runCheckpoints = loadSource(new URL('../src/modules/workflows/runCheckpoints.ts', import.meta.url), {
+  './goal/goalCheck.ts': goalCheck,
+});
 
 class ApiError extends Error {
   status: number;
@@ -21,6 +25,8 @@ interface Transport {
   post?: (url: string, body: any) => Promise<any>;
   nodeDetail?: (runId: string, nodeId: string) => Promise<any>;
   readContext?: (runId: string, path: string) => Promise<any>;
+  checkpointPage?: (runId: string, cursor?: string) => Promise<any>;
+  checkpointDetail?: (runId: string, nodeId: string) => Promise<any>;
 }
 
 function monitor(transport: Transport) {
@@ -36,6 +42,9 @@ function monitor(transport: Transport) {
     '../../lib/api/workflows': {
       workflowProgress: (id: string) => transport.progress!(id),
       workflowNodeDetail: (runId: string, nodeId: string) => transport.nodeDetail!(runId, nodeId),
+      workflowCheckpointPage: (runId: string, cursor?: string) =>
+        transport.checkpointPage ? transport.checkpointPage(runId, cursor) : Promise.resolve({ checkpoint_rev: 0, generation: 0, items: [], next_cursor: null }),
+      workflowCheckpointDetail: (runId: string, nodeId: string) => transport.checkpointDetail!(runId, nodeId),
       browseRunContext() {},
       readRunContext: (runId: string, path: string) => transport.readContext!(runId, path),
     },
@@ -50,6 +59,7 @@ function monitor(transport: Transport) {
     '../../lib/toast.svelte': { toasts: { success: (t: string) => toasts.push(t) } },
     '../../lib/toastError': { toastError: (t: string) => toasts.push(t) },
     './runContext': { runContextPath: (_d: string, p: string) => p },
+    './runCheckpoints': runCheckpoints,
     './runProgress': runProgress,
   }, {
     $effect: (fn: () => (() => void) | void) => { effects.push(fn); },
@@ -248,4 +258,188 @@ test('a contiguous bus event updates the on-screen overview in place (CR1-016)',
   assert.equal(run.rev, 5);
   assert.equal(run.overview.state, 'needs_you');
   assert.equal(run.overview.headline, 'Build asks to go ahead');
+});
+
+test('BUG-19 / ARCH-1: in-place retry clears checkpoints once without self-retriggering the effect or looping on empty page', async () => {
+  const pageReq = deferred<any>();
+  let pageCalls = 0;
+  const { mon, effects } = monitor({
+    checkpointPage: () => {
+      pageCalls++;
+      return pageReq.promise;
+    },
+  });
+  const initialCp = {
+    node_id: 'lp#1.0',
+    loop_id: 'lp',
+    iteration: 1,
+    step_index: 0,
+    kind: 'review_run',
+    name: 'review',
+    status: 'success',
+    attempts: 1,
+    input: null,
+    output: { review_id: 'rev-1', score: 60, threshold: 95 },
+    logs: [],
+    updated_at: '2026-11-27T10:00:00Z',
+  };
+  let runCpsWrites = 0;
+  const run: any = {
+    id: 'r-retry',
+    status: 'error',
+    rev: 4,
+    summary: false,
+    checkpoint_rev: 2,
+    checkpoint_generation: 0,
+    overview: { goal: { iteration: 1, max_iterations: 5, criteria_met: 0, criteria_total: 1, active_ms: 0 } },
+    nodes: [node('lp', 'error')],
+  };
+  let _cps: any[] = [initialCp];
+  Object.defineProperty(run, 'checkpoints', {
+    configurable: true,
+    enumerable: true,
+    get: () => _cps,
+    set: (v) => {
+      runCpsWrites++;
+      _cps = v;
+    },
+  });
+  mon.run = run;
+  effects.forEach((fn) => fn());
+  assert.equal(mon.checkpoints.length, 1);
+  assert.equal(pageCalls, 0);
+
+  // In-place retry snapshot bumps checkpoint_generation 0 -> 1.
+  const writesBefore = runCpsWrites;
+  mon.applyRunSnapshot({
+    id: 'r-retry',
+    status: 'running',
+    rev: 5,
+    summary: true,
+    checkpoint_rev: 0,
+    checkpoint_generation: 1,
+    overview: { goal: { iteration: 0, max_iterations: 5, criteria_met: 0, criteria_total: 1, active_ms: 0 } },
+    nodes: [node('lp', 'running')],
+  });
+  // mergeRunProgress clears run.checkpoints exactly once.
+  assert.equal(runCpsWrites, writesBefore + 1);
+
+  // Running the checkpoint effect repeatedly while the page fetch is still in flight
+  // must NOT mutate run.checkpoints or schedule additional page fetches.
+  const writesAfterMerge = runCpsWrites;
+  effects.forEach((fn) => fn());
+  effects.forEach((fn) => fn());
+  effects.forEach((fn) => fn());
+  assert.equal(runCpsWrites, writesAfterMerge, 'syncCheckpoints must not mutate run.checkpoints');
+  assert.equal(mon.checkpoints.length, 0, 'stale generation checkpoints cleared once');
+  assert.equal(pageCalls, 1, 'exactly one page request in flight');
+
+  // When the new generation returns an empty page, it settles and subsequent effects do not re-fetch.
+  pageReq.resolve({ checkpoint_rev: 0, generation: 1, items: [], next_cursor: null });
+  await flush();
+  effects.forEach((fn) => fn());
+  assert.equal(pageCalls, 1, 'empty page at new generation settles without re-fetching');
+});
+
+test('OBS-2: transient checkpoint detail failure keeps successful bodies and retries only the missing body on refresh', async () => {
+  let pageCalls = 0;
+  const detailCalls: string[] = [];
+  let failSecondOnce = true;
+  const cp1Summary = {
+    node_id: 'lp#1.0',
+    loop_id: 'lp',
+    iteration: 1,
+    step_index: 0,
+    kind: 'review_run',
+    name: 'review',
+    status: 'success',
+    attempts: 1,
+    input: null,
+    output: null,
+    logs: [],
+    updated_at: '2026-11-27T10:00:00Z',
+  };
+  const cp2Summary = {
+    node_id: 'lp#1.1',
+    loop_id: 'lp',
+    iteration: 1,
+    step_index: 1,
+    kind: 'check',
+    name: 'check',
+    status: 'success',
+    attempts: 1,
+    input: null,
+    output: null,
+    logs: [],
+    updated_at: '2026-11-27T10:01:00Z',
+  };
+  const cp1Full = { ...cp1Summary, output: { review_id: 'rev-1', score: 88, threshold: 95 } };
+  const cp2Full = {
+    ...cp2Summary,
+    output: {
+      criteria: [{ id: 'c1', text: 't', verify: 'expr', met: false, evidence: 'e', verified_by: 'rule' }],
+      all_met: false,
+      met: 0,
+      total: 1,
+      progress_pct: 0,
+      verdict: 'continue',
+      feedback: '',
+      feedback_md: '',
+      repeat_signature: '',
+      repeated_failures: 0,
+    },
+  };
+
+  const { mon, effects } = monitor({
+    checkpointPage: async () => {
+      pageCalls++;
+      return { checkpoint_rev: 2, generation: 0, items: [cp1Summary, cp2Summary], next_cursor: null };
+    },
+    checkpointDetail: async (_runId, nodeId) => {
+      detailCalls.push(nodeId);
+      if (nodeId === 'lp#1.0') return { detail_version: 'v1', body: cp1Full };
+      if (failSecondOnce) {
+        failSecondOnce = false;
+        throw new Error('transient network blip');
+      }
+      return { detail_version: 'v2', body: cp2Full };
+    },
+  });
+
+  mon.run = {
+    id: 'r-obs2',
+    status: 'running',
+    rev: 2,
+    summary: true,
+    checkpoint_rev: 2,
+    checkpoint_generation: 0,
+    overview: { goal: { iteration: 1, max_iterations: 5, criteria_met: 0, criteria_total: 1, active_ms: 0 } },
+    nodes: [node('lp', 'running')],
+  };
+  effects.forEach((fn) => fn());
+  await flush();
+  await flush();
+
+  // Page succeeded, cp1 hydrated, cp2 failed transiently -> cp1 kept, cp2 still null.
+  assert.equal(pageCalls, 1);
+  assert.deepEqual(detailCalls, ['lp#1.0', 'lp#1.1']);
+  assert.deepEqual(mon.checkpoints[0].output, cp1Full.output);
+  assert.equal(mon.checkpoints[1].output, null);
+
+  // Next /progress refresh at the SAME checkpoint_rev retries ONLY lp#1.1 (no re-page, no lp#1.0 re-fetch).
+  mon.applyRunSnapshot({
+    id: 'r-obs2',
+    status: 'success',
+    rev: 3,
+    summary: true,
+    checkpoint_rev: 2,
+    checkpoint_generation: 0,
+    overview: { goal: { iteration: 1, max_iterations: 5, criteria_met: 0, criteria_total: 1, active_ms: 0 } },
+    nodes: [node('lp', 'success')],
+  });
+  await flush();
+  await flush();
+  assert.equal(pageCalls, 1, 'should not re-page at the same checkpoint_rev');
+  assert.deepEqual(detailCalls, ['lp#1.0', 'lp#1.1', 'lp#1.1'], 'retries only the missing body');
+  assert.deepEqual(mon.checkpoints[1].output, cp2Full.output, 'missing body recovered');
 });
