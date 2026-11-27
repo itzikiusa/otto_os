@@ -124,6 +124,7 @@ export type RepoTestExecutionPlan =
         args: string[];
         build_flags: string[];
         cwd: string;
+        is_test?: boolean;
       };
     };
 
@@ -256,7 +257,7 @@ export function resolveRepoTestPlan(opts: {
         repoRoot,
         repoName,
         language: 'zig',
-        launch: { program: repoRoot, args: [], build_flags: [], cwd: repoRoot },
+        launch: { program: repoRoot, args: [], build_flags: [], cwd: repoRoot, is_test: true },
       };
     }
     if (eco === 'cpp_cmake' || eco === 'cpp_meson') {
@@ -347,7 +348,7 @@ export function resolveRepoTestPlan(opts: {
         kind: 'run',
         repoRoot,
         repoName,
-        adhoc: { ...common, runner: 'zig_test', args: [] },
+        adhoc: { ...common, runner: 'zig_test', args: ['build', 'test'] },
       };
     case 'cpp_cmake':
       return {

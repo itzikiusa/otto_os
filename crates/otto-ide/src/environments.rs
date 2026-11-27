@@ -426,6 +426,21 @@ impl EnvironmentManager {
         self.generation.fetch_add(1, Ordering::AcqRel);
     }
 
+    #[cfg(test)]
+    pub(crate) fn seed_snapshot(&self, project_key: &str, env: IdeProjectEnvironment) {
+        let stored: Vec<StoredEnvVar> = env
+            .env_vars
+            .iter()
+            .map(|v| StoredEnvVar {
+                key: v.key.clone(),
+                value: v.value.clone(),
+                secret: v.secret,
+                secret_ref: None,
+            })
+            .collect();
+        self.record_snapshot(project_key, &env, &stored);
+    }
+
     pub async fn ensure_hydrated(&self, pool: &DbPool) {
         if self.snapshots_hydrated.load(Ordering::Acquire) {
             return;

@@ -100,6 +100,9 @@ const REMOTE_TOOLCHAIN_PATH_EXPRS: &[&str] = &[
     "\"$HOME\"/.otto/toolchains/java/current/bin",
     "\"$HOME\"/.otto/toolchains/go/current/bin",
     "\"$HOME\"/.otto/toolchains/go/bin",
+    "\"$HOME\"/.otto/toolchains/zig/current",
+    "\"$HOME\"/.otto/toolchains/zig/current/bin",
+    "\"$HOME\"/.otto/toolchains/zig/bin",
     "\"$HOME\"/.otto/toolchains/node/current/bin",
     "\"$HOME\"/.otto/toolchains/python/current/bin",
     "\"$HOME\"/.otto/toolchains/python/bin",
@@ -109,6 +112,7 @@ const REMOTE_TOOLCHAIN_PATH_EXPRS: &[&str] = &[
     "\"$HOME\"/.otto/toolchains/json/bin",
     "\"$HOME\"/go/bin",
     "\"$HOME\"/.cargo/bin",
+    "\"$HOME\"/.zvm/bin",
     "\"$HOME\"/.local/bin",
 ];
 

@@ -175,6 +175,8 @@
                     <button class="mono path copy" title="Copy: {server.install_command}" onclick={() => void copyCmd(server.install_command ?? '')}>
                       {server.install_command}
                     </button>
+                  {:else if server.lang === 'zig'}
+                    <span class="mono path dim" title="Install ZLS via IDE → Toolchains & SDKs to match your selected Zig SDK">zls · install via IDE → Toolchains &amp; SDKs</span>
                   {:else}
                     <span class="mono path dim" title={server.command}>{server.command} · install it yourself</span>
                   {/if}

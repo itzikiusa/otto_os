@@ -116,7 +116,10 @@ test('build.zig.zon manifest parser, nesting, test plans, and debug previews', (
     goBuildTags: [],
   });
   assert.equal(runPlan.kind, 'run');
-  if (runPlan.kind === 'run') assert.equal(runPlan.adhoc.runner, 'zig_test');
+  if (runPlan.kind === 'run') {
+    assert.equal(runPlan.adhoc.runner, 'zig_test');
+    assert.deepEqual(runPlan.adhoc.args, ['build', 'test']);
+  }
 
   const dbgPlan = resolveRepoTestPlan({
     repoRoot: '/proj',
@@ -128,7 +131,10 @@ test('build.zig.zon manifest parser, nesting, test plans, and debug previews', (
     goBuildTags: [],
   });
   assert.equal(dbgPlan.kind, 'debug');
-  if (dbgPlan.kind === 'debug') assert.equal(dbgPlan.language, 'zig');
+  if (dbgPlan.kind === 'debug') {
+    assert.equal(dbgPlan.language, 'zig');
+    assert.equal(dbgPlan.launch.is_test, true);
+  }
 
   assert.equal(inferTestDebugLanguage('/proj/src/main.zig'), 'zig');
   assert.equal(inferTestDebugLanguage(null, 'zig_test'), 'zig');

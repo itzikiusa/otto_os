@@ -276,6 +276,7 @@ async fn full_room_lifecycle_roles_cursors_buffers_and_shared_debug() {
         error_kind: None,
         error_ecosystem: None,
         target_root: None,
+        supports_set_variable: false,
     };
     hub.publish_debug_snapshot(
         Some(&IdeTargetSpec::local("/tmp/shared-repo")),
@@ -317,6 +318,7 @@ async fn full_room_lifecycle_roles_cursors_buffers_and_shared_debug() {
         error_kind: None,
         error_ecosystem: None,
         target_root: None,
+        supports_set_variable: false,
     };
     hub.publish_debug_snapshot(
         Some(&IdeTargetSpec::local("/tmp/shared-repo")),

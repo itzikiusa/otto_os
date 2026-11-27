@@ -199,7 +199,9 @@ pub static REGISTRY: &[ServerDef] = &[
         fallback_cmd: None,
         fallback_args: &[],
         extensions: &[".zig", ".zon"],
-        install_command: Some("brew install zls"),
+        // Homebrew ships the latest ZLS (e.g. 0.17.x) which breaks Zig 0.14.x projects;
+        // install ZLS via IDE → Toolchains & SDKs so it matches the selected Zig SDK.
+        install_command: None,
     },
     ServerDef {
         lang: "cpp",

@@ -1205,3 +1205,62 @@ fn breakpoint_relocation_on_one_line_is_skipped_but_a_loop_revisit_is_not() {
     ));
     assert!(!is_same_line_relocation(None, &key, 0x95c));
 }
+
+#[tokio::test]
+async fn set_variable_is_rejected_when_adapter_omits_supports_set_variable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("app.js");
+    std::fs::write(&src, "const x = 1;\n").unwrap();
+    let canon_src = std::fs::canonicalize(&src)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+
+    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+    let _srv = spawn_mock_dap_server(server_io, canon_src.clone());
+
+    let mgr = DapManager::new(tmp.path().to_path_buf());
+    let req = IdeStartDebugReq {
+        target: IdeTargetSpec::local(tmp.path().to_string_lossy().into_owned()),
+        language: "javascript".into(),
+        launch: IdeDebugLaunchSpec {
+            program: canon_src.clone(),
+            cwd: Some(tmp.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        },
+        breakpoints: vec![IdeBreakpoint {
+            path: canon_src,
+            line: 1,
+            enabled: true,
+            condition: None,
+            hit_condition: None,
+            log_message: None,
+            verified: None,
+            message: None,
+        }],
+        ..Default::default()
+    };
+    let started = mgr
+        .start_session_with_stream(req, "node-cdp", client_io, true)
+        .await
+        .unwrap();
+    assert!(
+        !started.supports_set_variable,
+        "adapter omitting supportsSetVariable must report supports_set_variable = false"
+    );
+    let err = mgr
+        .set_variable(
+            &started.id,
+            crate::types::IdeDebugSetVariableReq {
+                variables_reference: 100,
+                name: "x".into(),
+                value: "99".into(),
+            },
+        )
+        .await
+        .expect_err("set_variable must fail when adapter does not advertise supportsSetVariable");
+    assert!(
+        err.to_string().contains("does not support setVariable"),
+        "unexpected error: {err}"
+    );
+}

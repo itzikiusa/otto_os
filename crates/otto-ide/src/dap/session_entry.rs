@@ -179,6 +179,7 @@ pub(super) struct ActiveConnection {
     pub(super) wire: Arc<DapWireClient>,
     pub(super) guard: Arc<BridgeGuard>,
     pub(super) supports_terminate: bool,
+    pub(super) supports_set_variable: bool,
     pub(super) exception_filters: Vec<String>,
 }
 
@@ -270,6 +271,7 @@ impl SessionEntry {
             error_kind: None,
             error_ecosystem: None,
             target_root: Some(req.target.root.clone()).filter(|r| !r.is_empty()),
+            supports_set_variable: false,
         };
         let initial_break_exc = req.break_on_exceptions;
         Arc::new(Self {

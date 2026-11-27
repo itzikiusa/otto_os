@@ -631,6 +631,7 @@ export interface IdeDebugLaunch {
   build_flags?: string[];
   cwd?: string | null;
   test_name?: string | null;
+  is_test?: boolean;
   attach_port?: number | null;
   attach_pid?: number | null;
   attach_process_name?: string | null;
@@ -763,6 +764,7 @@ export interface IdeDebugSessionSnapshot {
   error?: string | null;
   /** Next-step class of a start failure next to `error`. */
   error_kind?: 'adapter_missing' | 'toolchain_missing' | 'build_failed' | null;
+  supports_set_variable?: boolean;
   /** Toolchain ecosystem of that failure (`go`, `python`, `rust`, `java`, `node`, `shell`). */
   error_ecosystem?: string | null;
   /** Root of the IDE target the session was launched from. */

@@ -295,6 +295,90 @@ pub(crate) fn terminate_process_group(pgid: u32) {
     kill_process_group_sync(pgid);
 }
 
+/// Resolve validated project-pinned SDK executable directories that must take
+/// precedence over Otto's global managed `toolchains/*/current` defaults.
+fn pinned_local_lsp_sdk_dirs(
+    lang: &str,
+    root: &str,
+    environments: Option<&EnvironmentManager>,
+    owner_is_root: bool,
+) -> Vec<PathBuf> {
+    if !owner_is_root || servers::normalize_lsp_lang(lang) != "zig" {
+        return Vec::new();
+    }
+    let Some(envs) = environments else {
+        return Vec::new();
+    };
+    let Some(zig_home) = envs
+        .cached_project_env(root)
+        .and_then(|e| e.zig_home)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    else {
+        return Vec::new();
+    };
+    let hp = PathBuf::from(zig_home);
+    if let Some(zig_bin) = crate::toolchains::discovery::zig_bin_in_home(&hp) {
+        if let Some(dir) = zig_bin.parent() {
+            return vec![dir.to_path_buf()];
+        }
+    }
+    Vec::new()
+}
+
+/// Merge pinned project SDK dirs, managed/shell augmented PATH, and effective
+/// project PATH while stripping relative segments and workspace-local dirs.
+pub(crate) fn merge_local_lsp_path(
+    pinned_sdk_dirs: &[PathBuf],
+    aug_path: &str,
+    env_path: Option<&str>,
+    root_path: &std::path::Path,
+    canon_ws: Option<&std::path::Path>,
+) -> String {
+    let mut combined = String::new();
+    for dir in pinned_sdk_dirs {
+        let s = dir.to_string_lossy();
+        if !s.is_empty() {
+            if !combined.is_empty() {
+                combined.push(':');
+            }
+            combined.push_str(&s);
+        }
+    }
+    if !aug_path.is_empty() {
+        if !combined.is_empty() {
+            combined.push(':');
+        }
+        combined.push_str(aug_path);
+    }
+    if let Some(ep) = env_path.filter(|s| !s.is_empty()) {
+        if !combined.is_empty() {
+            combined.push(':');
+        }
+        combined.push_str(ep);
+    }
+    let mut safe_path_parts: Vec<String> = Vec::with_capacity(32);
+    for seg in combined.split(':').filter(|s| !s.is_empty()) {
+        let sp = std::path::Path::new(seg);
+        if !sp.is_absolute() || sp.starts_with(root_path) {
+            continue;
+        }
+        if let Some(cw) = canon_ws {
+            if sp.starts_with(cw) {
+                continue;
+            }
+            #[allow(clippy::disallowed_methods)]
+            if std::fs::canonicalize(sp).is_ok_and(|cs| cs.starts_with(cw)) {
+                continue;
+            }
+        }
+        if !safe_path_parts.iter().any(|existing| existing == seg) {
+            safe_path_parts.push(seg.to_string());
+        }
+    }
+    safe_path_parts.join(":")
+}
+
 pub(crate) fn build_process_spawner(
     data_dir: PathBuf,
     environments: Option<EnvironmentManager>,
@@ -362,33 +446,22 @@ pub(crate) fn build_process_spawner(
                 shell_snap.as_ref(),
                 owner_is_root,
             );
+            let pinned_sdk_dirs = pinned_local_lsp_sdk_dirs(
+                &key.lang,
+                &key.root,
+                environments.as_ref(),
+                owner_is_root,
+            );
             let root_path = std::path::Path::new(&key.root);
             #[allow(clippy::disallowed_methods)]
             let canon_ws = std::fs::canonicalize(root_path).ok();
-            let mut safe_path_parts: Vec<String> = Vec::with_capacity(32);
-            let combined_raw = match effective_env.get("PATH") {
-                Some(ep) if !ep.is_empty() => format!("{aug_path}:{ep}"),
-                _ => aug_path,
-            };
-            for seg in combined_raw.split(':').filter(|s| !s.is_empty()) {
-                let sp = std::path::Path::new(seg);
-                if !sp.is_absolute() || sp.starts_with(root_path) {
-                    continue;
-                }
-                if let Some(ref cw) = canon_ws {
-                    if sp.starts_with(cw) {
-                        continue;
-                    }
-                    #[allow(clippy::disallowed_methods)]
-                    if std::fs::canonicalize(sp).is_ok_and(|cs| cs.starts_with(cw)) {
-                        continue;
-                    }
-                }
-                if !safe_path_parts.iter().any(|existing| existing == seg) {
-                    safe_path_parts.push(seg.to_string());
-                }
-            }
-            let merged_path = safe_path_parts.join(":");
+            let merged_path = merge_local_lsp_path(
+                &pinned_sdk_dirs,
+                &aug_path,
+                effective_env.get("PATH").map(String::as_str),
+                root_path,
+                canon_ws.as_deref(),
+            );
 
             let mut c = tokio::process::Command::new(&launch.cmd);
             c.env_clear();
@@ -662,5 +735,30 @@ mod resource_metric_tests {
         let missing = samples.get(&bogus_pid).copied().unwrap_or_default();
         assert_eq!(missing.rss_bytes, None);
         assert_eq!(missing.fd_count, None);
+    }
+
+    #[test]
+    fn merge_local_lsp_path_puts_pinned_project_zig_before_managed_current() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("workspace");
+        let pinned = tmp.path().join("sdks/zig-0.13.0");
+        let managed = tmp.path().join("data/toolchains/zig/current");
+        let aug = format!("{}:/usr/bin", managed.display());
+        let env_p = format!("{}:/opt/homebrew/bin", pinned.display());
+        let merged =
+            merge_local_lsp_path(std::slice::from_ref(&pinned), &aug, Some(&env_p), &ws, None);
+        let parts: Vec<&str> = merged.split(':').collect();
+        let pin_pos = parts
+            .iter()
+            .position(|p| *p == pinned.to_string_lossy())
+            .expect("pinned zig dir present");
+        let mgr_pos = parts
+            .iter()
+            .position(|p| *p == managed.to_string_lossy())
+            .expect("managed current dir present");
+        assert!(
+            pin_pos < mgr_pos,
+            "pinned project Zig ({pin_pos}) must precede managed zig/current ({mgr_pos}): {merged}"
+        );
     }
 }

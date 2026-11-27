@@ -929,6 +929,21 @@ pub(crate) fn zig_dir_version(dir: &Path) -> String {
     }
 }
 
+/// Locate a version-keyed managed ZLS binary (`<root>/zig/zls/<maj>.<min>/zls`)
+/// matching the active Zig compiler's `major.minor` version so two projects pinned
+/// to different Zig minors never overwrite or attach each other's ZLS.
+pub(crate) fn resolve_managed_zls_for_zig_version(
+    roots: &[PathBuf],
+    zig_version: Option<&str>,
+) -> Option<PathBuf> {
+    let (maj, min) = zig_version.and_then(zig_major_minor)?;
+    let rel = format!("zig/zls/{maj}.{min}/zls");
+    roots
+        .iter()
+        .map(|r| r.join(&rel))
+        .find(|cand| is_executable_file(cand))
+}
+
 /// ZLS must match the active Zig compiler's `major.minor` version (e.g. Zig 0.14.x <-> ZLS 0.14.x).
 /// Record `zls --version` and flag `outdated` when `major.minor` diverges from the active Zig SDK.
 pub(super) fn mark_zig_tool_outdated(
