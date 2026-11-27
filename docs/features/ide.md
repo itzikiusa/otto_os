@@ -409,9 +409,11 @@ or built-in `otto-node-cdp` (`node --inspect-brk=0` CDP), `codelldb` /
 Some starts are refused with a message instead of opening a session: Debug of
 a Playwright or Karma / Angular test run (Playwright runs tests in a separate
 worker process, Karma in a browser; use Run, `PWDEBUG=1` or a Chrome CDP
-attach), a local .NET Debug of all tests in a folder or solution with more than
-one test project (a session attaches to one test host; pick that project's
-".NET Test" configuration or debug one test from the gutter), and
+attach), a .NET Debug of all tests (local or SSH) in a folder or solution with
+more than one test project (a session attaches to one test host; debug one test
+from the gutter, or a ".NET Test" configuration that targets one project; add it
+in Launch settings when discovery lists none, as for solutions of more than 6
+projects), and
 `unity://attach`. Debug All Tests on a Zig project with several test suites
 debugs one suite and names the others.
 
