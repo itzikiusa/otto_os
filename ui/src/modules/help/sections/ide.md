@@ -15,7 +15,7 @@ summary: Multi-language IDE with rectangular & multi-cursor editing, LSP navigat
 1. Open **IDE** from the **Build** section of the sidebar (or click **Open in IDE** from any file tab in **Threads**). Otto attaches your active workspace folder automatically.
 2. Browse files, symbol structure or breakpoints in the left rail, press `⌥O` to switch between C/C++ headers and sources, or press `⇧⇧` (**Search everywhere**) to jump to any file, symbol, text match or IDE action.
 3. Click any gutter **Run** icon next to a `main` function or unit test (`@Test`, `func Test*`, `#[test]`, `test "..."`, `TEST(...)`, `TEST_CASE(...)`, `[Fact]`/`[Test]`/`[TestMethod]`, `def test_*`, `it(...)`) to run or debug it in one click.
-4. Need a missing compiler, language server or debugger? Open **⋯ → Toolchains & SDKs** to download architecture-matched JDKs, Kotlin (`kotlin-language-server`), Go, Rust, Zig (`zls`), C/C++ (`clangd`/LLVM), .NET (`csharp-ls` / `netcoredbg`), Node.js or Python toolchains directly onto your Mac or remote SSH host.
+4. Need a missing compiler, language server or debugger? Open **⋯ → Toolchains & SDKs** to download architecture-matched JDKs, Kotlin (`kotlin-language-server`), Go, Rust, Zig (`zls`), C/C++ (`clangd`, `CodeLLDB`), .NET (`csharp-ls` / `netcoredbg`), Node.js or Python toolchains directly onto your Mac or remote SSH host.
 
 ## Everything it can do
 

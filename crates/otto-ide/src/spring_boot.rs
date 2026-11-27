@@ -169,24 +169,24 @@ fn scan_single_spring_module(
         );
     }
 
-    // 3. Scan `src/main/resources`, `src/main/resources/config`, & `config/` in two passes:
-    //    Pass 1: base config files (`application.*`, `bootstrap.*`) ordered in Spring Boot
-    //            precedence (packaged before external `config/`, YAML before `.properties`)
-    //            set base ports/paths and replace `active_profiles` / `default_profiles` when
-    //            a higher-priority file overrides `spring.profiles.{active,default}` (BUG3-5).
-    //    Pass 2: profile-specific files apply ONLY when their profile is active — using
-    //            `spring.profiles.active` if set, else `spring.profiles.default`, else
-    //            Spring Boot's implicit `"default"` profile (BUG2-8).
-    let mut base_configs: Vec<(PathBuf, String)> = Vec::new();
-    let mut profile_configs: Vec<(PathBuf, String, String)> = Vec::new();
-    for res_rel in ["src/main/resources", "src/main/resources/config", "config"] {
+    // 3. Config data in Spring Boot's precedence order (lowest -> highest): the packaged
+    //    group (`classpath:/`, `classpath:/config/`), then the external group (`file:./`,
+    //    `file:./config/`). Within a group, the active profiles' files override the plain
+    //    ones; within a directory `.properties` overrides YAML; within a file a later
+    //    document overrides an earlier one, and a `spring.config.activate.on-profile`
+    //    document applies only to an active profile (BUG2-8, BUG3-5).
+    let mut config_docs: Vec<ConfigFileDocs> = Vec::new();
+    for (group, res_rel) in [
+        (0, "src/main/resources"),
+        (0, "src/main/resources/config"),
+        (1, ""),
+        (1, "config"),
+    ] {
         let res_dir = root.join(res_rel);
         let Ok(rd) = fs::read_dir(&res_dir) else {
             continue;
         };
         let mut entries: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
-        // Within one config directory, Spring Boot gives `.properties` higher precedence than
-        // `.yml`/`.yaml`, so sort YAML before `.properties` (lowest -> highest).
         entries.sort_by(|a, b| {
             let rank = |p: &Path| {
                 let name = p
@@ -211,16 +211,26 @@ fn scan_single_spring_module(
                 continue;
             };
             let display = path.to_string_lossy().into_owned();
+            let file_profile = extract_profile_from_filename(fname).map(str::to_string);
+            profiles.extend(file_profile.iter().cloned());
+            let docs = split_config_documents(&raw)
+                .iter()
+                .map(|doc| {
+                    let parsed = props::extract_config_map(&display, doc);
+                    let on_profile = parsed
+                        .get("spring.config.activate.on-profile")
+                        .or_else(|| parsed.get("spring.profiles"))
+                        .map(|v| v.trim().to_string());
+                    if let Some(names) = on_profile.as_deref().filter(|e| is_profile_list(e)) {
+                        profiles.extend(profile_list(names));
+                    }
+                    (on_profile, parsed)
+                })
+                .collect();
             if !config_files.contains(&display) {
                 config_files.push(display);
             }
-            if let Some(prof) = extract_profile_from_filename(fname) {
-                let prof_name = prof.to_string();
-                profiles.insert(prof_name.clone());
-                profile_configs.push((path, prof_name, raw));
-            } else {
-                base_configs.push((path, raw));
-            }
+            config_docs.push((group, file_profile, docs));
         }
     }
 
@@ -228,119 +238,95 @@ fn scan_single_spring_module(
         return None;
     }
 
+    // Profile selectors come from plain documents only; the highest-precedence one wins.
+    let mut active_profiles: Vec<String> = Vec::new();
+    let mut default_profiles: Vec<String> = Vec::new();
+    for (_, file_profile, docs) in &config_docs {
+        for (on_profile, parsed) in docs {
+            if file_profile.is_some() || on_profile.is_some() {
+                continue;
+            }
+            for (key, selected) in [
+                ("spring.profiles.active", &mut active_profiles),
+                ("spring.profiles.default", &mut default_profiles),
+            ] {
+                let list = parsed.get(key).map(|v| profile_list(v)).unwrap_or_default();
+                if !list.is_empty() {
+                    profiles.extend(list.iter().cloned());
+                    *selected = list;
+                }
+            }
+        }
+    }
+    let effective_profiles = if !active_profiles.is_empty() {
+        active_profiles
+    } else if !default_profiles.is_empty() {
+        default_profiles
+    } else {
+        vec!["default".to_string()]
+    };
+    // A profile expression (`!a`, `a & b`) is not evaluated and never matches.
+    let doc_applies = |on_profile: &Option<String>| match on_profile.as_deref() {
+        None => true,
+        Some(names) => {
+            is_profile_list(names)
+                && profile_list(names)
+                    .iter()
+                    .any(|p| effective_profiles.contains(p))
+        }
+    };
+
     let mut server_port: u16 = 8080;
     let mut management_port: Option<u16> = None;
     let mut actuator_base_path = "/actuator".to_string();
     let mut trigger_file: Option<String> = None;
-    let mut active_profiles: BTreeSet<String> = BTreeSet::new();
-    let mut default_profiles: BTreeSet<String> = BTreeSet::new();
-
-    let apply_parsed = |parsed: &std::collections::BTreeMap<String, String>,
-                        server_port: &mut u16,
-                        management_port: &mut Option<u16>,
-                        actuator_base_path: &mut String,
-                        trigger_file: &mut Option<String>,
-                        profiles: &mut BTreeSet<String>,
-                        active_profiles: &mut BTreeSet<String>,
-                        default_profiles: &mut BTreeSet<String>,
-                        collect_profile_selectors: bool| {
-        if let Some(p) = parsed
-            .get("server.port")
-            .and_then(|v| v.trim().parse::<u16>().ok())
-        {
-            *server_port = p;
-        }
-        if let Some(p) = parsed
-            .get("management.server.port")
-            .and_then(|v| v.trim().parse::<u16>().ok())
-        {
-            *management_port = Some(p);
-        }
-        if let Some(bp) = parsed
-            .get("management.endpoints.web.base-path")
-            .map(|v| v.trim())
-            .filter(|v| !v.is_empty())
-        {
-            *actuator_base_path = if bp.starts_with('/') {
-                bp.trim_end_matches('/').to_string()
-            } else {
-                format!("/{}", bp.trim_end_matches('/'))
-            };
-        }
-        if let Some(tf) = parsed
-            .get("spring.devtools.restart.trigger-file")
-            .map(|v| v.trim())
-            .filter(|v| !v.is_empty())
-        {
-            *trigger_file = Some(tf.to_string());
-        }
-        if collect_profile_selectors {
-            if let Some(act_profs) = parsed.get("spring.profiles.active") {
-                let parsed_list: BTreeSet<String> = act_profs
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty() && !s.contains("${"))
-                    .map(String::from)
-                    .collect();
-                if !parsed_list.is_empty() {
-                    profiles.extend(parsed_list.iter().cloned());
-                    *active_profiles = parsed_list;
+    for group in [0, 1] {
+        // The group's plain files, then each active profile's files (the last profile wins).
+        let plain = config_docs
+            .iter()
+            .filter(|(g, fp, _)| *g == group && fp.is_none());
+        let by_profile = effective_profiles.iter().flat_map(|prof| {
+            config_docs
+                .iter()
+                .filter(move |(g, fp, _)| *g == group && fp.as_ref() == Some(prof))
+        });
+        for (_, _, docs) in plain.chain(by_profile) {
+            for (on_profile, parsed) in docs {
+                if !doc_applies(on_profile) {
+                    continue;
                 }
-            }
-            if let Some(def_profs) = parsed.get("spring.profiles.default") {
-                let parsed_list: BTreeSet<String> = def_profs
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty() && !s.contains("${"))
-                    .map(String::from)
-                    .collect();
-                if !parsed_list.is_empty() {
-                    profiles.extend(parsed_list.iter().cloned());
-                    *default_profiles = parsed_list;
+                if let Some(p) = parsed
+                    .get("server.port")
+                    .and_then(|v| v.trim().parse::<u16>().ok())
+                {
+                    server_port = p;
+                }
+                if let Some(p) = parsed
+                    .get("management.server.port")
+                    .and_then(|v| v.trim().parse::<u16>().ok())
+                {
+                    management_port = Some(p);
+                }
+                if let Some(bp) = parsed
+                    .get("management.endpoints.web.base-path")
+                    .map(|v| v.trim())
+                    .filter(|v| !v.is_empty())
+                {
+                    actuator_base_path = if bp.starts_with('/') {
+                        bp.trim_end_matches('/').to_string()
+                    } else {
+                        format!("/{}", bp.trim_end_matches('/'))
+                    };
+                }
+                if let Some(tf) = parsed
+                    .get("spring.devtools.restart.trigger-file")
+                    .map(|v| v.trim())
+                    .filter(|v| !v.is_empty())
+                {
+                    trigger_file = Some(tf.to_string());
                 }
             }
         }
-    };
-
-    for (path, raw) in &base_configs {
-        let parsed = props::extract_config_map(&path.to_string_lossy(), raw);
-        apply_parsed(
-            &parsed,
-            &mut server_port,
-            &mut management_port,
-            &mut actuator_base_path,
-            &mut trigger_file,
-            &mut profiles,
-            &mut active_profiles,
-            &mut default_profiles,
-            true,
-        );
-    }
-
-    let effective_profiles: BTreeSet<String> = if !active_profiles.is_empty() {
-        active_profiles.clone()
-    } else if !default_profiles.is_empty() {
-        default_profiles.clone()
-    } else {
-        BTreeSet::from(["default".to_string()])
-    };
-
-    for (path, prof, raw) in &profile_configs {
-        if !effective_profiles.contains(prof) {
-            continue;
-        }
-        let parsed = props::extract_config_map(&path.to_string_lossy(), raw);
-        apply_parsed(
-            &parsed,
-            &mut server_port,
-            &mut management_port,
-            &mut actuator_base_path,
-            &mut trigger_file,
-            &mut profiles,
-            &mut active_profiles,
-            &mut default_profiles,
-            false,
-        );
     }
 
     Some(ModuleSpringScan {
@@ -357,6 +343,44 @@ fn scan_single_spring_module(
         config_files,
         profiles,
     })
+}
+
+/// One config file: its location group (0 packaged, 1 external), the profile its name
+/// carries, and its documents as `(on-profile, key -> value)`.
+type ConfigFileDocs = (
+    u8,
+    Option<String>,
+    Vec<(Option<String>, std::collections::BTreeMap<String, String>)>,
+);
+
+/// Split a multi-document config file on YAML `---` and properties `#---` / `!---` lines.
+fn split_config_documents(raw: &str) -> Vec<String> {
+    let mut docs = vec![String::new()];
+    for line in raw.lines() {
+        if matches!(line.trim_end(), "---" | "#---" | "!---") {
+            docs.push(String::new());
+        } else if let Some(doc) = docs.last_mut() {
+            doc.push_str(line);
+            doc.push('\n');
+        }
+    }
+    docs
+}
+
+/// `a` / `a, b`, as opposed to a profile expression (`!a`, `a & b`, `(a | b)`).
+fn is_profile_list(raw: &str) -> bool {
+    !raw.contains(['!', '&', '|', '('])
+}
+
+/// `a, b` -> `["a", "b"]` in declared order, skipping placeholders.
+fn profile_list(raw: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for p in raw.split(',').map(str::trim) {
+        if !p.is_empty() && !p.contains("${") && !out.iter().any(|o| o == p) {
+            out.push(p.to_string());
+        }
+    }
+    out
 }
 
 fn extract_profile_from_filename(fname: &str) -> Option<&str> {
@@ -545,6 +569,24 @@ fn inherit_maven_parent_spring_capabilities(
             break;
         };
         let parent_stripped = crate::java_workspace::strip_xml_comments(&parent_raw);
+        // Maven reads the local file only when it IS the declared parent; otherwise it
+        // resolves the parent from the repository (BUG3-6).
+        let own_coords = [
+            "parent",
+            "dependencyManagement",
+            "dependencies",
+            "build",
+            "profiles",
+        ]
+        .iter()
+        .fold(parent_stripped.clone(), |xml, tag| {
+            crate::java_workspace::remove_all_tag_blocks(&xml, tag)
+        });
+        if crate::java_workspace::extract_tag_text(&own_coords, "artifactId")
+            != crate::java_workspace::extract_tag_text(parent_block, "artifactId")
+        {
+            break;
+        }
         let parent_deps =
             crate::java_workspace::remove_all_tag_blocks(&parent_stripped, "dependencyManagement");
         if parent_deps.contains("spring-boot-starter-actuator") {

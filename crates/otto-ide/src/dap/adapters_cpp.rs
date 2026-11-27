@@ -276,17 +276,16 @@ pub(super) async fn resolve_cpp_adapter(
         }
     }
     if let Some(tname) = req.launch.test_name.as_deref().filter(|s| !s.is_empty()) {
-        // GoogleTest uses `Suite.Test` / `--gtest_filter=...`; Catch2 accepts the test name directly.
-        if crate::environments::runner_cmd::is_gtest_filter_for_source(cwd, Some(&raw_prog), tname)
-            && !req
-                .launch
-                .args
-                .iter()
-                .any(|a| a.starts_with("--gtest_filter"))
+        // GoogleTest `--gtest_filter=`, doctest `--test-case=`, Catch2 the bare test name.
+        let filter_arg =
+            crate::environments::runner_cmd::cpp_test_filter_arg(cwd, Some(&raw_prog), tname);
+        if !req
+            .launch
+            .args
+            .iter()
+            .any(|a| a == tname || a.starts_with("--gtest_filter") || a.starts_with("--test-case"))
         {
-            prog_args.push(format!("--gtest_filter={tname}"));
-        } else if !req.launch.args.iter().any(|a| a == tname) {
-            prog_args.push(tname.to_string());
+            prog_args.push(filter_arg);
         }
     }
     prog_args.extend(req.launch.args.clone());
@@ -674,25 +673,18 @@ async fn compile_cpp_debug_artifact(
     //    referenced in `CMakeLists.txt` (and CMake doesn't glob sources), fall
     //    through to standalone compiler build so clicking Debug on a scratch or
     //    ad-hoc file inside a CMake repo still debugs that exact file.
-    let cmake_file = project_path.join("CMakeLists.txt");
-    let use_cmake = if is_local && cmake_file.is_file() {
-        if is_cpp_source_file(raw_prog) {
-            let cmake_text = std::fs::read_to_string(&cmake_file).unwrap_or_default();
-            let base = Path::new(raw_prog)
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("");
-            let lower = cmake_text.to_ascii_lowercase();
-            (!base.is_empty() && cmake_text.contains(base))
-                || lower.contains("file(glob")
-                || lower.contains("aux_source_directory")
-                || lower.contains("add_subdirectory")
-        } else {
-            true
-        }
+    //    A source file uses the same owning-target resolution as gutter Run (BUG-10).
+    let is_cmake = is_local && project_path.join("CMakeLists.txt").is_file();
+    let source_target = if is_cmake && is_cpp_source_file(raw_prog) {
+        crate::environments::runner_cmd::infer_cmake_target_for_source(
+            &project_dir,
+            raw_prog,
+            want_test,
+        )
     } else {
-        false
+        None
     };
+    let use_cmake = is_cmake && (!is_cpp_source_file(raw_prog) || source_target.is_some());
     if use_cmake {
         let cmake_bin = locate_binary(&req.target, ctx, env, &["cmake".into()])
             .await
@@ -730,7 +722,8 @@ async fn compile_cpp_debug_artifact(
             }
         }
         let mut build_args = vec!["--build".to_string(), build_dir.clone()];
-        let target_hint = infer_cmake_target_hint(project_path, raw_prog, want_test);
+        let target_hint =
+            source_target.or_else(|| infer_cmake_target_hint(project_path, raw_prog, want_test));
         if let Some(ref th) = target_hint {
             build_args.push("--target".into());
             build_args.push(th.clone());
@@ -949,15 +942,6 @@ fn cpp_debug_cache_bin_path(
 
 #[allow(clippy::disallowed_methods)]
 fn infer_cmake_target_hint(project_dir: &Path, raw_prog: &str, want_test: bool) -> Option<String> {
-    if is_cpp_source_file(raw_prog) {
-        if let Some(hit) = crate::environments::runner_cmd::infer_cmake_target_for_source(
-            &project_dir.to_string_lossy(),
-            raw_prog,
-            want_test,
-        ) {
-            return Some(hit);
-        }
-    }
     let cmake_txt = std::fs::read_to_string(project_dir.join("CMakeLists.txt")).ok()?;
     let targets = parse_cmake_executables(&cmake_txt);
     if targets.is_empty() {

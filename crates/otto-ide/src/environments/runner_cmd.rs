@@ -510,15 +510,14 @@ fn build_cpp_runner_cmd(
                 let mut out = build_flags;
                 out.extend(args);
                 if let Some(f) = filter {
-                    let has_filter = out
-                        .iter()
-                        .any(|a| a.starts_with("--gtest_filter=") || a == "-R" || a == f);
+                    let has_filter = out.iter().any(|a| {
+                        a.starts_with("--gtest_filter=")
+                            || a.starts_with("--test-case=")
+                            || a == "-R"
+                            || a == f
+                    });
                     if !has_filter {
-                        if f.contains('.') {
-                            out.push(format!("--gtest_filter={f}"));
-                        } else {
-                            out.push(f.to_string());
-                        }
+                        out.push(cpp_test_filter_arg(cwd, tp, f));
                     }
                 }
                 return (explicit.to_string(), out);
@@ -536,12 +535,7 @@ fn build_cpp_runner_cmd(
                     infer_cmake_target_for_source(cwd, tp.unwrap_or(""), true)
                 {
                     let build_dir = find_cpp_build_dir(cwd).unwrap_or_else(|| "build".into());
-                    let mut test_args = Vec::new();
-                    if is_gtest_filter_for_source(cwd, tp, f) {
-                        test_args.push(format!("--gtest_filter={f}"));
-                    } else {
-                        test_args.push(f.to_string());
-                    }
+                    let mut test_args = vec![cpp_test_filter_arg(cwd, tp, f)];
                     test_args.extend(build_flags);
                     return build_cmake_target_exec_cmd(&build_dir, &test_target, test_args);
                 }
@@ -707,57 +701,91 @@ fn build_cmake_target_exec_cmd(
     ("sh".into(), sh_args)
 }
 
+/// The argument that selects one gutter test in its framework's own binary: GoogleTest
+/// `--gtest_filter=`, doctest `--test-case=`, Catch2 the bare test name (BUG-11).
 #[allow(clippy::disallowed_methods)]
-pub(crate) fn is_gtest_filter_for_source(
-    cwd: &str,
-    source_path: Option<&str>,
-    filter: &str,
-) -> bool {
-    if let Some(sp) = source_path.filter(|s| is_cpp_source_path(s)) {
-        let p = if Path::new(sp).is_absolute() {
-            PathBuf::from(sp)
-        } else {
-            Path::new(cwd).join(sp)
-        };
-        if let Ok(src) = std::fs::read_to_string(&p) {
-            // BUG-11: share the same whitespace-tolerant macro recognition as `gutter/compiled.rs`
-            // and recognize both Catch2 v3 (`catch2/`) and v2 single-header (`catch.hpp` /
-            // `catch_amalgamated.hpp`).
-            static RE_CATCH_SRC: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-            static RE_GTEST_SRC: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-            let re_catch = RE_CATCH_SRC.get_or_init(|| {
-                regex::Regex::new(
-                    r#"(?m)(?:\b(?:TEST_CASE|SCENARIO|TEMPLATE_TEST_CASE|TEST_CASE_METHOD)\s*\(|#\s*include\s*[<"](?:[^>"]*/)?(?:catch2/|catch\.hpp|catch_amalgamated\.hpp))"#,
-                )
-                .unwrap()
-            });
-            let re_gtest = RE_GTEST_SRC.get_or_init(|| {
-                regex::Regex::new(
-                    r#"(?m)(?:\b(?:TEST|TEST_F|TEST_P|TYPED_TEST|TYPED_TEST_P)\s*\(|#\s*include\s*[<"]gtest/gtest\.h[>"])"#,
-                )
-                .unwrap()
-            });
-            let is_catch2 = re_catch.is_match(&src);
-            let is_gtest = re_gtest.is_match(&src);
-            if is_catch2 && !is_gtest {
-                return false;
-            }
-            if is_gtest && !is_catch2 {
-                return true;
-            }
-        }
+pub(crate) fn cpp_test_filter_arg(cwd: &str, source_path: Option<&str>, filter: &str) -> String {
+    static RE_DOCTEST: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static RE_CATCH_SRC: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static RE_GTEST_SRC: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let src = source_path
+        .filter(|s| is_cpp_source_path(s))
+        .and_then(|sp| std::fs::read_to_string(Path::new(cwd).join(sp)).ok())
+        .unwrap_or_default();
+    let re_doctest = RE_DOCTEST.get_or_init(|| {
+        regex::Regex::new(r#"(?m)#\s*include\s*[<"](?:[^>"]*/)?doctest\.h"#).unwrap()
+    });
+    if re_doctest.is_match(&src) {
+        return format!("--test-case={filter}");
     }
-    // Heuristic fallback when source cannot be read: GoogleTest `Suite.Test` has a single
-    // `.` separating two identifier-like tokens and never contains spaces.
-    !filter.chars().any(char::is_whitespace) && filter.contains('.')
+    // The same whitespace-tolerant macros as `gutter/compiled.rs`, plus the Catch2 v3
+    // (`catch2/`) and v2 single-header (`catch.hpp` / `catch_amalgamated.hpp`) includes.
+    let re_catch = RE_CATCH_SRC.get_or_init(|| {
+        regex::Regex::new(
+            r#"(?m)(?:\b(?:TEST_CASE|SCENARIO|TEMPLATE_TEST_CASE|TEST_CASE_METHOD)\s*\(|#\s*include\s*[<"](?:[^>"]*/)?(?:catch2/|catch\.hpp|catch_amalgamated\.hpp))"#,
+        )
+        .unwrap()
+    });
+    let re_gtest = RE_GTEST_SRC.get_or_init(|| {
+        regex::Regex::new(
+            r#"(?m)(?:\b(?:TEST|TEST_F|TEST_P|TYPED_TEST|TYPED_TEST_P)\s*\(|#\s*include\s*[<"]gtest/gtest\.h[>"])"#,
+        )
+        .unwrap()
+    });
+    let (is_catch2, is_gtest) = (re_catch.is_match(&src), re_gtest.is_match(&src));
+    let gtest = if is_catch2 != is_gtest {
+        is_gtest
+    } else {
+        // Unreadable or ambiguous source: GoogleTest `Suite.Test` has a `.` and no spaces.
+        !filter.chars().any(char::is_whitespace) && filter.contains('.')
+    };
+    if gtest {
+        format!("--gtest_filter={filter}")
+    } else {
+        filter.to_string()
+    }
 }
 
 struct CmakeTarget {
     name: String,
     is_executable: bool,
-    /// `(declaring_dir_prefix, raw_body)` preserving each `CMakeLists.txt` directory that
-    /// contributed sources (BUG-10) while keeping libraries non-executable (BUG3-2).
-    sources: Vec<(String, String)>,
+    /// Root-relative source paths, each resolved against the `CMakeLists.txt` directory
+    /// that listed it (BUG-10); libraries and `target_sources` never make a target
+    /// executable (BUG3-2).
+    sources: Vec<String>,
+}
+
+/// Resolve one source argument of `add_executable` / `add_library` / `target_sources`,
+/// declared in the root-relative directory `dir_prefix`, to a root-relative path.
+fn cmake_source_rel(dir_prefix: &str, token: &str) -> Option<String> {
+    let tok = token.trim_matches('"');
+    let (base, rest) = if let Some(r) = tok
+        .strip_prefix("${CMAKE_CURRENT_SOURCE_DIR}/")
+        .or_else(|| tok.strip_prefix("${CMAKE_CURRENT_LIST_DIR}/"))
+    {
+        (dir_prefix, r)
+    } else if let Some(r) = tok
+        .strip_prefix("${PROJECT_SOURCE_DIR}/")
+        .or_else(|| tok.strip_prefix("${CMAKE_SOURCE_DIR}/"))
+    {
+        ("", r)
+    } else {
+        (dir_prefix, tok)
+    };
+    if rest.contains('$') || rest.starts_with('/') || !is_cpp_source_path(rest) {
+        return None;
+    }
+    let mut parts: Vec<&str> = base.split('/').filter(|s| !s.is_empty()).collect();
+    for seg in rest.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            s => parts.push(s),
+        }
+    }
+    Some(parts.join("/"))
 }
 
 #[allow(clippy::disallowed_methods)]
@@ -771,10 +799,15 @@ fn collect_cmake_targets_recursive(
     if depth > 4 {
         return;
     }
-    let cm_path = dir.join("CMakeLists.txt");
-    let Ok(cmake_text) = std::fs::read_to_string(&cm_path) else {
+    let Ok(raw) = std::fs::read_to_string(dir.join("CMakeLists.txt")) else {
         return;
     };
+    // Drop `#` comments so a commented-out target never matches.
+    let cmake_text = raw
+        .lines()
+        .map(|l| l.split('#').next().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n");
     let dir_prefix = dir
         .strip_prefix(root_canon)
         .ok()
@@ -784,45 +817,34 @@ fn collect_cmake_targets_recursive(
     if lower_cm.contains("file(glob") || lower_cm.contains("aux_source_directory") {
         *uses_glob = true;
     }
-    if let Ok(re_exe) = regex::Regex::new(r"(?is)add_executable\s*\(\s*([A-Za-z0-9_.-]+)([^)]*)\)")
-    {
-        for cap in re_exe.captures_iter(&cmake_text) {
-            let name = cap[1].to_string();
-            let body = cap[2].to_string();
-            if name.contains("${") {
-                continue;
-            }
-            if let Some(existing) = targets.iter_mut().find(|t| t.name == name) {
-                existing.is_executable = true;
-                existing.sources.push((dir_prefix.clone(), body));
-            } else {
+    static RE_TARGET: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re_target = RE_TARGET.get_or_init(|| {
+        regex::Regex::new(
+            r"(?is)\b(add_executable|add_library|target_sources)\s*\(\s*([A-Za-z0-9_.-]+)([^)]*)\)",
+        )
+        .unwrap()
+    });
+    for cap in re_target.captures_iter(&cmake_text) {
+        let idx = match targets.iter().position(|t| t.name == cap[2]) {
+            Some(i) => i,
+            None => {
                 targets.push(CmakeTarget {
-                    name,
-                    is_executable: true,
-                    sources: vec![(dir_prefix.clone(), body)],
-                });
-            }
-        }
-    }
-    // Attach `target_sources(<target> PRIVATE/PUBLIC/INTERFACE ...)` preserving the declaring
-    // `CMakeLists.txt` directory (BUG-10), WITHOUT promoting libraries to runnable executables (BUG3-2).
-    if let Ok(re_ts) = regex::Regex::new(r"(?is)target_sources\s*\(\s*([A-Za-z0-9_.-]+)([^)]*)\)") {
-        for cap in re_ts.captures_iter(&cmake_text) {
-            let name = cap[1].to_string();
-            let body = cap[2].to_string();
-            if name.contains("${") {
-                continue;
-            }
-            if let Some(existing) = targets.iter_mut().find(|t| t.name == name) {
-                existing.sources.push((dir_prefix.clone(), body));
-            } else {
-                targets.push(CmakeTarget {
-                    name,
+                    name: cap[2].to_string(),
                     is_executable: false,
-                    sources: vec![(dir_prefix.clone(), body)],
+                    sources: Vec::new(),
                 });
+                targets.len() - 1
             }
+        };
+        let target = &mut targets[idx];
+        if cap[1].eq_ignore_ascii_case("add_executable") {
+            target.is_executable = true;
         }
+        target.sources.extend(
+            cap[3]
+                .split_whitespace()
+                .filter_map(|tok| cmake_source_rel(&dir_prefix, tok)),
+        );
     }
     if let Ok(re_sub) = regex::Regex::new(r"(?is)add_subdirectory\s*\(\s*([^\s)#]+)") {
         for cap in re_sub.captures_iter(&cmake_text) {
@@ -852,6 +874,33 @@ fn collect_cmake_targets_recursive(
     }
 }
 
+/// The CMake target that compiles `rel_source` according to the configured build's
+/// `compile_commands.json`: its object file lives under `CMakeFiles/<target>.dir/`.
+#[allow(clippy::disallowed_methods)]
+fn cmake_target_from_compile_db(root: &Path, rel_source: &str) -> Option<String> {
+    let build_dir = find_cpp_build_dir(&root.to_string_lossy())?;
+    let raw = std::fs::read_to_string(root.join(build_dir).join("compile_commands.json")).ok()?;
+    let entries: Vec<serde_json::Value> = serde_json::from_str(&raw).ok()?;
+    let want = root.join(rel_source);
+    let want_name = want.file_name()?;
+    entries.iter().find_map(|e| {
+        let file = Path::new(e.get("directory")?.as_str()?).join(e.get("file")?.as_str()?);
+        if file.file_name() != Some(want_name) || std::fs::canonicalize(&file).ok()? != want {
+            return None;
+        }
+        let output = match e.get("output").and_then(|v| v.as_str()) {
+            Some(o) => o.to_string(),
+            None => {
+                let mut argv = e.get("command")?.as_str()?.split_whitespace();
+                argv.find(|a| *a == "-o")?;
+                argv.next()?.to_string()
+            }
+        };
+        let (_, obj) = output.rsplit_once("CMakeFiles/")?;
+        obj.split_once(".dir/").map(|(t, _)| t.to_string())
+    })
+}
+
 #[allow(clippy::disallowed_methods)]
 pub(crate) fn infer_cmake_target_for_source(
     cwd: &str,
@@ -862,10 +911,6 @@ pub(crate) fn infer_cmake_target_for_source(
     let mut targets: Vec<CmakeTarget> = Vec::new();
     let mut uses_glob = false;
     collect_cmake_targets_recursive(&root_canon, &root_canon, 0, &mut targets, &mut uses_glob);
-    let exe_targets: Vec<&CmakeTarget> = targets.iter().filter(|t| t.is_executable).collect();
-    if exe_targets.is_empty() {
-        return None;
-    }
     let src_p = Path::new(source_path);
     let rel_source = if src_p.is_absolute() {
         std::fs::canonicalize(src_p)
@@ -877,37 +922,20 @@ pub(crate) fn infer_cmake_target_for_source(
     } else {
         source_path.trim_start_matches("./").replace('\\', "/")
     };
-    let base = src_p.file_name().and_then(|s| s.to_str()).unwrap_or("");
-    // 1a. Exact directory-relative source-file match across executable targets so a root
-    //     executable whose `target_sources` runs in `app/CMakeLists.txt` retains its `app/`
-    //     origin and matches `app/main.cpp` instead of an unrelated `src/main.cpp` (BUG-10).
-    if !rel_source.is_empty() {
-        if let Some(t) = exe_targets.iter().find(|t| {
-            t.sources.iter().any(|(dir_prefix, body)| {
-                if dir_prefix.is_empty() {
-                    body.contains(&rel_source)
-                } else {
-                    let prefix_slash = format!("{dir_prefix}/");
-                    rel_source
-                        .strip_prefix(&prefix_slash)
-                        .is_some_and(|in_dir| body.contains(in_dir))
-                        || body.contains(&rel_source)
-                }
-            })
-        }) {
-            return Some(t.name.clone());
+    // 1. The configured build's own answer, when there is one; a library that compiles the
+    //    file falls through to the test-executable fallback below (BUG3-2).
+    if let Some(name) = cmake_target_from_compile_db(&root_canon, &rel_source) {
+        if !targets.iter().any(|t| t.name == name && !t.is_executable) {
+            return Some(name);
         }
     }
-    // 1b. Basename fallback across executable targets only (never OBJECT/STATIC libraries, BUG3-2).
-    if !base.is_empty() {
-        if let Some(t) = exe_targets
-            .iter()
-            .find(|t| t.sources.iter().any(|(_, body)| body.contains(base)))
-        {
-            return Some(t.name.clone());
-        }
+    let exe_targets: Vec<&CmakeTarget> = targets.iter().filter(|t| t.is_executable).collect();
+    // 2. The executable that lists exactly this root-relative path (BUG-10). No basename
+    //    guess: a same-named file in another directory belongs to a different program.
+    if let Some(t) = exe_targets.iter().find(|t| t.sources.contains(&rel_source)) {
+        return Some(t.name.clone());
     }
-    // 2. For tests, prefer executable targets whose name contains "test" / "spec"
+    // 3. For tests, prefer executable targets whose name contains "test" / "spec"
     if want_test {
         if let Some(t) = exe_targets.iter().find(|t| {
             let l = t.name.to_ascii_lowercase();
@@ -917,7 +945,7 @@ pub(crate) fn infer_cmake_target_for_source(
         }
         return None;
     }
-    // 3. Only fall back to the first non-test executable if CMake globs sources
+    // 4. Only fall back to the first non-test executable if CMake globs sources
     if uses_glob {
         exe_targets
             .iter()

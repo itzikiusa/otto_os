@@ -998,11 +998,15 @@ async fn spring_boot_actuator_bypasses_ambient_http_proxy_without_mutating_paren
 
     trap_srv.abort();
     act_srv.abort();
+    let child_stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         out.status.success(),
-        "SEC-5/TEST3-2: child failed: stdout={} stderr={}",
-        String::from_utf8_lossy(&out.stdout),
+        "SEC-5/TEST3-2: child failed: stdout={child_stdout} stderr={}",
         String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        child_stdout.contains("1 passed"),
+        "SEC-5: the child must actually run the proxied request, got: {child_stdout}"
     );
     assert!(
         !trap_hit.load(Ordering::SeqCst),
@@ -1228,6 +1232,133 @@ async fn spring_boot_profiles_default_override_and_multimodule_parent_inheritanc
     assert!(
         !inh_info.has_actuator,
         "BUG3-6: <dependencyManagement> BOM entry and sibling module must not mark child as having actuator"
+    );
+}
+
+#[test]
+fn spring_boot_config_precedence_multidoc_profile_order_and_actual_parent() {
+    use crate::spring_boot::detect_spring_boot_workspace_scoped;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let boot_pom = "<project><dependencies><dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-web</artifactId></dependency></dependencies></project>";
+    let scan = |ws: &std::path::Path| {
+        let canon = ws.canonicalize().unwrap();
+        detect_spring_boot_workspace_scoped(
+            std::slice::from_ref(&canon),
+            std::slice::from_ref(&canon),
+            false,
+        )
+        .expect("Spring Boot module detected")
+    };
+
+    // BUG3-5: external plain config (`file:./config/`) overrides a packaged profile-specific
+    // file, and the module root (`file:./`) is a config location too.
+    let ext = tmp.path().join("ext-over-packaged-profile");
+    std::fs::create_dir_all(ext.join("src/main/resources")).unwrap();
+    std::fs::create_dir_all(ext.join("config")).unwrap();
+    std::fs::write(ext.join("pom.xml"), boot_pom).unwrap();
+    std::fs::write(
+        ext.join("src/main/resources/application.properties"),
+        "spring.profiles.active=dev\n",
+    )
+    .unwrap();
+    std::fs::write(
+        ext.join("src/main/resources/application-dev.properties"),
+        "server.port=9000\n",
+    )
+    .unwrap();
+    std::fs::write(
+        ext.join("config/application.properties"),
+        "server.port=8081\n",
+    )
+    .unwrap();
+    std::fs::write(
+        ext.join("application.properties"),
+        "management.server.port=9191\n",
+    )
+    .unwrap();
+    let info = scan(&ext);
+    assert_eq!(
+        info.server_port, 8081,
+        "external config/application.properties outranks packaged application-dev.properties"
+    );
+    assert_eq!(
+        info.management_port,
+        Some(9191),
+        "./application.properties is a Spring config location"
+    );
+
+    // An `on-profile` document of a multi-document file applies only to an active profile.
+    let multi = tmp.path().join("multi-doc");
+    std::fs::create_dir_all(multi.join("src/main/resources")).unwrap();
+    std::fs::write(multi.join("pom.xml"), boot_pom).unwrap();
+    std::fs::write(
+        multi.join("src/main/resources/application.yml"),
+        "server:\n  port: 8080\n---\nspring:\n  config:\n    activate:\n      on-profile: prod\nserver:\n  port: 9443\n",
+    )
+    .unwrap();
+    let info = scan(&multi);
+    assert_eq!(
+        info.server_port, 8080,
+        "the inactive prod document must not set the port"
+    );
+    assert!(info.profiles.iter().any(|p| p == "prod"));
+
+    // With several active profiles the last one wins, whatever the file names sort to.
+    let order = tmp.path().join("profile-order");
+    std::fs::create_dir_all(order.join("src/main/resources")).unwrap();
+    std::fs::write(order.join("pom.xml"), boot_pom).unwrap();
+    std::fs::write(
+        order.join("src/main/resources/application.properties"),
+        "spring.profiles.active=b,a\n",
+    )
+    .unwrap();
+    std::fs::write(
+        order.join("src/main/resources/application-a.properties"),
+        "server.port=7001\n",
+    )
+    .unwrap();
+    std::fs::write(
+        order.join("src/main/resources/application-b.properties"),
+        "server.port=7002\n",
+    )
+    .unwrap();
+    assert_eq!(
+        scan(&order).server_port,
+        7001,
+        "profile a is activated last"
+    );
+
+    // BUG3-6: an enclosing aggregator that is not the declared parent contributes nothing.
+    let agg = tmp.path().join("aggregator");
+    let svc = agg.join("svc");
+    std::fs::create_dir_all(svc.join("src/main/java/com/acme")).unwrap();
+    std::fs::write(
+        agg.join("pom.xml"),
+        "<project><artifactId>agg</artifactId><packaging>pom</packaging><modules><module>svc</module></modules><dependencies><dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-devtools</artifactId></dependency></dependencies></project>",
+    )
+    .unwrap();
+    std::fs::write(
+        svc.join("pom.xml"),
+        "<project><parent><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-parent</artifactId><version>3.3.0</version></parent><artifactId>svc</artifactId><dependencies><dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-web</artifactId></dependency></dependencies></project>",
+    )
+    .unwrap();
+    std::fs::write(
+        svc.join("src/main/java/com/acme/SvcApp.java"),
+        "package com.acme;\n@SpringBootApplication\npublic class SvcApp {}\n",
+    )
+    .unwrap();
+    let canon_agg = agg.canonicalize().unwrap();
+    let canon_svc = svc.canonicalize().unwrap();
+    let info = detect_spring_boot_workspace_scoped(
+        std::slice::from_ref(&canon_svc),
+        std::slice::from_ref(&canon_agg),
+        false,
+    )
+    .expect("svc Boot module detected");
+    assert!(
+        !info.has_devtools,
+        "BUG3-6: the aggregator is not svc's Maven parent, so its devtools is not inherited"
     );
 }
 
@@ -2727,4 +2858,94 @@ fn cpp_round3_fixes_root_subdir_target_sources_object_lib_and_catch2_v2() {
         a.iter().all(|x| !x.starts_with("--gtest_filter=")),
         "BUG-11: Catch2 v2 test with dot must NEVER receive --gtest_filter=: {a:?}"
     );
+}
+
+#[test]
+fn cpp_round4_exact_source_paths_compile_db_and_doctest() {
+    use crate::environments::runner_cmd::build_runner_command;
+    use crate::types::{IdeRunConfig, IdeRunnerKind, IdeTargetKind};
+    use std::collections::BTreeMap;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let proj = tmp.path().canonicalize().unwrap().join("cpp-r4");
+    for d in ["tools", "legacy", "core", "dt", "build"] {
+        std::fs::create_dir_all(proj.join(d)).unwrap();
+    }
+    std::fs::write(
+        proj.join("CMakeLists.txt"),
+        "cmake_minimum_required(VERSION 3.20)\nproject(r4)\nadd_executable(tool tools/main.cpp)\nadd_executable(app main.cpp)\n# add_executable(old_app legacy/main.cpp)\nset(CORE_SRCS core/core_main.cpp)\nadd_executable(core_app ${CORE_SRCS})\nadd_library(dt_objs OBJECT)\ntarget_sources(dt_objs PRIVATE dt/dt_test.cpp)\nadd_executable(dt_tests dt/dt_runner.cpp)\ntarget_link_libraries(dt_tests PRIVATE dt_objs)\n",
+    )
+    .unwrap();
+    for f in [
+        "main.cpp",
+        "tools/main.cpp",
+        "legacy/main.cpp",
+        "core/core_main.cpp",
+    ] {
+        std::fs::write(proj.join(f), "int main() { return 0; }\n").unwrap();
+    }
+    std::fs::write(
+        proj.join("dt/dt_test.cpp"),
+        "#include <doctest/doctest.h>\nTEST_CASE(\"adds.two\") { CHECK(1 + 1 == 2); }\n",
+    )
+    .unwrap();
+    // The configured build's compile database (`output` and `command -o` forms).
+    std::fs::write(proj.join("build/CMakeCache.txt"), "").unwrap();
+    let b = proj.join("build");
+    let db = serde_json::json!([
+        {
+            "directory": b,
+            "file": proj.join("core/core_main.cpp"),
+            "command": "c++ -g -o CMakeFiles/core_app.dir/core/core_main.cpp.o -c core_main.cpp"
+        },
+        {
+            "directory": b,
+            "file": proj.join("dt/dt_test.cpp"),
+            "output": "CMakeFiles/dt_objs.dir/dt/dt_test.cpp.o"
+        }
+    ]);
+    std::fs::write(b.join("compile_commands.json"), db.to_string()).unwrap();
+
+    let proj_s = proj.to_string_lossy().into_owned();
+    let run = |runner: IdeRunnerKind, target_path: &str, test_filter: Option<&str>| {
+        let mut cfg: IdeRunConfig = serde_json::from_value(serde_json::json!({
+            "id": "r4",
+            "name": "cfg",
+            "target_path": target_path,
+            "test_filter": test_filter
+        }))
+        .unwrap();
+        cfg.runner = runner;
+        build_runner_command(&cfg, IdeTargetKind::Local, &proj_s, &BTreeMap::new())
+    };
+
+    // BUG-10: `main.cpp` is app's source, not a substring of tool's `tools/main.cpp`.
+    let (_, a) = run(IdeRunnerKind::CppRun, "main.cpp", None);
+    assert!(a[1].contains("--target app"), "{}", a[1]);
+    // A commented-out target owns nothing; no other target lists this path, so it
+    // compiles standalone instead of borrowing a same-named file's target.
+    let (_, a) = run(IdeRunnerKind::CppRun, "legacy/main.cpp", None);
+    assert!(
+        !a[1].contains("--target") && a[1].contains("clang++"),
+        "{}",
+        a[1]
+    );
+    // Sources behind a variable resolve through the configured compile database.
+    let (_, a) = run(
+        IdeRunnerKind::CppRun,
+        &proj.join("core/core_main.cpp").to_string_lossy(),
+        None,
+    );
+    assert!(a[1].contains("--target core_app"), "{}", a[1]);
+
+    // BUG3-2 + BUG-11: the compile database names the OBJECT library, which is not runnable,
+    // so the linked test executable runs; doctest selects a case with `--test-case=`.
+    let (_, a) = run(IdeRunnerKind::Ctest, "dt/dt_test.cpp", Some("adds.two"));
+    assert!(
+        a[1].contains("--target dt_tests") && !a[1].contains("--target dt_objs"),
+        "{}",
+        a[1]
+    );
+    assert!(a.iter().any(|x| x == "--test-case=adds.two"), "{a:?}");
+    assert!(a.iter().all(|x| !x.starts_with("--gtest_filter=")), "{a:?}");
 }
