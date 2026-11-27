@@ -37,6 +37,16 @@ export function childOf(s: RuntimeSession | null | undefined): ChildOf | null {
   return v && typeof v.id === 'string' && (v.by === 'person' || v.by === 'agent') ? { id: v.id, by: v.by } : null;
 }
 
+/** `meta.source` values owned by an engine (workflows / reviews): kept out of
+ *  Threads' inbox/sidebar/History lists. Matches `ENGINE_THREAD_SOURCES` in
+ *  `crates/otto-core/src/agent_runtime.rs`. */
+const ENGINE_THREAD_SOURCES: ReadonlySet<string> = new Set(['workflow', 'review', 'review_summarizer']);
+
+export function isEngineThread(meta: Record<string, unknown> | null | undefined): boolean {
+  const src = meta?.source;
+  return typeof src === 'string' && ENGINE_THREAD_SOURCES.has(src);
+}
+
 /** True when `row` is in the thread family of any id in `watched` (itself,
  *  its `parent_id`, or any `meta.child_of` ancestor held in `byId`). Used so
  *  workspace reloads preserve watched engine families (root + live sub-threads). */

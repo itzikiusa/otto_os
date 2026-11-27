@@ -36,9 +36,9 @@ import type {
 } from '../../../lib/api/types';
 import { isRuntimeProvider, RUNTIME_PROVIDERS, sessionProviderSlug } from '../../../lib/providers';
 import { threads } from '../threadsStore.svelte';
-import { inWatchedFamily } from './childThreads';
+import { inWatchedFamily, isEngineThread } from './childThreads';
 
-export { isRuntimeProvider, RUNTIME_PROVIDERS };
+export { isEngineThread, isRuntimeProvider, RUNTIME_PROVIDERS };
 
 type QueuedAttachment = { name: string; mime: string; data_base64: string };
 
@@ -148,16 +148,6 @@ export function turnOutcomeOf(
 export function keepOutcome(next: RuntimeSession, prev: RuntimeSession | undefined): RuntimeSession {
   if ('last_turn_status' in next || !prev?.last_turn_status) return next;
   return { ...next, last_turn_status: prev.last_turn_status, last_error_class: prev.last_error_class ?? null };
-}
-
-/** `meta.source` values owned by an engine (workflows / reviews): kept out of
- *  Threads' inbox/sidebar/History lists, but openable directly by id. Matches
- *  `ENGINE_THREAD_SOURCES` in `crates/otto-core/src/agent_runtime.rs`. */
-const ENGINE_THREAD_SOURCES: ReadonlySet<string> = new Set(['workflow', 'review', 'review_summarizer']);
-
-export function isEngineThread(meta: Record<string, unknown> | null | undefined): boolean {
-  const src = meta?.source;
-  return typeof src === 'string' && ENGINE_THREAD_SOURCES.has(src);
 }
 
 /** A Threads row backed by a runtime session (see `asThreadSession`). */
@@ -341,22 +331,13 @@ class RuntimeThreads {
   watch(id: string): () => void {
     this.embedded.set(id, (this.embedded.get(id) ?? 0) + 1);
     this.markRead(id);
-    return () => {
-      const n = (this.embedded.get(id) ?? 1) - 1;
-      if (n > 0) this.embedded.set(id, n);
-      else this.embedded.delete(id);
-    };
+    return () => { const n = (this.embedded.get(id) ?? 1) - 1; if (n > 0) this.embedded.set(id, n); else this.embedded.delete(id); };
   }
 
-  /** A host (workflow run page) watches `id`'s whole thread family so workspace
-   *  reloads keep its engine rows and socket reconnects refresh its peers. */
+  /** A host watches `id`'s thread family so reloads keep its engine rows and reconnects refresh its peers. */
   watchGroup(id: string): () => void {
     this.watchedGroups.set(id, (this.watchedGroups.get(id) ?? 0) + 1);
-    return () => {
-      const n = (this.watchedGroups.get(id) ?? 1) - 1;
-      if (n > 0) this.watchedGroups.set(id, n);
-      else this.watchedGroups.delete(id);
-    };
+    return () => { const n = (this.watchedGroups.get(id) ?? 1) - 1; if (n > 0) this.watchedGroups.set(id, n); else this.watchedGroups.delete(id); };
   }
 
   markRead(id: string): void {
