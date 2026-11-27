@@ -7,6 +7,7 @@
   import PaneDivider from '../../../lib/components/PaneDivider.svelte';
   import { loadPaneWidth } from '../../../lib/paneResizer';
   import { auth } from '../../../lib/stores/auth.svelte';
+  import { viewport } from '../../../lib/stores/viewport.svelte';
   import { ide } from '../ideStore.svelte';
   import IdeBuildAndToolsSection from './IdeBuildAndToolsSection.svelte';
   import IdeEditorAppearanceSection from './IdeEditorAppearanceSection.svelte';
@@ -22,10 +23,9 @@
 
   const NAV_W_KEY = 'otto.ide.settingsNavW';
   let navW = $state(loadPaneWidth(NAV_W_KEY, 250, 190, 380));
-  // Narrow (a phone): categories and the page are one screen each — list →
-  // page with a back button — instead of a 250 px list beside a 100 px page.
-  let modalW = $state(0);
-  const narrow = $derived(modalW > 0 && modalW < 600);
+  // A phone (the one phone signal): categories and the page are one screen
+  // each — list → page with a back button — instead of a 250 px list beside a 100 px page.
+  const narrow = $derived(viewport.isPhone);
   let showList = $state(false);
   let searchQuery = $state('');
   let expandedGroups = $state<Record<string, boolean>>({
@@ -225,7 +225,7 @@
   onclose={() => ideSettings.cancel()}
   dismissable={!applying}
 >
-  <div class="st-modal" class:narrow class:list={narrow && showList} data-testid="ide-settings-modal" bind:clientWidth={modalW}>
+  <div class="st-modal" class:narrow class:list={narrow && showList} data-testid="ide-settings-modal">
     <aside class="st-left" style:inline-size={narrow ? undefined : `${navW}px`} aria-label="Settings categories">
       <div class="st-search-box">
         <Icon name="search" size={13} />
