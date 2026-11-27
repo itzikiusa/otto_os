@@ -30,7 +30,7 @@
   import { runReviews } from '../runReviews.svelte';
   import ProviderIcon from '../../../lib/components/ProviderIcon.svelte';
   import { plural } from '../../../lib/plural';
-  import { childWord, errorParts, stepDuration, stepWord, waitingThreadLabel } from './runWords';
+  import { childWord, stepDuration, stepErrorDisplay, stepWord, waitingThreadLabel } from './runWords';
   import {
     childCrumb,
     childTrail,
@@ -224,7 +224,7 @@
   };
   const attachments = $derived<AttachmentRef[]>(run.attachments ?? []);
   /** The failing step's own words, on every tab (the run's card shows one failure only, and none on a pushed phone pane). */
-  const failed = $derived(!child && node?.status === 'error' && node.node_id !== cardNode && (body?.error ?? node.error) ? errorParts((body?.error ?? node.error)!) : null);
+  const failed = $derived(!child && node?.status === 'error' && node.node_id !== cardNode && (body?.error ?? node.error) ? stepErrorDisplay((body?.error ?? node.error)!, showingThread) : null);
   // Result → Input: a text attachment previews in place; any downloads.
   let shown = $state<{ path: string; text: string | null; error: string | null } | null>(null);
   const previewable = (a: AttachmentRef) => /^text\/|json|xml|yaml|markdown/.test(a.mime);
@@ -264,7 +264,7 @@
   }
 </script>
 
-<section class="pane" data-testid="wf-step-pane" data-node-id={step?.id ?? '_result'} data-child-id={child?.id ?? undefined} aria-label={child?.label ?? step?.name ?? 'Run result'}>
+<section class="pane" class:conv-pane={showingThread} data-testid="wf-step-pane" data-node-id={step?.id ?? '_result'} data-child-id={child?.id ?? undefined} aria-label={child?.label ?? step?.name ?? 'Run result'}>
   <header class="ph">
     <div class="crumb" data-testid="wf-step-crumb">
       {#if child}
@@ -332,7 +332,16 @@
     {#if failed}
       <div class="failed" data-testid="wf-step-error">
         <p class="ftitle" dir="auto"><Icon name="x" size={13} />{failed.title}</p>
-        {#if failed.body}<p class="fbody" dir="auto">{failed.body}</p>{/if}
+        {#if failed.body}
+          {#if failed.collapseBody}
+            <details class="fmore" data-testid="wf-step-error-details">
+              <summary class="fsum"><Icon name="chevronRight" size={12} /><span>Details</span></summary>
+              <p class="fbody" dir="auto">{failed.body}</p>
+            </details>
+          {:else}
+            <p class="fbody" dir="auto">{failed.body}</p>
+          {/if}
+        {/if}
       </div>
     {/if}
   </header>
@@ -467,6 +476,13 @@
     gap: var(--sp-4);
     min-inline-size: 0;
     min-block-size: 0;
+  }
+  /* When the outer column locks scrolling to a live thread, bound the header so
+     a long failure diagnostic cannot push the tabs or conversation out of view. */
+  .pane.conv-pane > .ph {
+    flex: 0 1 auto;
+    max-block-size: 40%;
+    overflow-y: auto;
   }
   .crumb {
     display: flex;
@@ -720,6 +736,39 @@
   .ftitle :global(svg) {
     flex: none;
     margin-block-start: var(--sp-1);
+  }
+  .fmore {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-2);
+  }
+  .fsum {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sp-1);
+    align-self: flex-start;
+    padding: 0;
+    font-size: var(--fs-s);
+    font-weight: 500;
+    color: var(--danger);
+    list-style: none;
+    cursor: pointer;
+  }
+  .fsum::-webkit-details-marker {
+    display: none;
+  }
+  .fsum:focus-visible {
+    outline: 2px solid var(--accent-text);
+    outline-offset: 2px;
+    border-radius: var(--radius-s);
+  }
+  .fmore[open] > .fsum :global(svg) {
+    transform: rotate(90deg);
+  }
+  @media (pointer: coarse) {
+    .fsum {
+      min-block-size: var(--hit-min);
+    }
   }
   .fbody {
     margin: 0;

@@ -422,6 +422,34 @@ export function errorParts(error: string): { title: string; body: string } {
   return { title: m[1], body: m[3].trim() };
 }
 
+export interface StepErrorDisplay {
+  title: string;
+  body: string;
+  /** Collapse diagnostic detail behind a disclosure while the outer column
+   *  locks scroll to a retained live thread so tabs & conversation stay reachable. */
+  collapseBody: boolean;
+}
+
+/** Shape a failed step's error banner for the step header. On a retained
+ *  conversation tab, multi-line diagnostics without sentence punctuation also
+ *  split after the first line so only a one-line summary stays expanded above
+ *  the tabs while the rest collapses behind a disclosure. */
+export function stepErrorDisplay(error: string, showingThread: boolean): StepErrorDisplay {
+  let { title, body } = errorParts(error);
+  if (showingThread && !body) {
+    const nl = title.indexOf('\n');
+    if (nl !== -1) {
+      const first = title.slice(0, nl).trim();
+      const rest = title.slice(nl + 1).trim();
+      if (first && rest) {
+        title = first;
+        body = rest;
+      }
+    }
+  }
+  return { title, body, collapseBody: showingThread && !!body };
+}
+
 /** "24 hours", "7 days": a retention setting in words. */
 function keptFor(h: number): string {
   if (h % 24 === 0 && h >= 48) return `${h / 24} days`;

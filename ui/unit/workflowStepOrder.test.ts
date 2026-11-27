@@ -22,7 +22,9 @@ import {
   resolveThreadSelection,
   RESULT,
   retriedAttemptReason,
+  reuseMergedNode,
   runtimeChildStatus,
+  sameNodeFields,
   sameStepChildren,
   settledNodes,
   stepNumber,
@@ -31,10 +33,11 @@ import {
   waitingReviewers,
   waitingThreads,
 } from '../src/modules/workflows/runs/stepOrder.ts';
+import { applyLiveNode, mergeRunProgress } from '../src/modules/workflows/runProgress.ts';
 import { paneTabs } from '../src/modules/workflows/runs/stepTabs.ts';
 import { at, fanoutNodes, node, PR_GRAPH, reviewers, T0 } from './workflowRunFixtures.ts';
 import { childWord, stepWord } from '../src/modules/workflows/runs/runWords.ts';
-import type { RuntimeSession, WorkflowGraph } from '../src/lib/api/types';
+import type { RuntimeSession, WorkflowGraph, WorkflowRun } from '../src/lib/api/types';
 
 const NOW = T0 + 12 * 60_000;
 const shape = (entries: ReturnType<typeof orderSteps>) => entries.map((e) => (e.type === 'group' ? e.steps.map((s) => s.id) : e.step.id));
@@ -638,4 +641,146 @@ test('isWaitingOnSubagents and waitingThreads name the live threads a step is wa
     { childId: null, label: 'Run smoke tests', provider: '', startedAt: at(8) },
   ]);
   assert.equal(isWaitingOnSubagents(node('ok', 'success', 0, 1000)), false);
+});
+
+test('reuseMergedNode reflects in-place live node mutations while reusing unchanged merged children (BUG-15)', () => {
+  const baseNode = node('n3', 'running', 1, null, {
+    phase: 'working',
+    detail_version: 'v1',
+    thread: { thread_id: 'th-root', runner: 'threads', provider: 'claude', turns: 1, usage: {} as never },
+    children: [{ id: 'c1', label: 'Helper', provider: 'codex', status: 'success', thread_id: 'th-kid' }],
+  });
+  const run: WorkflowRun = {
+    id: 'run-1',
+    workflow_id: 'wf-1',
+    status: 'running',
+    summary: true,
+    rev: 1,
+    waiting_approval: false,
+    input: null,
+    output: null,
+    error: null,
+    started_at: at(0),
+    ended_at: null,
+    nodes: [baseNode],
+    checkpoints: [],
+  } as unknown as WorkflowRun;
+
+  const merged1 = [{ id: 'c1', label: 'Helper', provider: 'codex', status: 'success' as const, thread_id: 'th-kid', depth: 0, parent_child_id: null }];
+  const entry1 = reuseMergedNode(run.nodes[0], merged1, undefined);
+  assert.notEqual(entry1.node, run.nodes[0], 'merged children created a wrapper copy');
+  assert.equal(entry1.node.phase, 'working');
+
+  // Unrelated runtime-session tick with structurally identical children preserves exact node reference.
+  const mergedTick = merged1.map((c) => ({ ...c }));
+  const entryTick = reuseMergedNode(run.nodes[0], mergedTick, entry1);
+  assert.equal(entryTick, entry1);
+  assert.equal(entryTick.node, entry1.node);
+
+  // Live event mutates `run.nodes[0]` in place (same object identity) to `needs_you` with unchanged children.
+  const applied = applyLiveNode(run, {
+    rev: 2,
+    status: 'running',
+    waitingApproval: true,
+    overview: { state: 'needs_you', headline: 'Needs approval' } as never,
+    node: {
+      ...baseNode,
+      phase: 'needs_you',
+      detail_version: 'v2',
+      attention: { kind: 'approval', text: 'Approve command', since: at(2) },
+    },
+  });
+  assert.equal(applied, true);
+  assert.equal(run.nodes[0], baseNode, 'applyLiveNode mutated the node in place');
+  assert.equal(sameNodeFields(run.nodes[0], entry1.node), false);
+
+  const entry2 = reuseMergedNode(run.nodes[0], merged1.map((c) => ({ ...c })), entry1);
+  assert.equal(entry2.node.phase, 'needs_you');
+  assert.equal(entry2.node.attention?.text, 'Approve command');
+  assert.equal(entry2.children, entry1.children, 'unchanged merged children array is still reused');
+
+  // Progress poll settles the step in place and drops `thread`.
+  const settledSummary: WorkflowRun = {
+    ...run,
+    rev: 3,
+    status: 'success',
+    nodes: [
+      {
+        ...baseNode,
+        status: 'success',
+        phase: undefined,
+        attention: undefined,
+        thread: undefined,
+        duration_ms: 4200,
+        detail_version: 'v3',
+      },
+    ],
+  };
+  assert.equal(mergeRunProgress(run, settledSummary), true);
+  assert.equal(run.nodes[0], baseNode, 'mergeRunProgress mutated the node in place');
+  const entry3 = reuseMergedNode(run.nodes[0], merged1.map((c) => ({ ...c })), entry2);
+  assert.equal(entry3.node.status, 'success');
+  assert.equal(entry3.node.duration_ms, 4200);
+  assert.equal(entry3.node.thread, undefined, 'deleted field is no longer retained on cached node');
+  assert.equal(entry3.children, entry2.children);
+});
+
+test('annotateRetriedChildren keeps independent same-named failed threads active without checkpoint retry evidence (BUG-16)', () => {
+  // Agent opens two independent child threads with the same fallback/title; first fails, second runs.
+  const agentKids = [
+    { id: 'th-a', label: 'codex', provider: 'codex', status: 'error' as const, thread_id: 'th-a', depth: 0, parent_child_id: null },
+    { id: 'th-b', label: 'codex', provider: 'codex', status: 'running' as const, thread_id: 'th-b', depth: 0, parent_child_id: null },
+    { id: 'th-c', label: 'Check tests', provider: 'claude', status: 'error' as const, thread_id: 'th-c', depth: 0, parent_child_id: null },
+    { id: 'th-d', label: 'Check tests', provider: 'claude', status: 'running' as const, thread_id: 'th-d', depth: 0, parent_child_id: null },
+  ];
+  // Even if the parent step's own logs carry a bare `attempt 1:` line, independent child threads are NOT retried attempts.
+  const annotated = annotateRetriedChildren(agentKids, {
+    loopId: 'agent-step',
+    nodeLogs: ['attempt 1: parent step retried once'],
+  });
+  assert.equal(annotated, agentKids, 'returns original array untouched when no checkpoint retry evidence exists');
+  assert.deepEqual(childWord(annotated[0], NOW), { word: 'Failed', tone: 'danger' });
+  assert.deepEqual(childWord(annotated[2], NOW), { word: 'Failed', tone: 'danger' });
+  const tree = orderChildTree(annotated);
+  assert.deepEqual(tree.active.map((e) => e.child.id), ['th-a', 'th-b', 'th-c', 'th-d']);
+  assert.equal(tree.done.length, 0);
+
+  // Nested agent sub-threads under a loop iteration are never treated as checkpoint retries even if their label matches.
+  const loopCpBase = {
+    node_id: 'loop#1.0',
+    loop_id: 'loop',
+    iteration: 1,
+    step_index: 0,
+    kind: 'agent_prompt',
+    name: 'fix',
+    status: 'success',
+    attempts: 2,
+    input: null,
+    output: null,
+    logs: ['attempt 1: timed out'],
+    updated_at: at(1),
+  };
+  const loopCp = loopCpBase as never;
+  const nestedKids = [
+    { id: 'iter-1', label: 'fix · iteration 1', provider: 'claude', status: 'running' as const, thread_id: 'iter-1', depth: 0, parent_child_id: null },
+    { id: 'sub-1', label: 'fix', provider: 'codex', status: 'error' as const, thread_id: 'sub-1', depth: 1, parent_child_id: 'iter-1' },
+    { id: 'sub-2', label: 'fix', provider: 'codex', status: 'running' as const, thread_id: 'sub-2', depth: 1, parent_child_id: 'iter-1' },
+  ];
+  assert.equal(annotateRetriedChildren(nestedKids, { loopId: 'loop', checkpoints: [loopCp] }), nestedKids);
+
+  // Even an iteration-shaped label requires checkpoint `attempts > attempt` or attempt logs.
+  const singleAttemptCp = { ...loopCpBase, attempts: 1, logs: [] } as never;
+  const unconfirmed = [
+    { id: 'x1', label: 'fix · iteration 1', provider: 'claude', status: 'error' as const, thread_id: 'x1', depth: 0, parent_child_id: null },
+    { id: 'x2', label: 'fix · iteration 1', provider: 'claude', status: 'running' as const, thread_id: 'x2', depth: 0, parent_child_id: null },
+  ];
+  assert.equal(annotateRetriedChildren(unconfirmed, { loopId: 'loop', checkpoints: [singleAttemptCp] }), unconfirmed);
+
+  // A checkpoint with `attempts: 2` confirms the retry even before attempt logs are populated.
+  const countOnlyCp = { ...loopCpBase, attempts: 2, logs: [] } as never;
+  const confirmed = annotateRetriedChildren(unconfirmed, { loopId: 'loop', checkpoints: [countOnlyCp] });
+  assert.equal(confirmed[0].retried_attempt, 1);
+  assert.equal(confirmed[0].retried_reason, undefined);
+  assert.deepEqual(childWord(confirmed[0], NOW), { word: 'Attempt 1 failed · retried', tone: '' });
+  assert.deepEqual(orderChildTree(confirmed).done.map((e) => e.child.id), ['x1']);
 });

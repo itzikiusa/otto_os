@@ -29,7 +29,7 @@
   import StepPane from './StepPane.svelte';
   import { cancelQueued, pauseRun, rereview, resumeRun, retryStep, steerRun, stopRun } from './runActions';
   import { fallbackState, runTitle, runWord } from './runWords';
-  import { annotateRetriedChildren, defaultSelection, entrySteps, loopChildren, mergeStepChildren, orderSteps, RESULT, sameStepChildren, settledNodes, stepNumber, type StepChild } from './stepOrder';
+  import { annotateRetriedChildren, defaultSelection, entrySteps, loopChildren, mergeStepChildren, orderSteps, RESULT, reuseMergedNode, settledNodes, stepNumber, type MergedNodeCacheEntry, type StepChild } from './stepOrder';
   import { markRunOpened } from './seenRuns';
   import { registry } from '../../../lib/commands.svelte';
   import { workflowsUi } from '../workflowsUiState.svelte';
@@ -176,14 +176,14 @@
   // Keep previous node/array references when children are structurally unchanged
   // so streaming `last_active_at` updates don't churn the step pane.
   const rtSessions = $derived(rtPort ? Object.values(rtPort.runtimeThreads.byId) : []);
-  let prevMerged = new Map<string, { base: NodeRunState; children: StepChild[]; node: NodeRunState }>();
+  let prevMerged = new Map<string, MergedNodeCacheEntry>();
   let prevNodeList: NodeRunState[] = [];
   const nodes = $derived.by(() => {
     if (!run) {
       prevMerged = new Map();
       return (prevNodeList = []);
     }
-    const next = new Map<string, { base: NodeRunState; children: StepChild[]; node: NodeRunState }>();
+    const next = new Map<string, MergedNodeCacheEntry>();
     const out = settledNodes(run.nodes, live).map((n) => {
       const baseChildren =
         !n.children?.length && run.checkpoints?.some((c) => c.loop_id === n.node_id)
@@ -198,18 +198,9 @@
         checkpoints: run.checkpoints,
         nodeLogs: n.logs,
       });
-      if (annotated.length === 0 && !n.children?.length) {
-        next.set(n.node_id, { base: n, children: annotated, node: n });
-        return n;
-      }
-      const prev = prevMerged.get(n.node_id);
-      if (prev && prev.base === n && sameStepChildren(prev.children, annotated)) {
-        next.set(n.node_id, prev);
-        return prev.node;
-      }
-      const wrapped = annotated !== n.children ? { ...n, children: annotated } : n;
-      next.set(n.node_id, { base: n, children: annotated, node: wrapped });
-      return wrapped;
+      const entry = reuseMergedNode(n, annotated, prevMerged.get(n.node_id));
+      next.set(n.node_id, entry);
+      return entry.node;
     });
     prevMerged = next;
     if (prevNodeList.length === out.length && prevNodeList.every((x, i) => x === out[i])) return prevNodeList;
