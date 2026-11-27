@@ -15,9 +15,10 @@ use crate::dap::DapStartContext;
 use crate::types::{
     IdeCreatePythonVenvReq, IdeCreatePythonVenvResp, IdeDebugCommandReq, IdeDebugEvaluateReq,
     IdeDebugEvaluateResp, IdeDebugPortQuery, IdeDebugPortResp, IdeDebugSessionResp,
-    IdeDebugSessionsResp, IdeDebugState, IdeDebugVariablesReq, IdeDebugVariablesResp, IdeOkResp,
-    IdeRunConfigResp, IdeRunConfigsResp, IdeRunResp, IdeSetBreakpointsReq, IdeStartDebugReq,
-    IdeStartRunReq, IdeTargetKind, IdeTargetQuery, IdeTargetSpec, IdeUpsertRunConfigReq,
+    IdeDebugSessionsResp, IdeDebugSetVariableReq, IdeDebugSetVariableResp, IdeDebugState,
+    IdeDebugVariablesReq, IdeDebugVariablesResp, IdeOkResp, IdeRunConfigResp, IdeRunConfigsResp,
+    IdeRunResp, IdeSetBreakpointsReq, IdeStartDebugReq, IdeStartRunReq, IdeTargetKind,
+    IdeTargetQuery, IdeTargetSpec, IdeUpsertRunConfigReq,
 };
 use crate::IdeCtx;
 
@@ -567,5 +568,16 @@ pub(super) async fn debug_evaluate<S: IdeCtx>(
 ) -> ApiResult<Json<IdeDebugEvaluateResp>> {
     ctx.ide().authorize_debug_session(&user, &id)?;
     let resp = ctx.ide().dap.evaluate(&id, req).await?;
+    Ok(Json(resp))
+}
+
+pub(super) async fn debug_set_variable<S: IdeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<String>,
+    Json(req): Json<IdeDebugSetVariableReq>,
+) -> ApiResult<Json<IdeDebugSetVariableResp>> {
+    ctx.ide().authorize_debug_session(&user, &id)?;
+    let resp = ctx.ide().dap.set_variable(&id, req).await?;
     Ok(Json(resp))
 }

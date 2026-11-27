@@ -39,6 +39,11 @@ pub(super) fn formatter_candidates(
             "rustfmt".into(),
             vec!["--edition".into(), "2021".into()],
         )],
+        "zig" => vec![(
+            "zig fmt",
+            "zig".into(),
+            vec!["fmt".into(), "--stdin".into()],
+        )],
         "python" => vec![
             (
                 "ruff",
@@ -351,7 +356,16 @@ fn format_builtin_fallback_inner(lang: &str, content: &str) -> String {
     // more than it fixed. A real formatter (prettier, gofmt, rustfmt, …) runs before this.
     if matches!(
         lang,
-        "java" | "kotlin" | "javascript" | "typescript" | "rust" | "go" | "c" | "cpp" | "protobuf"
+        "java"
+            | "kotlin"
+            | "javascript"
+            | "typescript"
+            | "rust"
+            | "go"
+            | "zig"
+            | "c"
+            | "cpp"
+            | "protobuf"
     ) {
         return content.to_string();
     }

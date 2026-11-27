@@ -59,12 +59,13 @@ pub fn build_remote_lsp_script(root: &str, launch: &SpawnLaunch) -> String {
         "\"$HOME\"/.otto/toolchains/bin ",
         "\"$HOME\"/.otto/toolchains/*/bin ",
         "\"$HOME\"/.otto/toolchains/*/current/bin ",
+        "\"$HOME\"/.otto/toolchains/*/current ",
         "\"$HOME\"/.otto/toolchains/*/*/bin ",
         "\"$HOME\"/.otto/toolchains/*/*/*/bin ",
         "\"$HOME\"/.otto/toolchains/*/*/Contents/Home/bin ",
         "\"$HOME\"/.otto/toolchains/*/*/node_modules/.bin ",
         "\"$HOME\"/.otto/toolchains/*/*/lib/node_modules/.bin ",
-        "\"$HOME/go/bin\" \"$HOME/.cargo/bin\" \"$HOME/.local/bin\"; ",
+        "\"$HOME/go/bin\" \"$HOME/.cargo/bin\" \"$HOME/.zvm/bin\" \"$HOME/.local/bin\"; ",
         "do [ -d \"$d\" ] && PATH=\"$d:$PATH\"; done; export PATH"
     );
 

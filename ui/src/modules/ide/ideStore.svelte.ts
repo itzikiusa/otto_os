@@ -744,9 +744,9 @@ class IdeStore {
   selectFrame = (frameId: number, threadId?: number) => this.debugCommand('select_frame', { frame_id: frameId, thread_id: threadId });
   expandVariables(variablesRef: number): Promise<IdeVariable[]> { return loadLspMod().then((m) => m.runExpandVariables(this, variablesRef)); }
   evaluateDebug(expression: string, context: 'watch' | 'repl' | 'hover' = 'repl', frameId?: number): Promise<string> { return loadLspMod().then((m) => m.runEvaluateDebug(this, expression, context, frameId)); }
+  setDebugVariable(variablesRef: number, name: string, value: string): Promise<boolean> { return loadLspMod().then((m) => m.runSetDebugVariable(this, variablesRef, name, value)); }
   addWatch(expression: string): void {
-    const expr = expression.trim();
-    if (!expr) return;
+    const expr = expression.trim(); if (!expr) return;
     this.watches = [...this.watches, { id: `w-${Date.now()}-${this.watches.length}`, expression: expr, value: '…' }];
     void this.refreshWatches();
   }

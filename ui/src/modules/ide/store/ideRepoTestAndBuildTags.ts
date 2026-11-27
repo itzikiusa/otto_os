@@ -127,7 +127,7 @@ export type RepoTestExecutionPlan =
       };
     };
 
-type RepoTestEcosystem = 'go' | 'rust' | 'maven' | 'gradle' | 'vitest' | 'npm' | 'pytest';
+type RepoTestEcosystem = 'go' | 'rust' | 'zig' | 'maven' | 'gradle' | 'vitest' | 'npm' | 'pytest';
 
 export function detectRepoTestEcosystem(opts: {
   repoRoot: string;
@@ -140,6 +140,7 @@ export function detectRepoTestEcosystem(opts: {
   const entryNames = new Set(opts.dirEntries.map((e) => e.name.toLowerCase()));
   if (entryNames.has('go.mod') || entryNames.has('go.work')) return 'go';
   if (entryNames.has('cargo.toml')) return 'rust';
+  if (entryNames.has('build.zig') || entryNames.has('build.zig.zon')) return 'zig';
   if (entryNames.has('pom.xml')) return 'maven';
   if (entryNames.has('build.gradle') || entryNames.has('build.gradle.kts')) return 'gradle';
   if (
@@ -172,6 +173,7 @@ export function detectRepoTestEcosystem(opts: {
     const r = scopedConfigs[i].runner;
     if (r.startsWith('go_')) return 'go';
     if (r.startsWith('cargo_')) return 'rust';
+    if (r.startsWith('zig_')) return 'zig';
     if (r === 'maven' || r === 'java_junit') return 'maven';
     if (r === 'gradle') return 'gradle';
     if (r === 'vitest') return 'vitest';
@@ -186,6 +188,7 @@ export function detectRepoTestEcosystem(opts: {
     const lang = (t.language ?? '').toLowerCase();
     if (lang === 'go' || tp.endsWith('.go')) return 'go';
     if (lang === 'rust' || tp.endsWith('.rs')) return 'rust';
+    if (lang === 'zig' || tp.endsWith('.zig')) return 'zig';
     if (lang === 'java' || tp.endsWith('.java')) return 'maven';
     if (lang === 'python' || tp.endsWith('.py')) return 'pytest';
     if (
@@ -236,6 +239,15 @@ export function resolveRepoTestPlan(opts: {
         repoRoot,
         repoName,
         language: 'rust',
+        launch: { program: repoRoot, args: [], build_flags: [], cwd: repoRoot },
+      };
+    }
+    if (eco === 'zig') {
+      return {
+        kind: 'debug',
+        repoRoot,
+        repoName,
+        language: 'zig',
         launch: { program: repoRoot, args: [], build_flags: [], cwd: repoRoot },
       };
     }
@@ -303,6 +315,13 @@ export function resolveRepoTestPlan(opts: {
         repoRoot,
         repoName,
         adhoc: { ...common, runner: 'cargo_test', args: [] },
+      };
+    case 'zig':
+      return {
+        kind: 'run',
+        repoRoot,
+        repoName,
+        adhoc: { ...common, runner: 'zig_test', args: [] },
       };
     case 'maven':
       return {

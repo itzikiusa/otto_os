@@ -32,6 +32,8 @@ fn is_build_manifest_name(name: &str) -> bool {
             | "go.work"
             | "Cargo.toml"
             | "Cargo.lock"
+            | "build.zig"
+            | "build.zig.zon"
             | "package.json"
             | "package-lock.json"
             | "pnpm-lock.yaml"

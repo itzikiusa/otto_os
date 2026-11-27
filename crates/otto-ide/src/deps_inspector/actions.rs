@@ -99,6 +99,9 @@ pub async fn run_deps_action_scoped(
         ("go.mod", "sync") => {
             exec_cmd("go", &["mod", "download"], &dir, env_map, actor_is_root).await?
         }
+        ("build.zig.zon", "sync") => {
+            exec_cmd("zig", &["build", "--fetch"], &dir, env_map, actor_is_root).await?
+        }
         ("go.mod", "why") => {
             let m = validate_dep_spec("module", req.module.as_deref().unwrap_or(""))?;
             exec_cmd(

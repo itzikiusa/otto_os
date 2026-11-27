@@ -7,7 +7,7 @@ import { isMakefilePath } from './makefilePath.ts';
 
 /** Every key cm-langs.ts has a pack for (a unit test keeps the two lists equal). */
 export const LANG_KEYS: ReadonlySet<string> = new Set([
-  'sql', 'redis', 'js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs', 'mts', 'cts', 'py', 'pyi', 'go', 'rs',
+  'sql', 'redis', 'js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs', 'mts', 'cts', 'py', 'pyi', 'go', 'rs', 'zig',
   'json', 'jsonc', 'jsonl', 'ndjson', 'html', 'htm', 'xml', 'svelte', 'vue', 'css', 'scss', 'less',
   'md', 'mdx', 'markdown', 'java', 'class', 'gradle', 'kts', 'groovy', 'sh', 'bash', 'zsh', 'bats',
   'shell', 'shellscript', 'mod', 'sum', 'work', 'toml', 'makefile', 'properties', 'yaml', 'conf',
@@ -17,6 +17,7 @@ export const LANG_KEYS: ReadonlySet<string> = new Set([
 /** Extensions that name another key. */
 export const EXT_ALIAS: Readonly<Record<string, string>> = {
   yml: 'yaml', yaml: 'yaml',
+  zon: 'zig',
   ini: 'conf', cfg: 'conf', cnf: 'conf', conf: 'conf', inf: 'conf', prefs: 'conf', desktop: 'conf',
   service: 'conf', socket: 'conf', timer: 'conf', mount: 'conf', editorconfig: 'conf', gitconfig: 'conf',
   npmrc: 'conf', xcconfig: 'conf', env: 'dotenv',
@@ -64,7 +65,7 @@ const DIRS: [RegExp, string][] = [
 /** What a language the IDE read off a file (server ids, sniffed keys) is called here. */
 const HINT_ALIAS: Record<string, string> = {
   protobuf: 'proto', ini: 'conf', shell: 'sh', markdown: 'md', javascript: 'js', typescript: 'ts', python: 'py',
-  rust: 'rs', golang: 'go',
+  rust: 'rs', golang: 'go', zon: 'zig',
 };
 
 function extOf(base: string): string {

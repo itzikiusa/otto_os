@@ -83,6 +83,11 @@ pub(crate) fn local_env_mutation_requires_root(
             prev.rust_toolchain.as_deref(),
         ),
         (
+            "zig_home",
+            trimmed_opt(&req.zig_home),
+            prev.zig_home.as_deref(),
+        ),
+        (
             "node_home",
             trimmed_opt(&req.node_home),
             prev.node_home.as_deref(),
@@ -145,6 +150,11 @@ fn validate_environment_update_permissions(
                 "rust_toolchain",
                 clean_opt(&req.rust_toolchain),
                 prev_proj.rust_toolchain.clone(),
+            ),
+            (
+                "zig_home",
+                clean_opt(&req.zig_home),
+                prev_proj.zig_home.clone(),
             ),
             (
                 "node_home",
@@ -514,17 +524,20 @@ impl EnvironmentManager {
                 android_home: clean_opt(&req.android_home),
                 flutter_root: clean_opt(&req.flutter_root),
                 xcode_developer_dir: clean_opt(&req.xcode_developer_dir),
+                zig_home: clean_opt(&req.zig_home),
             }
         } else {
             StoredMobileSdks {
                 android_home: prev_proj.android_home.clone(),
                 flutter_root: prev_proj.flutter_root.clone(),
                 xcode_developer_dir: prev_proj.xcode_developer_dir.clone(),
+                zig_home: prev_proj.zig_home.clone(),
             }
         };
         if next_mobile_sdks.android_home.is_some()
             || next_mobile_sdks.flutter_root.is_some()
             || next_mobile_sdks.xcode_developer_dir.is_some()
+            || next_mobile_sdks.zig_home.is_some()
         {
             let encoded = serde_json::to_string(&next_mobile_sdks)
                 .map_err(|e| Error::Internal(format!("serialize mobile_sdks: {e}")))?;

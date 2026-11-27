@@ -533,6 +533,18 @@ export function detectFastRunConfigs(rootPath: string, entries: IdeFsEntry[]): I
       },
     );
   }
+  if (names.has('build.zig')) {
+    out.push(
+      {
+        id: 'auto:zig_build', name: 'zig build', runner: 'zig_build',
+        args: [], cwd: rootPath, env_overrides: {}, inherit_shell_env: true, auto_detected: true,
+      },
+      {
+        id: 'auto:zig_test', name: 'zig build test', runner: 'zig_test',
+        args: [], cwd: rootPath, env_overrides: {}, inherit_shell_env: true, auto_detected: true,
+      },
+    );
+  }
   if (names.has('package.json')) {
     out.push({
       id: 'auto:npm_test', name: 'npm test', runner: 'npm',

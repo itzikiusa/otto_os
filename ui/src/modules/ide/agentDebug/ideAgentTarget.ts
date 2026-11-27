@@ -107,6 +107,9 @@ export function launchPreview(l: {
     const where = pkg === '.' || pkg.startsWith('./') || pkg.startsWith('/') ? pkg : `./${pkg}`;
     if (l.test_name) parts.push('go test', flags, `-run ${goRunPattern(l.test_name)}`, where, args);
     else parts.push('go run', flags, where, args);
+  } else if (l.language === 'zig') {
+    if (l.test_name) parts.push('zig test', flags, `--test-filter "${l.test_name}"`, prog, args);
+    else parts.push('zig build', flags, prog, args);
   } else if (l.language === 'python') {
     parts.push(l.test_name ? `pytest ${l.test_name.includes('::') ? l.test_name : `${prog}::${l.test_name}`}` : `python ${prog}`, args);
   } else {

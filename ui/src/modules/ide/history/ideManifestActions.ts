@@ -107,5 +107,16 @@ export function buildManifestMenuItems(
       },
     ];
   }
+  if (fileName === 'build.zig.zon') {
+    return [
+      { separator: true },
+      {
+        label: 'Zig Fetch Dependencies',
+        icon: 'refresh',
+        action: () =>
+          void runManifestDepsAction(filePath, 'sync', 'Zig Fetch Dependencies', onTreeOutput, false),
+      },
+    ];
+  }
   return [];
 }

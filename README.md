@@ -462,10 +462,11 @@ including behaviour changes to know before upgrading.
   hand over and reclaim terminal control at any moment, and generate a local
   structured recap (decisions, actions, open questions) once participants consent.
 - **IDE (Beta)** — a multi-language IDE (`#/ide`) on your local or SSH
-  projects: language servers (hover, diagnostics, rename), a git gutter, run
-  configurations with live output and test trees, a DAP debugger with
-  breakpoints, and an agent dock that proposes diffs you apply or undo. See
-  `docs/features/ide.md`.
+  projects (Go, Java, Rust, Zig, TypeScript/JS, Python, Shell): language servers
+  (`gopls`, `jdtls`, `rust-analyzer`, `zls`, `pyright`, `tsserver`), a git gutter,
+  run configurations with live output and test trees, a DAP debugger with
+  breakpoints, watches, variable editing, and an agent dock that proposes diffs
+  you apply or undo. See `docs/features/ide.md`.
 - **Git & Pull Requests** — a GitKraken-style **commit graph** with a WIP row +
   staging panel, per-file diffs, folder-level stage/discard, an interactive
   **conflict resolver** (A/B line picking with live output) that covers merge,

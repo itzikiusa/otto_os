@@ -18,6 +18,7 @@ pub enum IdeEcosystemKind {
     Java,
     Go,
     Rust,
+    Zig,
     #[serde(alias = "javascript", alias = "typescript", alias = "js", alias = "ts")]
     Node,
     Python,
@@ -38,6 +39,7 @@ impl IdeEcosystemKind {
             Self::Java => "java",
             Self::Go => "go",
             Self::Rust => "rust",
+            Self::Zig => "zig",
             Self::Node => "node",
             Self::Python => "python",
             Self::Shell => "shell",
@@ -53,6 +55,7 @@ impl IdeEcosystemKind {
             Self::Java => "Java (Temurin JDK)",
             Self::Go => "Go SDK",
             Self::Rust => "Rust (rustup)",
+            Self::Zig => "Zig",
             Self::Node => "Node.js / TypeScript",
             Self::Python => "Python (uv)",
             Self::Shell => "Shell (Bash / Zsh)",
@@ -185,6 +188,9 @@ pub struct IdeInstallToolchainReq {
     /// Go), so the tool matches it; otherwise the newest Go found is used.
     #[serde(default)]
     pub go_root: Option<String>,
+    /// Zig LSP only: install `zls` matching this Zig installation (or active Zig).
+    #[serde(default)]
+    pub zig_home: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -360,6 +366,8 @@ pub struct IdeProjectEnvironment {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rust_toolchain: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zig_home: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_home: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub python_interpreter: Option<String>,
@@ -395,6 +403,7 @@ impl Default for IdeProjectEnvironment {
             java_home: None,
             go_root: None,
             rust_toolchain: None,
+            zig_home: None,
             node_home: None,
             python_interpreter: None,
             android_home: None,
@@ -422,6 +431,8 @@ pub struct IdeUpdateEnvironmentReq {
     pub go_root: Option<String>,
     #[serde(default)]
     pub rust_toolchain: Option<String>,
+    #[serde(default)]
+    pub zig_home: Option<String>,
     #[serde(default)]
     pub node_home: Option<String>,
     #[serde(default)]

@@ -124,6 +124,7 @@ export function languageFromRunner(runner: string | undefined, fallback: string)
   if (!runner) return fallback;
   if (runner.startsWith('go_')) return 'go';
   if (runner.startsWith('cargo_')) return 'rust';
+  if (runner.startsWith('zig_')) return 'zig';
   if (runner.startsWith('java_') || runner === 'maven' || runner === 'gradle') return 'java';
   if (runner === 'pytest' || runner === 'python') return 'python';
   if (runner === 'node' || runner === 'npm' || runner === 'vitest') return 'javascript';
@@ -550,7 +551,7 @@ function selectedGutterTarget(host: DebugAndEnvHost): IdeGutterItem | null {
 }
 
 const TOOL_ARGV_RUNNERS = new Set([
-  'go_run', 'go_test', 'go_build', 'cargo_run', 'cargo_test', 'pytest', 'npm', 'vitest', 'maven', 'java_junit', 'gradle',
+  'go_run', 'go_test', 'go_build', 'cargo_run', 'cargo_test', 'zig_build', 'zig_run', 'zig_test', 'pytest', 'npm', 'vitest', 'maven', 'java_junit', 'gradle',
 ]);
 
 /** The toolbar/shortcut target when the caller named none (`null` = the caller did). */

@@ -48,6 +48,7 @@ fn manifest_names_for_lang(norm_lang: &str) -> &'static [&'static str] {
             "settings.gradle.kts",
         ],
         "rust" => &["Cargo.toml"],
+        "zig" => &["build.zig", "build.zig.zon"],
         "typescript" | "javascript" => &["tsconfig.json", "jsconfig.json", "package.json"],
         "python" => &[
             "pyproject.toml",
@@ -94,6 +95,7 @@ fn dir_looks_like_child_repo(dir: &Path) -> bool {
         "build.gradle",
         "build.gradle.kts",
         "Cargo.toml",
+        "build.zig",
         "package.json",
         "pyproject.toml",
     ]
@@ -133,6 +135,10 @@ fn is_dependency_dir(dir: &Path) -> bool {
         // Homebrew's GOROOT is `…/go/<ver>/libexec`, the official one `/usr/local/go`.
         || parts.windows(2).any(|w| w == ["libexec", "src"])
         || parts.windows(3).any(|w| w == ["local", "go", "src"])
+        // Zig package cache (`~/.cache/zig/p/...`) and standard library (`…/lib/zig/std`, `…/lib/std`).
+        || parts.windows(2).any(|w| w == [".cache", "zig"])
+        || parts.windows(3).any(|w| w == ["lib", "zig", "std"])
+        || parts.windows(2).any(|w| w == ["lib", "std"])
 }
 
 #[allow(clippy::disallowed_methods)]

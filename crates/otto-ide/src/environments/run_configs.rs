@@ -617,6 +617,7 @@ fn is_allowed_standard_runner_command(runner: IdeRunnerKind, cmd: &str) -> bool 
     match runner {
         IdeRunnerKind::GoTest | IdeRunnerKind::GoRun | IdeRunnerKind::GoBuild => cmd == "go",
         IdeRunnerKind::CargoTest | IdeRunnerKind::CargoRun => cmd == "cargo",
+        IdeRunnerKind::ZigBuild | IdeRunnerKind::ZigRun | IdeRunnerKind::ZigTest => cmd == "zig",
         IdeRunnerKind::Python => matches!(cmd, "python" | "python3"),
         IdeRunnerKind::Pytest => matches!(cmd, "pytest" | "python" | "python3"),
         IdeRunnerKind::Node => cmd == "node",
