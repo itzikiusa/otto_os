@@ -29,6 +29,7 @@ import {
   isPosInCommentOrString,
   LSP_CODE_LANGUAGES,
   lspDiagnosticDedupeKey,
+  lspDocumentLanguageIdFor,
   MAX_POOLED_LSP_CLIENTS,
   normalizeIdeLspLanguage,
   posToLsp,
@@ -60,7 +61,7 @@ import {
   type IdeLspJumpTarget,
 } from './cm-ide-lsp-dive.ts';
 import { appLive } from '../live.ts';
-import { cancelLspReconnects, IDE_LSP_DIAGNOSTICS_EVENT, isLspReconnecting, noteLspDaemonShutdown, noteLspSessionReady, noteLspSocketClosed, noteLspStatus } from './cm-ide-lsp-reconnect.ts';
+import { cancelLspReconnects, IDE_LSP_DIAGNOSTICS_EVENT, isLspReconnecting, lspCooldownKey, lspHandshakeFailureReason, noteLspDaemonShutdown, noteLspSessionReady, noteLspSocketClosed, noteLspStatus } from './cm-ide-lsp-reconnect.ts';
 
 export {
   buildLspCompletionChangeSpec,
@@ -329,7 +330,7 @@ function acquirePooledClient(mod: MarimoMod, opts: AttachPooledLspOptions, resol
   }
 
   const rootUri = pathToFileUri(resolvedRoot);
-  const langProbeKey = `${serverLang}::${connKey}`;
+  const langProbeKey = lspCooldownKey(serverLang, opts.connId, resolvedRoot);
   const openViews = new Map<string, EditorView[]>();
   const transport = new mod.WebSocketTransport(opts.wsUri, opts.protocols);
   const origOnMessage = transport.onMessage.bind(transport);
@@ -471,8 +472,10 @@ function acquirePooledClient(mod: MarimoMod, opts: AttachPooledLspOptions, resol
     const hadSession = !handshakeFailed && Boolean(client.ready) && entry.refCount > 0;
     if (!hadSession && !daemonShutdown && !isLspReconnecting(entry.rootPath)) {
       unavailableLangUntil.set(langProbeKey, Date.now() + 30_000);
-      // Closed before any session (no binary: 503, or refused): say so instead of going silent.
-      if (handshakeFailed || !client.ready) noteLspStatus(entry.rootPath, 'unavailable', serverLang, 'no_session');
+      // Closed before any session (no binary: 503, or refused: 403 trust): say so instead of going silent.
+      if (handshakeFailed || !client.ready) {
+        noteLspStatus(entry.rootPath, 'unavailable', serverLang, lspHandshakeFailureReason(serverLang));
+      }
     }
     const root = entry.rootPath;
     entry.evictFn();
@@ -550,11 +553,11 @@ function acquirePooledClient(mod: MarimoMod, opts: AttachPooledLspOptions, resol
 export async function buildPooledLspExtensions(opts: AttachPooledLspOptions): Promise<Extension[]> {
   if (!shouldAttachIdeLsp(opts.filePath, opts.languageId, opts.rootPath)) return [];
   const serverLang = normalizeIdeLspLanguage(opts.languageId) ?? opts.languageId;
-  const langProbeKey = `${serverLang}::${opts.connId ?? 'local'}`;
-  const cooldownUntil = unavailableLangUntil.get(langProbeKey) ?? 0;
-  if (cooldownUntil > Date.now() && !isLspReconnecting(opts.rootPath)) return [];
-  if (cooldownUntil > 0) unavailableLangUntil.delete(langProbeKey);
   const resolvedRoot = resolveIdeLspModuleRoot(opts.rootPath, opts.filePath, opts.projectFolders);
+  const langProbeKey = lspCooldownKey(serverLang, opts.connId, resolvedRoot);
+  const cooldownUntil = unavailableLangUntil.get(langProbeKey) ?? 0;
+  if (cooldownUntil > Date.now() && !isLspReconnecting(resolvedRoot) && !isLspReconnecting(opts.rootPath)) return [];
+  if (cooldownUntil > 0) unavailableLangUntil.delete(langProbeKey);
   const absFile = toAbsoluteIdeFilePath(resolvedRoot, opts.filePath);
   if (!absFile || isSecretIdePath(absFile)) return [];
 
@@ -612,7 +615,7 @@ export async function buildPooledLspExtensions(opts: AttachPooledLspOptions): Pr
   const exts = mod.languageServerWithClient({
     client: pooled.client,
     documentUri,
-    languageId: opts.languageId,
+    languageId: lspDocumentLanguageIdFor(opts.languageId, opts.filePath),
     hoverEnabled: false,
     completionEnabled: false,
     signatureHelpEnabled: true,

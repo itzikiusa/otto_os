@@ -7,7 +7,19 @@ import { cmLangNow, loadCmLang } from '../src/lib/components/cm-langs.ts';
 import { detectManifestEcosystem, isIdeManifestPath, parseManifestDependencies } from '../src/lib/components/cm-ide-deps-model.ts';
 import { normalizeIdeLspLanguage, shouldAttachIdeLsp } from '../src/lib/components/cm-ide-lsp-completion.ts';
 import { classifySemanticTokens, detectSemanticLang } from '../src/lib/components/cm-ide-semantic.ts';
-import { ideFileKind, ideLanguageLabel, ideLanguageSettingsSection, ideLspLangFor, ideLspServerName } from '../src/modules/ide/editor/ideStatusModel.ts';
+import {
+  applyIdeLspLink,
+  ideFileKind,
+  ideLanguageLabel,
+  ideLanguageSettingsSection,
+  ideLspItem,
+  ideLspLangFor,
+  ideLspServerName,
+} from '../src/modules/ide/editor/ideStatusModel.ts';
+import {
+  lspCooldownKey,
+  lspHandshakeFailureReason,
+} from '../src/lib/components/cm-ide-lsp-reconnect.ts';
 import { detectIdeDocKind, extractInstantSymbols } from '../src/modules/ide/editor/ideLangAnalyzer.ts';
 import { nestParentName } from '../src/modules/ide/history/ideTreeNesting.ts';
 import { resolveRepoTestPlan } from '../src/modules/ide/store/ideRepoTestAndBuildTags.ts';
@@ -142,4 +154,27 @@ test('build.zig.zon manifest parser, nesting, test plans, and debug previews', (
     launchPreview({ language: 'zig', program: '/proj/src/main.zig', root: '/proj', test_name: 'adds' }),
     'zig test --test-filter "adds" src/main.zig',
   );
+
+  // OBS2-1: Failed-attach cooldowns are scoped per project root so an untrusted
+  // Zig project's 403 does not suppress ZLS in a separate trusted Zig project,
+  // and the status item surfaces the project trust opt-in reason.
+  assert.notEqual(
+    lspCooldownKey('zig', null, '/untrusted-zig'),
+    lspCooldownKey('zig', null, '/trusted-zig'),
+  );
+  assert.equal(
+    lspCooldownKey('zig', null, '/trusted-zig/'),
+    lspCooldownKey('zig', null, '/trusted-zig'),
+  );
+  const zigReason = lspHandshakeFailureReason('zig');
+  assert.equal(zigReason, 'trust_or_unavailable');
+  const recs = applyIdeLspLink([], {
+    rootPath: '/untrusted-zig',
+    state: 'unavailable',
+    attempt: 0,
+    lang: 'zig',
+    reason: zigReason,
+  });
+  const item = ideLspItem('zig', recs[0]);
+  assert.ok(item?.title.includes('OTTO_IDE_TRUST_ZIG_BUILD=1'));
 });

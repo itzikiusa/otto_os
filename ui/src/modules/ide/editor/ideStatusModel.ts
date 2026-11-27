@@ -134,7 +134,7 @@ export function ideLspServerName(lang: string): string {
 }
 
 export type IdeLspPhase = 'starting' | 'ready' | 'restarting' | 'lost' | 'unavailable';
-export interface IdeLspRecord { lang: string; rootPath: string; phase: IdeLspPhase }
+export interface IdeLspRecord { lang: string; rootPath: string; phase: IdeLspPhase; reason?: string }
 
 const related = (a: string, b: string): boolean => a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
 
@@ -145,7 +145,7 @@ export function applyIdeLspLink(records: readonly IdeLspRecord[], d: IdeLspLinkD
   if (d.lang) {
     const phase: IdeLspPhase = d.state === 'ready' ? 'ready' : d.state === 'unavailable' ? 'unavailable' : 'starting';
     const rest = records.filter((r) => !(r.lang === d.lang && r.rootPath === root));
-    return [...rest, { lang: d.lang, rootPath: root, phase }];
+    return [...rest, { lang: d.lang, rootPath: root, phase, ...(d.reason ? { reason: d.reason } : {}) }];
   }
   const phase: IdeLspPhase | null =
     d.state === 'connected' ? 'ready' : d.state === 'lost' ? 'lost' : d.state === 'reconnecting' || d.state === 'waiting' ? 'restarting' : null;
@@ -178,6 +178,22 @@ export function ideLspItem(lang: string, rec: IdeLspRecord | null): IdeLspItem |
     case 'lost':
       return { label: `${name} disconnected`, tone: 'bad', title: 'The language server connection dropped. Click to retry.', action: 'retry' };
     case 'unavailable':
+      if (rec.reason === 'trust_or_unavailable' && lang === 'zig') {
+        return {
+          label: `${name} untrusted / unavailable`,
+          tone: 'bad',
+          title: `${name} did not start for this project — set OTTO_IDE_TRUST_ZIG_BUILD=1 (or OTTO_IDE_TRUST_PROJECT_EXECUTION=1) in Project Environment to trust build.zig, or install zls via Toolchains & SDKs.`,
+          action: 'settings',
+        };
+      }
+      if (rec.reason === 'trust_or_unavailable' && lang === 'kotlin') {
+        return {
+          label: `${name} untrusted / unavailable`,
+          tone: 'bad',
+          title: `${name} did not start for this project — set OTTO_IDE_TRUST_KOTLIN_LSP=1 (or OTTO_IDE_TRUST_PROJECT_EXECUTION=1) in Project Environment to trust build import, or install it via Toolchains & SDKs.`,
+          action: 'settings',
+        };
+      }
       return {
         label: `${name} unavailable`,
         tone: 'bad',
