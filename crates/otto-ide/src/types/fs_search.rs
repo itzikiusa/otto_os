@@ -367,6 +367,10 @@ pub enum IdeRunnerKind {
     CargoTest,
     #[serde(alias = "cargo")]
     CargoRun,
+    ZigBuild,
+    ZigTest,
+    #[serde(alias = "zig")]
+    ZigRun,
     Node,
     #[serde(alias = "npm_script")]
     Npm,

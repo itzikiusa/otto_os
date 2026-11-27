@@ -7,6 +7,7 @@
   import Icon from '../../../lib/components/Icon.svelte';
   import Modal from '../../../lib/components/Modal.svelte';
   import { copyWithToast } from '../../../lib/clipboard';
+  import { confirmer } from '../../../lib/confirm.svelte';
   import { ctxMenu } from '../../../lib/contextmenu.svelte';
   import { rowMenu } from '../../../lib/rowMenu';
   import { ide, type IdeVariable } from '../ideStore.svelte';
@@ -16,6 +17,8 @@
     vars: readonly IdeVariable[];
     /** Path of the parent (a scope name, or an evaluate result's id). */
     root: string;
+    /** DAP `variablesReference` of the container holding `vars` (for `setVariable`). */
+    parentRef?: number;
     /** Ancestors of `vars` (for "Copy as expression"); empty under a scope. */
     chain?: readonly IdeVariable[];
     openPaths: Readonly<Record<string, boolean>>;
@@ -24,7 +27,7 @@
     depth?: number;
   }
 
-  let { vars, root, chain = [], openPaths, onsetopen, changed, depth = 0 }: Props = $props();
+  let { vars, root, parentRef = 0, chain = [], openPaths, onsetopen, changed, depth = 0 }: Props = $props();
 
   const VAR_CAP = 100;
   let loadingRefs = $state<Record<number, boolean>>({});
@@ -42,10 +45,29 @@
     finally { loadingRefs = { ...loadingRefs, [ref]: false }; }
   }
 
-  function openMenu(e: MouseEvent, v: IdeVariable, ancestors: readonly IdeVariable[]): void {
+  async function editVariableValue(v: IdeVariable, containerRef: number): Promise<void> {
+    if (containerRef <= 0) return;
+    const next = await confirmer.promptText(`New value for ${v.name}`, {
+      title: 'Set variable value',
+      confirmLabel: 'Set value',
+      initial: v.value,
+      placeholder: v.value,
+    });
+    if (next == null) return;
+    if (await ide.setDebugVariable(containerRef, v.name, next)) void ide.refreshWatches();
+  }
+
+  function openMenu(e: MouseEvent, v: IdeVariable, ancestors: readonly IdeVariable[], containerRef: number): void {
     e.preventDefault();
     const expr = copyExpression([...ancestors, v]);
+    const canSet = containerRef > 0 && ide.activeDebug?.state === 'paused';
     ctxMenu.show(e, [
+      ...(canSet
+        ? [
+            { label: 'Set value…', icon: 'edit' as const, action: () => void editVariableValue(v, containerRef) },
+            { separator: true as const },
+          ]
+        : []),
       { label: 'Copy value', icon: 'copy', action: () => void copyWithToast(v.value, v.name) },
       { label: 'Copy name', action: () => void copyWithToast(v.name, 'name') },
       { label: 'Copy as expression', action: () => void copyWithToast(expr, 'expression') },
@@ -56,7 +78,7 @@
   }
 </script>
 
-{#snippet rows(list: readonly IdeVariable[], level: number, parent: string, ancestors: readonly IdeVariable[])}
+{#snippet rows(list: readonly IdeVariable[], level: number, parent: string, ancestors: readonly IdeVariable[], containerRef: number)}
   {@const capKey = parent}
   {@const capped = !showAll[capKey] && list.length > VAR_CAP ? list.slice(0, VAR_CAP) : list}
   {#each capped as v (`${v.name}:${v.variables_reference}`)}
@@ -70,7 +92,7 @@
       class:is-changed={isChanged}
       style:padding-inline-start={`${12 + level * 14}px`}
       role="listitem"
-      oncontextmenu={(e) => openMenu(e, v, ancestors)}
+      oncontextmenu={(e) => openMenu(e, v, ancestors, containerRef)}
       use:rowMenu
       data-testid="ide-debug-var-row"
       data-var-name={v.name}
@@ -91,7 +113,7 @@
       <span class="dbg-var-eq dim">=</span>
       <span class="dbg-var-val mono ellipsis" dir="ltr" title={isChanged ? `${v.value} (changed)` : v.value}>{v.value}</span>
       {#if v.var_type}<span class="dbg-var-type mono ellipsis" dir="ltr" title={v.var_type}>{v.var_type}</span>{/if}
-      <button type="button" class="icon-btn reveal-on-hover" aria-label={`More actions for ${v.name}`} title={`More actions for ${v.name}`} onclick={(e) => openMenu(e, v, ancestors)}>
+      <button type="button" class="icon-btn reveal-on-hover" aria-label={`More actions for ${v.name}`} title={`More actions for ${v.name}`} onclick={(e) => openMenu(e, v, ancestors, containerRef)}>
         <Icon name="more" size={12} />
       </button>
     </div>
@@ -103,7 +125,7 @@
       {:else if children.length === 0}
         <div class="dbg-var-empty dim" style:padding-inline-start={`${26 + level * 14}px`}>Empty</div>
       {:else}
-        {@render rows(children, level + 1, path, [...ancestors, v])}
+        {@render rows(children, level + 1, path, [...ancestors, v], v.variables_reference)}
       {/if}
     {/if}
   {/each}
@@ -116,7 +138,7 @@
   {/if}
 {/snippet}
 
-{@render rows(vars, depth, root, chain)}
+{@render rows(vars, depth, root, chain, parentRef)}
 
 {#if viewing}
   {@const v = viewing}

@@ -6,7 +6,7 @@
 import type { Text } from '@codemirror/state';
 
 export type SemanticLangKind =
-  | 'go' | 'java' | 'ts' | 'rust' | 'python' | 'shell' | 'json' | 'csv' | 'other';
+  | 'go' | 'java' | 'ts' | 'rust' | 'zig' | 'python' | 'shell' | 'json' | 'csv' | 'other';
 
 export type SemanticRole =
   | 'fg' | 'keyword' | 'control' | 'func-decl' | 'func-call' | 'field'
@@ -95,6 +95,7 @@ export function detectSemanticLang(filePath: string, language?: string): Semanti
     return 'ts';
   }
   if (ext === 'rs' || language === 'rust') return 'rust';
+  if (ext === 'zig' || ext === 'zon' || language === 'zig') return 'zig';
   if (ext === 'py' || ext === 'pyi' || language === 'python') return 'python';
   if (['sh', 'bash', 'zsh', 'bats'].includes(ext) || language === 'shell' || language === 'shellscript') return 'shell';
   if (['json', 'jsonc', 'jsonl', 'ndjson'].includes(ext) || language === 'json' || language === 'jsonl') return 'json';
@@ -102,7 +103,7 @@ export function detectSemanticLang(filePath: string, language?: string): Semanti
 }
 
 export const CONTROL_KW = new Set(
-  'if else for range return switch case default select defer go break continue fallthrough try catch finally throw throws while do match loop await async yield elif except raise with'.split(' '),
+  'if else for range return switch case default select defer errdefer go break continue fallthrough try catch orelse unreachable finally throw throws while do match loop await async suspend resume yield elif except raise with'.split(' '),
 );
 
 export const GO_BUILTIN_TYPES = new Set(
@@ -116,6 +117,7 @@ export const GENERAL_KW = new Set(
     'transient native sealed non-sealed permits class enum record extends implements new instanceof ' +
     'void boolean short long double float char null this super export from let function typeof keyof ' +
     'readonly as in of undefined fn mut pub impl trait mod use where crate self Self unsafe dyn move ' +
+    'comptime inline noinline extern packed align linksection callconv threadlocal allowzero anytype anyframe nosuspend union opaque test ' +
     'ref def None True False and or not is lambda pass global nonlocal fi then done esac'
   ).split(' '),
 );
@@ -574,6 +576,20 @@ export function buildSymbolModel(
         const callIdx = line.indexOf(`${fnName}(`);
         const fnOffset = callIdx >= 0 ? callIdx : Math.max(0, line.indexOf(fnName));
         registerFuncDecl(fnName, i, line, lineStart, lineEnd, lineStart + fnOffset + fnName.length);
+      }
+    } else if (lang === 'zig') {
+      const mType = /^(?:pub\s+)?const\s+([A-Za-z_]\w*)\s*=\s*(?:packed\s+|extern\s+)?(?:struct|enum|union|opaque|error)\b/.exec(trimmed);
+      if (mType) {
+        typeNames.add(mType[1]);
+        continue;
+      }
+      const mFn = /^(?:pub\s+)?(?:export\s+|extern(?:\s+"[^"]*")?\s+|inline\s+|noinline\s+)*fn\s+([A-Za-z_]\w*)\s*\(/.exec(trimmed);
+      if (mFn) {
+        const fnName = mFn[1];
+        const fnIdx = line.indexOf(fnName);
+        if (fnIdx >= 0) {
+          registerFuncDecl(fnName, i, line, lineStart, lineEnd, lineStart + fnIdx + fnName.length);
+        }
       }
     } else if (lang === 'ts' || lang === 'rust' || lang === 'python' || lang === 'shell') {
       const re =

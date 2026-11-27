@@ -211,6 +211,9 @@ pub(super) fn add_language_specific_actions(
             "rust" => Some(format!(
                 "\n#[test]\nfn test_{name}() {{\n    // TODO: test {name}\n}}\n"
             )),
+            "zig" => Some(format!(
+                "\ntest \"{name}\" {{\n    // TODO: test {name}\n}}\n"
+            )),
             "python" => Some(format!(
                 "\ndef test_{name}():\n    # TODO: test {name}\n    assert True\n"
             )),
@@ -326,7 +329,7 @@ pub(super) fn build_doc_comment_action(
         return Some((doc, join_preserving_nl(&updated, content)));
     }
     let comment = match lang {
-        "rust" => format!("{indent}/// Documentation for `{sym_name}`."),
+        "rust" | "zig" => format!("{indent}/// Documentation for `{sym_name}`."),
         "go" => format!("{indent}// {sym_name} performs ..."),
         _ => format!("{indent}/** Documentation for `{sym_name}`. */"),
     };

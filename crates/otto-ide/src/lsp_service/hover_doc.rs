@@ -77,6 +77,15 @@ fn extract_package_or_module_name(path: &str, lang: &str, lines: &[&str]) -> Opt
             return Some(name);
         }
     }
+    if lang == "zig" {
+        let zon = Path::new(path)
+            .ancestors()
+            .skip(1)
+            .find_map(|d| std::fs::read_to_string(d.join("build.zig.zon")).ok());
+        if let Some(name) = zon.and_then(|z| parse_zig_zon_package_name(&z)) {
+            return Some(name);
+        }
+    }
     Path::new(path)
         .parent()
         .and_then(|p| p.file_name())
@@ -93,7 +102,7 @@ fn extract_clean_signature(
     let raw = lines[idx].trim();
     let clean_code = if matches!(
         lang,
-        "go" | "java" | "kotlin" | "rust" | "typescript" | "javascript"
+        "go" | "java" | "kotlin" | "rust" | "zig" | "typescript" | "javascript"
     ) && !raw.contains('"')
     {
         raw.split("//").next().unwrap_or(raw).trim()
@@ -147,10 +156,12 @@ fn extract_clean_signature(
 
     let kind = if clean_code.contains("interface ") {
         "interface"
-    } else if clean_code.contains("struct ") {
+    } else if clean_code.contains("struct ") || clean_code.contains("= struct") {
         "struct"
-    } else if clean_code.contains("enum ") {
+    } else if clean_code.contains("enum ") || clean_code.contains("= enum") {
         "enum"
+    } else if clean_code.contains("= union") || clean_code.contains("union(") {
+        "union"
     } else if clean_code.contains("class ") || clean_code.contains("record ") {
         "class"
     } else if clean_code.contains("fn ")
@@ -348,4 +359,29 @@ fn summarize_doc(raw: Option<&str>) -> (Option<String>, Option<String>) {
     }
     let summary = paragraphs.first().cloned();
     (summary, Some(doc.to_string()))
+}
+
+fn parse_zig_zon_package_name(zon: &str) -> Option<String> {
+    for line in zon.lines() {
+        let t = line.split("//").next().unwrap_or("").trim();
+        if let Some(rest) = t.strip_prefix(".name") {
+            let val = rest
+                .trim()
+                .strip_prefix('=')?
+                .trim()
+                .trim_end_matches(',')
+                .trim();
+            if let Some(ident) = val.strip_prefix('.') {
+                let clean = ident.trim();
+                if !clean.is_empty() {
+                    return Some(clean.to_string());
+                }
+            } else if let Some(quoted) = val.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+                if !quoted.is_empty() {
+                    return Some(quoted.to_string());
+                }
+            }
+        }
+    }
+    None
 }

@@ -3,7 +3,7 @@
 // Powers instant Cmd+F12 File Structure, Prev/Next Function, JSONPath breadcrumbs,
 // JSON Pretty/Minify/Sort transforms, and instant local Shell/JSON/$ref dive-in.
 
-import { loadErrorText } from '../../../lib/loadError';
+import { loadErrorText } from '../../../lib/loadError.ts';
 import type { IdeSymbolNode } from '../store/ideTypes';
 
 type OutlineCsvDelim = ',' | '\t' | ';' | '|';
@@ -63,7 +63,7 @@ function detectOutlineCsvDelim(sampleText: string, filePath: string): OutlineCsv
 export type IdeOutlineNode = IdeSymbolNode & { column?: number };
 
 export type IdeDocKind =
-  | 'go' | 'ts' | 'java' | 'rust' | 'python' | 'shell' | 'json' | 'jsonl' | 'csv' | 'other';
+  | 'go' | 'ts' | 'java' | 'rust' | 'zig' | 'python' | 'shell' | 'json' | 'jsonl' | 'csv' | 'other';
 
 export function detectIdeDocKind(filePath: string, language?: string): IdeDocKind {
   if (filePath.startsWith('jdt://')) return 'java';
@@ -77,6 +77,7 @@ export function detectIdeDocKind(filePath: string, language?: string): IdeDocKin
   if (ext === 'go' || language === 'go') return 'go';
   if (ext === 'java' || ext === 'class' || language === 'java') return 'java';
   if (ext === 'rs' || language === 'rust') return 'rust';
+  if (ext === 'zig' || ext === 'zon' || language === 'zig') return 'zig';
   if (ext === 'py' || ext === 'pyi' || language === 'python') return 'python';
   if (
     ext === 'sh' || ext === 'bash' || ext === 'zsh' || ext === 'bats' ||
@@ -193,6 +194,26 @@ export function extractInstantSymbols(filePath: string, language: string | undef
       }
       const mMacro = /^macro_rules!\s+(\w+)/.exec(trimmed);
       if (mMacro) out.push({ name: `${mMacro[1]}!`, kind: 'function', line: ln, column: 1, end_line: ln, children: [] });
+    } else if (kind === 'zig') {
+      const mFn = /^(?:pub\s+)?(?:export\s+|extern(?:\s+"[^"]*")?\s+|inline\s+|noinline\s+)*fn\s+(\w+)\s*\(/.exec(trimmed);
+      if (mFn) {
+        out.push({ name: mFn[1], kind: 'function', line: ln, column: 1, end_line: ln, children: [] });
+        continue;
+      }
+      const mType = /^(?:pub\s+)?const\s+(\w+)\s*=\s*(?:packed\s+|extern\s+)?(struct|enum|union|opaque|error)\b/.exec(trimmed);
+      if (mType) {
+        out.push({ name: mType[1], kind: mType[2] === 'enum' ? 'enum' : 'struct', line: ln, column: 1, end_line: ln, children: [] });
+        continue;
+      }
+      const mTestStr = /^test\s+"([^"]+)"\s*\{?/.exec(trimmed);
+      if (mTestStr) {
+        out.push({ name: mTestStr[1], kind: 'test', line: ln, column: 1, end_line: ln, children: [] });
+        continue;
+      }
+      const mTestDecl = /^test\s+([A-Za-z_]\w*)\s*\{?/.exec(trimmed);
+      if (mTestDecl) {
+        out.push({ name: mTestDecl[1], kind: 'test', line: ln, column: 1, end_line: ln, children: [] });
+      }
     } else if (kind === 'shell') {
       const mFn = /^(?:function\s+([\w.:-]+)(?:\s*\(\s*\))?|([\w.:-]+)\s*\(\s*\))\s*\{?/.exec(trimmed);
       if (mFn) {

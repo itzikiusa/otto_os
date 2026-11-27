@@ -57,6 +57,8 @@ use self::module_sdks::{
 };
 use self::runner::ActiveRunHandle;
 pub use self::runner_parsers::parse_test_output;
+#[cfg(test)]
+pub(crate) use self::runner_parsers::parse_zig_test_line;
 pub use self::shell_env::{parse_sentinel_env_zero, probe_remote_shell_env, ShellEnvResolver};
 
 const MAX_SYNC_PROJECT_SNAPSHOTS: usize = 128;

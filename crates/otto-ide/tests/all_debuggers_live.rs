@@ -30,8 +30,8 @@ fn var_names<'a>(vars: &[&'a serde_json::Value]) -> Vec<&'a str> {
 /// A session snapshot without its variables (see [`var_names`]).
 fn brief(sess: &serde_json::Value) -> String {
     format!(
-        "state={} paused_line={} title={}",
-        sess["state"], sess["paused_line"], sess["title"]
+        "state={} paused_line={} title={} error={}",
+        sess["state"], sess["paused_line"], sess["title"], sess["error"]
     )
 }
 
@@ -926,4 +926,268 @@ async fn live_shell_bridge_stops_in_a_file_sourced_through_dotdot() {
         let end = wait_until_terminated(&app, &sid, Duration::from_secs(10)).await;
         assert!(joined_output(&end).contains("GREET_DONE"), "{fname}: {end}");
     }
+}
+
+#[tokio::test]
+async fn live_zig_lldb_debugs_types_watch_set_variable_tests_and_panic() {
+    if !ensure_bins_or_skip(&["zig", "lldb"]) {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("zig-sample");
+    std::fs::create_dir_all(ws.join("src")).unwrap();
+    let main_zig = ws.join("src/main.zig");
+    std::fs::write(
+        &main_zig,
+        r#"const std = @import("std");
+
+const Point = struct {
+    x: i32,
+    y: i32,
+};
+
+const MyErr = error{Boom};
+
+fn add(a: i32, b: i32) i32 {
+    const total = a + b;
+    return total;
+}
+
+pub fn main() !void {
+    var counter: i32 = 4;
+    counter += 1;
+    const greeting: []const u8 = "hello zig";
+    const nums: []const i32 = &.{ 10, 20, 30 };
+    var opt_some: ?i32 = null;
+    opt_some = counter + 37;
+    var opt_none: ?i32 = 1;
+    opt_none = null;
+    const res_ok: MyErr!i32 = if (counter > 0) counter + 2 else MyErr.Boom;
+    const res_err: MyErr!i32 = if (counter < 0) counter else MyErr.Boom;
+    const pt = Point{ .x = 3, .y = 4 };
+    const sum = add(counter, pt.x);
+    std.debug.print("ZIG_DONE:{d}:{s}:{d}:{d}:{d}:{d}\n", .{ counter, greeting, sum, nums.len, opt_some orelse -1, opt_none orelse -1 });
+    _ = .{ res_ok catch 0, res_err catch 0 };
+}
+
+test "addition works" {
+    const result = add(19, 23);
+    try std.testing.expectEqual(@as(i32, 42), result);
+}
+"#,
+    )
+    .unwrap();
+
+    let (_ctx, app) = build_test_app(tmp.path().join("data"), &tmp.path().join("db.sqlite")).await;
+    let ws_str = ws.to_string_lossy().into_owned();
+    let main_str = main_zig.to_string_lossy().into_owned();
+
+    // 1. Main program: breakpoint on line 27 (`const sum = add(counter, pt.x);`)
+    let (st, start) = send_json(
+        &app,
+        Method::POST,
+        "/ide/debug/sessions",
+        Some(json!({
+            "target": { "kind": "local", "root": ws_str },
+            "language": "zig",
+            "launch": { "program": main_str, "cwd": ws_str },
+            "breakpoints": [{ "path": main_str, "line": 27 }],
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "Zig start_debug failed: {start}");
+    let sid = start["session"]["id"].as_str().unwrap().to_string();
+
+    let snap1 = wait_until_paused(&app, &sid, FIRST_PAUSE).await;
+    assert_eq!(
+        snap1["paused_line"],
+        27,
+        "Zig paused_line mismatch: {}",
+        brief(&snap1)
+    );
+    let vars1 = all_vars(&snap1);
+    let var_val = |name: &str| -> String {
+        vars1
+            .iter()
+            .find(|v| v["name"] == name)
+            .and_then(|v| v["value"].as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    assert!(
+        var_val("counter").contains("5"),
+        "expected counter=5, names={:?}",
+        var_names(&vars1)
+    );
+    assert!(
+        var_val("greeting").contains("hello zig"),
+        "expected Zig []const u8 pretty-printer for greeting, got '{}'",
+        var_val("greeting")
+    );
+    assert!(
+        var_val("nums").contains("10") && var_val("nums").contains("30"),
+        "expected Zig []const i32 pretty-printer for nums, got '{}'",
+        var_val("nums")
+    );
+    assert!(
+        var_val("opt_some").contains("42"),
+        "expected Zig ?i32 pretty-printer for opt_some, got '{}'",
+        var_val("opt_some")
+    );
+    assert!(
+        var_val("opt_none").contains("null"),
+        "expected Zig ?i32 pretty-printer for opt_none=null, got '{}'",
+        var_val("opt_none")
+    );
+    assert!(
+        var_val("res_ok").contains("7"),
+        "expected Zig error union pretty-printer for res_ok, got '{}'",
+        var_val("res_ok")
+    );
+    assert!(
+        var_val("res_err").contains("error") || var_val("res_err").contains("Boom"),
+        "expected Zig error union pretty-printer for res_err, got '{}'",
+        var_val("res_err")
+    );
+
+    // Watch / evaluate expression
+    let (st_ev, ev_body) = send_json(
+        &app,
+        Method::POST,
+        &format!("/ide/debug/sessions/{sid}/evaluate"),
+        Some(json!({ "expression": "counter + 10" })),
+    )
+    .await;
+    assert_eq!(st_ev, StatusCode::OK, "Zig evaluate failed: {ev_body}");
+    assert!(
+        ev_body["result"].as_str().unwrap_or("").contains("15"),
+        "expected 15 from counter + 10, got {ev_body}"
+    );
+
+    // Set variable via `POST /ide/debug/sessions/{id}/set-variable`
+    let locals_ref = snap1["scopes"][0]["variables_reference"]
+        .as_i64()
+        .unwrap_or(0);
+    assert!(
+        locals_ref > 0,
+        "expected Locals scope variables_reference > 0"
+    );
+    let (st_sv, sv_body) = send_json(
+        &app,
+        Method::POST,
+        &format!("/ide/debug/sessions/{sid}/set-variable"),
+        Some(json!({
+            "variables_reference": locals_ref,
+            "name": "counter",
+            "value": "99",
+        })),
+    )
+    .await;
+    assert_eq!(st_sv, StatusCode::OK, "Zig set-variable failed: {sv_body}");
+    assert!(
+        sv_body["value"].as_str().unwrap_or("").contains("99"),
+        "expected 99 after set-variable, got {sv_body}"
+    );
+
+    // Step into `add(counter, pt.x)` and step over
+    send_cmd(&app, &sid, "step_into").await;
+    let snap2 = wait_until_paused(&app, &sid, Duration::from_secs(10)).await;
+    let paused2 = snap2["paused_line"].as_u64().unwrap_or(0);
+    assert!(
+        (10..=13).contains(&paused2),
+        "expected step_into inside add() (lines 10..13), got line {paused2}: {}",
+        brief(&snap2)
+    );
+
+    send_cmd(&app, &sid, "continue").await;
+    let end = wait_until_terminated(&app, &sid, Duration::from_secs(15)).await;
+    assert_eq!(
+        end["state"], "terminated",
+        "Zig session ended in error: {end}"
+    );
+    let out = joined_output(&end);
+    assert!(
+        out.contains("ZIG_DONE:99:hello zig:102:3:42:-1"),
+        "expected mutated counter=99 and sum=102 in Zig output, got: {out}"
+    );
+
+    // 2. Single `test "addition works"` debug via `test_name` filter
+    let (st_t, start_t) = send_json(
+        &app,
+        Method::POST,
+        "/ide/debug/sessions",
+        Some(json!({
+            "target": { "kind": "local", "root": ws_str },
+            "language": "zig",
+            "launch": {
+                "program": main_str,
+                "cwd": ws_str,
+                "test_name": "addition works",
+            },
+            "breakpoints": [{ "path": main_str, "line": 34 }],
+        })),
+    )
+    .await;
+    assert_eq!(
+        st_t,
+        StatusCode::OK,
+        "Zig test start_debug failed: {start_t}"
+    );
+    let sid_t = start_t["session"]["id"].as_str().unwrap().to_string();
+    let snap_t = wait_until_paused(&app, &sid_t, FIRST_PAUSE).await;
+    assert_eq!(
+        snap_t["paused_line"],
+        34,
+        "Zig test paused_line mismatch: {}",
+        brief(&snap_t)
+    );
+    let vars_t = all_vars(&snap_t);
+    assert!(
+        vars_t
+            .iter()
+            .any(|v| v["name"] == "result" && v["value"].as_str().unwrap_or("").contains("42")),
+        "expected result=42 in Zig test locals: {vars_t:?}"
+    );
+    send_cmd(&app, &sid_t, "continue").await;
+    let end_t = wait_until_terminated(&app, &sid_t, Duration::from_secs(15)).await;
+    assert_eq!(
+        end_t["state"], "terminated",
+        "Zig test debug session ended in error: {end_t}"
+    );
+
+    // 3. Panic breakpoint (`break_on_exceptions: true` catches `@panic(...)`)
+    let panic_zig = ws.join("src/panic_demo.zig");
+    std::fs::write(
+        &panic_zig,
+        "pub fn main() void {\n    @panic(\"deliberate zig boom\");\n}\n",
+    )
+    .unwrap();
+    let panic_str = panic_zig.to_string_lossy().into_owned();
+    let (st_p, start_p) = send_json(
+        &app,
+        Method::POST,
+        "/ide/debug/sessions",
+        Some(json!({
+            "target": { "kind": "local", "root": ws_str },
+            "language": "zig",
+            "launch": { "program": panic_str, "cwd": ws_str },
+            "breakpoints": [],
+            "break_on_exceptions": true,
+        })),
+    )
+    .await;
+    assert_eq!(
+        st_p,
+        StatusCode::OK,
+        "Zig panic start_debug failed: {start_p}"
+    );
+    let sid_p = start_p["session"]["id"].as_str().unwrap().to_string();
+    let snap_p = wait_until_paused(&app, &sid_p, FIRST_PAUSE).await;
+    assert_eq!(
+        snap_p["state"],
+        "paused",
+        "expected Zig panic session to pause on @panic: {}",
+        brief(&snap_p)
+    );
+    send_cmd(&app, &sid_p, "stop").await;
 }

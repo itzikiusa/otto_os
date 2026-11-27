@@ -43,6 +43,19 @@ impl IncrementalTestTracker {
                     self.push_capped(tc);
                 }
             }
+            IdeRunnerKind::ZigTest => {
+                if let Some(tc) = parse_zig_test_line(line) {
+                    self.push_capped(tc);
+                } else if let Some((file, ln, msg)) = parse_zig_diag_line(line.trim()) {
+                    if let Some(last) = self.results.last_mut() {
+                        last.file.get_or_insert(file);
+                        last.line.get_or_insert(ln);
+                        if last.message.is_none() {
+                            last.message = Some(msg);
+                        }
+                    }
+                }
+            }
             IdeRunnerKind::Pytest => {
                 if let Some(tc) = parse_python_test_line(line) {
                     self.push_capped(tc);
@@ -251,6 +264,61 @@ fn parse_cargo_test_line(line: &str) -> Option<IdeTestCaseResult> {
         return None;
     };
     Some(simple_test_case(name.trim(), status, None))
+}
+
+pub(crate) fn parse_zig_test_line(line: &str) -> Option<IdeTestCaseResult> {
+    // Zig test runner output formats:
+    //   `1/3 main.test.addition works...OK`
+    //   `2/3 main.test.failing case...FAIL (TestExpectedEqual)`
+    //   `3/3 main.test.skipped...SKIP`
+    let t = line.trim();
+    let (prefix, rest) = t.split_once(' ')?;
+    let (cur, total) = prefix.split_once('/')?;
+    if !cur.chars().all(|c| c.is_ascii_digit())
+        || cur.is_empty()
+        || !total.chars().all(|c| c.is_ascii_digit())
+        || total.is_empty()
+    {
+        return None;
+    }
+    let (raw_name, outcome) = rest.rsplit_once("...")?;
+    let outcome = outcome.trim();
+    let (status, msg) = if outcome == "OK" || outcome.starts_with("OK ") {
+        (IdeTestCaseStatus::Passed, None)
+    } else if outcome == "FAIL" || outcome.starts_with("FAIL") {
+        let detail = outcome
+            .strip_prefix("FAIL")
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        (IdeTestCaseStatus::Failed, detail)
+    } else if outcome == "SKIP" || outcome.starts_with("SKIP") {
+        (IdeTestCaseStatus::Skipped, None)
+    } else {
+        return None;
+    };
+    let clean_name = raw_name
+        .trim()
+        .split_once(".test.")
+        .map(|(_, after)| after)
+        .unwrap_or_else(|| raw_name.trim());
+    let mut tc = simple_test_case(clean_name, status, None);
+    tc.message = msg;
+    Some(tc)
+}
+
+fn parse_zig_diag_line(trimmed: &str) -> Option<(String, u32, String)> {
+    let (file_part, rest) = trimmed.split_once(".zig:")?;
+    if file_part.contains(' ') {
+        return None;
+    }
+    let (line_s, tail) = rest.split_once(':')?;
+    let line_no = line_s.trim().parse::<u32>().ok()?;
+    let msg = tail
+        .split_once(':')
+        .map(|(_, m)| m.trim())
+        .unwrap_or_else(|| tail.trim());
+    Some((format!("{file_part}.zig"), line_no, msg.to_string()))
 }
 
 fn parse_python_test_line(line: &str) -> Option<IdeTestCaseResult> {

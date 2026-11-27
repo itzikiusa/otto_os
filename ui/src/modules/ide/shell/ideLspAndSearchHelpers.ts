@@ -646,6 +646,26 @@ export async function runEvaluateDebug(
   }
 }
 
+export async function runSetDebugVariable(
+  host: IdeLspSearchHost,
+  variablesRef: number,
+  name: string,
+  value: string,
+): Promise<boolean> {
+  if (!host.activeDebug || variablesRef <= 0 || !name.trim()) return false;
+  try {
+    await api.post<{ value: string; var_type?: string | null; variables_reference: number }>(
+      `/ide/debug/sessions/${encodeURIComponent(host.activeDebug.id)}/set-variable`,
+      { variables_reference: variablesRef, name, value },
+    );
+    await runExpandVariables(host, variablesRef);
+    return true;
+  } catch (e) {
+    toastError(`Couldn’t set ${name}`, e);
+    return false;
+  }
+}
+
 export async function runSendCursorUpdate(
   host: IdeLspSearchHost,
   path: string,

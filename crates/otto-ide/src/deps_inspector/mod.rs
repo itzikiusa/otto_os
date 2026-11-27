@@ -28,7 +28,8 @@ use self::enrich::{
 use self::go_mod::enrich_go_mod_updates;
 pub use self::go_mod::parse_go_mod;
 pub use self::parsers::{
-    apply_cargo_lock_versions, parse_cargo_toml, parse_package_json, parse_python_deps,
+    apply_cargo_lock_versions, parse_build_zig_zon, parse_cargo_toml, parse_package_json,
+    parse_python_deps,
 };
 
 /// Inspect a manifest file (`go.mod`, `pom.xml`, `build.gradle*`, `package.json`,
@@ -137,6 +138,9 @@ pub async fn inspect_dependencies_scoped(
         let mut list = parse_python_deps(fname, &content);
         enrich_pypi_updates(&mut list).await;
         ("pypi", "PyPI", list)
+    } else if fname == "build.zig.zon" {
+        let list = parse_build_zig_zon(&content);
+        ("zig", "", list)
     } else {
         return IdeDepsInspectResp {
             ecosystem: "unknown".into(),
@@ -144,7 +148,7 @@ pub async fn inspect_dependencies_scoped(
         };
     };
 
-    if !items.is_empty() && !otto_core::e2e::isolated() {
+    if !items.is_empty() && !osv_eco.is_empty() && !otto_core::e2e::isolated() {
         enrich_osv_vulnerabilities(osv_eco, &mut items).await;
     }
 

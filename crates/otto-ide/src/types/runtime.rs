@@ -304,6 +304,21 @@ pub struct IdeDebugEvaluateResp {
     pub variables_reference: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdeDebugSetVariableReq {
+    pub variables_reference: i64,
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdeDebugSetVariableResp {
+    pub value: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub var_type: Option<String>,
+    pub variables_reference: i64,
+}
+
 /// `GET /ide/debug/sessions/{id}/port?port=` — an agent launch's `ready_port`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct IdeDebugPortQuery {

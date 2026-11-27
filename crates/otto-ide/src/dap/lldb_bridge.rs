@@ -52,8 +52,9 @@ class _LldbDapBridge:
         self.process = None
         self.launch_cfg = {}
         self.bp_ids_by_file = {}
+        self.fn_bp_ids = []
         self.logpoints = {}
-        self.panic_bp_id = None
+        self.panic_bp_ids = []
         self.frame_map = {}
         self.val_refs = {}
         self.next_ref = 1000
@@ -64,11 +65,85 @@ class _LldbDapBridge:
         self.val_refs[self.next_ref] = sbval
         return self.next_ref
 
+    def _format_zig_sbval(self, v, tname):
+        if tname.startswith('[]'):
+            ptr = v.GetChildMemberWithName('ptr')
+            ln_val = v.GetChildMemberWithName('len')
+            if ptr and ptr.IsValid() and ln_val and ln_val.IsValid():
+                length = ln_val.GetValueAsUnsigned(0)
+                if length == 0:
+                    return '"" (len=0)' if 'u8' in tname else '[] (len=0)'
+                addr = ptr.GetValueAsUnsigned(0)
+                if addr == 0:
+                    return f'null (len={length})'
+                elem_type = ptr.GetType().GetPointeeType()
+                elem_name = elem_type.GetName() or ''
+                if ('u8' in tname or elem_name in ('unsigned char', 'u8', 'const unsigned char', 'const u8')) and self.process and self.process.IsValid():
+                    read_len = min(length, 256)
+                    err = lldb.SBError()
+                    data = self.process.ReadMemory(addr, read_len, err)
+                    if err.Success() and data is not None:
+                        try:
+                            text = data.decode('utf-8')
+                            if all(ch.isprintable() or ch in '\t\r\n' for ch in text):
+                                esc = text.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t')
+                                suffix = '...' if length > read_len else ''
+                                return f'"{esc}{suffix}" (len={length})'
+                        except Exception:
+                            pass
+                elem_size = elem_type.GetByteSize()
+                if self.target and self.target.IsValid() and elem_size > 0:
+                    shown = min(length, 8)
+                    elems = []
+                    for i in range(shown):
+                        ev = self.target.CreateValueFromAddress(f'[{i}]', lldb.SBAddress(addr + i * elem_size, self.target), elem_type)
+                        elems.append(ev.GetSummary() or ev.GetValue() or '{...}')
+                    more = ', ...' if length > shown else ''
+                    return f'[len={length}] {{{", ".join(elems)}{more}}}'
+                return f'[len={length}]'
+        if tname.startswith('?'):
+            some = v.GetChildMemberWithName('some')
+            data = v.GetChildMemberWithName('data')
+            if some and some.IsValid():
+                if some.GetValueAsUnsigned(0) == 0:
+                    return 'null'
+                if data and data.IsValid():
+                    d, _, _ = self._format_sbval(data)
+                    return d
+                return 'some'
+        if '!' in tname:
+            tag = v.GetChildMemberWithName('tag')
+            val = v.GetChildMemberWithName('value')
+            if tag and tag.IsValid():
+                code = tag.GetValueAsUnsigned(0)
+                if code == 0:
+                    if val and val.IsValid():
+                        d, _, _ = self._format_sbval(val)
+                        return f'ok({d})'
+                    return 'ok'
+                ts = tag.GetValue() or str(code)
+                return f'error(#{code})' if ts.isdigit() else f'error.{ts}'
+        if v.GetNumChildren(4) == 2:
+            tag = v.GetChildMemberWithName('tag')
+            payload = v.GetChildMemberWithName('payload')
+            if tag and tag.IsValid() and payload and payload.IsValid():
+                tstr = (tag.GetValue() or '').strip()
+                if tstr:
+                    active = payload.GetChildMemberWithName(tstr)
+                    if active and active.IsValid():
+                        d, _, _ = self._format_sbval(active)
+                        return f'.{tstr} = {d}'
+                    return f'.{tstr}'
+        return None
+
     def _format_sbval(self, v):
         tname = v.GetDisplayTypeName() or v.GetTypeName() or ''
+        zig_disp = self._format_zig_sbval(v, tname)
         summary = v.GetSummary()
         val = v.GetValue()
-        if summary and val:
+        if zig_disp is not None:
+            disp = zig_disp
+        elif summary and val:
             disp = f'{summary}' if tname.endswith('str') or 'String' in tname else f'{val} ({summary})'
         elif summary:
             disp = summary
@@ -238,8 +313,13 @@ class _LldbDapBridge:
                 'supportsConditionalBreakpoints': True,
                 'supportsHitConditionalBreakpoints': True,
                 'supportsLogPoints': True,
+                'supportsFunctionBreakpoints': True,
+                'supportsSetVariable': True,
                 'supportsTerminateRequest': True,
-                'exceptionBreakpointFilters': [{'filter': 'rust_panic', 'label': 'Rust Panics'}]
+                'exceptionBreakpointFilters': [
+                    {'filter': 'rust_panic', 'label': 'Rust Panics'},
+                    {'filter': 'zig_panic', 'label': 'Zig Panics'}
+                ]
             }})
         elif cmd in ('launch', 'attach'):
             self.launch_cfg = args
@@ -253,15 +333,36 @@ class _LldbDapBridge:
             _send({'type': 'event', 'event': 'initialized', 'body': {}})
         elif cmd == 'setBreakpoints':
             self.apply_breakpoints(rseq, args)
+        elif cmd == 'setFunctionBreakpoints':
+            fbps = args.get('breakpoints') or []
+            ack = []
+            with _state_lock:
+                for old_id in self.fn_bp_ids:
+                    if self.target and self.target.IsValid():
+                        self.target.BreakpointDelete(old_id)
+                self.fn_bp_ids = []
+                for fb in fbps:
+                    name = (fb.get('name') or '').strip()
+                    if not name or not self.target or not self.target.IsValid():
+                        ack.append({'verified': False})
+                        continue
+                    sbbp = self.target.BreakpointCreateByName(name)
+                    self.fn_bp_ids.append(sbbp.GetID())
+                    ack.append({'verified': sbbp.GetNumLocations() > 0})
+            _send({'type': 'response', 'request_seq': rseq, 'success': True, 'command': cmd, 'body': {'breakpoints': ack}})
         elif cmd == 'setExceptionBreakpoints':
             filters = args.get('filters') or []
             with _state_lock:
-                if self.panic_bp_id and self.target and self.target.IsValid():
-                    self.target.BreakpointDelete(self.panic_bp_id)
-                    self.panic_bp_id = None
+                for old_id in self.panic_bp_ids:
+                    if self.target and self.target.IsValid():
+                        self.target.BreakpointDelete(old_id)
+                self.panic_bp_ids = []
                 if filters and self.target and self.target.IsValid():
-                    pbp = self.target.BreakpointCreateByName('rust_panic')
-                    self.panic_bp_id = pbp.GetID()
+                    lang = (self.launch_cfg.get('language') or '').lower()
+                    names = ['debug.defaultPanic', 'builtin.default_panic', 'debug.panicImpl'] if lang == 'zig' else ['rust_panic']
+                    for sym in names:
+                        pbp = self.target.BreakpointCreateByName(sym)
+                        self.panic_bp_ids.append(pbp.GetID())
             _send({'type': 'response', 'request_seq': rseq, 'success': True, 'command': cmd, 'body': {}})
         elif cmd == 'configurationDone':
             argv = [str(x) for x in (self.launch_cfg.get('args') or [])]
@@ -346,6 +447,33 @@ class _LldbDapBridge:
                         disp, tname, cref = self._format_sbval(ch)
                         out.append({'name': nm, 'value': disp, 'type': tname, 'variablesReference': cref})
             _send({'type': 'response', 'request_seq': rseq, 'success': True, 'command': cmd, 'body': {'variables': out}})
+        elif cmd == 'setVariable':
+            vref = int(args.get('variablesReference') or 0)
+            name = (args.get('name') or '').strip()
+            new_val = str(args.get('value') or '')
+            with _state_lock:
+                target_var = None
+                if vref >= 100000:
+                    fid = vref - 100000
+                    tid, fidx = self.frame_map.get(fid, (0, 0))
+                    thr = self.process.GetThreadByID(tid) if (self.process and tid) else (self.process.GetThreadAtIndex(0) if self.process and self.process.GetNumThreads() > 0 else None)
+                    f = thr.GetFrameAtIndex(fidx) if thr and thr.IsValid() else None
+                    if f and f.IsValid():
+                        target_var = f.FindVariable(name)
+                elif vref in self.val_refs:
+                    parent = self.val_refs[vref]
+                    target_var = parent.GetChildMemberWithName(name)
+                if not target_var or not target_var.IsValid():
+                    _send({'type': 'response', 'request_seq': rseq, 'success': False, 'command': cmd, 'message': f'variable {name} not found'})
+                    return
+                err = lldb.SBError()
+                ok = target_var.SetValueFromCString(new_val, err)
+                if not ok or err.Fail():
+                    msg = err.GetCString() or f'failed to set variable {name}'
+                    _send({'type': 'response', 'request_seq': rseq, 'success': False, 'command': cmd, 'message': msg})
+                    return
+                disp, tname, cref = self._format_sbval(target_var)
+            _send({'type': 'response', 'request_seq': rseq, 'success': True, 'command': cmd, 'body': {'value': disp, 'type': tname, 'variablesReference': cref}})
         elif cmd == 'evaluate':
             expr = (args.get('expression') or '').strip()
             fid = int(args.get('frameId') or 1)

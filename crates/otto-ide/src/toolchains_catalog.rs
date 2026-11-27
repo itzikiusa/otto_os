@@ -180,6 +180,15 @@ impl TargetPlatform {
             (TargetOs::Linux, TargetArch::X86_64) => "linux-x64",
         }
     }
+
+    pub const fn zig_index_key(self) -> &'static str {
+        match (self.os, self.arch) {
+            (TargetOs::Macos, TargetArch::Aarch64) => "aarch64-macos",
+            (TargetOs::Macos, TargetArch::X86_64) => "x86_64-macos",
+            (TargetOs::Linux, TargetArch::Aarch64) => "aarch64-linux",
+            (TargetOs::Linux, TargetArch::X86_64) => "x86_64-linux",
+        }
+    }
 }
 
 /// First-class supported language toolchain ecosystems.
@@ -189,6 +198,7 @@ pub enum EcosystemKind {
     Java,
     Go,
     Rust,
+    Zig,
     Node,
     Python,
     Shell,
@@ -199,10 +209,11 @@ pub enum EcosystemKind {
 }
 
 impl EcosystemKind {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Java,
         Self::Go,
         Self::Rust,
+        Self::Zig,
         Self::Node,
         Self::Python,
         Self::Shell,
@@ -217,6 +228,7 @@ impl EcosystemKind {
             "java" | "jdk" => Some(Self::Java),
             "go" | "golang" => Some(Self::Go),
             "rust" | "cargo" => Some(Self::Rust),
+            "zig" | "zls" => Some(Self::Zig),
             "node" | "nodejs" | "javascript" | "typescript" | "js" | "ts" => Some(Self::Node),
             "python" | "py" | "uv" => Some(Self::Python),
             "shell" | "bash" | "sh" | "zsh" => Some(Self::Shell),
@@ -233,6 +245,7 @@ impl EcosystemKind {
             Self::Java => "java",
             Self::Go => "go",
             Self::Rust => "rust",
+            Self::Zig => "zig",
             Self::Node => "node",
             Self::Python => "python",
             Self::Shell => "shell",
@@ -248,6 +261,7 @@ impl EcosystemKind {
             Self::Java => "Java (Temurin JDK)",
             Self::Go => "Go",
             Self::Rust => "Rust",
+            Self::Zig => "Zig",
             Self::Node => "Node.js (JS / TS)",
             Self::Python => "Python (uv)",
             Self::Shell => "Shell (Bash / Zsh)",
@@ -263,6 +277,7 @@ impl EcosystemKind {
             Self::Java => "jdtls",
             Self::Go => "gopls",
             Self::Rust => "rust-analyzer",
+            Self::Zig => "zls",
             Self::Node => "typescript-language-server",
             Self::Python => "pyright",
             Self::Shell => "bash-language-server",
@@ -278,6 +293,7 @@ impl EcosystemKind {
             Self::Java => "java-debug",
             Self::Go => "dlv",
             Self::Rust => "codelldb",
+            Self::Zig => "codelldb",
             Self::Node => "js-debug",
             Self::Python => "debugpy",
             Self::Shell => "bashdb",
@@ -293,6 +309,7 @@ impl EcosystemKind {
             Self::Java => "21",
             Self::Go => "1.24.2",
             Self::Rust => "stable",
+            Self::Zig => "0.14.0",
             Self::Node => "22.14.0",
             Self::Python => "3.13",
             Self::Shell => "3.10.0",
@@ -325,6 +342,7 @@ impl From<crate::types::IdeEcosystemKind> for EcosystemKind {
             crate::types::IdeEcosystemKind::Java => Self::Java,
             crate::types::IdeEcosystemKind::Go => Self::Go,
             crate::types::IdeEcosystemKind::Rust => Self::Rust,
+            crate::types::IdeEcosystemKind::Zig => Self::Zig,
             crate::types::IdeEcosystemKind::Node => Self::Node,
             crate::types::IdeEcosystemKind::Python => Self::Python,
             crate::types::IdeEcosystemKind::Shell => Self::Shell,
@@ -342,6 +360,7 @@ impl From<EcosystemKind> for crate::types::IdeEcosystemKind {
             EcosystemKind::Java => Self::Java,
             EcosystemKind::Go => Self::Go,
             EcosystemKind::Rust => Self::Rust,
+            EcosystemKind::Zig => Self::Zig,
             EcosystemKind::Node => Self::Node,
             EcosystemKind::Python => Self::Python,
             EcosystemKind::Shell => Self::Shell,
@@ -415,6 +434,24 @@ pub fn codelldb_vsix_url(platform: TargetPlatform) -> String {
     format!(
         "https://github.com/vadimcn/codelldb/releases/download/v1.11.4/codelldb-{}.vsix",
         platform.codelldb_slug()
+    )
+}
+
+pub fn zig_tarball_url(version: &str, platform: TargetPlatform) -> String {
+    let clean = version.trim().trim_start_matches('v');
+    format!(
+        "https://ziglang.org/download/{clean}/zig-{}-{}-{clean}.tar.xz",
+        platform.os.as_str(),
+        platform.arch.as_str()
+    )
+}
+
+pub fn zls_tarball_url(version: &str, platform: TargetPlatform) -> String {
+    let clean = version.trim().trim_start_matches('v');
+    format!(
+        "https://github.com/zigtools/zls/releases/download/{clean}/zls-{}-{}.tar.xz",
+        platform.arch.as_str(),
+        platform.os.as_str()
     )
 }
 
@@ -526,6 +563,23 @@ pub fn curated_catalog(ecosystem: EcosystemKind, platform: TargetPlatform) -> Ve
             arch: arch.clone(),
             url: rustup_init_url(platform),
             size_hint: Some("180 MB".to_string()),
+            sha256: None,
+        })
+        .collect(),
+        EcosystemKind::Zig => [
+            ("0.14.0", true, "46 MB"),
+            ("0.13.0", false, "44 MB"),
+            ("0.12.1", false, "43 MB"),
+        ]
+        .into_iter()
+        .map(|(ver, lts, sz)| CatalogSdkEntry {
+            version: ver.to_string(),
+            label: format!("Zig {ver}"),
+            lts,
+            os: os.clone(),
+            arch: arch.clone(),
+            url: zig_tarball_url(ver, platform),
+            size_hint: Some(sz.to_string()),
             sha256: None,
         })
         .collect(),
@@ -663,6 +717,19 @@ pub fn resolve_sdk_download(
             size_hint: None,
             sha256: None,
         }),
+        EcosystemKind::Zig => {
+            let clean = ver.trim_start_matches('v').to_string();
+            Ok(CatalogSdkEntry {
+                version: clean.clone(),
+                label: format!("Zig {clean}"),
+                lts: true,
+                os,
+                arch,
+                url: zig_tarball_url(&clean, platform),
+                size_hint: None,
+                sha256: None,
+            })
+        }
         EcosystemKind::Node => {
             let clean = ver.trim_start_matches('v').to_string();
             Ok(CatalogSdkEntry {
@@ -937,6 +1004,81 @@ pub fn parse_uv_release_json(raw: &str, platform: TargetPlatform) -> Vec<Catalog
     entries
 }
 
+pub fn parse_zig_index_json(raw: &str, platform: TargetPlatform) -> Vec<CatalogSdkEntry> {
+    let Ok(serde_json::Value::Object(root)) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return Vec::new();
+    };
+    let key = platform.zig_index_key();
+    let mut entries: Vec<(bool, (u32, u32, u32), CatalogSdkEntry)> = Vec::new();
+    for (ver_key, meta) in root {
+        let is_master = ver_key == "master";
+        let resolved_ver = if is_master {
+            meta.get("version")
+                .and_then(|v| v.as_str())
+                .unwrap_or("master")
+                .to_string()
+        } else {
+            ver_key.clone()
+        };
+        if !is_safe_version_token(&resolved_ver) {
+            continue;
+        }
+        let Some(target_obj) = meta.get(key) else {
+            continue;
+        };
+        let Some(url) = target_obj
+            .get("tarball")
+            .and_then(|v| v.as_str())
+            .filter(|u| u.starts_with("https://"))
+        else {
+            continue;
+        };
+        let sha256 = normalize_sha256(target_obj.get("shasum").and_then(|v| v.as_str()));
+        let size_hint = target_obj
+            .get("size")
+            .and_then(|v| {
+                v.as_str()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .or_else(|| v.as_u64())
+            })
+            .map(format_mb);
+        let mut nums = resolved_ver
+            .split(['.', '-', '+'])
+            .filter_map(|p| p.parse::<u32>().ok());
+        let semver = (
+            nums.next().unwrap_or(0),
+            nums.next().unwrap_or(0),
+            nums.next().unwrap_or(0),
+        );
+        let label = if is_master {
+            format!("Zig master ({resolved_ver})")
+        } else {
+            format!("Zig {resolved_ver}")
+        };
+        entries.push((
+            is_master,
+            semver,
+            CatalogSdkEntry {
+                version: resolved_ver,
+                label,
+                lts: false,
+                os: platform.os.as_str().to_string(),
+                arch: platform.arch.as_str().to_string(),
+                url: url.to_string(),
+                size_hint,
+                sha256,
+            },
+        ));
+    }
+    // Stable releases newest-first, master at the end.
+    entries.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
+    let mut out: Vec<CatalogSdkEntry> = entries.into_iter().take(12).map(|(_, _, e)| e).collect();
+    if let Some(first_stable) = out.iter_mut().find(|e| !e.label.starts_with("Zig master")) {
+        first_stable.lts = true;
+    }
+    out
+}
+
 // ── Live + Cached Catalog Client ─────────────────────────────────────────────
 
 struct CachedPlatformCatalog {
@@ -1043,17 +1185,19 @@ impl CatalogClient {
             }
         }
 
-        let (java, go, rust, node, python) = tokio::join!(
+        let (java, go, rust, zig, node, python) = tokio::join!(
             self.fetch_java(platform),
             self.fetch_go(platform),
             self.fetch_rust(platform),
+            self.fetch_zig(platform),
             self.fetch_node(platform),
             self.fetch_python(platform),
         );
-        let mut map = HashMap::with_capacity(10);
+        let mut map = HashMap::with_capacity(11);
         map.insert(EcosystemKind::Java, java);
         map.insert(EcosystemKind::Go, go);
         map.insert(EcosystemKind::Rust, rust);
+        map.insert(EcosystemKind::Zig, zig);
         map.insert(EcosystemKind::Node, node);
         map.insert(EcosystemKind::Python, python);
         map.insert(
@@ -1151,6 +1295,19 @@ impl CatalogClient {
             return parse_rust_channel_toml(&raw, platform);
         }
         curated_catalog(EcosystemKind::Rust, platform)
+    }
+
+    async fn fetch_zig(&self, platform: TargetPlatform) -> Vec<CatalogSdkEntry> {
+        if let Some(raw) = self
+            .get_text("https://ziglang.org/download/index.json")
+            .await
+        {
+            let parsed = parse_zig_index_json(&raw, platform);
+            if !parsed.is_empty() {
+                return parsed;
+            }
+        }
+        curated_catalog(EcosystemKind::Zig, platform)
     }
 
     async fn fetch_node(&self, platform: TargetPlatform) -> Vec<CatalogSdkEntry> {

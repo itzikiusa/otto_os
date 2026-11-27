@@ -215,6 +215,7 @@ enum SdkKindHint {
     Java,
     Python,
     Rust,
+    Zig,
     Node,
     GenericPath,
 }
@@ -238,6 +239,9 @@ fn infer_sdk_kind(
             }
             IdeRunnerKind::Python | IdeRunnerKind::Pytest => return SdkKindHint::Python,
             IdeRunnerKind::CargoRun | IdeRunnerKind::CargoTest => return SdkKindHint::Rust,
+            IdeRunnerKind::ZigBuild | IdeRunnerKind::ZigRun | IdeRunnerKind::ZigTest => {
+                return SdkKindHint::Zig;
+            }
             IdeRunnerKind::Node
             | IdeRunnerKind::Npm
             | IdeRunnerKind::Vitest
@@ -264,6 +268,9 @@ fn infer_sdk_kind(
         }
         if lower == "rust" || lower.ends_with(".rs") {
             return SdkKindHint::Rust;
+        }
+        if lower == "zig" || lower.ends_with(".zig") || lower.ends_with(".zon") {
+            return SdkKindHint::Zig;
         }
         if matches!(
             lower.as_str(),
@@ -304,6 +311,16 @@ fn infer_sdk_kind(
     if sp.join("bin/rustc").is_file() || sp.join("bin/cargo").is_file() || s_low.contains("rust") {
         return SdkKindHint::Rust;
     }
+    if sp.join("zig").is_file()
+        || sp.join("bin/zig").is_file()
+        || s_low.ends_with("/zig")
+        || s_low.contains("/zig/")
+        || s_low.contains("zig-macos")
+        || s_low.contains("zig-linux")
+        || s_low.contains(".zvm")
+    {
+        return SdkKindHint::Zig;
+    }
     if sp.join("bin/node").is_file()
         || s_low.ends_with("/node")
         || s_low.contains("/node/")
@@ -326,6 +343,9 @@ fn infer_sdk_kind(
     }
     if mr.join("Cargo.toml").is_file() {
         return SdkKindHint::Rust;
+    }
+    if mr.join("build.zig").is_file() || mr.join("build.zig.zon").is_file() {
+        return SdkKindHint::Zig;
     }
     if mr.join("package.json").is_file() {
         return SdkKindHint::Node;
@@ -379,6 +399,14 @@ pub(crate) fn apply_module_sdk_to_project_env(
                 .or_else(|| trimmed.strip_suffix("/bin"))
                 .unwrap_or(trimmed);
             proj.rust_toolchain = Some(root.to_string());
+        }
+        SdkKindHint::Zig => {
+            let root = trimmed
+                .strip_suffix("/bin/zig")
+                .or_else(|| trimmed.strip_suffix("/zig"))
+                .or_else(|| trimmed.strip_suffix("/bin"))
+                .unwrap_or(trimmed);
+            proj.zig_home = Some(root.to_string());
         }
         SdkKindHint::Node => {
             let root = trimmed
@@ -471,6 +499,9 @@ pub(super) async fn layer_child_and_module_sdk_for_run(
                 }
                 if mod_proj.rust_toolchain.is_some() {
                     proj.rust_toolchain = mod_proj.rust_toolchain;
+                }
+                if mod_proj.zig_home.is_some() {
+                    proj.zig_home = mod_proj.zig_home;
                 }
                 if mod_proj.node_home.is_some() {
                     proj.node_home = mod_proj.node_home;

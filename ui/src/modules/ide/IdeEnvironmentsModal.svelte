@@ -55,6 +55,7 @@
   let goRoot = $state('');
   let goBuildTagsText = $state('');
   let rustToolchain = $state('');
+  let zigHome = $state('');
   let nodeHome = $state('');
   let pythonInterpreter = $state('');
   let dotenvPath = $state('');
@@ -80,6 +81,7 @@
       goRoot: goRoot.trim(),
       goBuildTagsText: goBuildTagsText.trim(),
       rustToolchain: rustToolchain.trim(),
+      zigHome: zigHome.trim(),
       nodeHome: nodeHome.trim(),
       pythonInterpreter: pythonInterpreter.trim(),
       dotenvPath: dotenvPath.trim(),
@@ -210,6 +212,7 @@
       goRoot = e.go_root ?? '';
       goBuildTagsText = (e.go_build_tags ?? []).join(', ');
       rustToolchain = e.rust_toolchain ?? '';
+      zigHome = e.zig_home ?? '';
       nodeHome = e.node_home ?? '';
       pythonInterpreter = e.python_interpreter ?? '';
       dotenvPath = e.dotenv_path ?? '';
@@ -340,6 +343,7 @@
         go_root: goRoot.trim() || null,
         go_build_tags: parsedGoTags,
         rust_toolchain: rustToolchain.trim() || null,
+        zig_home: zigHome.trim() || null,
         node_home: nodeHome.trim() || null,
         python_interpreter: pythonInterpreter.trim() || null,
         dotenv_path: dotenvPath.trim() || null,
@@ -521,6 +525,14 @@
                     <option value="stable">stable</option>
                     <option value="nightly">nightly</option>
                     {#each sdkOptionsFor('rust') as opt (opt.value)}<option value={opt.value}>{opt.label}</option>{/each}
+                  </datalist>
+                </div>
+
+                <div class="field">
+                  <label for="env-zig-home">Zig SDK</label>
+                  <input id="env-zig-home" class="input" type="text" dir="ltr" list="env-zig-datalist" placeholder="System default zig" bind:value={zigHome} />
+                  <datalist id="env-zig-datalist">
+                    {#each sdkOptionsFor('zig') as opt (opt.value)}<option value={opt.value}>{opt.label}</option>{/each}
                   </datalist>
                 </div>
 

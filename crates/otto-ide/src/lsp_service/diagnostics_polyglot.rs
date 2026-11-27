@@ -238,6 +238,70 @@ pub(super) fn analyze_rust_diagnostics(path: &str, content: &str) -> Vec<IdeDiag
     find_simple_unused_imports(path, "rust", content)
 }
 
+pub(super) async fn analyze_zig_diagnostics(
+    path: &str,
+    content: &str,
+    env_map: &BTreeMap<String, String>,
+) -> Vec<IdeDiagnostic> {
+    if !path.ends_with(".zon") {
+        let mut cmd = Command::new("zig");
+        cmd.arg("ast-check")
+            .env_clear()
+            .envs(crate::environments::shell_env::collect_safe_non_root_base_env());
+        for (k, v) in env_map {
+            if !crate::environments::is_dangerous_loader_env_key(k) {
+                cmd.env(k, v);
+            }
+        }
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        if let Some((ok, stderr)) =
+            run_stdin_diag_cmd(cmd, content.as_bytes(), true, DIAG_CMD_TIMEOUT).await
+        {
+            if !ok {
+                let parsed = parse_zig_ast_check_stderr(&stderr);
+                if !parsed.is_empty() {
+                    return parsed;
+                }
+            }
+        }
+    }
+    find_simple_unused_imports(path, "zig", content)
+}
+
+pub(crate) fn parse_zig_ast_check_stderr(stderr: &str) -> Vec<IdeDiagnostic> {
+    static RE_ZIG: OnceLock<Regex> = OnceLock::new();
+    let re = RE_ZIG
+        .get_or_init(|| Regex::new(r"^.+?:(\d+):(\d+):\s*(error|warning|note):\s*(.+)$").unwrap());
+    let mut diags = Vec::new();
+    for line in stderr.lines() {
+        let trimmed = line.trim_end_matches('\r');
+        if let Some(cap) = re.captures(trimmed) {
+            let ln: u32 = cap[1].parse().unwrap_or(1);
+            let col: u32 = cap[2].parse().unwrap_or(1);
+            let sev = match &cap[3] {
+                "warning" => "warning",
+                "note" => "info",
+                _ => "error",
+            };
+            diags.push(IdeDiagnostic {
+                line: ln,
+                col,
+                end_line: ln,
+                end_col: col + 1,
+                severity: sev.into(),
+                code: "zig_ast_check".into(),
+                source: "zig".into(),
+                message: cap[4].trim().to_string(),
+                quick_fixes: Vec::new(),
+            });
+        }
+    }
+    diags
+}
+
 fn find_simple_unused_imports(path: &str, lang: &str, content: &str) -> Vec<IdeDiagnostic> {
     let lines: Vec<&str> = content.lines().collect();
     let mut imports: Vec<(u32, String)> = Vec::new();
@@ -305,6 +369,22 @@ fn find_simple_unused_imports(path: &str, lang: &str, content: &str) -> Vec<IdeD
                     .trim();
                 if !sym.is_empty() {
                     imports.push((ln, sym.to_string()));
+                }
+            }
+            "zig" => {
+                if let Some(rest) = t.strip_prefix("const ") {
+                    if let Some((lhs, rhs)) = rest.split_once('=') {
+                        let rhs_t = rhs.trim();
+                        if rhs_t.starts_with("@import(") && rhs_t.ends_with(';') {
+                            let sym = lhs.trim();
+                            if !sym.is_empty()
+                                && sym != "_"
+                                && sym.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                            {
+                                imports.push((ln, sym.to_string()));
+                            }
+                        }
+                    }
                 }
             }
             _ => {}

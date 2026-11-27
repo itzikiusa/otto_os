@@ -107,6 +107,8 @@ fn has_project_manifest(dir: &Path) -> bool {
     const MANIFESTS: &[&str] = &[
         "go.mod",
         "Cargo.toml",
+        "build.zig",
+        "build.zig.zon",
         "package.json",
         "pyproject.toml",
         "setup.py",
@@ -130,6 +132,7 @@ fn has_project_manifest(dir: &Path) -> bool {
         }
     }
     !list_files_with_suffix(dir, ".go").is_empty()
+        || !list_files_with_suffix(dir, ".zig").is_empty()
         || !list_files_with_suffix(dir, ".py").is_empty()
         || !list_files_with_suffix(dir, ".sh").is_empty()
 }
@@ -147,6 +150,10 @@ fn scan_project_folder(root: &Path, root_badge: Option<&str>, out: &mut Vec<IdeR
         return;
     }
     discover_rust(root, &proj_name, root_badge, &cwd_override, out);
+    if out.len() >= MAX_DISCOVERED_CONFIGS {
+        return;
+    }
+    discover_zig(root, &proj_name, root_badge, &cwd_override, out);
     if out.len() >= MAX_DISCOVERED_CONFIGS {
         return;
     }
@@ -454,6 +461,139 @@ fn discover_rust(
         cwd.clone(),
         None,
     ));
+}
+
+// ── 2b. Zig (`build.zig`, `build.zig.zon`, `src/main.zig`, `*.zig`) ──────────
+
+pub(crate) fn parse_zig_build_steps(build_zig_text: &str) -> Vec<String> {
+    let mut steps = Vec::new();
+    let mut rest = build_zig_text;
+    while let Some(pos) = rest.find(".step(") {
+        let after = &rest[pos + 6..];
+        let trimmed = after.trim_start();
+        if let Some(after_quote) = trimmed.strip_prefix('"') {
+            if let Some(end_q) = after_quote.find('"') {
+                let step_name = after_quote[..end_q].trim();
+                if !step_name.is_empty()
+                    && step_name
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+                    && !steps.iter().any(|s| s == step_name)
+                {
+                    steps.push(step_name.to_string());
+                }
+            }
+        }
+        rest = after;
+    }
+    steps
+}
+
+fn discover_zig(
+    root: &Path,
+    proj_name: &str,
+    root_badge: Option<&str>,
+    cwd: &Option<String>,
+    out: &mut Vec<IdeRunConfig>,
+) {
+    let build_zig = root.join("build.zig");
+    let has_build_zig = build_zig.is_file();
+    let root_zig_files = list_files_with_suffix(root, ".zig");
+    if !has_build_zig && root_zig_files.is_empty() {
+        return;
+    }
+
+    if has_build_zig {
+        let steps = read_head(&build_zig)
+            .map(|s| parse_zig_build_steps(&s))
+            .unwrap_or_default();
+
+        out.push(make_auto_config(
+            root_badge,
+            IdeRunnerKind::ZigBuild,
+            "build",
+            format!("Zig Build ({proj_name})"),
+            Some("zig"),
+            vec!["build".into()],
+            cwd.clone(),
+            None,
+        ));
+
+        if steps.iter().any(|s| s == "run") {
+            out.push(make_auto_config(
+                root_badge,
+                IdeRunnerKind::ZigBuild,
+                "run",
+                format!("Zig Build Run ({proj_name})"),
+                Some("zig"),
+                vec!["build".into(), "run".into()],
+                cwd.clone(),
+                Some("run".into()),
+            ));
+        }
+        if steps.iter().any(|s| s == "test") {
+            out.push(make_auto_config(
+                root_badge,
+                IdeRunnerKind::ZigTest,
+                "test",
+                format!("Zig Build Test ({proj_name})"),
+                Some("zig"),
+                vec!["build".into(), "test".into()],
+                cwd.clone(),
+                Some("test".into()),
+            ));
+        }
+        for step in steps
+            .into_iter()
+            .filter(|s| s != "run" && s != "test")
+            .take(6)
+        {
+            out.push(make_auto_config(
+                root_badge,
+                IdeRunnerKind::ZigBuild,
+                &format!("step-{step}"),
+                format!("Zig Build {step}"),
+                Some("zig"),
+                vec!["build".into(), step.clone()],
+                cwd.clone(),
+                Some(step),
+            ));
+        }
+        return;
+    }
+
+    for zig_file in root_zig_files.into_iter().take(6) {
+        let Some(fname) = zig_file.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let Some(head) = read_head(&zig_file) else {
+            continue;
+        };
+        if head.contains("pub fn main(") {
+            out.push(make_auto_config(
+                root_badge,
+                IdeRunnerKind::ZigRun,
+                fname,
+                format!("Zig Run {fname}"),
+                Some("zig"),
+                vec!["run".into(), fname.to_string()],
+                cwd.clone(),
+                Some(fname.to_string()),
+            ));
+        }
+        if head.contains("test \"") || head.contains("test {") {
+            out.push(make_auto_config(
+                root_badge,
+                IdeRunnerKind::ZigTest,
+                &format!("test-{fname}"),
+                format!("Zig Test {fname}"),
+                Some("zig"),
+                vec!["test".into(), fname.to_string()],
+                cwd.clone(),
+                Some(fname.to_string()),
+            ));
+        }
+    }
 }
 
 pub(crate) fn parse_cargo_package_name(toml_text: &str) -> Option<String> {

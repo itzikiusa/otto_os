@@ -118,8 +118,41 @@ export const PY_PIPELINE_SOURCE = [
   '',
 ].join('\n');
 
+export const ZIG_MAIN_SOURCE = [
+  'const std = @import("std");',
+  '',
+  'pub const Settlement = struct {',
+  '    amount: i32,',
+  '    bonus: i32,',
+  '',
+  '    pub fn total(self: Settlement) i32 {',
+  '        return self.amount + self.bonus;',
+  '    }',
+  '};',
+  '',
+  'pub fn computeBonus(amount: i32, rate: i32) i32 {',
+  '    return amount + rate * 2;',
+  '}',
+  '',
+  'pub fn triggerPanic() noreturn {',
+  '    @panic("deliberate zig settlement panic");',
+  '}',
+  '',
+  'pub fn main() !void {',
+  '    const item = Settlement{ .amount = 40, .bonus = computeBonus(10, 5) };',
+  '    const total = item.total();',
+  '    std.debug.print("ZIG_SETTLEMENT_DONE:{d}\\n", .{total});',
+  '}',
+  '',
+  'test "settlement total" {',
+  '    const item = Settlement{ .amount = 30, .bonus = 12 };',
+  '    try std.testing.expectEqual(@as(i32, 42), item.total());',
+  '}',
+  '',
+].join('\n');
+
 export function seedPolyglotFiles(dir: string): void {
-  for (const sub of ['app', 'decimal', 'pyapp', 'web', 'scripts', 'notes', 'src/main/java/com/otto']) {
+  for (const sub of ['app', 'decimal', 'pyapp', 'zigapp/src', 'web', 'scripts', 'notes', 'src/main/java/com/otto']) {
     mkdirSync(join(dir, sub), { recursive: true });
   }
 
@@ -186,6 +219,48 @@ export function seedPolyglotFiles(dir: string): void {
   writeFileSync(join(dir, 'src/main/java/com/otto', 'BonusService.java'), JAVA_BONUS_SOURCE);
   writeFileSync(join(dir, 'pyapp', '__init__.py'), '');
   writeFileSync(join(dir, 'pyapp', 'pipeline.py'), PY_PIPELINE_SOURCE);
+
+  writeFileSync(
+    join(dir, 'zigapp', 'build.zig'),
+    [
+      'const std = @import("std");',
+      '',
+      'pub fn build(b: *std.Build) void {',
+      '    const target = b.standardTargetOptions(.{});',
+      '    const optimize = b.standardOptimizeOption(.{});',
+      '    const exe = b.addExecutable(.{',
+      '        .name = "zigapp",',
+      '        .root_source_file = b.path("src/main.zig"),',
+      '        .target = target,',
+      '        .optimize = optimize,',
+      '    });',
+      '    b.installArtifact(exe);',
+      '    const run_step = b.step("run", "Run the app");',
+      '    run_step.dependOn(&b.addRunArtifact(exe).step);',
+      '    const unit_tests = b.addTest(.{',
+      '        .root_source_file = b.path("src/main.zig"),',
+      '        .target = target,',
+      '        .optimize = optimize,',
+      '    });',
+      '    const test_step = b.step("test", "Run unit tests");',
+      '    test_step.dependOn(&b.addRunArtifact(unit_tests).step);',
+      '}',
+      '',
+    ].join('\n'),
+  );
+  writeFileSync(
+    join(dir, 'zigapp', 'build.zig.zon'),
+    [
+      '.{',
+      '    .name = .zigapp,',
+      '    .version = "0.1.0",',
+      '    .dependencies = .{},',
+      '    .paths = .{ "build.zig", "build.zig.zon", "src" },',
+      '}',
+      '',
+    ].join('\n'),
+  );
+  writeFileSync(join(dir, 'zigapp', 'src', 'main.zig'), ZIG_MAIN_SOURCE);
 
   writeFileSync(
     join(dir, 'package.json'),

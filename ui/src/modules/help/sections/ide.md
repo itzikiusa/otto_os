@@ -8,14 +8,14 @@ summary: Multi-language IDE with rectangular & multi-cursor editing, LSP navigat
 
 ## What it's for
 
-**IDE** brings JetBrains-grade code editing, navigation, testing and step-through debugging directly into Otto for **Java**, **Go**, **Rust**, **JavaScript / TypeScript** and **Python** — locally or over an SSH connection, with zero external window switching.
+**IDE** brings JetBrains-grade code editing, navigation, testing and step-through debugging directly into Otto for **Java**, **Go**, **Rust**, **Zig**, **JavaScript / TypeScript** and **Python** — locally or over an SSH connection, with zero external window switching.
 
 ## Getting started
 
 1. Open **IDE** from the **Build** section of the sidebar (or click **Open in IDE** from any file tab in **Threads**). Otto attaches your active workspace folder automatically.
 2. Browse files, symbol structure or breakpoints in the left rail, or press `⇧⇧` (**Search everywhere**) to jump to any file, symbol, text match or IDE action.
-3. Click any gutter **Run** icon next to a `main` function or unit test (`@Test`, `func Test*`, `#[test]`, `def test_*`, `it(...)`) to run or debug it in one click.
-4. Need a missing compiler, language server or debugger? Open **⋯ → Toolchains & SDKs** to download architecture-matched JDKs, Go, Rust, Node.js or Python toolchains directly onto your Mac or remote SSH host.
+3. Click any gutter **Run** icon next to a `main` function or unit test (`@Test`, `func Test*`, `#[test]`, `test "..."`, `def test_*`, `it(...)`) to run or debug it in one click.
+4. Need a missing compiler, language server or debugger? Open **⋯ → Toolchains & SDKs** to download architecture-matched JDKs, Go, Rust, Zig (`zls`), Node.js or Python toolchains directly onto your Mac or remote SSH host.
 
 ## Everything it can do
 
