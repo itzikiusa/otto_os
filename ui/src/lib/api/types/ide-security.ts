@@ -1,4 +1,4 @@
-export type SecurityCheck = 'vulnerability' | 'secret' | 'misconfiguration' | 'license';
+export type SecurityCheck = 'vulnerability' | 'secret' | 'misconfiguration' | 'license' | 'sast';
 export type SecuritySeverity = 'critical' | 'high' | 'medium' | 'low' | 'unknown';
 export type SecurityScanStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
 
@@ -30,6 +30,13 @@ export interface SecurityEngineVersion {
   checked_at: string;
 }
 
+export interface SecurityEngineRun {
+  name: string;
+  version: SecurityEngineVersion;
+  metrics: { wall_ms: number; peak_cpu_percent: number; peak_rss_bytes: number };
+  mode: 'cached' | 'incremental' | 'full';
+}
+
 export interface SecurityScanSummary {
   id: string;
   status: SecurityScanStatus;
@@ -40,6 +47,7 @@ export interface SecurityScanSummary {
   metrics: { wall_ms: number; peak_cpu_percent: number; peak_rss_bytes: number } | null;
   error: string | null;
   count: number;
+  engines: SecurityEngineRun[];
 }
 
 export interface SecurityScanDetail {
@@ -51,4 +59,5 @@ export interface ProjectScans {
   settings: ScanSettings;
   engine: SecurityEngineVersion | null;
   scans: SecurityScanSummary[];
+  opengrep: SecurityEngineVersion | null;
 }

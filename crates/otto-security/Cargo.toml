@@ -8,6 +8,8 @@ description = "Confined, resource-governed security scans for local IDE projects
 [dependencies]
 chrono = { workspace = true }
 flate2 = { workspace = true }
+globset = "0.4"
+ignore = { workspace = true }
 hex = { workspace = true }
 otto-core = { workspace = true }
 otto-sandbox = { workspace = true }
@@ -15,6 +17,7 @@ otto-state = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = { workspace = true }
 sha2 = { workspace = true }
 sqlx = { workspace = true }
 tar = "0.4"

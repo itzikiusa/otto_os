@@ -9,11 +9,12 @@ use otto_state::DbPool;
 use tokio::sync::{Mutex, OnceCell, Semaphore};
 use tokio_util::sync::CancellationToken;
 
-use crate::engine::Engine;
+use crate::engine::{Engine, EngineKind};
 use crate::{governor::cancelled, store, ProjectScans, ScanDetail, ScanSettings, ScanSummary};
 
 pub struct SecurityScans {
     engine: Engine,
+    sast: Engine,
     queue: Semaphore,
     shutdown: CancellationToken,
     init: OnceCell<()>,
@@ -28,7 +29,8 @@ struct Job {
 impl SecurityScans {
     pub fn new(toolchains: &Path) -> Self {
         Self {
-            engine: Engine::new(toolchains),
+            engine: Engine::new(toolchains, EngineKind::Trivy),
+            sast: Engine::new(toolchains, EngineKind::Opengrep),
             queue: Semaphore::new(1),
             shutdown: CancellationToken::new(),
             init: OnceCell::new(),
@@ -45,6 +47,7 @@ impl SecurityScans {
         self.recover(pool).await?;
         let mut status = store::list(pool, project).await?;
         status.engine = self.engine.status().await;
+        status.opengrep = self.sast.status().await;
         Ok(status)
     }
 
@@ -122,7 +125,30 @@ impl SecurityScans {
                 if cancel.is_cancelled() || !store::start(&pool, &id).await? {
                     return Err(cancelled());
                 }
-                service.engine.execute(&roots, &settings, &cancel).await
+                let mut runs = Vec::new();
+                let mut findings = Vec::new();
+                for (engine, only_sast) in [(&service.engine, false), (&service.sast, true)] {
+                    let mut config = settings.clone();
+                    config
+                        .checks
+                        .retain(|check| (*check == crate::Check::Sast) == only_sast);
+                    if !config.checks.is_empty() {
+                        let (run, mut result) = engine.execute(&roots, &config, &cancel).await?;
+                        runs.push(run);
+                        findings.append(&mut result);
+                    }
+                }
+                findings.sort_unstable_by(|a, b| {
+                    a.severity
+                        .cmp(&b.severity)
+                        .then_with(|| a.fingerprint.cmp(&b.fingerprint))
+                });
+                if findings.len() > crate::report::MAX_FINDINGS {
+                    return Err(Error::internal_public(
+                        "This scan produced too many findings. Narrow its scope and retry.",
+                    ));
+                }
+                Ok((runs, findings))
             };
             // Cancel queued scans without waiting for the active scan. Once the
             // engine starts, let its deadline/kill-and-reap path finish under the permit.
@@ -185,6 +211,7 @@ fn validate(settings: &mut ScanSettings) -> Result<()> {
             "Use up to 64 relative exclude patterns without commas or parent directories.".into(),
         ));
     }
+    crate::incremental::exclude_globs(settings)?;
     settings.checks.sort_unstable();
     settings.checks.dedup();
     Ok(())

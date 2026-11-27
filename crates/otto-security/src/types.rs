@@ -7,6 +7,7 @@ pub enum Check {
     Secret,
     Misconfiguration,
     License,
+    Sast,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -22,7 +23,12 @@ pub struct ScanSettings {
 impl Default for ScanSettings {
     fn default() -> Self {
         Self {
-            checks: vec![Check::Vulnerability, Check::Secret, Check::Misconfiguration],
+            checks: vec![
+                Check::Vulnerability,
+                Check::Secret,
+                Check::Misconfiguration,
+                Check::Sast,
+            ],
             excludes: Vec::new(),
             parallelism: 1,
             memory_mib: 1024,
@@ -70,6 +76,22 @@ pub struct EngineVersion {
     pub checked_at: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScanMode {
+    Cached,
+    Incremental,
+    Full,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EngineRun {
+    pub name: String,
+    pub version: EngineVersion,
+    pub metrics: ScanMetrics,
+    pub mode: ScanMode,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScanStatus {
@@ -91,6 +113,7 @@ pub struct ScanSummary {
     pub metrics: Option<ScanMetrics>,
     pub error: Option<String>,
     pub count: u32,
+    pub engines: Vec<EngineRun>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,4 +127,5 @@ pub struct ProjectScans {
     pub settings: ScanSettings,
     pub engine: Option<EngineVersion>,
     pub scans: Vec<ScanSummary>,
+    pub opengrep: Option<EngineVersion>,
 }

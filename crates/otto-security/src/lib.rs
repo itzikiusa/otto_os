@@ -3,7 +3,9 @@
 mod download;
 mod engine;
 mod governor;
+mod incremental;
 mod report;
+mod sast;
 mod service;
 mod store;
 mod types;

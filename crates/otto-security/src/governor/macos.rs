@@ -52,6 +52,8 @@ pub(crate) async fn run(
         .env("GOPROXY", "off")
         .env("GOSUMDB", "off")
         .env("GOTOOLCHAIN", "local")
+        .env("OPENGREP_SEND_METRICS", "off")
+        .env("SEMGREP_SEND_METRICS", "off")
         .current_dir(output)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -86,13 +88,13 @@ pub(crate) async fn run(
             biased;
             _ = cancel.cancelled() => break Err(cancelled()),
             _ = &mut deadline => {
-                break Err(Error::internal_public("Trivy reached the scan time limit."));
+                break Err(Error::internal_public("The scanner reached the scan time limit."));
             }
             status = child.wait() => {
                 match status {
                     Ok(status) if status.success() => break Ok(()),
                     _ => break Err(Error::internal_public(
-                        "Trivy could not finish this scan. Check the scan scope and resource limits.",
+                        "The scanner could not finish this scan. Check the scan scope and resource limits.",
                     )),
                 }
             }
@@ -109,7 +111,7 @@ pub(crate) async fn run(
                 }
                 last = Some((now, cpu_ticks));
                 if rss > u64::from(settings.memory_mib) * 1024 * 1024 {
-                    break Err(Error::internal_public("Trivy reached the scan memory limit."));
+                    break Err(Error::internal_public("The scanner reached the scan memory limit."));
                 }
             }
         }

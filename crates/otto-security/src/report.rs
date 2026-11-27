@@ -84,7 +84,7 @@ pub(crate) fn parse_report(data: &[u8], root: &Path) -> Result<Vec<Finding>> {
     Ok(findings)
 }
 
-fn relative_path(raw: &str, root: &Path) -> Option<String> {
+pub(crate) fn relative_path(raw: &str, root: &Path) -> Option<String> {
     let path = Path::new(raw);
     let path = if path.is_absolute() {
         path.strip_prefix(root).ok()?
@@ -156,6 +156,7 @@ fn normalize(root: &Path, path: &str, check: Check, issue: Issue) -> Finding {
             text(&issue.description, 900),
             text(&issue.resolution, 600),
         ),
+        Check::Sast => unreachable!("Trivy cannot report SAST findings"),
         Check::License => (
             format!("{} license", text(&issue.name, 160)),
             format!(
@@ -184,7 +185,7 @@ fn normalize(root: &Path, path: &str, check: Check, issue: Issue) -> Finding {
     }
 }
 
-fn text(raw: &str, max: usize) -> String {
+pub(crate) fn text(raw: &str, max: usize) -> String {
     raw.chars()
         .filter(|c| !c.is_control() || *c == '\n')
         .take(max)

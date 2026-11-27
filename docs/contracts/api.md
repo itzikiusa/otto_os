@@ -7375,7 +7375,7 @@ Full multi-language IDE over Local (`kind: "local"`) and Remote SSH (`kind: "ssh
 | POST /ide/projects/folders | Agents: Edit | `IdeProjectFolderReq` (`target`, `folder_path`) | `IdeEnvironmentResp` (attaches `folder_path` to `env.additional_roots`) |
 | DELETE /ide/projects/folders?kind=&root=&workspace_id=&connection_id=&folder_path= | Agents: Edit | query `IdeDeleteProjectFolderQuery` | `IdeEnvironmentResp` (detaches `folder_path` from `env.additional_roots`) |
 | POST /ide/projects/folders/bulk | Agents: Edit | `IdeBulkFoldersReq` (`target`, `folder_paths`) | `IdeBulkFoldersResp` (`additional_roots`) |
-| GET /ide/projects/{id}/security | Agents: Edit | — | `ProjectScans` with settings, installed Trivy version and timestamps, and the 30 most recent scan summaries |
+| GET /ide/projects/{id}/security | Agents: Edit | — | `ProjectScans` with settings, installed Trivy and Opengrep versions and timestamps, and the 30 most recent scan summaries |
 | PUT /ide/projects/{id}/security | Agents: Edit | `ScanSettings` | saved `ScanSettings` |
 | POST /ide/projects/{id}/security/scans | Agents: Edit | — | HTTP 202 with a queued `ScanSummary`. HTTP 409 if the project already has a scan queued or running |
 | GET /ide/projects/{id}/security/scans/{scan_id} | Agents: Edit | — | `ScanDetail` (summary and normalized findings) |
@@ -7433,8 +7433,8 @@ Full multi-language IDE over Local (`kind: "local"`) and Remote SSH (`kind: "ssh
 
 These routes accept named local project IDs. The caller needs access to the project and each of its current roots. A scan ID is scoped to its project.
 
-- `ScanSettings` has `checks` (`vulnerability`, `secret`, `misconfiguration`, `license`), `excludes` (root-relative globs), `parallelism` (1–2), `memory_mib` (256–4096) and `timeout_secs` (10–900). Defaults enable vulnerabilities, secrets and misconfiguration, with one worker, 1024 MiB and 180 seconds per engine invocation. Include at least one check.
-- `ScanSummary` has `id`, `status` (`queued`, `running`, `completed`, `failed`, `cancelled`), `created_at`, nullable `started_at`, `finished_at`, `engine`, `metrics`, `error`, and `count`. Timestamps are UTC RFC 3339. Engine metadata includes `version`, `updated_at`, and `checked_at`. Metrics are `wall_ms`, `peak_cpu_percent` relative to one core, and `peak_rss_bytes`.
+- `ScanSettings` has `checks` (`vulnerability`, `secret`, `misconfiguration`, `license`, `sast`), `excludes` (root-relative globs), `parallelism` (1–2), `memory_mib` (256–4096) and `timeout_secs` (10–900). Defaults enable vulnerabilities, secrets, misconfiguration, and SAST, with one worker, 1024 MiB and 180 seconds per engine invocation. Include at least one check.
+- `ScanSummary` has `id`, `status` (`queued`, `running`, `completed`, `failed`, `cancelled`), `created_at`, nullable `started_at`, `finished_at`, `engine`, `metrics`, `error`, and `count`. `engines` gives each engine’s name, version, metrics and scan mode (`full`, `incremental`, or `cached`). Timestamps are UTC RFC 3339. Engine metadata includes `version`, `updated_at`, and `checked_at`. Metrics are `wall_ms`, `peak_cpu_percent` relative to one core, and `peak_rss_bytes`.
 - Findings have a `fingerprint`, `engine`, `check`, `severity` (`critical`, `high`, `medium`, `low`, `unknown`), `root`, project-relative `path`, optional one-based `line`, `rule`, `title`, `description`, and `fix`. Secret matches and source snippets are discarded before persistence.
 
 ## Mobile Simulators & Emulators (`otto-simulators`, `/api/v1/simulators/*`)

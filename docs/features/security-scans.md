@@ -1,6 +1,6 @@
 # IDE security scans
 
-Otto runs Trivy against local named IDE projects. A project can span several
+Otto runs Trivy and Opengrep against local named IDE projects. A project can span several
 folders. They share one settings record, one scan history and one queue entry.
 
 ## Set up a project
@@ -11,22 +11,22 @@ ID. Open Project Settings to see the folders that belong to it. The
 starts and cancels scans, and returns their findings.
 
 By default Otto checks dependencies for known vulnerabilities, scans for
-credential patterns and checks infrastructure files for misconfigurations.
+credential patterns, checks infrastructure files for misconfigurations and runs static security analysis.
 Enable license checking in the project's settings. Each folder uses the same
 root-relative excludes. Otto skips common build and dependency directories.
 
 ## Coverage
 
-| IDE language | Trivy dependency coverage |
-| --- | --- |
-| Go | Go modules |
-| Rust | Cargo lockfiles |
-| JavaScript and TypeScript | npm, Yarn, pnpm and other supported lockfiles |
-| Python | Supported pip, Poetry, Pipenv and uv dependency files |
-| Java and Kotlin | Maven and Gradle dependency files that Trivy can resolve offline |
-| C and C++ | Supported Conan lockfiles |
-| .NET | Supported NuGet dependency files |
-| Zig | No native advisory analysis for Zig package manifests |
+| IDE language | Trivy dependency coverage | Opengrep static analysis |
+| --- | --- | --- |
+| Go | Go modules | Community security rules |
+| Rust | Cargo lockfiles | Community security rules |
+| JavaScript and TypeScript | npm, Yarn, pnpm and other supported lockfiles | Community security rules |
+| Python | Supported pip, Poetry, Pipenv and uv dependency files | Community security rules |
+| Java and Kotlin | Maven and Gradle dependency files that Trivy can resolve offline | Community security rules for both languages |
+| C and C++ | Supported Conan lockfiles | Community C rules and a focused C++ unsafe-input check |
+| .NET | Supported NuGet dependency files | Community C# rules |
+| Zig | Package manifests outside Trivy coverage | Focused runtime-safety check |
 
 Secret and infrastructure checks can report findings in any project. Trivy
 also provides the optional license check. The existing IDE dependency
@@ -54,16 +54,39 @@ in project settings. Cancelling a scan stops the scanner's process group.
 Remote SSH project scans and Java archive scanning are outside the current
 coverage. Java archive scanning requires Trivy's separate Java index download.
 
-## Measured resource use
+## Incremental scans and measured resource use
 
-A full Trivy 0.76.2 scan of the Otto worktree on Apple Silicon ran in 18.392
-seconds with one worker, a sampled peak of 100.2% of one CPU core and 241 MiB
-peak RSS. These are engine measurements. The acceptance test also downloaded
-and unpacked the engine and database into temporary tool state.
+Otto verifies Opengrep against the upstream release digest, refreshes its
+community rules daily, and runs it offline. The selection favors high-confidence
+community security rules. Source analysis covers files up to 256 KiB with a
+five-second per-rule/file time budget. Remote rule options and cross-file mode
+are disabled. Project users can suppress findings through the Security view
+once available.
+
+The result cache uses file contents, engine versions, rule and database
+versions, and scan settings. For small Opengrep edits Otto scans changed files
+and drops results from deleted files. Trivy reuses results for unchanged
+content and reruns a full scan after changes. Broad edits, rule and ignore-file
+changes, and a missing snapshot trigger full scans. Symlinks, unreadable files,
+and scopes beyond 100,000 files or 512 MiB bypass result reuse.
+
+Measured on the Otto worktree on Apple Silicon with one engine worker. CPU
+percentages are sampled relative to one core. The total includes cache lookup
+and, for the first run, engine and rules or database preparation.
+
+| Engine and mode | Engine wall time | Total wall time | Peak CPU | Peak RSS |
+| --- | ---: | ---: | ---: | ---: |
+| Opengrep 2.1.0, full | 23.082 s | 42.762 s | 99.9% | 186 MiB |
+| Opengrep 2.1.0, one-file incremental | 0.683 s | 2.205 s | 96.0% | 94 MiB |
+| Opengrep 2.1.0, unchanged cache | 0 s | 0.820 s | — | — |
+| Trivy 0.76.2, full | 14.442 s | 64.421 s | 99.7% | 211 MiB |
+| Trivy 0.76.2, unchanged cache | 0 s | 0.939 s | — | — |
 
 ```sh
-CARGO_INCREMENTAL=0 cargo test -j 2 -p otto-security --lib live_trivy_on_otto_worktree -- --ignored --nocapture
+CARGO_INCREMENTAL=0 cargo test -j 2 -p otto-security --lib live_incremental_engines_on_otto_worktree -- --ignored --nocapture
 ```
+
+[Opengrep releases](https://github.com/opengrep/opengrep/releases) · [Community rules](https://semgrep.dev/p/default)
 
 ## Troubleshooting
 

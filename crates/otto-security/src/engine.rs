@@ -11,20 +11,56 @@ use crate::download::{self, io_error, upstream};
 use crate::governor::{self, cancelled};
 use crate::{Check, EngineVersion, Finding, ScanMetrics, ScanSettings};
 
-const RELEASE_API: &str = "https://api.github.com/repos/aquasecurity/trivy/releases/latest";
 const MIB: u64 = 1024 * 1024;
 const DB_REFRESH_HOURS: i64 = 6;
 const DB_REPO: &str = "aquasecurity/trivy-db";
-const BASE_EXCLUDED_DIRS: &[&str] = &[".git", "node_modules", "target", ".venv", ".gradle"];
+pub(crate) const BASE_EXCLUDED_DIRS: &[&str] =
+    &[".git", "node_modules", "target", ".venv", ".gradle"];
 
 pub(crate) struct Engine {
     dir: PathBuf,
+    kind: EngineKind,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EngineKind {
+    Trivy,
+    Opengrep,
+}
+
+impl EngineKind {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Trivy => "trivy",
+            Self::Opengrep => "opengrep",
+        }
+    }
+
+    fn repository(self) -> &'static str {
+        match self {
+            Self::Trivy => "aquasecurity/trivy",
+            Self::Opengrep => "opengrep/opengrep",
+        }
+    }
+
+    fn asset(self, version: &str) -> Result<String> {
+        match (self, std::env::consts::ARCH) {
+            (Self::Trivy, "aarch64") => Ok(format!("trivy_{version}_macOS-ARM64.tar.gz")),
+            (Self::Trivy, "x86_64") => Ok(format!("trivy_{version}_macOS-64bit.tar.gz")),
+            (Self::Opengrep, "aarch64") => Ok("opengrep_osx_arm64".into()),
+            (Self::Opengrep, "x86_64") => Ok("opengrep_osx_x86".into()),
+            _ => Err(Error::Invalid(
+                "This scanner is unavailable on this architecture.".into(),
+            )),
+        }
+    }
 }
 
 impl Engine {
-    pub(crate) fn new(toolchains: &Path) -> Self {
+    pub(crate) fn new(toolchains: &Path, kind: EngineKind) -> Self {
         Self {
-            dir: toolchains.join("security-trivy"),
+            dir: toolchains.join(format!("security-{}", kind.name())),
+            kind,
         }
     }
 
@@ -37,7 +73,7 @@ impl Engine {
         roots: &[PathBuf],
         settings: &ScanSettings,
         cancel: &CancellationToken,
-    ) -> Result<(EngineVersion, ScanMetrics, Vec<Finding>)> {
+    ) -> Result<(crate::EngineRun, Vec<Finding>)> {
         if !cfg!(target_os = "macos") {
             return Err(Error::Invalid(
                 "Security scans require macOS Seatbelt.".into(),
@@ -51,12 +87,19 @@ impl Engine {
         let updates = cancel.child_token();
         let prepared = async {
             let version = self.refresh_release(&client, &updates).await?;
-            let cache = if settings.checks.contains(&Check::Vulnerability) {
+            let cache = if self.kind == EngineKind::Trivy
+                && settings.checks.contains(&Check::Vulnerability)
+            {
                 self.refresh_database(&client, &updates).await?
             } else {
                 self.dir.join("offline-cache")
             };
-            Ok::<_, Error>((version, cache))
+            let rules = if self.kind == EngineKind::Opengrep {
+                Some(crate::sast::refresh_rules(&client, &self.dir, &updates).await?)
+            } else {
+                None
+            };
+            Ok::<_, Error>((version, cache, rules))
         };
         tokio::pin!(prepared);
         let mut interrupted = None;
@@ -78,18 +121,53 @@ impl Engine {
             let _ = prepared.await;
             return Err(error);
         }
-        let (version, cache) = result.expect("preparation completed")?;
+        let (version, cache, rules) = result.expect("preparation completed")?;
         tokio::fs::create_dir_all(&cache).await.map_err(io_error)?;
         let program = self.binary(&version.version)?;
-        let mut metrics = ScanMetrics::default();
+        let mut engine_run = crate::EngineRun {
+            name: self.kind.name().into(),
+            version: version.clone(),
+            metrics: ScanMetrics::default(),
+            mode: crate::ScanMode::Cached,
+        };
+        let key = crate::store::encode(&(
+            "2",
+            &version.version,
+            &cache,
+            rules.as_ref().map(|rules| &rules.digest),
+            settings,
+        ))?;
+        let cache_context = crate::incremental::CacheContext::new(&self.dir, &key, settings);
         let mut findings = Vec::new();
         for root in roots {
-            let (run, mut results) = self
-                .scan_root(&program, &cache, root, settings, cancel)
+            let plan = cache_context.plan(root, self.kind, cancel).await?;
+            let (run, results) = match &plan.selection {
+                crate::incremental::Selection::Files(files) if files.is_empty() => {
+                    (ScanMetrics::default(), Vec::new())
+                }
+                selection => {
+                    self.scan_root(
+                        &program,
+                        &cache,
+                        root,
+                        settings,
+                        rules.as_ref(),
+                        selection,
+                        cancel,
+                    )
+                    .await?
+                }
+            };
+            let mut results = cache_context
+                .finish(root, plan, &mut engine_run.mode, results, cancel)
                 .await?;
-            metrics.wall_ms += run.wall_ms;
-            metrics.peak_cpu_percent = metrics.peak_cpu_percent.max(run.peak_cpu_percent);
-            metrics.peak_rss_bytes = metrics.peak_rss_bytes.max(run.peak_rss_bytes);
+            engine_run.metrics.wall_ms += run.wall_ms;
+            engine_run.metrics.peak_cpu_percent = engine_run
+                .metrics
+                .peak_cpu_percent
+                .max(run.peak_cpu_percent);
+            engine_run.metrics.peak_rss_bytes =
+                engine_run.metrics.peak_rss_bytes.max(run.peak_rss_bytes);
             findings.append(&mut results);
             if findings.len() > crate::report::MAX_FINDINGS {
                 return Err(Error::internal_public(
@@ -103,40 +181,59 @@ impl Engine {
                 .then_with(|| a.fingerprint.cmp(&b.fingerprint))
         });
         findings.dedup_by(|a, b| a.fingerprint == b.fingerprint);
-        Ok((version, metrics, findings))
+        Ok((engine_run, findings))
     }
 
+    #[allow(clippy::too_many_arguments)] // Already-prepared engine inputs and the run cancellation token.
     async fn scan_root(
         &self,
         program: &Path,
         cache: &Path,
         root: &Path,
         settings: &ScanSettings,
+        rules: Option<&crate::sast::Rules>,
+        selection: &crate::incremental::Selection,
         cancel: &CancellationToken,
     ) -> Result<(ScanMetrics, Vec<Finding>)> {
         let scratch = tempfile::tempdir_in(&self.dir).map_err(io_error)?;
         let output = tokio::fs::canonicalize(scratch.path())
             .await
             .map_err(io_error)?;
-        let config = output.join("config.yaml");
-        tokio::fs::write(&config, "{}\n").await.map_err(io_error)?;
         let report = output.join("report.json");
-        let args = trivy_args(root, cache, &report, &config, settings);
+        let args = if let Some(rules) = rules {
+            crate::sast::args(root, &report, &output, rules, settings, selection).await?
+        } else {
+            let config = output.join("config.yaml");
+            tokio::fs::write(&config, "{}\n").await.map_err(io_error)?;
+            trivy_args(root, cache, &report, &config, settings)
+        };
         let metrics = governor::run(program, &args, root, cache, &output, settings, cancel).await?;
         let path = root.to_path_buf();
         let data = tokio::fs::read(&report).await.map_err(io_error)?;
-        let findings =
-            tokio::task::spawn_blocking(move || crate::report::parse_report(&data, &path))
-                .await
-                .map_err(|_| Error::Internal("security report worker stopped".into()))??;
+        let kind = self.kind;
+        let rules = rules.cloned();
+        let findings = tokio::task::spawn_blocking(move || match kind {
+            EngineKind::Trivy => crate::report::parse_report(&data, &path),
+            EngineKind::Opengrep => crate::sast::parse(
+                &data,
+                &path,
+                rules.as_ref().expect("prepared Opengrep rules"),
+            ),
+        })
+        .await
+        .map_err(|_| Error::Internal("security report worker stopped".into()))??;
         Ok((metrics, findings))
     }
 
     fn binary(&self, version: &str) -> Result<PathBuf> {
         if !version_valid(version) {
-            return Err(upstream("Trivy returned an invalid release version."));
+            return Err(upstream("The scanner returned an invalid release version."));
         }
-        Ok(self.dir.join("releases").join(version).join("trivy"))
+        Ok(self
+            .dir
+            .join("releases")
+            .join(version)
+            .join(self.kind.name()))
     }
 
     async fn refresh_release(
@@ -155,60 +252,67 @@ impl Engine {
         };
         if last.as_deref().is_some_and(|stamp| fresh(stamp, 24)) {
             return installed.filter(|_| usable).ok_or_else(|| {
-                upstream("Trivy installation failed today. Otto will check for a release again tomorrow.")
+                upstream("Scanner installation failed today. Otto will check for a release again tomorrow.")
             });
         }
         write_json(&attempt, &crate::store::now()).await?;
-        let update =
-            async {
-                let request =
-                    async {
-                        download::json::<Release>(client.get(RELEASE_API).send().await.map_err(
-                            |_| upstream("The Trivy release service could not be reached."),
-                        )?)
+        let update = async {
+            let request = async {
+                download::json::<Release>(
+                    client
+                        .get(format!(
+                            "https://api.github.com/repos/{}/releases/latest",
+                            self.kind.repository()
+                        ))
+                        .send()
                         .await
-                    };
-                let release = tokio::select! {
-                    biased;
-                    _ = cancel.cancelled() => return Err(cancelled()),
-                    result = request => result?,
-                };
-                let version = release
-                    .tag_name
-                    .strip_prefix('v')
-                    .unwrap_or(&release.tag_name)
-                    .to_string();
-                let binary = self.binary(&version)?;
-                let changed = installed
-                    .as_ref()
-                    .is_none_or(|current| current.version != version)
-                    || !usable;
-                if changed {
-                    self.install_release(client, release, &binary, cancel)
-                        .await?;
-                }
-                let checked_at = crate::store::now();
-                let updated_at = if changed {
-                    checked_at.clone()
-                } else {
-                    installed
-                        .as_ref()
-                        .expect("installed release")
-                        .updated_at
-                        .clone()
-                };
-                let record = EngineVersion {
-                    version,
-                    updated_at,
-                    checked_at,
-                };
-                write_json(&self.dir.join("engine.json"), &record).await?;
-                Ok(record)
+                        .map_err(|_| {
+                            upstream("The scanner release service could not be reached.")
+                        })?,
+                )
+                .await
+            };
+            let release = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return Err(cancelled()),
+                result = request => result?,
+            };
+            let version = release
+                .tag_name
+                .strip_prefix('v')
+                .unwrap_or(&release.tag_name)
+                .to_string();
+            let binary = self.binary(&version)?;
+            let changed = installed
+                .as_ref()
+                .is_none_or(|current| current.version != version)
+                || !usable;
+            if changed {
+                self.install_release(client, release, &binary, cancel)
+                    .await?;
             }
-            .await;
+            let checked_at = crate::store::now();
+            let updated_at = if changed {
+                checked_at.clone()
+            } else {
+                installed
+                    .as_ref()
+                    .expect("installed release")
+                    .updated_at
+                    .clone()
+            };
+            let record = EngineVersion {
+                version,
+                updated_at,
+                checked_at,
+            };
+            write_json(&self.dir.join("engine.json"), &record).await?;
+            Ok(record)
+        }
+        .await;
         match update {
             Err(error) if usable && !cancel.is_cancelled() => {
-                tracing::warn!(%error, "Trivy release refresh failed; keeping installed version");
+                tracing::warn!(%error, "Scanner release refresh failed; keeping installed version");
                 Ok(installed.expect("installed release"))
             }
             result => result,
@@ -222,34 +326,34 @@ impl Engine {
         binary: &Path,
         cancel: &CancellationToken,
     ) -> Result<()> {
-        let asset_platform = match std::env::consts::ARCH {
-            "aarch64" => "macOS-ARM64",
-            "x86_64" => "macOS-64bit",
-            _ => {
-                return Err(Error::Invalid(
-                    "Trivy is unavailable on this architecture.".into(),
-                ))
-            }
-        };
         let version = release.tag_name.trim_start_matches('v');
-        let name = format!("trivy_{version}_{asset_platform}.tar.gz");
+        let name = self.kind.asset(version)?;
         let asset = release
             .assets
             .iter()
             .find(|asset| asset.name == name)
-            .ok_or_else(|| upstream("The current Trivy release has no asset for this Mac."))?;
+            .ok_or_else(|| upstream("The scanner release has no asset for this Mac."))?;
         let digest = download::sha256(&asset.digest)?;
         let url = format!(
-            "https://github.com/aquasecurity/trivy/releases/download/{}/{name}",
+            "https://github.com/{}/releases/download/{}/{name}",
+            self.kind.repository(),
             release.tag_name
         );
         let dir = binary.parent().expect("release directory");
         tokio::fs::create_dir_all(dir).await.map_err(io_error)?;
         let stage = tempfile::tempdir_in(dir).map_err(io_error)?;
-        let archive = stage.path().join("release.tgz");
-        fetch(client.get(url), &archive, digest, 160 * MIB, cancel).await?;
-        let stage = unpack(stage, archive, &["trivy"], 512 * MIB, cancel).await?;
-        let executable = stage.path().join("trivy");
+        let payload = stage.path().join("release");
+        fetch(client.get(url), &payload, digest, 256 * MIB, cancel).await?;
+        let stage = if self.kind == EngineKind::Trivy {
+            unpack(stage, payload, &["trivy"], 512 * MIB, cancel).await?
+        } else {
+            stage
+        };
+        let executable = stage.path().join(if self.kind == EngineKind::Trivy {
+            "trivy"
+        } else {
+            "release"
+        });
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -421,19 +525,19 @@ fn version_valid(version: &str) -> bool {
     parts.len() == 3 && parts.iter().all(|p| p.parse::<u32>().is_ok())
 }
 
-fn fresh(at: &str, hours: i64) -> bool {
+pub(crate) fn fresh(at: &str, hours: i64) -> bool {
     DateTime::parse_from_rfc3339(at).is_ok_and(|stamp| {
         let age = Utc::now().signed_duration_since(stamp);
         age >= chrono::Duration::zero() && age < chrono::Duration::hours(hours)
     })
 }
 
-async fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
+pub(crate) async fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
     let bytes = tokio::fs::read(path).await.ok()?;
     serde_json::from_slice(&bytes).ok()
 }
 
-async fn write_json(path: &Path, value: &impl serde::Serialize) -> Result<()> {
+pub(crate) async fn write_json(path: &Path, value: &impl serde::Serialize) -> Result<()> {
     let contents = crate::store::encode(value)?;
     let stage =
         tempfile::tempdir_in(path.parent().expect("metadata directory")).map_err(io_error)?;
@@ -494,6 +598,7 @@ fn trivy_args(
             Check::Secret => "secret",
             Check::Misconfiguration => "misconfig",
             Check::License => "license",
+            Check::Sast => unreachable!("Trivy receives only Trivy checks"),
         })
         .collect::<Vec<_>>()
         .join(",");
@@ -560,14 +665,15 @@ mod tests {
             .canonicalize()
             .unwrap();
         let tools = tempfile::tempdir().unwrap();
-        let engine = Engine::new(&tools.path().canonicalize().unwrap());
+        let engine = Engine::new(&tools.path().canonicalize().unwrap(), EngineKind::Trivy);
         let cancel = CancellationToken::new();
         let settings = ScanSettings {
+            checks: vec![Check::Vulnerability, Check::Secret, Check::Misconfiguration],
             timeout_secs: 300,
             ..Default::default()
         };
-        let (version, metrics, findings) =
-            engine.execute(&[root], &settings, &cancel).await.unwrap();
+        let (run, findings) = engine.execute(&[root], &settings, &cancel).await.unwrap();
+        let (version, metrics) = (run.version, run.metrics);
         println!(
             "Trivy {} full scan of Otto: {} findings, wall={} ms, sampled peak CPU={:.1}%, peak RSS={} MiB",
             version.version,
@@ -578,5 +684,84 @@ mod tests {
         );
         assert!(metrics.peak_rss_bytes > 0);
         assert!(metrics.peak_cpu_percent > 0.0);
+    }
+
+    #[tokio::test]
+    #[ignore = "downloads Opengrep and community rules, then scans the Otto worktree"]
+    async fn live_incremental_engines_on_otto_worktree() {
+        use std::time::Instant;
+
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap();
+        let tools = tempfile::tempdir().unwrap();
+        let path = tools.path().canonicalize().unwrap();
+        let sample = tempfile::Builder::new()
+            .prefix("otto-secscan-")
+            .suffix(".zig")
+            .tempfile_in(&root)
+            .unwrap();
+        tokio::fs::write(sample.path(), "pub fn probe() void {}\n")
+            .await
+            .unwrap();
+        let name = sample.path().file_name().unwrap().to_str().unwrap();
+        let cancel = CancellationToken::new();
+        for kind in [EngineKind::Opengrep, EngineKind::Trivy] {
+            let engine = Engine::new(&path, kind);
+            let settings = ScanSettings {
+                checks: if kind == EngineKind::Opengrep {
+                    vec![Check::Sast]
+                } else {
+                    vec![Check::Vulnerability, Check::Secret, Check::Misconfiguration]
+                },
+                timeout_secs: 300,
+                ..Default::default()
+            };
+            let start = Instant::now();
+            let (full, _) = engine
+                .execute(std::slice::from_ref(&root), &settings, &cancel)
+                .await
+                .unwrap();
+            assert_eq!(full.mode, crate::ScanMode::Full);
+            print_metrics(&full, start);
+            if kind == EngineKind::Opengrep {
+                tokio::fs::write(
+                    sample.path(),
+                    "pub fn probe() void { @setRuntimeSafety(false); }\n",
+                )
+                .await
+                .unwrap();
+                let start = Instant::now();
+                let (incremental, findings) = engine
+                    .execute(std::slice::from_ref(&root), &settings, &cancel)
+                    .await
+                    .unwrap();
+                assert_eq!(incremental.mode, crate::ScanMode::Incremental);
+                print_metrics(&incremental, start);
+                assert!(findings.iter().any(|finding| finding.path == name
+                    && finding.rule == "otto.zig.runtime-safety-disabled"));
+            }
+            let start = Instant::now();
+            let (cached, _) = engine
+                .execute(std::slice::from_ref(&root), &settings, &cancel)
+                .await
+                .unwrap();
+            assert_eq!(cached.mode, crate::ScanMode::Cached);
+            print_metrics(&cached, start);
+        }
+    }
+
+    fn print_metrics(run: &crate::EngineRun, start: std::time::Instant) {
+        println!(
+            "{} {} {:?}: engine={} ms total={} ms peak CPU={:.1}% peak RSS={} MiB",
+            run.name,
+            run.version.version,
+            run.mode,
+            run.metrics.wall_ms,
+            start.elapsed().as_millis(),
+            run.metrics.peak_cpu_percent,
+            run.metrics.peak_rss_bytes / MIB
+        );
     }
 }

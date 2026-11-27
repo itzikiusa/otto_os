@@ -32,6 +32,7 @@ struct Row {
     metrics: Option<String>,
     error: Option<String>,
     count: u32,
+    engines: String,
 }
 
 impl TryFrom<Row> for ScanSummary {
@@ -56,6 +57,7 @@ impl TryFrom<Row> for ScanSummary {
             metrics: row.metrics.as_deref().map(decode).transpose()?,
             error: row.error,
             count: row.count,
+            engines: decode(&row.engines)?,
         })
     }
 }
@@ -64,7 +66,7 @@ macro_rules! summary_query {
     ($prefix:literal, $suffix:literal) => {
         concat!(
             $prefix,
-            "id, status, created_at, started_at, finished_at, engine, metrics, error, count",
+            "id, status, created_at, started_at, finished_at, engine, metrics, error, count, engines",
             $suffix,
         )
     };
@@ -129,6 +131,7 @@ pub(crate) async fn list(pool: &DbPool, project: &str) -> Result<ProjectScans> {
         settings: settings(pool, project).await?,
         engine: None,
         scans,
+        opengrep: None,
     })
 }
 
@@ -195,21 +198,31 @@ pub(crate) async fn start(pool: &DbPool, id: &str) -> Result<bool> {
 pub(crate) async fn finish(
     pool: &DbPool,
     id: &str,
-    result: Result<(
-        crate::EngineVersion,
-        crate::ScanMetrics,
-        Vec<crate::Finding>,
-    )>,
+    result: Result<(Vec<crate::EngineRun>, Vec<crate::Finding>)>,
 ) -> Result<()> {
-    let (status, engine, metrics, error, count, findings) = match result {
-        Ok((engine, metrics, findings)) => (
-            "completed",
-            Some(encode(&engine)?),
-            Some(encode(&metrics)?),
-            None,
-            findings.len(),
-            encode(&findings)?,
-        ),
+    let (status, engine, metrics, error, count, findings, engines) = match result {
+        Ok((engines, findings)) => {
+            let primary = engines
+                .first()
+                .map(|run| encode(&run.version))
+                .transpose()?;
+            let mut metrics = crate::ScanMetrics::default();
+            for run in &engines {
+                metrics.wall_ms += run.metrics.wall_ms;
+                metrics.peak_cpu_percent =
+                    metrics.peak_cpu_percent.max(run.metrics.peak_cpu_percent);
+                metrics.peak_rss_bytes = metrics.peak_rss_bytes.max(run.metrics.peak_rss_bytes);
+            }
+            (
+                "completed",
+                primary,
+                Some(encode(&metrics)?),
+                None,
+                findings.len(),
+                encode(&findings)?,
+                encode(&engines)?,
+            )
+        }
         Err(error) => (
             "failed",
             None,
@@ -217,10 +230,11 @@ pub(crate) async fn finish(
             Some(error.public_message()),
             0,
             "[]".into(),
+            "[]".into(),
         ),
     };
     sqlx::query(
-        "UPDATE ide_security_scans          SET status = ?, finished_at = ?, engine = ?, metrics = ?, error = ?, count = ?, findings = ?          WHERE id = ? AND status IN ('queued', 'running')",
+        "UPDATE ide_security_scans          SET status = ?, finished_at = ?, engine = ?, metrics = ?, error = ?, count = ?, findings = ?, engines = ?          WHERE id = ? AND status IN ('queued', 'running')",
     )
     .bind(status)
     .bind(now())
@@ -229,6 +243,7 @@ pub(crate) async fn finish(
     .bind(error)
     .bind(count as u32)
     .bind(findings)
+    .bind(engines)
     .bind(id)
     .execute(pool)
     .await

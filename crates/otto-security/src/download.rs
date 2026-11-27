@@ -18,6 +18,7 @@ const UPSTREAM_HOSTS: &[&str] = &[
     "release-assets.githubusercontent.com",
     "ghcr.io",
     "pkg-containers.githubusercontent.com",
+    "semgrep.dev",
 ];
 
 pub(crate) fn client() -> Result<Client> {
@@ -180,11 +181,11 @@ pub(crate) fn io_error(error: io::Error) -> Error {
 }
 
 #[cfg(target_os = "macos")]
-struct BackgroundThread;
+pub(crate) struct BackgroundThread;
 
 #[cfg(target_os = "macos")]
 impl BackgroundThread {
-    fn enter() -> Self {
+    pub(crate) fn enter() -> Self {
         // This runs on the blocking pool. Restore its normal priority before returning it.
         unsafe { libc::setpriority(libc::PRIO_DARWIN_THREAD, 0, libc::PRIO_DARWIN_BG) };
         Self
