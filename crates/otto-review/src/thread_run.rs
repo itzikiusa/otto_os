@@ -260,6 +260,67 @@ impl Threads {
         }
     }
 
+    /// Drive a held summarizer thread through `summarizer::drive` and clean up
+    /// its persisted `otto-summary-*` temp directory afterward.
+    pub async fn drive_held_summarizer<C>(
+        &self,
+        thread_id: &otto_core::Id,
+        result_path: &Path,
+        brief: SummarizerBrief<'_>,
+        deadline: tokio::time::Instant,
+        cancelled: C,
+        cancel: Option<&Arc<AtomicBool>>,
+    ) -> Result<String, String>
+    where
+        C: std::future::Future<Output = ()>,
+    {
+        if tokio::time::Instant::now() >= deadline {
+            return Err(crate::summarizer::DEADLINE_EXCEEDED.into());
+        }
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let _ = ready_tx.send(thread_id.to_string());
+        let turn = self.resume_summarizer_turn(thread_id, result_path, brief, cancel);
+        let stop = |sid: String| async move { self.close(&sid).await };
+        let res = crate::summarizer::drive(
+            turn,
+            ready_rx,
+            deadline,
+            cancelled,
+            |_| async { Ok(()) },
+            stop,
+        )
+        .await;
+        crate::summarizer::cleanup_summary_dir(result_path).await;
+        res
+    }
+
+    /// Drive a fresh thread-backed summarizer attempt, persisting its handoff
+    /// dir across restarts and cleaning it up once the attempt finishes here.
+    pub async fn drive_fresh_summarizer<C, P, PF>(
+        &self,
+        attempt: &mut crate::summarizer::Attempt,
+        brief: SummarizerBrief<'_>,
+        deadline: tokio::time::Instant,
+        cancelled: C,
+        publish: P,
+        cancel: Option<&Arc<AtomicBool>>,
+    ) -> Result<String, String>
+    where
+        C: std::future::Future<Output = ()>,
+        P: FnOnce(String) -> PF,
+        PF: std::future::Future<Output = Result<(), String>>,
+    {
+        attempt.persist_for_restart();
+        attempt.meta["result_path"] = serde_json::json!(attempt.result_path().to_string_lossy());
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let turn = self.summarizer_turn(attempt, brief, ready_tx, cancel);
+        let stop = |sid: String| async move { self.close(&sid).await };
+        let res =
+            crate::summarizer::drive(turn, ready_rx, deadline, cancelled, publish, stop).await;
+        attempt.cleanup();
+        res
+    }
+
     pub(crate) fn meta_into(&self, meta: &mut Value) {
         if let (Some(m), Some(extra)) = (meta.as_object_mut(), self.meta.as_object()) {
             for (k, v) in extra {
@@ -267,6 +328,16 @@ impl Threads {
             }
         }
     }
+}
+
+/// Extract workflow linkage fields (`run_id`, `node_id`, `work`) from an
+/// existing review thread's `meta` for `ReviewConfig::thread_meta`.
+pub fn extract_workflow_meta(meta: &Value) -> Option<Value> {
+    let kept: serde_json::Map<_, _> = ["run_id", "node_id", "work"]
+        .into_iter()
+        .filter_map(|k| meta.get(k).map(|v| (k.into(), v.clone())))
+        .collect();
+    (!kept.is_empty()).then_some(Value::Object(kept))
 }
 
 /// A review cancel flag as the runner's [`CancelSignal`], for as long as

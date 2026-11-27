@@ -1611,9 +1611,7 @@ pub fn workflow_review_config(
     } else {
         providers.to_vec()
     };
-    if !providers.is_empty() {
-        base.summarizer.provider = provs[0].clone();
-    }
+    base.summarizer.provider = provs[0].clone();
     if lenses.is_empty() {
         for a in base.agents.iter_mut() {
             a.provider = provs[0].clone();
@@ -1706,39 +1704,53 @@ pub fn apply_summarizer_row(
     }
 }
 
-/// Build the `review_run` node's `ReviewConfig` override from its JSON params,
-/// ensuring neither the summarizer nor the checks reviewer silently introduces
-/// a provider the step did not name.
-pub fn build_workflow_review_config(
+/// Base `ReviewConfig` when a `review_run` step explicitly declares reviewers,
+/// providers or lenses; returns `None` when reviewers are left implicit so each
+/// target inherits its own resolved repository review configuration (BUG-13).
+pub fn workflow_review_base_config(
     default_provider: &str,
     p: &Value,
     reviewers: &[Value],
     providers: &[String],
     lenses: &[String],
-    check_specs: &[(String, String)],
 ) -> Option<ReviewConfig> {
-    let mut cfg_override = if !reviewers.is_empty() {
+    if !reviewers.is_empty() {
         Some(workflow_review_config_from_json(
             default_provider,
             reviewers,
             p.get("summarizer"),
         ))
-    } else if providers.is_empty() && lenses.is_empty() {
-        p.get("summarizer").map(|s| {
-            let mut cfg = workflow_review_config(default_provider, &[], &[]);
-            apply_summarizer_param(&mut cfg, s);
-            cfg
-        })
+    } else if !providers.is_empty() || !lenses.is_empty() {
+        Some(workflow_review_config(default_provider, providers, lenses))
     } else {
-        let mut cfg = workflow_review_config(default_provider, providers, lenses);
+        None
+    }
+}
+
+/// Whether the `review_run` node carries per-step overlays (`summarizer`,
+/// `checks`, or review-wide params) to layer onto either its explicit config
+/// or each target's inherited repository configuration.
+pub fn has_workflow_review_overlays(p: &Value, check_specs: &[(String, String)]) -> bool {
+    !check_specs.is_empty() || p.get("summarizer").is_some() || has_node_review_params(p)
+}
+
+/// Layer a `review_run` node's `summarizer`, `checks`, and review-wide params
+/// onto `cfg` (either an explicit workflow config or a target's inherited repo
+/// config). `summarizer_already_applied` avoids appending `instructions` twice
+/// when `workflow_review_config_from_json` already applied them.
+pub fn apply_workflow_review_overlays(
+    cfg: &mut ReviewConfig,
+    default_provider: &str,
+    p: &Value,
+    check_specs: &[(String, String)],
+    summarizer_already_applied: bool,
+) {
+    if !summarizer_already_applied {
         if let Some(s) = p.get("summarizer") {
-            apply_summarizer_param(&mut cfg, s);
+            apply_summarizer_param(cfg, s);
         }
-        Some(cfg)
-    };
+    }
     if !check_specs.is_empty() {
-        let cfg =
-            cfg_override.get_or_insert_with(|| workflow_review_config(default_provider, &[], &[]));
         let check_provider = cfg
             .agents
             .first()
@@ -1754,11 +1766,60 @@ pub fn build_workflow_review_config(
             .push(checks_review_agent(&check_provider, check_specs));
     }
     if has_node_review_params(p) {
-        let cfg =
-            cfg_override.get_or_insert_with(|| workflow_review_config(default_provider, &[], &[]));
         apply_node_review_params(cfg, p);
     }
-    cfg_override
+}
+
+/// Provider for `review_run` goal grading: explicit node `summarizer.provider`,
+/// else the explicit workflow override's summarizer provider (only `Some` when
+/// the step named reviewers/providers/lenses), else flat `providers[0]`, else
+/// `default_provider` (never an accidental hardcoded `claude` from checks — BUG-14).
+pub fn goals_provider(
+    p: &Value,
+    explicit_cfg: Option<&ReviewConfig>,
+    providers: &[String],
+    default_provider: &str,
+) -> String {
+    p.get("summarizer")
+        .and_then(|s| s.get("provider"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            explicit_cfg
+                .map(|c| c.summarizer.provider.trim())
+                .filter(|s| !s.is_empty())
+        })
+        .or_else(|| {
+            providers
+                .first()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or(default_provider)
+        .to_string()
+}
+
+/// Build the `review_run` node's `ReviewConfig` override when reviewers are
+/// explicitly declared; returns `None` when reviewers are implicit (so each
+/// target overlays onto its inherited repository config).
+pub fn build_workflow_review_config(
+    default_provider: &str,
+    p: &Value,
+    reviewers: &[Value],
+    providers: &[String],
+    lenses: &[String],
+    check_specs: &[(String, String)],
+) -> Option<ReviewConfig> {
+    let mut cfg = workflow_review_base_config(default_provider, p, reviewers, providers, lenses)?;
+    apply_workflow_review_overlays(
+        &mut cfg,
+        default_provider,
+        p,
+        check_specs,
+        !reviewers.is_empty(),
+    );
+    Some(cfg)
 }
 
 /// Rich workflow-review config (PR-review parity): each reviewer carries its OWN

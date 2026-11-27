@@ -323,3 +323,54 @@ async fn a_review_with_completed_reviewers_and_persisted_prompts_resumes_even_wi
     assert_eq!(after.agents[0].status, "done");
     assert_eq!(after.agents[1].status, "pending");
 }
+
+#[tokio::test]
+async fn ensure_review_diff_restores_missing_temp_file_and_errors_when_absent() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = otto_state::db::open(&dir.path().join("state.sqlite"))
+        .await
+        .unwrap();
+    let reviews = otto_state::ReviewsRepo::new(pool);
+
+    // DATA-2: missing temp diff is restored from durable DB diff.
+    let row = reviews.create_review(&"repo".into(), 0).await.unwrap();
+    let diff_path = std::env::temp_dir().join(format!("otto-review-{}.diff", row.id));
+    let _ = tokio::fs::remove_file(&diff_path).await;
+    let body = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n(diff omitted: review size cap reached)\n";
+    reviews.set_diff(&row.id, body).await.unwrap();
+    let restored = ensure_review_diff(&reviews, &row.id).await.unwrap();
+    assert_eq!(restored, body);
+    assert_eq!(tokio::fs::read_to_string(&diff_path).await.unwrap(), body);
+    let _ = tokio::fs::remove_file(&diff_path).await;
+
+    // BUG-11: partial diff produces the real partial-diff blocker (not SUMMARIZER_RETRY_BLOCKER)
+    // so verification::incomplete_reason marks the resumed review incomplete.
+    let blocker = resumed_resolve_blocker(Some(&restored));
+    assert_eq!(blocker, Some("partial diff (files omitted)"));
+    let settled = crate::verification::Settled {
+        comments: vec![],
+        notes: vec![],
+        total: 0,
+        accounted: 0,
+        unverified: 0,
+        incomplete: false,
+    };
+    let why = crate::verification::incomplete_reason(&settled, None, blocker, &[]);
+    assert!(
+        why.as_deref()
+            .is_some_and(|m| m.contains("partial diff (files omitted)")),
+        "resumed partial diff must be marked incomplete: {why:?}"
+    );
+    assert_eq!(
+        resumed_resolve_blocker(Some("diff --git a/a.rs b/a.rs\n+ok\n")),
+        Some(crate::verification::SUMMARIZER_RETRY_BLOCKER)
+    );
+
+    // DATA-2: when no durable diff exists either, surface Conflict error instead of zero-byte diff.
+    let empty = reviews.create_review(&"repo".into(), 0).await.unwrap();
+    let err = ensure_review_diff(&reviews, &empty.id).await.unwrap_err();
+    assert!(
+        err.to_string().contains("no stored diff"),
+        "expected missing stored diff error, got: {err}"
+    );
+}

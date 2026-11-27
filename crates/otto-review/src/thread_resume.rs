@@ -30,6 +30,8 @@ pub struct ResumeCtx {
     pub cwd: String,
     pub review_id: String,
     pub grace: Duration,
+    /// Review-configured per-agent attempt cap (`ReviewConfig::max_attempts`).
+    pub max_attempts: Option<u32>,
     pub skills_dir: Option<String>,
     pub cancel: Option<Arc<AtomicBool>>,
     /// Per-agent cancel registry (the fresh path's `review_agent_cancels`).
@@ -199,7 +201,7 @@ async fn resume_row(
         i,
         &prompt,
         c.grace,
-        None,
+        c.max_attempts,
         Some(cancel),
         c.skills_dir.as_deref(),
         &row.lens_slugs,

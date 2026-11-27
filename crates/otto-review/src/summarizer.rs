@@ -98,6 +98,42 @@ pub fn valid_result(text: &str) -> bool {
     crate::engine::draft_comments_from_json(text).is_ok()
 }
 
+/// Extract a held summarizer thread's persisted `result_path` from its `meta`.
+pub fn held_result_path(meta: Option<&serde_json::Value>) -> Option<PathBuf> {
+    let p = meta?.get("result_path")?.as_str()?;
+    (!p.is_empty()).then(|| PathBuf::from(p))
+}
+
+/// Remove a persisted `otto-summary-*` temp directory after resuming a held
+/// summarizer turn.
+pub async fn cleanup_summary_dir(result_path: &std::path::Path) {
+    if let Some(dir) = result_path.parent().filter(|p| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("otto-summary-"))
+    }) {
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+}
+
+/// Parse the summarizer's raw JSON output into draft comments, applying any
+/// lens score to `row` and rejecting an empty list when findings existed.
+pub fn parse_summarizer_comments(
+    review_id: &otto_core::Id,
+    row: &mut otto_core::domain::ReviewAgentState,
+    total_findings: usize,
+    text: &str,
+) -> Result<Vec<crate::engine::DraftComment>, String> {
+    let parsed = crate::engine::parse_draft_comments(review_id, text);
+    crate::prompts::apply_lens_score(row, text);
+    if parsed.is_empty() && total_findings > 0 {
+        return Err(format!(
+            "returned no comments for {total_findings} findings"
+        ));
+    }
+    Ok(parsed)
+}
+
 #[cfg(test)]
 async fn read_result(path: &std::path::Path) -> Option<String> {
     tokio::fs::read_to_string(path)

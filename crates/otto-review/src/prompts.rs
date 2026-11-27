@@ -75,6 +75,55 @@ pub fn seed_states(agent_runs: &[AgentRun], summarizer: &ReviewAgentCfg) -> Vec<
     agent_states
 }
 
+/// Build and persist every reviewer prompt BEFORE entering the stagger loop so
+/// a restart mid-stagger never leaves queued reviewers without a DB prompt.
+#[allow(clippy::too_many_arguments)]
+pub async fn prepare_reviewer_prompts<F>(
+    reviews: &otto_state::ReviewsRepo,
+    cli_family: F,
+    review_id: &Id,
+    agent_runs: Vec<AgentRun>,
+    branch_ctx: &str,
+    changed_files: usize,
+    changed_lines: usize,
+    user_ctx: &str,
+    jira_ctx: &str,
+    diff_path_str: &str,
+) -> Vec<(usize, AgentRun, Vec<String>, String)>
+where
+    F: Fn(&str) -> String,
+{
+    let mut prepared = Vec::with_capacity(agent_runs.len());
+    for (i, run) in in_spawn_order(agent_runs) {
+        let prompt_lens = if run.lenses.is_empty() {
+            run.prompt_lens.clone()
+        } else {
+            compose_orchestrator_prompt(
+                &run.lenses,
+                &cli_family(&run.provider),
+                |slug| crate::session::lens_findings_path(review_id.as_str(), i, slug),
+                &crate::session::findings_path(review_id.as_str(), i),
+            )
+        };
+        let lens_slugs = run.lens_slugs();
+        let prompt = reviewer_prompt(
+            branch_ctx,
+            changed_files,
+            changed_lines,
+            &prompt_lens,
+            user_ctx,
+            jira_ctx,
+            diff_path_str,
+        );
+        let _ = tokio::fs::write(crate::session::prompt_path(review_id, i), &prompt).await;
+        if let Err(e) = reviews.set_agent_prompt(review_id, i, &prompt).await {
+            tracing::warn!(review = %review_id, agent = i, "could not persist agent prompt: {e}");
+        }
+        prepared.push((i, run, lens_slugs, prompt));
+    }
+    prepared
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn reviewer_prompt(
     branch_ctx: &str,

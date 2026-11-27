@@ -585,6 +585,7 @@ async fn after_a_restart_a_held_reviewer_is_awaited_and_only_the_lost_one_re_run
         cwd: r._dir.path().to_string_lossy().into_owned(),
         review_id: r.review_id.clone(),
         grace: Duration::from_secs(600),
+        max_attempts: None,
         skills_dir: None,
         cancel: None,
         agent_cancels: Default::default(),
@@ -700,6 +701,7 @@ async fn stopping_a_resumed_reviewer_keeps_it_stopped_and_never_re_runs_it() {
             cwd: r._dir.path().to_string_lossy().into_owned(),
             review_id: r.review_id.clone(),
             grace: Duration::from_secs(600),
+            max_attempts: None,
             skills_dir: None,
             cancel: Some(review_cancel),
             agent_cancels: agent_cancels.clone(),
@@ -858,6 +860,7 @@ async fn stopping_a_resumed_reviewer_when_its_thread_closes_first_never_overwrit
         cwd: r._dir.path().to_string_lossy().into_owned(),
         review_id: r.review_id.clone(),
         grace: Duration::from_secs(600),
+        max_attempts: None,
         skills_dir: None,
         cancel: Some(Arc::new(AtomicBool::new(false))),
         agent_cancels: agent_cancels.clone(),
@@ -911,6 +914,7 @@ async fn after_a_restart_with_all_reviewers_done_a_held_summarizer_thread_is_not
         cwd: r._dir.path().to_string_lossy().into_owned(),
         review_id: r.review_id.clone(),
         grace: Duration::from_secs(600),
+        max_attempts: None,
         skills_dir: None,
         cancel: None,
         agent_cancels: Default::default(),
@@ -964,6 +968,7 @@ async fn after_a_restart_a_resumed_reviewer_carries_its_persisted_prompt_for_zer
         cwd: r._dir.path().to_string_lossy().into_owned(),
         review_id: r.review_id.clone(),
         grace: Duration::from_secs(600),
+        max_attempts: None,
         skills_dir: None,
         cancel: None,
         agent_cancels: Default::default(),
@@ -976,5 +981,59 @@ async fn after_a_restart_a_resumed_reviewer_carries_its_persisted_prompt_for_zer
         turns[0].prompt.contains("Review the diff carefully."),
         "StepRunner::resume needs the real prompt if restart landed before turn 1 went out; got: {:?}",
         turns[0].prompt
+    );
+}
+
+#[tokio::test]
+async fn after_a_restart_a_queued_reviewer_honors_configured_max_attempts() {
+    // API-2: operator sets max_attempts = 1; a failing queued reviewer must stop
+    // after 1 attempt instead of retrying with the default of 3.
+    let fail = Act {
+        fail: Some(StepErrorClass::Provider),
+        ..Default::default()
+    };
+    let r = rig(vec![fail.clone(), fail.clone(), fail]).await;
+    let id: Id = r.review_id.clone();
+    let rows = vec![
+        ReviewAgentState {
+            name: "Queued".into(),
+            provider: "claude".into(),
+            status: "pending".into(),
+            lens: "Queued".into(),
+            ..Default::default()
+        },
+        ReviewAgentState {
+            name: "Summarizer".into(),
+            provider: "claude".into(),
+            status: "pending".into(),
+            ..Default::default()
+        },
+    ];
+    r.reviews.set_agents(&id, &rows).await.unwrap();
+    r.reviews
+        .set_agent_prompt(&id, 0, "Review lens 0")
+        .await
+        .unwrap();
+    let _ = crate::thread_resume::resume_reviewers(crate::thread_resume::ResumeCtx {
+        manager: r.manager.clone(),
+        threads: r.threads.clone(),
+        reviews: r.reviews.clone(),
+        ws: r.ws.clone(),
+        user: r.user.clone(),
+        cwd: r._dir.path().to_string_lossy().into_owned(),
+        review_id: r.review_id.clone(),
+        grace: Duration::from_secs(600),
+        max_attempts: Some(1),
+        skills_dir: None,
+        cancel: None,
+        agent_cancels: Default::default(),
+    })
+    .await
+    .unwrap();
+    let turns = r.fake.turns.lock().unwrap().clone();
+    assert_eq!(
+        turns.len(),
+        1,
+        "max_attempts: Some(1) must cap queued reviewer launches to 1 attempt on restart"
     );
 }

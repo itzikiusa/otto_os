@@ -358,6 +358,84 @@ pub fn with_failure_reasons(rows: &[ReviewAgentState]) -> Vec<ReviewAgentState> 
         .collect()
 }
 
+/// The review's error note when its diff file can't be written for the
+/// reviewers (a new run settles with it; a retry refuses with it).
+pub fn diff_write_failure(cause: &dyn std::fmt::Display) -> String {
+    format!("Couldn't write the diff for the reviewers: {cause}")
+}
+
+/// Write the diff to `$TMPDIR/otto-review-<id>.diff` and persist its durable copy.
+pub async fn materialize_review_diff(
+    reviews: &otto_state::ReviewsRepo,
+    review_id: &Id,
+    diff_text: &str,
+) -> Result<std::path::PathBuf> {
+    let diff_path = std::env::temp_dir().join(format!("otto-review-{review_id}.diff"));
+    if let Err(e) = tokio::fs::write(&diff_path, diff_text).await {
+        tracing::warn!(review = %review_id, "could not write review diff file: {e}");
+        return Err(Error::Internal(diff_write_failure(&e)));
+    }
+    if let Err(e) = reviews.set_diff(review_id, diff_text).await {
+        tracing::warn!(review = %review_id, "could not persist review diff: {e}");
+    }
+    Ok(diff_path)
+}
+
+/// Remove matching `$TMPDIR/otto-review-<id>*` files (FILES only, never worktrees).
+#[allow(clippy::disallowed_methods)]
+pub fn remove_review_temp_files_in(dir: &std::path::Path, prefix: &str) {
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for entry in rd.flatten() {
+            if entry.file_name().to_string_lossy().starts_with(prefix)
+                && entry.file_type().is_ok_and(|t| t.is_file())
+            {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
+/// Ensure `$TMPDIR/otto-review-<review_id>.diff` exists on disk (restoring it
+/// from the durable `reviews` diff column if a reboot or temp sweep removed it)
+/// and return its text. Fails loudly if no durable diff exists so queued
+/// reviewers never start against a missing file (DATA-2).
+pub async fn ensure_review_diff(
+    reviews: &otto_state::ReviewsRepo,
+    review_id: &Id,
+) -> Result<String> {
+    let diff_file = std::env::temp_dir().join(format!("otto-review-{review_id}.diff"));
+    if let Ok(existing) = tokio::fs::read_to_string(&diff_file).await {
+        if !existing.is_empty() {
+            return Ok(existing);
+        }
+    }
+    match reviews.get_diff(review_id).await {
+        Ok(Some(diff)) if !diff.is_empty() => {
+            tokio::fs::write(&diff_file, &diff).await.map_err(|e| {
+                Error::Internal(format!("Couldn't write the diff for the reviewers: {e}"))
+            })?;
+            Ok(diff)
+        }
+        Ok(_) => Err(Error::Conflict(
+            "this review has no stored diff to retry against; start a new review".into(),
+        )),
+        Err(e) => Err(Error::Internal(format!(
+            "Couldn't write the diff for the reviewers: {e}"
+        ))),
+    }
+}
+
+/// Blocker passed to `summarize_and_persist` when resuming a review after a
+/// restart: preserves the fresh path's partial-diff incompleteness check so a
+/// resumed review whose persisted diff omitted files can never pass clean
+/// (BUG-11), otherwise uses `SUMMARIZER_RETRY_BLOCKER`.
+pub fn resumed_resolve_blocker(diff_text: Option<&str>) -> Option<&'static str> {
+    if diff_text.is_some_and(crate::engine::diff_is_partial) {
+        return Some("partial diff (files omitted)");
+    }
+    Some(crate::verification::SUMMARIZER_RETRY_BLOCKER)
+}
+
 #[cfg(test)]
 #[path = "restart_tests.rs"]
 mod tests;

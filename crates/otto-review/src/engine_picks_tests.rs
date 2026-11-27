@@ -304,6 +304,62 @@ fn workflow_review_configs_never_introduce_claude_when_step_names_other_provider
 }
 
 #[test]
+fn summarizer_only_and_checks_only_do_not_replace_repo_reviewers_or_force_claude() {
+    // BUG-13: setting only summarizer instructions/provider with no explicit reviewers
+    // must NOT build a generic override that wipes the repo's configured reviewers.
+    let sum_only = build_workflow_review_config(
+        "codex",
+        &json!({"summarizer": {"provider": "agy", "instructions": "scope gate"}}),
+        &[],
+        &[],
+        &[],
+        &[],
+    );
+    assert!(
+        sum_only.is_none(),
+        "summarizer-only params must leave base override None so repo reviewers are inherited: {:?}",
+        sum_only.map(|c| c.agents.len())
+    );
+
+    // BUG-13: applying summarizer-only overlay onto an inherited repo config keeps
+    // the repo's custom lenses/providers intact while updating the summarizer.
+    let mut repo_cfg = cfg(vec![lens("CustomRepoLens", &["agy"], "gemini-2.5", "high")]);
+    repo_cfg.summarizer.provider = "codex".into();
+    apply_workflow_review_overlays(
+        &mut repo_cfg,
+        "codex",
+        &json!({"summarizer": {"provider": "agy", "instructions": "scope gate"}}),
+        &[],
+        false,
+    );
+    assert_eq!(repo_cfg.agents.len(), 1);
+    assert_eq!(repo_cfg.agents[0].name, "CustomRepoLens");
+    assert_eq!(repo_cfg.summarizer.provider, "agy");
+    assert!(repo_cfg.summarizer.prompt.contains("scope gate"));
+
+    // BUG-14: a Codex-default workflow with required checks + goals (no explicit
+    // providers/summarizer) must never synthesize a claude summarizer or move goals to claude.
+    let checks_only = workflow_review_config("codex", &[], &[]);
+    assert_eq!(
+        checks_only.summarizer.provider, "codex",
+        "workflow_review_config with codex default must not keep hardcoded claude summarizer"
+    );
+    let checks = vec![("unit".to_string(), "cargo test".to_string())];
+    let p_checks = json!({"goals": ["tests pass"]});
+    let base = workflow_review_base_config("codex", &p_checks, &[], &[], &[]);
+    assert!(base.is_none(), "checks-only leaves repo config implicit");
+    assert_eq!(
+        goals_provider(&p_checks, base.as_ref(), &[], "codex"),
+        "codex",
+        "checks + goals on codex default must grade goals on codex, not claude"
+    );
+    let mut target_cfg = workflow_review_config("codex", &[], &[]);
+    apply_workflow_review_overlays(&mut target_cfg, "codex", &p_checks, &checks, false);
+    assert_eq!(target_cfg.summarizer.provider, "codex");
+    assert_eq!(target_cfg.agents.last().unwrap().provider, "codex");
+}
+
+#[test]
 fn codex_reviewers_start_first_and_rows_keep_their_order() {
     let c = cfg(vec![
         lens("A", &["claude", "codex"], "", ""),
