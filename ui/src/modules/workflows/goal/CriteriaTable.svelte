@@ -10,7 +10,8 @@
 </script>
 
 <ul class="crit">
-  {#each rows as r (r.id)}
+  <!-- Two check steps of one run may each have a criterion with the same id: key by place too. -->
+  {#each rows as r, i (`${i}:${r.id}`)}
     <li data-testid="wf-goal-criterion" data-criterion-id={r.id} data-met={MET_ATTR[r.state]} data-method={r.method}>
       <div class="line">
         <span class="w {r.state}">{STATE_WORD[r.state]}</span>
