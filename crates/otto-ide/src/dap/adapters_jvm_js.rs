@@ -829,14 +829,9 @@ pub(super) async fn resolve_java_adapter(
             } else {
                 (PathBuf::from(cwd), Some(program.clone()))
             };
-        let include_tests = req
-            .launch
-            .test_name
-            .as_deref()
-            .is_some_and(|s| !s.trim().is_empty());
-        // A test selector (`com.acme.CalcTest#adds`) runs through a JUnit launcher,
-        // unless the class is an app with its own `main` (the gutter's main item also
-        // names its class as the filter).
+        // A test selector (`com.acme.CalcTest#adds`) runs through a JUnit launcher on the
+        // test classpath, unless the class is an app with its own `main` (the gutter's main
+        // item also names its class as the filter): that launches on main sources (BUG2-6).
         let has_main = std::fs::read_to_string(&program).is_ok_and(|src| {
             src.contains("static void main(")
                 || (is_kotlin_file && (src.contains("fun main(") || src.contains("fun main ()")))
@@ -845,7 +840,8 @@ pub(super) async fn resolve_java_adapter(
             .launch
             .test_name
             .clone()
-            .filter(|_| include_tests && !has_main);
+            .filter(|s| !s.trim().is_empty() && !has_main);
+        let include_tests = test_selector.is_some();
         let mut cwd_hash: u64 = 0xcbf29ce484222325;
         for b in cwd.as_bytes() {
             cwd_hash ^= u64::from(*b);
