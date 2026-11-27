@@ -489,8 +489,8 @@
             props={{
               path: stagedPrimaryTab.path, content: stagedPrimaryTab.content,
               readOnly: stagedPrimaryTab.readOnly || !ide.canEditCollab,
-              onchange: (val: string) => { ide.updateBuffer(stagedPrimaryTab!.path, val); },
-              onswitchtext: () => { idePreviewMode.set(stagedPrimaryTab!.path, 'source'); },
+              onchange: (targetPath: string, val: string) => { ide.updateBuffer(targetPath, val); },
+              onswitchtext: (targetPath: string) => { idePreviewMode.set(targetPath, 'source'); },
             }}
           />
         {:else if effectiveViewMode === 'table' && (activeDocKind === 'csv' || activeDocKind === 'jsonl') && stagedPrimaryTab.path === activeTab.path}

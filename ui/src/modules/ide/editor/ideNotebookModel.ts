@@ -22,6 +22,8 @@ export interface NotebookCell {
   execution_count: number | null;
   outputs: NotebookOutput[];
   metadata: Record<string, unknown>;
+  /** Preserved nbformat v4 Markdown/raw cell attachments (`attachment:<name>`). */
+  attachments?: Record<string, Record<string, unknown>>;
 }
 
 export interface NotebookDoc {
@@ -100,6 +102,10 @@ export function parseIpynb(raw: string): { doc: NotebookDoc; parseError: string 
       const rawType = typeof obj.cell_type === 'string' ? obj.cell_type : 'code';
       const cell_type: NotebookCellType =
         rawType === 'markdown' || rawType === 'raw' ? rawType : 'code';
+      const attachments =
+        obj.attachments && typeof obj.attachments === 'object' && !Array.isArray(obj.attachments)
+          ? (obj.attachments as Record<string, Record<string, unknown>>)
+          : undefined;
       return {
         id: typeof obj.id === 'string' && obj.id.trim() ? obj.id : `cell-${idx + 1}`,
         cell_type,
@@ -111,6 +117,7 @@ export function parseIpynb(raw: string): { doc: NotebookDoc; parseError: string 
           obj.metadata && typeof obj.metadata === 'object' && !Array.isArray(obj.metadata)
             ? (obj.metadata as Record<string, unknown>)
             : {},
+        ...(attachments ? { attachments } : {}),
       };
     });
     return {
@@ -145,6 +152,9 @@ export function serializeIpynb(doc: NotebookDoc): string {
       if (c.cell_type === 'code') {
         base.execution_count = c.execution_count;
         base.outputs = c.outputs ?? [];
+      }
+      if (c.attachments && Object.keys(c.attachments).length > 0) {
+        base.attachments = c.attachments;
       }
       return base;
     }),
@@ -224,6 +234,19 @@ export function applyNotebookExecution(
     i === index ? { ...c, execution_count: executionCount, outputs } : c,
   );
   return { ...doc, cells };
+}
+
+/** Apply execution results by stable cell id so moving/deleting cells mid-run
+ *  never overwrites a different cell's outputs. */
+export function applyNotebookExecutionById(
+  doc: NotebookDoc,
+  cellId: string,
+  executionCount: number,
+  outputs: NotebookOutput[],
+): { doc: NotebookDoc; applied: boolean } {
+  const idx = doc.cells.findIndex((c) => c.id === cellId && c.cell_type === 'code');
+  if (idx < 0) return { doc, applied: false };
+  return { doc: applyNotebookExecution(doc, idx, executionCount, outputs), applied: true };
 }
 
 export function clearNotebookOutputs(doc: NotebookDoc): NotebookDoc {

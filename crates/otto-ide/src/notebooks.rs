@@ -10,7 +10,7 @@
 //! as `image/png`, formatted tracebacks, and live global variables.
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
@@ -123,22 +123,33 @@ pub struct IdeNotebookOkResp {
 // ---------------------------------------------------------------------------
 
 const OTTO_KERNEL_PY: &str = r#"
-import ast, base64, io, json, os, signal, sys, traceback
+import ast, base64, io, json, os, signal, sys, tempfile, traceback
 
 os.environ.setdefault("MPLBACKEND", "Agg")
 
-_ORIG_OUT = sys.stdout
-_ORIG_ERR = sys.stderr
-
-class _StreamCapture(io.StringIO):
+# Move the JSON protocol channel onto a private, non-inheritable fd so
+# subprocesses and C extensions writing to OS fd 1/2 never corrupt protocol lines.
+_PROTO_FD = os.dup(1)
+try:
+    os.set_inheritable(_PROTO_FD, False)
+except Exception:
     pass
+_PROTO_OUT = os.fdopen(_PROTO_FD, "w", buffering=1, encoding="utf-8", errors="replace")
+_DEVNULL_FD = os.open(os.devnull, os.O_WRONLY)
+try:
+    os.dup2(_DEVNULL_FD, 1)
+    os.dup2(_DEVNULL_FD, 2)
+except Exception:
+    pass
+
+_MAX_STREAM_BYTES = 2 * 1024 * 1024
 
 _NS = {"__name__": "__main__", "__doc__": None}
 _EXEC_COUNT = 0
 
 def _emit(obj):
-    _ORIG_OUT.write(json.dumps(obj, ensure_ascii=False) + "\n")
-    _ORIG_OUT.flush()
+    _PROTO_OUT.write(json.dumps(obj, ensure_ascii=False) + "\n")
+    _PROTO_OUT.flush()
 
 def _repr_bundle(val):
     data = {}
@@ -235,10 +246,14 @@ def _exec_cell(code):
     _EXEC_COUNT += 1
     outputs = []
     status = "ok"
-    cap_out = _StreamCapture()
-    cap_err = _StreamCapture()
-    sys.stdout = cap_out
-    sys.stderr = cap_err
+    tmp_out = tempfile.TemporaryFile(mode="w+b")
+    tmp_err = tempfile.TemporaryFile(mode="w+b")
+    old_py_out = sys.stdout
+    old_py_err = sys.stderr
+    os.dup2(tmp_out.fileno(), 1)
+    os.dup2(tmp_err.fileno(), 2)
+    sys.stdout = io.TextIOWrapper(os.fdopen(os.dup(1), "wb", buffering=0), encoding="utf-8", errors="replace", line_buffering=True)
+    sys.stderr = io.TextIOWrapper(os.fdopen(os.dup(2), "wb", buffering=0), encoding="utf-8", errors="replace", line_buffering=True)
     result_val = None
     has_result = False
     try:
@@ -271,11 +286,30 @@ def _exec_cell(code):
             "traceback": tb[-40:],
         })
     finally:
-        sys.stdout = _ORIG_OUT
-        sys.stderr = _ORIG_ERR
+        try:
+            sys.stdout.flush()
+            sys.stdout.close()
+        except Exception:
+            pass
+        try:
+            sys.stderr.flush()
+            sys.stderr.close()
+        except Exception:
+            pass
+        sys.stdout = old_py_out
+        sys.stderr = old_py_err
+        try:
+            os.dup2(_DEVNULL_FD, 1)
+            os.dup2(_DEVNULL_FD, 2)
+        except Exception:
+            pass
 
-    out_txt = cap_out.getvalue()
-    err_txt = cap_err.getvalue()
+    tmp_out.seek(0)
+    tmp_err.seek(0)
+    out_txt = tmp_out.read(_MAX_STREAM_BYTES).decode("utf-8", errors="replace")
+    err_txt = tmp_err.read(_MAX_STREAM_BYTES).decode("utf-8", errors="replace")
+    tmp_out.close()
+    tmp_err.close()
     if out_txt:
         outputs.insert(0, {"output_type": "stream", "name": "stdout", "text": out_txt.splitlines(True)})
     if err_txt:
@@ -396,8 +430,29 @@ pub fn detect_local_accelerators() -> Vec<IdeMlAcceleratorInfo> {
 }
 
 // ---------------------------------------------------------------------------
-// Kernel Discovery (venv / uv / conda / poetry / Jupyter kernelspecs / system)
+// Kernel Discovery (venv / uv / conda / poetry / system Python interpreters)
 // ---------------------------------------------------------------------------
+
+/// Compute a stable environment identity key for deduplication without collapsing
+/// two distinct virtual environments whose `bin/python` symlinks target the same
+/// base Python executable.
+fn python_env_dedup_key(interpreter: &str, kind: &str) -> String {
+    let p = Path::new(interpreter);
+    if kind != "system" {
+        if let Some(parent) = p.parent() {
+            let env_root = if parent.file_name().and_then(|s| s.to_str()) == Some("bin") {
+                parent.parent().unwrap_or(parent)
+            } else {
+                parent
+            };
+            let canon_root =
+                std::fs::canonicalize(env_root).unwrap_or_else(|_| env_root.to_path_buf());
+            return format!("env:{}", canon_root.to_string_lossy());
+        }
+    }
+    let canon = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    format!("sys:{}", canon.to_string_lossy())
+}
 
 #[allow(clippy::disallowed_methods)] // bounded manifest reads executed inside spawn_blocking
 pub fn discover_notebook_kernels(
@@ -407,30 +462,26 @@ pub fn discover_notebook_kernels(
 ) -> Vec<IdeNotebookKernelInfo> {
     let mut kernels = Vec::new();
     let mut seen: Vec<String> = Vec::new();
-    let active_py = project_env
+    let raw_active = project_env
         .and_then(|e| e.python_interpreter.as_deref())
         .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| {
-            std::fs::canonicalize(s)
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_else(|_| s.to_string())
-        });
+        .filter(|s| !s.is_empty());
+    let active_env_key = raw_active.map(|s| python_env_dedup_key(s, "venv"));
+    let active_sys_key = raw_active.map(|s| python_env_dedup_key(s, "system"));
 
     let mut push_kernel = |id: String,
                            display_name: String,
                            interpreter: String,
                            kind: &str,
                            version: Option<String>| {
-        let canon = std::fs::canonicalize(&interpreter)
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| interpreter.clone());
-        if seen.contains(&canon) {
+        let dedup = python_env_dedup_key(&interpreter, kind);
+        if seen.contains(&dedup) {
             return;
         }
-        seen.push(canon.clone());
-        let active = active_py.as_deref() == Some(canon.as_str())
-            || active_py.as_deref() == Some(interpreter.as_str());
+        seen.push(dedup.clone());
+        let active = raw_active == Some(interpreter.as_str())
+            || (kind != "system" && active_env_key.as_deref() == Some(dedup.as_str()))
+            || (kind == "system" && active_sys_key.as_deref() == Some(dedup.as_str()));
         kernels.push(IdeNotebookKernelInfo {
             id,
             display_name,
@@ -465,67 +516,7 @@ pub fn discover_notebook_kernels(
         );
     }
 
-    // 2. Installed Jupyter kernelspecs (`kernels/*/kernel.json`)
-    let mut spec_dirs: Vec<PathBuf> = Vec::new();
-    if !otto_core::e2e::isolated() {
-        if let Some(home) = dirs::home_dir() {
-            spec_dirs.push(home.join(".local/share/jupyter/kernels"));
-            spec_dirs.push(home.join("Library/Jupyter/kernels"));
-        }
-        spec_dirs.push(PathBuf::from("/usr/local/share/jupyter/kernels"));
-        spec_dirs.push(PathBuf::from("/opt/homebrew/share/jupyter/kernels"));
-    }
-    for sub in [".venv", "venv"] {
-        spec_dirs.push(root.join(sub).join("share/jupyter/kernels"));
-    }
-    for sdir in spec_dirs {
-        #[allow(clippy::disallowed_methods)]
-        let Ok(rd) = std::fs::read_dir(&sdir) else {
-            continue;
-        };
-        for entry in rd.flatten().take(24) {
-            let kjson = entry.path().join("kernel.json");
-            let Ok(raw) = std::fs::read_to_string(&kjson) else {
-                continue;
-            };
-            let Ok(val) = serde_json::from_str::<Value>(&raw) else {
-                continue;
-            };
-            let lang = val
-                .get("language")
-                .and_then(Value::as_str)
-                .unwrap_or("python");
-            if !lang.eq_ignore_ascii_case("python") {
-                continue;
-            }
-            let Some(argv0) = val
-                .get("argv")
-                .and_then(Value::as_array)
-                .and_then(|a| a.first())
-                .and_then(Value::as_str)
-            else {
-                continue;
-            };
-            if !Path::new(argv0).is_file() {
-                continue;
-            }
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let display = val
-                .get("display_name")
-                .and_then(Value::as_str)
-                .unwrap_or(&name)
-                .to_string();
-            push_kernel(
-                format!("kernelspec:{name}"),
-                format!("{display} (Jupyter)"),
-                argv0.to_string(),
-                "kernelspec",
-                None,
-            );
-        }
-    }
-
-    // 3. System python3 fallback
+    // 2. System python3 fallback (standard Python execution)
     let search_dirs = crate::toolchains::system_search_dirs();
     if let Some(py3) = crate::toolchains::find_executable_in(&search_dirs, &["python3", "python"]) {
         let py_str = py3.to_string_lossy().into_owned();
@@ -571,9 +562,19 @@ struct KernelProc {
     last_used: Instant,
 }
 
+impl KernelProc {
+    fn terminate_tree(&mut self) {
+        #[cfg(unix)]
+        if let Some(pid) = self.pid {
+            send_unix_signal_group(pid, 9 /* SIGKILL */);
+        }
+        let _ = self.child.start_kill();
+    }
+}
+
 impl Drop for KernelProc {
     fn drop(&mut self) {
-        let _ = self.child.start_kill();
+        self.terminate_tree();
     }
 }
 
@@ -584,10 +585,12 @@ struct KernelKey {
     notebook_path: String,
 }
 
+type KernelSlot = Arc<TokioMutex<Option<KernelProc>>>;
+
 /// Manages persistent per-notebook Python kernel processes for the IDE.
 #[derive(Clone, Default)]
 pub struct NotebookManager {
-    sessions: Arc<StdMutex<HashMap<KernelKey, Arc<TokioMutex<KernelProc>>>>>,
+    sessions: Arc<StdMutex<HashMap<KernelKey, KernelSlot>>>,
 }
 
 impl NotebookManager {
@@ -607,14 +610,16 @@ impl NotebookManager {
             notebook_path: notebook_path.to_string(),
         };
         let guard = self.sessions.lock().ok()?;
-        let arc = guard.get(&key)?.clone();
+        let slot = guard.get(&key)?.clone();
         drop(guard);
-        arc.try_lock().ok().map(|k| {
-            (
-                k.session_id.clone(),
-                k.interpreter.clone(),
-                k.execution_count,
-            )
+        slot.try_lock().ok().and_then(|opt| {
+            opt.as_ref().map(|k| {
+                (
+                    k.session_id.clone(),
+                    k.interpreter.clone(),
+                    k.execution_count,
+                )
+            })
         })
     }
 
@@ -631,20 +636,26 @@ impl NotebookManager {
         timeout: Duration,
     ) -> Result<IdeNotebookExecuteResp> {
         let started = Instant::now();
-        let kernel_arc = self
-            .get_or_spawn(owner, project_key, notebook_path, cwd, interpreter, env)
-            .await?;
-        let mut proc = kernel_arc.lock().await;
+        let key = KernelKey {
+            owner: owner.to_string(),
+            project_key: project_key.to_string(),
+            notebook_path: notebook_path.to_string(),
+        };
+        let slot = self.get_or_create_slot(&key).await?;
+        let mut slot_guard = slot.lock().await;
+        ensure_slot_kernel(&key, &mut slot_guard, interpreter, cwd, env).await?;
+        let proc = slot_guard
+            .as_mut()
+            .ok_or_else(|| Error::Internal("notebook kernel missing after spawn".into()))?;
         proc.last_used = Instant::now();
 
         let payload = json!({ "cmd": "exec", "code": code });
-        let resp = send_kernel_rpc(&mut proc, &payload, timeout).await;
+        let resp = send_kernel_rpc(proc, &payload, timeout).await;
         let val = match resp {
             Ok(v) => v,
             Err(e) => {
                 // Evict broken kernel so the next run spawns cleanly.
-                drop(proc);
-                self.remove_session(owner, project_key, notebook_path);
+                clear_slot_kernel(&key, &mut slot_guard);
                 return Err(e);
             }
         };
@@ -686,16 +697,22 @@ impl NotebookManager {
         project_key: &str,
         notebook_path: &str,
     ) -> Result<IdeNotebookVariablesResp> {
-        let Some(kernel_arc) = self.get_existing(owner, project_key, notebook_path) else {
+        let Some(slot) = self.get_existing_slot(owner, project_key, notebook_path) else {
             return Ok(IdeNotebookVariablesResp {
                 session_id: None,
                 execution_count: 0,
                 variables: Vec::new(),
             });
         };
-        let mut proc = kernel_arc.lock().await;
-        let val =
-            send_kernel_rpc(&mut proc, &json!({ "cmd": "vars" }), Duration::from_secs(5)).await?;
+        let mut slot_guard = slot.lock().await;
+        let Some(proc) = slot_guard.as_mut() else {
+            return Ok(IdeNotebookVariablesResp {
+                session_id: None,
+                execution_count: 0,
+                variables: Vec::new(),
+            });
+        };
+        let val = send_kernel_rpc(proc, &json!({ "cmd": "vars" }), Duration::from_secs(5)).await?;
         let variables: Vec<IdeNotebookVariable> = val
             .get("variables")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
@@ -707,14 +724,11 @@ impl NotebookManager {
         })
     }
 
-    /// Send `SIGINT` to the active kernel process without destroying the session.
+    /// Send `SIGINT` to the active kernel process group without destroying the session.
     pub fn interrupt(&self, owner: &str, project_key: &str, notebook_path: &str) -> bool {
-        let Some(kernel_arc) = self.get_existing(owner, project_key, notebook_path) else {
+        let Some(_slot) = self.get_existing_slot(owner, project_key, notebook_path) else {
             return false;
         };
-        // Read PID without waiting for an executing cell's lock? Store PID safely via try_lock
-        // or inspect child PID — actually we keep a parallel PID map so interrupt works DURING exec!
-        let _ = kernel_arc;
         self.send_sigint_by_key(&KernelKey {
             owner: owner.to_string(),
             project_key: project_key.to_string(),
@@ -731,28 +745,39 @@ impl NotebookManager {
         interpreter: &str,
         env: &BTreeMap<String, String>,
     ) -> Result<String> {
-        self.shutdown_session(owner, project_key, notebook_path)
-            .await;
-        let arc = self
-            .get_or_spawn(owner, project_key, notebook_path, cwd, interpreter, env)
-            .await?;
-        let proc = arc.lock().await;
+        let key = KernelKey {
+            owner: owner.to_string(),
+            project_key: project_key.to_string(),
+            notebook_path: notebook_path.to_string(),
+        };
+        let slot = self.get_or_create_slot(&key).await?;
+        let mut slot_guard = slot.lock().await;
+        clear_slot_kernel(&key, &mut slot_guard);
+        ensure_slot_kernel(&key, &mut slot_guard, interpreter, cwd, env).await?;
+        let proc = slot_guard
+            .as_ref()
+            .ok_or_else(|| Error::Internal("notebook kernel missing after restart".into()))?;
         Ok(proc.session_id.clone())
     }
 
     pub async fn shutdown_session(&self, owner: &str, project_key: &str, notebook_path: &str) {
-        if let Some(arc) = self.remove_session(owner, project_key, notebook_path) {
-            let mut proc = arc.lock().await;
-            let _ = proc.child.start_kill();
+        let key = KernelKey {
+            owner: owner.to_string(),
+            project_key: project_key.to_string(),
+            notebook_path: notebook_path.to_string(),
+        };
+        if let Some(slot) = self.remove_slot(&key) {
+            let mut slot_guard = slot.lock().await;
+            clear_slot_kernel(&key, &mut slot_guard);
         }
     }
 
-    fn get_existing(
+    fn get_existing_slot(
         &self,
         owner: &str,
         project_key: &str,
         notebook_path: &str,
-    ) -> Option<Arc<TokioMutex<KernelProc>>> {
+    ) -> Option<KernelSlot> {
         let key = KernelKey {
             owner: owner.to_string(),
             project_key: project_key.to_string(),
@@ -761,20 +786,10 @@ impl NotebookManager {
         self.sessions.lock().ok()?.get(&key).cloned()
     }
 
-    fn remove_session(
-        &self,
-        owner: &str,
-        project_key: &str,
-        notebook_path: &str,
-    ) -> Option<Arc<TokioMutex<KernelProc>>> {
-        let key = KernelKey {
-            owner: owner.to_string(),
-            project_key: project_key.to_string(),
-            notebook_path: notebook_path.to_string(),
-        };
-        let removed = self.sessions.lock().ok()?.remove(&key);
+    fn remove_slot(&self, key: &KernelKey) -> Option<KernelSlot> {
+        let removed = self.sessions.lock().ok()?.remove(key);
         if let Ok(mut pids) = kernel_pids().lock() {
-            pids.remove(&key);
+            pids.remove(key);
         }
         removed
     }
@@ -786,7 +801,7 @@ impl NotebookManager {
         };
         #[cfg(unix)]
         {
-            send_unix_sigint(pid)
+            send_unix_signal_group(pid, 2 /* SIGINT */)
         }
         #[cfg(not(unix))]
         {
@@ -795,65 +810,72 @@ impl NotebookManager {
         }
     }
 
-    async fn get_or_spawn(
-        &self,
-        owner: &str,
-        project_key: &str,
-        notebook_path: &str,
-        cwd: &str,
-        interpreter: &str,
-        env: &BTreeMap<String, String>,
-    ) -> Result<Arc<TokioMutex<KernelProc>>> {
-        let key = KernelKey {
-            owner: owner.to_string(),
-            project_key: project_key.to_string(),
-            notebook_path: notebook_path.to_string(),
-        };
-
-        if let Some(existing) = self.get_existing(owner, project_key, notebook_path) {
-            let reuse = {
-                let mut proc = existing.lock().await;
-                let alive = proc.child.try_wait().ok().flatten().is_none();
-                alive && proc.interpreter == interpreter && proc.cwd == cwd
-            };
-            if reuse {
-                return Ok(existing);
-            }
-            self.shutdown_session(owner, project_key, notebook_path)
-                .await;
-        }
-
-        let proc = spawn_python_kernel(interpreter, cwd, env).await?;
-        let pid = proc.pid;
-        let arc = Arc::new(TokioMutex::new(proc));
-
-        let mut evicted: Option<Arc<TokioMutex<KernelProc>>> = None;
-        {
+    /// Atomically returns the per-notebook slot mutex so concurrent first runs
+    /// serialize kernel creation and share a single kernel process.
+    async fn get_or_create_slot(&self, key: &KernelKey) -> Result<KernelSlot> {
+        let mut evicted: Option<(KernelKey, KernelSlot)> = None;
+        let slot = {
             let mut guard = self
                 .sessions
                 .lock()
                 .map_err(|_| Error::Internal("notebook session lock poisoned".into()))?;
-            if guard.len() >= MAX_ACTIVE_KERNELS {
-                if let Some(oldest_key) = guard.keys().next().cloned() {
-                    evicted = guard.remove(&oldest_key);
-                    if let Ok(mut pids) = kernel_pids().lock() {
-                        pids.remove(&oldest_key);
+            if let Some(existing) = guard.get(key) {
+                Arc::clone(existing)
+            } else {
+                if guard.len() >= MAX_ACTIVE_KERNELS {
+                    if let Some(oldest_key) = guard.keys().next().cloned() {
+                        if let Some(old_slot) = guard.remove(&oldest_key) {
+                            evicted = Some((oldest_key, old_slot));
+                        }
                     }
                 }
+                let fresh: KernelSlot = Arc::new(TokioMutex::new(None));
+                guard.insert(key.clone(), Arc::clone(&fresh));
+                fresh
             }
-            guard.insert(key.clone(), Arc::clone(&arc));
-            if let Some(p) = pid {
-                if let Ok(mut pids) = kernel_pids().lock() {
-                    pids.insert(key, p);
-                }
-            }
+        };
+        if let Some((old_key, old_slot)) = evicted {
+            let mut g = old_slot.lock().await;
+            clear_slot_kernel(&old_key, &mut g);
         }
-        if let Some(old) = evicted {
-            let mut g = old.lock().await;
-            let _ = g.child.start_kill();
-        }
-        Ok(arc)
+        Ok(slot)
     }
+}
+
+fn clear_slot_kernel(key: &KernelKey, slot_guard: &mut Option<KernelProc>) {
+    if let Ok(mut pids) = kernel_pids().lock() {
+        pids.remove(key);
+    }
+    if let Some(mut proc) = slot_guard.take() {
+        proc.terminate_tree();
+    }
+}
+
+async fn ensure_slot_kernel(
+    key: &KernelKey,
+    slot_guard: &mut Option<KernelProc>,
+    interpreter: &str,
+    cwd: &str,
+    env: &BTreeMap<String, String>,
+) -> Result<()> {
+    let reuse = if let Some(proc) = slot_guard.as_mut() {
+        let alive = proc.child.try_wait().ok().flatten().is_none();
+        alive && proc.interpreter == interpreter && proc.cwd == cwd
+    } else {
+        false
+    };
+    if reuse {
+        return Ok(());
+    }
+    clear_slot_kernel(key, slot_guard);
+    let proc = spawn_python_kernel(interpreter, cwd, env).await?;
+    if let Some(p) = proc.pid {
+        if let Ok(mut pids) = kernel_pids().lock() {
+            pids.insert(key.clone(), p);
+        }
+    }
+    *slot_guard = Some(proc);
+    Ok(())
 }
 
 fn kernel_pids() -> &'static StdMutex<HashMap<KernelKey, u32>> {
@@ -864,19 +886,19 @@ fn kernel_pids() -> &'static StdMutex<HashMap<KernelKey, u32>> {
 
 #[cfg(unix)]
 #[allow(unsafe_code)]
-fn send_unix_sigint(pid: u32) -> bool {
+fn send_unix_signal_group(pid: u32, sig: std::ffi::c_int) -> bool {
     extern "C" {
         fn kill(pid: std::ffi::c_int, sig: std::ffi::c_int) -> std::ffi::c_int;
     }
-    const SIGINT: std::ffi::c_int = 2;
     let Ok(p) = std::ffi::c_int::try_from(pid) else {
         return false;
     };
     if p <= 1 {
         return false;
     }
-    // SAFETY: Sending SIGINT to a child kernel PID we spawned is OS-safe.
-    unsafe { kill(p, SIGINT) == 0 }
+    // SAFETY: The kernel is spawned in its own process group (`process_group(0)`),
+    // so signaling `-p` targets only the kernel and its spawned worker children.
+    unsafe { kill(-p, sig) == 0 || kill(p, sig) == 0 }
 }
 
 async fn spawn_python_kernel(
@@ -895,6 +917,8 @@ async fn spawn_python_kernel(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
+    #[cfg(unix)]
+    cmd.process_group(0);
 
     let mut child = cmd.spawn().map_err(|e| {
         Error::Upstream(format!(
@@ -1081,7 +1105,7 @@ mod tests {
             .expect("execute_result");
         assert_eq!(res["data"]["text/plain"], "42");
 
-        // 3. Rich HTML table & PNG display via _repr_html_ / _repr_png_
+        // 3. Simulated rich HTML (_repr_html_) delivery (not a real pandas DataFrame)
         let r3 = mgr
             .execute_cell(
                 "u1",
@@ -1090,7 +1114,7 @@ mod tests {
                 &cwd,
                 &py_str,
                 &env,
-                "class FakeDF:\n  def _repr_html_(self): return '<table><tr><th>a</th></tr><tr><td>1</td></tr></table>'\nFakeDF()",
+                "class SimulatedHtmlObj:\n  def _repr_html_(self): return '<table><tr><th>a</th></tr><tr><td>1</td></tr></table>'\nSimulatedHtmlObj()",
                 Duration::from_secs(10),
             )
             .await
@@ -1104,6 +1128,33 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("<table>"));
+
+        // 3b. Subprocess writing directly to OS fd 1 must not corrupt protocol (BUG-37)
+        let r_sub = mgr
+            .execute_cell(
+                "u1",
+                "local:/tmp/nb",
+                "demo.ipynb",
+                &cwd,
+                &py_str,
+                &env,
+                "import subprocess, sys\nsubprocess.run([sys.executable, '-c', 'print(\"from-subproc\")'], check=True)\n'still-alive'",
+                Duration::from_secs(10),
+            )
+            .await
+            .expect("cell with subprocess stdout");
+        assert_eq!(r_sub.status, "ok");
+        assert_eq!(r_sub.session_id, r1.session_id);
+        let sub_stdout = r_sub
+            .outputs
+            .iter()
+            .find(|o| o["output_type"] == "stream" && o["name"] == "stdout")
+            .expect("captured subprocess stdout");
+        assert!(sub_stdout["text"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|l| l.as_str().unwrap_or("").contains("from-subproc")));
 
         // 4. Runtime error does not kill kernel state
         let r4 = mgr
@@ -1169,7 +1220,77 @@ mod tests {
             .expect("vars after restart");
         assert!(vars_after.variables.is_empty());
 
+        // 8. Background child worker spawned by a cell is killed with the kernel process group (OBS-3)
+        #[cfg(unix)]
+        {
+            let r_bg = mgr
+                .execute_cell(
+                    "u1",
+                    "local:/tmp/nb",
+                    "demo.ipynb",
+                    &cwd,
+                    &py_str,
+                    &env,
+                    "import subprocess, sys\n_bg = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n_bg.pid",
+                    Duration::from_secs(10),
+                )
+                .await
+                .expect("spawn bg worker");
+            let child_pid: u32 = r_bg
+                .outputs
+                .iter()
+                .find(|o| o["output_type"] == "execute_result")
+                .and_then(|o| o["data"]["text/plain"].as_str())
+                .and_then(|s| s.trim().parse().ok())
+                .expect("child pid");
+            mgr.shutdown_session("u1", "local:/tmp/nb", "demo.ipynb")
+                .await;
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            assert!(
+                !send_unix_signal_group(child_pid, 0),
+                "background worker {child_pid} should be terminated with the kernel process group"
+            );
+        }
+        #[cfg(not(unix))]
         mgr.shutdown_session("u1", "local:/tmp/nb", "demo.ipynb")
+            .await;
+
+        // 9. Concurrent first runs on a brand-new notebook share one kernel (CONC-5)
+        let (c1, c2) = tokio::join!(
+            mgr.execute_cell(
+                "u1",
+                "local:/tmp/nb-conc",
+                "race.ipynb",
+                &cwd,
+                &py_str,
+                &env,
+                "first_var = 101",
+                Duration::from_secs(10),
+            ),
+            mgr.execute_cell(
+                "u1",
+                "local:/tmp/nb-conc",
+                "race.ipynb",
+                &cwd,
+                &py_str,
+                &env,
+                "second_var = 202",
+                Duration::from_secs(10),
+            ),
+        );
+        let c1 = c1.expect("concurrent run 1");
+        let c2 = c2.expect("concurrent run 2");
+        assert_eq!(
+            c1.session_id, c2.session_id,
+            "concurrent first runs must share a single kernel session"
+        );
+        let conc_vars = mgr
+            .list_variables("u1", "local:/tmp/nb-conc", "race.ipynb")
+            .await
+            .expect("concurrent vars");
+        assert!(conc_vars.variables.iter().any(|v| v.name == "first_var"));
+        assert!(conc_vars.variables.iter().any(|v| v.name == "second_var"));
+        mgr.shutdown_session("u1", "local:/tmp/nb-conc", "race.ipynb")
             .await;
     }
 
@@ -1187,12 +1308,37 @@ mod tests {
             !kernels.is_empty(),
             "expected at least system python3 kernel on host"
         );
+        assert!(
+            !kernels.iter().any(|k| k.kind == "kernelspec"),
+            "built-in Python runner should not advertise Jupyter kernelspec protocol"
+        );
+
+        // Distinct virtualenvs symlinking to the same host Python binary stay distinct (BUG-38)
+        #[cfg(unix)]
+        {
+            let search = crate::toolchains::system_search_dirs();
+            if let Some(sys_py) = crate::toolchains::find_executable_in(&search, &["python3"]) {
+                let venv_proj = tempfile::tempdir().unwrap();
+                for name in [".venv", "venv"] {
+                    let vdir = venv_proj.path().join(name);
+                    std::fs::create_dir_all(vdir.join("bin")).unwrap();
+                    std::fs::write(vdir.join("pyvenv.cfg"), "version = 3.12.0\n").unwrap();
+                    std::os::unix::fs::symlink(&sys_py, vdir.join("bin/python")).unwrap();
+                }
+                let found = discover_notebook_kernels(venv_proj.path(), venv_proj.path(), None);
+                let env_kernels: Vec<_> = found.iter().filter(|k| k.kind == "venv").collect();
+                assert!(
+                    env_kernels.len() >= 2,
+                    "two distinct venvs pointing to the same python binary must both remain selectable: {found:?}"
+                );
+            }
+        }
 
         let ipynb = r##"{"cells":[{"cell_type":"markdown","source":["# hi"]},{"cell_type":"code","source":["a = 1\n","b = 2\n"]}],"metadata":{},"nbformat":4,"nbformat_minor":5}"##;
         let cell1 = extract_ipynb_cell_python(ipynb, Some(1)).unwrap();
         assert_eq!(cell1, "a = 1\nb = 2\n");
 
-        // Verify ML training, TensorBoard, and Jupyter Lab auto-discovery
+        // Verify ML training, TensorBoard, and Jupyter Lab auto-discovery (BUG-39 & SEC-9)
         let ml_dir = tempfile::tempdir().unwrap();
         std::fs::write(ml_dir.path().join("train.py"), "print('epoch 1')\n").unwrap();
         std::fs::write(
@@ -1211,15 +1357,31 @@ mod tests {
             project_folders: Vec::new(),
         };
         let discovered = crate::environments::discover_run_configs(&target, &[]);
-        assert!(
-            discovered.iter().any(|c| c.name.contains("ML Train")
-                && c.env_overrides.get("PYTHONUNBUFFERED").map(String::as_str) == Some("1")),
-            "expected ML Train auto-config with PYTHONUNBUFFERED=1: {discovered:?}"
+        let ml_cfg = discovered
+            .iter()
+            .find(|c| c.name.contains("ML Train"))
+            .expect("expected ML Train auto-config");
+        assert_eq!(
+            ml_cfg
+                .env_overrides
+                .get("PYTHONUNBUFFERED")
+                .map(String::as_str),
+            Some("1")
         );
         assert!(
-            discovered.iter().any(|c| c.name.contains("TensorBoard")
-                && c.args.iter().any(|a| a == "tensorboard.main")),
-            "expected TensorBoard auto-config: {discovered:?}"
+            !ml_cfg.args.iter().any(|a| a == "-u"),
+            "ML Train must not pass -u as a script arg: {:?}",
+            ml_cfg.args
+        );
+        let tb_cfg = discovered
+            .iter()
+            .find(|c| c.name.contains("TensorBoard"))
+            .expect("expected TensorBoard auto-config");
+        assert!(tb_cfg.args.iter().any(|a| a == "tensorboard.main"));
+        assert!(
+            !tb_cfg.args.iter().any(|a| a == "--bind_all"),
+            "TensorBoard auto-config must stay on loopback by default: {:?}",
+            tb_cfg.args
         );
         assert!(
             discovered.iter().any(|c| c.name == "Jupyter Lab"),

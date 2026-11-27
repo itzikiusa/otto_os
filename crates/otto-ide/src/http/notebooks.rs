@@ -28,7 +28,14 @@ async fn authorize_notebook_target<S: IdeCtx>(
             "notebook kernels currently support local workspaces only".into(),
         ));
     }
+    if write {
+        require_notebook_exec_authority(&user.0)?;
+    }
     ctx.authorize_local_target(&user.0, target, write).await
+}
+
+fn require_notebook_exec_authority(user: &otto_core::domain::User) -> Result<()> {
+    super::require_root_user(user)
 }
 
 async fn resolve_notebook_interpreter_and_env<S: IdeCtx>(
@@ -254,4 +261,30 @@ pub(super) async fn notebook_shutdown<S: IdeCtx>(
         ok: true,
         message: Some("Kernel stopped".into()),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use otto_core::domain::User;
+
+    fn make_user(is_root: bool) -> User {
+        User {
+            id: "u1".into(),
+            username: "u".into(),
+            display_name: "U".into(),
+            is_root,
+            disabled: false,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn notebook_exec_authority_rejects_non_root_and_allows_root() {
+        let non_root = make_user(false);
+        assert!(require_notebook_exec_authority(&non_root).is_err());
+
+        let root = make_user(true);
+        assert!(require_notebook_exec_authority(&root).is_ok());
+    }
 }

@@ -22,7 +22,7 @@
   import { ide } from '../ideStore.svelte';
   import {
     addNotebookCell,
-    applyNotebookExecution,
+    applyNotebookExecutionById,
     changeNotebookCellType,
     clearNotebookOutputs,
     deleteNotebookCell,
@@ -40,8 +40,8 @@
     path: string;
     content: string;
     readOnly?: boolean;
-    onchange: (nextJson: string) => void;
-    onswitchtext: () => void;
+    onchange: (targetPath: string, nextJson: string) => void;
+    onswitchtext: (targetPath: string) => void;
   }
 
   let { path, content, readOnly = false, onchange, onswitchtext }: Props = $props();
@@ -49,48 +49,57 @@
   let doc = $state<NotebookDoc>(parseIpynb('').doc);
   let parseError = $state<string | null>(null);
   let lastSerialized = '';
+  let lastParsedPath = '';
   let kernels = $state<IdeNotebookKernelInfo[]>([]);
   let accelerators = $state<IdeMlAcceleratorInfo[]>([]);
   let selectedInterpreter = $state('');
   let kernelsLoading = $state(false);
-  let runningIdx = $state<number | null>(null);
+  let runningCellId = $state<string | null>(null);
   let runningAll = $state(false);
   let variables = $state<IdeNotebookVariable[]>([]);
   let varsOpen = $state(false);
   let activeSessionId = $state<string | null>(null);
 
   $effect(() => {
-    if (content === lastSerialized) return;
+    if (path === lastParsedPath && content === lastSerialized) return;
     const res = parseIpynb(content);
     doc = res.doc;
     parseError = res.parseError;
+    lastParsedPath = path;
     lastSerialized = content;
   });
 
   $effect(() => {
     const p = path;
     untrack(() => {
+      runningCellId = null;
+      runningAll = false;
+      variables = [];
+      activeSessionId = null;
       if (ide.hasTarget && p) {
-        void refreshKernels();
+        void refreshKernels(p);
       }
     });
   });
 
-  function commitDoc(next: NotebookDoc): void {
+  function commitDoc(next: NotebookDoc, targetPath: string = path): void {
+    if (targetPath !== path) return;
     doc = next;
     const json = serializeIpynb(next);
+    lastParsedPath = targetPath;
     lastSerialized = json;
-    onchange(json);
+    onchange(targetPath, json);
   }
 
-  async function refreshKernels(): Promise<void> {
+  async function refreshKernels(targetPath: string = path): Promise<void> {
     if (!ide.hasTarget) return;
     kernelsLoading = true;
     try {
       const resp = await api.post<IdeNotebookKernelsResp>('/ide/notebooks/kernels', {
         target: ide.target,
-        notebook_path: path,
+        notebook_path: targetPath,
       });
+      if (path !== targetPath) return;
       kernels = resp.kernels ?? [];
       accelerators = resp.accelerators ?? [];
       activeSessionId = resp.active_session_id ?? null;
@@ -105,47 +114,56 @@
     } catch {
       /* kernels optional while offline or SSH */
     } finally {
-      kernelsLoading = false;
+      if (path === targetPath) kernelsLoading = false;
+    }
+  }
+
+  async function runCellById(cellId: string): Promise<boolean> {
+    const cell = doc.cells.find((c) => c.id === cellId);
+    if (!cell || cell.cell_type !== 'code' || runningCellId !== null) return false;
+    const origPath = path;
+    runningCellId = cellId;
+    try {
+      const resp = await api.post<IdeNotebookExecuteResp>('/ide/notebooks/execute', {
+        target: ide.target,
+        notebook_path: origPath,
+        code: cell.source,
+        interpreter: selectedInterpreter || undefined,
+      });
+      if (path !== origPath) return false;
+      activeSessionId = resp.session_id;
+      variables = resp.variables ?? [];
+      const { doc: next, applied } = applyNotebookExecutionById(
+        doc,
+        cellId,
+        resp.execution_count,
+        (resp.outputs ?? []) as unknown as NotebookOutput[],
+      );
+      if (applied) commitDoc(next, origPath);
+      return resp.status === 'ok';
+    } catch (e) {
+      if (path === origPath) toastError('Couldn’t run cell', e);
+      return false;
+    } finally {
+      if (runningCellId === cellId) runningCellId = null;
     }
   }
 
   async function runCell(index: number): Promise<boolean> {
     const cell = doc.cells[index];
-    if (!cell || cell.cell_type !== 'code' || runningIdx !== null) return false;
-    runningIdx = index;
-    try {
-      const resp = await api.post<IdeNotebookExecuteResp>('/ide/notebooks/execute', {
-        target: ide.target,
-        notebook_path: path,
-        code: cell.source,
-        interpreter: selectedInterpreter || undefined,
-      });
-      activeSessionId = resp.session_id;
-      variables = resp.variables ?? [];
-      const next = applyNotebookExecution(
-        doc,
-        index,
-        resp.execution_count,
-        (resp.outputs ?? []) as unknown as NotebookOutput[],
-      );
-      commitDoc(next);
-      return resp.status === 'ok';
-    } catch (e) {
-      toastError('Couldn’t run cell', e);
-      return false;
-    } finally {
-      runningIdx = null;
-    }
+    if (!cell) return false;
+    return runCellById(cell.id);
   }
 
   async function runAllCells(): Promise<void> {
-    if (runningAll || runningIdx !== null) return;
+    if (runningAll || runningCellId !== null) return;
+    const origPath = path;
+    const codeIds = doc.cells.filter((c) => c.cell_type === 'code').map((c) => c.id);
     runningAll = true;
     try {
-      for (let i = 0; i < doc.cells.length; i++) {
-        if (!runningAll) break;
-        if (doc.cells[i]?.cell_type !== 'code') continue;
-        const ok = await runCell(i);
+      for (const id of codeIds) {
+        if (!runningAll || path !== origPath) break;
+        const ok = await runCellById(id);
         if (!ok) break;
       }
     } finally {
@@ -155,8 +173,9 @@
 
   async function interruptKernel(): Promise<void> {
     runningAll = false;
+    const origPath = path;
     try {
-      await api.post('/ide/notebooks/interrupt', { target: ide.target, notebook_path: path });
+      await api.post('/ide/notebooks/interrupt', { target: ide.target, notebook_path: origPath });
       toasts.info('Interrupt sent to Python kernel');
     } catch (e) {
       toastError('Couldn’t interrupt kernel', e);
@@ -165,15 +184,17 @@
 
   async function restartKernel(): Promise<void> {
     runningAll = false;
+    const origPath = path;
     try {
       await api.post('/ide/notebooks/restart', {
         target: ide.target,
-        notebook_path: path,
+        notebook_path: origPath,
         interpreter: selectedInterpreter || undefined,
       });
+      if (path !== origPath) return;
       variables = [];
       toasts.success('Python kernel restarted');
-      await refreshKernels();
+      await refreshKernels(origPath);
     } catch (e) {
       toastError('Couldn’t restart kernel', e);
     }
@@ -181,13 +202,14 @@
 
   async function toggleVariables(): Promise<void> {
     varsOpen = !varsOpen;
+    const origPath = path;
     if (varsOpen && activeSessionId) {
       try {
         const resp = await api.post<IdeNotebookVariablesResp>('/ide/notebooks/variables', {
           target: ide.target,
-          notebook_path: path,
+          notebook_path: origPath,
         });
-        variables = resp.variables ?? [];
+        if (path === origPath) variables = resp.variables ?? [];
       } catch {
         /* keep last known variables */
       }
@@ -197,13 +219,16 @@
   async function debugCell(index: number): Promise<void> {
     const cell = doc.cells[index];
     if (!cell || cell.cell_type !== 'code') return;
-    await ide.saveFile(path);
+    const origPath = path;
+    const saved = await ide.saveFile(origPath);
+    if (!saved || path !== origPath) return;
     await ide.startDebug({
       language: 'python',
       launch: {
-        program: path,
+        program: origPath,
         args: ['--cell', String(index)],
         cwd: ide.target.root,
+        sdk_path: selectedInterpreter || undefined,
       },
     });
   }
@@ -227,7 +252,7 @@
       <button
         type="button"
         class="btn small primary"
-        disabled={readOnly || runningIdx !== null || runningAll}
+        disabled={readOnly || runningCellId !== null || runningAll}
         onclick={() => void runAllCells()}
         data-testid="ide-nb-run-all"
       >
@@ -237,7 +262,7 @@
       <button
         type="button"
         class="btn small ghost"
-        disabled={runningIdx === null && !runningAll}
+        disabled={runningCellId === null && !runningAll}
         onclick={() => void interruptKernel()}
         title="Interrupt running cell (SIGINT)"
         aria-label="Interrupt running cell"
@@ -248,7 +273,7 @@
       <button
         type="button"
         class="btn small ghost"
-        disabled={readOnly || runningIdx !== null}
+        disabled={readOnly || runningCellId !== null}
         onclick={() => void restartKernel()}
         title="Restart kernel"
         aria-label="Restart kernel"
@@ -282,8 +307,9 @@
       {/if}
       <select
         class="input nb-kernel-sel"
-        aria-label="Notebook Python kernel"
-        disabled={kernelsLoading || runningIdx !== null}
+        aria-label="Python interpreter kernel"
+        title="Built-in Python kernel (standard Python; IPython %magic not supported)"
+        disabled={kernelsLoading || runningCellId !== null}
         bind:value={selectedInterpreter}
         data-testid="ide-nb-kernel-select"
       >
@@ -298,7 +324,7 @@
       <button
         type="button"
         class="btn small ghost"
-        onclick={onswitchtext}
+        onclick={() => onswitchtext(path)}
         title="View raw .ipynb JSON"
       >
         JSON
@@ -309,14 +335,14 @@
   {#if parseError}
     <div class="nb-banner-err">
       <span>Couldn’t parse notebook JSON: {parseError}</span>
-      <button type="button" class="btn small" onclick={onswitchtext}>Edit raw JSON</button>
+      <button type="button" class="btn small" onclick={() => onswitchtext(path)}>Edit raw JSON</button>
     </div>
   {/if}
 
   <div class="nb-body">
     <div class="nb-cells">
       {#each doc.cells as cell, idx (cell.id)}
-        {@const isRunning = runningIdx === idx}
+        {@const isRunning = runningCellId === cell.id}
         {@const normOutputs = normalizeNotebookOutputs(cell.outputs)}
         <section class="nb-cell" class:is-code={cell.cell_type === 'code'} data-testid={`ide-nb-cell-${idx}`}>
           <div class="nb-cell-head">
@@ -326,7 +352,7 @@
                 <button
                   type="button"
                   class="icon-btn nb-run-btn"
-                  disabled={readOnly || runningIdx !== null}
+                  disabled={readOnly || runningCellId !== null}
                   onclick={() => void runCell(idx)}
                   aria-label={`Run cell ${idx + 1}`}
                   title="Run cell (⇧⏎ / ⌘⏎)"
@@ -337,10 +363,10 @@
                 <button
                   type="button"
                   class="icon-btn"
-                  disabled={readOnly || runningIdx !== null}
+                  disabled={readOnly || runningCellId !== null}
                   onclick={() => void debugCell(idx)}
-                  aria-label={`Debug cell ${idx + 1}`}
-                  title="Debug cell in IDE Debugger"
+                  aria-label={`Debug cell ${idx + 1} (isolated)`}
+                  title="Debug cell in an isolated Python process (uses selected interpreter)"
                 >
                   <Icon name="bug" size={12} />
                 </button>

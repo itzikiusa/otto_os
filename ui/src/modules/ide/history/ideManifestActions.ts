@@ -15,6 +15,19 @@ export interface DepsActionResp {
   output?: string;
 }
 
+export function classifyDepsActionOutcome(
+  res: DepsActionResp,
+  label: string,
+  fileName: string,
+): { level: 'success' | 'error'; title: string; detail: string } {
+  const out = (res.output ?? '').trim();
+  const detail = out ? out.split('\n')[0].slice(0, 140) : fileName;
+  if (!res.ok) {
+    return { level: 'error', title: `Couldn’t run ${label}`, detail };
+  }
+  return { level: 'success', title: label, detail };
+}
+
 export async function runManifestDepsAction(
   filePath: string,
   action: string,
@@ -38,10 +51,13 @@ export async function runManifestDepsAction(
     void ideGit.refreshActive();
 
     const out = (res.output ?? '').trim();
-    if (showModalOutput && out && onTreeOutput) {
+    const outcome = classifyDepsActionOutcome(res, label, ideBasename(filePath));
+    if (outcome.level === 'error') {
+      toasts.error(outcome.title, outcome.detail);
+    } else if (showModalOutput && out && onTreeOutput) {
       onTreeOutput(`${label} — ${ideBasename(filePath)}`, out);
     } else {
-      toasts.success(label, out ? out.split('\n')[0].slice(0, 140) : ideBasename(filePath));
+      toasts.success(outcome.title, outcome.detail);
     }
   } catch (e) {
     toastError(`Couldn’t run ${label}`, e);

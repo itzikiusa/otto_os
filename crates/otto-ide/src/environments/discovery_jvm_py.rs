@@ -47,7 +47,7 @@ pub(super) fn discover_python(
         }
     }
 
-    // ML training & evaluation scripts (stream unbuffered live logs).
+    // ML training & evaluation scripts (stream unbuffered live logs via PYTHONUNBUFFERED).
     for train_rel in [
         "train.py",
         "finetune.py",
@@ -63,7 +63,7 @@ pub(super) fn discover_python(
                 &format!("ml-{}", train_rel.replace('/', "-")),
                 format!("ML Train ({train_rel})"),
                 Some("python3"),
-                vec!["-u".into()],
+                Vec::new(),
                 cwd.clone(),
                 Some(train_rel.into()),
             );
@@ -97,7 +97,6 @@ pub(super) fn discover_python(
                 "tensorboard.main".into(),
                 "--logdir".into(),
                 logdir.into(),
-                "--bind_all".into(),
             ],
             cwd.clone(),
             None,

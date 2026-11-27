@@ -1,10 +1,12 @@
 // Jupyter Notebook (.ipynb) & ML workflow unit tests.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { loadSource } from './sourceHarness.ts';
 
 import {
   addNotebookCell,
   applyNotebookExecution,
+  applyNotebookExecutionById,
   changeNotebookCellType,
   clearNotebookOutputs,
   deleteNotebookCell,
@@ -139,4 +141,95 @@ test('normalizeNotebookOutputs handles stream, HTML tables, PNG/SVG images, and 
   assert.equal(outputs[3].kind, 'error');
   assert.equal(outputs[3].ename, 'ZeroDivisionError');
   assert.ok(!outputs[3].text.includes('\x1b['), 'ANSI escape sequences should be stripped from tracebacks');
+});
+
+test('DATA-4: Markdown cell attachments round-trip across parse, edit, and serialize', () => {
+  const sample = JSON.stringify({
+    nbformat: 4,
+    nbformat_minor: 5,
+    metadata: {},
+    cells: [
+      {
+        id: 'md-img',
+        cell_type: 'markdown',
+        metadata: {},
+        attachments: {
+          'plot.png': { 'image/png': 'iVBORw0KGgoAAAANSUhEUg==' },
+        },
+        source: ['![diagram](attachment:plot.png)\n'],
+      },
+      {
+        id: 'code-1',
+        cell_type: 'code',
+        metadata: {},
+        execution_count: null,
+        outputs: [],
+        source: ['x = 1'],
+      },
+    ],
+  });
+  const { doc, parseError } = parseIpynb(sample);
+  assert.equal(parseError, null);
+  const edited = updateNotebookCellSource(doc, 1, 'x = 2');
+  const reparsed = JSON.parse(serializeIpynb(edited));
+  assert.deepEqual(reparsed.cells[0].attachments, {
+    'plot.png': { 'image/png': 'iVBORw0KGgoAAAANSUhEUg==' },
+  });
+});
+
+test('CONC-4: applyNotebookExecutionById tracks moved cells and discards deleted cells', () => {
+  const { doc } = parseIpynb(JSON.stringify({
+    nbformat: 4,
+    nbformat_minor: 5,
+    metadata: {},
+    cells: [
+      { id: 'c-first', cell_type: 'code', metadata: {}, execution_count: null, outputs: [], source: ['1'] },
+      { id: 'c-second', cell_type: 'code', metadata: {}, execution_count: null, outputs: [], source: ['2'] },
+    ],
+  }));
+  // Move c-first from index 0 to index 1 while execution is in flight.
+  const moved = moveNotebookCell(doc, 0, 1);
+  const out = [{ output_type: 'execute_result', execution_count: 5, data: { 'text/plain': '1' } }];
+  const res = applyNotebookExecutionById(moved, 'c-first', 5, out);
+  assert.equal(res.applied, true);
+  assert.equal(res.doc.cells[0].id, 'c-second');
+  assert.equal(res.doc.cells[0].outputs.length, 0);
+  assert.equal(res.doc.cells[1].id, 'c-first');
+  assert.equal(res.doc.cells[1].execution_count, 5);
+
+  // Deleted cell discards cleanly without touching remaining cells.
+  const deleted = deleteNotebookCell(moved, 1);
+  const dropped = applyNotebookExecutionById(deleted, 'c-first', 6, out);
+  assert.equal(dropped.applied, false);
+  assert.equal(dropped.doc.cells.length, 1);
+  assert.equal(dropped.doc.cells[0].outputs.length, 0);
+});
+
+test('OBS-4: classifyDepsActionOutcome reports error when backend returns ok: false', () => {
+  const mod = loadSource(
+    new URL('../src/modules/ide/history/ideManifestActions.ts', import.meta.url),
+    {
+      '../../../lib/api/client': { api: {} },
+      '../../../lib/toast.svelte': { toasts: {} },
+      '../../../lib/toastError': { toastError: () => {} },
+      '../git/ideGitController.svelte': { ideGit: {} },
+      '../ideStore.svelte': { ide: {}, ideBasename: (p: string) => p.split('/').pop() ?? p },
+    },
+  );
+  const failed = mod.classifyDepsActionOutcome(
+    { ok: false, output: 'uv pip install exited with status 1\nmissing wheel' },
+    'Sync Python Dependencies',
+    'requirements.txt',
+  );
+  assert.equal(failed.level, 'error');
+  assert.match(failed.title, /Couldn’t run Sync Python Dependencies/);
+  assert.match(failed.detail, /exited with status 1/);
+
+  const ok = mod.classifyDepsActionOutcome(
+    { ok: true, output: 'Resolved 12 packages' },
+    'Sync Python Dependencies',
+    'requirements.txt',
+  );
+  assert.equal(ok.level, 'success');
+  assert.equal(ok.title, 'Sync Python Dependencies');
 });
