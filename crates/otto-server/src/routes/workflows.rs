@@ -997,8 +997,17 @@ pub(crate) async fn recompute_overview(
     run: &WorkflowRun,
 ) -> Option<otto_core::workflows::RunOverview> {
     let wf = repo(ctx).definition_for_run(run).await.ok()?;
+    let with_cps = if run.checkpoints.is_empty()
+        && otto_workflows::goal_progress::has_goal_checks(&wf.graph)
+    {
+        let mut r = run.clone();
+        r.checkpoints = repo(ctx).checkpoints(&run.id).await.unwrap_or_default();
+        Some(r)
+    } else {
+        None
+    };
     Some(otto_workflows::overview::run_overview(
-        run,
+        with_cps.as_ref().unwrap_or(run),
         &wf.graph,
         None,
         None,

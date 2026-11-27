@@ -3015,8 +3015,12 @@ as before, so the previous build reads every row. New enums end in a catch-all
   number, `#15`, `repo#15` or a PR URL; `ticket` the issue key in `jira_ticket`; `branch`
   the `pr_branch`, never the `base`; `url` is `""` when the input has none);
   `goal = GoalProgress {iteration, max_iterations, criteria_met, criteria_total, active_ms,
-  max_active_ms?, awaiting?}` (while the loop runs the counts are the newest check's, 0 of
-  the check's criteria before the first); `hold = RunHold`. The field is `overview`, never
+  max_active_ms?, awaiting?, criteria?: GoalCriterion[]}` (while the loop runs the counts are the
+  newest check's, 0 of the check's criteria before the first; `GoalCriterion = {step_id,
+  step_name?, id, text?, met?, awaiting?, progress?, history?: CriterionPoint[]}` keyed by
+  `(step_id, id)` across all check steps so two loops with the same criterion id stay distinct,
+  where `step_id` is `<loop_id>.<step_index>` for an inner check or the top-level node id, and
+  `CriterionPoint = {iteration, met, value?}`, bounded to 50 rounds per criterion); `hold = RunHold`. The field is `overview`, never
   `summary` (`/progress` keeps its boolean `summary: true` marker). Stored in
   `workflow_runs.overview_json` stamped with the row's `rev` by the same progress write;
   it is absent from a response when the stored one is stale (its `rev` is not the row's —
@@ -3044,9 +3048,12 @@ as before, so the previous build reads every row. New enums end in a catch-all
   `WorkflowCheckpoint` gains `active_ms?` (the attempt's time minus its time on a person;
   omitted at 0), `thread_id?` and `start_ordinal?` (the inner step's thread, resumed after a
   restart mid-iteration). A `check` step's output is `CheckOutput {criteria: [{id, text,
-  verify, met, evidence, verified_by}], all_met, met, total, progress_pct, verdict:
-  achieved|continue|blocked, feedback, feedback_md, repeat_signature, repeated_failures,
-  review?: {approved, findings}}`.
+  verify, met, evidence, verified_by, progress?: CriterionProgress}], all_met, met, total,
+  progress_pct, verdict: achieved|continue|blocked, feedback, feedback_md, repeat_signature,
+  repeated_failures, review?: {approved, findings}}` where `CriterionProgress = {value?, target?,
+  unit?, label?, values?: Record<string, unknown>}` records how close the criterion is to its
+  target, what blocks it in words, and the values inspected (rule identifiers + review
+  score/threshold/must-fix/should-fix counts, or command exit code + last meaningful line).
 - `PATCH /workflows/{id}` checks `expected_version` in the same statement that saves, so two
   saves from one base never both land (the second answers **409**).
 - Run retention: goal workflows keep no run by count (the 30-day age rule still keeps recent

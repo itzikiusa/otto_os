@@ -90,9 +90,17 @@ impl RunBoard {
                 s.output = Some(out.clone());
             }
         }
+        let checkpoints = if self.base.is_some()
+            && otto_workflows::goal_progress::has_goal_checks(&cx.workflow.graph)
+        {
+            cx.repo.checkpoints(cx.run_id).await.unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         let mut overview = self.base.as_ref().map(|base| {
             let run = WorkflowRun {
                 nodes: states.clone(),
+                checkpoints,
                 waiting_approval: gate.is_some(),
                 approval_node_id: gate.clone(),
                 ..base.clone()

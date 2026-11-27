@@ -555,6 +555,80 @@ pub struct Subject {
     pub branch: Option<String>,
 }
 
+/// How close one criterion is to its target (additive on `CriterionResult` and
+/// `GoalCriterion`). Small and generic across rules, review outputs, and commands.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CriterionProgress {
+    /// Current measured value (e.g. review score `72`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<f64>,
+    /// Target value to reach (e.g. review threshold `95`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<f64>,
+    /// Optional unit (e.g. `"%"`, `"ms"`; omitted for plain ratios like `72 / 95`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    /// Short human-readable blocker or status (e.g. `"3 must-fix findings left"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Values inspected by the check (rule identifiers, review counts, command
+    /// exit code and last meaningful line).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub values: std::collections::BTreeMap<String, Value>,
+}
+
+impl CriterionProgress {
+    pub fn is_empty(&self) -> bool {
+        self.value.is_none()
+            && self.target.is_none()
+            && self.unit.is_none()
+            && self.label.is_none()
+            && self.values.is_empty()
+    }
+}
+
+/// One round's recorded outcome/value for a criterion (bounded to 50 rounds).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CriterionPoint {
+    pub iteration: u32,
+    pub met: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<f64>,
+}
+
+/// One criterion's current state and per-round history on [`GoalProgress`],
+/// keyed by `(step_id, id)` so two check steps with the same criterion id stay
+/// distinct everywhere.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct GoalCriterion {
+    /// Stable check-step key: top-level node id, or `<loop_id>.<step_index>`.
+    pub step_id: String,
+    /// Human-readable step or loop label (e.g. `"UI"`, `"server"`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub step_name: String,
+    /// Criterion id within its check step.
+    pub id: String,
+    /// Criterion text (clipped for overview compactness).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub text: String,
+    /// Latest check outcome (`None` before its first check).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub met: Option<bool>,
+    /// True while parked waiting for a person to verify this criterion.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub awaiting: bool,
+    /// Latest progress (value, target, unit, label, inspected values).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<CriterionProgress>,
+    /// Per-round history from the loop's checkpoints (ascending, ≤ 50).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<CriterionPoint>,
+}
+
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
 /// A goal run's progress (the run's graph has a loop with a check step).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct GoalProgress {
@@ -570,6 +644,9 @@ pub struct GoalProgress {
     /// Criterion ids parked for a person.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub awaiting: Vec<String>,
+    /// Per-criterion current status and round history, keyed by `(step_id, id)`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub criteria: Vec<GoalCriterion>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -720,6 +797,9 @@ pub struct CriterionResult {
     pub evidence: String,
     /// `command` | `rule` | `agent` | the person's name.
     pub verified_by: String,
+    /// Numeric progress, blocker label, and values inspected by the check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<CriterionProgress>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1364,5 +1444,79 @@ mod tests {
             ..cp
         };
         assert_eq!(serde_json::to_value(&banked).unwrap()["active_ms"], 42);
+    }
+
+    #[test]
+    fn criterion_progress_and_goal_criteria_are_optional_and_round_trip() {
+        // Legacy rows without `criteria` or `progress` still decode cleanly.
+        let old_goal: GoalProgress = serde_json::from_value(json!({
+            "iteration": 2, "max_iterations": 5, "criteria_met": 1, "criteria_total": 2, "active_ms": 1000
+        }))
+        .unwrap();
+        assert!(old_goal.criteria.is_empty());
+        assert!(serde_json::to_value(&old_goal)
+            .unwrap()
+            .get("criteria")
+            .is_none());
+
+        let old_res: CriterionResult = serde_json::from_value(json!({
+            "id": "r", "text": "t", "verify": "expr", "met": false, "evidence": "e", "verified_by": "rule"
+        }))
+        .unwrap();
+        assert!(old_res.progress.is_none());
+        assert!(serde_json::to_value(&old_res)
+            .unwrap()
+            .get("progress")
+            .is_none());
+
+        let mut values = std::collections::BTreeMap::new();
+        values.insert("score".into(), json!(72));
+        values.insert("threshold".into(), json!(95));
+        let full_goal = GoalProgress {
+            iteration: 3,
+            max_iterations: 5,
+            criteria_met: 0,
+            criteria_total: 1,
+            active_ms: 5000,
+            max_active_ms: None,
+            awaiting: vec![],
+            criteria: vec![GoalCriterion {
+                step_id: "ui.1".into(),
+                step_name: "UI".into(),
+                id: "review-passes".into(),
+                text: "Review passes".into(),
+                met: Some(false),
+                awaiting: false,
+                progress: Some(CriterionProgress {
+                    value: Some(72.0),
+                    target: Some(95.0),
+                    unit: None,
+                    label: Some("3 must-fix findings left".into()),
+                    values,
+                }),
+                history: vec![
+                    CriterionPoint {
+                        iteration: 1,
+                        met: false,
+                        value: Some(35.0),
+                    },
+                    CriterionPoint {
+                        iteration: 2,
+                        met: false,
+                        value: Some(58.0),
+                    },
+                    CriterionPoint {
+                        iteration: 3,
+                        met: false,
+                        value: Some(72.0),
+                    },
+                ],
+            }],
+        };
+        let encoded = serde_json::to_value(&full_goal).unwrap();
+        assert_eq!(
+            serde_json::from_value::<GoalProgress>(encoded).unwrap(),
+            full_goal
+        );
     }
 }

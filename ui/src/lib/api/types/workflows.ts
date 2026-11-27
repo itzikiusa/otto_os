@@ -267,6 +267,34 @@ export interface RunSubject {
   branch?: string;
 }
 
+/** How close one criterion is to its target (additive on CriterionResult and GoalCriterion). */
+export interface CriterionProgress {
+  value?: number;
+  target?: number;
+  unit?: string;
+  label?: string;
+  values?: Record<string, unknown>;
+}
+
+/** One round's recorded outcome/value for a criterion (bounded to 50). */
+export interface CriterionPoint {
+  iteration: number;
+  met: boolean;
+  value?: number;
+}
+
+/** One criterion's current state and per-round history on GoalProgress, keyed by `(step_id, id)`. */
+export interface GoalCriterion {
+  step_id: string;
+  step_name?: string;
+  id: string;
+  text?: string;
+  met?: boolean;
+  awaiting?: boolean;
+  progress?: CriterionProgress;
+  history?: CriterionPoint[];
+}
+
 /** A goal run's progress. */
 export interface GoalProgress {
   iteration: number;
@@ -277,6 +305,8 @@ export interface GoalProgress {
   max_active_ms?: number;
   /** Criterion ids parked for a person. */
   awaiting?: string[];
+  /** Per-criterion current status and per-round history, keyed by `(step_id, id)`. */
+  criteria?: GoalCriterion[];
 }
 
 export type HoldKind = 'paused' | 'blocked' | 'exhausted' | 'unknown';
@@ -349,6 +379,8 @@ export interface CriterionResult {
   evidence: string;
   /** `command` · `rule` · `agent` · the person's name. */
   verified_by: string;
+  /** Numeric progress, blocker label, and values inspected by the check. */
+  progress?: CriterionProgress;
 }
 
 export type CheckVerdict = 'achieved' | 'continue' | 'blocked' | 'unknown';

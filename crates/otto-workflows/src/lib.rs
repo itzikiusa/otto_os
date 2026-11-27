@@ -19,6 +19,7 @@ pub mod context;
 pub mod criteria;
 pub mod deliverables;
 pub mod goal;
+pub mod goal_progress;
 pub mod hold;
 pub mod http;
 pub mod location;

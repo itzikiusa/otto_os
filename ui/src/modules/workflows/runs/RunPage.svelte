@@ -332,7 +332,21 @@
       {#if !pushed && !(wide && maximized)}
         <div class="col">
           <RunOverview {run} {runState} word={word.word} {entries} {sync} {now} {nodeName} {criteria} onopenstep={openStepTab} staleSince={stale ? heardAt : null} />
-          <StepList {entries} {runState} clock={{ start: Date.parse(run.started_at), end: run.finished_at ? Date.parse(run.finished_at) : now }} {now} selected={wide ? selected : { node: '', child: null }} result={run.status === 'success' || run.status === 'canceled'} compact={!wide} onselect={select} />
+          <StepList
+            {entries}
+            {runState}
+            clock={{ start: Date.parse(run.started_at), end: run.finished_at ? Date.parse(run.finished_at) : now }}
+            {now}
+            selected={wide ? selected : { node: '', child: null }}
+            result={run.status === 'success' || run.status === 'canceled'}
+            compact={!wide}
+            onselect={select}
+            runId={run.id}
+            {graph}
+            checkpoints={run.checkpoints}
+            goal={run.overview?.goal}
+            limits={run.limits}
+          />
         </div>
       {/if}
       {#if wide || pushed}

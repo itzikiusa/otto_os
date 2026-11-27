@@ -102,3 +102,103 @@ export async function serveGoalRun(page: Page, workspaceId: string, state: State
   });
   return { writes };
 }
+
+export const MULTI_LOOP_WF = 'wf-goal-multi';
+export const MULTI_LOOP_RUN = 'run-goal-multi';
+
+/** Serve a run with two review-and-fix loops whose check steps share the same
+ *  criterion id (`review-passes`), each with score progress and round history. */
+export async function serveMultiLoopGoalRun(page: Page, workspaceId: string): Promise<void> {
+  const reviewCriterion = { id: 'review-passes', text: 'A fresh independent review passes', verify: 'expr', how: '', expr: 'steps.review.passed == true' };
+  const wf = {
+    id: MULTI_LOOP_WF, workspace_id: workspaceId, name: 'Review & fix (UI + server)', description: 'Score 95+ in both loops', instructions: '',
+    origin: 'goal', version: 1, created_by: 'u', created_at: '2026-11-20T09:00:00Z', updated_at: '2026-11-20T09:00:00Z',
+    graph: {
+      nodes: [
+        { id: 'start', kind: 'manual_trigger', name: 'Start', x: 0, y: 0, params: { lane: 'long' } },
+        { id: 'ui', kind: 'loop', name: 'UI', x: 0, y: 120, params: { max_iterations: 5, steps: [{ kind: 'review_run', name: 'review' }, { kind: 'check', name: 'check', params: { criteria: [reviewCriterion] } }, { kind: 'agent_prompt', name: 'fix' }] } },
+        { id: 'server', kind: 'loop', name: 'server', x: 240, y: 120, params: { max_iterations: 5, steps: [{ kind: 'review_run', name: 'review' }, { kind: 'check', name: 'check', params: { criteria: [reviewCriterion] } }, { kind: 'agent_prompt', name: 'fix' }] } },
+      ],
+      edges: [{ id: 'e1', source: 'start', target: 'ui' }, { id: 'e2', source: 'start', target: 'server' }],
+    },
+  };
+  const mkCheck = (met: boolean, score: number, label?: string) => ({
+    criteria: [{
+      id: 'review-passes', text: reviewCriterion.text, verify: 'expr', met,
+      evidence: `steps.review.passed == true is ${met} — ${score} / 95${label ? `, ${label}` : ''}`, verified_by: 'rule',
+      progress: { value: score, target: 95, ...(label ? { label } : {}), values: { 'steps.review.passed': met, score, threshold: 95 } },
+    }],
+    all_met: met, met: met ? 1 : 0, total: 1, progress_pct: met ? 100 : 0, verdict: met ? 'achieved' : 'continue',
+    feedback: '', feedback_md: '', repeat_signature: '', repeated_failures: 0,
+  });
+  const checkpoints = [
+    { node_id: 'ui#1.0#review.0', loop_id: 'ui', iteration: 1, step_index: 0, kind: 'review_run', name: 'review', status: 'success', attempts: 1, input: null, output: { review_id: 'ui-rev-1' }, logs: [], updated_at: '2026-11-20T09:05:00Z' },
+    { node_id: 'ui#1.0', loop_id: 'ui', iteration: 1, step_index: 0, kind: 'review_run', name: 'review', status: 'success', attempts: 1, input: null, output: { review_id: 'ui-rev-1', score: 35, threshold: 95, open: 68 }, logs: [], updated_at: '2026-11-20T09:08:00Z' },
+    { node_id: 'ui#1.1', loop_id: 'ui', iteration: 1, step_index: 1, kind: 'check', name: 'check', status: 'success', attempts: 1, input: null, output: mkCheck(false, 35, '4 must-fix findings left'), logs: [], updated_at: '2026-11-20T09:10:00Z' },
+    { node_id: 'ui#1.2', loop_id: 'ui', iteration: 1, step_index: 2, kind: 'agent_prompt', name: 'fix', status: 'success', attempts: 2, input: null, output: {}, logs: ['attempt 1: timed out waiting for tool'], updated_at: '2026-11-20T09:14:00Z', thread_id: 'th-ui-fix-1b' },
+    { node_id: 'ui#2.0#review.0', loop_id: 'ui', iteration: 2, step_index: 0, kind: 'review_run', name: 'review', status: 'success', attempts: 1, input: null, output: { review_id: 'ui-rev-2' }, logs: [], updated_at: '2026-11-20T09:16:00Z' },
+    { node_id: 'ui#2.0', loop_id: 'ui', iteration: 2, step_index: 0, kind: 'review_run', name: 'review', status: 'success', attempts: 1, input: null, output: { review_id: 'ui-rev-2', score: 58, threshold: 95, open: 12 }, logs: [], updated_at: '2026-11-20T09:19:00Z' },
+    { node_id: 'ui#2.1', loop_id: 'ui', iteration: 2, step_index: 1, kind: 'check', name: 'check', status: 'success', attempts: 1, input: null, output: mkCheck(false, 58, '3 must-fix findings left'), logs: [], updated_at: '2026-11-20T09:20:00Z' },
+    { node_id: 'ui#2.2', loop_id: 'ui', iteration: 2, step_index: 2, kind: 'agent_prompt', name: 'fix', status: 'success', attempts: 1, input: null, output: {}, logs: [], updated_at: '2026-11-20T09:25:00Z', thread_id: 'th-ui-fix-2' },
+    { node_id: 'ui#3.0#review.0', loop_id: 'ui', iteration: 3, step_index: 0, kind: 'review_run', name: 'review', status: 'running', attempts: 1, input: null, output: { review_id: 'ui-rev-3' }, logs: [], updated_at: '2026-11-20T09:28:00Z' },
+    { node_id: 'ui#3.1', loop_id: 'ui', iteration: 3, step_index: 1, kind: 'check', name: 'check', status: 'success', attempts: 1, input: null, output: mkCheck(false, 72, '3 must-fix findings left'), logs: [], updated_at: '2026-11-20T09:30:00Z' },
+    { node_id: 'server#1.1', loop_id: 'server', iteration: 1, step_index: 1, kind: 'check', name: 'check', status: 'success', attempts: 1, input: null, output: mkCheck(false, 60, '2 must-fix findings left'), logs: [], updated_at: '2026-11-20T09:10:00Z' },
+    { node_id: 'server#2.1', loop_id: 'server', iteration: 2, step_index: 1, kind: 'check', name: 'check', status: 'success', attempts: 1, input: null, output: mkCheck(false, 80, '1 must-fix finding left'), logs: [], updated_at: '2026-11-20T09:20:00Z' },
+    { node_id: 'server#3.1', loop_id: 'server', iteration: 3, step_index: 1, kind: 'check', name: 'check', status: 'success', attempts: 1, input: null, output: mkCheck(false, 81, '1 must-fix finding left'), logs: [], updated_at: '2026-11-20T09:30:00Z' },
+  ];
+  const run = {
+    id: MULTI_LOOP_RUN, workflow_id: MULTI_LOOP_WF, workspace_id: workspaceId, status: 'running', input: { goal: { title: 'Review & fix' } },
+    started_at: '2026-11-20T09:00:00Z', finished_at: null, rev: 9, workflow_version: 1,
+    resume_attempts: 0, checkpoint_rev: checkpoints.length, checkpoint_generation: 0, waiting_approval: false, steering_queued: [],
+    nodes: [
+      { node_id: 'start', status: 'success', logs: [], step_no: 1 },
+      {
+        node_id: 'ui', status: 'running', logs: ['🔁 iteration 3/5'], step_no: 2, phase: 'finishing',
+        activity: { phase: 'waiting on 2 sub-agent(s)', updated_at: '2026-11-20T09:30:00Z', pending_tasks: 2, subagents: [] },
+        review_ids: ['ui-rev-1', 'ui-rev-2', 'ui-rev-3'],
+        children: [
+          { id: 'ui-rev-1.0', label: 'Correctness', provider: 'codex', status: 'success', note: '68 findings' },
+          { id: 'ui-rev-1.1', label: 'Summarizer', provider: 'claude', status: 'success', note: 'Done' },
+          { id: 'th-ui-fix-1a', label: 'fix · iteration 1', provider: 'claude', status: 'error', thread_id: 'th-ui-fix-1a' },
+          { id: 'th-ui-fix-1b', label: 'fix · iteration 1', provider: 'claude', status: 'success', thread_id: 'th-ui-fix-1b' },
+          { id: 'ui-rev-2.0', label: 'Correctness', provider: 'codex', status: 'success', note: '12 findings' },
+          { id: 'ui-rev-2.1', label: 'Summarizer', provider: 'claude', status: 'success', note: 'Done' },
+          { id: 'th-ui-fix-2', label: 'fix · iteration 2', provider: 'claude', status: 'success', thread_id: 'th-ui-fix-2' },
+          { id: 'ui-rev-3.0', label: 'Design', provider: 'claude', status: 'success', note: '2 findings' },
+          { id: 'ui-rev-3.1', label: 'Security · Claude', provider: 'claude', status: 'running', started_at: '2026-11-20T09:28:00Z', thread_id: 'th-ui-rev-3-1' },
+          { id: 'ui-rev-3.2', label: 'Correctness · Codex', provider: 'codex', status: 'running', started_at: '2026-11-20T09:29:00Z', thread_id: 'th-ui-rev-3-2' },
+          { id: 'ui-rev-3.3', label: 'Summarizer', provider: 'claude', status: 'pending' },
+        ],
+      },
+      { node_id: 'server', status: 'running', logs: ['🔁 iteration 3/5'], step_no: 3, phase: 'working', children: [{ id: 'th-srv-fix-3', label: 'fix · iteration 3', provider: 'claude', status: 'running', thread_id: 'th-srv-fix-3' }] },
+    ],
+    checkpoints,
+    overview: {
+      rev: 9, state: 'running', headline: 'Round 3 of 5 — UI 72 / 95, server 81 / 95',
+      steps_done: 1, steps_total: 3, attention: [], deliverables: [], usage: {}, time: { queued_ms: 0, waiting_ms: 0, with_you_ms: 0, working_ms: 0 }, elapsed_ms: 1_800_000,
+      goal: {
+        iteration: 3, max_iterations: 5, criteria_met: 0, criteria_total: 2, active_ms: 900_000,
+        criteria: [
+          {
+            step_id: 'ui.1', step_name: 'UI', id: 'review-passes', text: reviewCriterion.text, met: false,
+            progress: { value: 72, target: 95, label: '3 must-fix findings left', values: { 'steps.review.passed': false, score: 72, threshold: 95 } },
+            history: [{ iteration: 1, met: false, value: 35 }, { iteration: 2, met: false, value: 58 }, { iteration: 3, met: false, value: 72 }],
+          },
+          {
+            step_id: 'server.1', step_name: 'server', id: 'review-passes', text: reviewCriterion.text, met: false,
+            progress: { value: 81, target: 95, label: '1 must-fix finding left', values: { 'steps.review.passed': false, score: 81, threshold: 95 } },
+            history: [{ iteration: 1, met: false, value: 60 }, { iteration: 2, met: false, value: 80 }, { iteration: 3, met: false, value: 81 }],
+          },
+        ],
+      },
+    },
+  };
+  await page.route(/\/api\/v1\/(workflow-runs|workflows)\//, async (route: Route) => {
+    const path = new URL(route.request().url()).pathname.replace('/api/v1', '');
+    if (path === `/workflow-runs/${MULTI_LOOP_RUN}`) return route.fulfill({ json: run });
+    if (path === `/workflow-runs/${MULTI_LOOP_RUN}/progress`) return route.fulfill({ json: progressOf(run as unknown as ReturnType<typeof goalRun>) });
+    if (path === `/workflow-runs/${MULTI_LOOP_RUN}/checkpoints`) return route.fulfill({ json: { checkpoint_rev: run.checkpoint_rev, generation: 0, items: run.checkpoints, next_cursor: null } });
+    if (path.startsWith(`/workflows/${MULTI_LOOP_WF}`)) return route.fulfill({ json: wf });
+    return route.fallback();
+  });
+}

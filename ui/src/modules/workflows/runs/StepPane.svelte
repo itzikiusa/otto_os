@@ -20,7 +20,7 @@
   import RunFinalOutput from '../RunFinalOutput.svelte';
   import type { RunSync } from '../runSync.svelte';
   import CriteriaTable from '../goal/CriteriaTable.svelte';
-  import { criterionRows, latestCheck } from '../goal/goalCheck';
+  import { criterionRows, latestCheck, type ScopedCriterion } from '../goal/goalCheck';
   import GoalCard from './GoalCard.svelte';
   import { cardKind } from './StateCards.svelte';
   import StepConversation from './StepConversation.svelte';
@@ -28,8 +28,19 @@
   import { openReview, retryStep, skipStep } from './runActions';
   import { reviewIds } from '../reviewAgents';
   import { runReviews } from '../runReviews.svelte';
-  import { childWord, errorParts, stepDuration, stepWord } from './runWords';
-  import { childCrumb, childTrail, resolveThreadSelection, type StepChild, type StepItem } from './stepOrder';
+  import ProviderIcon from '../../../lib/components/ProviderIcon.svelte';
+  import { plural } from '../../../lib/plural';
+  import { childWord, errorParts, stepDuration, stepWord, waitingThreadLabel } from './runWords';
+  import {
+    childCrumb,
+    childTrail,
+    isWaitingOnSubagents,
+    resolveThreadSelection,
+    waitingReviewers,
+    waitingThreads,
+    type StepChild,
+    type StepItem,
+  } from './stepOrder';
   import { paneTabs, phaseSegments, TAB_LABEL, type PaneTab } from './stepTabs';
 
   interface Props {
@@ -46,7 +57,7 @@
     now: number;
     /** A tab a card asked for ("conversation", "preview"). */
     tab?: string | null;
-    criteria?: readonly Criterion[];
+    criteria?: readonly (Criterion | ScopedCriterion)[];
     /** The step whose failure the run's card beside the pane already shows. */
     cardNode?: string | null;
     /** The pane's own Maximize (the run column folds behind "Run"). */
@@ -177,6 +188,12 @@
   const segs = $derived(!child && node?.phases?.length ? phaseSegments(node.phases, node.status === 'running' ? now : Date.parse(node.started_at ?? '') + (node.duration_ms ?? 0)) : []);
   const segTotal = $derived(Math.max(1, segs.reduce((s, x) => s + x.ms, 0)));
   const summarizer = $derived(node?.children?.find((c) => /^summar/i.test(c.label) || c.id === 'summarizer') ?? null);
+  const stepWaiting = $derived(
+    !child && node && isWaitingOnSubagents(node)
+      ? waitingThreads(node, { scopeChildren: stepChildren, excludeSummarizer: step?.kind === 'review_run' })
+      : [],
+  );
+  const revWaiting = $derived(waitingReviewers(stepChildren));
   const summarizerThread = $derived<StepThread | null>(
     summarizer?.thread_id
       ? { thread_id: summarizer.thread_id, runner: 'threads', provider: summarizer.provider, turns: 0, usage: {} as StepThread['usage'] }
@@ -289,6 +306,29 @@
     {:else if child?.retried_reason}
       <p class="wait" data-testid="wf-child-retry-reason">{child.retried_reason}</p>
     {/if}
+    {#if stepWaiting.length}
+      <div class="wait-panel" data-testid="wf-pane-waiting">
+        <span class="wait-title">Waiting on {plural(stepWaiting.length, 'thread')}:</span>
+        <ul class="wait-links">
+          {#each stepWaiting as w, idx (w.childId ?? `${w.label}-${idx}`)}
+            {@const text = waitingThreadLabel(w, now)}
+            <li>
+              {#if w.childId && onselectchild}
+                <button type="button" class="wait-btn" data-testid="wf-waiting-thread" data-child-id={w.childId} onclick={() => onselectchild(w.childId)}>
+                  <ProviderIcon provider={w.provider} size={12} />
+                  <span dir="auto">{text}</span>
+                </button>
+              {:else}
+                <span class="wait-static" data-testid="wf-waiting-thread">
+                  {#if w.provider}<ProviderIcon provider={w.provider} size={12} />{/if}
+                  <span dir="auto">{text}</span>
+                </span>
+              {/if}
+            </li>
+          {/each}
+        </ul>
+      </div>
+    {/if}
     {#if failed}
       <div class="failed" data-testid="wf-step-error">
         <p class="ftitle" dir="auto"><Icon name="x" size={13} />{failed.title}</p>
@@ -308,6 +348,32 @@
     {:else if tab === 'summarizer'}
       {#if summarizerThread}
         <StepConversation thread={summarizerThread} {workspaceId} runId={run.id} nodeId="" attempt={node?.attempts ?? 1} onselectthread={onselectchild ? selectThread : undefined} onunavailable={onConversationUnavailable} />
+      {:else if revWaiting.running.length || revWaiting.queued > 0}
+        <div class="wait-panel" data-testid="wf-summarizer-waiting">
+          <p class="none">
+            The summarizer starts after {revWaiting.running.length ? `${plural(revWaiting.running.length, 'running reviewer')}` : ''}{revWaiting.running.length && revWaiting.queued ? ' and ' : ''}{revWaiting.queued ? `${plural(revWaiting.queued, 'queued reviewer')}` : ''}.
+          </p>
+          {#if revWaiting.running.length}
+            <ul class="wait-links">
+              {#each revWaiting.running as w, idx (w.childId ?? `${w.label}-${idx}`)}
+                {@const text = waitingThreadLabel(w, now)}
+                <li>
+                  {#if w.childId && onselectchild}
+                    <button type="button" class="wait-btn" data-testid="wf-waiting-thread" data-child-id={w.childId} onclick={() => onselectchild(w.childId)}>
+                      <ProviderIcon provider={w.provider} size={12} />
+                      <span dir="auto">{text}</span>
+                    </button>
+                  {:else}
+                    <span class="wait-static" data-testid="wf-waiting-thread">
+                      {#if w.provider}<ProviderIcon provider={w.provider} size={12} />{/if}
+                      <span dir="auto">{text}</span>
+                    </span>
+                  {/if}
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        </div>
       {:else}
         <p class="none">The summarizer starts after the reviewers.</p>
       {/if}
@@ -335,7 +401,8 @@
       {/if}
     {:else if tab === 'criteria'}
       {#if step?.kind === 'check'}
-        <CriteriaTable rows={criterionRows(criteria, latestCheck(body ? [body] : []), node?.attention?.criterion_id ? [node.attention.criterion_id] : [])} />
+        {@const stepCriteria = criteria.filter((c) => 'step_id' in c && c.step_id === step.id)}
+        <CriteriaTable rows={criterionRows(stepCriteria.length ? stepCriteria : criteria, latestCheck(body ? [body] : []), node?.attention?.criterion_id ? [node.attention.criterion_id] : [])} />
       {:else if run.overview?.goal}<GoalCard goal={run.overview.goal} {run} {criteria} />{/if}
     {:else if tab === 'input'}
       {#if attachments.length}
@@ -500,6 +567,54 @@
     margin-block-start: var(--sp-3);
     font-size: var(--fs-s);
     color: var(--text-dim);
+  }
+  .wait-panel {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-2);
+    margin-block-start: var(--sp-3);
+  }
+  .wait-title {
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+  }
+  .wait-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--sp-2);
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  .wait-btn,
+  .wait-static {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sp-1);
+    padding-block: var(--sp-1);
+    padding-inline: var(--sp-3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: var(--surface-2);
+    color: var(--accent-text);
+    font: inherit;
+    font-size: var(--fs-xs);
+    font-variant-numeric: tabular-nums;
+  }
+  .wait-btn {
+    cursor: pointer;
+  }
+  .wait-btn:hover {
+    background: var(--hover);
+    border-color: var(--accent-line);
+  }
+  .wait-static {
+    color: var(--text-dim);
+  }
+  @media (pointer: coarse) {
+    .wait-btn {
+      min-block-size: var(--hit-min);
+    }
   }
   .body {
     min-block-size: 0;

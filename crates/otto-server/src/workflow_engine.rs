@@ -1804,7 +1804,11 @@ async fn deliver_run_result(
     let (mut brief, full) = build_run_summary(workflow, states, status);
     // Live style (§9.2): the final post says what was delivered, in words.
     if run::chat::style(workflow, input) == otto_workflows::chat_status::ChatUpdates::Live {
-        if let Ok(run) = WorkflowsRepo::new(ctx.pool.clone()).get_run(run_id).await {
+        let repo = WorkflowsRepo::new(ctx.pool.clone());
+        if let Ok(mut run) = repo.get_run(run_id).await {
+            if otto_workflows::goal_progress::has_goal_checks(&workflow.graph) {
+                run.checkpoints = repo.checkpoints(run_id).await.unwrap_or_default();
+            }
             let ov = otto_workflows::overview::run_overview(
                 &run,
                 &workflow.graph,

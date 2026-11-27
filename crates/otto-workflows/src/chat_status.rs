@@ -119,6 +119,13 @@ pub fn render_status(
     if let Some(t) = overview.typical_ms {
         first.push_str(&format!(" (usually {})", approx(t)));
     }
+    let mut header = vec![first];
+    if let Some(goal) = overview.goal.as_ref() {
+        if let Some(goal_line) = crate::goal_progress::chat_goal_line(goal) {
+            header.push(goal_line);
+        }
+        header.extend(crate::goal_progress::chat_round_lines(goal));
+    }
     let lines: Vec<(bool, String)> = listed
         .iter()
         .map(|(n, s)| {
@@ -126,7 +133,9 @@ pub fn render_status(
             (ok, status_line(view, n, *s))
         })
         .collect();
-    let full = std::iter::once(first.clone())
+    let full = header
+        .iter()
+        .cloned()
         .chain(lines.iter().map(|(_, l)| l.clone()))
         .collect::<Vec<_>>()
         .join("\n");
@@ -134,7 +143,7 @@ pub fn render_status(
         return full;
     }
     let folded = lines.iter().filter(|(ok, _)| *ok).count();
-    let mut out = vec![first];
+    let mut out = header;
     let mut said = false;
     for (ok, line) in lines {
         match (ok, said) {
@@ -272,6 +281,12 @@ pub fn render_final(
                 });
             }
         }
+    }
+    if let Some(goal) = overview.goal.as_ref() {
+        if let Some(goal_line) = crate::goal_progress::chat_goal_line(goal) {
+            lines.push(goal_line);
+        }
+        lines.extend(crate::goal_progress::chat_round_lines(goal));
     }
     for d in &overview.deliverables {
         let detail = d.detail.as_deref().filter(|s| !s.trim().is_empty());
