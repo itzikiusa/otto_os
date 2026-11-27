@@ -766,25 +766,27 @@ const MAX_WS_CRITERION_HISTORY: usize = 3;
 
 impl RunOverview {
     /// Return a bounded projection of this overview suitable for
-    /// `Event::WorkflowRunUpdated` (≤ 4 KiB). Full 50-round history and
-    /// `progress.values` remain on HTTP detail / progress reads.
-    pub fn ws_projected(&self) -> Self {
+    /// `Event::WorkflowRunUpdated` (≤ 4 KiB UTF-8 JSON bytes), or `None` if
+    /// even the minimal bounded representation cannot fit (in which case the
+    /// event omits `overview` and clients keep the last one or refetch). Full
+    /// 50-round history, `progress.values`, and unclipped names remain on HTTP
+    /// detail / progress reads.
+    pub fn ws_projected(&self) -> Option<Self> {
         let mut out = self.clone();
-        let Some(goal) = out.goal.as_mut() else {
-            return out;
-        };
-        for c in &mut goal.criteria {
-            c.text = crate::agent_runtime::clip(&c.text, 80);
-            if let Some(p) = c.progress.as_mut() {
-                p.values.clear();
-            }
-            if c.history.len() > MAX_WS_CRITERION_HISTORY {
-                let drop = c.history.len() - MAX_WS_CRITERION_HISTORY;
-                c.history.drain(..drop);
+        if let Some(goal) = out.goal.as_mut() {
+            for c in &mut goal.criteria {
+                c.text = clip_utf8(&c.text, 80);
+                if let Some(p) = c.progress.as_mut() {
+                    p.values.clear();
+                }
+                if c.history.len() > MAX_WS_CRITERION_HISTORY {
+                    let drop = c.history.len() - MAX_WS_CRITERION_HISTORY;
+                    c.history.drain(..drop);
+                }
             }
         }
         if ws_overview_json_len(&out) <= WS_OVERVIEW_MAX_BYTES {
-            return out;
+            return Some(out);
         }
         if let Some(goal) = out.goal.as_mut() {
             for c in &mut goal.criteria {
@@ -792,7 +794,7 @@ impl RunOverview {
             }
         }
         if ws_overview_json_len(&out) <= WS_OVERVIEW_MAX_BYTES {
-            return out;
+            return Some(out);
         }
         if let Some(goal) = out.goal.as_mut() {
             for c in &mut goal.criteria {
@@ -810,12 +812,111 @@ impl RunOverview {
                 break;
             }
         }
-        out
+        if ws_overview_json_len(&out) <= WS_OVERVIEW_MAX_BYTES {
+            return Some(out);
+        }
+
+        // Whole-overview trimming in priority order (handles multi-byte CJK step
+        // names, long attention/deliverable text, and non-goal overviews).
+        out.headline = clip_utf8(&out.headline, 160);
+        for a in &mut out.attention {
+            a.name = clip_utf8(&a.name, 64);
+            a.attention.text = clip_utf8(&a.attention.text, 160);
+        }
+        if let Some(now) = out.now.as_mut() {
+            for n in &mut now.node_names {
+                *n = clip_utf8(n, 64);
+            }
+            if let Some(w) = now.wait_text.as_mut() {
+                *w = clip_utf8(w, 120);
+            }
+        }
+        for d in &mut out.deliverables {
+            d.label = clip_utf8(&d.label, 64);
+            if let Some(det) = d.detail.as_mut() {
+                *det = clip_utf8(det, 120);
+            }
+        }
+        if let Some(fs) = out.failed_step.as_mut() {
+            fs.name = clip_utf8(&fs.name, 64);
+            fs.error = clip_utf8(&fs.error, 160);
+        }
+        if let Some(h) = out.hold.as_mut() {
+            h.reason = clip_utf8(&h.reason, 160);
+        }
+        if ws_overview_json_len(&out) <= WS_OVERVIEW_MAX_BYTES {
+            return Some(out);
+        }
+
+        // Drop lower-priority detail fields progressively until ≤ 4 KiB.
+        for d in &mut out.deliverables {
+            d.detail = None;
+            d.url = None;
+        }
+        while !out.deliverables.is_empty() && ws_overview_json_len(&out) > WS_OVERVIEW_MAX_BYTES {
+            out.deliverables.pop();
+        }
+        if ws_overview_json_len(&out) <= WS_OVERVIEW_MAX_BYTES {
+            return Some(out);
+        }
+        if let Some(now) = out.now.as_mut() {
+            now.node_names.clear();
+            now.wait_text = None;
+        }
+        if ws_overview_json_len(&out) <= WS_OVERVIEW_MAX_BYTES {
+            return Some(out);
+        }
+        while out.attention.len() > 1 && ws_overview_json_len(&out) > WS_OVERVIEW_MAX_BYTES {
+            out.attention.pop();
+        }
+        if ws_overview_json_len(&out) <= WS_OVERVIEW_MAX_BYTES {
+            return Some(out);
+        }
+        out.origin = None;
+        out.subject = None;
+        if let Some(goal) = out.goal.as_mut() {
+            goal.awaiting.clear();
+        }
+        if ws_overview_json_len(&out) <= WS_OVERVIEW_MAX_BYTES {
+            return Some(out);
+        }
+        out.attention.clear();
+        out.now = None;
+        if let Some(fs) = out.failed_step.as_mut() {
+            fs.error.clear();
+        }
+        if let Some(h) = out.hold.as_mut() {
+            h.reason.clear();
+        }
+        out.headline = clip_utf8(&out.headline, 64);
+        if ws_overview_json_len(&out) <= WS_OVERVIEW_MAX_BYTES {
+            Some(out)
+        } else {
+            None
+        }
     }
 }
 
+fn clip_utf8(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    let ellipsis = "…";
+    let cap = max_bytes.saturating_sub(ellipsis.len());
+    let mut end = cap.min(s.len());
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = String::with_capacity(end + ellipsis.len());
+    out.push_str(&s[..end]);
+    if cap > 0 {
+        out.push_str(ellipsis);
+    }
+    out
+}
+
 fn ws_overview_json_len(o: &RunOverview) -> usize {
-    serde_json::to_vec(o).map_or(0, |v| v.len())
+    serde_json::to_vec(o).map_or(usize::MAX, |v| v.len())
 }
 
 /// How a `check` criterion is verified (wire values `command` | `agent` |

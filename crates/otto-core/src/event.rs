@@ -218,10 +218,11 @@ pub enum Event {
         /// The run's computed overview (≤ 4 KiB), so attention, queue,
         /// phase and wait show without a GET. `None` from emitters that
         /// do not compute it. Serialized through `RunOverview::ws_projected`
-        /// so large goal histories never break the 4 KiB WS frame budget.
+        /// so large goal histories or multi-byte names never break the 4 KiB
+        /// WS frame budget (and omitted if even the minimal form cannot fit).
         #[serde(
             default,
-            skip_serializing_if = "Option::is_none",
+            skip_serializing_if = "overview_omitted_on_ws",
             serialize_with = "serialize_ws_overview"
         )]
         overview: Option<Box<crate::workflows::RunOverview>>,
@@ -830,6 +831,10 @@ impl Event {
     }
 }
 
+fn overview_omitted_on_ws(overview: &Option<Box<crate::workflows::RunOverview>>) -> bool {
+    overview.as_ref().and_then(|o| o.ws_projected()).is_none()
+}
+
 fn serialize_ws_overview<S>(
     overview: &Option<Box<crate::workflows::RunOverview>>,
     serializer: S,
@@ -837,8 +842,8 @@ fn serialize_ws_overview<S>(
 where
     S: serde::Serializer,
 {
-    match overview {
-        Some(o) => serde::Serialize::serialize(&o.ws_projected(), serializer),
+    match overview.as_ref().and_then(|o| o.ws_projected()) {
+        Some(projected) => serde::Serialize::serialize(&projected, serializer),
         None => serializer.serialize_none(),
     }
 }
@@ -1139,6 +1144,93 @@ mod tests {
             .map(Vec::len)
             .unwrap_or(0);
         assert!(h0 <= 3);
+
+        // API-1 (round 2): 8 parallel check steps awaiting verification with 100-char CJK
+        // names (>4,800 UTF-8 bytes in attention[].name + now.node_names) must still fit <= 4 KiB.
+        let cjk_name = "検".repeat(100);
+        let attention: Vec<_> = (0..8)
+            .map(|i| crate::workflows::AttentionRef {
+                node_id: format!("check_{i}"),
+                name: cjk_name.clone(),
+                attention: crate::agent_runtime::Attention {
+                    kind: crate::agent_runtime::AttentionKind::Verify,
+                    text: "確認してください ".repeat(20),
+                    since: chrono::Utc::now(),
+                    request_id: None,
+                    thread_id: None,
+                    criterion_id: Some(format!("c{i}")),
+                    resets_at: None,
+                    via: None,
+                },
+            })
+            .collect();
+        let cjk_overview = crate::workflows::RunOverview {
+            rev: 7,
+            state: crate::workflows::RunState::NeedsYou,
+            headline: format!("Needs you — {cjk_name}"),
+            now: Some(crate::workflows::Now {
+                node_ids: (0..8).map(|i| format!("check_{i}")).collect(),
+                node_names: vec![cjk_name.clone(); 8],
+                phase: crate::workflows::StepPhase::NeedsYou,
+                wait_text: Some(cjk_name.clone()),
+                fan: None,
+            }),
+            attention,
+            goal: None, // Also exercises non-goal overview trimming!
+            ..Default::default()
+        };
+        assert!(
+            serde_json::to_vec(&cjk_overview).unwrap().len()
+                > crate::workflows::WS_OVERVIEW_MAX_BYTES
+        );
+        let ev_cjk = Event::WorkflowRunUpdated {
+            workspace_id: "ws1".into(),
+            run_id: "r2".into(),
+            status: "running".into(),
+            node_id: None,
+            rev: 7,
+            node: None,
+            nodes_done: 0,
+            nodes_total: 8,
+            waiting_approval: false,
+            overview: Some(Box::new(cjk_overview)),
+        };
+        let wire_cjk: serde_json::Value = serde_json::to_value(&ev_cjk).unwrap();
+        let cjk_bytes = serde_json::to_vec(&wire_cjk["overview"]).unwrap().len();
+        assert!(
+            cjk_bytes <= crate::workflows::WS_OVERVIEW_MAX_BYTES,
+            "CJK non-goal overview must fit 4 KiB (got {cjk_bytes})"
+        );
+
+        // API-1 (round 2): when even the minimal bounded overview cannot fit, omit `overview`.
+        let unshrinkable = crate::workflows::RunOverview {
+            rev: 8,
+            state: crate::workflows::RunState::Failed,
+            failed_step: Some(crate::workflows::FailedStep {
+                node_id: "n".repeat(5_000),
+                name: "step".into(),
+                error: "failed".into(),
+                error_class: None,
+            }),
+            ..Default::default()
+        };
+        let ev_omit = Event::WorkflowRunUpdated {
+            workspace_id: "ws1".into(),
+            run_id: "r3".into(),
+            status: "error".into(),
+            node_id: None,
+            rev: 8,
+            node: None,
+            nodes_done: 0,
+            nodes_total: 1,
+            waiting_approval: false,
+            overview: Some(Box::new(unshrinkable)),
+        };
+        let wire_omit: serde_json::Value = serde_json::to_value(&ev_omit).unwrap();
+        assert!(
+            wire_omit.get("overview").is_none(),
+            "unshrinkable >4 KiB overview must be omitted from WS frame"
+        );
     }
 
     /// `session_removed` keeps the fields the SPA reads and adds the owner

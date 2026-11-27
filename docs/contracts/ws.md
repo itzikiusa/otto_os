@@ -1022,12 +1022,14 @@ non-terminal so the view converges even with no WS connection.
   in place without a second GET (`nodes_total` 0 = unknown, keep last counts).
 - `waiting_approval` — true on the pause event; the approve/reject decision
   re-emits with false.
-- `overview` — the run's computed `RunOverview` (api.md "Run view"; ≤ 4 KiB:
-  `now.node_ids` ≤ 8, `attention` ≤ 8, `deliverables` ≤ 12, `goal.awaiting` ≤ 8,
-  `goal.criteria` projected via `ws_projection` to at most the last 3 history
-  points per criterion with `progress.values` omitted, and further trimmed/dropped
-  if needed to stay ≤ 4 KiB; full 50-round history and `progress.values` stay on
-  HTTP detail reads), so attention, queue, phase and wait show without a GET.
+- `overview` — the run's computed `RunOverview` (api.md "Run view"; ≤ 4 KiB
+  UTF-8 JSON bytes: `now.node_ids` ≤ 8, `attention` ≤ 8, `deliverables` ≤ 12,
+  `goal.awaiting` ≤ 8, `goal.criteria` projected via `ws_projected` to at most
+  the last 3 history points per criterion with `progress.values` omitted, then
+  remaining contributors clipped/trimmed in priority order to stay ≤ 4 KiB;
+  omitted if even the minimal bounded representation cannot fit; full 50-round
+  history, `progress.values`, and unclipped names stay on HTTP detail reads), so
+  attention, queue, phase and wait show without a GET.
   Omitted by emitters that do not compute it; clients keep the last one then.
   The `node` summary carries the run-view node fields `/progress` serves
   (`phase`, `wait`, `attention`, `thread` without digest, …).
