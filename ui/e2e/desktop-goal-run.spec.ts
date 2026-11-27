@@ -106,8 +106,14 @@ test('two review-and-fix loops with the same criterion id show each meter, trend
   await stepWaiting.locator('[data-testid="wf-waiting-thread"][data-child-id="ui-rev-3.1"]').click();
   await expect(page.getByTestId('wf-step-pane')).toHaveAttribute('data-child-id', 'ui-rev-3.1');
 
-  // Expanding Round 1 keeps the retried fix attempt inside Round 1.
+  // Expanding Round 1 and its fix done fold proves the retried failed attempt is nested inside Round 1.
   await uiRounds.nth(0).getByTestId('wf-loop-round-toggle').click();
-  await expect(uiRounds.nth(0).locator('[data-testid="wf-round-step"][data-step-kind="agent_prompt"]')).toContainText('fix');
+  const round1Fix = uiRounds.nth(0).locator('[data-testid="wf-round-step"][data-step-kind="agent_prompt"]');
+  await expect(round1Fix).toContainText('fix');
+  await round1Fix.locator('button.kfold').click();
+  const retriedRow = round1Fix.locator('[data-testid="wf-step-child"][data-child-id="th-ui-fix-1a"][data-retried="true"]');
+  await expect(retriedRow).toBeVisible();
+  await expect(retriedRow).toContainText('Attempt 1 failed · retried');
+  await expect(round1Fix.locator('[data-testid="wf-step-child"][data-child-id="th-ui-fix-1b"]')).toBeVisible();
   await expectNoHorizontalOverflow(page);
 });

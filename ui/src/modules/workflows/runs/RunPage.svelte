@@ -109,6 +109,7 @@
   });
 
   const run = $derived(sync.run?.id === runId ? sync.run : null);
+  const checkpoints = $derived(sync.run?.id === runId ? (sync.checkpoints.length || sync.run.checkpoints?.length ? sync.checkpoints : []) : []);
   const now = $derived(clockNow());
   const runState = $derived(run ? (run.overview?.state ?? fallbackState(run.status, run.waiting_approval)) : 'unknown');
   const live = $derived(run?.status === 'pending' || run?.status === 'running');
@@ -186,8 +187,8 @@
     const next = new Map<string, MergedNodeCacheEntry>();
     const out = settledNodes(run.nodes, live).map((n) => {
       const baseChildren =
-        !n.children?.length && run.checkpoints?.some((c) => c.loop_id === n.node_id)
-          ? loopChildren(run.checkpoints, n.node_id)
+        !n.children?.length && checkpoints.some((c) => c.loop_id === n.node_id)
+          ? loopChildren(checkpoints, n.node_id)
           : (n.children ?? []);
       const rootTid = n.thread?.runner === 'threads' ? n.thread.thread_id : null;
       const merged = rootTid || baseChildren.some((c) => c.thread_id)
@@ -195,7 +196,7 @@
         : (baseChildren as StepChild[]);
       const annotated = annotateRetriedChildren(merged, {
         loopId: n.node_id,
-        checkpoints: run.checkpoints,
+        checkpoints,
         nodeLogs: n.logs,
       });
       const entry = reuseMergedNode(n, annotated, prevMerged.get(n.node_id));
@@ -334,7 +335,7 @@
             onselect={select}
             runId={run.id}
             {graph}
-            checkpoints={run.checkpoints}
+            {checkpoints}
             goal={run.overview?.goal}
             limits={run.limits}
           />

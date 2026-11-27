@@ -193,7 +193,7 @@
       ? waitingThreads(node, { scopeChildren: stepChildren, excludeSummarizer: step?.kind === 'review_run' })
       : [],
   );
-  const revWaiting = $derived(waitingReviewers(stepChildren));
+  const revWaiting = $derived(waitingReviewers(stepChildren, child?.id ?? summarizer?.id));
   const summarizerThread = $derived<StepThread | null>(
     summarizer?.thread_id
       ? { thread_id: summarizer.thread_id, runner: 'threads', provider: summarizer.provider, turns: 0, usage: {} as StepThread['usage'] }
@@ -401,7 +401,7 @@
       <StepFiles runId={run.id} contextDir={run.context_dir} stepFile={node?.step_file ?? null} />
     {:else if tab === 'result'}
       <!-- A goal run whose card is taken by a hold, a person or an error: its criteria head the Result. -->
-      {#if run.overview?.goal && cardKind(run, runState) !== 'goal'}<GoalCard goal={run.overview.goal} {run} {criteria} />{/if}
+      {#if run.overview?.goal && cardKind(run, runState) !== 'goal'}<GoalCard goal={run.overview.goal} {run} {criteria} checkpoints={sync.checkpoints} />{/if}
       {#if run.status === 'success'}
         <RunFinalOutput mon={sync} {run} />
         {#if !sync.hasFinalOutput(run) && !sync.finalOutputError}<p class="none">This run wrote no final output.</p>{/if}
@@ -412,7 +412,7 @@
       {#if step?.kind === 'check'}
         {@const stepCriteria = criteria.filter((c) => 'step_id' in c && c.step_id === step.id)}
         <CriteriaTable rows={criterionRows(stepCriteria.length ? stepCriteria : criteria, latestCheck(body ? [body] : []), node?.attention?.criterion_id ? [node.attention.criterion_id] : [])} />
-      {:else if run.overview?.goal}<GoalCard goal={run.overview.goal} {run} {criteria} />{/if}
+      {:else if run.overview?.goal}<GoalCard goal={run.overview.goal} {run} {criteria} checkpoints={sync.checkpoints} />{/if}
     {:else if tab === 'input'}
       {#if attachments.length}
         <h4>Files sent with the run</h4>

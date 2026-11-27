@@ -53,6 +53,8 @@ export interface CriterionRow {
   progress?: CriterionProgress;
   /** Per-round history (ascending by iteration, bounded to 50). */
   history: CriterionPoint[];
+  /** Rule expression (when `method === 'expr'`), used to distinguish floor vs ceiling rules. */
+  expr?: string;
 }
 
 export function criterionKey(stepId: string, id: string): string {
@@ -288,7 +290,9 @@ export function criterionRows(
               : 'not_met'
             : 'pending';
       const progress = r?.progress ?? gc?.progress;
-      const history = gc?.history?.length ? gc.history : (cpHistory.get(key) ?? []);
+      const fromCp = cpHistory.get(key) ?? [];
+      const fromGoal = gc?.history ?? [];
+      const history = fromCp.length > fromGoal.length ? fromCp : fromGoal;
       return {
         key,
         step_id,
@@ -301,6 +305,7 @@ export function criterionRows(
         by: r?.verified_by ?? '',
         progress,
         history,
+        ...(c.expr ? { expr: c.expr } : {}),
       };
     });
   }
@@ -325,7 +330,7 @@ export function criterionRows(
           ...splitEvidence(r.evidence ?? ''),
           by: r.verified_by ?? '',
           progress: r.progress ?? gc?.progress,
-          history: gc?.history?.length ? gc.history : (cpHistory.get(key) ?? []),
+          history: (cpHistory.get(key)?.length ?? 0) > (gc?.history?.length ?? 0) ? (cpHistory.get(key) ?? []) : (gc?.history ?? []),
         });
       }
     }
@@ -391,11 +396,22 @@ export function formatRatio(p?: CriterionProgress): string {
   return unit ? `${v} ${unit}` : v;
 }
 
-/** Meter fill percentage (0..100) for a numeric target, or `null` when no positive target exists. */
-export function progressPct(p?: CriterionProgress, state?: CriterionState): number | null {
+/** True when a rule expression compares a metric against a ceiling (`<=`, `<`)
+ *  or exact number (`== <num>`), so `value / target` would be misleading as a
+ *  directional progress bar (e.g. `latency <= 200` at 300). */
+export function isCeilingOrEqualityRule(expr?: string): boolean {
+  if (!expr) return false;
+  // `path <= 200`, `path < 5`, `path == 0`, or flipped `200 >= path`, `5 > path`.
+  return /(?:<=|<|==)\s*-?\d+(?:\.\d+)?\b/.test(expr) || /\b-?\d+(?:\.\d+)?\s*(?:>=|>)\s*[a-zA-Z_]/.test(expr);
+}
+
+/** Meter fill percentage (0..100) for a directional floor numeric target, or
+ *  `null` when no positive target exists or the rule is a ceiling/equality rule. */
+export function progressPct(p?: CriterionProgress, state?: CriterionState, expr?: string): number | null {
   if (!p || p.value == null || p.target == null || !Number.isFinite(p.value) || !Number.isFinite(p.target) || p.target <= 0) {
     return null;
   }
+  if (isCeilingOrEqualityRule(expr)) return null;
   if (state === 'met') return 100;
   return Math.max(0, Math.min(100, Math.round((p.value / p.target) * 100)));
 }

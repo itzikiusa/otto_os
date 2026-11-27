@@ -24,10 +24,12 @@
 <ul class="crit">
   {#each rows as r (r.key)}
     {@const ratio = formatRatio(r.progress)}
-    {@const pct = progressPct(r.progress, r.state)}
+    {@const pct = progressPct(r.progress, r.state, r.expr)}
     {@const trend = recentTrend(r.history)}
     {@const blocker = r.state !== 'met' ? (r.progress?.label ?? '') : ''}
     {@const pairs = observedPairs(r.progress)}
+    {@const ariaMax = r.progress?.target ?? 100}
+    {@const ariaNow = Math.max(0, Math.min(ariaMax, r.progress?.value ?? 0))}
     <li
       data-testid="wf-goal-criterion"
       data-step-id={r.step_id || undefined}
@@ -50,9 +52,10 @@
             <div
               class="track"
               role="progressbar"
-              aria-valuenow={r.progress?.value ?? 0}
+              aria-valuenow={ariaNow}
               aria-valuemin={0}
-              aria-valuemax={r.progress?.target ?? 100}
+              aria-valuemax={ariaMax}
+              aria-valuetext={ratio || undefined}
               aria-label={`${r.step_name ? `${r.step_name}: ` : ''}${r.text} (${ratio})`}
             >
               <div class="fill {r.state}" style:inline-size="{pct}%"></div>

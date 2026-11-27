@@ -245,6 +245,13 @@ test('progress formatting helpers: ratios, meters, trends, and observed pairs', 
   assert.equal(progressPct({ value: 72, target: 95 }, 'not_met'), 76);
   assert.equal(progressPct({ value: 96, target: 95 }, 'met'), 100);
   assert.equal(progressPct({ value: 1, target: 0 }, 'not_met'), null);
+  // INPUT-1: ceiling and exact-number rules never show a directional floor meter.
+  assert.equal(progressPct({ value: 300, target: 200 }, 'not_met', 'steps.bench.latency <= 200'), null);
+  assert.equal(progressPct({ value: 5, target: 0 }, 'not_met', 'steps.bench.errors == 0'), null);
+  assert.equal(progressPct({ value: 300, target: 200 }, 'not_met', '200 >= steps.bench.latency'), null);
+  // Floor rules (including review score/passed rules) still show a meter.
+  assert.equal(progressPct({ value: 72, target: 95 }, 'not_met', 'steps.review.passed == true'), 76);
+  assert.equal(progressPct({ value: 64, target: 80 }, 'not_met', 'steps.bench.coverage >= 80'), 80);
   assert.equal(recentTrend([{ iteration: 1, met: false, value: 35 }]), '');
   assert.equal(
     recentTrend([

@@ -63,7 +63,7 @@ export interface LoopRoundsView {
   ungrouped: StepChild[];
 }
 
-const isSummarizer = (c: Pick<ChildThread, 'id' | 'label'>) => /^summar/i.test(c.label) || c.id === 'summarizer';
+const isSummarizer = (c: Pick<ChildThread, 'id' | 'label'>) => /(?:^|·\s*)summar/i.test(c.label) || c.id === 'summarizer';
 const isScopeAssessment = (c: Pick<ChildThread, 'label'>) => c.label.trim().toLowerCase() === 'scope assessment';
 const isReviewerRow = (c: Pick<ChildThread, 'id' | 'label'>) => !isSummarizer(c) && !isScopeAssessment(c);
 
@@ -208,14 +208,24 @@ export function groupLoopRounds(
     if (cp.iteration <= 0) continue;
     iterations.add(cp.iteration);
     cpBySlot.set(`${cp.iteration}:${cp.step_index}`, cp);
-    if (cp.thread_id) threadToSlot.set(cp.thread_id, { iteration: cp.iteration, stepIndex: cp.step_index });
-    const out = cp.output as { review_id?: unknown; reviews?: { review_id?: unknown }[] } | null | undefined;
-    if (typeof out?.review_id === 'string' && out.review_id) {
-      reviewToSlot.set(out.review_id, { iteration: cp.iteration, stepIndex: cp.step_index });
+    if (cp.thread_id) {
+      const prev = threadToSlot.get(cp.thread_id);
+      if (!prev || cp.iteration > prev.iteration || (cp.iteration === prev.iteration && cp.step_index >= prev.stepIndex)) {
+        threadToSlot.set(cp.thread_id, { iteration: cp.iteration, stepIndex: cp.step_index });
+      }
     }
-    for (const r of out?.reviews ?? []) {
-      if (typeof r?.review_id === 'string' && r.review_id) {
-        reviewToSlot.set(r.review_id, { iteration: cp.iteration, stepIndex: cp.step_index });
+    if (cp.kind === 'review_run') {
+      const out = cp.output as { review_id?: unknown; reviews?: unknown } | null | undefined;
+      if (typeof out?.review_id === 'string' && out.review_id) {
+        reviewToSlot.set(out.review_id, { iteration: cp.iteration, stepIndex: cp.step_index });
+      }
+      if (Array.isArray(out?.reviews)) {
+        for (const r of out.reviews) {
+          const rid = (r as { review_id?: unknown } | null | undefined)?.review_id;
+          if (typeof rid === 'string' && rid) {
+            reviewToSlot.set(rid, { iteration: cp.iteration, stepIndex: cp.step_index });
+          }
+        }
       }
     }
   }
@@ -315,11 +325,6 @@ export function groupLoopRounds(
       pushSlot(slot.iteration, slot.stepIndex, c);
       continue;
     }
-    if (root.thread_id && threadToSlot.has(root.thread_id)) {
-      const slot = threadToSlot.get(root.thread_id)!;
-      pushSlot(slot.iteration, slot.stepIndex, c);
-      continue;
-    }
     const m = iterLabelRe.exec(root.label.trim());
     if (m) {
       const iter = Number(m[2]);
@@ -331,6 +336,11 @@ export function groupLoopRounds(
     if (sm) {
       const iter = Number(sm[1]);
       pushSlot(iter, 0, c);
+      continue;
+    }
+    if (root.thread_id && threadToSlot.has(root.thread_id)) {
+      const slot = threadToSlot.get(root.thread_id)!;
+      pushSlot(slot.iteration, slot.stepIndex, c);
       continue;
     }
     if (step.node.status === 'running') {
@@ -562,12 +572,21 @@ export function waitingThreads(
   return out;
 }
 
-/** Reviewers still running or queued ahead of a review's summarizer. */
-export function waitingReviewers(children: readonly StepChild[]): { running: WaitingThreadRef[]; queued: number } {
+/** Reviewers still running or queued ahead of a review's summarizer.
+ *  When `forChildId` carries a review prefix (e.g. `<review_id>.3`), scopes
+ *  blockers strictly to that review so multi-repo reviews never list another
+ *  target's reviewers. */
+export function waitingReviewers(
+  children: readonly StepChild[],
+  forChildId?: string | null,
+): { running: WaitingThreadRef[]; queued: number } {
+  const scopeReview = forChildId ? reviewPrefixOf(forChildId) : null;
   const running: WaitingThreadRef[] = [];
   let queued = 0;
   for (const c of children) {
+    if (forChildId && c.id === forChildId) continue;
     if ((c.depth ?? 0) !== 0 || !isReviewerRow(c)) continue;
+    if (scopeReview && reviewPrefixOf(c.id) !== scopeReview) continue;
     if (c.status === 'running' || c.status === 'needs_you') {
       running.push({
         childId: c.id,

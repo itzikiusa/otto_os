@@ -84,6 +84,7 @@
   let openDone = $state<Record<string, boolean>>({});
   let openQueued = $state<Record<string, boolean>>({});
   let openRounds = $state<Record<string, boolean>>({});
+  let openWaits = $state<Record<string, boolean>>({});
   let listEl = $state<HTMLElement | null>(null);
   let scrolledFor = '';
 
@@ -140,12 +141,14 @@
   {:else}<span class="g"><span class="hollow"></span></span>{/if}
 {/snippet}
 
-{#snippet waitingLinks(stepId: string, heading: string, list: readonly WaitingThreadRef[], testid: string)}
+{#snippet waitingLinks(stepId: string, heading: string, list: readonly WaitingThreadRef[], testid: string, waitKey: string)}
   {#if list.length}
+    {@const expanded = openWaits[waitKey] ?? false}
+    {@const visible = expanded ? list : list.slice(0, 6)}
     <div class="wait-box" data-testid={testid}>
       <span class="wait-head">{heading}</span>
       <ul class="wait-list">
-        {#each list.slice(0, 6) as w, idx (w.childId ?? `${w.label}-${idx}`)}
+        {#each visible as w, idx (w.childId ?? `${w.label}-${idx}`)}
           {@const text = waitingThreadLabel(w, now)}
           <li>
             {#if w.childId}
@@ -161,7 +164,19 @@
             {/if}
           </li>
         {/each}
-        {#if list.length > 6}<li class="wait-more">+{list.length - 6} more</li>{/if}
+        {#if list.length > 6}
+          <li>
+            <button
+              type="button"
+              class="wait-more"
+              data-testid="wf-waiting-more"
+              aria-expanded={expanded}
+              onclick={() => (openWaits[waitKey] = !expanded)}
+            >
+              {expanded ? 'Show fewer' : `+${list.length - 6} more`}
+            </button>
+          </li>
+        {/if}
       </ul>
     </div>
   {/if}
@@ -207,7 +222,7 @@
       </span>
     </button>
     {#if summWaiting?.length}
-      {@render waitingLinks(stepId, `Waiting on ${plural(summWaiting.length, 'reviewer')}:`, summWaiting, 'wf-summarizer-waiting')}
+      {@render waitingLinks(stepId, `Waiting on ${plural(summWaiting.length, 'reviewer')}:`, summWaiting, 'wf-summarizer-waiting', `${stepId}:summ:${c.id}`)}
     {/if}
   </li>
 {/snippet}
@@ -224,7 +239,6 @@
 )}
   {@const doneOpen = openDone[foldKey] ?? stepErrored}
   {@const queuedOpen = openQueued[foldKey] ?? v.queued.length <= 3}
-  {@const revWait = waitingReviewers(allChildren)}
   <ol class="kids {extraClass}">
     {#each v.active as e (e.child.id)}
       {@const liveChild = stepLive && (e.child.status === 'running' || e.child.status === 'needs_you')}
@@ -246,6 +260,7 @@
       {#if doneOpen}{#each v.done as e (e.child.id)}{@render childRow(stepId, e.child, e.depth, e.parentLabel)}{/each}{/if}
     {/if}
     {#each v.trailing as e (e.child.id)}
+      {@const revWait = waitingReviewers(allChildren, e.child.id)}
       {@const summPending = e.child.status === 'queued' || e.child.status === 'pending'}
       {@const summAfter = summPending ? summarizerWaitWord(revWait.running.length, revWait.queued) : undefined}
       {@const liveSumm = stepLive && (e.child.status === 'running' || e.child.status === 'needs_you')}
@@ -363,7 +378,7 @@
   </button>
   {#if waiting.length}
     <div class="step-wait">
-      {@render waitingLinks(s.id, `Waiting on ${plural(waiting.length, 'thread')}:`, waiting, 'wf-step-waiting')}
+      {@render waitingLinks(s.id, `Waiting on ${plural(waiting.length, 'thread')}:`, waiting, 'wf-step-waiting', `${s.id}:step`)}
     </div>
   {/if}
   {#if rounds}
@@ -688,9 +703,21 @@
     color: var(--text-dim);
   }
   .wait-more {
-    align-self: center;
-    font-size: var(--fs-xs);
+    display: inline-flex;
+    align-items: center;
+    padding-block: var(--sp-1);
+    padding-inline: var(--sp-2);
+    border: 1px dashed var(--border);
+    border-radius: var(--radius-s);
+    background: transparent;
     color: var(--text-dim);
+    font: inherit;
+    font-size: var(--fs-xs);
+    cursor: pointer;
+  }
+  .wait-more:hover {
+    background: var(--hover);
+    color: var(--text);
   }
   @media (max-width: 640px) {
     .kids {
@@ -714,7 +741,8 @@
     .rstep {
       min-block-size: 44px;
     }
-    .wait-link {
+    .wait-link,
+    .wait-more {
       min-block-size: var(--hit-min);
     }
   }

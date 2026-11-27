@@ -182,7 +182,7 @@
         {/each}
       </ul>
     {:else if kind === 'goal' && run.overview?.goal}
-      <GoalCard goal={run.overview.goal} {run} {criteria} />
+      <GoalCard goal={run.overview.goal} {run} {criteria} checkpoints={sync.checkpoints} />
     {/if}
   </section>
 {/if}
