@@ -452,7 +452,16 @@ async fn compile_zig_debug_artifact(
                 {
                     Ok(stdout) => {
                         let bins = parse_otto_zig_test_bins(&stdout);
-                        if let Some(bin) = bins.into_iter().next() {
+                        if let Some((bin, notice)) =
+                            select_zig_test_bin(&bins, raw_prog, is_zig_file)
+                        {
+                            if let Some(msg) = notice {
+                                initial_output.push(IdeDebugOutputEntry {
+                                    category: "console".into(),
+                                    text: format!("{msg}\n"),
+                                    seq: 0,
+                                });
+                            }
                             let abs = if bin.starts_with('/') {
                                 bin
                             } else {
@@ -460,22 +469,19 @@ async fn compile_zig_debug_artifact(
                             };
                             return Ok(abs);
                         }
-                        if !is_zig_file {
-                            return Err(Error::Upstream(format!(
-                                "zig build test did not emit a test executable in '{zig_cwd}'"
-                            )));
-                        }
+                        return Err(Error::Upstream(format!(
+                            "zig build test did not emit a test executable in '{zig_cwd}'"
+                        )));
                     }
-                    Err(err) if !is_zig_file => return Err(err),
-                    Err(_) => {
-                        // Single-file test in a project whose build.zig test step didn't
-                        // cover this file (or macOS host linker mismatch): fall through to
-                        // direct `zig test --test-no-exec` with the full transitive module graph.
+                    Err(err) => {
+                        // BUG-35: Preserve the real build.zig compiler graph; fail clearly
+                        // rather than silently substituting a partial source-only compile.
+                        return Err(err);
                     }
                 }
-            } else if !is_zig_file {
+            } else {
                 return Err(Error::Upstream(format!(
-                    "could not prepare Zig no-exec test build runner for '{zig_bin}'; cannot debug project test suite without executing tests first"
+                    "Zig no-exec project test debugging requires a supported Zig 0.14.x build runner (unsupported runner layout for '{zig_bin}'); cannot debug build.zig tests without executing them first"
                 )));
             }
         }
@@ -1026,20 +1032,39 @@ pub(crate) fn append_zig_source_and_modules(
 }
 
 const OTTO_ZIG_RUNNER_PRE_HOOK: &str = r#"
-    var otto_test_compiles = ArrayList(*Step.Compile).init(arena);
     const otto_no_exec = if (graph.env_map.get("OTTO_ZIG_TEST_NO_EXEC")) |v| mem.eql(u8, v, "1") else false;
     const otto_filter = graph.env_map.get("OTTO_ZIG_TEST_FILTER");
     const otto_file = graph.env_map.get("OTTO_ZIG_TEST_FILE");
     if (otto_no_exec or (otto_filter != null and otto_filter.?.len > 0)) {
+        const OttoTestEntry = struct {
+            compile: *Step.Compile,
+            run_step: ?*Step.Run,
+        };
         const OttoWalker = struct {
             seen: std.AutoHashMap(*Step, void),
-            out: *ArrayList(*Step.Compile),
+            entries: *ArrayList(OttoTestEntry),
+            fn findCompileIn(s: *Step, depth: usize) ?*Step.Compile {
+                if (depth > 8) return null;
+                if (s.cast(Step.Compile)) |c| {
+                    if (c.kind == .@"test") return c;
+                }
+                for (s.dependencies.items) |d| {
+                    if (findCompileIn(d, depth + 1)) |found| return found;
+                }
+                return null;
+            }
             fn visit(self: *@This(), s: *Step) !void {
                 if (self.seen.contains(s)) return;
                 try self.seen.put(s, {});
+                if (s.cast(Step.Run)) |r| {
+                    if (findCompileIn(s, 0)) |c| {
+                        try self.entries.append(.{ .compile = c, .run_step = r });
+                        return;
+                    }
+                }
                 if (s.cast(Step.Compile)) |c| {
                     if (c.kind == .@"test") {
-                        try self.out.append(c);
+                        try self.entries.append(.{ .compile = c, .run_step = null });
                     }
                 }
                 for (s.dependencies.items) |dep| {
@@ -1047,9 +1072,10 @@ const OTTO_ZIG_RUNNER_PRE_HOOK: &str = r#"
                 }
             }
         };
+        var otto_entries = ArrayList(OttoTestEntry).init(arena);
         var walker = OttoWalker{
             .seen = std.AutoHashMap(*Step, void).init(arena),
-            .out = &otto_test_compiles,
+            .entries = &otto_entries,
         };
         if (targets.items.len > 0) {
             for (targets.items) |tname| {
@@ -1060,85 +1086,199 @@ const OTTO_ZIG_RUNNER_PRE_HOOK: &str = r#"
         } else if (builder.top_level_steps.get("test")) |tls| {
             try walker.visit(&tls.step);
         }
+        var file_matched = false;
         if (otto_file) |want_file| {
-            if (want_file.len > 0 and otto_test_compiles.items.len > 1) {
-                var matched = ArrayList(*Step.Compile).init(arena);
-                for (otto_test_compiles.items) |c| {
-                    if (c.root_module.root_source_file) |lp| {
+            if (want_file.len > 0 and otto_entries.items.len > 1) {
+                var matched = ArrayList(OttoTestEntry).init(arena);
+                for (otto_entries.items) |e| {
+                    if (e.compile.root_module.root_source_file) |lp| {
                         const rp = lp.getPath(builder);
-                        if (mem.eql(u8, rp, want_file) or mem.endsWith(u8, want_file, rp) or mem.endsWith(u8, rp, want_file)) {
-                            try matched.append(c);
+                        const eq = mem.eql(u8, rp, want_file);
+                        const want_suf = want_file.len > rp.len and want_file[want_file.len - rp.len - 1] == '/' and mem.endsWith(u8, want_file, rp);
+                        const rp_suf = rp.len > want_file.len and rp[rp.len - want_file.len - 1] == '/' and mem.endsWith(u8, rp, want_file);
+                        if (eq or want_suf or rp_suf) {
+                            try matched.append(e);
                         }
                     }
                 }
                 if (matched.items.len > 0) {
-                    otto_test_compiles = matched;
+                    otto_entries = matched;
+                    file_matched = true;
                 }
             }
         }
         if (otto_filter) |f| {
             if (f.len > 0) {
                 const slice = try arena.dupe([]const u8, &.{f});
-                for (otto_test_compiles.items) |c| {
-                    c.filters = slice;
+                for (otto_entries.items) |e| {
+                    e.compile.filters = slice;
                 }
             }
         }
         if (otto_no_exec) {
-            if (otto_test_compiles.items.len == 0) {
+            if (otto_entries.items.len == 0) {
                 fatal("otto: no Zig test compile step found in build.zig", .{});
             }
-            const compile_only = builder.step("__otto_compile_tests", "Compile Zig tests without running");
-            for (otto_test_compiles.items) |c| {
-                compile_only.dependOn(&c.step);
+            const OttoEmitBinStep = struct {
+                step: Step,
+                entries: []const OttoTestEntry,
+                fn make(step: *Step, _: Step.MakeOptions) anyerror!void {
+                    const self: *@This() = @fieldParentPtr("step", step);
+                    const out = io.getStdOut().writer();
+                    for (self.entries) |e| {
+                        const bp = e.compile.getEmittedBin().getPath(step.owner);
+                        const src: []const u8 = if (e.compile.root_module.root_source_file) |lp| lp.getPath(step.owner) else "";
+                        try out.print("OTTO_ZIG_TEST_BIN:{s}|{s}|{s}\n", .{ e.compile.name, src, bp });
+                    }
+                }
+            };
+            const emit_step = try arena.create(OttoEmitBinStep);
+            emit_step.* = .{
+                .step = Step.init(.{
+                    .id = .custom,
+                    .name = "__otto_emit_test_bins",
+                    .owner = builder,
+                    .makeFn = OttoEmitBinStep.make,
+                }),
+                .entries = otto_entries.items,
+            };
+            for (otto_entries.items) |e| {
+                emit_step.step.dependOn(&e.compile.step);
             }
+            const compile_only = builder.step("__otto_compile_tests", "Compile Zig tests without running");
+            compile_only.dependOn(&emit_step.step);
             targets.clearRetainingCapacity();
             try targets.append("__otto_compile_tests");
-        }
-    }
-"#;
-
-const OTTO_ZIG_RUNNER_POST_HOOK: &str = r#"
-        if (otto_no_exec) {
-            for (otto_test_compiles.items) |c| {
-                const bp = c.getEmittedBin().getPath(builder);
-                try stdout_writer.print("OTTO_ZIG_TEST_BIN:{s}\n", .{bp});
+        } else if (file_matched) {
+            const filtered_run = builder.step("__otto_run_filtered_tests", "Run only the selected Zig test suite");
+            var added_any = false;
+            for (otto_entries.items) |e| {
+                if (e.run_step) |rs| {
+                    filtered_run.dependOn(&rs.step);
+                    added_any = true;
+                }
+            }
+            if (added_any) {
+                targets.clearRetainingCapacity();
+                try targets.append("__otto_run_filtered_tests");
             }
         }
+    }
 "#;
 
-/// Patch Zig's own `compiler/build_runner.zig` so `zig build --build-runner <path> test`
-/// compiles the project's test `Step.Compile` artifact(s) with optional `compile.filters`
-/// WITHOUT executing `Step.Run` (`addRunArtifact`) and prints `OTTO_ZIG_TEST_BIN:<path>`
-/// even on warm cache hits (BUG-5, BUG2-1, BUG-35, BUG2-2).
+/// Emitted test suite executable reported by `OttoEmitBinStep.make` before `run.cleanExit()`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ZigEmittedTestBin {
+    pub name: String,
+    pub source: String,
+    pub path: String,
+}
+
+/// Patch Zig 0.14.x's own `compiler/build_runner.zig` so `zig build --build-runner <path> test`:
+/// - In no-exec debug mode (`OTTO_ZIG_TEST_NO_EXEC=1`): compiles test `Step.Compile` artifacts
+///   without running `Step.Run` (`addRunArtifact`), and runs `OttoEmitBinStep.make` inside the
+///   step graph BEFORE `run.cleanExit()` calls `process.exit(0)` (BUG3-1, BUG-5, BUG2-1, BUG-35).
+/// - In filtered single-file run mode (`OTTO_ZIG_TEST_FILTER` + `OTTO_ZIG_TEST_FILE`): routes
+///   execution through `__otto_run_filtered_tests` depending ONLY on the matched file's `Step.Run`
+///   so unrelated suites in dual-suite templates never execute (BUG2-2).
+/// - Explicitly gates unsupported Zig SDK runner layouts (e.g., 0.13.0 / 0.15.2) by returning `None`.
 pub(crate) fn patch_zig_build_runner(orig_source: &str) -> Option<String> {
     const PRE_ANCHOR: &str = "if (steps_menu)";
-    const POST_ANCHOR: &str = "if (!watch) return cleanExit();";
-    if !orig_source.contains(PRE_ANCHOR) || !orig_source.contains(POST_ANCHOR) {
+    const REQUIRED_MARKERS: &[&str] = &[
+        PRE_ANCHOR,
+        "const io = std.io;",
+        "const Step = std.Build.Step;",
+        "var targets = ArrayList([]const u8).init(arena);",
+    ];
+    if !REQUIRED_MARKERS.iter().all(|m| orig_source.contains(m)) {
         return None;
     }
-    let with_pre = orig_source.replacen(
+    Some(orig_source.replacen(
         PRE_ANCHOR,
         &format!("{OTTO_ZIG_RUNNER_PRE_HOOK}\n    {PRE_ANCHOR}"),
-        1,
-    );
-    Some(with_pre.replacen(
-        POST_ANCHOR,
-        &format!("{OTTO_ZIG_RUNNER_POST_HOOK}\n        {POST_ANCHOR}"),
         1,
     ))
 }
 
-/// Extract emitted test binary paths from `OTTO_ZIG_TEST_BIN:<path>` lines printed by
-/// our patched Zig build runner.
-pub(crate) fn parse_otto_zig_test_bins(stdout: &str) -> Vec<String> {
+/// Extract emitted test suite binaries from `OTTO_ZIG_TEST_BIN:<name>|<src>|<path>`
+/// (or legacy `OTTO_ZIG_TEST_BIN:<path>`) lines printed by `OttoEmitBinStep.make`.
+pub(crate) fn parse_otto_zig_test_bins(stdout: &str) -> Vec<ZigEmittedTestBin> {
     stdout
         .lines()
         .filter_map(|line| line.trim().strip_prefix("OTTO_ZIG_TEST_BIN:"))
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .map(String::from)
+        .filter_map(|rest| {
+            let trimmed = rest.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            let parts: Vec<&str> = trimmed.splitn(3, '|').collect();
+            if parts.len() == 3 && !parts[2].trim().is_empty() {
+                Some(ZigEmittedTestBin {
+                    name: parts[0].trim().to_string(),
+                    source: parts[1].trim().to_string(),
+                    path: parts[2].trim().to_string(),
+                })
+            } else {
+                Some(ZigEmittedTestBin {
+                    name: "test".into(),
+                    source: String::new(),
+                    path: trimmed.to_string(),
+                })
+            }
+        })
         .collect()
+}
+
+/// Select the test binary to attach to LLDB and, when a project defines multiple test
+/// suites (such as Zig 0.14.0's stock `lib_unit_tests` + `exe_unit_tests` template) and
+/// the user invoked project-wide Debug, return an explicit notice naming the selected
+/// suite and the other suites instead of claiming all suites run in one LLDB session (BUG-5).
+pub(crate) fn select_zig_test_bin(
+    bins: &[ZigEmittedTestBin],
+    raw_prog: &str,
+    is_zig_file: bool,
+) -> Option<(String, Option<String>)> {
+    if bins.is_empty() {
+        return None;
+    }
+    if bins.len() == 1 {
+        return Some((bins[0].path.clone(), None));
+    }
+    if is_zig_file && !raw_prog.is_empty() {
+        if let Some(matched) = bins.iter().find(|b| {
+            !b.source.is_empty()
+                && (b.source == raw_prog
+                    || raw_prog.ends_with(&format!("/{}", b.source))
+                    || b.source.ends_with(&format!("/{raw_prog}")))
+        }) {
+            return Some((matched.path.clone(), None));
+        }
+    }
+    let chosen = bins
+        .iter()
+        .find(|b| b.source.ends_with("src/main.zig") || b.source == "src/main.zig")
+        .unwrap_or(&bins[0]);
+    let all_labels: Vec<String> = bins
+        .iter()
+        .map(|b| {
+            if b.source.is_empty() {
+                b.name.clone()
+            } else {
+                format!("{} ({})", b.name, b.source)
+            }
+        })
+        .collect();
+    let chosen_label = if chosen.source.is_empty() {
+        chosen.name.clone()
+    } else {
+        format!("{} ({})", chosen.name, chosen.source)
+    };
+    let notice = format!(
+        "Zig project defines {} test suites [{}]; LLDB attaches to one executable per session — debugging suite {chosen_label}. Use a file gutter Debug button to debug another suite.",
+        bins.len(),
+        all_labels.join(", ")
+    );
+    Some((chosen.path.clone(), Some(notice)))
 }
 
 fn parse_zig_env_lib_dir(zig_env_stdout: &str) -> Option<String> {
@@ -1231,9 +1371,52 @@ async fn prepare_zig_build_runner_for_target(
     prepare_ssh_zig_build_runner(&req.target, ctx.ssh.as_ref(), zig_bin, zig_cwd, env).await
 }
 
-/// Prepare and cache the patched `otto-zig-runner-*.zig` on an SSH host so remote
-/// `zig build --build-runner` supports both no-exec debug builds (BUG-5/BUG2-1) and
-/// filtered single-test gutter runs (BUG2-2/BUG-35).
+/// Build a POSIX shell script that stages the patched Zig build runner inside the
+/// SSH user's private `$HOME/.otto/cache/zig-build-runners` directory (`0700` dir,
+/// `0600` file), rejecting symlinks or foreign ownership and verifying SHA-256
+/// content before reusing any cached runner — never using shared `/tmp` (SEC3-1).
+pub(crate) fn build_ssh_zig_runner_install_script(
+    key_prefix: &str,
+    expected_sha256: &str,
+    patched: &str,
+) -> String {
+    format!(
+        "set -eu\n\
+         umask 077\n\
+         BASE=\"$HOME/.otto\"\n\
+         CACHE=\"$BASE/cache\"\n\
+         DIR=\"$CACHE/zig-build-runners\"\n\
+         for d in \"$BASE\" \"$CACHE\" \"$DIR\"; do\n\
+           if [ -L \"$d\" ]; then echo 'otto: refusing symlink runner cache dir' >&2; exit 1; fi\n\
+           if [ ! -d \"$d\" ]; then mkdir -m 700 \"$d\"; fi\n\
+           if [ ! -O \"$d\" ]; then echo 'otto: runner cache dir not owned by SSH user' >&2; exit 1; fi\n\
+           chmod 700 \"$d\"\n\
+         done\n\
+         DEST=\"$DIR/runner-{key_prefix}.zig\"\n\
+         WANT='{expected_sha256}'\n\
+         NEED_WRITE=1\n\
+         if [ -f \"$DEST\" ] && [ ! -L \"$DEST\" ] && [ -O \"$DEST\" ]; then\n\
+           GOT=\"\"\n\
+           if command -v sha256sum >/dev/null 2>&1; then GOT=$(sha256sum \"$DEST\" | awk '{{print $1}}');\n\
+           elif command -v shasum >/dev/null 2>&1; then GOT=$(shasum -a 256 \"$DEST\" | awk '{{print $1}}'); fi\n\
+           if [ \"$GOT\" = \"$WANT\" ]; then chmod 600 \"$DEST\"; NEED_WRITE=0; fi\n\
+         fi\n\
+         if [ \"$NEED_WRITE\" = \"1\" ]; then\n\
+           TMP=\"$DIR/.runner-{key_prefix}.$$.tmp\"\n\
+           rm -f \"$TMP\"\n\
+           cat <<'__OTTO_ZIG_RUNNER__' > \"$TMP\"\n\
+{patched}\n\
+__OTTO_ZIG_RUNNER__\n\
+           chmod 600 \"$TMP\"\n\
+           mv -f \"$TMP\" \"$DEST\"\n\
+         fi\n\
+         printf 'RUNNER_PATH:%s\\n' \"$DEST\"\n"
+    )
+}
+
+/// Prepare and cache the patched `runner-*.zig` inside the SSH user's private
+/// `$HOME/.otto/cache/zig-build-runners` directory so remote `zig build --build-runner`
+/// supports both no-exec debug builds (BUG-5/BUG2-1) and filtered gutter runs (BUG2-2/BUG-35).
 pub(crate) async fn prepare_ssh_zig_build_runner(
     target: &IdeTargetSpec,
     ssh: Option<&crate::types::IdeSshSpec>,
@@ -1241,7 +1424,6 @@ pub(crate) async fn prepare_ssh_zig_build_runner(
     zig_cwd: &str,
     env: &BTreeMap<String, String>,
 ) -> Option<String> {
-    // Remote SSH: read `<lib_dir>/compiler/build_runner.zig`, patch in Rust, write to remote /tmp.
     let env_out = run_target_command(
         target,
         ssh,
@@ -1277,14 +1459,18 @@ pub(crate) async fn prepare_ssh_zig_build_runner(
     }
     let orig = String::from_utf8_lossy(&cat_out.stdout);
     let patched = patch_zig_build_runner(&orig)?;
+    // Account for trailing newline added by heredoc when computing expected SHA-256.
+    let patched_with_nl = if patched.ends_with('\n') {
+        patched
+    } else {
+        format!("{patched}\n")
+    };
     let mut h = Sha256::new();
-    h.update(patched.as_bytes());
-    let key = hex::encode(h.finalize());
-    let remote_dest = format!("/tmp/otto-zig-runner-{}.zig", &key[..16]);
-    let write_script = format!(
-        "if [ ! -f {d} ]; then cat <<'__OTTO_ZIG_RUNNER__' > {d}.$$\n{patched}\n__OTTO_ZIG_RUNNER__\nmv -f {d}.$$ {d}; fi",
-        d = shell_words::quote(&remote_dest),
-    );
+    h.update(patched_with_nl.as_bytes());
+    let full_sha = hex::encode(h.finalize());
+    let body_for_heredoc = patched_with_nl.trim_end_matches('\n');
+    let write_script =
+        build_ssh_zig_runner_install_script(&full_sha[..16], &full_sha, body_for_heredoc);
     let wr = run_target_command(
         target,
         ssh,
@@ -1296,7 +1482,15 @@ pub(crate) async fn prepare_ssh_zig_build_runner(
     )
     .await
     .ok()?;
-    wr.status.success().then_some(remote_dest)
+    if !wr.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&wr.stdout)
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("RUNNER_PATH:"))
+        .map(str::trim)
+        .filter(|p| !p.is_empty() && p.starts_with('/'))
+        .map(String::from)
 }
 
 #[allow(clippy::disallowed_methods)]
@@ -1339,6 +1533,7 @@ mod zig_support_tests {
     use crate::lsp_service::{parse_document_symbols, parse_zig_ast_check_stderr};
     use crate::toolchains_catalog::{parse_zig_index_json, EcosystemKind, TargetPlatform};
     use crate::types::{detect_language, IdeTestCaseStatus};
+    use std::path::Path;
 
     #[test]
     fn zig_language_detection_and_lsp_registry() {
@@ -1684,29 +1879,36 @@ test "failing sibling" { try std.testing.expectEqual(@as(i32, 1), 2); }
         std::fs::create_dir_all(&fake_lib).unwrap();
         std::fs::write(
             fake_lib.join("build_runner.zig"),
-            "pub fn main() !void {\n    if (steps_menu) return;\n    if (!watch) return cleanExit();\n}\n",
+            "const std = @import(\"std\");\nconst io = std.io;\nconst Step = std.Build.Step;\npub fn main() !void {\n    var targets = ArrayList([]const u8).init(arena);\n    if (steps_menu) return;\n}\n",
         )
         .unwrap();
 
         let proj = tmp.path().join("proj");
         std::fs::create_dir_all(proj.join("zig-out/bin")).unwrap();
         std::fs::create_dir_all(proj.join(".zig-cache/o/warm123")).unwrap();
+        std::fs::create_dir_all(proj.join(".zig-cache/o/warm456")).unwrap();
         std::fs::write(
             proj.join("build.zig"),
             "pub fn build(b: *std.Build) void { _ = b.step(\"test\", \"tests\"); }\n",
         )
         .unwrap();
         let app_bin = proj.join("zig-out/bin/proj");
-        let warm_test_bin = proj.join(".zig-cache/o/warm123/test");
-        for p in [&app_bin, &warm_test_bin] {
+        let warm_lib_test_bin = proj.join(".zig-cache/o/warm123/test");
+        let warm_exe_test_bin = proj.join(".zig-cache/o/warm456/test");
+        for p in [&app_bin, &warm_lib_test_bin, &warm_exe_test_bin] {
             std::fs::write(p, "#!/bin/sh\nexit 0\n").unwrap();
             std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        // Make the cached test binary old (1 hour ago) — old 2s mtime scan would reject it!
-        #[allow(clippy::disallowed_methods)]
-        let _ = std::process::Command::new("touch")
-            .args(["-t", "202001010000", &warm_test_bin.to_string_lossy()])
-            .status();
+        // Make cached test binaries old (2020) using async tokio::process::Command (TEST3-1).
+        let _ = tokio::process::Command::new("touch")
+            .args([
+                "-t",
+                "202001010000",
+                &warm_lib_test_bin.to_string_lossy(),
+                &warm_exe_test_bin.to_string_lossy(),
+            ])
+            .status()
+            .await;
 
         let fake_zig = fake_zig_dir.join("zig");
         let marker = tmp.path().join("invoked.txt");
@@ -1715,9 +1917,11 @@ test "failing sibling" { try std.testing.expectEqual(@as(i32, 1), 2); }
              printf '%s|%s\\n' \"$OTTO_ZIG_TEST_NO_EXEC\" \"$*\" > \"{}\"\n\
              if [ \"$OTTO_ZIG_TEST_NO_EXEC\" != \"1\" ]; then echo 'missing NO_EXEC' >&2; exit 2; fi\n\
              case \"$*\" in *--build-runner*) ;; *) echo 'missing --build-runner' >&2; exit 3 ;; esac\n\
-             echo 'OTTO_ZIG_TEST_BIN:{}'\n",
+             echo 'OTTO_ZIG_TEST_BIN:lib_test|src/root.zig|{}'\n\
+             echo 'OTTO_ZIG_TEST_BIN:exe_test|src/main.zig|{}'\n",
             marker.display(),
-            warm_test_bin.display()
+            warm_lib_test_bin.display(),
+            warm_exe_test_bin.display()
         );
         std::fs::write(&fake_zig, fake_zig_script).unwrap();
         std::fs::set_permissions(&fake_zig, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -1759,19 +1963,384 @@ test "failing sibling" { try std.testing.expectEqual(@as(i32, 1), 2); }
         )
         .await
         .expect("no-exec build runner must return warm-cached test binary");
-        assert_eq!(resolved_bin, warm_test_bin.to_string_lossy());
+        assert_eq!(resolved_bin, warm_exe_test_bin.to_string_lossy());
         assert_ne!(resolved_bin, app_bin.to_string_lossy());
+        // BUG-5: Multi-suite project must explicitly disclose which suite was selected.
+        assert!(
+            out.iter()
+                .any(|e| e.text.contains("2 test suites")
+                    && e.text.contains("exe_test (src/main.zig)")),
+            "expected multi-suite selection notice in initial_output, got: {out:?}"
+        );
 
         let invoked = std::fs::read_to_string(&marker).unwrap();
         assert!(invoked.starts_with("1|build --build-runner "));
-        // Verify the generated runner actually strips Step.Run and emits OTTO_ZIG_TEST_BIN.
+        // BUG3-1 + BUG2-2: Verify generated runner uses OttoEmitBinStep inside the step graph
+        // (runs before run.cleanExit()!) and routes filtered single-file runs through
+        // __otto_run_filtered_tests (never running unrelated suites).
         let runner_path = invoked
             .split_whitespace()
             .skip_while(|t| *t != "--build-runner")
             .nth(1)
             .expect("runner path in argv");
         let runner_src = std::fs::read_to_string(runner_path).unwrap();
+        assert!(runner_src.contains("OttoEmitBinStep"));
         assert!(runner_src.contains("__otto_compile_tests"));
+        assert!(runner_src.contains("__otto_run_filtered_tests"));
         assert!(runner_src.contains("OTTO_ZIG_TEST_BIN:"));
+
+        // BUG3-1: Unsupported Zig SDK runner layouts (e.g., 0.13.0 or 0.15.2 without
+        // `const io = std.io;` or `ArrayList([]const u8).init(arena)`) are explicitly gated.
+        assert!(super::patch_zig_build_runner(
+            "const std = @import(\"std\");\npub fn main() !void { if (steps_menu) return; }\n"
+        )
+        .is_none());
+
+        // BUG-35: Single-file Debug inside a build.zig project with a `test` step must fail
+        // clearly when the build runner fails rather than silently substituting a partial
+        // regex-only `zig test` compile.
+        let fail_zig_dir = tmp.path().join("fail-zig");
+        let fail_lib = fail_zig_dir.join("lib/zig/compiler");
+        std::fs::create_dir_all(&fail_lib).unwrap();
+        std::fs::write(
+            fail_lib.join("build_runner.zig"),
+            "const std = @import(\"std\");\nconst io = std.io;\nconst Step = std.Build.Step;\npub fn main() !void {\n    var targets = ArrayList([]const u8).init(arena);\n    if (steps_menu) return;\n}\n",
+        )
+        .unwrap();
+        let fail_zig = fail_zig_dir.join("zig");
+        std::fs::write(
+            &fail_zig,
+            "#!/bin/sh\necho 'build.zig dependency failed' >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fail_zig, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let main_zig = proj.join("src/main.zig");
+        std::fs::create_dir_all(main_zig.parent().unwrap()).unwrap();
+        std::fs::write(&main_zig, "test \"t\" {}\n").unwrap();
+        let mut fail_env = BTreeMap::new();
+        fail_env.insert(
+            "ZIG_HOME".into(),
+            fail_zig_dir.to_string_lossy().into_owned(),
+        );
+        fail_env.insert(
+            "PATH".into(),
+            format!("{}:/usr/bin:/bin", fail_zig_dir.display()),
+        );
+        let single_req = crate::types::IdeStartDebugReq {
+            target: crate::types::IdeTargetSpec::local(proj.to_string_lossy().into_owned()),
+            language: "zig".into(),
+            launch: crate::types::IdeDebugLaunchSpec {
+                program: main_zig.to_string_lossy().into_owned(),
+                cwd: Some(proj.to_string_lossy().into_owned()),
+                test_name: Some("t".into()),
+                is_test: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = super::compile_zig_debug_artifact(
+            &data_dir,
+            &single_req,
+            &ctx,
+            &proj.to_string_lossy(),
+            &main_zig.to_string_lossy(),
+            true,
+            &fail_env,
+            &mut Vec::new(),
+        )
+        .await
+        .expect_err("BUG-35: must fail clearly instead of partial source-only fallback");
+        assert!(
+            err.to_string().contains("build.zig dependency failed"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ssh_zig_runner_uses_private_home_dir_and_rejects_tampered_file_and_symlinks() {
+        use sha2::{Digest, Sha256};
+        use std::os::unix::fs::PermissionsExt;
+
+        // SEC3-1: SSH Zig runner must NEVER use shared /tmp; it must stage in private
+        // `$HOME/.otto/cache/zig-build-runners` (0700/0600), verify SHA-256 + ownership
+        // before reuse, overwrite tampered files, and refuse symlinked cache dirs.
+        let tmp = tempfile::tempdir().unwrap();
+        let fake_home = tmp.path().join("ssh-user-home");
+        std::fs::create_dir_all(&fake_home).unwrap();
+
+        let body = "// verified otto zig runner\nconst x = 1;";
+        let body_with_nl = format!("{body}\n");
+        let mut h = Sha256::new();
+        h.update(body_with_nl.as_bytes());
+        let full_sha = hex::encode(h.finalize());
+        let key_prefix = &full_sha[..16];
+
+        let script = super::build_ssh_zig_runner_install_script(key_prefix, &full_sha, body);
+        assert!(
+            !script.contains("/tmp/"),
+            "SEC3-1: SSH runner script must never use shared /tmp: {script}"
+        );
+
+        // Pre-plant a tampered file at the exact destination pathname.
+        let cache_dir = fake_home.join(".otto/cache/zig-build-runners");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let dest = cache_dir.join(format!("runner-{key_prefix}.zig"));
+        std::fs::write(&dest, "// TAMPERED MALICIOUS RUNNER\n").unwrap();
+
+        let out = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .env("HOME", &fake_home)
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "runner install script failed: {:?}",
+            out
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let reported = stdout
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("RUNNER_PATH:"))
+            .expect("RUNNER_PATH output");
+        assert_eq!(reported, dest.to_string_lossy());
+        assert_eq!(
+            std::fs::read_to_string(&dest).unwrap(),
+            body_with_nl,
+            "SEC3-1: tampered file at runner path must be overwritten with verified content"
+        );
+        let dir_mode = std::fs::metadata(&cache_dir).unwrap().permissions().mode() & 0o777;
+        let file_mode = std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700);
+        assert_eq!(file_mode, 0o600);
+
+        // Symlinked cache directory must be refused (non-zero exit).
+        let sym_home = tmp.path().join("sym-home");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(sym_home.join(".otto/cache")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, sym_home.join(".otto/cache/zig-build-runners"))
+            .unwrap();
+        let sym_out = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .env("HOME", &sym_home)
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            !sym_out.status.success(),
+            "SEC3-1: symlinked cache directory must be refused"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn real_zig_014_build_runner_emits_bins_before_clean_exit_and_isolates_filtered_suite() {
+        // BUG3-1 + BUG-5 + BUG2-2 live proof against the host's real Zig 0.14.x compiler
+        // when installed: compiles the patched `compiler/build_runner.zig` against a stock
+        // dual-suite `build.zig` (`lib_unit_tests` + `exe_unit_tests`) and executes it live.
+        let Ok(env_out) = tokio::process::Command::new("zig")
+            .arg("env")
+            .output()
+            .await
+        else {
+            return;
+        };
+        if !env_out.status.success() {
+            return;
+        }
+        let env_str = String::from_utf8_lossy(&env_out.stdout);
+        let Some(lib_dir) = super::parse_zig_env_lib_dir(&env_str) else {
+            return;
+        };
+        let orig_path = Path::new(&lib_dir).join("compiler/build_runner.zig");
+        let Ok(orig) = std::fs::read_to_string(&orig_path) else {
+            return;
+        };
+        let Some(patched) = super::patch_zig_build_runner(&orig) else {
+            return;
+        };
+        let zig_exe = env_str
+            .lines()
+            .find_map(|l| {
+                l.trim()
+                    .strip_prefix("\"zig_exe\":")
+                    .or_else(|| l.trim().strip_prefix(".zig_exe ="))
+                    .and_then(|r| {
+                        r.trim()
+                            .trim_end_matches(',')
+                            .trim()
+                            .strip_prefix('"')
+                            .and_then(|s| s.strip_suffix('"'))
+                    })
+            })
+            .unwrap_or("zig")
+            .to_string();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("dual_proj");
+        std::fs::create_dir_all(proj.join("src")).unwrap();
+        let lib_marker = tmp.path().join("lib_ran.marker");
+        let exe_fail_marker = tmp.path().join("exe_fail_ran.marker");
+
+        std::fs::write(
+            proj.join("src/root.zig"),
+            format!(
+                "const std = @import(\"std\");\n\
+                 pub fn add(a: i32, b: i32) i32 {{ return a + b; }}\n\
+                 test \"failing lib suite\" {{\n\
+                     var f = try std.fs.createFileAbsolute(\"{}\", .{{}});\n\
+                     f.close();\n\
+                     try std.testing.expectEqual(@as(i32, 1), 999);\n\
+                 }}\n",
+                lib_marker.display()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            proj.join("src/main.zig"),
+            format!(
+                "const std = @import(\"std\");\n\
+                 const lib = @import(\"dual_lib\");\n\
+                 pub fn main() void {{ _ = lib.add(1, 2); }}\n\
+                 test \"passing exe\" {{ try std.testing.expectEqual(@as(i32, 3), lib.add(1, 2)); }}\n\
+                 test \"failing exe sibling\" {{\n\
+                     var f = try std.fs.createFileAbsolute(\"{}\", .{{}});\n\
+                     f.close();\n\
+                     try std.testing.expectEqual(@as(i32, 1), 2);\n\
+                 }}\n",
+                exe_fail_marker.display()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            proj.join("build.zig"),
+            r#"const std = @import("std");
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+    const lib_mod = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const exe_mod = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    exe_mod.addImport("dual_lib", lib_mod);
+    const lib_unit_tests = b.addTest(.{ .root_module = lib_mod });
+    const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
+    const exe_unit_tests = b.addTest(.{ .root_module = exe_mod });
+    const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
+    const test_step = b.step("test", "Run unit tests");
+    test_step.dependOn(&run_lib_unit_tests.step);
+    test_step.dependOn(&run_exe_unit_tests.step);
+}
+"#,
+        )
+        .unwrap();
+
+        let runner_src = tmp.path().join("otto_build_runner.zig");
+        let deps_src = tmp.path().join("deps.zig");
+        let runner_bin = tmp.path().join("otto_runner_bin");
+        std::fs::write(&runner_src, patched).unwrap();
+        std::fs::write(
+            &deps_src,
+            "pub const packages = struct {}; pub const root_deps: []const struct { []const u8, []const u8 } = &.{};\n",
+        )
+        .unwrap();
+
+        let mut compile_cmd = tokio::process::Command::new(&zig_exe);
+        compile_cmd.arg("build-exe");
+        if cfg!(target_os = "macos") {
+            compile_cmd.args(["-target", "native-macos.15.0"]);
+        }
+        let compile_out = compile_cmd
+            .args([
+                &format!("-femit-bin={}", runner_bin.display()),
+                "--dep",
+                "@build",
+                "--dep",
+                "@dependencies",
+                &format!("-Mroot={}", runner_src.display()),
+                &format!("-M@build={}", proj.join("build.zig").display()),
+                &format!("-M@dependencies={}", deps_src.display()),
+            ])
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            compile_out.status.success(),
+            "patched build_runner.zig failed to compile: {}",
+            String::from_utf8_lossy(&compile_out.stderr)
+        );
+
+        let cache_dir = proj.join(".zig-cache");
+        let global_cache = tmp.path().join("global-cache");
+        let mut runner_args = vec![
+            zig_exe.clone(),
+            lib_dir.clone(),
+            proj.to_string_lossy().into_owned(),
+            cache_dir.to_string_lossy().into_owned(),
+            global_cache.to_string_lossy().into_owned(),
+        ];
+        if cfg!(target_os = "macos") {
+            runner_args.push("-Dtarget=native-macos.15.0".into());
+        }
+        runner_args.push("test".into());
+
+        // 1. BUG3-1 + BUG-5 + BUG2-1: No-exec mode emits BOTH suite binaries BEFORE
+        //    run.cleanExit() and never executes either test binary.
+        let no_exec_out = tokio::process::Command::new(&runner_bin)
+            .args(&runner_args)
+            .current_dir(&proj)
+            .env("OTTO_ZIG_TEST_NO_EXEC", "1")
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            no_exec_out.status.success(),
+            "no-exec runner failed: {}",
+            String::from_utf8_lossy(&no_exec_out.stderr)
+        );
+        assert!(!lib_marker.exists() && !exe_fail_marker.exists());
+        let bins = super::parse_otto_zig_test_bins(&String::from_utf8_lossy(&no_exec_out.stdout));
+        assert_eq!(
+            bins.len(),
+            2,
+            "expected both suites emitted before cleanExit: {bins:?}"
+        );
+        for b in &bins {
+            assert!(
+                Path::new(&b.path).is_file(),
+                "emitted binary missing: {}",
+                b.path
+            );
+        }
+
+        // 2. BUG2-2: Filtered single-file Run on src/main.zig executes ONLY `passing exe`,
+        //    skipping both failing `lib_unit_tests` (src/root.zig) and failing exe sibling.
+        let filtered_out = tokio::process::Command::new(&runner_bin)
+            .args(&runner_args)
+            .current_dir(&proj)
+            .env("OTTO_ZIG_TEST_FILTER", "passing exe")
+            .env("OTTO_ZIG_TEST_FILE", proj.join("src/main.zig"))
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            filtered_out.status.success(),
+            "BUG2-2: filtered run should pass without executing failing lib suite or sibling: {}",
+            String::from_utf8_lossy(&filtered_out.stderr)
+        );
+        assert!(!lib_marker.exists(), "BUG2-2: unrelated lib_unit_tests ran");
+        assert!(!exe_fail_marker.exists(), "BUG2-2: failing exe sibling ran");
     }
 }
