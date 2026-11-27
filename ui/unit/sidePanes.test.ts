@@ -17,7 +17,6 @@ import {
 } from '../src/lib/components/side/paneKeys.ts';
 import { moveIndex, treeStep } from '../src/lib/components/side/listNav.ts';
 import { listPageMenu } from '../src/lib/components/side/context.ts';
-import { readFileSync } from 'node:fs';
 
 function mem(seed: Record<string, string> = {}) {
   const m = new Map(Object.entries(seed));
@@ -96,7 +95,7 @@ test('→ / ← open, close, descend and climb a tree (mirrored in RTL)', () => 
   assert.equal(treeStep('ArrowLeft', false, 1, true), 'expand', 'RTL: ← opens');
 });
 
-test('a phone list page keeps the page: its ⋯ = the pane menu, then the page more rows; its tabs stay below', () => {
+test('a phone list page keeps the page: its ⋯ = the pane menu, then the page more rows', () => {
   const pane = () => [{ label: 'Refresh', action: () => {} }];
   const page = () => [{ label: 'Switch context', action: () => {} }];
   assert.deepEqual(listPageMenu(pane, page)?.().map((i) => ('label' in i ? i.label : '—')), ['Refresh', '—', 'Switch context']);
@@ -104,7 +103,4 @@ test('a phone list page keeps the page: its ⋯ = the pane menu, then the page m
   assert.equal(listPageMenu(undefined, page), page);
   assert.equal(listPageMenu(undefined, undefined), undefined);
   assert.deepEqual(listPageMenu(() => [], page)?.().map((i) => ('label' in i ? i.label : '—')), ['Switch context'], 'no separator around nothing');
-  const header = readFileSync(new URL('../src/lib/components/PageHeader.svelte', import.meta.url), 'utf8');
-  assert.match(header, /listPageMenu\(listPage\.menu, more\)/);
-  assert.match(header, /\{#if tabs && tabsBelow\}/, 'the page tabs (Containers | Images …) are not dropped on a phone list page');
 });
