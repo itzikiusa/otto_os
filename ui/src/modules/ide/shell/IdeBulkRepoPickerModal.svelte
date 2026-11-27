@@ -155,6 +155,8 @@
           if (names.has('pom.xml') || names.has('build.gradle') || names.has('build.gradle.kts')) detected.push('java');
           if (names.has('Cargo.toml')) detected.push('rust');
           if (names.has('build.zig') || names.has('build.zig.zon')) detected.push('zig');
+          if (names.has('Assets') && names.has('ProjectSettings')) detected.push('unity');
+          else if (names.has('global.json') || [...names].some((n) => /\.(?:sln|slnx|csproj|fsproj|uproject)$/i.test(n))) detected.push('dotnet');
           if (names.has('package.json')) detected.push('node');
           if (names.has('pyproject.toml') || names.has('requirements.txt')) detected.push('python');
           if (detected.length > 0) {
@@ -381,6 +383,8 @@
                 {#if techs.includes('java')}<Badge tone="neutral" variant="outline" label="Maven/Gradle" />{/if}
                 {#if techs.includes('rust')}<Badge tone="neutral" variant="outline" label="Rust" />{/if}
                 {#if techs.includes('zig')}<Badge tone="neutral" variant="outline" label="Zig" />{/if}
+                {#if techs.includes('unity')}<Badge tone="neutral" variant="outline" label="Unity" />{/if}
+                {#if techs.includes('dotnet')}<Badge tone="neutral" variant="outline" label=".NET" />{/if}
                 {#if techs.includes('node')}<Badge tone="neutral" variant="outline" label="Node/TS" />{/if}
                 {#if techs.includes('python')}<Badge tone="neutral" variant="outline" label="Python" />{/if}
                 {#if mode === 'create' && checked}

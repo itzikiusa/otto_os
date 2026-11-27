@@ -44,6 +44,8 @@ pub fn normalize_lsp_lang(lang: &str) -> &str {
         "containerfile" => "dockerfile",
         "kt" | "kts" => "kotlin",
         "zon" => "zig",
+        "cs" | "csx" | "c#" | "razor" | "cshtml" => "csharp",
+        "fs" | "fsx" | "fsi" | "f#" => "fsharp",
         other => other,
     }
 }
@@ -158,6 +160,24 @@ pub static REGISTRY: &[ServerDef] = &[
         extensions: &[".zig", ".zon"],
         install_command: Some("brew install zls"),
     },
+    ServerDef {
+        lang: "csharp",
+        cmd: "csharp-ls",
+        args: &[],
+        fallback_cmd: Some("OmniSharp"),
+        fallback_args: &["-lsp"],
+        extensions: &[".cs", ".csx", ".razor"],
+        install_command: Some("dotnet tool install --global csharp-ls"),
+    },
+    ServerDef {
+        lang: "fsharp",
+        cmd: "fsautocomplete",
+        args: &["--adaptive-lsp-server-enabled"],
+        fallback_cmd: None,
+        fallback_args: &[],
+        extensions: &[".fs", ".fsx", ".fsi"],
+        install_command: Some("dotnet tool install --global fsautocomplete"),
+    },
 ];
 
 /// Result of resolving one language server against toolchain dirs + PATH.
@@ -222,6 +242,8 @@ fn collect_developer_bin_dirs(
                     ".npm-global/bin",
                     ".volta/bin",
                     ".zvm/bin",
+                    ".dotnet",
+                    ".dotnet/tools",
                 ] {
                     dirs.push(home.join(rel));
                 }
@@ -232,6 +254,8 @@ fn collect_developer_bin_dirs(
         "/opt/homebrew/bin",
         "/opt/homebrew/sbin",
         "/usr/local/go/bin",
+        "/usr/local/share/dotnet",
+        "/opt/homebrew/opt/dotnet/libexec",
         "/usr/local/bin",
         "/usr/bin",
         "/bin",
@@ -441,6 +465,26 @@ fn resolve_def(def: &ServerDef, extra_dirs: &[PathBuf]) -> Resolved {
     }
     if def.lang == "python" {
         if let Some(resolved) = which_in("basedpyright-langserver", extra_dirs) {
+            return Resolved {
+                lang: def.lang.to_string(),
+                available: true,
+                command: resolved,
+                args: vec!["--stdio".into()],
+                install_command: def.install_command.map(str::to_string),
+            };
+        }
+    }
+    if def.lang == "csharp" {
+        if let Some(resolved) = which_in("omnisharp", extra_dirs) {
+            return Resolved {
+                lang: def.lang.to_string(),
+                available: true,
+                command: resolved,
+                args: vec!["-lsp".into()],
+                install_command: def.install_command.map(str::to_string),
+            };
+        }
+        if let Some(resolved) = which_in("Microsoft.CodeAnalysis.LanguageServer", extra_dirs) {
             return Resolved {
                 lang: def.lang.to_string(),
                 available: true,

@@ -545,6 +545,18 @@ export function detectFastRunConfigs(rootPath: string, entries: IdeFsEntry[]): I
       },
     );
   }
+  if (names.has('global.json') || [...names].some((n) => /\.(?:sln|slnx|csproj|fsproj)$/i.test(n))) {
+    out.push(
+      {
+        id: 'auto:dotnet_build', name: 'dotnet build', runner: 'dotnet_build',
+        args: ['build'], cwd: rootPath, env_overrides: {}, inherit_shell_env: true, auto_detected: true,
+      },
+      {
+        id: 'auto:dotnet_test', name: 'dotnet test', runner: 'dotnet_test',
+        args: ['test'], cwd: rootPath, env_overrides: {}, inherit_shell_env: true, auto_detected: true,
+      },
+    );
+  }
   if (names.has('package.json')) {
     out.push({
       id: 'auto:npm_test', name: 'npm test', runner: 'npm',

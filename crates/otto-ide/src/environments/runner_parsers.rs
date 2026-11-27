@@ -56,6 +56,36 @@ impl IncrementalTestTracker {
                     }
                 }
             }
+            IdeRunnerKind::DotnetTest => {
+                if let Some(tc) = parse_dotnet_test_line(line) {
+                    self.push_capped(tc);
+                } else if let Some((file, ln)) = parse_dotnet_stack_location(line.trim()) {
+                    if let Some(last) = self
+                        .results
+                        .last_mut()
+                        .filter(|t| t.status == IdeTestCaseStatus::Failed)
+                    {
+                        last.file.get_or_insert(file);
+                        last.line.get_or_insert(ln);
+                    }
+                } else {
+                    let trimmed = line.trim();
+                    if let Some(last) = self
+                        .results
+                        .last_mut()
+                        .filter(|t| t.status == IdeTestCaseStatus::Failed && t.message.is_none())
+                    {
+                        if let Some(msg) = trimmed
+                            .strip_prefix("Assert.")
+                            .map(|_| trimmed)
+                            .or_else(|| trimmed.strip_prefix("Expected:").map(|_| trimmed))
+                            .or_else(|| trimmed.strip_prefix("System.").map(|_| trimmed))
+                        {
+                            last.message = Some(msg.to_string());
+                        }
+                    }
+                }
+            }
             IdeRunnerKind::Pytest => {
                 if let Some(tc) = parse_python_test_line(line) {
                     self.push_capped(tc);
@@ -569,6 +599,80 @@ fn parse_ms_suffix(s: &str) -> Option<u64> {
         .parse::<f64>()
         .ok()
         .map(|v| v.round() as u64)
+}
+
+fn parse_dotnet_duration_bracket(s: &str) -> Option<u64> {
+    let open = s.rfind('[')?;
+    let close = s[open + 1..].find(']')?;
+    let raw = s[open + 1..open + 1 + close].trim();
+    if raw.starts_with('<') && raw.contains("ms") {
+        return Some(1);
+    }
+    if let Some(ms) = raw.strip_suffix("ms") {
+        return ms.trim().parse::<f64>().ok().map(|v| v.round() as u64);
+    }
+    if let Some(sec) = raw.strip_suffix('s') {
+        return sec
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .map(|v| (v * 1000.0).round() as u64);
+    }
+    None
+}
+
+/// Parse `dotnet test --verbosity normal` result lines:
+/// - `Passed MyApp.Tests.MathTests.Adds [12 ms]`
+/// - `Failed MyApp.Tests.MathTests.Divides [< 1 ms]`
+/// - `Skipped MyApp.Tests.MathTests.Pending`
+pub(crate) fn parse_dotnet_test_line(line: &str) -> Option<IdeTestCaseResult> {
+    let t = line.trim();
+    let (status, rest) = if let Some(r) = t.strip_prefix("Passed ") {
+        (IdeTestCaseStatus::Passed, r.trim())
+    } else if let Some(r) = t.strip_prefix("Failed ") {
+        (IdeTestCaseStatus::Failed, r.trim())
+    } else {
+        let r = t.strip_prefix("Skipped ")?;
+        (IdeTestCaseStatus::Skipped, r.trim())
+    };
+    // Skip summary lines like `Passed!  - Failed:     0, Passed:     2, ...`
+    if rest.is_empty() || rest.starts_with('-') || rest.contains("Failed:") {
+        return None;
+    }
+    let duration_ms = parse_dotnet_duration_bracket(rest);
+    let raw_name = match rest.rfind('[') {
+        Some(idx) => rest[..idx].trim(),
+        None => rest,
+    };
+    if raw_name.is_empty() {
+        return None;
+    }
+    let (suite, name) = match raw_name.rsplit_once('.') {
+        Some((s, n)) if !n.is_empty() => (Some(s.to_string()), n.to_string()),
+        _ => (None, raw_name.to_string()),
+    };
+    Some(IdeTestCaseResult {
+        name,
+        suite,
+        status,
+        duration_ms,
+        file: None,
+        line: None,
+        message: None,
+    })
+}
+
+/// Parse .NET stack frame location: `at MyApp.Tests.MathTests.Divides() in /path/MathTests.cs:line 42`
+fn parse_dotnet_stack_location(trimmed: &str) -> Option<(String, u32)> {
+    let (_, after_in) = trimmed.rsplit_once(" in ")?;
+    let (file, line_s) = after_in.rsplit_once(":line ")?;
+    let ln = line_s.trim().parse::<u32>().ok()?;
+    let clean_file = file.trim();
+    if clean_file.ends_with(".cs") || clean_file.ends_with(".fs") {
+        Some((clean_file.to_string(), ln))
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]

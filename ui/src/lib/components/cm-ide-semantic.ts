@@ -149,7 +149,7 @@ export function classifySemanticTokensWithModel(
       if (ch === '/' && docText[i + 1] === '/') {
         const nl = docText.indexOf('\n', i + 2);
         const end = nl >= 0 ? Math.min(to, nl) : to;
-        if ((docText[i + 2] === '/' && (lang === 'rust' || lang === 'zig')) || (docText[i + 2] === '!' && lang === 'zig')) {
+        if ((docText[i + 2] === '/' && (lang === 'rust' || lang === 'zig' || lang === 'csharp' || lang === 'fsharp')) || (docText[i + 2] === '!' && lang === 'zig')) {
           classifyDocComment(docText.slice(i, end), i, out);
         }
         i = end;

@@ -31,6 +31,10 @@ pub(super) fn collect_managed_bin_dirs(tc_root: &Path, out: &mut Vec<PathBuf>) {
         "zig/bin",
         "zig/current",
         "zig/current/bin",
+        "dotnet/current",
+        "dotnet/tools",
+        "dotnet/dap",
+        "dotnet/netcoredbg",
         "node/current/bin",
         "node/lsp/node_modules/.bin",
         "python/bin",
@@ -50,11 +54,15 @@ pub(super) fn collect_managed_bin_dirs(tc_root: &Path, out: &mut Vec<PathBuf>) {
         "java/jdks",
         "go/sdks",
         "zig/sdks",
+        "dotnet/sdks",
         "node/sdks",
         "python/interpreters",
     ] {
         for p in read_subdirs(&tc_root.join(sub)) {
             if sub == "zig/sdks" && p.join("zig").is_file() && !out.contains(&p) {
+                out.push(p.clone());
+            }
+            if sub == "dotnet/sdks" && p.join("dotnet").is_file() && !out.contains(&p) {
                 out.push(p.clone());
             }
             for rel in ["bin", "Contents/Home/bin", "go/bin"] {
@@ -82,7 +90,14 @@ pub(crate) fn system_search_dirs_with_shell(shell_path: Option<&str>) -> Vec<Pat
             }
         }
     }
-    for extra in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"] {
+    for extra in [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/local/share/dotnet",
+        "/opt/homebrew/opt/dotnet/libexec",
+        "/usr/bin",
+        "/bin",
+    ] {
         let p = PathBuf::from(extra);
         if !dirs.contains(&p) {
             dirs.push(p);
@@ -90,7 +105,14 @@ pub(crate) fn system_search_dirs_with_shell(shell_path: Option<&str>) -> Vec<Pat
     }
     if !otto_core::e2e::isolated() {
         if let Some(home) = dirs::home_dir() {
-            for rel in [".cargo/bin", "go/bin", ".local/bin", ".zvm/bin"] {
+            for rel in [
+                ".cargo/bin",
+                "go/bin",
+                ".local/bin",
+                ".zvm/bin",
+                ".dotnet",
+                ".dotnet/tools",
+            ] {
                 let p = home.join(rel);
                 if !dirs.contains(&p) {
                     dirs.push(p);
@@ -185,6 +207,14 @@ fn scan_otto_sdks(
                 if let Some(zh) = resolve_zig_home_dir(&dir) {
                     let v = zig_dir_version(&dir);
                     push_sdk(out, seen, "zig", &v, &zh, "otto");
+                }
+            }
+        }
+        EcosystemKind::Dotnet => {
+            for dir in read_subdirs(&root.join("dotnet/sdks")) {
+                if let Some(dr) = resolve_dotnet_root_dir(&dir) {
+                    let v = dotnet_dir_version(&dr);
+                    push_sdk(out, seen, "dotnet", &v, &dr, "otto");
                 }
             }
         }
@@ -326,6 +356,53 @@ fn scan_system_sdks(
                 }
             }
         }
+        EcosystemKind::Dotnet => {
+            if let Ok(env_root) = std::env::var("DOTNET_ROOT") {
+                let p = PathBuf::from(env_root.trim());
+                if let Some(dr) = resolve_dotnet_root_dir(&p) {
+                    let v = dotnet_dir_version(&dr);
+                    push_sdk(out, seen, "dotnet", &v, &dr, "system");
+                }
+            }
+            for cand in [
+                "/usr/local/share/dotnet",
+                "/opt/homebrew/opt/dotnet/libexec",
+                "/usr/local/opt/dotnet/libexec",
+                "/usr/share/dotnet",
+            ] {
+                let p = PathBuf::from(cand);
+                if let Some(dr) = resolve_dotnet_root_dir(&p) {
+                    let v = dotnet_dir_version(&dr);
+                    push_sdk(out, seen, "dotnet", &v, &dr, "system");
+                }
+            }
+            if let Some(h) = &home {
+                let dot_dotnet = h.join(".dotnet");
+                if let Some(dr) = resolve_dotnet_root_dir(&dot_dotnet) {
+                    let v = dotnet_dir_version(&dr);
+                    push_sdk(out, seen, "dotnet", &v, &dr, "system");
+                }
+                for (parent, src) in [
+                    (h.join(".asdf/installs/dotnet-core"), "asdf"),
+                    (h.join(".asdf/installs/dotnet"), "asdf"),
+                    (h.join(".local/share/mise/installs/dotnet"), "mise"),
+                ] {
+                    for dir in read_subdirs(&parent) {
+                        if let Some(dr) = resolve_dotnet_root_dir(&dir) {
+                            let v = dotnet_dir_version(&dr);
+                            push_sdk(out, seen, "dotnet", &v, &dr, src);
+                        }
+                    }
+                }
+            }
+            if let Some(bin) = find_executable_in(&search, &["dotnet"]) {
+                if let Some(dr) = dotnet_root_from_bin(&bin) {
+                    let v =
+                        read_dotnet_bin_version(&bin).unwrap_or_else(|| dotnet_dir_version(&dr));
+                    push_sdk(out, seen, "dotnet", &v, &dr, "system");
+                }
+            }
+        }
         EcosystemKind::Node => {
             if let Some(h) = &home {
                 for dir in read_subdirs(&h.join(".nvm/versions/node")) {
@@ -407,6 +484,11 @@ pub(super) fn discover_local_lsp_with_shell(
         EcosystemKind::Go => &["go/bin/gopls"],
         EcosystemKind::Rust => &["rust/bin/rust-analyzer", "rust/cargo/bin/rust-analyzer"],
         EcosystemKind::Zig => &["zig/bin/zls"],
+        EcosystemKind::Dotnet => &[
+            "dotnet/tools/csharp-ls",
+            "dotnet/bin/csharp-ls",
+            "dotnet/tools/fsautocomplete",
+        ],
         EcosystemKind::Node => &["node/lsp/node_modules/.bin/typescript-language-server"],
         EcosystemKind::Python => &["python/bin/pyright-langserver", "python/bin/pyright"],
         EcosystemKind::Shell => &["shell/lsp/node_modules/.bin/bash-language-server"],
@@ -435,6 +517,13 @@ pub(super) fn discover_local_lsp_with_shell(
         EcosystemKind::Go => &["gopls"],
         EcosystemKind::Rust => &["rust-analyzer"],
         EcosystemKind::Zig => &["zls"],
+        EcosystemKind::Dotnet => &[
+            "csharp-ls",
+            "OmniSharp",
+            "omnisharp",
+            "Microsoft.CodeAnalysis.LanguageServer",
+            "fsautocomplete",
+        ],
         EcosystemKind::Node => &["typescript-language-server"],
         EcosystemKind::Python => &["pyright-langserver", "pyright"],
         EcosystemKind::Shell => &["bash-language-server"],
@@ -485,6 +574,12 @@ pub(super) fn discover_local_dap_with_shell(
             "rust/codelldb/adapter/codelldb",
             "zig/dap/extension/adapter/codelldb",
         ],
+        EcosystemKind::Dotnet => vec![
+            "dotnet/dap/netcoredbg/netcoredbg",
+            "dotnet/dap/netcoredbg",
+            "dotnet/netcoredbg/netcoredbg",
+            "dotnet/bin/netcoredbg",
+        ],
         EcosystemKind::Node => vec![
             "node/dap/js-debug/src/dapDebugServer.js",
             "node/js-debug/src/dapDebugServer.js",
@@ -502,6 +597,7 @@ pub(super) fn discover_local_dap_with_shell(
                 EcosystemKind::Go
                 | EcosystemKind::Rust
                 | EcosystemKind::Zig
+                | EcosystemKind::Dotnet
                 | EcosystemKind::Shell
                 | EcosystemKind::Json
                 | EcosystemKind::Ios
@@ -523,6 +619,7 @@ pub(super) fn discover_local_dap_with_shell(
         EcosystemKind::Java => &["java-debug", "java"],
         EcosystemKind::Go => &["dlv"],
         EcosystemKind::Rust | EcosystemKind::Zig => &["codelldb", "lldb-dap", "lldb"],
+        EcosystemKind::Dotnet => &["netcoredbg", "vsdbg"],
         EcosystemKind::Node => &["js-debug-dap", "node"],
         EcosystemKind::Python => &["debugpy", "debugpy-adapter", "python3"],
         EcosystemKind::Shell => &["bashdb", "bash", "zsh"],
@@ -751,6 +848,86 @@ pub(super) fn mark_zig_tool_outdated(
     }
 }
 
+/// Locate the `dotnet` executable inside a .NET SDK root (`<root>/dotnet` or `<root>/bin/dotnet`).
+pub(crate) fn dotnet_bin_in_root(dotnet_root: &Path) -> Option<PathBuf> {
+    for rel in ["dotnet", "bin/dotnet"] {
+        let cand = dotnet_root.join(rel);
+        if is_executable_file(&cand) {
+            return Some(cand);
+        }
+    }
+    None
+}
+
+/// Resolve a .NET SDK root directory containing `dotnet` (or `libexec/dotnet`).
+pub(crate) fn resolve_dotnet_root_dir(dir: &Path) -> Option<PathBuf> {
+    if dotnet_bin_in_root(dir).is_some() {
+        return Some(dir.to_path_buf());
+    }
+    let libexec = dir.join("libexec");
+    if dotnet_bin_in_root(&libexec).is_some() {
+        return Some(libexec);
+    }
+    read_subdirs(dir)
+        .into_iter()
+        .find(|sub| dotnet_bin_in_root(sub).is_some())
+}
+
+/// Derive a .NET SDK root from a `dotnet` executable path (resolving symlinks).
+#[allow(clippy::disallowed_methods)]
+pub(crate) fn dotnet_root_from_bin(bin: &Path) -> Option<PathBuf> {
+    let real = std::fs::canonicalize(bin).unwrap_or_else(|_| bin.to_path_buf());
+    let parent = real.parent()?;
+    if parent.file_name().and_then(|n| n.to_str()) == Some("bin") {
+        let grand = parent.parent()?;
+        if grand.join("sdk").is_dir() {
+            return Some(grand.to_path_buf());
+        }
+        if grand.join("libexec/sdk").is_dir() {
+            return Some(grand.join("libexec"));
+        }
+        Some(grand.to_path_buf())
+    } else {
+        Some(parent.to_path_buf())
+    }
+}
+
+/// Read the latest installed SDK version under `<dotnet_root>/sdk/*` (zero-subprocess).
+pub(crate) fn dotnet_dir_version(dotnet_root: &Path) -> String {
+    let mut versions: Vec<String> = read_subdirs(&dotnet_root.join("sdk"))
+        .into_iter()
+        .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(str::to_string))
+        .filter(|s| s.chars().next().is_some_and(|c| c.is_ascii_digit()))
+        .collect();
+    versions.sort();
+    if let Some(latest) = versions.pop() {
+        return latest;
+    }
+    let name = dir_name_version(dotnet_root);
+    if name.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        name
+    } else {
+        "system".into()
+    }
+}
+
+#[allow(clippy::disallowed_methods)]
+pub(crate) fn read_dotnet_bin_version(dotnet_bin: &Path) -> Option<String> {
+    let out = std::process::Command::new(dotnet_bin)
+        .arg("--version")
+        .env("DOTNET_CLI_TELEMETRY_OPTOUT", "1")
+        .env("DOTNET_NOLOGO", "1")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let ver = text.lines().next()?.trim();
+    (!ver.is_empty()).then(|| ver.to_string())
+}
+
 #[allow(clippy::disallowed_methods)] // called from the toolchain listing's blocking task
 fn python_has_debugpy(python: &str) -> bool {
     std::process::Command::new(python)
@@ -772,6 +949,7 @@ pub(super) fn mark_active_sdk(
         EcosystemKind::Go => env.go_root.as_deref(),
         EcosystemKind::Rust => env.rust_toolchain.as_deref(),
         EcosystemKind::Zig => env.zig_home.as_deref(),
+        EcosystemKind::Dotnet => env.dotnet_root.as_deref(),
         EcosystemKind::Node => env.node_home.as_deref(),
         EcosystemKind::Python => env.python_interpreter.as_deref(),
         EcosystemKind::Ios => env.xcode_developer_dir.as_deref(),

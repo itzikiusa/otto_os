@@ -29,6 +29,7 @@
     { name: 'pyright', eco: 'python', lang: 'Python' },
     { name: 'rust-analyzer', eco: 'rust', lang: 'Rust' },
     { name: 'zls', eco: 'zig', lang: 'Zig' },
+    { name: 'csharp-ls', eco: 'dotnet', lang: 'C# / .NET' },
     { name: 'bash-language-server', eco: 'shell', lang: 'Shell (zsh / bash)' },
   ];
 

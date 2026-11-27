@@ -49,6 +49,15 @@ fn manifest_names_for_lang(norm_lang: &str) -> &'static [&'static str] {
         ],
         "rust" => &["Cargo.toml"],
         "zig" => &["build.zig", "build.zig.zon"],
+        "csharp" | "fsharp" => &[
+            "*.sln",
+            "*.slnx",
+            "*.csproj",
+            "*.fsproj",
+            "global.json",
+            "Directory.Build.props",
+            "Directory.Packages.props",
+        ],
         "typescript" | "javascript" => &["tsconfig.json", "jsconfig.json", "package.json"],
         "python" => &[
             "pyproject.toml",
@@ -74,15 +83,26 @@ fn manifest_names_for_lang(norm_lang: &str) -> &'static [&'static str] {
     }
 }
 
+#[allow(clippy::disallowed_methods)] // shallow 1-level dir check executed during LSP root resolution
+fn dir_has_suffix(dir: &Path, suffix: &str) -> bool {
+    std::fs::read_dir(dir).ok().is_some_and(|rd| {
+        rd.flatten()
+            .any(|e| e.file_name().to_str().is_some_and(|n| n.ends_with(suffix)))
+    })
+}
+
 fn dir_has_any_manifest(dir: &Path, names: &[&str], extra_markers: &[String]) -> bool {
-    names
+    names.iter().any(|m| {
+        if let Some(suffix) = m.strip_prefix('*') {
+            dir_has_suffix(dir, suffix)
+        } else {
+            dir.join(m).is_file() || dir.join(m).is_dir()
+        }
+    }) || extra_markers
         .iter()
-        .any(|m| dir.join(m).is_file() || dir.join(m).is_dir())
-        || extra_markers
-            .iter()
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty() && !s.contains('/') && !s.contains('\\') && *s != "..")
-            .any(|m| dir.join(m).exists())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty() && !s.contains('/') && !s.contains('\\') && *s != "..")
+        .any(|m| dir.join(m).exists())
 }
 
 fn dir_looks_like_child_repo(dir: &Path) -> bool {
@@ -139,6 +159,9 @@ fn is_dependency_dir(dir: &Path) -> bool {
         || parts.windows(2).any(|w| w == [".cache", "zig"])
         || parts.windows(3).any(|w| w == ["lib", "zig", "std"])
         || parts.windows(2).any(|w| w == ["lib", "std"])
+        // NuGet package cache (`~/.nuget/packages/...`) and .NET shared reference packs.
+        || parts.windows(2).any(|w| w == [".nuget", "packages"])
+        || parts.windows(2).any(|w| w == ["dotnet", "packs"])
 }
 
 #[allow(clippy::disallowed_methods)]
@@ -206,6 +229,15 @@ pub(crate) fn climb_to_build_root(
             // Cargo binds a member to its nearest `[workspace]` ancestor.
             "rust" if is_cargo_workspace(&parent) => return parent,
             "rust" => true,
+            // .NET binds a `.csproj`/`.fsproj` member to its nearest `.sln`/`.slnx` ancestor.
+            "csharp" | "fsharp"
+                if dir_has_suffix(&parent, ".sln") || dir_has_suffix(&parent, ".slnx") =>
+            {
+                return parent;
+            }
+            "csharp" | "fsharp" => {
+                !dir_has_suffix(module, ".sln") && !dir_has_suffix(module, ".slnx")
+            }
             _ => false,
         };
         if !climb {

@@ -451,13 +451,13 @@ credentials are refused with 403 (`RootRoute::Lsp`).
   outside Otto's data dir and secret directories (`~/.ssh`, key files). When optional `file` is
   supplied inside an authorized directory, the bridge walks up from `file` to
   the nearest module manifest (`go.mod`, `Cargo.toml`, `build.zig`, `build.zig.zon`,
-  `pom.xml`, `build.gradle*`, `package.json`, `pyproject.toml`) so multi-repo workspaces always bind to the
+  `*.sln`, `*.slnx`, `*.csproj`, `*.fsproj`, `pom.xml`, `build.gradle*`, `package.json`, `pyproject.toml`) so multi-repo workspaces always bind to the
   active file's module root. Binary discovery checks
   `<data_dir>/toolchains/**/bin` first (prepend to `PATH`, plus managed JDK
   `JAVA_HOME`), then standard developer bin directories (`~/.cargo/bin`,
-  `~/go/bin`, `~/.zvm/bin`, `~/.local/bin`, Homebrew, …), and includes both the built-in
+  `~/go/bin`, `~/.zvm/bin`, `~/.dotnet/tools`, `~/.local/bin`, Homebrew, …), and includes both the built-in
   language servers (`gopls`, `typescript-language-server`, `jdtls`,
-  `rust-analyzer`, `zls`, `pyright-langserver`, `bash-language-server`,
+  `rust-analyzer`, `zls`, `csharp-ls` / `OmniSharp` / `fsautocomplete`, `pyright-langserver`, `bash-language-server`,
   `vscode-json-language-server`, `vscode-css-language-server`,
   `vscode-html-language-server`, `marksman`) and any enabled runtime IDE plugin
   language servers (`IdePluginRegistry`, e.g. `kotlin-language-server` or

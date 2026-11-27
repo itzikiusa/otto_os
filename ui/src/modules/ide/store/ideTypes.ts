@@ -278,7 +278,7 @@ export interface IdeInstallJob {
 export interface IdeEnvVar { key: string; value?: string; secret: boolean; has_secret?: boolean }
 
 export interface IdeProjectEnvironment {
-  java_home?: string | null; go_root?: string | null; rust_toolchain?: string | null; zig_home?: string | null;
+  java_home?: string | null; go_root?: string | null; rust_toolchain?: string | null; zig_home?: string | null; dotnet_root?: string | null;
   node_home?: string | null; python_interpreter?: string | null;
   android_home?: string | null; flutter_root?: string | null; xcode_developer_dir?: string | null;
   dotenv_path?: string | null; extra_path?: string | null;
@@ -430,6 +430,7 @@ export function isReadOnlySdkOrCachePath(p: string): boolean {
   if (p.includes('/.m2/repository/') || p.includes('/.gradle/caches/')) return true;
   if (p.includes('/.cargo/registry/') || p.includes('/rustlib/src/')) return true;
   if (p.includes('/.cache/zig/') || p.includes('/lib/zig/std/') || p.includes('/lib/std/') || p.includes('/.zvm/')) return true;
+  if (p.includes('/.nuget/packages/') || p.includes('/.dotnet/') || p.startsWith('/usr/local/share/dotnet/') || p.startsWith('/usr/share/dotnet/')) return true;
   if (p.includes('/node_modules/') || p.includes('/site-packages/') || p.includes('/dist-packages/')) return true;
   if (p.includes('/.otto/toolchains/')) return true;
   return false;
@@ -451,7 +452,9 @@ export function detectIdeLanguage(p: string): string {
   if (lower === 'bashrc' || lower === '.bashrc' || lower === '.zshrc' || lower === '.zshenv') return 'shell';
   const ext = lower.includes('.') ? (lower.split('.').pop() ?? '') : '';
   const map: Record<string, string> = {
-    go: 'go', java: 'java', class: 'java', rs: 'rust', zig: 'zig', zon: 'zig', py: 'python', pyi: 'python',
+    go: 'go', java: 'java', class: 'java', rs: 'rust', zig: 'zig', zon: 'zig',
+    cs: 'csharp', csx: 'csharp', razor: 'csharp', cshtml: 'csharp', fs: 'fsharp', fsx: 'fsharp', fsi: 'fsharp',
+    py: 'python', pyi: 'python',
     ts: 'typescript', mts: 'typescript', cts: 'typescript', tsx: 'tsx',
     js: 'javascript', mjs: 'javascript', cjs: 'javascript', jsx: 'jsx',
     json: 'json', jsonc: 'json', jsonl: 'jsonl', csv: 'csv', tsv: 'tsv',
@@ -476,7 +479,7 @@ export const GUTTER_TARGET_ID = 'gutter';
 
 export function defaultRunnerForLanguage(lang: string): string {
   const map: Record<string, string> = {
-    go: 'go_run', rust: 'cargo_run', zig: 'zig_run', java: 'java_main', python: 'python',
+    go: 'go_run', rust: 'cargo_run', zig: 'zig_run', csharp: 'dotnet_run', fsharp: 'dotnet_run', java: 'java_main', python: 'python',
     javascript: 'node', typescript: 'node', tsx: 'npm', jsx: 'node', shell: 'shell',
   };
   return map[lang] ?? 'custom';
@@ -509,6 +512,28 @@ export function buildNewFileTemplate(fullPath: string, rootPath: string, sibling
       return `const std = @import("std");\n\npub fn main() !void {\n}\n`;
     }
     return `const std = @import("std");\n\n`;
+  }
+  if (lower.endsWith('.cs')) {
+    const stem = name.slice(0, -3).replace(/[^A-Za-z0-9_]/g, '') || 'Class1';
+    const ns = ideBasename(parentDir).replace(/[^A-Za-z0-9_]/g, '') || 'App';
+    if (lower === 'program.cs') {
+      return `Console.WriteLine("Hello from ${ns}");\n`;
+    }
+    if (lower.endsWith('.build.cs')) {
+      const mod = name.slice(0, -9).replace(/[^A-Za-z0-9_]/g, '') || 'Game';
+      return `using UnrealBuildTool;\n\npublic class ${mod} : ModuleRules\n{\n    public ${mod}(ReadOnlyTargetRules Target) : base(Target)\n    {\n        PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;\n    }\n}\n`;
+    }
+    if (parentDir.includes('/Assets/') || parentDir.endsWith('/Assets')) {
+      return `using UnityEngine;\n\npublic class ${stem} : MonoBehaviour\n{\n    private void Start()\n    {\n    }\n\n    private void Update()\n    {\n    }\n}\n`;
+    }
+    return `namespace ${ns};\n\npublic class ${stem}\n{\n}\n`;
+  }
+  if (lower.endsWith('.fs')) {
+    const stem = name.slice(0, -3).replace(/[^A-Za-z0-9_]/g, '') || 'Program';
+    if (lower === 'program.fs') {
+      return `[<EntryPoint>]\nlet main argv =\n    printfn "Hello from F#"\n    0\n`;
+    }
+    return `module ${stem}\n\n`;
   }
   if (lower.endsWith('.sh') || lower.endsWith('.bash')) return '#!/usr/bin/env bash\nset -euo pipefail\n\n';
   if (lower.endsWith('.zsh')) return '#!/usr/bin/env zsh\nset -euo pipefail\n\n';
@@ -569,7 +594,7 @@ export async function collabGuestPost<T>(path: string, guestToken: string | null
   return (await resp.json()) as T;
 }
 
-const ENTRY_FILE_NAMES = ['readme.md', 'main.go', 'main.rs', 'main.zig', 'main.py', 'index.ts', 'app.svelte', 'go.mod', 'cargo.toml', 'build.zig', 'package.json'];
+const ENTRY_FILE_NAMES = ['readme.md', 'main.go', 'main.rs', 'main.zig', 'program.cs', 'program.fs', 'main.py', 'index.ts', 'app.svelte', 'go.mod', 'cargo.toml', 'build.zig', 'package.json'];
 
 export function pickInitialEntryFile(entries: IdeFsEntry[]): IdeFsEntry | null {
   const files = entries.filter((e) => e.kind === 'file' && !e.name.startsWith('.'));

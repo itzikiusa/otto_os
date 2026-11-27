@@ -109,6 +109,9 @@ fn has_project_manifest(dir: &Path) -> bool {
         "Cargo.toml",
         "build.zig",
         "build.zig.zon",
+        "global.json",
+        "Directory.Build.props",
+        "Directory.Packages.props",
         "package.json",
         "pyproject.toml",
         "setup.py",
@@ -133,6 +136,12 @@ fn has_project_manifest(dir: &Path) -> bool {
     }
     !list_files_with_suffix(dir, ".go").is_empty()
         || !list_files_with_suffix(dir, ".zig").is_empty()
+        || !list_files_with_suffix(dir, ".sln").is_empty()
+        || !list_files_with_suffix(dir, ".slnx").is_empty()
+        || !list_files_with_suffix(dir, ".csproj").is_empty()
+        || !list_files_with_suffix(dir, ".fsproj").is_empty()
+        || !list_files_with_suffix(dir, ".uproject").is_empty()
+        || (dir.join("Assets").is_dir() && dir.join("ProjectSettings").is_dir())
         || !list_files_with_suffix(dir, ".py").is_empty()
         || !list_files_with_suffix(dir, ".sh").is_empty()
 }
@@ -154,6 +163,10 @@ fn scan_project_folder(root: &Path, root_badge: Option<&str>, out: &mut Vec<IdeR
         return;
     }
     discover_zig(root, &proj_name, root_badge, &cwd_override, out);
+    if out.len() >= MAX_DISCOVERED_CONFIGS {
+        return;
+    }
+    discover_dotnet(root, &proj_name, root_badge, &cwd_override, out);
     if out.len() >= MAX_DISCOVERED_CONFIGS {
         return;
     }
@@ -592,6 +605,264 @@ fn discover_zig(
                 cwd.clone(),
                 Some(fname.to_string()),
             ));
+        }
+    }
+}
+
+// ── 2c. .NET (`.sln`, `.slnx`, `*.csproj`, `*.fsproj`, Unity, Unreal C#) ────
+
+pub(crate) fn is_dotnet_test_project_xml(xml: &str) -> bool {
+    let low = xml.to_ascii_lowercase();
+    low.contains("microsoft.net.test.sdk")
+        || low.contains("include=\"xunit")
+        || low.contains("include=\"nunit")
+        || low.contains("include=\"mstest.")
+        || low.contains("<istestproject>true</istestproject>")
+}
+
+pub(crate) fn is_dotnet_runnable_project_xml(xml: &str) -> bool {
+    let low = xml.to_ascii_lowercase();
+    low.contains("<outputtype>exe</outputtype>")
+        || low.contains("<outputtype>winexe</outputtype>")
+        || low.contains("microsoft.net.sdk.web")
+        || low.contains("microsoft.net.sdk.worker")
+        || low.contains("microsoft.net.sdk.blazorwebassembly")
+}
+
+pub(crate) fn parse_unity_editor_version(root: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(root.join("ProjectSettings/ProjectVersion.txt")).ok()?;
+    for line in raw.lines() {
+        if let Some(rest) = line.strip_prefix("m_EditorVersion:") {
+            let v = rest.trim();
+            if !v.is_empty() {
+                return Some(v.to_string());
+            }
+        }
+    }
+    None
+}
+
+#[allow(clippy::disallowed_methods)] // bounded <=48-entry scan executed inside spawn_blocking
+fn collect_dotnet_projects(root: &Path) -> Vec<PathBuf> {
+    let mut projs = Vec::new();
+    for suffix in [".csproj", ".fsproj"] {
+        projs.extend(list_files_with_suffix(root, suffix));
+    }
+    // Check 1-level child directories (common layout: `src/App/App.csproj`, `tests/App.Tests/App.Tests.csproj`).
+    if let Ok(rd) = std::fs::read_dir(root) {
+        for entry in rd.flatten().take(48) {
+            let p = entry.path();
+            if !p.is_dir() {
+                continue;
+            }
+            let nm = entry.file_name().to_string_lossy().into_owned();
+            if nm.starts_with('.')
+                || matches!(
+                    nm.as_str(),
+                    "bin" | "obj" | "node_modules" | "Library" | "Temp" | "Logs" | "target"
+                )
+            {
+                continue;
+            }
+            for suffix in [".csproj", ".fsproj"] {
+                projs.extend(list_files_with_suffix(&p, suffix));
+            }
+            if matches!(nm.as_str(), "src" | "tests" | "test" | "Source") {
+                if let Ok(sub_rd) = std::fs::read_dir(&p) {
+                    for sub in sub_rd.flatten().take(24) {
+                        let sp = sub.path();
+                        if sp.is_dir() {
+                            for suffix in [".csproj", ".fsproj"] {
+                                projs.extend(list_files_with_suffix(&sp, suffix));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    projs.sort();
+    projs.dedup();
+    projs
+}
+
+fn discover_dotnet(
+    root: &Path,
+    proj_name: &str,
+    root_badge: Option<&str>,
+    cwd: &Option<String>,
+    out: &mut Vec<IdeRunConfig>,
+) {
+    let is_unity = root.join("Assets").is_dir() && root.join("ProjectSettings").is_dir();
+    let uprojects = list_files_with_suffix(root, ".uproject");
+    let mut slns = list_files_with_suffix(root, ".sln");
+    slns.extend(list_files_with_suffix(root, ".slnx"));
+    slns.sort();
+    let projs = collect_dotnet_projects(root);
+
+    if slns.is_empty() && projs.is_empty() && !is_unity && uprojects.is_empty() {
+        return;
+    }
+
+    if is_unity {
+        let unity_ver = parse_unity_editor_version(root)
+            .map(|v| format!(" {v}"))
+            .unwrap_or_default();
+        if let Some(sln) = slns.first() {
+            let sln_name = sln
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("Unity.sln");
+            out.push(make_auto_config(
+                root_badge,
+                IdeRunnerKind::DotnetBuild,
+                "unity-build",
+                format!("Unity Build Scripts{unity_ver} ({sln_name})"),
+                Some("dotnet"),
+                vec!["build".into(), sln_name.to_string()],
+                cwd.clone(),
+                Some(sln_name.to_string()),
+            ));
+        } else if root.join("Assembly-CSharp.csproj").is_file() {
+            out.push(make_auto_config(
+                root_badge,
+                IdeRunnerKind::DotnetBuild,
+                "unity-build",
+                format!("Unity Build Scripts{unity_ver} (Assembly-CSharp)"),
+                Some("dotnet"),
+                vec!["build".into(), "Assembly-CSharp.csproj".into()],
+                cwd.clone(),
+                Some("Assembly-CSharp.csproj".into()),
+            ));
+        }
+        // Unity Editor attach configuration (debuggable via DAP attach)
+        out.push(make_auto_config(
+            root_badge,
+            IdeRunnerKind::DotnetRun,
+            "unity-attach",
+            format!("Attach to Unity Editor{unity_ver} ({proj_name})"),
+            Some("dotnet"),
+            vec![],
+            cwd.clone(),
+            Some("unity://attach".into()),
+        ));
+        return;
+    }
+
+    if !uprojects.is_empty() && slns.is_empty() && projs.is_empty() {
+        if let Some(up) = uprojects.first() {
+            let name = up.file_stem().and_then(|s| s.to_str()).unwrap_or(proj_name);
+            out.push(make_auto_config(
+                root_badge,
+                IdeRunnerKind::DotnetBuild,
+                "unreal-cs",
+                format!("Unreal C# Build Rules ({name})"),
+                Some("dotnet"),
+                vec!["build".into()],
+                cwd.clone(),
+                None,
+            ));
+        }
+        return;
+    }
+
+    if let Some(sln) = slns.first() {
+        let sln_name = sln
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(proj_name);
+        out.push(make_auto_config(
+            root_badge,
+            IdeRunnerKind::DotnetBuild,
+            "sln-build",
+            format!(".NET Build ({sln_name})"),
+            Some("dotnet"),
+            vec!["build".into(), sln_name.to_string()],
+            cwd.clone(),
+            Some(sln_name.to_string()),
+        ));
+        out.push(make_auto_config(
+            root_badge,
+            IdeRunnerKind::DotnetTest,
+            "sln-test",
+            format!(".NET Test ({sln_name})"),
+            Some("dotnet"),
+            vec!["test".into(), sln_name.to_string()],
+            cwd.clone(),
+            Some(sln_name.to_string()),
+        ));
+    }
+
+    let mut emitted_build = !slns.is_empty();
+    let mut emitted_test = !slns.is_empty();
+    for proj in projs.iter().take(12) {
+        let rel = proj
+            .strip_prefix(root)
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| proj.to_string_lossy().into_owned());
+        let stem = proj
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(proj_name);
+        let xml = read_head(proj).unwrap_or_default();
+        let is_test = is_dotnet_test_project_xml(&xml);
+        let is_runnable = !is_test && is_dotnet_runnable_project_xml(&xml);
+
+        if !emitted_build {
+            out.push(make_auto_config(
+                root_badge,
+                IdeRunnerKind::DotnetBuild,
+                &format!("build-{stem}"),
+                format!(".NET Build ({stem})"),
+                Some("dotnet"),
+                vec!["build".into(), rel.clone()],
+                cwd.clone(),
+                Some(rel.clone()),
+            ));
+            emitted_build = true;
+        }
+        if is_runnable {
+            out.push(make_auto_config(
+                root_badge,
+                IdeRunnerKind::DotnetRun,
+                &format!("run-{stem}"),
+                format!(".NET Run ({stem})"),
+                Some("dotnet"),
+                vec!["run".into(), "--project".into(), rel.clone()],
+                cwd.clone(),
+                Some(rel.clone()),
+            ));
+            if xml.to_ascii_lowercase().contains("microsoft.net.sdk.web") {
+                out.push(make_auto_config(
+                    root_badge,
+                    IdeRunnerKind::DotnetRun,
+                    &format!("watch-{stem}"),
+                    format!(".NET Watch Run ({stem})"),
+                    Some("dotnet"),
+                    vec![
+                        "watch".into(),
+                        "run".into(),
+                        "--project".into(),
+                        rel.clone(),
+                    ],
+                    cwd.clone(),
+                    Some(rel.clone()),
+                ));
+            }
+        }
+        if is_test && (!emitted_test || projs.len() <= 6) {
+            out.push(make_auto_config(
+                root_badge,
+                IdeRunnerKind::DotnetTest,
+                &format!("test-{stem}"),
+                format!(".NET Test ({stem})"),
+                Some("dotnet"),
+                vec!["test".into(), rel.clone()],
+                cwd.clone(),
+                Some(rel.clone()),
+            ));
+            emitted_test = true;
         }
     }
 }

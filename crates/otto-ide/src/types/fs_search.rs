@@ -371,6 +371,10 @@ pub enum IdeRunnerKind {
     ZigTest,
     #[serde(alias = "zig")]
     ZigRun,
+    DotnetBuild,
+    DotnetTest,
+    #[serde(alias = "dotnet")]
+    DotnetRun,
     Node,
     #[serde(alias = "npm_script")]
     Npm,

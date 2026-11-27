@@ -19,6 +19,8 @@ pub enum IdeEcosystemKind {
     Go,
     Rust,
     Zig,
+    #[serde(alias = "csharp", alias = "fsharp", alias = "cs", alias = "fs")]
+    Dotnet,
     #[serde(alias = "javascript", alias = "typescript", alias = "js", alias = "ts")]
     Node,
     Python,
@@ -40,6 +42,7 @@ impl IdeEcosystemKind {
             Self::Go => "go",
             Self::Rust => "rust",
             Self::Zig => "zig",
+            Self::Dotnet => "dotnet",
             Self::Node => "node",
             Self::Python => "python",
             Self::Shell => "shell",
@@ -56,6 +59,7 @@ impl IdeEcosystemKind {
             Self::Go => "Go SDK",
             Self::Rust => "Rust (rustup)",
             Self::Zig => "Zig",
+            Self::Dotnet => ".NET SDK (C# / F#)",
             Self::Node => "Node.js / TypeScript",
             Self::Python => "Python (uv)",
             Self::Shell => "Shell (Bash / Zsh)",
@@ -191,6 +195,9 @@ pub struct IdeInstallToolchainReq {
     /// Zig LSP only: install `zls` matching this Zig installation (or active Zig).
     #[serde(default)]
     pub zig_home: Option<String>,
+    /// .NET LSP only: install `csharp-ls` using this .NET SDK root (or active dotnet).
+    #[serde(default)]
+    pub dotnet_root: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -368,6 +375,8 @@ pub struct IdeProjectEnvironment {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub zig_home: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dotnet_root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_home: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub python_interpreter: Option<String>,
@@ -404,6 +413,7 @@ impl Default for IdeProjectEnvironment {
             go_root: None,
             rust_toolchain: None,
             zig_home: None,
+            dotnet_root: None,
             node_home: None,
             python_interpreter: None,
             android_home: None,
@@ -433,6 +443,8 @@ pub struct IdeUpdateEnvironmentReq {
     pub rust_toolchain: Option<String>,
     #[serde(default)]
     pub zig_home: Option<String>,
+    #[serde(default)]
+    pub dotnet_root: Option<String>,
     #[serde(default)]
     pub node_home: Option<String>,
     #[serde(default)]

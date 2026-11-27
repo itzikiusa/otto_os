@@ -216,6 +216,7 @@ enum SdkKindHint {
     Python,
     Rust,
     Zig,
+    Dotnet,
     Node,
     GenericPath,
 }
@@ -241,6 +242,9 @@ fn infer_sdk_kind(
             IdeRunnerKind::CargoRun | IdeRunnerKind::CargoTest => return SdkKindHint::Rust,
             IdeRunnerKind::ZigBuild | IdeRunnerKind::ZigRun | IdeRunnerKind::ZigTest => {
                 return SdkKindHint::Zig;
+            }
+            IdeRunnerKind::DotnetBuild | IdeRunnerKind::DotnetRun | IdeRunnerKind::DotnetTest => {
+                return SdkKindHint::Dotnet;
             }
             IdeRunnerKind::Node
             | IdeRunnerKind::Npm
@@ -271,6 +275,18 @@ fn infer_sdk_kind(
         }
         if lower == "zig" || lower.ends_with(".zig") || lower.ends_with(".zon") {
             return SdkKindHint::Zig;
+        }
+        if matches!(lower.as_str(), "dotnet" | "csharp" | "fsharp" | "cs" | "fs")
+            || lower.ends_with(".cs")
+            || lower.ends_with(".csx")
+            || lower.ends_with(".fs")
+            || lower.ends_with(".fsx")
+            || lower.ends_with(".csproj")
+            || lower.ends_with(".fsproj")
+            || lower.ends_with(".sln")
+            || lower.ends_with(".slnx")
+        {
+            return SdkKindHint::Dotnet;
         }
         if matches!(
             lower.as_str(),
@@ -321,6 +337,14 @@ fn infer_sdk_kind(
     {
         return SdkKindHint::Zig;
     }
+    if sp.join("dotnet").is_file()
+        || sp.join("bin/dotnet").is_file()
+        || s_low.ends_with("/dotnet")
+        || s_low.contains("/dotnet/")
+        || s_low.contains(".dotnet")
+    {
+        return SdkKindHint::Dotnet;
+    }
     if sp.join("bin/node").is_file()
         || s_low.ends_with("/node")
         || s_low.contains("/node/")
@@ -347,10 +371,31 @@ fn infer_sdk_kind(
     if mr.join("build.zig").is_file() || mr.join("build.zig.zon").is_file() {
         return SdkKindHint::Zig;
     }
+    if mr.join("global.json").is_file()
+        || mr.join("Directory.Build.props").is_file()
+        || (mr.join("Assets").is_dir() && mr.join("ProjectSettings").is_dir())
+        || dir_has_dotnet_manifest(mr)
+    {
+        return SdkKindHint::Dotnet;
+    }
     if mr.join("package.json").is_file() {
         return SdkKindHint::Node;
     }
     SdkKindHint::GenericPath
+}
+
+#[allow(clippy::disallowed_methods)] // shallow 1-level dir check on module root
+fn dir_has_dotnet_manifest(mr: &Path) -> bool {
+    std::fs::read_dir(mr).ok().is_some_and(|rd| {
+        rd.flatten().any(|e| {
+            e.file_name().to_str().is_some_and(|n| {
+                n.ends_with(".sln")
+                    || n.ends_with(".slnx")
+                    || n.ends_with(".csproj")
+                    || n.ends_with(".fsproj")
+            })
+        })
+    })
 }
 
 pub(crate) fn apply_module_sdk_to_project_env(
@@ -407,6 +452,14 @@ pub(crate) fn apply_module_sdk_to_project_env(
                 .or_else(|| trimmed.strip_suffix("/bin"))
                 .unwrap_or(trimmed);
             proj.zig_home = Some(root.to_string());
+        }
+        SdkKindHint::Dotnet => {
+            let root = trimmed
+                .strip_suffix("/bin/dotnet")
+                .or_else(|| trimmed.strip_suffix("/dotnet"))
+                .or_else(|| trimmed.strip_suffix("/bin"))
+                .unwrap_or(trimmed);
+            proj.dotnet_root = Some(root.to_string());
         }
         SdkKindHint::Node => {
             let root = trimmed
@@ -502,6 +555,9 @@ pub(super) async fn layer_child_and_module_sdk_for_run(
                 }
                 if mod_proj.zig_home.is_some() {
                     proj.zig_home = mod_proj.zig_home;
+                }
+                if mod_proj.dotnet_root.is_some() {
+                    proj.dotnet_root = mod_proj.dotnet_root;
                 }
                 if mod_proj.node_home.is_some() {
                     proj.node_home = mod_proj.node_home;

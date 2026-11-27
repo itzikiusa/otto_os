@@ -44,6 +44,8 @@ export const LSP_CODE_LANGUAGES = new Set([
   'go',
   'rust',
   'zig',
+  'csharp',
+  'fsharp',
   'java',
   'typescript',
   'javascript',
@@ -126,6 +128,8 @@ export function normalizeIdeLspLanguage(langOrExt?: string | null): string | nul
   if (raw === 'go' || raw === 'golang') return 'go';
   if (raw === 'rs' || raw === 'rust') return 'rust';
   if (raw === 'zig' || raw === 'zon') return 'zig';
+  if (raw === 'cs' || raw === 'csx' || raw === 'csharp') return 'csharp';
+  if (raw === 'fs' || raw === 'fsx' || raw === 'fsi' || raw === 'fsharp') return 'fsharp';
   if (raw === 'java') return 'java';
   if (raw === 'ts' || raw === 'tsx' || raw === 'mts' || raw === 'cts' || raw === 'typescript' || raw === 'typescriptreact') {
     return 'typescript';

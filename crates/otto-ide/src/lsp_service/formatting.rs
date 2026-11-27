@@ -44,6 +44,16 @@ pub(super) fn formatter_candidates(
             "zig".into(),
             vec!["fmt".into(), "--stdin".into()],
         )],
+        "csharp" => vec![(
+            "csharpier",
+            "csharpier".into(),
+            vec!["format".into(), "--write-stdout".into()],
+        )],
+        "fsharp" => vec![(
+            "fantomas",
+            "fantomas".into(),
+            vec!["--stdin".into(), "--stdout".into()],
+        )],
         "python" => vec![
             (
                 "ruff",

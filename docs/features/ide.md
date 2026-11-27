@@ -244,6 +244,7 @@ global system directories:
 | **Python** | `uv`, standalone CPython (3.11 / 3.12 / 3.13), `pyright`, `ruff`, `debugpy` |
 | **Rust** | `rustup` (`rustc` + `cargo`), `rust-analyzer`, `CodeLLDB` (`codelldb`) |
 | **Zig** | Official Zig SDK tarball (`ziglang.org/download/index.json`, SHA-256 verified), local SDK registration, `zls` (Zig-version-matched), `CodeLLDB` (`codelldb`) / `lldb-dap` / built-in `otto-lldb-dap` with Zig LLDB type formatters |
+| **.NET (C# / F# / Unity / Unreal)** | Official .NET SDK tarball (`dotnetcli.azureedge.net` / `builds.dotnet.microsoft.com`, LTS 8.0 / 9.0), local SDK registration (`DOTNET_ROOT`), `csharp-ls` (with OmniSharp / Roslyn / `fsautocomplete` fallback), NuGet inspector & OSV vulnerabilities, `netcoredbg` (and `vsdbg` fallback) with `VSTEST_HOST_DEBUG` test debugging & Unity attach |
 | **Go** | Official Go SDK tarball, local SDK registration (`POST /ide/toolchains/local`), `gopls`, Delve (`dlv`), `gofumpt` |
 | **Node / TypeScript** | Node LTS (22), `pnpm`, `typescript-language-server`, `vscode-langservers-extracted`, `prettier`, `js-debug` |
 | **Shell (Bash / Zsh)** | `bash-language-server`, `shellcheck`, `shfmt`, built-in `otto-sh-dap` (`DEBUG` trap DAP debugger) |
@@ -274,7 +275,7 @@ never spawned per request) and merges:
 `daemon base env → cached login shell env → selected SDK env → project .env file → Run/Debug config overrides`
 
 into **all** Run executions, DAP Debug sessions, IDE Terminals, and local LSP
-servers (`gopls`, `jdtls`, `rust-analyzer`, `zls`, `pyright`, `tsserver`).
+servers (`gopls`, `jdtls`, `rust-analyzer`, `zls`, `csharp-ls`, `pyright`, `tsserver`).
 When that PATH has no `mvn` / `gradle` (a slow capture falls back to `-lc`, which
 skips `~/.zshrc` and so sdkman's init), a local run looks in
 `~/.sdkman/candidates/{maven,gradle}/current/bin`, then `/opt/homebrew/bin` and
@@ -286,7 +287,7 @@ secret environment variable values stored in the macOS Keychain via
 `otto-keychain` (`ide-env:<project_hash>:<key>`):
 
 - Select SDK/toolchain overrides per project (`java_home`, `go_root`,
-  `rust_toolchain`, `zig_home`, `node_home`, `python_interpreter`, `dotenv_path`,
+  `rust_toolchain`, `zig_home`, `dotnet_root`, `node_home`, `python_interpreter`, `dotenv_path`,
   `extra_path`, `inherit_shell_env`, `additional_roots`).
 - Create project-local Python virtual environments (`POST /ide/environments/python-venv`
   via `uv venv` or `python3 -m venv`), discover `.env*` files, and configure
@@ -294,14 +295,14 @@ secret environment variable values stored in the macOS Keychain via
 - Instant (`< 25ms`, pure file-stat/manifest scan with zero subprocess spawns)
   runner discovery across primary and attached folders plus reusable **Run
   Configurations** (`go_test`, `go_run`, `java_junit`, `java_main`, `maven`,
-  `gradle`, `cargo_test`, `cargo_run`, `zig_build`, `zig_run`, `zig_test`, `node`, `npm`, `vitest`, `pytest`,
+  `gradle`, `cargo_test`, `cargo_run`, `zig_build`, `zig_run`, `zig_test`, `dotnet_build`, `dotnet_run`, `dotnet_test`, `node`, `npm`, `vitest`, `pytest`,
   `python`, `shell`, `compound`, `custom`), launched in the **Run** bottom dock
   (`POST /ide/runs`) with live output and structured test-result trees, or
   stopped via `POST /ide/runs/{run_id}/stop`.
 - Maven / Gradle runs read the JUnit XML reports the run wrote (`TEST-*.xml`
   under `**/target/surefire-reports` and `**/build/test-results/**`) for one row
   per test with its time and failure message, instead of the console's one row
-  per class. A test run with a filter (`go_test`, `cargo_test`, `zig_test`, `pytest`,
+  per class. A test run with a filter (`go_test`, `cargo_test`, `zig_test`, `dotnet_test`, `pytest`,
   `vitest`, `java_junit`, `maven`, `gradle`) that exits 0 with no tests fails
   with `No tests matched '<filter>'` instead of showing green.
 - A config's `before_launch` hook runs before the program, in its own process
@@ -860,7 +861,7 @@ Full schemas and route tables live in [`docs/contracts/api.md`](../contracts/api
 
 - **"Language server unavailable" banner:** Click **Toolchains** in the IDE
   toolbar and install the matching language server (for example `rust-analyzer`,
-  `zls`, `gopls`, `pyright`, `jdtls`, or `typescript-language-server`, or install/enable
+  `zls`, `csharp-ls`, `gopls`, `pyright`, `jdtls`, or `typescript-language-server`, or install/enable
   a runtime IDE plugin for additional languages such as Kotlin or C/C++). The
   editor reconnects automatically once the install job finishes. A rustup
   `rust-analyzer` proxy only counts as installed once `rust-analyzer --version`

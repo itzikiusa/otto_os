@@ -19,6 +19,15 @@ use crate::plugins::IdePluginRegistry;
 use crate::types::{IdeLspAvailableServer, IdeLspServerStat, IdeLspStatusResp};
 
 fn is_build_manifest_name(name: &str) -> bool {
+    let low = name.to_ascii_lowercase();
+    if low.ends_with(".sln")
+        || low.ends_with(".slnx")
+        || low.ends_with(".csproj")
+        || low.ends_with(".fsproj")
+        || low.ends_with(".vbproj")
+    {
+        return true;
+    }
     matches!(
         name,
         "pom.xml"
@@ -34,6 +43,11 @@ fn is_build_manifest_name(name: &str) -> bool {
             | "Cargo.lock"
             | "build.zig"
             | "build.zig.zon"
+            | "global.json"
+            | "Directory.Build.props"
+            | "Directory.Packages.props"
+            | "nuget.config"
+            | "NuGet.Config"
             | "package.json"
             | "package-lock.json"
             | "pnpm-lock.yaml"

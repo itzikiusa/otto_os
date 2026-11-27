@@ -102,6 +102,51 @@ pub async fn run_deps_action_scoped(
         ("build.zig.zon", "sync") => {
             exec_cmd("zig", &["build", "--fetch"], &dir, env_map, actor_is_root).await?
         }
+        (f, "sync")
+            if {
+                let low = f.to_ascii_lowercase();
+                low.ends_with(".csproj")
+                    || low.ends_with(".fsproj")
+                    || low.ends_with(".vbproj")
+                    || low == "directory.packages.props"
+            } =>
+        {
+            exec_cmd("dotnet", &["restore"], &dir, env_map, actor_is_root).await?
+        }
+        (f, "outdated")
+            if {
+                let low = f.to_ascii_lowercase();
+                low.ends_with(".csproj") || low.ends_with(".fsproj") || low.ends_with(".vbproj")
+            } =>
+        {
+            exec_cmd(
+                "dotnet",
+                &["list", "package", "--outdated"],
+                &dir,
+                env_map,
+                actor_is_root,
+            )
+            .await?
+        }
+        (f, "update_one")
+            if {
+                let low = f.to_ascii_lowercase();
+                low.ends_with(".csproj") || low.ends_with(".fsproj") || low.ends_with(".vbproj")
+            } =>
+        {
+            let m = validate_dep_spec("module", req.module.as_deref().unwrap_or(""))?;
+            let mut cmd_args = vec!["add", f, "package", m];
+            let v_opt = req.version.as_deref().filter(|s| !s.trim().is_empty());
+            let clean_v;
+            if let Some(rv) = v_opt {
+                clean_v = validate_dep_spec("version", rv)?.to_string();
+                if clean_v != "latest" && clean_v != "patch" {
+                    cmd_args.push("--version");
+                    cmd_args.push(&clean_v);
+                }
+            }
+            exec_cmd("dotnet", &cmd_args, &dir, env_map, actor_is_root).await?
+        }
         ("go.mod", "why") => {
             let m = validate_dep_spec("module", req.module.as_deref().unwrap_or(""))?;
             exec_cmd(

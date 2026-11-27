@@ -7,6 +7,8 @@ const MANIFEST_NAMES = new Set([
   'package.json',
   'cargo.toml',
   'build.zig.zon',
+  'directory.packages.props',
+  'packages.config',
   'requirements.txt',
   'pyproject.toml',
   'build.gradle',
@@ -15,5 +17,11 @@ const MANIFEST_NAMES = new Set([
 
 export function isIdeManifestPath(filePath: string): boolean {
   const base = filePath.split('?')[0].split('/').pop()?.toLowerCase() ?? '';
-  return MANIFEST_NAMES.has(base) || /^requirements(?:[-_.][\w-]+)?\.txt$/.test(base);
+  return (
+    MANIFEST_NAMES.has(base) ||
+    base.endsWith('.csproj') ||
+    base.endsWith('.fsproj') ||
+    base.endsWith('.vbproj') ||
+    /^requirements(?:[-_.][\w-]+)?\.txt$/.test(base)
+  );
 }

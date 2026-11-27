@@ -40,6 +40,8 @@ pub(super) struct StoredMobileSdks {
     pub(super) xcode_developer_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) zig_home: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) dotnet_root: Option<String>,
 }
 
 pub(crate) fn is_reserved_internal_env_key(key: &str) -> bool {
@@ -67,6 +69,9 @@ pub(crate) fn is_dangerous_loader_env_key(key: &str) -> bool {
         || upper.starts_with("XDG_")
         || upper.starts_with("PKG_CONFIG_")
         || upper.starts_with("CGO_")
+        || upper.starts_with("DOTNET_")
+        || upper.starts_with("CORECLR_")
+        || upper.starts_with("COMPLUS_")
         || (upper.starts_with("CARGO_TARGET_")
             && (upper.ends_with("_LINKER") || upper.ends_with("_RUNNER")))
         || matches!(
@@ -260,6 +265,13 @@ pub(super) fn apply_run_config_sdk_override(
             if trimmed.starts_with('/') {
                 push_unique(path_dirs, format!("{trimmed}/bin"));
                 push_unique(path_dirs, trimmed.to_string());
+            }
+        }
+        IdeRunnerKind::DotnetBuild | IdeRunnerKind::DotnetRun | IdeRunnerKind::DotnetTest => {
+            if trimmed.starts_with('/') {
+                map.insert("DOTNET_ROOT".into(), trimmed.to_string());
+                push_unique(path_dirs, trimmed.to_string());
+                push_unique(path_dirs, format!("{trimmed}/bin"));
             }
         }
         IdeRunnerKind::Python | IdeRunnerKind::Pytest => {
@@ -481,6 +493,7 @@ fn decode_project_env_row(
         go_root: row.try_get("go_root").ok().flatten(),
         rust_toolchain: row.try_get("rust_toolchain").ok().flatten(),
         zig_home: mobile_sdks.zig_home,
+        dotnet_root: mobile_sdks.dotnet_root,
         node_home: row.try_get("node_home").ok().flatten(),
         python_interpreter: row.try_get("python_interpreter").ok().flatten(),
         android_home: mobile_sdks.android_home,

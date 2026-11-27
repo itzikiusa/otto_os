@@ -45,6 +45,12 @@ impl CompiledDefMatcher {
             "java" | "kotlin" => format!(
                 r"^(?:(?:public|private|protected|static|final|abstract|synchronized|default|sealed|open|data|internal|override|suspend)\s+)*(?:class|interface|enum|record|object|fun)\s+{escaped}\b|^(?:(?:public|private|protected|static|final|synchronized|abstract|default)\s+)*(?:<[^>]+>\s+)?[A-Za-z0-9_<>,.\[\]?]+\s+{escaped}\s*\(|^(?:(?:public|private|protected|static|final|volatile|transient)\s+)+[A-Za-z0-9_<>,.\[\]?]+\s+{escaped}\s*(?:=|;)"
             ),
+            "csharp" => format!(
+                r"^(?:(?:public|private|protected|internal|static|abstract|sealed|partial|readonly|ref|file|new)\s+)*(?:class|struct|interface|enum|record(?:\s+struct|\s+class)?|delegate|namespace)\s+{escaped}\b|^(?:(?:public|private|protected|internal|static|async|virtual|override|sealed|abstract|extern|unsafe|new|partial)\s+)*[A-Za-z0-9_<>,.\[\]?\s]+?\s+{escaped}\s*(?:<[^>]+>)?\s*(?:\(|\{{|=>)"
+            ),
+            "fsharp" => format!(
+                r"^(?:module|namespace|type|exception)\s+(?:rec\s+)?(?:private\s+|internal\s+|public\s+)?{escaped}\b|^(?:let|and|member|static\s+member|override|default)\s+(?:rec\s+)?(?:inline\s+)?(?:mutable\s+)?(?:private\s+|internal\s+)?(?:[A-Za-z_][A-Za-z0-9_]*\.)?{escaped}\b"
+            ),
             "shell" | "bash" | "sh" | "zsh" => format!(
                 r"^(?:function\s+)?{escaped}\s*\(\s*\)|^function\s+{escaped}(?:\s*\{{|\s*$)|^(?:export\s+|readonly\s+|local\s+)?{escaped}="
             ),

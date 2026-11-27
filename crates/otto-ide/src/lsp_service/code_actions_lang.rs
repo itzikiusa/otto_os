@@ -330,6 +330,9 @@ pub(super) fn build_doc_comment_action(
     }
     let comment = match lang {
         "rust" | "zig" => format!("{indent}/// Documentation for `{sym_name}`."),
+        "csharp" | "fsharp" => format!(
+            "{indent}/// <summary>\n{indent}/// Documentation for <c>{sym_name}</c>.\n{indent}/// </summary>"
+        ),
         "go" => format!("{indent}// {sym_name} performs ..."),
         _ => format!("{indent}/** Documentation for `{sym_name}`. */"),
     };
@@ -369,6 +372,10 @@ pub(super) fn build_extract_variable_action(
         ),
         "java" => (
             format!("{indent}final var result = {expr};"),
+            format!("{indent}return result;"),
+        ),
+        "csharp" => (
+            format!("{indent}var result = {expr};"),
             format!("{indent}return result;"),
         ),
         _ => (

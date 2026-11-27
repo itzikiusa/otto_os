@@ -376,6 +376,24 @@ pub fn scan_parent_repos(parent_path: &str, is_root_user: bool) -> Result<IdeSca
             || canon.join("build.gradle.kts").is_file();
         let has_cargo = canon.join("Cargo.toml").is_file();
         let has_zig = canon.join("build.zig").is_file() || canon.join("build.zig.zon").is_file();
+        let is_unity = canon.join("Assets").is_dir() && canon.join("ProjectSettings").is_dir();
+        let has_dotnet = is_unity
+            || canon.join("global.json").is_file()
+            || canon.join("Directory.Build.props").is_file()
+            || fs::read_dir(&canon).ok().is_some_and(|rd| {
+                rd.flatten().any(|e| {
+                    e.file_name()
+                        .to_str()
+                        .map(|n| n.to_ascii_lowercase())
+                        .is_some_and(|n| {
+                            n.ends_with(".sln")
+                                || n.ends_with(".slnx")
+                                || n.ends_with(".csproj")
+                                || n.ends_with(".fsproj")
+                                || n.ends_with(".uproject")
+                        })
+                })
+            });
         let has_node = canon.join("package.json").is_file();
         let has_py =
             canon.join("pyproject.toml").is_file() || canon.join("requirements.txt").is_file();
@@ -389,6 +407,10 @@ pub fn scan_parent_repos(parent_path: &str, is_root_user: bool) -> Result<IdeSca
             "rust"
         } else if has_zig {
             "zig"
+        } else if is_unity {
+            "unity"
+        } else if has_dotnet {
+            "dotnet"
         } else if has_node {
             "node"
         } else if has_py {

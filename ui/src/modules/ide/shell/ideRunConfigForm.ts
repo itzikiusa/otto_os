@@ -8,8 +8,8 @@ export type RunConfigField =
   | 'target' | 'command' | 'test_filter' | 'args' | 'cwd'
   | 'build_flags' | 'sdk' | 'env_file' | 'before_launch' | 'inherit_shell_env';
 
-const TEST_RUNNERS = new Set(['go_test', 'java_junit', 'cargo_test', 'zig_test', 'pytest', 'vitest', 'maven', 'gradle']);
-const BUILD_FLAG_RUNNERS = new Set(['go_test', 'go_run', 'go_build', 'cargo_test', 'cargo_run', 'zig_build', 'zig_run', 'zig_test', 'maven', 'gradle', 'java_main', 'java_junit']);
+const TEST_RUNNERS = new Set(['go_test', 'java_junit', 'cargo_test', 'zig_test', 'dotnet_test', 'pytest', 'vitest', 'maven', 'gradle']);
+const BUILD_FLAG_RUNNERS = new Set(['go_test', 'go_run', 'go_build', 'cargo_test', 'cargo_run', 'zig_build', 'zig_run', 'zig_test', 'dotnet_build', 'dotnet_run', 'dotnet_test', 'maven', 'gradle', 'java_main', 'java_junit']);
 const NO_SDK_RUNNERS = new Set(['shell', 'custom']);
 
 /** Fields the runner uses at all: everyday ones first, the rest under "Advanced". */
@@ -70,6 +70,9 @@ const TARGET_COPY: Record<string, { label: string; placeholder: string }> = {
   zig_build: { label: 'Build step', placeholder: 'install or run' },
   zig_run: { label: 'Source file or step', placeholder: 'src/main.zig' },
   zig_test: { label: 'Source file (or blank for zig build test)', placeholder: 'src/main.zig' },
+  dotnet_build: { label: 'Solution or project', placeholder: 'App.sln or src/App/App.csproj' },
+  dotnet_run: { label: 'Project or file', placeholder: 'src/App/App.csproj' },
+  dotnet_test: { label: 'Test project or solution', placeholder: 'tests/App.Tests/App.Tests.csproj' },
   java_main: { label: 'Main class or file', placeholder: 'com.acme.App' },
   java_junit: { label: 'Test class or file', placeholder: 'com.acme.AppTest' },
   maven: { label: 'Module', placeholder: 'service-core' },

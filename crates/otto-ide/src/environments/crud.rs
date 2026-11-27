@@ -88,6 +88,11 @@ pub(crate) fn local_env_mutation_requires_root(
             prev.zig_home.as_deref(),
         ),
         (
+            "dotnet_root",
+            trimmed_opt(&req.dotnet_root),
+            prev.dotnet_root.as_deref(),
+        ),
+        (
             "node_home",
             trimmed_opt(&req.node_home),
             prev.node_home.as_deref(),
@@ -525,6 +530,7 @@ impl EnvironmentManager {
                 flutter_root: clean_opt(&req.flutter_root),
                 xcode_developer_dir: clean_opt(&req.xcode_developer_dir),
                 zig_home: clean_opt(&req.zig_home),
+                dotnet_root: clean_opt(&req.dotnet_root),
             }
         } else {
             StoredMobileSdks {
@@ -532,12 +538,14 @@ impl EnvironmentManager {
                 flutter_root: prev_proj.flutter_root.clone(),
                 xcode_developer_dir: prev_proj.xcode_developer_dir.clone(),
                 zig_home: prev_proj.zig_home.clone(),
+                dotnet_root: prev_proj.dotnet_root.clone(),
             }
         };
         if next_mobile_sdks.android_home.is_some()
             || next_mobile_sdks.flutter_root.is_some()
             || next_mobile_sdks.xcode_developer_dir.is_some()
             || next_mobile_sdks.zig_home.is_some()
+            || next_mobile_sdks.dotnet_root.is_some()
         {
             let encoded = serde_json::to_string(&next_mobile_sdks)
                 .map_err(|e| Error::Internal(format!("serialize mobile_sdks: {e}")))?;

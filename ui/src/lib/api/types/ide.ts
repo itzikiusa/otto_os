@@ -174,6 +174,9 @@ export type IdeRunnerKind =
   | 'zig_build'
   | 'zig_run'
   | 'zig_test'
+  | 'dotnet_build'
+  | 'dotnet_run'
+  | 'dotnet_test'
   | 'node'
   | 'npm'
   | 'vitest'
@@ -219,6 +222,7 @@ export type IdeEcosystem =
   | 'go'
   | 'rust'
   | 'zig'
+  | 'dotnet'
   | 'node'
   | 'python'
   | 'shell'
@@ -403,6 +407,7 @@ export interface IdeProjectEnvironment {
   go_root?: string | null;
   rust_toolchain?: string | null;
   zig_home?: string | null;
+  dotnet_root?: string | null;
   node_home?: string | null;
   python_interpreter?: string | null;
   android_home?: string | null;
@@ -545,7 +550,7 @@ export interface IdeRunResp {
 
 // ── DAP Debugger Engine ──────────────────────────────────────────────────────
 
-export type IdeDebugLanguage = 'go' | 'java' | 'rust' | 'zig' | 'javascript' | 'typescript' | 'python' | 'shell' | string;
+export type IdeDebugLanguage = 'go' | 'java' | 'rust' | 'zig' | 'csharp' | 'fsharp' | 'javascript' | 'typescript' | 'python' | 'shell' | string;
 
 export interface IdeBreakpoint {
   path: string;

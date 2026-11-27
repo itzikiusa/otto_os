@@ -433,6 +433,131 @@ fn build_zig_runner_cmd(
     }
 }
 
+fn build_dotnet_runner_cmd(
+    runner: IdeRunnerKind,
+    cfg: &IdeRunConfig,
+    cmd_opt: Option<&str>,
+    mut args: Vec<String>,
+    build_flags: Vec<String>,
+    filter: Option<&str>,
+) -> (String, Vec<String>) {
+    let prog = cmd_opt.unwrap_or("dotnet").to_string();
+    let tp = cfg
+        .target_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    match runner {
+        IdeRunnerKind::DotnetBuild => {
+            if args.first().map(String::as_str) == Some("build") {
+                args.remove(0);
+            }
+            let mut out = vec!["build".to_string()];
+            if let Some(proj) = tp.filter(|p| {
+                p.ends_with(".sln")
+                    || p.ends_with(".slnx")
+                    || p.ends_with(".csproj")
+                    || p.ends_with(".fsproj")
+            }) {
+                if !args.iter().any(|a| a == proj) {
+                    out.push(proj.to_string());
+                }
+            }
+            if cfg.offline && !build_flags.iter().any(|f| f == "--no-restore") {
+                out.push("--no-restore".to_string());
+            }
+            out.extend(build_flags);
+            out.extend(args);
+            (prog, out)
+        }
+        IdeRunnerKind::DotnetRun => {
+            let is_watch = args.first().map(String::as_str) == Some("watch");
+            let mut out = if is_watch {
+                args.remove(0);
+                if args.first().map(String::as_str) == Some("run") {
+                    args.remove(0);
+                }
+                vec!["watch".to_string(), "run".to_string()]
+            } else {
+                if args.first().map(String::as_str) == Some("run") {
+                    args.remove(0);
+                }
+                vec!["run".to_string()]
+            };
+            if let Some(proj) = tp.filter(|p| p.ends_with(".csproj") || p.ends_with(".fsproj")) {
+                if !args.iter().any(|a| a == "--project" || a == proj) {
+                    out.push("--project".to_string());
+                    out.push(proj.to_string());
+                }
+            }
+            if cfg.offline && !build_flags.iter().any(|f| f == "--no-restore") {
+                out.push("--no-restore".to_string());
+            }
+            out.extend(build_flags);
+            if !args.is_empty() {
+                let starts_with_dotnet_flag = args[0].starts_with("--project")
+                    || args[0] == "-p"
+                    || args[0] == "-c"
+                    || args[0] == "--configuration"
+                    || args[0] == "--";
+                if !starts_with_dotnet_flag {
+                    out.push("--".to_string());
+                }
+                out.extend(args);
+            }
+            (prog, out)
+        }
+        IdeRunnerKind::DotnetTest => {
+            if args.first().map(String::as_str) == Some("test") {
+                args.remove(0);
+            }
+            let mut out = vec!["test".to_string()];
+            if let Some(proj) = tp.filter(|p| {
+                p.ends_with(".sln")
+                    || p.ends_with(".slnx")
+                    || p.ends_with(".csproj")
+                    || p.ends_with(".fsproj")
+            }) {
+                if !args.iter().any(|a| a == proj) {
+                    out.push(proj.to_string());
+                }
+            }
+            if !args.iter().any(|a| a == "--verbosity" || a == "-v")
+                && !build_flags.iter().any(|a| a == "--verbosity" || a == "-v")
+            {
+                out.push("--verbosity".to_string());
+                out.push("normal".to_string());
+            }
+            if let Some(f) = filter {
+                if !args.iter().any(|a| a == "--filter") {
+                    out.push("--filter".to_string());
+                    let expr = if f.contains('=') || f.contains('~') {
+                        f.to_string()
+                    } else {
+                        format!("FullyQualifiedName~{f}")
+                    };
+                    out.push(expr);
+                }
+            }
+            if cfg.offline && !build_flags.iter().any(|f| f == "--no-restore") {
+                out.push("--no-restore".to_string());
+            }
+            if cfg.coverage
+                && !build_flags
+                    .iter()
+                    .any(|f| f.contains("XPlat Code Coverage"))
+            {
+                out.push("--collect:XPlat Code Coverage".to_string());
+            }
+            out.extend(build_flags);
+            out.extend(args);
+            (prog, out)
+        }
+        _ => (prog, args),
+    }
+}
+
 pub(super) fn build_runner_command(
     cfg: &IdeRunConfig,
     target_kind: IdeTargetKind,
@@ -513,6 +638,9 @@ pub(super) fn build_runner_command(
         ),
         IdeRunnerKind::ZigBuild | IdeRunnerKind::ZigRun | IdeRunnerKind::ZigTest => {
             build_zig_runner_cmd(cfg.runner, cfg, cwd, cmd_opt, args, build_flags, filter)
+        }
+        IdeRunnerKind::DotnetBuild | IdeRunnerKind::DotnetRun | IdeRunnerKind::DotnetTest => {
+            build_dotnet_runner_cmd(cfg.runner, cfg, cmd_opt, args, build_flags, filter)
         }
         IdeRunnerKind::Pytest => build_pytest_cmd(
             cfg,

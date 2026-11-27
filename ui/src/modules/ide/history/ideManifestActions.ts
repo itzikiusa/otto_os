@@ -118,5 +118,23 @@ export function buildManifestMenuItems(
       },
     ];
   }
+  const lowName = fileName.toLowerCase();
+  if (lowName.endsWith('.csproj') || lowName.endsWith('.fsproj') || lowName.endsWith('.vbproj') || lowName === 'directory.packages.props') {
+    return [
+      { separator: true },
+      {
+        label: 'Restore NuGet Packages',
+        icon: 'refresh',
+        action: () =>
+          void runManifestDepsAction(filePath, 'sync', 'Restore NuGet Packages', onTreeOutput, false),
+      },
+      {
+        label: 'List Outdated NuGet Packages',
+        icon: 'layers',
+        action: () =>
+          void runManifestDepsAction(filePath, 'outdated', 'Outdated NuGet Packages', onTreeOutput, true),
+      },
+    ];
+  }
   return [];
 }

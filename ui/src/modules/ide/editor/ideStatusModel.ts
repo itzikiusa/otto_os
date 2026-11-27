@@ -10,7 +10,7 @@ export type IdeFileKind = 'code' | 'markup' | 'data' | 'text';
 
 const CODE_EXT = new Set([
   'go', 'rs', 'zig', 'zon', 'java', 'kt', 'kts', 'scala', 'groovy', 'ts', 'tsx', 'mts', 'cts', 'js', 'jsx', 'mjs', 'cjs',
-  'py', 'pyi', 'rb', 'php', 'c', 'h', 'cc', 'cpp', 'cxx', 'hpp', 'cs', 'swift', 'dart', 'lua', 'sh', 'bash',
+  'py', 'pyi', 'rb', 'php', 'c', 'h', 'cc', 'cpp', 'cxx', 'hpp', 'cs', 'csx', 'fs', 'fsx', 'fsi', 'razor', 'swift', 'dart', 'lua', 'sh', 'bash',
   'zsh', 'svelte', 'vue', 'css', 'scss', 'less', 'sql', 'proto',
 ]);
 /** Code without functions to step through. */
@@ -18,7 +18,7 @@ const FUNCTIONLESS_EXT = new Set(['css', 'scss', 'less', 'sql', 'proto']);
 const MARKUP_EXT = new Set(['md', 'markdown', 'mdx', 'rst', 'adoc', 'txt', 'html', 'htm', 'svg']);
 const DATA_EXT = new Set(['csv', 'tsv', 'json', 'jsonc', 'jsonl', 'ndjson', 'yaml', 'yml', 'toml', 'xml', 'ini', 'env', 'lock', 'properties']);
 const FORMATTABLE_DATA_EXT = new Set(['json', 'jsonc', 'yaml', 'yml', 'html', 'htm']);
-const CODE_LANGS = new Set(['go', 'rust', 'zig', 'java', 'kotlin', 'typescript', 'javascript', 'python', 'ruby', 'php', 'c', 'cpp', 'csharp', 'swift', 'shell', 'bash']);
+const CODE_LANGS = new Set(['go', 'rust', 'zig', 'java', 'kotlin', 'typescript', 'javascript', 'python', 'ruby', 'php', 'c', 'cpp', 'csharp', 'fsharp', 'swift', 'shell', 'bash']);
 
 function extOf(path: string): string {
   const base = path.split('?')[0].split('/').pop() ?? '';
@@ -61,13 +61,13 @@ const LANG_LABELS: Record<string, string> = {
   go: 'Go', rust: 'Rust', zig: 'Zig', zon: 'Zig Object Notation', java: 'Java', kotlin: 'Kotlin', typescript: 'TypeScript', javascript: 'JavaScript',
   python: 'Python', markdown: 'Markdown', json: 'JSON', jsonl: 'JSON Lines', csv: 'CSV', tsv: 'TSV', yaml: 'YAML',
   toml: 'TOML', xml: 'XML', html: 'HTML', css: 'CSS', scss: 'SCSS', sql: 'SQL', shell: 'Shell', bash: 'Shell',
-  dockerfile: 'Dockerfile', makefile: 'Makefile', svelte: 'Svelte', vue: 'Vue', c: 'C', cpp: 'C++', csharp: 'C#', ruby: 'Ruby', php: 'PHP',
+  dockerfile: 'Dockerfile', makefile: 'Makefile', svelte: 'Svelte', vue: 'Vue', c: 'C', cpp: 'C++', csharp: 'C#', fsharp: 'F#', ruby: 'Ruby', php: 'PHP',
   properties: 'Properties', conf: 'Config', ini: 'INI', dotenv: '.env', ignore: 'Ignore file', requirements: 'pip requirements',
   nginx: 'nginx', proto: 'Protocol Buffers', protobuf: 'Protocol Buffers', hcl: 'HCL', diff: 'Diff', powershell: 'PowerShell',
   batch: 'Batch', vtt: 'WebVTT', groovy: 'Groovy', mod: 'Go module', sum: 'Go checksums', work: 'Go workspace',
 };
 const EXT_LANG: Record<string, string> = {
-  rs: 'rust', zon: 'zig', ts: 'typescript', tsx: 'typescript', js: 'javascript', jsx: 'javascript', mjs: 'javascript',
+  rs: 'rust', zon: 'zig', cs: 'csharp', csx: 'csharp', razor: 'csharp', fs: 'fsharp', fsx: 'fsharp', fsi: 'fsharp', ts: 'typescript', tsx: 'typescript', js: 'javascript', jsx: 'javascript', mjs: 'javascript',
   cjs: 'javascript', py: 'python', md: 'markdown', yml: 'yaml', sh: 'shell', kt: 'kotlin', rb: 'ruby',
 };
 
@@ -89,6 +89,7 @@ export function ideLanguageSettingsSection(path: string, language?: string | nul
   if (lang === 'python') return 'lang.python';
   if (lang === 'rust') return 'lang.rust';
   if (lang === 'zig') return 'lang.zig';
+  if (lang === 'csharp' || lang === 'fsharp' || lang === 'dotnet') return 'lang.dotnet';
   if (lang === 'csv' || lang === 'tsv') return 'lang.csv';
   return null;
 }
@@ -113,7 +114,7 @@ export function ideProblemCounts(problems: readonly { severity: string }[]): { e
 // ── Language server ─────────────────────────────────────────────────────────
 
 const SERVER_NAMES: Record<string, string> = {
-  go: 'gopls', rust: 'rust-analyzer', zig: 'zls', java: 'jdtls', typescript: 'tsserver', javascript: 'tsserver', python: 'pyright',
+  go: 'gopls', rust: 'rust-analyzer', zig: 'zls', csharp: 'csharp-ls', fsharp: 'fsautocomplete', java: 'jdtls', typescript: 'tsserver', javascript: 'tsserver', python: 'pyright',
 };
 
 /** The language-server id (`go`, `typescript`, …) for a file, or null when Otto runs none for it. */

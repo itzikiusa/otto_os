@@ -154,6 +154,8 @@ pub(crate) fn collect_base_readonly_sdk_roots(
         "GRADLE_USER_HOME",
         "ZIG_LIB_DIR",
         "ZIG_GLOBAL_CACHE_DIR",
+        "DOTNET_ROOT",
+        "NUGET_PACKAGES",
     ] {
         if let Some(v) = env_val(key) {
             candidates.push(PathBuf::from(v));
@@ -225,6 +227,8 @@ pub(crate) fn collect_base_readonly_sdk_roots(
             ".zvm",
             ".local/share/zigup",
             "zig",
+            ".dotnet",
+            ".nuget/packages",
             ".m2/repository",
             ".gradle/caches",
             ".sdkman/candidates/java",
@@ -256,6 +260,9 @@ pub(crate) fn collect_base_readonly_sdk_roots(
         "/Library/Frameworks/Python.framework",
         "/usr/lib/python3",
         "/Library/Developer/CommandLineTools/SDKs",
+        "/usr/local/share/dotnet",
+        "/usr/share/dotnet",
+        "/opt/homebrew/opt/dotnet",
     ] {
         candidates.push(PathBuf::from(sys));
     }

@@ -33,6 +33,8 @@ pub const BASH_LSP_NPM_PACKAGES: &[&str] = &["bash-language-server"];
 pub const JSON_LSP_NPM_PACKAGES: &[&str] = &["vscode-langservers-extracted"];
 pub const PYRIGHT_PKG: &str = "pyright";
 pub const DEBUGPY_PKG: &str = "debugpy";
+pub const CSHARP_LS_TOOL: &str = "csharp-ls";
+pub const FSAUTOCOMPLETE_TOOL: &str = "fsautocomplete";
 
 /// Normalized target operating system (`macos` or `linux`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -189,6 +191,24 @@ impl TargetPlatform {
             (TargetOs::Linux, TargetArch::X86_64) => "x86_64-linux",
         }
     }
+
+    pub const fn dotnet_rid(self) -> &'static str {
+        match (self.os, self.arch) {
+            (TargetOs::Macos, TargetArch::Aarch64) => "osx-arm64",
+            (TargetOs::Macos, TargetArch::X86_64) => "osx-x64",
+            (TargetOs::Linux, TargetArch::Aarch64) => "linux-arm64",
+            (TargetOs::Linux, TargetArch::X86_64) => "linux-x64",
+        }
+    }
+
+    pub const fn netcoredbg_slug(self) -> &'static str {
+        match (self.os, self.arch) {
+            (TargetOs::Macos, TargetArch::Aarch64) => "osx-amd64",
+            (TargetOs::Macos, TargetArch::X86_64) => "osx-amd64",
+            (TargetOs::Linux, TargetArch::Aarch64) => "linux-arm64",
+            (TargetOs::Linux, TargetArch::X86_64) => "linux-amd64",
+        }
+    }
 }
 
 /// First-class supported language toolchain ecosystems.
@@ -199,6 +219,7 @@ pub enum EcosystemKind {
     Go,
     Rust,
     Zig,
+    Dotnet,
     Node,
     Python,
     Shell,
@@ -209,11 +230,12 @@ pub enum EcosystemKind {
 }
 
 impl EcosystemKind {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Java,
         Self::Go,
         Self::Rust,
         Self::Zig,
+        Self::Dotnet,
         Self::Node,
         Self::Python,
         Self::Shell,
@@ -229,6 +251,7 @@ impl EcosystemKind {
             "go" | "golang" => Some(Self::Go),
             "rust" | "cargo" => Some(Self::Rust),
             "zig" | "zls" => Some(Self::Zig),
+            "dotnet" | "csharp" | "fsharp" | "cs" | "fs" | "c#" | "f#" => Some(Self::Dotnet),
             "node" | "nodejs" | "javascript" | "typescript" | "js" | "ts" => Some(Self::Node),
             "python" | "py" | "uv" => Some(Self::Python),
             "shell" | "bash" | "sh" | "zsh" => Some(Self::Shell),
@@ -246,6 +269,7 @@ impl EcosystemKind {
             Self::Go => "go",
             Self::Rust => "rust",
             Self::Zig => "zig",
+            Self::Dotnet => "dotnet",
             Self::Node => "node",
             Self::Python => "python",
             Self::Shell => "shell",
@@ -262,6 +286,7 @@ impl EcosystemKind {
             Self::Go => "Go",
             Self::Rust => "Rust",
             Self::Zig => "Zig",
+            Self::Dotnet => ".NET SDK (C# / F#)",
             Self::Node => "Node.js (JS / TS)",
             Self::Python => "Python (uv)",
             Self::Shell => "Shell (Bash / Zsh)",
@@ -278,6 +303,7 @@ impl EcosystemKind {
             Self::Go => "gopls",
             Self::Rust => "rust-analyzer",
             Self::Zig => "zls",
+            Self::Dotnet => "csharp-ls",
             Self::Node => "typescript-language-server",
             Self::Python => "pyright",
             Self::Shell => "bash-language-server",
@@ -294,6 +320,7 @@ impl EcosystemKind {
             Self::Go => "dlv",
             Self::Rust => "codelldb",
             Self::Zig => "codelldb",
+            Self::Dotnet => "netcoredbg",
             Self::Node => "js-debug",
             Self::Python => "debugpy",
             Self::Shell => "bashdb",
@@ -310,6 +337,7 @@ impl EcosystemKind {
             Self::Go => "1.24.2",
             Self::Rust => "stable",
             Self::Zig => "0.14.0",
+            Self::Dotnet => "9.0.203",
             Self::Node => "22.14.0",
             Self::Python => "3.13",
             Self::Shell => "3.10.0",
@@ -343,6 +371,7 @@ impl From<crate::types::IdeEcosystemKind> for EcosystemKind {
             crate::types::IdeEcosystemKind::Go => Self::Go,
             crate::types::IdeEcosystemKind::Rust => Self::Rust,
             crate::types::IdeEcosystemKind::Zig => Self::Zig,
+            crate::types::IdeEcosystemKind::Dotnet => Self::Dotnet,
             crate::types::IdeEcosystemKind::Node => Self::Node,
             crate::types::IdeEcosystemKind::Python => Self::Python,
             crate::types::IdeEcosystemKind::Shell => Self::Shell,
@@ -361,6 +390,7 @@ impl From<EcosystemKind> for crate::types::IdeEcosystemKind {
             EcosystemKind::Go => Self::Go,
             EcosystemKind::Rust => Self::Rust,
             EcosystemKind::Zig => Self::Zig,
+            EcosystemKind::Dotnet => Self::Dotnet,
             EcosystemKind::Node => Self::Node,
             EcosystemKind::Python => Self::Python,
             EcosystemKind::Shell => Self::Shell,
@@ -452,6 +482,21 @@ pub fn zls_tarball_url(version: &str, platform: TargetPlatform) -> String {
         "https://github.com/zigtools/zls/releases/download/{clean}/zls-{}-{}.tar.xz",
         platform.arch.as_str(),
         platform.os.as_str()
+    )
+}
+
+pub fn dotnet_sdk_tarball_url(version: &str, platform: TargetPlatform) -> String {
+    let clean = version.trim().trim_start_matches('v');
+    format!(
+        "https://builds.dotnet.microsoft.com/dotnet/Sdk/{clean}/dotnet-sdk-{clean}-{}.tar.gz",
+        platform.dotnet_rid()
+    )
+}
+
+pub fn netcoredbg_tarball_url(platform: TargetPlatform) -> String {
+    format!(
+        "https://github.com/Samsung/netcoredbg/releases/latest/download/netcoredbg-{}.tar.gz",
+        platform.netcoredbg_slug()
     )
 }
 
@@ -579,6 +624,22 @@ pub fn curated_catalog(ecosystem: EcosystemKind, platform: TargetPlatform) -> Ve
             os: os.clone(),
             arch: arch.clone(),
             url: zig_tarball_url(ver, platform),
+            size_hint: Some(sz.to_string()),
+            sha256: None,
+        })
+        .collect(),
+        EcosystemKind::Dotnet => [
+            ("9.0.203", ".NET SDK 9.0.203 (STS)", false, "215 MB"),
+            ("8.0.408", ".NET SDK 8.0.408 (LTS)", true, "205 MB"),
+        ]
+        .into_iter()
+        .map(|(ver, label, lts, sz)| CatalogSdkEntry {
+            version: ver.to_string(),
+            label: label.to_string(),
+            lts,
+            os: os.clone(),
+            arch: arch.clone(),
+            url: dotnet_sdk_tarball_url(ver, platform),
             size_hint: Some(sz.to_string()),
             sha256: None,
         })
@@ -727,6 +788,19 @@ pub fn resolve_sdk_download(
                 arch,
                 url: zig_tarball_url(&clean, platform),
                 size_hint: None,
+                sha256: None,
+            })
+        }
+        EcosystemKind::Dotnet => {
+            let clean = ver.trim_start_matches('v').to_string();
+            Ok(CatalogSdkEntry {
+                version: clean.clone(),
+                label: format!(".NET SDK {clean}"),
+                lts: clean.starts_with("8.") || clean.starts_with("10."),
+                os,
+                arch,
+                url: dotnet_sdk_tarball_url(&clean, platform),
+                size_hint: Some("210 MB".to_string()),
                 sha256: None,
             })
         }
@@ -1079,6 +1153,55 @@ pub fn parse_zig_index_json(raw: &str, platform: TargetPlatform) -> Vec<CatalogS
     out
 }
 
+pub fn parse_dotnet_releases_index_json(
+    raw: &str,
+    platform: TargetPlatform,
+) -> Vec<CatalogSdkEntry> {
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return Vec::new();
+    };
+    let Some(channels) = val.get("releases-index").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for ch in channels {
+        let phase = ch
+            .get("support-phase")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if !matches!(phase, "active" | "maintenance") {
+            continue;
+        }
+        let Some(sdk_ver) = ch
+            .get("latest-sdk")
+            .and_then(|v| v.as_str())
+            .filter(|s| is_safe_version_token(s))
+        else {
+            continue;
+        };
+        let release_type = ch
+            .get("release-type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("sts");
+        let is_lts = release_type.eq_ignore_ascii_case("lts");
+        let tag = if is_lts { "LTS" } else { "STS" };
+        out.push(CatalogSdkEntry {
+            version: sdk_ver.to_string(),
+            label: format!(".NET SDK {sdk_ver} ({tag})"),
+            lts: is_lts,
+            os: platform.os.as_str().to_string(),
+            arch: platform.arch.as_str().to_string(),
+            url: dotnet_sdk_tarball_url(sdk_ver, platform),
+            size_hint: Some("210 MB".to_string()),
+            sha256: None,
+        });
+        if out.len() >= 6 {
+            break;
+        }
+    }
+    out
+}
+
 // ── Live + Cached Catalog Client ─────────────────────────────────────────────
 
 struct CachedPlatformCatalog {
@@ -1185,19 +1308,21 @@ impl CatalogClient {
             }
         }
 
-        let (java, go, rust, zig, node, python) = tokio::join!(
+        let (java, go, rust, zig, dotnet, node, python) = tokio::join!(
             self.fetch_java(platform),
             self.fetch_go(platform),
             self.fetch_rust(platform),
             self.fetch_zig(platform),
+            self.fetch_dotnet(platform),
             self.fetch_node(platform),
             self.fetch_python(platform),
         );
-        let mut map = HashMap::with_capacity(11);
+        let mut map = HashMap::with_capacity(12);
         map.insert(EcosystemKind::Java, java);
         map.insert(EcosystemKind::Go, go);
         map.insert(EcosystemKind::Rust, rust);
         map.insert(EcosystemKind::Zig, zig);
+        map.insert(EcosystemKind::Dotnet, dotnet);
         map.insert(EcosystemKind::Node, node);
         map.insert(EcosystemKind::Python, python);
         map.insert(
@@ -1308,6 +1433,21 @@ impl CatalogClient {
             }
         }
         curated_catalog(EcosystemKind::Zig, platform)
+    }
+
+    async fn fetch_dotnet(&self, platform: TargetPlatform) -> Vec<CatalogSdkEntry> {
+        if let Some(raw) = self
+            .get_text(
+                "https://dotnetcli.blob.core.windows.net/dotnet/release-metadata/releases-index.json",
+            )
+            .await
+        {
+            let parsed = parse_dotnet_releases_index_json(&raw, platform);
+            if !parsed.is_empty() {
+                return parsed;
+            }
+        }
+        curated_catalog(EcosystemKind::Dotnet, platform)
     }
 
     async fn fetch_node(&self, platform: TargetPlatform) -> Vec<CatalogSdkEntry> {

@@ -11,9 +11,11 @@ use crate::toolchains_catalog::EcosystemKind;
 use crate::types::{IdeInstalledSdk, IdeTargetKind, IdeTargetSpec};
 
 use super::discovery::{
-    dir_name_version, is_executable_file, python_dir_version, read_go_root_version,
-    read_java_release_version, read_zig_bin_version, resolve_java_home_dir, resolve_zig_home_dir,
-    rust_toolchain_label, zig_bin_in_home, zig_dir_version, zig_home_from_bin,
+    dir_name_version, dotnet_bin_in_root, dotnet_dir_version, dotnet_root_from_bin,
+    is_executable_file, python_dir_version, read_dotnet_bin_version, read_go_root_version,
+    read_java_release_version, read_zig_bin_version, resolve_dotnet_root_dir,
+    resolve_java_home_dir, resolve_zig_home_dir, rust_toolchain_label, zig_bin_in_home,
+    zig_dir_version, zig_home_from_bin,
 };
 
 pub(super) fn host_key_for_target(target: &IdeTargetSpec) -> String {
@@ -187,6 +189,26 @@ pub(super) fn normalize_and_validate_local_sdk(
                 ))
             })?;
             let ver = read_zig_bin_version(&bin).unwrap_or_else(|| zig_dir_version(&root));
+            Ok((root.to_string_lossy().into_owned(), ver))
+        }
+        EcosystemKind::Dotnet => {
+            let root = if canon.is_file() && is_executable_file(&canon) {
+                dotnet_root_from_bin(&canon).unwrap_or(canon)
+            } else {
+                resolve_dotnet_root_dir(&canon).ok_or_else(|| {
+                    Error::Invalid(format!(
+                        "'{}' does not contain a valid .NET SDK (expected dotnet executable)",
+                        canon.display()
+                    ))
+                })?
+            };
+            let bin = dotnet_bin_in_root(&root).ok_or_else(|| {
+                Error::Invalid(format!(
+                    "'{}' does not contain an executable dotnet binary",
+                    root.display()
+                ))
+            })?;
+            let ver = read_dotnet_bin_version(&bin).unwrap_or_else(|| dotnet_dir_version(&root));
             Ok((root.to_string_lossy().into_owned(), ver))
         }
         EcosystemKind::Node => {

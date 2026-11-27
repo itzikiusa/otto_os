@@ -57,9 +57,9 @@ export async function promptCreateTreeEntry(
   const name = await confirmer.promptText(
     isDir ? `Folder name inside ${displayDir}` : `File name inside ${displayDir}`,
     {
-      title: isDir ? 'New folder' : extHint === '.go' ? 'New Go file' : extHint === '.zig' ? 'New Zig file' : 'New file',
+      title: isDir ? 'New folder' : extHint === '.go' ? 'New Go file' : extHint === '.zig' ? 'New Zig file' : extHint === '.cs' ? 'New C# file' : 'New file',
       confirmLabel: 'Create',
-      placeholder: isDir ? 'pkg/handlers' : extHint === '.go' ? 'service.go' : extHint === '.zig' ? 'module.zig' : 'handler.go',
+      placeholder: isDir ? 'pkg/handlers' : extHint === '.go' ? 'service.go' : extHint === '.zig' ? 'module.zig' : extHint === '.cs' ? 'Service.cs' : 'handler.go',
       validate: (v) => (v.includes('..') ? 'Relative parent segments (..) aren’t allowed.' : null),
     },
   );
@@ -209,9 +209,13 @@ export function showTreeNodeContextMenu(
   // "New Go file…" only where Go is in play: a go.mod / go.work or .go file among the loaded folders.
   const isGo = Object.values(ide.childrenByDir).some((es) => es.some((e) => e.name === 'go.mod' || e.name === 'go.work' || e.name.endsWith('.go')));
   const isZig = Object.values(ide.childrenByDir).some((es) => es.some((e) => e.name === 'build.zig' || e.name === 'build.zig.zon' || e.name.endsWith('.zig')));
+  const isDotnet = Object.values(ide.childrenByDir).some((es) =>
+    es.some((e) => e.name.endsWith('.csproj') || e.name.endsWith('.fsproj') || e.name.endsWith('.sln') || e.name.endsWith('.slnx') || e.name.endsWith('.cs') || e.name.endsWith('.fs')),
+  );
   items.push({ label: 'New file…', icon: 'plus', action: () => void promptCreateTreeEntry(baseDir, 'create_file') });
   if (isGo) items.push({ label: 'New Go file…', icon: 'file', action: () => void promptCreateTreeEntry(baseDir, 'create_file', '.go') });
   if (isZig) items.push({ label: 'New Zig file…', icon: 'file', action: () => void promptCreateTreeEntry(baseDir, 'create_file', '.zig') });
+  if (isDotnet) items.push({ label: 'New C# file…', icon: 'file', action: () => void promptCreateTreeEntry(baseDir, 'create_file', '.cs') });
   items.push({ label: 'New folder…', icon: 'folder', action: () => void promptCreateTreeEntry(baseDir, 'mkdir') });
   if (ide.target.kind === 'local') {
     items.push(

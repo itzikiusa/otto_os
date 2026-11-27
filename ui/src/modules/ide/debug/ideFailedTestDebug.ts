@@ -42,6 +42,8 @@ export function inferTestDebugLanguage(
   if (lower.endsWith('.go')) return 'go';
   if (lower.endsWith('.rs')) return 'rust';
   if (lower.endsWith('.zig')) return 'zig';
+  if (lower.endsWith('.cs') || lower.endsWith('.csx')) return 'csharp';
+  if (lower.endsWith('.fs') || lower.endsWith('.fsx')) return 'fsharp';
   if (lower.endsWith('.py') || lower.endsWith('.pyi')) return 'python';
   if (lower.endsWith('.java')) return 'java';
   if (lower.endsWith('.ts') || lower.endsWith('.tsx') || lower.endsWith('.mts') || lower.endsWith('.cts')) return 'typescript';
@@ -52,6 +54,7 @@ export function inferTestDebugLanguage(
   if (r.startsWith('go_')) return 'go';
   if (r.startsWith('cargo_')) return 'rust';
   if (r.startsWith('zig_')) return 'zig';
+  if (r.startsWith('dotnet_')) return 'csharp';
   if (r.startsWith('java_') || r === 'maven' || r === 'gradle') return 'java';
   if (r === 'pytest' || r === 'python') return 'python';
   if (r === 'node' || r === 'npm' || r === 'vitest') return 'javascript';
