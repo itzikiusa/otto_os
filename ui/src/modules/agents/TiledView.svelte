@@ -32,6 +32,8 @@
   import { MAX_PANES, applyTileOrder } from '../../lib/stores/splitLayout';
   import { layout } from '../../lib/stores/splitLayout.svelte';
   import { liveTracks, type Tracks } from './tileTracks';
+  import { selectLiveTiles } from './paneMountQueue';
+  import { createPaneMountState } from './paneMountQueue.svelte';
 
   // Max number of tiles allowed to hold a live terminal/WS at once. Visible,
   // recently-focused tiles win the budget; everything else stays a placeholder.
@@ -361,25 +363,25 @@
     for (const id of [...visible]) if (!ids.has(id)) visible.delete(id);
   });
 
-  // Decide which tiles get a live terminal. The focused/active tile is always
-  // live (keeps the normal attach path intact), then pinned tiles, then visible
-  // tiles in grid order — capped at MAX_LIVE_TILES.
-  const liveIds = $derived.by(() => {
-    const live = new Set<string>();
-    const active = ws.activeSessionId;
-    if (active && ordered.some((s) => s.id === active)) live.add(active);
-    // Explicit attaches next — honor the user's deliberate choice before
-    // best-effort visible tiles.
-    for (const s of ordered) {
-      if (live.size >= MAX_LIVE_TILES) break;
-      if (pinned.has(s.id)) live.add(s.id);
-    }
-    for (const s of ordered) {
-      if (live.size >= MAX_LIVE_TILES) break;
-      if (visible.has(s.id)) live.add(s.id);
-    }
-    return live;
-  });
+  // Decide which tiles get a live terminal (active, pinned, then live visible —
+  // skipping threads and inactive suspended/exited sessions), capped at MAX_LIVE_TILES.
+  const liveOrder = $derived(
+    selectLiveTiles(ordered, {
+      activeId: ws.activeSessionId,
+      pinned,
+      visible,
+      isThread: (s) => 'thread' in s,
+      isInactive: (s) => !('thread' in s) && tileState(s).inactive,
+      maxLive: MAX_LIVE_TILES,
+    }),
+  );
+  const liveIds = $derived(new Set(liveOrder));
+  const priorityTileId = $derived(
+    ws.activeSessionId && liveIds.has(ws.activeSessionId) ? ws.activeSessionId : (liveOrder[0] ?? null),
+  );
+  // Frame 0 mounts only the priority tile; remaining live tiles hydrate one by one.
+  const tileMounts = createPaneMountState(() => ws.currentId, () => liveOrder, () => priorityTileId);
+  const mountedIds = $derived(tileMounts.mounted);
 
   // True when the live budget is full and some visible tiles had to stay
   // placeholders — surfaced as a hint on those tiles.
@@ -482,7 +484,7 @@
       >
         {#if 'thread' in s}
           <LazyMount lazy={ThreadPane} what="the thread" variant="panel" props={{ threadId: s.id, focused: ws.activeSessionId === s.id, showClose: false, showGrip: ordered.length > 1, dragKey: s.id, ondragpane: (phase: 'start' | 'end') => (tileDragId = phase === 'start' ? s.id : null), onfocus: () => { ws.openSession(s.id); layout.focusIndex(0); }, onclose: () => ws.closeTab(s.id) }} />
-        {:else if liveIds.has(s.id)}
+        {:else if mountedIds.has(s.id)}
           <SessionView
             sessionId={s.id}
             focused={ws.activeSessionId === s.id}
@@ -522,11 +524,16 @@
             </span>
             <div class="ph-body">
               <Icon name="terminal" size={24} />
-              <span class="ph-cta">Click to attach</span>
-              {#if atCapacity}
-                <span class="ph-hint">Live tiles capped at {MAX_LIVE_TILES} to save memory</span>
+              {#if liveIds.has(s.id)}
+                <span class="ph-cta">Opening terminal…</span>
+                <span class="ph-hint">Click to focus now</span>
               {:else}
-                <span class="ph-hint">{placeholderHint(tileState(s))}</span>
+                <span class="ph-cta">Click to attach</span>
+                {#if atCapacity}
+                  <span class="ph-hint">Live tiles capped at {MAX_LIVE_TILES} to save memory</span>
+                {:else}
+                  <span class="ph-hint">{placeholderHint(tileState(s))}</span>
+                {/if}
               {/if}
             </div>
           </button>

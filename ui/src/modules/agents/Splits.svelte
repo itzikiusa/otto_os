@@ -3,6 +3,7 @@
   import { focusOnMount } from '../../lib/focusOnMount';
   import { broadcastScope } from './viewFilters';
   import { toastError } from '../../lib/toastError';
+  import { createPaneMountState } from './paneMountQueue.svelte';
   // Split layout host: renders the nested split TREE (`layout.tree`) through the
   // recursive SplitNode, and owns the layout-wide keyboard chords + ⌘K commands.
   // Pane membership, fractions and focus live in the layout store — this file
@@ -145,6 +146,21 @@
     }
   }
 
+  // Progressive priority-first mount for multi-pane splits: Frame 0 mounts ONLY
+  // the focused terminal pane; remaining session panes hydrate one at a time.
+  const sessionLeafKeys = $derived(
+    layout.leaves
+      .filter((l) => l.ref.kind === 'session' && l.ref.id !== DB_PANE_ID)
+      .map((l) => l.key),
+  );
+  const priorityLeafKey = $derived.by(() => {
+    const focused = layout.leaves[layout.focusedIndex];
+    if (focused && focused.ref.kind === 'session' && focused.ref.id !== DB_PANE_ID) return focused.key;
+    return sessionLeafKeys[0] ?? null;
+  });
+  const paneMounts = createPaneMountState(() => ws.currentId, () => sessionLeafKeys, () => priorityLeafKey);
+  const mountedKeys = $derived(paneMounts.mounted);
+
   function onBroadcastKeydown(e: KeyboardEvent): void {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -193,7 +209,7 @@
            crush terminals to ~175px wide: focus the active leaf full-width
            without destroying the saved desktop layout (TabBar switches tabs). -->
       {@const phoneLeaf = viewport.isPhone && layout.leaves.length > 1 ? (layout.leaves[layout.focusedIndex] ?? layout.leaves[0]) : null}
-      <SplitNode node={phoneLeaf ?? layout.tree} />
+      <SplitNode node={phoneLeaf ?? layout.tree} {mountedKeys} />
     {/if}
   </div>
 </div>

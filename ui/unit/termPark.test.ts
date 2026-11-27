@@ -148,3 +148,25 @@ test('park: the default budget holds ~5 worst-case (4000 × 200) engines, all PA
   assert.deepEqual(disposed, ['s0', 's1', 's2', 's3', 's4', 's5', 's6']);
 });
 
+test('park: priorityOf keeps the most-recently-focused engine when a multi-pane unmount exceeds PARK_CAP', () => {
+  const t = timers();
+  const disposed: string[] = [];
+  // Simulate 15 tiled panes unmounting in DOM order (s0..s14) where s0 was the
+  // active/focused pane (highest lastFocus) and s1..s14 were never focused (0).
+  const park = new TermPark<{ id: string; lastFocus: number }>(
+    (v) => disposed.push(v.id),
+    PARK_CAP,
+    PARK_TTL_MS,
+    t.setT,
+    t.clearT,
+    undefined,
+    undefined,
+    (v) => v.lastFocus,
+  );
+  park.put('s0', { id: 's0', lastFocus: 1000 });
+  for (let i = 1; i < 15; i++) park.put(`s${i}`, { id: `s${i}`, lastFocus: 0 });
+  assert.equal(park.size, PARK_CAP);
+  assert.equal(park.has('s0'), true, 'focused pane must survive eviction even though it parked first');
+  assert.deepEqual(disposed, ['s1', 's2', 's3'], 'oldest unfocused panes are evicted instead');
+});
+

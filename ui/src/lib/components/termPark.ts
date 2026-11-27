@@ -51,6 +51,7 @@ export class TermPark<T> {
   private readonly clearT: (id: TimerId) => void;
   private readonly sizeOf: (value: T) => number;
   private readonly budget: number;
+  private readonly priorityOf?: (value: T) => number;
 
   constructor(
     dispose: (value: T, key: string) => void,
@@ -62,6 +63,9 @@ export class TermPark<T> {
      *  Read at every `put`: a parked engine keeps growing to PARK_SCROLLBACK. */
     sizeOf: (value: T) => number = () => 0,
     budget = PARK_BUDGET_BYTES,
+    /** Optional eviction priority (higher = keep longer, e.g. last-focused
+     *  timestamp). Absent = FIFO/oldest-parked first. */
+    priorityOf?: (value: T) => number,
   ) {
     this.dispose = dispose;
     this.cap = cap;
@@ -70,6 +74,7 @@ export class TermPark<T> {
     this.clearT = clearT;
     this.sizeOf = sizeOf;
     this.budget = budget;
+    this.priorityOf = priorityOf;
   }
 
   /** Estimated bytes held by every parked entry right now. */
@@ -87,22 +92,45 @@ export class TermPark<T> {
     return this.slots.has(key);
   }
 
+  /** Pick the entry to evict (never `excludeKey`). With `priorityOf`, drops
+   *  the lowest-priority entry (ties broken by oldest insertion order); else
+   *  the oldest entry. */
+  private victimKey(excludeKey: string): string | null {
+    if (!this.priorityOf) {
+      for (const k of this.slots.keys()) if (k !== excludeKey) return k;
+      return null;
+    }
+    let bestKey: string | null = null;
+    let bestPri = Infinity;
+    for (const [k, slot] of this.slots) {
+      if (k === excludeKey) continue;
+      const pri = this.priorityOf(slot.value);
+      if (bestKey === null || pri < bestPri) {
+        bestKey = k;
+        bestPri = pri;
+      }
+    }
+    return bestKey;
+  }
+
   /** Park `value` under `key`. An entry already parked under the key is
    *  disposed (one parked engine per session); past the cap or the byte
-   *  budget the oldest go. The entry just parked always stays. */
+   *  budget the lowest-priority / oldest go. The entry just parked always stays. */
   put(key: string, value: T): void {
     this.evict(key);
     const timer = this.setT(() => this.evict(key), this.ttl);
     this.slots.set(key, { value, timer });
     while (this.slots.size > this.cap) {
-      const oldest = this.slots.keys().next().value as string;
-      this.evict(oldest);
+      const victim = this.victimKey(key);
+      if (!victim) break;
+      this.evict(victim);
     }
     let total = this.bytes;
     while (total > this.budget && this.slots.size > 1) {
-      const oldest = this.slots.keys().next().value as string;
-      total -= this.sizeOf(this.slots.get(oldest)!.value);
-      this.evict(oldest);
+      const victim = this.victimKey(key);
+      if (!victim) break;
+      total -= this.sizeOf(this.slots.get(victim)!.value);
+      this.evict(victim);
     }
   }
 
