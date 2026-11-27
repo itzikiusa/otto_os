@@ -1,6 +1,6 @@
 import { test, expect, type APIRequestContext } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
-import { expectFingerSized } from './helpers';
+import { expectFingerSized, expectNoHorizontalOverflow } from './helpers';
 
 // Phone (spec A1 + A6): #/agents is the inbox; a tap pushes the session
 // full-height; "Sessions" (or the system Back) returns to the list.
@@ -82,6 +82,28 @@ test('the list and the app bar give 44 px targets', async ({ page }) => {
     expect(Math.round(box.height), await t.getAttribute('aria-label') ?? await t.innerText()).toBeGreaterThanOrEqual(44);
     expect(Math.round(box.width), await t.getAttribute('aria-label') ?? await t.innerText()).toBeGreaterThanOrEqual(44);
   }
+});
+
+test('workspace groups fit the phone list and fold on tap', async ({ page }) => {
+  const name = 'Another workspace with a long name for the phone sidebar';
+  const other = await seedWorkspace(ctx, base, name);
+  const r = await ctx.post(`${base}/api/v1/workspaces/${other}/sessions`, {
+    data: { kind: 'agent', provider: 'shell', title: 'Other session', cwd: '/tmp', meta: { origin: 'e2e' } },
+  });
+  expect(r.ok(), await r.text()).toBeTruthy();
+
+  await page.goto('/#/agents');
+  await expect(page.getByTestId('agents-inbox')).toBeVisible({ timeout: 20_000 });
+  await page.getByTestId('agents-sort-toggle').tap();
+  await page.getByRole('menuitemcheckbox', { name: 'All workspaces' }).tap();
+  const group = page.getByRole('region', { name, exact: true });
+  const fold = group.getByRole('button', { name: `${name} 1` });
+  await expect(group.getByText('Other session', { exact: true })).toBeVisible();
+  await expectFingerSized(fold);
+  await expectNoHorizontalOverflow(page);
+  await fold.tap();
+  await expect(fold).toHaveAttribute('aria-expanded', 'false');
+  await expect(group.getByText('Other session', { exact: true })).toHaveCount(0);
 });
 
 // New session on a phone: the Terminal | Chat switch and each card's − / +

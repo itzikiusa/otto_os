@@ -29,21 +29,30 @@ export function threadNeedsYou(id: string): boolean {
   return ws.needsYou[id] === true || runtimeThreads.get(id)?.status === 'awaiting_permission' || isRuntimeWaiting(id);
 }
 
-/** The one state a Threads list row shows for `s` (dot, label, tooltip). */
-export function threadRowState(s: Session): SessionStateInfo {
+function stateWithConnectivity(s: Session, stale: boolean): SessionStateInfo {
   const needs = ws.needsYou[s.id] === true || runtimeThreads.get(s.id)?.status === 'awaiting_permission' || mcpAsks.waiting(s.id);
   return withBackgroundState(
-    sessionState(s, ws.statusMap[s.id] ?? s.status, needs, { stale: events.state !== 'connected' }),
+    sessionState(s, ws.statusMap[s.id] ?? s.status, needs, { stale }),
     runtimeThreads.get(s.id)?.background_tasks?.length ?? 0,
   );
+}
+
+/** The one state a Threads list row shows for `s` (dot, label, tooltip). */
+export function threadRowState(s: Session): SessionStateInfo {
+  return stateWithConnectivity(s, events.state !== 'connected');
+}
+
+/** Ordering can use the last observed state while the event stream reconnects. */
+export function threadLastKnownState(s: Session): SessionStateInfo {
+  return stateWithConnectivity(s, false);
 }
 
 /** Where a thread row belongs in an inbox — THE needs-you derivation, shared
  *  by the Threads sidebar and the Agents inbox: its row state plus the requests
  *  this client knows wait on the person (a live approval, an MCP card), which
  *  count even while the provider still says "working". */
-export function threadClass(s: Session, unread: boolean): InboxClass {
-  return inboxClass(threadRowState(s).key, unread, inboxLive.kindsOf(s.id).length);
+export function threadClass(s: Session, unread: boolean, state = threadRowState(s)): InboxClass {
+  return inboxClass(state.key, unread, inboxLive.kindsOf(s.id).length);
 }
 
 /** `threadRowState` for a thread known only by id (a family's child); null
