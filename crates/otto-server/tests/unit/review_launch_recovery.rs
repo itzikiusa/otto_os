@@ -44,6 +44,7 @@ async fn precancelled_review_never_seeds_or_launches_agents() {
         None,
         Some(default_review_config("claude")),
         None,
+        None,
     )
     .await;
     let after = ctx.reviews_store.get_review(&review.id).await.unwrap();

@@ -151,6 +151,43 @@ fn config() -> ReviewConfig {
 
 const DIFF: &str = "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -0,0 +1 @@\n+pub fn add(a: i32, b: i32) -> i32 { a - b }\n";
 
+#[tokio::test]
+async fn an_exhausted_review_deadline_reaches_the_verifier() {
+    let (_tmp, ctx, ws, repo) = rig().await;
+    let review = ctx
+        .reviews_store
+        .create_review(&repo.id, LOCAL_REVIEW_PR_NUMBER)
+        .await
+        .unwrap();
+    let mut cfg = config();
+    cfg.agents.truncate(1);
+    cfg.runner = Some("threads".into());
+    let result = run_review_core(
+        &ctx,
+        &review.id,
+        &repo.path,
+        DIFF.into(),
+        None,
+        None,
+        &ws,
+        &repo.id,
+        0,
+        None,
+        Some(cfg),
+        None,
+        Some(std::time::Instant::now()),
+    )
+    .await;
+    let review = ctx.reviews_store.get_review(&review.id).await.unwrap();
+    assert_eq!(review.agents[0].status.as_str(), "done");
+    assert!(review.agents.last().unwrap().session_id.is_none());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains(otto_review::summarizer::DEADLINE_EXCEEDED),
+        "{err}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_whole_review_runs_on_threads_scope_twelve_reviewers_and_the_summarizer() {
     let (_tmp, ctx, ws, repo) = rig().await;
@@ -171,6 +208,7 @@ async fn a_whole_review_runs_on_threads_scope_twelve_reviewers_and_the_summarize
         0,
         None,
         Some(config()),
+        None,
         None,
     )
     .await;
@@ -336,6 +374,7 @@ async fn a_configured_scope_drops_the_lens_the_scope_agent_adds() {
         0,
         None,
         Some(cfg),
+        None,
         None,
     )
     .await;

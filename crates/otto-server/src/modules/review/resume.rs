@@ -75,7 +75,7 @@ pub(crate) async fn resume_held_review(
         let blocker = Some(otto_review::verification::SUMMARIZER_RETRY_BLOCKER);
         let pr = review.pr_number;
         summarize_and_persist(
-            &ctx, &review_id, &cwd, &ws, &user, &repo.id, pr, &cfg, &findings, "", blocker,
+            &ctx, &review_id, &cwd, &ws, &user, &repo.id, pr, &cfg, None, &findings, "", blocker,
         )
         .await?;
         // A finished review's threads are kept for the success period.

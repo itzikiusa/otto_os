@@ -87,7 +87,12 @@ pub(in crate::workflow_engine) async fn execute(
             let plan = &plan;
             Box::pin(async move {
                 let mut target_logs = Vec::new();
-                let Some(launched) = launch(plan, t_idx, target, &mut target_logs).await? else {
+                let deadline = plan
+                    .await_done
+                    .then(|| Instant::now() + Duration::from_secs(plan.timeout_s));
+                let Some(launched) =
+                    launch(plan, t_idx, target, deadline, &mut target_logs).await?
+                else {
                     return Ok::<_, otto_core::Error>((None, target_logs));
                 };
                 let status = await_review(
@@ -95,7 +100,7 @@ pub(in crate::workflow_engine) async fn execute(
                     plan.ws,
                     &plan.env.run_id,
                     &launched.review_id,
-                    plan.await_done.then_some(plan.timeout_s),
+                    deadline,
                     otto_review::engine::REVIEW_STALL_GRACE,
                     plan.session_tx,
                     &launched.tag,
@@ -353,6 +358,7 @@ async fn launch(
     plan: &ReviewPlan<'_>,
     t_idx: usize,
     target: &ReviewTarget,
+    review_deadline: Option<Instant>,
     logs: &mut Vec<String>,
 ) -> Result<Option<Launched>> {
     if WorkflowsRepo::new(plan.ctx.pool.clone())
@@ -453,6 +459,7 @@ async fn launch(
         plan.jira_context.clone(),
         plan.run_context.clone(),
         Some(plan.mode),
+        review_deadline,
         (run_id, association),
     )
     .await
@@ -860,7 +867,7 @@ async fn resolve_targets(
 
 /// Wait for a launched review to settle — event-driven, re-reading only its
 /// status and agent rows — and surface every reviewer session under this
-/// step as it appears. `timeout_s: None` is a fire-and-forget review: only
+/// step as it appears. `deadline: None` is a fire-and-forget review: only
 /// the sessions already spawned are surfaced. Returns the review's settled
 /// status (`done` / `error` / `cancelled` / `timeout`, or `running` when not
 /// awaited); a run cancel stops the wait with an error. A review that stalls
@@ -872,7 +879,7 @@ async fn await_review(
     ws: &Workspace,
     run_id: &Id,
     review_id: &Id,
-    timeout_s: Option<u64>,
+    deadline: Option<Instant>,
     stall_grace: Duration,
     session_tx: &tokio::sync::mpsc::UnboundedSender<AgentAssociation>,
     tag: &str,
@@ -885,8 +892,7 @@ async fn await_review(
     // `states[idx].sessions`; a set dedups repeated poll harvests. The
     // summarizer publishes its managed session while it is running too.
     let mut seen_sessions: std::collections::HashSet<String> = std::collections::HashSet::new();
-    if let Some(timeout_s) = timeout_s {
-        let deadline = Instant::now() + Duration::from_secs(timeout_s);
+    if let Some(deadline) = deadline {
         // Event-driven: subscribe BEFORE the first read, then
         // re-read only the status + agent rows (never the
         // comments) when this review's `ReviewChanged` or a run

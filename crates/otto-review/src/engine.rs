@@ -341,10 +341,6 @@ pub fn review_agent_timeout(diff_len: usize, override_secs: Option<u64>) -> Dura
     Duration::from_secs(secs)
 }
 
-/// Ceiling on the summarizer's budget (see `summarizer_timeout` in
-/// `finish_review`): `(300 + 3 s/finding).clamp(300, 1_800)`.
-pub const SUMMARIZER_BUDGET_CAP: Duration = Duration::from_secs(1_800);
-
 /// Pure half of `review_wait_budget`.
 pub fn review_wait_budget_for(cfg: &ReviewConfig, diff_len: usize) -> Duration {
     let agents = review_agent_timeout(diff_len, cfg.timeout_secs);
@@ -353,7 +349,7 @@ pub fn review_wait_budget_for(cfg: &ReviewConfig, diff_len: usize) -> Duration {
     } else {
         agents
     };
-    agents + SUMMARIZER_BUDGET_CAP + Duration::from_secs(600)
+    agents + crate::prompts::STANDALONE_SUMMARIZER_CEILING + Duration::from_secs(600)
 }
 
 /// Display name of the engine's synthesized CI-gate reviewer — the one lens
@@ -1414,9 +1410,9 @@ mod review_r10_tests {
     fn review_wait_budget_exceeds_agent_plus_summarizer() {
         let cfg = default_review_config("claude");
         let small = review_wait_budget_for(&cfg, 100);
-        assert!(small >= Duration::from_secs(600 + 1_800), "{small:?}");
+        assert!(small >= Duration::from_secs(600 + 7_200), "{small:?}");
         let huge = review_wait_budget_for(&cfg, 1_000_000);
-        assert!(huge >= Duration::from_secs(7_200 + 1_800), "{huge:?}");
+        assert!(huge >= Duration::from_secs(7_200 + 7_200), "{huge:?}");
     }
 }
 

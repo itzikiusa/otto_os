@@ -157,7 +157,8 @@ async fn fail_orphaned_reviews(ctx: &ServerCtx, adopted: &otto_agent_protocol::A
     let users = otto_state::UsersRepo::new(ctx.pool.clone());
     for id in settled.summarizer_resume {
         let user = otto_review::restart::review_user(&users).await;
-        let resumed = async { crate::modules::review::rerun_summarizer(ctx, &id, user?).await };
+        let resumed =
+            async { crate::modules::review::rerun_summarizer(ctx, &id, user?, None).await };
         match resumed.await {
             Ok(()) => tracing::info!(review = %id, "review recovery: resumed the summarizer"),
             Err(e) => tracing::warn!(review = %id, "review recovery: summarizer resume: {e}"),

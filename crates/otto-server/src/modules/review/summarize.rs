@@ -7,6 +7,8 @@
 
 use super::*;
 use otto_review::prompts::*;
+use otto_review::summarizer::DEADLINE_EXCEEDED;
+use tokio::time::Instant;
 
 /// The draft loop reads the durable review status once per this many parsed
 /// comments; the in-memory cancel flag is checked for every one.
@@ -24,6 +26,7 @@ pub(crate) async fn summarize_and_persist(
     repo_id: &Id,
     pr_number: u64,
     cfg: &ReviewConfig,
+    review_deadline: Option<std::time::Instant>,
     agent_findings: &[Vec<otto_core::domain::ReviewFinding>],
     // What the caller already knew about the change (ticket + prior-step
     // briefs), pre-rendered. The summarizer is the step that applies the scope
@@ -87,11 +90,16 @@ pub(crate) async fn summarize_and_persist(
     let context = context.to_string() + &lens_scores_block(&agent_states[..summarizer_idx]);
     let summarizer_prompt = summarizer_prompt(&context, summarizer_cfg, agent_findings);
 
-    let summarizer_timeout = summarizer_budget(total_findings);
+    let now = Instant::now();
+    let remaining = review_deadline.map(|at| Instant::from_std(at).saturating_duration_since(now));
+    let budget = summarizer_budget(total_findings, remaining);
+    let budget = remaining.map_or(budget, |left| {
+        budget.min(left.saturating_sub(SUMMARIZER_PUBLISH_MARGIN))
+    });
     tracing::info!(
         review = %review_id,
         "running summarizer agent ({total_findings} findings in, {}s budget)",
-        summarizer_timeout.as_secs()
+        budget.as_secs()
     );
     // The shared summarizer step (`otto_agent_run::fanout::summarize`): the
     // managed turn, else the deterministic floor (design 2026-07-04 §C: dedupe
@@ -110,7 +118,7 @@ pub(crate) async fn summarize_and_persist(
         user,
         cfg: summarizer_cfg,
         prompt: &summarizer_prompt,
-        timeout: summarizer_timeout,
+        deadline: now + budget,
         total_findings,
         cancel_flag: cancel_flag.as_ref(),
         row: summarizer_idx,
@@ -118,10 +126,7 @@ pub(crate) async fn summarize_and_persist(
     };
     // A start/delivery failure gets a fresh attempt (fresh handoff dir) within
     // the same overall budget; the verifier used to get exactly one.
-    let (deadline, states) = (
-        std::time::Instant::now() + summarizer_timeout,
-        &mut agent_states,
-    );
+    let states = &mut agent_states;
     let summary = otto_agent_run::fanout::summarize(
         &batches_in,
         |_| async move {
@@ -129,11 +134,14 @@ pub(crate) async fn summarize_and_persist(
             for _ in 1..otto_review::verification::SUMMARIZER_ATTEMPTS {
                 match &result {
                     Err(e) if otto_review::verification::summarizer_retryable(e) && !flag_tripped() => {
+                        let retry_at = Instant::now() + otto_review::verification::SUMMARIZER_RETRY_BACKOFF;
+                        if retry_at >= turn.deadline {
+                            break;
+                        }
                         tracing::warn!(review = %review_id, "summarizer did not start ({e}); retrying");
-                        tokio::time::sleep(otto_review::verification::SUMMARIZER_RETRY_BACKOFF).await;
-                        let timeout = deadline.saturating_duration_since(std::time::Instant::now());
+                        tokio::time::sleep_until(retry_at).await;
                         mark_summarizer_starting(&mut states[summarizer_idx], summarizer_cfg);
-                        result = SummarizerTurn { timeout, ..turn }.run(&mut *states).await;
+                        result = turn.run(&mut *states).await;
                     }
                     _ => break,
                 }
@@ -306,7 +314,7 @@ struct SummarizerTurn<'a> {
     user: &'a otto_core::domain::User,
     cfg: &'a ReviewAgentCfg,
     prompt: &'a str,
-    timeout: Duration,
+    deadline: Instant,
     total_findings: usize,
     cancel_flag: Option<&'a Arc<std::sync::atomic::AtomicBool>>,
     /// The summarizer's agent row (always the last).
@@ -347,8 +355,11 @@ impl SummarizerTurn<'_> {
             self.user,
             self.repo_path,
         );
-        let (summarizer_cfg, summarizer_prompt, summarizer_timeout, summarizer_idx) =
-            (self.cfg, self.prompt, self.timeout, self.row);
+        let (summarizer_cfg, summarizer_prompt, deadline, summarizer_idx) =
+            (self.cfg, self.prompt, self.deadline, self.row);
+        if Instant::now() >= deadline {
+            return Err(DEADLINE_EXCEEDED.into());
+        }
         let flag_tripped = || {
             self.cancel_flag
                 .is_some_and(|f| f.load(std::sync::atomic::Ordering::SeqCst))
@@ -393,24 +404,16 @@ impl SummarizerTurn<'_> {
             let turn = threads.summarizer_turn(&attempt, brief, ready_tx, self.cancel_flag);
             let stop = |sid: String| async move { threads.close(&sid).await };
             return crate::review_summarizer::drive(
-                turn,
-                ready_rx,
-                summarizer_timeout,
-                cancelled,
-                publish,
-                stop,
+                turn, ready_rx, deadline, cancelled, publish, stop,
             )
             .await;
         }
-        // Queue for a machine slot BEFORE the summarizer's hard budget starts,
-        // racing against cancellation so a cancelled review never hangs queued.
+        // Admission shares the verifier's deadline, just as on threads.
+        tokio::pin!(cancelled);
         let admission = tokio::select! {
             biased;
-            _ = async {
-                while !flag_tripped() && !review_is_cancelled(ctx, review_id).await {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-            } => return Err("review cancelled".into()),
+            _ = &mut cancelled => return Err("review cancelled".into()),
+            _ = tokio::time::sleep_until(deadline) => return Err(DEADLINE_EXCEEDED.into()),
             a = ctx.manager.admit_background("review_summarizer") => a,
         };
         admission.stamp(&mut attempt.meta);
@@ -425,7 +428,7 @@ impl SummarizerTurn<'_> {
             &attempt.provider,
             attempt.meta.clone(),
             &prompt,
-            summarizer_timeout,
+            deadline.saturating_duration_since(Instant::now()),
             crate::agent_session::TurnOpts {
                 cancel: self.cancel_flag.cloned(),
                 done_file: Some(attempt.result_path()),
@@ -443,7 +446,7 @@ impl SummarizerTurn<'_> {
                     .map_err(|e| e.0.to_string())
             },
             ready_rx,
-            summarizer_timeout,
+            deadline,
             cancelled,
             publish,
             |sid| async move {
