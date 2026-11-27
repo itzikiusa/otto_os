@@ -28,7 +28,7 @@ zero-rebuild **runtime IDE plugins**.
     (`POST /ide/collab/rooms`) carry `RouteClass::Secret` (human credentials only);
     and subprocess-spawning workspace mutations (`python-venv`, `deps/action`,
     `POST /ide/runs`, `POST /ide/debug/sessions`, `POST /ide/notebooks/{execute,interrupt,restart,shutdown}`) carry `RouteClass::Admin`
-    (human credentials only).
+    (human credentials only; local execution/restart also requires root authority).
   - Public guest routes (`/api/v1/ide/collab/guest/*`) sit outside the bearer
     chokepoint and authenticate each request with the room's capability share
     token (`viewer` vs `editor`).
@@ -242,7 +242,7 @@ global system directories:
 |-----------|------------|
 | **Java / JVM** | Adoptium Temurin JDK (17, 21 LTS), Maven, Gradle, Eclipse `jdtls`, `java-debug-adapter` |
 | **Kotlin** | Kotlin Compiler (`kotlinc` / `KOTLIN_HOME`, SDKMAN / Homebrew / official archive), `kotlin-language-server`, `ktfmt` / `ktlint`, Gradle Kotlin DSL (`build.gradle.kts`) & Version Catalog (`gradle/libs.versions.toml`), mixed Java/Kotlin Maven & Gradle modules, JUnit 5 (incl. backtick names) & Kotest gutter runs, JVM JDWP debugging via `java-debug` |
-| **Spring Boot** | Auto-detected from `@SpringBootApplication`, `pom.xml`, and `build.gradle*`; Spring Boot run/debug configs & gutter icons with profile activation (`SPRING_PROFILES_ACTIVE` / `-Dspring-boot.run.profiles`), `application*.{properties,yml}` completion, hover, diagnostics + Quick Fixes, bidirectional `@Value` / `@ConfigurationProperties` ↔ config navigation, loopback-only Actuator inspector (Health, Endpoints/Mappings, Beans, redacted Env), and DevTools `.reloadtrigger` live restart |
+| **Spring Boot** | Auto-detected from `@SpringBootApplication`, `pom.xml`, and `build.gradle*` (including multi-module sub-projects); Spring Boot run/debug configs & gutter icons with profile activation (`SPRING_PROFILES_ACTIVE` / `-Dspring-boot.run.profiles`), `application*.{properties,yml}` completion, hover, diagnostics (with deprecated-property Quick Fixes in `.properties`), bidirectional `@Value` / `@ConfigurationProperties` ↔ config navigation, loopback-only Actuator inspector (Health incl. 503 DOWN/OUT_OF_SERVICE, Endpoints/Mappings, Beans, redacted Env), and DevTools classpath trigger touch |
 | **Python** | `uv`, standalone CPython (3.11 / 3.12 / 3.13), `pyright`, `ruff`, `debugpy` |
 | **Rust** | `rustup` (`rustc` + `cargo`), `rust-analyzer`, `CodeLLDB` (`codelldb`) |
 | **Zig** | Official Zig SDK tarball (`ziglang.org/download/index.json`, SHA-256 verified), local SDK registration, `zls` (Zig-version-matched), `CodeLLDB` (`codelldb`) / `lldb-dap` / built-in `otto-lldb-dap` with Zig LLDB type formatters |

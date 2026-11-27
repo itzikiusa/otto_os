@@ -409,8 +409,6 @@ pub(super) fn detect_kotlin(path: &str, dir: &str, content: &str, out: &mut Vec<
     static RE_TEST_ANN: OnceLock<Regex> = OnceLock::new();
     static RE_MAIN: OnceLock<Regex> = OnceLock::new();
     static RE_FUN: OnceLock<Regex> = OnceLock::new();
-    static RE_KOTEST_BLOCK: OnceLock<Regex> = OnceLock::new();
-    static RE_KOTEST_STRING: OnceLock<Regex> = OnceLock::new();
 
     let re_pkg =
         RE_PKG.get_or_init(|| Regex::new(r"^\s*package\s+([A-Za-z_][A-Za-z0-9_.]*)").unwrap());
@@ -441,14 +439,6 @@ pub(super) fn detect_kotlin(path: &str, dir: &str, content: &str, out: &mut Vec<
         )
         .unwrap()
     });
-    let re_kotest_block = RE_KOTEST_BLOCK.get_or_init(|| {
-        Regex::new(
-            r#"^\s*(?:test|context|describe|it|should|feature|scenario|given|When|when|then|expect)\s*\(\s*"([^"]+)"\s*\)"#,
-        )
-        .unwrap()
-    });
-    let re_kotest_string = RE_KOTEST_STRING
-        .get_or_init(|| Regex::new(r#"^\s*"([^"]+)"\s*(?:\{|\.config\s*\()"#).unwrap());
 
     let dir = path
         .rfind("/src/")
@@ -470,7 +460,6 @@ pub(super) fn detect_kotlin(path: &str, dir: &str, content: &str, out: &mut Vec<
     let top_level_cls = crate::dap::java_bridge::infer_kotlin_class_stem(file_stem, content);
 
     let mut current_class: Option<(String, u32)> = None;
-    let mut current_kotest: Option<(String, String, u32)> = None; // (cls, style, line)
     let mut class_has_tests = false;
     let mut pending_test_ann = false;
     let mut emitted_suite_line: Option<u32> = None;
@@ -485,12 +474,12 @@ pub(super) fn detect_kotlin(path: &str, dir: &str, content: &str, out: &mut Vec<
 
         if let Some(cap) = re_kotest_class.captures(line) {
             let cls = cap[1].to_string();
-            let style = cap[2].to_string();
             let fqcn = qualify_java(&package_name, &cls);
             current_class = Some((cls.clone(), line_no));
-            current_kotest = Some((cls.clone(), style, line_no));
             class_has_tests = true;
             emitted_suite_line = Some(line_no);
+            // Kotest specs are executed at spec-class granularity via JUnit 5 Platform
+            // (leaf DSL strings are not JUnit method selectors).
             out.push(IdeGutterItem {
                 line: line_no,
                 kind: IdeGutterKind::Suite,
@@ -510,7 +499,6 @@ pub(super) fn detect_kotlin(path: &str, dir: &str, content: &str, out: &mut Vec<
         } else if let Some(cap) = re_class.captures(line) {
             let cls = cap[1].to_string();
             current_class = Some((cls, line_no));
-            current_kotest = None;
             class_has_tests = false;
             emitted_suite_line = None;
         }
@@ -594,37 +582,6 @@ pub(super) fn detect_kotlin(path: &str, dir: &str, content: &str, out: &mut Vec<
                 }
                 pending_test_ann = false;
             }
-        } else if let Some((ref cls, ref style, _)) = current_kotest {
-            let kt_name = re_kotest_block
-                .captures(line)
-                .map(|c| c[1].to_string())
-                .or_else(|| {
-                    if style == "StringSpec" || style == "FreeSpec" || style == "WordSpec" {
-                        re_kotest_string.captures(line).map(|c| c[1].to_string())
-                    } else {
-                        None
-                    }
-                });
-            if let Some(test_title) = kt_name {
-                let fqcn = qualify_java(&package_name, cls);
-                let selector = format!("{fqcn}#{test_title}");
-                out.push(IdeGutterItem {
-                    line: line_no,
-                    kind: IdeGutterKind::Test,
-                    label: format!("{cls}.{test_title}"),
-                    language: "kotlin".into(),
-                    run_spec: IdeQuickRunSpec {
-                        runner: IdeRunnerKind::JavaJunit,
-                        command: None,
-                        args: Vec::new(),
-                        cwd: Some(dir.to_string()),
-                        target_path: Some(path.to_string()),
-                        test_filter: Some(fqcn.clone()),
-                        debug_program: Some(fqcn),
-                        debug_test_name: Some(selector),
-                    },
-                });
-            }
         }
 
         let code_only = strip_line_comment(line);
@@ -633,9 +590,6 @@ pub(super) fn detect_kotlin(path: &str, dir: &str, content: &str, out: &mut Vec<
                 brace_depth += 1;
             } else if ch == '}' {
                 brace_depth = (brace_depth - 1).max(0);
-                if brace_depth == 0 {
-                    current_kotest = None;
-                }
             }
         }
     }
@@ -854,7 +808,15 @@ pub(super) fn detect_zig(path: &str, dir: &str, content: &str, out: &mut Vec<Ide
     let re_test_decl = RE_TEST_DECL
         .get_or_init(|| Regex::new(r"^\s*test\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{").unwrap());
 
-    let effective_cwd = find_zig_project_root(dir).unwrap_or_else(|| dir.to_string());
+    let project_root = find_zig_project_root(dir);
+    let build_steps: Vec<String> = project_root
+        .as_deref()
+        .and_then(|root| std::fs::read_to_string(std::path::Path::new(root).join("build.zig")).ok())
+        .map(|src| crate::environments::discovery::parse_zig_build_steps(&src))
+        .unwrap_or_default();
+    let has_run_step = build_steps.iter().any(|s| s == "run");
+    let has_test_step = build_steps.iter().any(|s| s == "test");
+    let effective_cwd = project_root.unwrap_or_else(|| dir.to_string());
 
     for (idx, line) in content.lines().enumerate() {
         let line_no = (idx + 1) as u32;
@@ -864,17 +826,30 @@ pub(super) fn detect_zig(path: &str, dir: &str, content: &str, out: &mut Vec<Ide
         }
 
         if re_main.is_match(line) {
+            let (runner, args, target_path) = if has_run_step {
+                (
+                    IdeRunnerKind::ZigBuild,
+                    vec!["build".into(), "run".into()],
+                    None,
+                )
+            } else {
+                (
+                    IdeRunnerKind::ZigRun,
+                    vec!["run".into(), path.to_string()],
+                    Some(path.to_string()),
+                )
+            };
             out.push(IdeGutterItem {
                 line: line_no,
                 kind: IdeGutterKind::Main,
                 label: "main".into(),
                 language: "zig".into(),
                 run_spec: IdeQuickRunSpec {
-                    runner: IdeRunnerKind::ZigRun,
+                    runner,
                     command: Some("zig".into()),
-                    args: vec!["run".into(), path.to_string()],
+                    args,
                     cwd: Some(effective_cwd.clone()),
-                    target_path: Some(path.to_string()),
+                    target_path,
                     test_filter: None,
                     debug_program: Some(path.to_string()),
                     debug_test_name: None,
@@ -882,6 +857,16 @@ pub(super) fn detect_zig(path: &str, dir: &str, content: &str, out: &mut Vec<Ide
             });
         } else if let Some(cap) = re_test_str.captures(line) {
             let test_name = cap[1].replace("\\\"", "\"");
+            let args = if has_test_step {
+                vec!["build".into(), "test".into()]
+            } else {
+                vec![
+                    "test".into(),
+                    "--test-filter".into(),
+                    test_name.clone(),
+                    path.to_string(),
+                ]
+            };
             out.push(IdeGutterItem {
                 line: line_no,
                 kind: IdeGutterKind::Test,
@@ -890,12 +875,7 @@ pub(super) fn detect_zig(path: &str, dir: &str, content: &str, out: &mut Vec<Ide
                 run_spec: IdeQuickRunSpec {
                     runner: IdeRunnerKind::ZigTest,
                     command: Some("zig".into()),
-                    args: vec![
-                        "test".into(),
-                        "--test-filter".into(),
-                        test_name.clone(),
-                        path.to_string(),
-                    ],
+                    args,
                     cwd: Some(effective_cwd.clone()),
                     target_path: Some(path.to_string()),
                     test_filter: Some(test_name.clone()),
@@ -905,6 +885,16 @@ pub(super) fn detect_zig(path: &str, dir: &str, content: &str, out: &mut Vec<Ide
             });
         } else if let Some(cap) = re_test_decl.captures(line) {
             let decl_name = cap[1].to_string();
+            let args = if has_test_step {
+                vec!["build".into(), "test".into()]
+            } else {
+                vec![
+                    "test".into(),
+                    "--test-filter".into(),
+                    decl_name.clone(),
+                    path.to_string(),
+                ]
+            };
             out.push(IdeGutterItem {
                 line: line_no,
                 kind: IdeGutterKind::Test,
@@ -913,12 +903,7 @@ pub(super) fn detect_zig(path: &str, dir: &str, content: &str, out: &mut Vec<Ide
                 run_spec: IdeQuickRunSpec {
                     runner: IdeRunnerKind::ZigTest,
                     command: Some("zig".into()),
-                    args: vec![
-                        "test".into(),
-                        "--test-filter".into(),
-                        decl_name.clone(),
-                        path.to_string(),
-                    ],
+                    args,
                     cwd: Some(effective_cwd.clone()),
                     target_path: Some(path.to_string()),
                     test_filter: Some(decl_name.clone()),

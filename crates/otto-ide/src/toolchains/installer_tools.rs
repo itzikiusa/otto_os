@@ -3,8 +3,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::toolchains_catalog::{
-    clangd_zip_url, codelldb_vsix_url, jq_binary_url, kotlin_lsp_zip_url, netcoredbg_tarball_url,
-    rust_analyzer_gz_url, uv_tarball_url, zls_tarball_url, EcosystemKind, TargetPlatform,
+    clangd_download_url, codelldb_vsix_url, jq_binary_url, kotlin_lsp_zip_url,
+    netcoredbg_tarball_url, rust_analyzer_gz_url, uv_tarball_url, EcosystemKind, TargetPlatform,
     BASH_LSP_NPM_PACKAGES, CSHARP_LS_TOOL, DEBUGPY_PKG, DLV_PKG, GOPLS_PKG, JAVA_DEBUG_JAR_NAME,
     JAVA_DEBUG_JAR_URL, JDTLS_TARBALL_URL, JSON_LSP_NPM_PACKAGES, JS_DEBUG_TARBALL_URL,
     PYRIGHT_PKG, TS_LSP_NPM_PACKAGES,
@@ -17,6 +17,18 @@ use super::installer::{
 use super::{
     find_executable_in, is_executable_file, system_search_dirs_with_shell, ToolchainManager,
 };
+
+/// Job-scoped staging directory so concurrent ZLS installs never share archive or
+/// extraction files (CONC-3).
+pub(super) fn zls_stage_dir(tmp: &Path, job_id: &str) -> PathBuf {
+    tmp.join(format!("zls-stage-{job_id}"))
+}
+
+/// Job-scoped staging directory so concurrent CodeLLDB installs (Rust/Zig/C++) never
+/// share archive or extraction files (CONC-2).
+pub(crate) fn codelldb_stage_dir(tmp: &Path, job_id: &str) -> PathBuf {
+    tmp.join(format!("codelldb-stage-{job_id}"))
+}
 
 /// `<go_root>/bin/go` when the caller named the project's GOROOT and it holds a Go.
 fn project_go_bin(go_root: Option<&Path>) -> Option<PathBuf> {
@@ -113,8 +125,8 @@ pub(super) async fn install_local_lsp(
             Ok(dest.to_string_lossy().into_owned())
         }
         EcosystemKind::Zig => {
-            // Match ZLS release to the active Zig version; prefer releases.zigtools.org
-            // for exact compatibility + SHA-256 verification, falling back to GitHub tag.
+            // Require verified ZLS release metadata + SHA-256 digest matching the active
+            // Zig version; never fall back to an unverified download (SEC-1).
             let zig_ver = zig_home
                 .and_then(super::discovery::zig_bin_in_home)
                 .and_then(|b| super::discovery::read_zig_bin_version(&b))
@@ -128,109 +140,140 @@ pub(super) async fn install_local_lsp(
             let lookup_ver = zig_ver
                 .as_deref()
                 .unwrap_or_else(|| EcosystemKind::Zig.default_sdk_version());
-            let (zls_ver, tarball_url, expected_sha256) =
-                if let Some(rel) = mgr.catalog.fetch_zls_release(lookup_ver, platform).await {
-                    (rel.version, rel.url, rel.sha256)
-                } else {
-                    let fallback = zig_ver
-                        .as_deref()
-                        .and_then(super::discovery::zig_major_minor)
-                        .map(|(maj, min)| format!("{maj}.{min}.0"))
-                        .unwrap_or_else(|| EcosystemKind::Zig.default_sdk_version().to_string());
-                    let url = zls_tarball_url(&fallback, platform);
-                    (fallback, url, None)
-                };
-            let archive = tmp.join(format!("zls-{zls_ver}.tar.xz"));
-            download_https_to_file(
-                mgr,
-                job_id,
-                &tarball_url,
-                &archive,
-                expected_sha256.as_deref(),
-                65,
-            )
-            .await?;
-            let bin_dir = root.join("zig/bin");
-            tokio::fs::create_dir_all(&bin_dir)
+            let rel = mgr
+                .catalog
+                .fetch_zls_release(lookup_ver, platform)
                 .await
-                .map_err(|e| e.to_string())?;
-            let extract_dir = tmp.join("zls-extract");
-            let _ = tokio::fs::remove_dir_all(&extract_dir).await;
+                .ok_or_else(|| {
+                    format!(
+                        "Could not fetch verified ZLS release checksum for Zig {lookup_ver} ({}); retry when releases.zigtools.org is reachable",
+                        platform.zig_index_key()
+                    )
+                })?;
+            let zls_ver = rel.version;
+            let minor_slot = super::discovery::zig_major_minor(&zls_ver)
+                .map(|(maj, min)| format!("{maj}.{min}"))
+                .unwrap_or_else(|| zls_ver.clone());
+            // Job-scoped staging prevents concurrent LSP-only and Full Setup jobs from
+            // clobbering each other's archive or extraction directory (CONC-3).
+            let stage_dir = zls_stage_dir(&tmp, job_id);
+            let extract_dir = stage_dir.join("extract");
+            let archive = stage_dir.join(format!("zls-{zls_ver}.tar.xz"));
+            let _ = tokio::fs::remove_dir_all(&stage_dir).await;
             tokio::fs::create_dir_all(&extract_dir)
                 .await
                 .map_err(|e| e.to_string())?;
-            run_local_cmd(
-                mgr,
-                job_id,
-                75,
-                Path::new("tar"),
-                &[
-                    "-xJf",
-                    &archive.to_string_lossy(),
-                    "-C",
-                    &extract_dir.to_string_lossy(),
-                ],
-                &[],
-            )
-            .await?;
-            let _ = tokio::fs::remove_file(&archive).await;
-            let src_bin = [extract_dir.join("zls"), extract_dir.join("bin/zls")]
-                .into_iter()
-                .find(|p| p.is_file())
-                .ok_or("ZLS archive missing zls binary")?;
-            let dest = bin_dir.join("zls");
-            let _ = tokio::fs::remove_file(&dest).await;
-            tokio::fs::rename(&src_bin, &dest)
-                .await
-                .map_err(|e| e.to_string())?;
-            let _ = tokio::fs::remove_dir_all(&extract_dir).await;
-            make_executable(&dest)?;
-            Ok(dest.to_string_lossy().into_owned())
+            let staged_res = async {
+                download_https_to_file(
+                    mgr,
+                    job_id,
+                    &rel.url,
+                    &archive,
+                    Some(rel.sha256.as_str()),
+                    65,
+                )
+                .await?;
+                run_local_cmd(
+                    mgr,
+                    job_id,
+                    75,
+                    Path::new("tar"),
+                    &[
+                        "-xJf",
+                        &archive.to_string_lossy(),
+                        "-C",
+                        &extract_dir.to_string_lossy(),
+                    ],
+                    &[],
+                )
+                .await?;
+                let src_bin = [extract_dir.join("zls"), extract_dir.join("bin/zls")]
+                    .into_iter()
+                    .find(|p| p.is_file())
+                    .ok_or("ZLS archive missing zls binary")?;
+                // Store per Zig major.minor so multiple projects pinned to different Zig
+                // versions keep their own compatible ZLS (BUG-4).
+                let version_dir = root.join("zig/zls").join(&minor_slot);
+                tokio::fs::create_dir_all(&version_dir)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let tmp_dest = version_dir.join(format!(".zls.{job_id}.tmp"));
+                let dest = version_dir.join("zls");
+                let _ = tokio::fs::remove_file(&tmp_dest).await;
+                tokio::fs::rename(&src_bin, &tmp_dest)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                make_executable(&tmp_dest)?;
+                tokio::fs::rename(&tmp_dest, &dest)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let bin_dir = root.join("zig/bin");
+                tokio::fs::create_dir_all(&bin_dir)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                relink_current(&bin_dir.join("zls"), &dest);
+                Ok::<String, String>(dest.to_string_lossy().into_owned())
+            }
+            .await;
+            let _ = tokio::fs::remove_dir_all(&stage_dir).await;
+            staged_res
         }
         EcosystemKind::Cpp => {
-            let ver = EcosystemKind::Cpp.default_sdk_version();
-            let zip = tmp.join(format!("clangd-{ver}.zip"));
-            download_https_to_file(mgr, job_id, &clangd_zip_url(ver, platform), &zip, None, 65)
-                .await?;
-            let extract_dir = tmp.join("clangd-extract");
-            let _ = tokio::fs::remove_dir_all(&extract_dir).await;
+            let url = clangd_download_url(platform)?;
+            let stage_dir = tmp.join(format!("clangd-stage-{job_id}"));
+            let _ = tokio::fs::remove_dir_all(&stage_dir).await;
+            let extract_dir = stage_dir.join("extract");
             tokio::fs::create_dir_all(&extract_dir)
                 .await
                 .map_err(|e| e.to_string())?;
-            run_local_cmd(
-                mgr,
-                job_id,
-                75,
-                Path::new("unzip"),
-                &[
-                    "-q",
-                    "-o",
-                    &zip.to_string_lossy(),
-                    "-d",
-                    &extract_dir.to_string_lossy(),
-                ],
-                &[],
-            )
-            .await?;
-            let _ = tokio::fs::remove_file(&zip).await;
-            let bin_dir = root.join("cpp/bin");
-            tokio::fs::create_dir_all(&bin_dir)
-                .await
-                .map_err(|e| e.to_string())?;
-            let src_bin = super::read_subdirs(&extract_dir)
-                .into_iter()
-                .map(|d| d.join("bin/clangd"))
-                .chain(std::iter::once(extract_dir.join("bin/clangd")))
-                .find(|p| p.is_file())
-                .ok_or("clangd archive missing bin/clangd")?;
-            let dest = bin_dir.join("clangd");
-            let _ = tokio::fs::remove_file(&dest).await;
-            tokio::fs::rename(&src_bin, &dest)
-                .await
-                .map_err(|e| e.to_string())?;
-            let _ = tokio::fs::remove_dir_all(&extract_dir).await;
-            make_executable(&dest)?;
-            Ok(dest.to_string_lossy().into_owned())
+            let zip = stage_dir.join("clangd.zip");
+            let staged_res = async {
+                download_https_to_file(mgr, job_id, &url, &zip, None, 65).await?;
+                run_local_cmd(
+                    mgr,
+                    job_id,
+                    75,
+                    Path::new("unzip"),
+                    &[
+                        "-q",
+                        "-o",
+                        &zip.to_string_lossy(),
+                        "-d",
+                        &extract_dir.to_string_lossy(),
+                    ],
+                    &[],
+                )
+                .await?;
+                let src_tree = super::read_subdirs(&extract_dir)
+                    .into_iter()
+                    .find(|d| d.join("bin/clangd").is_file())
+                    .or_else(|| {
+                        extract_dir
+                            .join("bin/clangd")
+                            .is_file()
+                            .then(|| extract_dir.clone())
+                    })
+                    .ok_or("clangd archive missing bin/clangd")?;
+                // Preserve the full `clangd` tree (`bin/clangd` + `lib/clang/...` builtin
+                // headers) under `cpp/lsp` and symlink `cpp/bin/clangd`.
+                let lsp_dir = root.join("cpp/lsp");
+                let bin_dir = root.join("cpp/bin");
+                tokio::fs::create_dir_all(&bin_dir)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let _ = tokio::fs::remove_dir_all(&lsp_dir).await;
+                tokio::fs::rename(&src_tree, &lsp_dir)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let real_bin = lsp_dir.join("bin/clangd");
+                make_executable(&real_bin)?;
+                let link = bin_dir.join("clangd");
+                relink_current(&link, &real_bin);
+                Ok::<String, String>(link.to_string_lossy().into_owned())
+            }
+            .await;
+            let _ = tokio::fs::remove_dir_all(&stage_dir).await;
+            staged_res
         }
         EcosystemKind::Kotlin => {
             let zip = tmp.join("kotlin-language-server.zip");
@@ -425,34 +468,58 @@ pub(super) async fn install_local_dap(
             Ok(gobin.join("dlv").to_string_lossy().into_owned())
         }
         EcosystemKind::Rust | EcosystemKind::Zig | EcosystemKind::Cpp => {
-            let vsix = tmp.join("codelldb.vsix");
-            download_https_to_file(mgr, job_id, &codelldb_vsix_url(platform), &vsix, None, 85)
-                .await?;
-            let dest = root.join("rust/dap");
-            let _ = tokio::fs::remove_dir_all(&dest).await;
-            tokio::fs::create_dir_all(&dest)
+            // Serialize shared CodeLLDB installs across Rust, Zig, and C++ jobs and use
+            // job-scoped staging paths so concurrent jobs never clobber each other (CONC-2).
+            static CODELLDB_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> =
+                std::sync::OnceLock::new();
+            let _guard = CODELLDB_LOCK
+                .get_or_init(|| tokio::sync::Mutex::new(()))
+                .lock()
+                .await;
+            let stage_dir = codelldb_stage_dir(&tmp, job_id);
+            let _ = tokio::fs::remove_dir_all(&stage_dir).await;
+            let extract_dir = stage_dir.join("extract");
+            tokio::fs::create_dir_all(&extract_dir)
                 .await
                 .map_err(|e| e.to_string())?;
-            run_local_cmd(
-                mgr,
-                job_id,
-                94,
-                Path::new("unzip"),
-                &[
-                    "-q",
-                    "-o",
-                    &vsix.to_string_lossy(),
-                    "-d",
-                    &dest.to_string_lossy(),
-                ],
-                &[],
-            )
-            .await?;
-            let _ = tokio::fs::remove_file(&vsix).await;
-            let adapter = dest.join("extension/adapter/codelldb");
-            make_executable(&adapter)?;
-            relink_current(&root.join("rust/codelldb"), &dest.join("extension"));
-            Ok(adapter.to_string_lossy().into_owned())
+            let vsix = stage_dir.join("codelldb.vsix");
+            let staged_res = async {
+                download_https_to_file(mgr, job_id, &codelldb_vsix_url(platform), &vsix, None, 85)
+                    .await?;
+                run_local_cmd(
+                    mgr,
+                    job_id,
+                    94,
+                    Path::new("unzip"),
+                    &[
+                        "-q",
+                        "-o",
+                        &vsix.to_string_lossy(),
+                        "-d",
+                        &extract_dir.to_string_lossy(),
+                    ],
+                    &[],
+                )
+                .await?;
+                let staged_adapter = extract_dir.join("extension/adapter/codelldb");
+                make_executable(&staged_adapter)?;
+                let dest = root.join("rust/dap");
+                if let Some(parent) = dest.parent() {
+                    tokio::fs::create_dir_all(parent)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                }
+                let _ = tokio::fs::remove_dir_all(&dest).await;
+                tokio::fs::rename(&extract_dir, &dest)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let adapter = dest.join("extension/adapter/codelldb");
+                relink_current(&root.join("rust/codelldb"), &dest.join("extension"));
+                Ok::<String, String>(adapter.to_string_lossy().into_owned())
+            }
+            .await;
+            let _ = tokio::fs::remove_dir_all(&stage_dir).await;
+            staged_res
         }
         EcosystemKind::Dotnet => {
             let archive = tmp.join("netcoredbg.tar.gz");

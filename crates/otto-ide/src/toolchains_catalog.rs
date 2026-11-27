@@ -511,6 +511,10 @@ pub fn zls_tarball_url(version: &str, platform: TargetPlatform) -> String {
     )
 }
 
+/// Pinned upstream `clangd/clangd` GitHub release tag (decoupled from LLVM SDK
+/// versions because `clangd/clangd` only publishes specific release tags).
+pub const CLANGD_RELEASE_VERSION: &str = "19.1.2";
+
 pub fn llvm_tarball_url(version: &str, platform: TargetPlatform) -> String {
     let clean = version.trim().trim_start_matches("llvmorg-");
     let slug = match (platform.os, platform.arch) {
@@ -531,6 +535,17 @@ pub fn clangd_zip_url(version: &str, platform: TargetPlatform) -> String {
         TargetOs::Linux => "linux",
     };
     format!("https://github.com/clangd/clangd/releases/download/{clean}/clangd-{slug}-{clean}.zip")
+}
+
+/// Resolve the official `clangd/clangd` release zip URL for `platform`.
+/// Upstream `clangd/clangd` publishes macOS universal and Linux x86_64 zips (no Linux ARM64).
+pub fn clangd_download_url(platform: TargetPlatform) -> Result<String, String> {
+    if platform.os == TargetOs::Linux && platform.arch == TargetArch::Aarch64 {
+        return Err(
+            "Prebuilt clangd archives are not published for Linux arm64; install clangd via your system package manager (`apt install clangd` / `dnf install clang-tools-extra`).".into(),
+        );
+    }
+    Ok(clangd_zip_url(CLANGD_RELEASE_VERSION, platform))
 }
 
 pub fn kotlin_compiler_zip_url(version: &str) -> String {
@@ -685,19 +700,10 @@ pub fn curated_catalog(ecosystem: EcosystemKind, platform: TargetPlatform) -> Ve
             sha256: None,
         })
         .collect(),
-        EcosystemKind::Cpp => [("19.1.7", true, "340 MB"), ("18.1.8", false, "320 MB")]
-            .into_iter()
-            .map(|(ver, lts, sz)| CatalogSdkEntry {
-                version: ver.to_string(),
-                label: format!("LLVM / Clang {ver}"),
-                lts,
-                os: os.clone(),
-                arch: arch.clone(),
-                url: llvm_tarball_url(ver, platform),
-                size_hint: Some(sz.to_string()),
-                sha256: None,
-            })
-            .collect(),
+        // Upstream LLVM release archives exceed the 1 GiB download cap (1.1-1.6 GiB) and
+        // vary per platform/version; install Clang/GCC via Xcode CLT, Homebrew, or apt/dnf
+        // and use 1-click installs for `clangd` (LSP) and `CodeLLDB` (DAP).
+        EcosystemKind::Cpp => Vec::new(),
         EcosystemKind::Kotlin => [("2.1.20", true, "76 MB"), ("2.0.21", false, "74 MB")]
             .into_iter()
             .map(|(ver, lts, sz)| CatalogSdkEntry {
@@ -874,19 +880,9 @@ pub fn resolve_sdk_download(
                 sha256: None,
             })
         }
-        EcosystemKind::Cpp => {
-            let clean = ver.trim_start_matches("llvmorg-").to_string();
-            Ok(CatalogSdkEntry {
-                version: clean.clone(),
-                label: format!("LLVM / Clang {clean}"),
-                lts: true,
-                os,
-                arch,
-                url: llvm_tarball_url(&clean, platform),
-                size_hint: None,
-                sha256: None,
-            })
-        }
+        EcosystemKind::Cpp => Err(
+            "C/C++ compiler toolchains (Clang / GCC / LLVM) are installed via Xcode Command Line Tools (`xcode-select --install`), Homebrew (`brew install llvm`), or your Linux package manager (`apt install clang` / `dnf install clang`), then auto-detected or added via 'Add Local SDK'.".into(),
+        ),
         EcosystemKind::Kotlin => {
             let clean = ver.trim_start_matches('v').to_string();
             Ok(CatalogSdkEntry {
@@ -1316,11 +1312,11 @@ pub fn parse_dotnet_releases_index_json(
 pub struct ZlsReleaseAsset {
     pub version: String,
     pub url: String,
-    pub sha256: Option<String>,
+    pub sha256: String,
 }
 
 /// Parse `https://releases.zigtools.org/v1/zls/select-version` JSON for `platform`,
-/// extracting the HTTPS tarball URL and official 64-hex SHA-256 digest (`shasum`).
+/// requiring both an HTTPS tarball URL and a valid 64-hex SHA-256 digest (`shasum`).
 pub fn parse_zls_select_version_json(
     raw: &str,
     platform: TargetPlatform,
@@ -1338,7 +1334,7 @@ pub fn parse_zls_select_version_json(
         .and_then(|v| v.as_str())
         .filter(|u| u.starts_with("https://"))?
         .to_string();
-    let sha256 = normalize_sha256(target_obj.get("shasum").and_then(|v| v.as_str()));
+    let sha256 = normalize_sha256(target_obj.get("shasum").and_then(|v| v.as_str()))?;
     Some(ZlsReleaseAsset {
         version,
         url,
@@ -1693,11 +1689,14 @@ mod tests {
                 let items = curated_catalog(eco, platform);
                 if matches!(
                     eco,
-                    EcosystemKind::Ios | EcosystemKind::Android | EcosystemKind::Flutter
+                    EcosystemKind::Cpp
+                        | EcosystemKind::Ios
+                        | EcosystemKind::Android
+                        | EcosystemKind::Flutter
                 ) {
                     assert!(
                         items.is_empty(),
-                        "{eco:?} is a native SDK and should not expose archive tarballs"
+                        "{eco:?} is installed via native/system packages and should not expose archive tarballs"
                     );
                     continue;
                 }
@@ -1838,12 +1837,14 @@ mod tests {
             "https://builds.zigtools.org/zls-macos-aarch64-0.14.0.tar.xz"
         );
         assert_eq!(
-            mac.sha256.as_deref(),
-            Some("dfb627e1f9603583678f552d8035a12dce878215c0a507b32d6f1b9d074d6c4d")
+            mac.sha256,
+            "dfb627e1f9603583678f552d8035a12dce878215c0a507b32d6f1b9d074d6c4d"
         );
 
-        let lin = parse_zls_select_version_json(raw, linux_x64).expect("linux x64 release");
-        assert_eq!(lin.sha256, None);
+        // Missing or malformed shasum must be rejected so ZLS never installs unverified.
+        assert!(parse_zls_select_version_json(raw, linux_x64).is_none());
+        let missing_sha = r#"{"version":"0.14.0","aarch64-macos":{"tarball":"https://builds.zigtools.org/zls-macos-aarch64-0.14.0.tar.xz"}}"#;
+        assert!(parse_zls_select_version_json(missing_sha, mac_arm).is_none());
 
         // Non-HTTPS URLs and upstream error payloads must be rejected.
         let insecure = r#"{"version":"0.14.0","aarch64-macos":{"tarball":"http://example.com/zls.tar.xz","shasum":"dfb627e1f9603583678f552d8035a12dce878215c0a507b32d6f1b9d074d6c4d"}}"#;

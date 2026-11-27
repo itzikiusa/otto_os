@@ -339,10 +339,10 @@ fn build_cargo_runner_cmd(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build_zig_runner_cmd(
+pub(crate) fn build_zig_runner_cmd(
     runner: IdeRunnerKind,
     cfg: &IdeRunConfig,
-    cwd: &str,
+    _cwd: &str,
     cmd_opt: Option<&str>,
     mut args: Vec<String>,
     build_flags: Vec<String>,
@@ -361,7 +361,7 @@ fn build_zig_runner_cmd(
                 args.remove(0);
             }
             let mut out = vec!["build".to_string()];
-            if let Some(step) = tp {
+            if let Some(step) = tp.filter(|s| !s.ends_with(".zig") && !s.contains('/')) {
                 if !args.iter().any(|a| a == step) {
                     out.push(step.to_string());
                 }
@@ -394,9 +394,10 @@ fn build_zig_runner_cmd(
             (prog, out)
         }
         IdeRunnerKind::ZigTest => {
+            // Project-wide Zig test runs (no `.zig` file in target_path or args) must use
+            // `zig build test` without checking local disk (so SSH remote projects work too).
             let is_build_test = args.first().map(String::as_str) == Some("build")
                 || (tp.is_none_or(|p| !p.ends_with(".zig"))
-                    && Path::new(cwd).join("build.zig").is_file()
                     && !args.iter().any(|a| a.ends_with(".zig")));
             if is_build_test {
                 if args.first().map(String::as_str) == Some("build") {
@@ -455,7 +456,21 @@ fn build_cpp_runner_cmd(
         IdeRunnerKind::Cmake => {
             let prog = cmd_opt.unwrap_or("cmake").to_string();
             let mut out = if args.is_empty() {
-                vec!["--build".into(), "build".into()]
+                if let Some(preset) = tp
+                    .and_then(|t| t.strip_prefix("preset:"))
+                    .filter(|p| !p.is_empty())
+                {
+                    vec!["--build".into(), "--preset".into(), preset.to_string()]
+                } else {
+                    let build_dir = find_cpp_build_dir(cwd).unwrap_or_else(|| "build".into());
+                    let mut v = vec!["--build".into(), build_dir];
+                    if let Some(target) = tp.filter(|t| {
+                        *t != "CMakeLists.txt" && !is_cpp_source_path(t) && !t.contains('/')
+                    }) {
+                        v.extend(["--target".into(), target.to_string()]);
+                    }
+                    v
+                }
             } else {
                 args
             };
@@ -481,9 +496,37 @@ fn build_cpp_runner_cmd(
                 }
                 return (explicit.to_string(), out);
             }
+            // BUG-11: Gutter GoogleTest/Catch2 run inside a CMake project: build the test
+            // target and invoke the test executable directly with `--gtest_filter` / case
+            // filter (falls back to `ctest -R` only when no test target can be resolved).
+            if cmd_opt.is_none()
+                && args.is_empty()
+                && target_kind == IdeTargetKind::Local
+                && filter.is_some()
+                && Path::new(cwd).join("CMakeLists.txt").is_file()
+            {
+                if let Some(test_target) =
+                    infer_cmake_target_for_source(cwd, tp.unwrap_or(""), true)
+                {
+                    let f = filter.unwrap();
+                    let build_dir = find_cpp_build_dir(cwd).unwrap_or_else(|| "build".into());
+                    let mut test_args = Vec::new();
+                    if f.contains('.') {
+                        test_args.push(format!("--gtest_filter={f}"));
+                    } else {
+                        test_args.push(f.to_string());
+                    }
+                    test_args.extend(build_flags);
+                    return build_cmake_target_exec_cmd(&build_dir, &test_target, test_args);
+                }
+            }
             let prog = cmd_opt.unwrap_or("ctest").to_string();
             let mut out = if args.is_empty() {
-                let test_dir = find_cpp_build_dir(cwd).unwrap_or_else(|| "build".into());
+                let test_dir = tp
+                    .filter(|t| *t != "CMakeLists.txt" && !is_cpp_source_path(t))
+                    .map(str::to_string)
+                    .or_else(|| find_cpp_build_dir(cwd))
+                    .unwrap_or_else(|| "build".into());
                 vec!["--test-dir".into(), test_dir, "--output-on-failure".into()]
             } else {
                 args
@@ -510,7 +553,10 @@ fn build_cpp_runner_cmd(
         IdeRunnerKind::Meson => {
             let prog = cmd_opt.unwrap_or("meson").to_string();
             let mut out = if args.is_empty() {
-                vec!["compile".into(), "-C".into(), "builddir".into()]
+                let build_dir = tp
+                    .filter(|t| *t != "meson.build" && !is_cpp_source_path(t))
+                    .unwrap_or("builddir");
+                vec!["compile".into(), "-C".into(), build_dir.to_string()]
             } else {
                 args
             };
@@ -523,43 +569,37 @@ fn build_cpp_runner_cmd(
                 out.extend(args);
                 return (explicit.to_string(), out);
             }
-            // If `target_path` is a built CMake/Meson target name (not a source file),
-            // locate the compiled executable inside common build directories or build + run it.
-            let is_source = tp.is_some_and(|p| {
-                let l = p.to_ascii_lowercase();
-                l.ends_with(".c")
-                    || l.ends_with(".cpp")
-                    || l.ends_with(".cc")
-                    || l.ends_with(".cxx")
-                    || l.ends_with(".c++")
-            });
+            let is_source = tp.is_some_and(is_cpp_source_path);
             if let Some(target_name) = tp.filter(|_| !is_source) {
                 if target_kind == IdeTargetKind::Local {
+                    // BUG-12: For CMake targets, always run incremental `cmake --build` before
+                    // executing so source edits never silently run a stale binary. Only run an
+                    // existing standalone binary directly when no CMake project owns it or the
+                    // user specified an explicit binary path.
+                    let is_explicit_path =
+                        target_name.contains('/') && is_executable_file(Path::new(target_name));
+                    if !is_explicit_path && Path::new(cwd).join("CMakeLists.txt").is_file() {
+                        let build_dir = find_cpp_build_dir(cwd).unwrap_or_else(|| "build".into());
+                        return build_cmake_target_exec_cmd(&build_dir, target_name, args);
+                    }
                     if let Some(exe) = find_built_cpp_executable(cwd, target_name) {
                         return (exe, args);
-                    }
-                    // Build with CMake then run if CMakeLists.txt is present.
-                    if Path::new(cwd).join("CMakeLists.txt").is_file() {
-                        let build_dir = find_cpp_build_dir(cwd).unwrap_or_else(|| "build".into());
-                        let q_bd = shell_words::quote(&build_dir);
-                        let q_t = shell_words::quote(target_name);
-                        let script = format!(
-                            "if [ ! -f {q_bd}/CMakeCache.txt ]; then cmake -S . -B {q_bd} -DCMAKE_BUILD_TYPE=Debug -DCMAKE_EXPORT_COMPILE_COMMANDS=ON || exit $?; fi; \
-                             cmake --build {q_bd} --target {q_t} || exit $?; \
-                             if [ -x {q_bd}/{q_t} ]; then exec {q_bd}/{q_t} \"$@\"; \
-                             elif [ -x {q_bd}/Debug/{q_t} ]; then exec {q_bd}/Debug/{q_t} \"$@\"; \
-                             else found=$(find {q_bd} -maxdepth 3 -type f -name {q_t} -perm -111 2>/dev/null | head -n 1); \
-                             [ -n \"$found\" ] && exec \"$found\" \"$@\"; echo \"Built target '{target_name}' not found under {build_dir}\" >&2; exit 1; fi"
-                        );
-                        let mut sh_args = vec!["-c".into(), script, "otto-cpp-run".into()];
-                        sh_args.extend(args);
-                        return ("sh".into(), sh_args);
                     }
                 }
                 return (format!("./build/{target_name}"), args);
             }
-            // Compile and run a single C or C++ source file cleanly via a temp binary.
+            // BUG-10: Gutter Run beside `main()` inside a CMake project builds & runs the
+            // owning CMake target instead of compiling a single `.cpp` file standalone.
             let src = tp.unwrap_or("main.cpp");
+            if target_kind == IdeTargetKind::Local
+                && Path::new(cwd).join("CMakeLists.txt").is_file()
+            {
+                if let Some(cmake_target) = infer_cmake_target_for_source(cwd, src, false) {
+                    let build_dir = find_cpp_build_dir(cwd).unwrap_or_else(|| "build".into());
+                    return build_cmake_target_exec_cmd(&build_dir, &cmake_target, args);
+                }
+            }
+            // Compile and run a standalone C or C++ source file cleanly via a temp binary.
             let is_c = src.to_ascii_lowercase().ends_with(".c");
             let compiler = if is_c {
                 env_map
@@ -593,6 +633,89 @@ fn build_cpp_runner_cmd(
         }
         IdeRunnerKind::Unreal => build_unreal_runner_cmd(env_map, cmd_opt, args, build_flags),
         _ => (cmd_opt.unwrap_or("cmake").to_string(), args),
+    }
+}
+
+fn is_cpp_source_path(p: &str) -> bool {
+    let l = p.to_ascii_lowercase();
+    l.ends_with(".c")
+        || l.ends_with(".cpp")
+        || l.ends_with(".cc")
+        || l.ends_with(".cxx")
+        || l.ends_with(".c++")
+        || l.ends_with(".h")
+        || l.ends_with(".hpp")
+}
+
+fn build_cmake_target_exec_cmd(
+    build_dir: &str,
+    target_name: &str,
+    args: Vec<String>,
+) -> (String, Vec<String>) {
+    let q_bd = shell_words::quote(build_dir);
+    let q_t = shell_words::quote(target_name);
+    let script = format!(
+        "if [ ! -f {q_bd}/CMakeCache.txt ]; then cmake -S . -B {q_bd} -DCMAKE_BUILD_TYPE=Debug -DCMAKE_EXPORT_COMPILE_COMMANDS=ON || exit $?; fi; \
+         cmake --build {q_bd} --target {q_t} || exit $?; \
+         if [ -x {q_bd}/{q_t} ]; then exec {q_bd}/{q_t} \"$@\"; \
+         elif [ -x {q_bd}/Debug/{q_t} ]; then exec {q_bd}/Debug/{q_t} \"$@\"; \
+         elif [ -x {q_bd}/bin/{q_t} ]; then exec {q_bd}/bin/{q_t} \"$@\"; \
+         else found=$(find {q_bd} -maxdepth 3 -type f -name {q_t} -perm -111 2>/dev/null | head -n 1); \
+         [ -n \"$found\" ] && exec \"$found\" \"$@\"; echo \"Built target '{target_name}' not found under {build_dir}\" >&2; exit 1; fi"
+    );
+    let mut sh_args = vec!["-c".into(), script, "otto-cpp-run".into()];
+    sh_args.extend(args);
+    ("sh".into(), sh_args)
+}
+
+#[allow(clippy::disallowed_methods)]
+fn infer_cmake_target_for_source(cwd: &str, source_path: &str, want_test: bool) -> Option<String> {
+    let cmake_text = std::fs::read_to_string(Path::new(cwd).join("CMakeLists.txt")).ok()?;
+    let base = Path::new(source_path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    let re = regex::Regex::new(r"(?is)add_executable\s*\(\s*([A-Za-z0-9_.-]+)([^)]*)\)").ok()?;
+    let mut targets: Vec<(String, String)> = Vec::new();
+    for cap in re.captures_iter(&cmake_text) {
+        let name = cap[1].to_string();
+        let body = cap[2].to_string();
+        if !name.contains("${") {
+            targets.push((name, body));
+        }
+    }
+    if targets.is_empty() {
+        return None;
+    }
+    // 1. Exact source-file match inside `add_executable(target ... src.cpp ...)`
+    if !base.is_empty() {
+        if let Some((name, _)) = targets.iter().find(|(_, body)| body.contains(base)) {
+            return Some(name.clone());
+        }
+    }
+    // 2. For tests, prefer targets whose name contains "test" / "spec"
+    if want_test {
+        if let Some((name, _)) = targets.iter().find(|(n, _)| {
+            let l = n.to_ascii_lowercase();
+            l.contains("test") || l.contains("spec")
+        }) {
+            return Some(name.clone());
+        }
+        return None;
+    }
+    // 3. Only fall back to the first non-test executable if CMake globs sources or has a single target
+    let lower_cm = cmake_text.to_ascii_lowercase();
+    let uses_glob = lower_cm.contains("file(glob")
+        || lower_cm.contains("aux_source_directory")
+        || lower_cm.contains("add_subdirectory");
+    if uses_glob {
+        targets
+            .iter()
+            .find(|(n, _)| !n.to_ascii_lowercase().contains("test"))
+            .or_else(|| targets.first())
+            .map(|(n, _)| n.clone())
+    } else {
+        None
     }
 }
 
@@ -877,7 +1000,7 @@ fn build_dotnet_runner_cmd(
     }
 }
 
-pub(super) fn build_runner_command(
+pub(crate) fn build_runner_command(
     cfg: &IdeRunConfig,
     target_kind: IdeTargetKind,
     cwd: &str,

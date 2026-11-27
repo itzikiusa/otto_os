@@ -10,8 +10,8 @@ use tokio::process::Command;
 const REMOTE_INSTALL_TIMEOUT: Duration = Duration::from_secs(900);
 
 use crate::toolchains_catalog::{
-    clangd_zip_url, codelldb_vsix_url, jq_binary_url, kotlin_lsp_zip_url, netcoredbg_tarball_url,
-    rust_analyzer_gz_url, shfmt_binary_url, zls_tarball_url, CatalogSdkEntry, EcosystemKind,
+    clangd_download_url, codelldb_vsix_url, jq_binary_url, kotlin_lsp_zip_url,
+    netcoredbg_tarball_url, rust_analyzer_gz_url, shfmt_binary_url, CatalogSdkEntry, EcosystemKind,
     TargetPlatform, CSHARP_LS_TOOL, DEBUGPY_PKG, DLV_PKG, GOPLS_PKG, JAVA_DEBUG_JAR_NAME,
     JAVA_DEBUG_JAR_URL, JDTLS_TARBALL_URL, JS_DEBUG_TARBALL_URL, PYRIGHT_PKG,
 };
@@ -144,11 +144,22 @@ pub(super) async fn run_ssh_streaming<F: FnMut(String)>(
     Ok(installed)
 }
 
-pub(super) fn build_remote_install_script(
+#[cfg(test)]
+pub(crate) fn build_remote_install_script(
     eco: EcosystemKind,
     component: IdeInstallComponent,
     platform: TargetPlatform,
     sdk: Option<&CatalogSdkEntry>,
+) -> std::result::Result<String, String> {
+    build_remote_install_script_with_zls(eco, component, platform, sdk, None)
+}
+
+pub(super) fn build_remote_install_script_with_zls(
+    eco: EcosystemKind,
+    component: IdeInstallComponent,
+    platform: TargetPlatform,
+    sdk: Option<&CatalogSdkEntry>,
+    zls_release: Option<&crate::toolchains_catalog::ZlsReleaseAsset>,
 ) -> std::result::Result<String, String> {
     let mut s = String::from(
         "set -eu\nTC=\"$HOME/.otto/toolchains\"\nmkdir -p \"$TC/.downloads\"\nMAX_DL_BYTES=1073741824\nverify_sha256() {\n  file=\"$1\"; expected=\"$2\"\n  if [ -z \"$expected\" ]; then return 0; fi\n  if command -v sha256sum >/dev/null 2>&1; then\n    actual=$(sha256sum \"$file\" | awk '{print tolower($1)}')\n  elif command -v shasum >/dev/null 2>&1; then\n    actual=$(shasum -a 256 \"$file\" | awk '{print tolower($1)}')\n  elif command -v openssl >/dev/null 2>&1; then\n    actual=$(openssl dgst -sha256 \"$file\" | awk '{print tolower($NF)}')\n  else\n    rm -f \"$file\"\n    echo \"ERROR: no sha256sum/shasum/openssl found to verify checksum\" >&2\n    exit 1\n  fi\n  exp_lc=$(printf '%s' \"$expected\" | tr 'A-Z' 'a-z')\n  if [ \"$actual\" != \"$exp_lc\" ]; then\n    rm -f \"$file\"\n    echo \"SHA-256 checksum mismatch: expected $exp_lc, got $actual\" >&2\n    exit 1\n  fi\n}\ndownload_and_verify() {\n  url=\"$1\"; dest=\"$2\"; expected=\"${3:-}\"\n  curl --proto '=https' --tlsv1.2 --max-filesize \"$MAX_DL_BYTES\" -fsSL \"$url\" -o \"$dest\"\n  if [ -z \"$expected\" ]; then\n    cand=$(curl --proto '=https' --tlsv1.2 --max-filesize 4096 -fsSL \"${url}.sha256\" 2>/dev/null | awk '{print $1}' | head -n 1 || true)\n    case \"$cand\" in\n      [0-9a-fA-F]*) [ \"${#cand}\" -eq 64 ] && expected=\"$cand\" ;;\n    esac\n  fi\n  verify_sha256 \"$dest\" \"$expected\"\n}\nfor d in \"$TC\"/go/sdks/*/go/bin \"$TC\"/node/sdks/*/bin; do [ -d \"$d\" ] && PATH=\"$d:$PATH\"; done\nexport PATH=\"$TC/java/current/bin:$TC/go/current/bin:$TC/node/current/bin:$TC/rust/cargo/bin:$TC/python/bin:$PATH\"\n",
@@ -183,7 +194,7 @@ pub(super) fn build_remote_install_script(
             )),
             EcosystemKind::Go => s.push_str(&format!("DEST=\"$TC/go/sdks/{0}\"\nARCH=\"$TC/.downloads/go-{0}.tar.gz\"\nrm -rf \"$DEST\" && mkdir -p \"$DEST\"\ndownload_and_verify {u} \"$ARCH\" '{exp_sha}'\ntar -xzf \"$ARCH\" -C \"$DEST\"\nrm -f \"$ARCH\"\n\"$DEST/go/bin/go\" version\nln -sfn \"$DEST/go\" \"$TC/go/current\"\nexport PATH=\"$TC/go/current/bin:$PATH\"\necho \"INSTALLED_PATH:$DEST/go\"\n", entry.version)),
             EcosystemKind::Rust => s.push_str(&format!("INIT=\"$TC/.downloads/rustup-init\"\ndownload_and_verify {u} \"$INIT\" '{exp_sha}'\nchmod +x \"$INIT\"\nRUSTUP_HOME=\"$TC/rust/rustup\" CARGO_HOME=\"$TC/rust/cargo\" \"$INIT\" -y --no-modify-path --default-toolchain {v}\nrm -f \"$INIT\"\necho \"INSTALLED_PATH:$TC/rust/cargo\"\n")),
-            EcosystemKind::Zig => s.push_str(&format!("DEST=\"$TC/zig/sdks/{0}\"\nARCH=\"$TC/.downloads/zig-{0}.tar.xz\"\nrm -rf \"$DEST\" && mkdir -p \"$DEST\"\ndownload_and_verify {u} \"$ARCH\" '{exp_sha}'\ntar -xJf \"$ARCH\" --strip-components=1 -C \"$DEST\"\nrm -f \"$ARCH\"\n\"$DEST/zig\" version\nln -sfn \"$DEST\" \"$TC/zig/current\"\nexport PATH=\"$TC/zig/current:$PATH\"\necho \"INSTALLED_PATH:$DEST\"\n", entry.version)),
+            EcosystemKind::Zig => s.push_str(&format!("DEST=\"$TC/zig/sdks/{0}\"\nSTAGE=\"$TC/.downloads/zig-stage-{0}-$$\"\nARCH=\"$STAGE/zig.tar.xz\"\nrm -rf \"$STAGE\" && mkdir -p \"$STAGE/sdk\" \"$TC/zig/sdks\"\ndownload_and_verify {u} \"$ARCH\" '{exp_sha}'\ntar -xJf \"$ARCH\" --strip-components=1 -C \"$STAGE/sdk\"\nrm -f \"$ARCH\"\n\"$STAGE/sdk/zig\" version\nrm -rf \"$DEST\" && mv \"$STAGE/sdk\" \"$DEST\" && rm -rf \"$STAGE\"\nln -sfn \"$DEST\" \"$TC/zig/current\"\nexport PATH=\"$TC/zig/current:$PATH\"\necho \"INSTALLED_PATH:$DEST\"\n", entry.version)),
             EcosystemKind::Cpp => s.push_str(&format!("DEST=\"$TC/cpp/sdks/{0}\"\nARCH=\"$TC/.downloads/llvm-{0}.tar.xz\"\nrm -rf \"$DEST\" && mkdir -p \"$DEST\"\ndownload_and_verify {u} \"$ARCH\" '{exp_sha}'\ntar -xJf \"$ARCH\" --strip-components=1 -C \"$DEST\"\nrm -f \"$ARCH\"\n\"$DEST/bin/clang++\" --version\nln -sfn \"$DEST\" \"$TC/cpp/current\"\nexport PATH=\"$TC/cpp/current/bin:$PATH\"\necho \"INSTALLED_PATH:$DEST\"\n", entry.version)),
             EcosystemKind::Kotlin => s.push_str(&format!("DEST=\"$TC/kotlin/sdks/{0}\"\nARCH=\"$TC/.downloads/kotlin-compiler-{0}.zip\"\nrm -rf \"$DEST\" && mkdir -p \"$DEST\"\ndownload_and_verify {u} \"$ARCH\" '{exp_sha}'\nunzip -q -o \"$ARCH\" -d \"$DEST\"\nrm -f \"$ARCH\"\nKH=\"$DEST\"; [ -x \"$DEST/kotlinc/bin/kotlinc\" ] && KH=\"$DEST/kotlinc\"\nchmod +x \"$KH/bin/kotlinc\"\nln -sfn \"$KH\" \"$TC/kotlin/current\"\nexport PATH=\"$TC/kotlin/current/bin:$PATH\"\necho \"INSTALLED_PATH:$KH\"\n", entry.version)),
             EcosystemKind::Dotnet => s.push_str(&format!("DEST=\"$TC/dotnet/sdks/{0}\"\nARCH=\"$TC/.downloads/dotnet-sdk-{0}.tar.gz\"\nrm -rf \"$DEST\" && mkdir -p \"$DEST\"\ndownload_and_verify {u} \"$ARCH\" '{exp_sha}'\ntar -xzf \"$ARCH\" -C \"$DEST\"\nrm -f \"$ARCH\"\nDOTNET_ROOT=\"$DEST\" \"$DEST/dotnet\" --version\nln -sfn \"$DEST\" \"$TC/dotnet/current\"\nexport DOTNET_ROOT=\"$TC/dotnet/current\"\nexport PATH=\"$TC/dotnet/current:$PATH\"\necho \"INSTALLED_PATH:$DEST\"\n", entry.version)),
@@ -204,8 +215,27 @@ pub(super) fn build_remote_install_script(
             EcosystemKind::Java => s.push_str(&format!("mkdir -p \"$TC/java/lsp\"\nARCH=\"$TC/.downloads/jdtls.tar.gz\"\ndownload_and_verify '{JDTLS_TARBALL_URL}' \"$ARCH\"\ntar -xzf \"$ARCH\" -C \"$TC/java/lsp\" && rm -f \"$ARCH\" && chmod +x \"$TC/java/lsp/bin/jdtls\"\necho \"INSTALLED_PATH:$TC/java/lsp/bin/jdtls\"\n")),
             EcosystemKind::Go => s.push_str(&format!("export PATH=\"$TC/go/current/bin:$PATH\"\nmkdir -p \"$TC/go/bin\"\nGOBIN=\"$TC/go/bin\" GOPATH=\"$TC/go/gopath\" go install '{GOPLS_PKG}'\necho \"INSTALLED_PATH:$TC/go/bin/gopls\"\n")),
             EcosystemKind::Rust => s.push_str(&format!("mkdir -p \"$TC/rust/bin\"\nARCH=\"$TC/.downloads/rust-analyzer.gz\"\ndownload_and_verify '{}' \"$ARCH\"\ngzip -dc \"$ARCH\" > \"$TC/rust/bin/rust-analyzer\" && rm -f \"$ARCH\" && chmod +x \"$TC/rust/bin/rust-analyzer\"\necho \"INSTALLED_PATH:$TC/rust/bin/rust-analyzer\"\n", rust_analyzer_gz_url(platform))),
-            EcosystemKind::Zig => s.push_str(&format!("mkdir -p \"$TC/zig/bin\" \"$TC/.downloads/zls-extract\"\nARCH=\"$TC/.downloads/zls.tar.xz\"\ndownload_and_verify '{}' \"$ARCH\"\nrm -rf \"$TC/.downloads/zls-extract\" && mkdir -p \"$TC/.downloads/zls-extract\"\ntar -xJf \"$ARCH\" -C \"$TC/.downloads/zls-extract\" && rm -f \"$ARCH\"\nZLS_BIN=$(find \"$TC/.downloads/zls-extract\" -name zls -type f | head -n 1)\nmv \"$ZLS_BIN\" \"$TC/zig/bin/zls\" && chmod +x \"$TC/zig/bin/zls\" && rm -rf \"$TC/.downloads/zls-extract\"\necho \"INSTALLED_PATH:$TC/zig/bin/zls\"\n", zls_tarball_url(EcosystemKind::Zig.default_sdk_version(), platform))),
-            EcosystemKind::Cpp => s.push_str(&format!("mkdir -p \"$TC/cpp/bin\" \"$TC/.downloads/clangd-extract\"\nARCH=\"$TC/.downloads/clangd.zip\"\ndownload_and_verify '{}' \"$ARCH\"\nrm -rf \"$TC/.downloads/clangd-extract\" && mkdir -p \"$TC/.downloads/clangd-extract\"\nunzip -q -o \"$ARCH\" -d \"$TC/.downloads/clangd-extract\" && rm -f \"$ARCH\"\nCD_BIN=$(find \"$TC/.downloads/clangd-extract\" -name clangd -type f | head -n 1)\nmv \"$CD_BIN\" \"$TC/cpp/bin/clangd\" && chmod +x \"$TC/cpp/bin/clangd\" && rm -rf \"$TC/.downloads/clangd-extract\"\necho \"INSTALLED_PATH:$TC/cpp/bin/clangd\"\n", clangd_zip_url(EcosystemKind::Cpp.default_sdk_version(), platform))),
+            EcosystemKind::Zig => {
+                let rel = zls_release.ok_or_else(|| {
+                    "missing verified ZLS release metadata and SHA-256 digest for remote Zig LSP install".to_string()
+                })?;
+                let sha = rel.sha256.trim();
+                if sha.len() != 64 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return Err(format!("invalid ZLS SHA-256 digest '{sha}'"));
+                }
+                let sha_lc = sha.to_ascii_lowercase();
+                let minor_slot = super::discovery::zig_major_minor(&rel.version)
+                    .map(|(maj, min)| format!("{maj}.{min}"))
+                    .unwrap_or_else(|| rel.version.clone());
+                let zu = shell_words::quote(&rel.url);
+                s.push_str(&format!(
+                    "STAGE=\"$TC/.downloads/zls-stage-$$\"\nARCH=\"$STAGE/zls.tar.xz\"\nrm -rf \"$STAGE\" && mkdir -p \"$STAGE/extract\" \"$TC/zig/bin\" \"$TC/zig/zls/{minor_slot}\"\ndownload_and_verify {zu} \"$ARCH\" '{sha_lc}'\ntar -xJf \"$ARCH\" -C \"$STAGE/extract\" && rm -f \"$ARCH\"\nZLS_BIN=$(find \"$STAGE/extract\" -name zls -type f | head -n 1)\n[ -n \"$ZLS_BIN\" ] || {{ rm -rf \"$STAGE\"; echo \"ZLS archive missing zls binary\" >&2; exit 1; }}\nZLS_DEST=\"$TC/zig/zls/{minor_slot}/zls\"\nZLS_TMP=\"$TC/zig/zls/{minor_slot}/.zls.$$.tmp\"\nmv \"$ZLS_BIN\" \"$ZLS_TMP\" && chmod +x \"$ZLS_TMP\" && mv -f \"$ZLS_TMP\" \"$ZLS_DEST\"\nln -sfn \"$ZLS_DEST\" \"$TC/zig/bin/zls\"\nrm -rf \"$STAGE\"\necho \"INSTALLED_PATH:$ZLS_DEST\"\n"
+                ));
+            }
+            EcosystemKind::Cpp => {
+                let url = clangd_download_url(platform)?;
+                s.push_str(&format!("STAGE=\"$TC/.downloads/clangd-stage-$$\"\nARCH=\"$STAGE/clangd.zip\"\nrm -rf \"$STAGE\" && mkdir -p \"$STAGE/extract\" \"$TC/cpp/bin\"\ndownload_and_verify '{url}' \"$ARCH\"\nunzip -q -o \"$ARCH\" -d \"$STAGE/extract\" && rm -f \"$ARCH\"\nCD_BIN=$(find \"$STAGE/extract\" -path '*/bin/clangd' -type f | head -n 1)\n[ -n \"$CD_BIN\" ] || {{ rm -rf \"$STAGE\"; echo \"clangd archive missing bin/clangd\" >&2; exit 1; }}\nCD_ROOT=$(dirname \"$(dirname \"$CD_BIN\")\")\nrm -rf \"$TC/cpp/lsp\" && mv \"$CD_ROOT\" \"$TC/cpp/lsp\" && chmod +x \"$TC/cpp/lsp/bin/clangd\"\nln -sfn \"$TC/cpp/lsp/bin/clangd\" \"$TC/cpp/bin/clangd\" && rm -rf \"$STAGE\"\necho \"INSTALLED_PATH:$TC/cpp/bin/clangd\"\n"));
+            }
             EcosystemKind::Kotlin => s.push_str(&format!("rm -rf \"$TC/kotlin/lsp\" && mkdir -p \"$TC/kotlin/lsp\" \"$TC/kotlin/bin\"\nARCH=\"$TC/.downloads/kotlin-language-server.zip\"\ndownload_and_verify '{}' \"$ARCH\"\nunzip -q -o \"$ARCH\" -d \"$TC/kotlin/lsp\" && rm -f \"$ARCH\"\nKLS_BIN=\"$TC/kotlin/lsp/server/bin/kotlin-language-server\"\n[ -f \"$KLS_BIN\" ] || KLS_BIN=\"$TC/kotlin/lsp/bin/kotlin-language-server\"\nchmod +x \"$KLS_BIN\" && ln -sfn \"$KLS_BIN\" \"$TC/kotlin/bin/kotlin-language-server\"\necho \"INSTALLED_PATH:$KLS_BIN\"\n", kotlin_lsp_zip_url())),
             EcosystemKind::Dotnet => s.push_str(&format!("export PATH=\"$TC/dotnet/current:$HOME/.dotnet:$PATH\"\nmkdir -p \"$TC/dotnet/tools\"\ndotnet tool update --tool-path \"$TC/dotnet/tools\" '{CSHARP_LS_TOOL}' || dotnet tool install --tool-path \"$TC/dotnet/tools\" '{CSHARP_LS_TOOL}'\necho \"INSTALLED_PATH:$TC/dotnet/tools/{CSHARP_LS_TOOL}\"\n")),
             EcosystemKind::Node => s.push_str("export PATH=\"$TC/node/current/bin:$PATH\"\nmkdir -p \"$TC/node/lsp\"\nnpm install --prefix \"$TC/node/lsp\" typescript typescript-language-server\necho \"INSTALLED_PATH:$TC/node/lsp/node_modules/.bin/typescript-language-server\"\n"),
@@ -224,7 +254,7 @@ pub(super) fn build_remote_install_script(
         match eco {
             EcosystemKind::Java | EcosystemKind::Kotlin => s.push_str(&format!("mkdir -p \"$TC/java/dap\"\nJAR_TMP=\"$TC/.downloads/{JAVA_DEBUG_JAR_NAME}\"\ndownload_and_verify '{JAVA_DEBUG_JAR_URL}' \"$JAR_TMP\"\nmv \"$JAR_TMP\" \"$TC/java/dap/{JAVA_DEBUG_JAR_NAME}\"\necho \"INSTALLED_PATH:$TC/java/dap/{JAVA_DEBUG_JAR_NAME}\"\n")),
             EcosystemKind::Go => s.push_str(&format!("export PATH=\"$TC/go/current/bin:$PATH\"\nmkdir -p \"$TC/go/bin\"\nGOBIN=\"$TC/go/bin\" GOPATH=\"$TC/go/gopath\" go install '{DLV_PKG}'\necho \"INSTALLED_PATH:$TC/go/bin/dlv\"\n")),
-            EcosystemKind::Rust | EcosystemKind::Zig | EcosystemKind::Cpp => s.push_str(&format!("rm -rf \"$TC/rust/dap\" && mkdir -p \"$TC/rust/dap\"\nVSIX=\"$TC/.downloads/codelldb.vsix\"\ndownload_and_verify '{}' \"$VSIX\"\nunzip -q -o \"$VSIX\" -d \"$TC/rust/dap\" && rm -f \"$VSIX\" && chmod +x \"$TC/rust/dap/extension/adapter/codelldb\"\nln -sfn \"$TC/rust/dap/extension\" \"$TC/rust/codelldb\"\necho \"INSTALLED_PATH:$TC/rust/dap/extension/adapter/codelldb\"\n", codelldb_vsix_url(platform))),
+            EcosystemKind::Rust | EcosystemKind::Zig | EcosystemKind::Cpp => s.push_str(&format!("STAGE=\"$TC/.downloads/codelldb-stage-$$\"\nVSIX=\"$STAGE/codelldb.vsix\"\nrm -rf \"$STAGE\" && mkdir -p \"$STAGE/extract\" \"$TC/rust\"\ndownload_and_verify '{}' \"$VSIX\"\nunzip -q -o \"$VSIX\" -d \"$STAGE/extract\" && rm -f \"$VSIX\"\nchmod +x \"$STAGE/extract/extension/adapter/codelldb\"\nrm -rf \"$TC/rust/dap\" && mv \"$STAGE/extract\" \"$TC/rust/dap\" && rm -rf \"$STAGE\"\nln -sfn \"$TC/rust/dap/extension\" \"$TC/rust/codelldb\"\necho \"INSTALLED_PATH:$TC/rust/dap/extension/adapter/codelldb\"\n", codelldb_vsix_url(platform))),
             EcosystemKind::Dotnet => s.push_str(&format!("rm -rf \"$TC/dotnet/dap\" && mkdir -p \"$TC/dotnet/dap\"\nARCH=\"$TC/.downloads/netcoredbg.tar.gz\"\ndownload_and_verify '{}' \"$ARCH\"\ntar -xzf \"$ARCH\" -C \"$TC/dotnet/dap\" && rm -f \"$ARCH\"\nNC_BIN=$(find \"$TC/dotnet/dap\" -name netcoredbg -type f | head -n 1)\nchmod +x \"$NC_BIN\"\nln -sfn \"$(dirname \"$NC_BIN\")\" \"$TC/dotnet/netcoredbg\"\necho \"INSTALLED_PATH:$NC_BIN\"\n", netcoredbg_tarball_url(platform))),
             EcosystemKind::Node => s.push_str(&format!("rm -rf \"$TC/node/dap\" && mkdir -p \"$TC/node/dap\"\nARCH=\"$TC/.downloads/js-debug.tar.gz\"\ndownload_and_verify '{JS_DEBUG_TARBALL_URL}' \"$ARCH\"\ntar -xzf \"$ARCH\" -C \"$TC/node/dap\" && rm -f \"$ARCH\"\nln -sfn \"$TC/node/dap/js-debug\" \"$TC/node/js-debug\"\necho \"INSTALLED_PATH:$TC/node/dap/js-debug/src/dapDebugServer.js\"\n")),
             EcosystemKind::Python => s.push_str(&format!("\"$TC/python/bin/uv\" venv --clear \"$TC/python/dap\" && \"$TC/python/bin/uv\" pip install --python \"$TC/python/dap/bin/python\" '{DEBUGPY_PKG}'\necho \"INSTALLED_PATH:$TC/python/dap/bin/python\"\n")),
@@ -426,5 +456,69 @@ mod tests {
                 "remote {eco:?}/{comp:?} script must bound download size:\n{script}"
             );
         }
+    }
+
+    #[test]
+    fn remote_zig_sdk_stages_before_replacing_existing_and_zls_requires_verified_digest() {
+        let platform = TargetPlatform::from_uname("Linux", "x86_64").unwrap();
+        let zig_sdk = CatalogSdkEntry {
+            version: "0.13.0".into(),
+            label: "Zig 0.13.0".into(),
+            lts: false,
+            os: "linux".into(),
+            arch: "x86_64".into(),
+            url: "https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz".into(),
+            size_hint: None,
+            sha256: Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into()),
+        };
+        // DATA-3: download + verify + version check must happen BEFORE removing $DEST.
+        let sdk_script = build_remote_install_script_with_zls(
+            EcosystemKind::Zig,
+            IdeInstallComponent::Sdk,
+            platform,
+            Some(&zig_sdk),
+            None,
+        )
+        .unwrap();
+        let dl_pos = sdk_script.find("download_and_verify").expect("download");
+        let ver_pos = sdk_script
+            .find("\"$STAGE/sdk/zig\" version")
+            .expect("verify");
+        let rm_dest_pos = sdk_script.find("rm -rf \"$DEST\"").expect("swap");
+        assert!(
+            dl_pos < rm_dest_pos && ver_pos < rm_dest_pos,
+            "{sdk_script}"
+        );
+
+        // BUG-2 + SEC-1: Zig LSP remote install must fail without verified ZlsReleaseAsset.
+        assert!(build_remote_install_script_with_zls(
+            EcosystemKind::Zig,
+            IdeInstallComponent::Lsp,
+            platform,
+            None,
+            None,
+        )
+        .is_err());
+
+        // BUG-2: Selected Zig 0.13 ZLS asset + required SHA-256 digest are embedded and version-slotted.
+        let zls_013 = crate::toolchains_catalog::ZlsReleaseAsset {
+            version: "0.13.0".into(),
+            url: "https://builds.zigtools.org/zls-linux-x86_64-0.13.0.tar.xz".into(),
+            sha256: "ec4c1b45caf88e2bcb9ebb16c670603cc596e4f621b96184dfbe837b39cd8410".into(),
+        };
+        let lsp_script = build_remote_install_script_with_zls(
+            EcosystemKind::Zig,
+            IdeInstallComponent::Lsp,
+            platform,
+            None,
+            Some(&zls_013),
+        )
+        .unwrap();
+        assert!(lsp_script.contains("zls-linux-x86_64-0.13.0.tar.xz"));
+        assert!(
+            lsp_script.contains("ec4c1b45caf88e2bcb9ebb16c670603cc596e4f621b96184dfbe837b39cd8410")
+        );
+        assert!(lsp_script.contains("$TC/zig/zls/0.13/zls"));
+        assert!(!lsp_script.contains("0.14.0"));
     }
 }

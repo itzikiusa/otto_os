@@ -190,6 +190,78 @@ pub async fn plan_lsp_install_compound(
     Ok(unique.join("; echo; "))
 }
 
+/// Project environment key opting a Zig project into automatic ZLS startup
+/// (ZLS evaluates `build.zig` during source discovery).
+pub const TRUST_ZIG_LSP_ENV: &str = "OTTO_IDE_TRUST_ZIG_BUILD";
+/// Project environment key opting a Kotlin project into automatic `kotlin-language-server`
+/// startup (KLS invokes Gradle/Maven build scripts during workspace import).
+pub const TRUST_KOTLIN_LSP_ENV: &str = "OTTO_IDE_TRUST_KOTLIN_LSP";
+/// Shared project environment key opting a project into trusted build-tool execution.
+pub const TRUST_PROJECT_EXECUTION_ENV: &str = "OTTO_IDE_TRUST_PROJECT_EXECUTION";
+
+fn lsp_execution_trusted_for_key(
+    envs: &crate::environments::EnvironmentManager,
+    root: &str,
+    ssh_conn_id: Option<&str>,
+    lang_key: &str,
+) -> bool {
+    let trimmed = root.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return false;
+    }
+    let has_opt_in = |env: &crate::types::IdeProjectEnvironment| {
+        env.env_vars.iter().any(|v| {
+            !v.secret
+                && (v.key == lang_key || v.key == TRUST_PROJECT_EXECUTION_ENV)
+                && v.value.as_deref().is_some_and(|val| val.trim() == "1")
+        })
+    };
+    let mut cur = Path::new(trimmed);
+    for _ in 0..8 {
+        let cur_s = cur.to_string_lossy();
+        let lookup_key = match ssh_conn_id {
+            Some(cid) => format!("ssh:{cid}:{cur_s}"),
+            None => cur_s.into_owned(),
+        };
+        if envs
+            .cached_project_env(&lookup_key)
+            .is_some_and(|env| has_opt_in(&env))
+        {
+            return true;
+        }
+        let Some(parent) = cur.parent() else {
+            break;
+        };
+        if parent == cur || parent == Path::new("/") {
+            break;
+        }
+        cur = parent;
+    }
+    false
+}
+
+/// Returns `true` only when the project (or an ancestor workspace root) explicitly
+/// opted in to Zig build execution via a non-secret `OTTO_IDE_TRUST_ZIG_BUILD=1`
+/// or `OTTO_IDE_TRUST_PROJECT_EXECUTION=1` entry in `IdeProjectEnvironment::env_vars`.
+pub fn zig_lsp_execution_trusted(
+    envs: &crate::environments::EnvironmentManager,
+    root: &str,
+    ssh_conn_id: Option<&str>,
+) -> bool {
+    lsp_execution_trusted_for_key(envs, root, ssh_conn_id, TRUST_ZIG_LSP_ENV)
+}
+
+/// Returns `true` only when the project (or an ancestor workspace root) explicitly
+/// opted in to Kotlin LSP build execution via a non-secret `OTTO_IDE_TRUST_KOTLIN_LSP=1`
+/// or `OTTO_IDE_TRUST_PROJECT_EXECUTION=1` entry in `IdeProjectEnvironment::env_vars`.
+pub fn kotlin_lsp_execution_trusted(
+    envs: &crate::environments::EnvironmentManager,
+    root: &str,
+    ssh_conn_id: Option<&str>,
+) -> bool {
+    lsp_execution_trusted_for_key(envs, root, ssh_conn_id, TRUST_KOTLIN_LSP_ENV)
+}
+
 /// Validate query parameters, authorize SSH or local workspace roots, sync
 /// effective Go build tags for `go`, and prepare the [`PoolKey`] + [`SpawnLaunch`].
 pub async fn prepare_lsp_ws_session<C: IdeCtx>(
@@ -265,6 +337,28 @@ pub async fn prepare_lsp_ws_session<C: IdeCtx>(
         };
         let trimmed = root.trim_end_matches('/');
         let norm_root = if trimmed.is_empty() { "/" } else { trimmed }.to_string();
+        if remote.lang == "zig"
+            && !zig_lsp_execution_trusted(&ide.environments, &norm_root, Some(&conn_id))
+        {
+            return Err(LspWsError {
+                status: StatusCode::FORBIDDEN,
+                code: "zig_lsp_requires_trust",
+                message: format!(
+                    "ZLS evaluates build.zig during discovery; set {TRUST_ZIG_LSP_ENV}=1 in project environment settings to start ZLS"
+                ),
+            });
+        }
+        if remote.lang == "kotlin"
+            && !kotlin_lsp_execution_trusted(&ide.environments, &norm_root, Some(&conn_id))
+        {
+            return Err(LspWsError {
+                status: StatusCode::FORBIDDEN,
+                code: "kotlin_lsp_requires_trust",
+                message: format!(
+                    "kotlin-language-server runs Gradle/Maven build scripts during workspace import; set {TRUST_KOTLIN_LSP_ENV}=1 (or {TRUST_PROJECT_EXECUTION_ENV}=1) in project environment settings to start it"
+                ),
+            });
+        }
         return Ok(PreparedLspSession {
             key: PoolKey {
                 owner: user.id.to_string(),
@@ -336,6 +430,60 @@ pub async fn prepare_lsp_ws_session<C: IdeCtx>(
             resolved.command
         )));
     }
+    if resolved.lang == "zig" && !zig_lsp_execution_trusted(&ide.environments, &resolved_root, None)
+    {
+        return Err(LspWsError {
+            status: StatusCode::FORBIDDEN,
+            code: "zig_lsp_requires_trust",
+            message: format!(
+                "ZLS evaluates build.zig during discovery; set {TRUST_ZIG_LSP_ENV}=1 in project environment settings to start ZLS"
+            ),
+        });
+    }
+    if resolved.lang == "kotlin"
+        && !kotlin_lsp_execution_trusted(&ide.environments, &resolved_root, None)
+    {
+        return Err(LspWsError {
+            status: StatusCode::FORBIDDEN,
+            code: "kotlin_lsp_requires_trust",
+            message: format!(
+                "kotlin-language-server runs Gradle/Maven build scripts during workspace import; set {TRUST_KOTLIN_LSP_ENV}=1 (or {TRUST_PROJECT_EXECUTION_ENV}=1) in project environment settings to start it"
+            ),
+        });
+    }
+
+    let mut launch_cmd = resolved.command;
+    if resolved.lang == "zig" {
+        if let Some(zig_home) = ide
+            .environments
+            .cached_project_env(&resolved_root)
+            .and_then(|e| e.zig_home)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
+            let data_dir = ide.data_dir.clone();
+            if let Ok(Some(matched_zls)) = tokio::task::spawn_blocking(move || {
+                let zig_ver = crate::toolchains::discovery::zig_bin_in_home(Path::new(&zig_home))
+                    .and_then(|b| crate::toolchains::discovery::read_zig_bin_version(&b));
+                let mut tc_roots = vec![data_dir.join("toolchains")];
+                if !otto_core::e2e::isolated() {
+                    if let Some(dot_otto) = dirs::home_dir().map(|h| h.join(".otto/toolchains")) {
+                        if !tc_roots.contains(&dot_otto) {
+                            tc_roots.push(dot_otto);
+                        }
+                    }
+                }
+                crate::toolchains::discovery::resolve_managed_zls_for_zig_version(
+                    &tc_roots,
+                    zig_ver.as_deref(),
+                )
+            })
+            .await
+            {
+                launch_cmd = matched_zls.to_string_lossy().into_owned();
+            }
+        }
+    }
 
     let canon_go_tags = if resolved.lang == "go" {
         let eff_tags = ide
@@ -356,7 +504,7 @@ pub async fn prepare_lsp_ws_session<C: IdeCtx>(
             ssh: None,
             go_build_tags: canon_go_tags,
         },
-        launch: SpawnLaunch::primary(resolved.command, resolved.args),
+        launch: SpawnLaunch::primary(launch_cmd, resolved.args),
         file_hint,
     })
 }
@@ -555,5 +703,59 @@ mod root_tests {
         let d = tempfile::tempdir().unwrap();
         let plain = std::fs::canonicalize(d.path()).unwrap();
         assert!(secret_root_denial(&plain).is_none());
+    }
+
+    #[test]
+    fn zig_lsp_requires_explicit_project_execution_trust() {
+        let tmp = tempfile::tempdir().unwrap();
+        let envs = crate::environments::EnvironmentManager::new(tmp.path().to_path_buf());
+        let root = tmp.path().join("zig-repo");
+        let nested = root.join("sub-pkg");
+        let root_s = root.to_string_lossy().into_owned();
+        let nested_s = nested.to_string_lossy().into_owned();
+
+        // Untrusted by default (neither root nor nested sub-package may auto-start ZLS).
+        assert!(!zig_lsp_execution_trusted(&envs, &root_s, None));
+        assert!(!zig_lsp_execution_trusted(&envs, &nested_s, None));
+
+        // Secret or value != "1" must not enable execution trust.
+        envs.seed_snapshot(
+            &root_s,
+            crate::types::IdeProjectEnvironment {
+                env_vars: vec![
+                    crate::types::IdeEnvVarEntry {
+                        key: TRUST_ZIG_LSP_ENV.into(),
+                        value: Some("1".into()),
+                        secret: true,
+                        has_secret: true,
+                    },
+                    crate::types::IdeEnvVarEntry {
+                        key: TRUST_PROJECT_EXECUTION_ENV.into(),
+                        value: Some("0".into()),
+                        secret: false,
+                        has_secret: false,
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+        assert!(!zig_lsp_execution_trusted(&envs, &root_s, None));
+
+        // Explicit non-secret OTTO_IDE_TRUST_ZIG_BUILD=1 approves root and nested sub-packages.
+        envs.seed_snapshot(
+            &root_s,
+            crate::types::IdeProjectEnvironment {
+                env_vars: vec![crate::types::IdeEnvVarEntry {
+                    key: TRUST_ZIG_LSP_ENV.into(),
+                    value: Some("1".into()),
+                    secret: false,
+                    has_secret: false,
+                }],
+                ..Default::default()
+            },
+        );
+        assert!(zig_lsp_execution_trusted(&envs, &root_s, None));
+        assert!(zig_lsp_execution_trusted(&envs, &nested_s, None));
+        assert!(!zig_lsp_execution_trusted(&envs, &root_s, Some("ssh-1")));
     }
 }

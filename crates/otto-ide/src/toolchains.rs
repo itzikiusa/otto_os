@@ -9,11 +9,11 @@
 mod detected;
 pub(crate) mod discovery;
 mod installer;
-mod installer_remote;
-mod installer_tools;
+pub(crate) mod installer_remote;
+pub(crate) mod installer_tools;
 mod jobs;
 mod local_registry;
-mod remote_probe;
+pub(crate) mod remote_probe;
 
 use self::detected::scan_detected_sdks;
 use self::discovery::{
@@ -435,8 +435,25 @@ impl ToolchainManager {
                         mark_go_tool_outdated(&mut dap_status, goroot.as_deref());
                     } else if eco == EcosystemKind::Zig {
                         let active_zig = installed.iter().find(|s| s.active);
-                        if !lsp_status.available {
-                            if let Some(zh) = active_zig.map(|s| PathBuf::from(&s.path)) {
+                        let active_path = active_zig.map(|s| PathBuf::from(&s.path));
+                        let active_ver = active_zig
+                            .map(|s| s.version.clone())
+                            .filter(|v| discovery::zig_major_minor(v).is_some())
+                            .or_else(|| {
+                                active_path
+                                    .as_deref()
+                                    .and_then(discovery::zig_bin_in_home)
+                                    .and_then(|b| discovery::read_zig_bin_version(&b))
+                            });
+                        if let Some(versioned_zls) = discovery::resolve_managed_zls_for_zig_version(
+                            &roots,
+                            active_ver.as_deref(),
+                        ) {
+                            lsp_status.available = true;
+                            lsp_status.path = Some(versioned_zls.to_string_lossy().into_owned());
+                            lsp_status.outdated = None;
+                        } else if !lsp_status.available {
+                            if let Some(zh) = active_path.as_deref() {
                                 for cand in [zh.join("zls"), zh.join("bin/zls")] {
                                     if is_executable_file(&cand) {
                                         lsp_status.available = true;
@@ -446,9 +463,11 @@ impl ToolchainManager {
                                 }
                             }
                         }
-                        let active_path = active_zig.map(|s| PathBuf::from(&s.path));
-                        let active_ver = active_zig.map(|s| s.version.as_str());
-                        mark_zig_tool_outdated(&mut lsp_status, active_path.as_deref(), active_ver);
+                        mark_zig_tool_outdated(
+                            &mut lsp_status,
+                            active_path.as_deref(),
+                            active_ver.as_deref(),
+                        );
                     }
                     let downloadable = catalogs
                         .get(&eco)
