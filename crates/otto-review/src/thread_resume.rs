@@ -46,12 +46,21 @@ pub async fn resume_reviewers(c: ResumeCtx) -> otto_core::Result<Vec<Vec<ReviewF
     let id: otto_core::Id = c.review_id.clone();
     let rows = c.reviews.get_review(&id).await?.agents;
     let n = rows.len().saturating_sub(1);
-    if let Some(sid) = rows
-        .last()
-        .filter(|s| n > 0 && s.thread)
-        .and_then(|s| s.session_id.clone())
-    {
-        c.threads.close(&sid).await;
+    let any_reviewer_unfinished = rows
+        .iter()
+        .take(n)
+        .any(|r| matches!(r.status.as_str(), "pending" | "running" | "waiting"));
+    // Close a stale summarizer thread only when reviewers still need to run;
+    // when every reviewer already finished, keep the held summarizer open so
+    // the caller can await it in its holder.
+    if any_reviewer_unfinished {
+        if let Some(sid) = rows
+            .last()
+            .filter(|s| n > 0 && s.thread)
+            .and_then(|s| s.session_id.clone())
+        {
+            c.threads.close(&sid).await;
+        }
     }
     let states: SharedStates = Arc::new(tokio::sync::Mutex::new(rows.clone()));
     let mut set = tokio::task::JoinSet::new();
@@ -110,6 +119,17 @@ async fn resume_row(
     if let (true, Some(thread)) = (row.thread, row.session_id.clone()) {
         let mut meta = review_session_meta(&c.review_id, i, !row.lens_slugs.is_empty());
         c.threads.meta_into(&mut meta);
+        let findings = findings_path(&c.review_id, i);
+        // Supply the persisted reviewer prompt so `StepRunner::resume` can send
+        // it if the restart landed after `create` and before turn 1 went out.
+        let prompt = c
+            .reviews
+            .get_agent_prompt(&c.review_id, i)
+            .await
+            .ok()
+            .flatten()
+            .map(|p| crate::session::typed_reviewer_prompt(&p, &findings.to_string_lossy(), None))
+            .unwrap_or_default();
         let turn = StepTurn {
             user_id: c.user.id.clone(),
             workspace_id: c.ws.id.clone(),
@@ -119,10 +139,9 @@ async fn resume_row(
             cwd: c.cwd.clone().into(),
             title: row.name.clone(),
             meta,
-            // A held thread is awaited; an unheld one is told Otto restarted.
-            prompt: String::new(),
+            prompt,
             continue_thread: None,
-            handoff: Some(findings_path(&c.review_id, i)),
+            handoff: Some(findings),
             read_only: true,
             timeout: None,
             no_progress: Some(c.grace),

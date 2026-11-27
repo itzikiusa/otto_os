@@ -5,6 +5,22 @@
 
 use super::*;
 
+pub(super) fn restore_summarizer_row(
+    cfg: &mut ReviewConfig,
+    agents: &[otto_core::domain::ReviewAgentState],
+) {
+    let Some(sum) = agents.last() else { return };
+    if !sum.provider.trim().is_empty() {
+        cfg.summarizer.provider = sum.provider.clone();
+    }
+    if !sum.model.trim().is_empty() {
+        cfg.summarizer.model = sum.model.clone();
+    }
+    if !sum.effort.trim().is_empty() {
+        cfg.summarizer.effort = sum.effort.clone();
+    }
+}
+
 /// `live`: the review's cancel flag, registered by boot before this task
 /// runs, so a resumed workflow step sees a live review at once (CR1-028).
 pub(crate) async fn resume_held_review(
@@ -45,7 +61,25 @@ pub(crate) async fn resume_held_review(
         let ws = ctx.workspaces.get(&repo.workspace_id).await?;
         let user = otto_review::restart::review_user(&otto_state::UsersRepo::new(ctx.pool.clone()))
             .await?;
-        let cfg = load_review_config_for_repo(&ctx, &repo.id).await;
+        let mut cfg = load_review_config_for_repo(&ctx, &repo.id).await;
+        restore_summarizer_row(&mut cfg, &review.agents);
+        for sid in review
+            .agents
+            .iter()
+            .filter(|a| a.thread)
+            .filter_map(|a| a.session_id.as_deref())
+        {
+            if let Ok(Some(meta)) = ctx.agent_runtime.get(&sid.into()).await.map(|s| s.meta) {
+                let kept: serde_json::Map<_, _> = ["run_id", "node_id", "work"]
+                    .into_iter()
+                    .filter_map(|k| meta.get(k).map(|v| (k.into(), v.clone())))
+                    .collect();
+                if !kept.is_empty() {
+                    cfg.thread_meta = serde_json::Value::Object(kept);
+                    break;
+                }
+            }
+        }
         let Some(threads) = review_threads(&ctx, Some(&cfg)).await else {
             // Switched to the terminal runner meanwhile: the held agents stop.
             for agent in &review.agents {

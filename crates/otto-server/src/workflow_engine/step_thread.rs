@@ -72,6 +72,26 @@ pub(super) fn mark_resume(run_id: &Id, node_id: &str, t: &StepThread) {
     }
 }
 
+pub(super) fn peek_resume(run_id: &Id, node_id: &str) -> Option<(Id, u32)> {
+    resumes()
+        .lock()
+        .ok()
+        .and_then(|m| m.get(&(run_id.clone(), node_id.to_string())).cloned())
+}
+
+pub(super) fn take_resume(run_id: &Id, node_id: &str) -> Option<(Id, u32)> {
+    resumes()
+        .lock()
+        .ok()
+        .and_then(|mut m| m.remove(&(run_id.clone(), node_id.to_string())))
+}
+
+pub(super) fn restore_resume(run_id: &Id, node_id: &str, entry: (Id, u32)) {
+    if let Ok(mut m) = resumes().lock() {
+        m.insert((run_id.clone(), node_id.to_string()), entry);
+    }
+}
+
 /// The run ended: its next execution latches the runner again.
 pub(super) fn forget(run_id: &Id) {
     if let Ok(mut m) = latched().lock() {

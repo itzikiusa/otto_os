@@ -515,9 +515,9 @@ pub(crate) async fn rerun_summarizer(
             // user's checkout holds other line text and would re-key nothing.
             branch_retry_checkout(&ctx_bg, &repo, &review_id_bg, "-sum").await
         };
-        // The summarizer follows the repo's EFFECTIVE config (per-repo binding
-        // resolution included), same as a fresh run would.
-        let cfg = load_review_config_for_repo(&ctx_bg, &repo_id).await;
+        // Preserve any per-run provider/model/effort override recorded on the summarizer row.
+        let mut cfg = load_review_config_for_repo(&ctx_bg, &repo_id).await;
+        super::resume::restore_summarizer_row(&mut cfg, &settled.agents);
         // A re-run replaces the previous draft comments; posted/approved/
         // declined ones are user decisions and stay untouched.
         match ctx_bg

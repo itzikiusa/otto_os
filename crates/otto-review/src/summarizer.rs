@@ -12,7 +12,8 @@ pub const DEADLINE_EXCEEDED: &str = "summarizer absolute deadline exceeded";
 pub use crate::handoff::PASTE_INLINE_MAX;
 
 pub struct Attempt {
-    dir: tempfile::TempDir,
+    dir: Option<tempfile::TempDir>,
+    path: PathBuf,
     pub provider: String,
     pub meta: serde_json::Value,
 }
@@ -23,6 +24,7 @@ impl Attempt {
             .prefix("otto-summary-")
             .tempdir()
             .map_err(|e| e.to_string())?;
+        let path = dir.path().to_path_buf();
         let provider = if provider.trim().is_empty() {
             "claude"
         } else {
@@ -39,19 +41,35 @@ impl Attempt {
             meta["model"] = model.trim().into();
         }
         Ok(Self {
-            dir,
+            dir: Some(dir),
+            path,
             provider: provider.into(),
             meta,
         })
     }
+    /// Disarm `TempDir` drop-cleanup so a daemon restart does not delete the
+    /// directory while a detached held summarizer CLI is still writing to it.
+    /// Call [`Self::cleanup`] once the attempt finishes in this process.
+    pub fn persist_for_restart(&mut self) {
+        if let Some(dir) = self.dir.take() {
+            let _ = dir.keep();
+        }
+    }
+    /// Remove a directory previously kept via [`Self::persist_for_restart`].
+    #[allow(clippy::disallowed_methods)]
+    pub fn cleanup(&self) {
+        if self.dir.is_none() {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
     pub fn result_path(&self) -> PathBuf {
-        self.dir.path().join("result.json")
+        self.path.join("result.json")
     }
     pub fn temporary_path(&self) -> PathBuf {
-        self.dir.path().join("result.json.tmp")
+        self.path.join("result.json.tmp")
     }
     pub fn instructions_path(&self) -> PathBuf {
-        self.dir.path().join("instructions.md")
+        self.path.join("instructions.md")
     }
     /// The text typed into the summarizer's terminal. A large brief (every raw
     /// claim plus the run's context — 100+ KB on a big PR) is written to
@@ -200,6 +218,23 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn a_persisted_attempt_keeps_its_dir_across_drop_until_cleanup() {
+        let mut attempt = Attempt::new("claude", "").unwrap();
+        let path = attempt.result_path();
+        let dir = path.parent().unwrap().to_path_buf();
+        attempt.persist_for_restart();
+        std::fs::write(&path, "[]").unwrap();
+        let cleanup_dir = dir.clone();
+        drop(attempt);
+        assert!(
+            path.exists(),
+            "dropping a persisted Attempt must keep its dir for restart"
+        );
+        let _ = std::fs::remove_dir_all(cleanup_dir);
+    }
 
     #[tokio::test]
     async fn a_cancel_is_heard_on_this_reviews_change_and_on_the_flag() {

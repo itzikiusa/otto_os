@@ -58,10 +58,14 @@ pub(crate) async fn summarize_and_persist(
         .len()
         .checked_sub(1)
         .ok_or_else(|| Error::Invalid("review has no summarizer row".into()))?;
-    mark_summarizer_starting(&mut agent_states[summarizer_idx], summarizer_cfg);
-    ctx.reviews_store
-        .set_agent_at(review_id, summarizer_idx, &agent_states[summarizer_idx])
-        .await?;
+    let held_summarizer =
+        held_summarizer_thread(ctx, threads.is_some(), &agent_states[summarizer_idx]).await;
+    if held_summarizer.is_none() {
+        mark_summarizer_starting(&mut agent_states[summarizer_idx], summarizer_cfg);
+        ctx.reviews_store
+            .set_agent_at(review_id, summarizer_idx, &agent_states[summarizer_idx])
+            .await?;
+    }
 
     // A finding with an empty body carries nothing reviewable — feeding husks
     // to the summarizer just teaches it to answer `[]`. Drop them up front.
@@ -127,7 +131,23 @@ pub(crate) async fn summarize_and_persist(
     let summary = otto_agent_run::fanout::summarize(
         &batches_in,
         |_| async move {
-            let mut result = turn.run(&mut *states).await;
+            let mut result = if let Some((sid, path)) = held_summarizer {
+                match turn.resume_held(&mut *states, &sid, &path).await {
+                    Ok(comments) => return Ok(comments),
+                    Err(e) if flag_tripped() || Instant::now() >= turn.deadline => return Err(e),
+                    Err(e) => {
+                        tracing::warn!(review = %review_id, "held summarizer failed ({e}); starting fresh");
+                        mark_summarizer_starting(&mut states[summarizer_idx], summarizer_cfg);
+                        let _ = ctx
+                            .reviews_store
+                            .set_agent_at(review_id, summarizer_idx, &states[summarizer_idx])
+                            .await;
+                        turn.run(&mut *states).await
+                    }
+                }
+            } else {
+                turn.run(&mut *states).await
+            };
             for _ in 1..otto_review::verification::SUMMARIZER_ATTEMPTS {
                 match &result {
                     Err(e) if otto_review::verification::summarizer_retryable(e) && !flag_tripped() => {
@@ -299,6 +319,23 @@ async fn persist_comments(
     Ok(Some(seen_fingerprints))
 }
 
+async fn held_summarizer_thread(
+    ctx: &ServerCtx,
+    has_threads: bool,
+    row: &otto_core::domain::ReviewAgentState,
+) -> Option<(Id, std::path::PathBuf)> {
+    if !has_threads || !row.thread || row.status != "running" {
+        return None;
+    }
+    let tid: Id = row.session_id.as_deref()?.into();
+    let s = ctx.agent_runtime.get(&tid).await.ok()?;
+    if s.status == otto_core::agent_runtime::RuntimeSessionStatus::Closed {
+        return None;
+    }
+    let p = s.meta.as_ref()?.get("result_path")?.as_str()?;
+    (!p.is_empty()).then(|| (tid, std::path::PathBuf::from(p)))
+}
+
 /// One managed summarizer turn — the `summarizer` step [`summarize_and_persist`]
 /// hands to `otto_agent_run::fanout::summarize`. It fails (so the runner
 /// takes the deterministic fallback) on a provider error AND on a reply that
@@ -320,6 +357,22 @@ struct SummarizerTurn<'a> {
 }
 
 impl SummarizerTurn<'_> {
+    fn parse_output(
+        &self,
+        agent_states: &mut [otto_core::domain::ReviewAgentState],
+        text: &str,
+    ) -> std::result::Result<Vec<otto_review::engine::DraftComment>, String> {
+        let parsed = parse_draft_comments(self.review_id, text);
+        apply_lens_score(&mut agent_states[self.row], text);
+        if parsed.is_empty() && self.total_findings > 0 {
+            return Err(format!(
+                "returned no comments for {} findings",
+                self.total_findings
+            ));
+        }
+        Ok(parsed)
+    }
+
     async fn run(
         &self,
         agent_states: &mut [otto_core::domain::ReviewAgentState],
@@ -328,15 +381,61 @@ impl SummarizerTurn<'_> {
             .drive(agent_states)
             .await
             .map_err(|e| otto_core::text::clip_chars(e.trim(), 200))?;
-        let parsed = parse_draft_comments(self.review_id, &text);
-        apply_lens_score(&mut agent_states[self.row], &text);
-        if parsed.is_empty() && self.total_findings > 0 {
-            return Err(format!(
-                "returned no comments for {} findings",
-                self.total_findings
-            ));
+        self.parse_output(agent_states, &text)
+    }
+
+    /// Await a summarizer thread that survived a daemon restart in its holder.
+    async fn resume_held(
+        &self,
+        agent_states: &mut [otto_core::domain::ReviewAgentState],
+        thread_id: &Id,
+        result_path: &std::path::Path,
+    ) -> std::result::Result<Vec<otto_review::engine::DraftComment>, String> {
+        let Some(threads) = self.threads else {
+            return Err("thread runner unavailable".into());
+        };
+        if Instant::now() >= self.deadline {
+            return Err(DEADLINE_EXCEEDED.into());
         }
-        Ok(parsed)
+        let flag_tripped = || {
+            self.cancel_flag
+                .is_some_and(|f| f.load(std::sync::atomic::Ordering::SeqCst))
+        };
+        let cancelled = otto_review::summarizer::until_cancelled(
+            self.ctx.events.subscribe(),
+            self.review_id,
+            flag_tripped,
+            || review_is_cancelled(self.ctx, self.review_id),
+        );
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let _ = ready_tx.send(thread_id.to_string());
+        let brief = (
+            self.prompt,
+            self.cfg,
+            self.workspace,
+            self.user,
+            self.repo_path,
+        );
+        let turn = threads.resume_summarizer_turn(thread_id, result_path, brief, self.cancel_flag);
+        let stop = |sid: String| async move { threads.close(&sid).await };
+        let res = crate::review_summarizer::drive(
+            turn,
+            ready_rx,
+            self.deadline,
+            cancelled,
+            |_| async { Ok(()) },
+            stop,
+        )
+        .await;
+        if let Some(dir) = result_path.parent().filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("otto-summary-"))
+        }) {
+            let _ = tokio::fs::remove_dir_all(dir).await;
+        }
+        let text = res.map_err(|e| otto_core::text::clip_chars(e.trim(), 200))?;
+        self.parse_output(agent_states, &text)
     }
 
     /// Every provider uses a managed session. A fresh attempt owns its output
@@ -390,6 +489,11 @@ impl SummarizerTurn<'_> {
         };
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         if let Some(threads) = self.threads {
+            // Keep the handoff directory across a daemon restart while the held
+            // summarizer CLI is still running; remove it once drive finishes here.
+            attempt.persist_for_restart();
+            attempt.meta["result_path"] =
+                serde_json::json!(attempt.result_path().to_string_lossy());
             // The runner takes the machine place itself.
             let brief = (
                 summarizer_prompt,
@@ -400,10 +504,11 @@ impl SummarizerTurn<'_> {
             );
             let turn = threads.summarizer_turn(&attempt, brief, ready_tx, self.cancel_flag);
             let stop = |sid: String| async move { threads.close(&sid).await };
-            return crate::review_summarizer::drive(
-                turn, ready_rx, deadline, cancelled, publish, stop,
-            )
-            .await;
+            let res =
+                crate::review_summarizer::drive(turn, ready_rx, deadline, cancelled, publish, stop)
+                    .await;
+            attempt.cleanup();
+            return res;
         }
         // Admission shares the verifier's deadline, just as on threads.
         tokio::pin!(cancelled);

@@ -35,7 +35,7 @@ pub async fn recover_before_serve(ctx: &ServerCtx, boot: &mut BootPhases) -> Res
     // delivery runs in the background, after this settles their rows' state.
     warn_on_err(
         "personal-agent delegation recovery",
-        otto_assistant::personal_agent_team::recover_delegations(ctx).await,
+        otto_assistant::personal_agent_team::recover_delegations(ctx, &adopted.handled_ids).await,
     );
     // Await old-life settlement before any supervisor or resumed workflow can
     // admit a fresh run; a detached sweep can accidentally reap that new work.
@@ -53,6 +53,24 @@ pub async fn recover_before_serve(ctx: &ServerCtx, boot: &mut BootPhases) -> Res
             .reap_running()
             .await,
     );
+    // Stop adopted threads of reaped personal-agent runs (never chat or delegated threads).
+    for id in &adopted.handled_ids {
+        let meta = ctx.agent_runtime.get(id).await.ok().and_then(|s| s.meta);
+        let reaped = meta.as_ref().is_some_and(|m| {
+            m.get("source").and_then(|v| v.as_str()) == Some("personal_agent")
+                && m.get("run_id")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|r| !r.is_empty())
+                && m.get("personal_agent_chat").and_then(|v| v.as_bool()) != Some(true)
+                && m.get("delegated_by_agent").is_none()
+        });
+        if reaped {
+            let _ = ctx
+                .agent_runtime
+                .close_retained(id, chrono::Utc::now() + chrono::Duration::hours(168))
+                .await;
+        }
+    }
     // Status flips only; the vault rescans it needs run in the background.
     warn_on_err(
         "vault-docs recovery",
@@ -130,7 +148,12 @@ async fn restore_sessions(
 /// the rest fail as re-runnable, and every live agent row is settled too.
 async fn fail_orphaned_reviews(ctx: &ServerCtx, adopted: &otto_agent_protocol::Adopted) {
     let held = ctx.agent_runtime.held_reviews(adopted).await;
-    let settled = otto_review::restart::settle_after_restart(&ctx.reviews_store, &held).await;
+    let settled = otto_review::restart::settle_after_restart_with_threads(
+        &ctx.reviews_store,
+        &held,
+        Some(&adopted.handled_ids),
+    )
+    .await;
     let settled = settled
         .inspect_err(|e| tracing::warn!("review recovery: {e}"))
         .unwrap_or_default();

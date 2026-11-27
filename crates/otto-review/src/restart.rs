@@ -155,17 +155,72 @@ pub struct Settled {
     pub resume_held: Vec<Id>,
 }
 
+/// True when the review's summarizer row is a thread whose id survived in a
+/// holder (`held_threads`: `None` trusts `held` for the review itself).
+fn summarizer_is_held_thread(
+    review: &Review,
+    held_threads: Option<&std::collections::HashSet<Id>>,
+) -> bool {
+    let Some(sum) = review.agents.last().filter(|_| review.agents.len() >= 2) else {
+        return false;
+    };
+    if !sum.thread {
+        return false;
+    }
+    let Some(sid) = sum.session_id.as_ref() else {
+        return false;
+    };
+    held_threads.is_none_or(|threads| threads.contains(sid))
+}
+
+/// True when unfinished reviewers can all be resumed or started from persisted
+/// prompts (e.g. finished reviewers closed their threads and the remaining ones
+/// were still queued behind the admission ceiling with no live holder sockets).
+async fn has_persisted_prompts_for_unfinished(
+    reviews: &otto_state::ReviewsRepo,
+    review: &Review,
+) -> bool {
+    let n = review.agents.len().saturating_sub(1);
+    if n == 0 {
+        return false;
+    }
+    let mut any_unfinished = false;
+    for (i, a) in review.agents.iter().take(n).enumerate() {
+        if matches!(a.status.as_str(), "pending" | "running" | "waiting") {
+            any_unfinished = true;
+            if !(a.thread && a.session_id.is_some()) {
+                match reviews.get_agent_prompt(&review.id, i).await {
+                    Ok(Some(_)) => {}
+                    _ => return false,
+                }
+            }
+        }
+    }
+    any_unfinished
+}
+
 /// Settle what a dead daemon left `running`: a review with an agent in
-/// `held` (its holder survived the restart) whose reviewers had not all
-/// finished stays running for a driver ([`Settled::resume_held`], DR-006);
-/// any other either gets its summarizer resumed or fails with the reason.
-/// Both resumes count against [`MAX_RESTART_RESUMES`]. Live agent rows of
-/// settled reviews are failed too. One review's failed write is logged and
-/// skipped; the closing sweep still fails it, so nothing else is left
-/// `running`.
+/// `held` (its holder survived the restart — reviewer or summarizer) or with
+/// persisted reviewer prompts for every unfinished reviewer stays running for a
+/// driver ([`Settled::resume_held`], DR-006); any other either gets its
+/// summarizer resumed or fails with the reason. Both resumes count against
+/// [`MAX_RESTART_RESUMES`]. Live agent rows of settled reviews are failed too.
+/// One review's failed write is logged and skipped; the closing sweep still
+/// fails it, so nothing else is left `running`.
 pub async fn settle_after_restart(
     reviews: &otto_state::ReviewsRepo,
     held: &std::collections::HashSet<Id>,
+) -> Result<Settled> {
+    settle_after_restart_with_threads(reviews, held, None).await
+}
+
+/// [`settle_after_restart`] with the exact set of adopted runtime thread ids
+/// (`adopted.handled_ids`), so a held summarizer is recognized only when its
+/// own thread survived.
+pub async fn settle_after_restart_with_threads(
+    reviews: &otto_state::ReviewsRepo,
+    held: &std::collections::HashSet<Id>,
+    held_threads: Option<&std::collections::HashSet<Id>>,
 ) -> Result<Settled> {
     let mut resume = Vec::new();
     let mut resume_held = Vec::new();
@@ -182,15 +237,25 @@ pub async fn settle_after_restart(
                 }
             }
         }
-        let awaitable = held.contains(&id) && !summarizer_only_left(&review);
+        let sum_only = summarizer_only_left(&review);
+        let held_sum =
+            held.contains(&id) && sum_only && summarizer_is_held_thread(&review, held_threads);
+        let resumable_reviewers = !sum_only
+            && (held.contains(&id) || has_persisted_prompts_for_unfinished(reviews, &review).await);
+        let awaitable = held_sum || resumable_reviewers;
         if let Some(mut plan) = review
             .scope_plan
             .clone()
             .filter(|p| awaitable && restart_resumes(p) < MAX_RESTART_RESUMES)
         {
             let n = restart_resumes(&plan) + 1;
+            let what = if held_sum {
+                "its summarizer was awaited in its holder."
+            } else {
+                "its reviewers were awaited in their holders."
+            };
             plan.verification_notes.push(format!(
-                "{RESUME_NOTE} ({n} of {MAX_RESTART_RESUMES}); its reviewers were awaited in their holders."
+                "{RESUME_NOTE} ({n} of {MAX_RESTART_RESUMES}); {what}"
             ));
             match reviews.set_scope_plan(&id, &plan).await {
                 Ok(()) => {

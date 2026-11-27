@@ -575,3 +575,111 @@ async fn a_held_review_whose_repo_is_gone_stops_its_threads_and_ends() {
     let done = ctx.reviews_store.get_review(&review.id).await.unwrap();
     assert_eq!(done.status, ReviewStatus::Error);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_held_summarizer_thread_is_awaited_on_restart_without_spawning_a_second() {
+    let (_tmp, ctx, ws, repo) = rig().await;
+    let review = ctx
+        .reviews_store
+        .create_review(&repo.id, LOCAL_REVIEW_PR_NUMBER)
+        .await
+        .unwrap();
+    let owner: String = sqlx::query_scalar("SELECT id FROM users LIMIT 1")
+        .fetch_one(&ctx.pool)
+        .await
+        .unwrap();
+    let mut attempt = crate::review_summarizer::Attempt::new("codex", "gpt-5").unwrap();
+    attempt.persist_for_restart();
+    let result_path = attempt.result_path();
+    let drafts = json!([{
+        "source_ids": [otto_review::engine::raw_claim_id(0, 0)],
+        "path": "src/lib.rs",
+        "line": 1,
+        "severity": "bug",
+        "body": "add subtracts",
+        "category": "correctness",
+        "disposition": "verified",
+        "evidence": "src/lib.rs:1 returns a - b"
+    }]);
+    std::fs::write(&result_path, drafts.to_string()).unwrap();
+    let sum_thread = ctx
+        .agent_runtime
+        .create(
+            &owner,
+            &ws.id,
+            otto_core::agent_runtime::CreateRuntimeSessionReq {
+                provider: Some(otto_core::agent_runtime::RuntimeProvider::Codex),
+                cwd: Some(repo.path.clone()),
+                title: Some("Review summarizer".into()),
+                meta: Some(json!({
+                    "source": "review_summarizer",
+                    "review_id": review.id,
+                    "result_path": result_path.to_string_lossy(),
+                })),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    ctx.agent_runtime
+        .prompt(&sum_thread.id, "summarize")
+        .await
+        .unwrap();
+    // Wait briefly so the scripted agent finishes turn 1 on the held thread.
+    for _ in 0..40 {
+        let s = ctx.agent_runtime.get(&sum_thread.id).await.unwrap();
+        if s.status == otto_core::agent_runtime::RuntimeSessionStatus::Idle {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let rows = [
+        otto_core::domain::ReviewAgentState {
+            name: "Lens 1".into(),
+            provider: "claude".into(),
+            status: "done".into(),
+            findings: vec![otto_core::domain::ReviewFinding {
+                path: Some("src/lib.rs".into()),
+                line: Some(1),
+                line_end: None,
+                severity: "bug".into(),
+                body: "add subtracts".into(),
+                lens: None,
+            }],
+            ..Default::default()
+        },
+        otto_core::domain::ReviewAgentState {
+            name: "Summarizer".into(),
+            provider: "codex".into(),
+            model: "gpt-5".into(),
+            status: "running".into(),
+            thread: true,
+            session_id: Some(sum_thread.id.to_string()),
+            ..Default::default()
+        },
+    ];
+    ctx.reviews_store
+        .set_agents(&review.id, &rows)
+        .await
+        .unwrap();
+    let live = ctx.review_cancels.register(&review.id);
+    resume_held_review(ctx.clone(), review.id.clone(), live).await;
+    let done = ctx.reviews_store.get_review(&review.id).await.unwrap();
+    assert_eq!(done.status, ReviewStatus::Done, "{:?}", done.error);
+    assert_eq!(done.comments.len(), 1);
+    assert_eq!(done.comments[0].body, "add subtracts");
+    let sum_threads = ctx
+        .agent_runtime
+        .list_filtered(&ws.id, None, Some("review_summarizer"), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        sum_threads.len(),
+        1,
+        "held summarizer must be awaited, not replaced by a second summarizer thread"
+    );
+    assert!(
+        !result_path.parent().unwrap().exists(),
+        "held summarizer temp dir cleaned up after resume"
+    );
+}

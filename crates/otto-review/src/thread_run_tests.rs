@@ -875,3 +875,106 @@ async fn stopping_a_resumed_reviewer_when_its_thread_closes_first_never_overwrit
         "must not fall through to re-run after per-agent Stop"
     );
 }
+
+#[tokio::test]
+async fn after_a_restart_with_all_reviewers_done_a_held_summarizer_thread_is_not_closed() {
+    let r = rig(vec![]).await;
+    let id: Id = r.review_id.clone();
+    let mut done = ReviewAgentState {
+        name: "Done".into(),
+        provider: "claude".into(),
+        status: "done".into(),
+        lens: "Done".into(),
+        session_id: Some("t-rev".into()),
+        thread: true,
+        ..Default::default()
+    };
+    done.findings = crate::session::parse_findings(FINDINGS);
+    let summarizer = ReviewAgentState {
+        name: "Summarizer".into(),
+        provider: "claude".into(),
+        status: "running".into(),
+        session_id: Some("t-sum".into()),
+        thread: true,
+        ..Default::default()
+    };
+    r.reviews
+        .set_agents(&id, &[done, summarizer])
+        .await
+        .unwrap();
+    let findings = crate::thread_resume::resume_reviewers(crate::thread_resume::ResumeCtx {
+        manager: r.manager.clone(),
+        threads: r.threads.clone(),
+        reviews: r.reviews.clone(),
+        ws: r.ws.clone(),
+        user: r.user.clone(),
+        cwd: r._dir.path().to_string_lossy().into_owned(),
+        review_id: r.review_id.clone(),
+        grace: Duration::from_secs(600),
+        skills_dir: None,
+        cancel: None,
+        agent_cancels: Default::default(),
+    })
+    .await
+    .unwrap();
+    assert_eq!(findings.len(), 1);
+    assert_eq!(findings[0].len(), 2);
+    assert!(
+        !r.fake.closed.lock().unwrap().contains(&Id::from("t-sum")),
+        "when all reviewers already finished, the held summarizer thread must stay open to be awaited"
+    );
+}
+
+#[tokio::test]
+async fn after_a_restart_a_resumed_reviewer_carries_its_persisted_prompt_for_zero_turn_threads() {
+    let r = rig(vec![Act {
+        write: Some(FINDINGS.into()),
+        ..Default::default()
+    }])
+    .await;
+    let id: Id = r.review_id.clone();
+    let rows = vec![
+        ReviewAgentState {
+            name: "Held".into(),
+            provider: "claude".into(),
+            status: "running".into(),
+            lens: "Held".into(),
+            session_id: Some("t-held".into()),
+            thread: true,
+            ..Default::default()
+        },
+        ReviewAgentState {
+            name: "Summarizer".into(),
+            provider: "claude".into(),
+            status: "pending".into(),
+            ..Default::default()
+        },
+    ];
+    r.reviews.set_agents(&id, &rows).await.unwrap();
+    r.reviews
+        .set_agent_prompt(&id, 0, "Review the diff carefully.")
+        .await
+        .unwrap();
+    let _ = crate::thread_resume::resume_reviewers(crate::thread_resume::ResumeCtx {
+        manager: r.manager.clone(),
+        threads: r.threads.clone(),
+        reviews: r.reviews.clone(),
+        ws: r.ws.clone(),
+        user: r.user.clone(),
+        cwd: r._dir.path().to_string_lossy().into_owned(),
+        review_id: r.review_id.clone(),
+        grace: Duration::from_secs(600),
+        skills_dir: None,
+        cancel: None,
+        agent_cancels: Default::default(),
+    })
+    .await
+    .unwrap();
+    let turns = r.fake.turns.lock().unwrap().clone();
+    assert_eq!(turns.len(), 1);
+    assert!(
+        turns[0].prompt.contains("Review the diff carefully."),
+        "StepRunner::resume needs the real prompt if restart landed before turn 1 went out; got: {:?}",
+        turns[0].prompt
+    );
+}
