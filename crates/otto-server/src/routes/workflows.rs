@@ -1001,7 +1001,10 @@ pub(crate) async fn recompute_overview(
         && otto_workflows::goal_progress::has_goal_checks(&wf.graph)
     {
         let mut r = run.clone();
-        r.checkpoints = repo(ctx).checkpoints(&run.id).await.unwrap_or_default();
+        r.checkpoints = repo(ctx)
+            .goal_checkpoints(&run.id)
+            .await
+            .unwrap_or_default();
         Some(r)
     } else {
         None

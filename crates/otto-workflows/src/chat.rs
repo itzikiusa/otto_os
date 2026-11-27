@@ -1351,7 +1351,7 @@ impl<C: WorkflowCtx> WorkflowChatTrigger for WorkflowChatTriggerImpl<C> {
                         let mut with_cps = run.clone();
                         if crate::goal_progress::has_goal_checks(&graph) {
                             with_cps.checkpoints =
-                                repo.checkpoints(&run.id).await.unwrap_or_default();
+                                repo.goal_checkpoints(&run.id).await.unwrap_or_default();
                         }
                         crate::overview::run_overview(&with_cps, &graph, None, None, view.now)
                     }

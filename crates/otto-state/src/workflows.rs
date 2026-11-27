@@ -249,6 +249,76 @@ impl WorkflowsRepo {
             .collect()
     }
 
+    /// Compact checkpoint read for goal progress (`goal_progress::compute`):
+    /// pulls only iteration/active-time metadata and settled `check` outputs
+    /// via SQLite `json_extract`, avoiding full deserialization of unrelated
+    /// checkpoint inputs, outputs, and logs under the board writer lock.
+    pub async fn goal_checkpoints(&self, run_id: &Id) -> Result<Vec<WorkflowCheckpoint>> {
+        type Row = (
+            String,
+            Option<String>,
+            Option<i64>,
+            Option<i64>,
+            Option<String>,
+            Option<String>,
+            Option<i64>,
+            Option<String>,
+        );
+        let rows: Vec<Row> = sqlx::query_as(
+            "SELECT \
+                node_id, \
+                json_extract(checkpoint_json, '$.loop_id'), \
+                json_extract(checkpoint_json, '$.iteration'), \
+                json_extract(checkpoint_json, '$.step_index'), \
+                json_extract(checkpoint_json, '$.kind'), \
+                json_extract(checkpoint_json, '$.status'), \
+                json_extract(checkpoint_json, '$.active_ms'), \
+                CASE \
+                    WHEN json_extract(checkpoint_json, '$.kind') = 'check' \
+                     AND json_extract(checkpoint_json, '$.status') = 'success' \
+                    THEN json_extract(checkpoint_json, '$.output') \
+                    ELSE NULL \
+                END \
+             FROM workflow_checkpoints \
+             WHERE run_id = ? \
+             ORDER BY node_id",
+        )
+        .bind(run_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("read goal checkpoints"))?;
+        let mut out = Vec::with_capacity(rows.len());
+        for (node_id, loop_id, iteration, step_index, kind, status, active_ms, output_json) in rows
+        {
+            let status = status
+                .as_deref()
+                .and_then(|s| serde_json::from_value(serde_json::Value::String(s.to_string())).ok())
+                .unwrap_or(NodeStatus::Pending);
+            let output = output_json
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+            out.push(WorkflowCheckpoint {
+                node_id,
+                loop_id: loop_id.unwrap_or_default(),
+                iteration: iteration.unwrap_or(0).max(0) as u64,
+                step_index: step_index.unwrap_or(0).max(0) as usize,
+                kind: kind.unwrap_or_default(),
+                name: String::new(),
+                status,
+                attempts: 0,
+                input: serde_json::Value::Null,
+                output,
+                error: None,
+                logs: Vec::new(),
+                updated_at: Utc::now(),
+                active_ms: active_ms.unwrap_or(0).max(0) as u64,
+                thread_id: None,
+                start_ordinal: None,
+            });
+        }
+        Ok(out)
+    }
+
     /// Frozen `input` of the synthetic workflow launch checkpoint (`#review.N`)
     /// that started `review_id` (never the ordinary result checkpoint, which
     /// shares `output.review_id` but lacks `input.config`).
@@ -3620,6 +3690,89 @@ mod tests {
         assert!(
             got.get("config").is_some(),
             "must select synthetic launch checkpoint with frozen config, not ordinary result checkpoint: {got}"
+        );
+    }
+
+    #[tokio::test]
+    async fn goal_checkpoints_keeps_check_outputs_and_active_ms_without_non_check_bodies() {
+        let pool = mem_pool().await;
+        let repo = WorkflowsRepo::new(pool.clone());
+        let owner: Id = "owner".into();
+        let wf = repo
+            .create(
+                &"ws".into(),
+                "Goal",
+                "",
+                "",
+                &WorkflowGraph::default(),
+                &owner,
+            )
+            .await
+            .unwrap();
+        let run = repo
+            .create_run(&wf.id, &"ws".into(), &serde_json::json!({}), None)
+            .await
+            .unwrap();
+        let big = "x".repeat(64 * 1024);
+        let agent_cp = WorkflowCheckpoint {
+            node_id: "lp#1.0".into(),
+            loop_id: "lp".into(),
+            iteration: 1,
+            step_index: 0,
+            kind: "agent_prompt".into(),
+            name: "Work".into(),
+            status: NodeStatus::Success,
+            attempts: 1,
+            input: serde_json::json!({"prompt": big}),
+            output: Some(serde_json::json!({"reply": big})),
+            error: None,
+            logs: vec![big],
+            updated_at: Utc::now(),
+            active_ms: 42_000,
+            thread_id: Some("th-1".into()),
+            start_ordinal: None,
+        };
+        let check_cp = WorkflowCheckpoint {
+            node_id: "lp#1.1".into(),
+            loop_id: "lp".into(),
+            iteration: 1,
+            step_index: 1,
+            kind: "check".into(),
+            name: "Check".into(),
+            status: NodeStatus::Success,
+            attempts: 1,
+            input: serde_json::json!({"ignored": true}),
+            output: Some(
+                serde_json::json!({"verdict": "continue", "criteria": [{"id": "c1", "met": false}]}),
+            ),
+            error: None,
+            logs: vec!["verbose log".into()],
+            updated_at: Utc::now(),
+            active_ms: 3_000,
+            thread_id: None,
+            start_ordinal: None,
+        };
+        repo.save_checkpoint(&run.id, &agent_cp).await.unwrap();
+        repo.save_checkpoint(&run.id, &check_cp).await.unwrap();
+
+        let compact = repo.goal_checkpoints(&run.id).await.unwrap();
+        assert_eq!(compact.len(), 2);
+        assert_eq!(compact[0].node_id, "lp#1.0");
+        assert_eq!(compact[0].active_ms, 42_000);
+        assert_eq!(compact[0].input, serde_json::Value::Null);
+        assert!(compact[0].output.is_none());
+        assert!(compact[0].logs.is_empty());
+
+        assert_eq!(compact[1].node_id, "lp#1.1");
+        assert_eq!(compact[1].active_ms, 3_000);
+        assert_eq!(compact[1].input, serde_json::Value::Null);
+        assert!(compact[1].logs.is_empty());
+        assert_eq!(
+            compact[1]
+                .output
+                .as_ref()
+                .and_then(|o| o["verdict"].as_str()),
+            Some("continue")
         );
     }
 }

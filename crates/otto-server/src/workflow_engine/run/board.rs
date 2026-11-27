@@ -93,7 +93,10 @@ impl RunBoard {
         let checkpoints = if self.base.is_some()
             && otto_workflows::goal_progress::has_goal_checks(&cx.workflow.graph)
         {
-            cx.repo.checkpoints(cx.run_id).await.unwrap_or_default()
+            cx.repo
+                .goal_checkpoints(cx.run_id)
+                .await
+                .unwrap_or_default()
         } else {
             Vec::new()
         };
