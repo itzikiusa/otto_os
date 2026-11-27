@@ -11,6 +11,7 @@ pub mod chat;
 pub mod chat_rejected;
 pub mod chat_resolve;
 pub mod chat_status;
+pub mod check_resume;
 pub mod check_run;
 pub mod checkout;
 pub mod checkout_run;

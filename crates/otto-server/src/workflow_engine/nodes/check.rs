@@ -65,10 +65,10 @@ pub(in crate::workflow_engine) async fn execute(
     let decided = decided.map_err(otto_core::Error::Upstream)?;
     let handoff = |ext: &str| env.files.step_md_path(&base).map(|p| p.with_extension(ext));
     // One agent turn on a fresh thread — never the worker's: independence.
-    let turn = async |label: &str, prompt: &str, h: Option<std::path::PathBuf>| {
+    let turn = async |label: &str, phase: &str, prompt: &str, h: Option<std::path::PathBuf>| {
         let mut n = node.clone();
         n.name = label.into();
-        n.params = json!({"effort": cp.effort, "timeout_s": 1800});
+        n.params = json!({"effort": cp.effort, "timeout_s": 1800, "check_phase": phase});
         let provider = cp.provider.as_deref().unwrap_or(&env.default_provider);
         let (wf, model, cwd) = (&env.wf_name, cp.model.as_deref(), &env.run_cwd);
         let (reply, _) = Box::pin(run_node_agent(
@@ -91,13 +91,14 @@ pub(in crate::workflow_engine) async fn execute(
         let text = h.and_then(|p| std::fs::read_to_string(p).ok());
         Ok::<_, otto_core::Error>((text, reply))
     };
+    use otto_workflows::check_resume as cr;
     let resuming_final_review = match step_thread::peek_resume(run_id, &node.id) {
         Some((tid, _)) => ctx
             .agent_runtime
             .get(&tid)
             .await
             .ok()
-            .is_some_and(|s| s.title.contains("Completion review")),
+            .is_some_and(|s| cr::is_completion_review_thread(s.meta.as_ref(), &s.title)),
         None => false,
     };
     let mut deferred_review_resume = None;
@@ -105,13 +106,7 @@ pub(in crate::workflow_engine) async fn execute(
     let raw = if cp.needs_agent() {
         let h = handoff("output.json");
         let cached = if resuming_final_review {
-            match h.as_ref() {
-                Some(p) => tokio::fs::read_to_string(p)
-                    .await
-                    .ok()
-                    .and_then(|t| check_run::evaluation(Some(&t), "")),
-                None => None,
-            }
+            cr::load_accepted_evaluation(h.as_deref()).await
         } else {
             None
         };
@@ -121,14 +116,18 @@ pub(in crate::workflow_engine) async fn execute(
             if resuming_final_review {
                 deferred_review_resume = step_thread::take_resume(run_id, &node.id);
             }
+            cr::clear_accepted_evaluation(h.as_deref()).await;
             let path = h
                 .as_ref()
                 .map_or(String::new(), |p| p.display().to_string());
             let ins = cp.instructions.as_deref();
             let prompt = criteria::evaluator_prompt(&cp.criteria, &decided, ins, &path);
-            let (text, reply) = turn("Check criteria", &prompt, h).await?;
+            let (text, reply) =
+                turn("Check criteria", cr::PHASE_CRITERIA, &prompt, h.clone()).await?;
             let ev = check_run::evaluation(text.as_deref(), &reply);
-            if ev.is_none() {
+            if let Some(ref accepted) = ev {
+                cr::save_accepted_evaluation(h.as_deref(), accepted).await;
+            } else {
                 logs.push(format!("⚠ {}", criteria::NO_VERDICT));
             }
             ev
@@ -176,6 +175,7 @@ pub(in crate::workflow_engine) async fn execute(
             .map_or(String::new(), |p| p.display().to_string());
         let (text, reply) = turn(
             "Completion review",
+            cr::PHASE_COMPLETION_REVIEW,
             &check_run::review_prompt(&cp, &path),
             h,
         )
