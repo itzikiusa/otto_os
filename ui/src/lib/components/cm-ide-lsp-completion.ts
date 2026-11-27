@@ -183,7 +183,9 @@ export function shouldAttachIdeLsp(
   }
   const dot = base.lastIndexOf('.');
   const ext = dot >= 0 ? base.slice(dot + 1) : '';
-  const resolved = languageId ? normalizeIdeLspLanguage(languageId) : normalizeIdeLspLanguage(ext);
+  const resolved = base.endsWith('.component.html')
+    ? 'angular'
+    : (languageId ? normalizeIdeLspLanguage(languageId) : normalizeIdeLspLanguage(ext));
   if (resolved !== null && pluginLspLanguages.has(resolved)) return true;
   if (ext && NON_CODE_EXTENSIONS.has(ext)) return false;
   return resolved !== null && LSP_CODE_LANGUAGES.has(resolved);
@@ -334,6 +336,12 @@ export function dedupeLspJsonRpcMessage<T>(
 
 export function buildLspInitializationOptions(languageId: string): Record<string, unknown> | undefined {
   const lang = normalizeIdeLspLanguage(languageId) ?? languageId.toLowerCase();
+  if (lang === 'svelte') {
+    return { isTrusted: false };
+  }
+  if (lang === 'vue') {
+    return { vue: { hybridMode: false } };
+  }
   if (lang === 'go') {
     return {
       buildFlags: ['-mod=mod'],

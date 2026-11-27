@@ -749,34 +749,13 @@ fn discover_dotnet(
                 Some("Assembly-CSharp.csproj".into()),
             ));
         }
-        // Unity Editor attach configuration (debuggable via DAP attach)
-        out.push(make_auto_config(
-            root_badge,
-            IdeRunnerKind::DotnetRun,
-            "unity-attach",
-            format!("Attach to Unity Editor{unity_ver} ({proj_name})"),
-            Some("dotnet"),
-            vec![],
-            cwd.clone(),
-            Some("unity://attach".into()),
-        ));
+        // Note: Unity Editor uses the Mono Soft Debugger protocol (not DAP);
+        // direct DAP attach requires a dedicated Unity DAP plugin.
         return;
     }
 
     if !uprojects.is_empty() && slns.is_empty() && projs.is_empty() {
-        if let Some(up) = uprojects.first() {
-            let name = up.file_stem().and_then(|s| s.to_str()).unwrap_or(proj_name);
-            out.push(make_auto_config(
-                root_badge,
-                IdeRunnerKind::DotnetBuild,
-                "unreal-cs",
-                format!("Unreal C# Build Rules ({name})"),
-                Some("dotnet"),
-                vec!["build".into()],
-                cwd.clone(),
-                None,
-            ));
-        }
+        // Wait until Unreal generates a real `.sln` / `.csproj` before emitting a `dotnet build` config.
         return;
     }
 
@@ -1095,11 +1074,12 @@ fn discover_js_ts(
         || root.join("karma.conf.ts").is_file()
         || (framework == Some(WebFrameworkKind::Angular) && !has_jest && !has_vitest);
 
+    let before_len = out.len();
     if let Some(val) = parsed_pkg.as_ref() {
         let mut emitted_vitest = false;
         let mut emitted_jest = false;
-        let mut emitted_playwright = false;
-        let mut emitted_karma = false;
+        let emitted_playwright = false;
+        let emitted_karma = false;
         if let Some(scripts) = val.get("scripts").and_then(|v| v.as_object()) {
             const PRIORITY: &[&str] = &[
                 "dev",
@@ -1150,49 +1130,6 @@ fn discover_js_ts(
                         cwd.clone(),
                         Some("package.json".into()),
                     ));
-                } else if script_body.contains("playwright")
-                    && (name == "test" || name.contains("e2e") || name.contains("playwright"))
-                {
-                    emitted_playwright = true;
-                    out.push(make_auto_config(
-                        root_badge,
-                        IdeRunnerKind::Playwright,
-                        &format!("playwright-{name}"),
-                        format!("Playwright E2E ({pm} {name})"),
-                        Some("npx"),
-                        vec!["--no-install".into(), "playwright".into(), "test".into()],
-                        cwd.clone(),
-                        Some("package.json".into()),
-                    ));
-                } else if (script_body.contains("ng test") || script_body.contains("karma"))
-                    && name == "test"
-                {
-                    emitted_karma = true;
-                    let args = if script_body.contains("ng test") {
-                        vec![
-                            "--no-install".into(),
-                            "ng".into(),
-                            "test".into(),
-                            "--watch=false".into(),
-                        ]
-                    } else {
-                        vec![
-                            "--no-install".into(),
-                            "karma".into(),
-                            "start".into(),
-                            "--single-run".into(),
-                        ]
-                    };
-                    out.push(make_auto_config(
-                        root_badge,
-                        IdeRunnerKind::Karma,
-                        "karma-test",
-                        "Karma / Angular Test".into(),
-                        Some("npx"),
-                        args,
-                        cwd.clone(),
-                        Some("package.json".into()),
-                    ));
                 } else {
                     let display = match (framework, name.as_str()) {
                         (Some(fw), "dev" | "start" | "serve") => {
@@ -1217,16 +1154,19 @@ fn discover_js_ts(
             }
         } else if let Some(fw) = framework {
             // Bare framework project with no `scripts` block — emit canonical dev/build commands.
-            let (dev_args, build_args): (Vec<String>, Vec<String>) = match fw {
+            let (dev_cli, dev_args, build_args): (&str, Vec<String>, Vec<String>) = match fw {
                 WebFrameworkKind::Angular => (
+                    "ng",
                     vec!["--no-install".into(), "ng".into(), "serve".into()],
                     vec!["--no-install".into(), "ng".into(), "build".into()],
                 ),
                 WebFrameworkKind::NextJs => (
+                    "next",
                     vec!["--no-install".into(), "next".into(), "dev".into()],
                     vec!["--no-install".into(), "next".into(), "build".into()],
                 ),
                 WebFrameworkKind::Nuxt => (
+                    "nuxt",
                     vec!["--no-install".into(), "nuxt".into(), "dev".into()],
                     vec!["--no-install".into(), "nuxt".into(), "build".into()],
                 ),
@@ -1235,6 +1175,7 @@ fn discover_js_ts(
                 | WebFrameworkKind::Vue
                 | WebFrameworkKind::React
                 | WebFrameworkKind::Vite => (
+                    "vite",
                     vec!["--no-install".into(), "vite".into()],
                     vec!["--no-install".into(), "vite".into(), "build".into()],
                 ),
@@ -1247,7 +1188,7 @@ fn discover_js_ts(
                 Some("npx"),
                 dev_args,
                 cwd.clone(),
-                Some("package.json".into()),
+                Some(dev_cli.into()),
             ));
             out.push(make_auto_config(
                 root_badge,
@@ -1324,7 +1265,9 @@ fn discover_js_ts(
                 Some("package.json".into()),
             ));
         }
-        return;
+        if out.len() > before_len {
+            return;
+        }
     }
 
     for entry in ["index.js", "server.js", "app.js", "main.js"] {

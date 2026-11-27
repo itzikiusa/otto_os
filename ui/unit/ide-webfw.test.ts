@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { normalizeIdeLspLanguage, shouldAttachIdeLsp } from '../src/lib/components/cm-ide-lsp-completion.ts';
+import { loadSource } from './sourceHarness.ts';
+import { buildLspInitializationOptions, normalizeIdeLspLanguage, shouldAttachIdeLsp } from '../src/lib/components/cm-ide-lsp-completion.ts';
 import { ideLanguageLabel, ideLanguageSettingsSection, ideLspLangFor, ideLspServerName } from '../src/modules/ide/editor/ideStatusModel.ts';
 import { nestParentName } from '../src/modules/ide/history/ideTreeNesting.ts';
 import { buildDedupedBulkRepos } from '../src/modules/ide/shell/bulkRepoModel.ts';
@@ -57,4 +58,59 @@ test('Angular and SvelteKit tree nesting, repo badges, and runner/debug metadata
   assert.equal(langKeyFor('/app/src/App.vue'), 'vue');
   assert.equal(langGutters('/app/src/App.svelte').breakpoints, true);
   assert.equal(langGutters('/app/src/App.vue').breakpoints, true);
+});
+
+test('BUG-26: Angular .component.html attaches to angular LSP in both editor selector and status strip', () => {
+  const keymapMod = loadSource(
+    new URL('../src/lib/components/cm-ide-keymap.ts', import.meta.url),
+    {
+      '@codemirror/commands': { toggleComment: () => false },
+      '@codemirror/search': {},
+      '@codemirror/state': {},
+      '@codemirror/view': {},
+      './cm-ide-quickfix.ts': {},
+      './cm-ide-semantic.ts': {},
+    },
+  );
+  assert.equal(keymapMod.lspLanguageIdFor('/app/src/app/hero.component.html', true, 'html'), 'angular');
+  assert.equal(keymapMod.lspLanguageIdFor('/app/src/app/hero.component.html', true), 'angular');
+  assert.equal(keymapMod.lspLanguageIdFor('/app/src/App.svelte', true), 'svelte');
+  assert.equal(keymapMod.lspLanguageIdFor('/app/src/App.vue', true), 'vue');
+  assert.equal(shouldAttachIdeLsp('/app/src/app/hero.component.html', 'html', '/app'), true);
+  assert.equal(ideLspLangFor('/app/src/app/hero.component.html', 'html'), 'angular');
+  assert.equal(buildLspInitializationOptions('svelte')?.isTrusted, false);
+  assert.deepEqual(buildLspInitializationOptions('vue'), { vue: { hybridMode: false } });
+});
+
+test('BUG-27: resolveFrameworkDevDebugLaunch forwards framework CLI instead of package.json', async () => {
+  const { resolveFrameworkDevDebugLaunch } = await import('../src/modules/ide/store/ideDebugLaunchHelpers.ts');
+  const viteDev = resolveFrameworkDevDebugLaunch({
+    id: 'auto:fw-dev',
+    name: 'Vite Dev',
+    runner: 'npm',
+    command: 'npx',
+    args: ['--no-install', 'vite'],
+    target_path: 'package.json',
+    env_overrides: {},
+    inherit_shell_env: true,
+    build_flags: [],
+    compound_configs: [],
+    auto_detected: true,
+  });
+  assert.deepEqual(viteDev, { program: 'vite', args: [] });
+
+  const ngDev = resolveFrameworkDevDebugLaunch({
+    id: 'auto:fw-dev',
+    name: 'Angular Dev',
+    runner: 'npm',
+    command: 'npx',
+    args: ['--no-install', 'ng', 'serve'],
+    target_path: 'ng',
+    env_overrides: {},
+    inherit_shell_env: true,
+    build_flags: [],
+    compound_configs: [],
+    auto_detected: true,
+  });
+  assert.deepEqual(ngDev, { program: 'ng', args: ['serve'] });
 });

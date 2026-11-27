@@ -48,6 +48,15 @@ pub enum DapAdapterTransport {
         cwd: String,
         env: BTreeMap<String, String>,
     },
+    /// Stdio DAP adapter accompanied by a lifetime-bound companion process guard
+    /// (e.g., `dotnet test` with `VSTEST_HOST_DEBUG=1`).
+    StdioWithCompanion {
+        command: String,
+        args: Vec<String>,
+        cwd: String,
+        env: BTreeMap<String, String>,
+        companion: std::sync::Arc<super::BridgeGuard>,
+    },
     /// Adapter spawns a headless loopback TCP server and prints its port on stdout/stderr.
     TcpListen {
         command: String,
@@ -120,6 +129,21 @@ impl std::fmt::Debug for DapAdapterTransport {
             } => {
                 let env_keys: Vec<&str> = env.keys().map(String::as_str).collect();
                 f.debug_struct("Stdio")
+                    .field("command", command)
+                    .field("args", args)
+                    .field("cwd", cwd)
+                    .field("env_keys", &env_keys)
+                    .finish()
+            }
+            Self::StdioWithCompanion {
+                command,
+                args,
+                cwd,
+                env,
+                ..
+            } => {
+                let env_keys: Vec<&str> = env.keys().map(String::as_str).collect();
+                f.debug_struct("StdioWithCompanion")
                     .field("command", command)
                     .field("args", args)
                     .field("cwd", cwd)

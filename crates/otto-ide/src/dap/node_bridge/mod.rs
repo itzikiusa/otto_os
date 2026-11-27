@@ -51,9 +51,17 @@ pub(crate) async fn spawn_node_inspector_bridge(
     let guard = BridgeGuard::new();
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<(String, String)>();
 
+    let requested_url = (spec.program.starts_with("http://")
+        || spec.program.starts_with("https://"))
+    .then_some(spec.program.as_str());
+    let is_browser_attach = spec.attach_port.is_some()
+        && (requested_url.is_some()
+            || spec.program.starts_with("chrome://")
+            || spec.program.starts_with("browser://"));
+
     let (local_port, ws_path) = if let Some(attach_port) = spec.attach_port {
         let port = maybe_tunnel_port(target, ssh, &guard, attach_port).await?;
-        let path = discover_attach_ws_path(port).await?;
+        let path = discover_attach_ws_path(port, requested_url).await?;
         (port, path)
     } else {
         let (remote_port, path) = spawn_inspected_node(target, ssh, &spec, &guard, &out_tx).await?;
@@ -66,14 +74,22 @@ pub(crate) async fn spawn_node_inspector_bridge(
     let guard_for_task = guard.clone();
     let workspace_cwd = spec.cwd.clone();
     tokio::spawn(async move {
-        let _ =
-            run_node_bridge_loop(server_io, ws, &mut out_rx, guard_for_task, workspace_cwd).await;
+        let _ = run_node_bridge_loop(
+            server_io,
+            ws,
+            &mut out_rx,
+            guard_for_task,
+            workspace_cwd,
+            is_browser_attach,
+        )
+        .await;
     });
     Ok((client_io, guard))
 }
 
 pub(super) struct NodeBridgeState {
     pub(super) workspace_cwd: String,
+    pub(super) is_browser_attach: bool,
     pub(super) cdp_id: i64,
     pub(super) pending_cdp: HashMap<i64, (i64, String, String)>,
     pub(super) script_urls: HashMap<String, String>,
@@ -88,9 +104,10 @@ pub(super) struct NodeBridgeState {
 }
 
 impl NodeBridgeState {
-    fn new(workspace_cwd: String) -> Self {
+    fn new(workspace_cwd: String, is_browser_attach: bool) -> Self {
         Self {
             workspace_cwd,
+            is_browser_attach,
             cdp_id: 1,
             pending_cdp: HashMap::new(),
             script_urls: HashMap::new(),
@@ -322,17 +339,46 @@ fn escape_js_template(s: &str) -> String {
         .replace("${", "\\${")
 }
 
+/// Return whether a breakpoint can honestly be marked verified immediately (BUG-31).
+/// In browser attach mode, compiled source files (`.ts`/`.tsx`/`.svelte`/`.vue`) are
+/// bundled under different URLs without source-map resolution here, so keep them
+/// unverified unless a loaded script URL directly maps to `path`.
+pub(crate) fn is_initial_bp_verified(
+    path: &str,
+    is_browser_attach: bool,
+    script_urls: &HashMap<String, String>,
+    workspace_cwd: &str,
+) -> bool {
+    if !is_browser_attach {
+        return true;
+    }
+    let low = path.to_ascii_lowercase();
+    let is_compiled_src = low.ends_with(".ts")
+        || low.ends_with(".tsx")
+        || low.ends_with(".mts")
+        || low.ends_with(".cts")
+        || low.ends_with(".svelte")
+        || low.ends_with(".vue");
+    if !is_compiled_src {
+        return true;
+    }
+    script_urls
+        .values()
+        .any(|u| file_url_to_path_in_cwd(u, workspace_cwd).is_some_and(|mapped| mapped == path))
+}
+
 async fn run_node_bridge_loop(
     server_io: DuplexStream,
     mut ws: InspectorWs,
     out_rx: &mut mpsc::UnboundedReceiver<(String, String)>,
     guard: Arc<BridgeGuard>,
     workspace_cwd: String,
+    is_browser_attach: bool,
 ) -> io::Result<()> {
     let (r, w) = tokio::io::split(server_io);
     let mut dap_rx = DapReader::new(r).into_channel();
     let mut dap_w = DapWriter::new(w);
-    let mut st = NodeBridgeState::new(workspace_cwd);
+    let mut st = NodeBridgeState::new(workspace_cwd, is_browser_attach);
 
     loop {
         tokio::select! {
@@ -513,6 +559,15 @@ async fn handle_node_dap_req<W: AsyncWrite + Unpin>(
             let _ = dap_w.send_event("terminated", Some(json!({}))).await;
             return Ok(true);
         }
+        "setVariable" => {
+            dap_w
+                .send_response(
+                    req.seq,
+                    "setVariable",
+                    Err("setVariable is not supported by the bundled Node CDP adapter".into()),
+                )
+                .await?;
+        }
         other => {
             dap_w
                 .send_response(req.seq, other, Ok(Some(json!({}))))
@@ -558,6 +613,12 @@ async fn handle_node_set_bps<W: AsyncWrite + Unpin>(
     let mut lines = Vec::new();
     let mut verified = Vec::new();
     let url_re = path_to_url_regex_in_cwd(&path, &st.workspace_cwd);
+    let initial_verified = is_initial_bp_verified(
+        &path,
+        st.is_browser_attach,
+        &st.script_urls,
+        &st.workspace_cwd,
+    );
     for bp in bps {
         let line = bp.get("line").and_then(Value::as_u64).unwrap_or(1) as u32;
         let cond = build_cdp_bp_condition(&bp);
@@ -575,7 +636,16 @@ async fn handle_node_set_bps<W: AsyncWrite + Unpin>(
             }
         }))
         .await?;
-        verified.push(json!({ "verified": true, "line": line, "source": { "path": path } }));
+        if initial_verified {
+            verified.push(json!({ "verified": true, "line": line, "source": { "path": path } }));
+        } else {
+            verified.push(json!({
+                "verified": false,
+                "line": line,
+                "source": { "path": path },
+                "message": "Unbound: browser bundle has no loaded script matching this source path (source maps are not resolved in the built-in browser CDP bridge)"
+            }));
+        }
     }
     st.user_bp_lines.insert(path, lines);
     dap_w

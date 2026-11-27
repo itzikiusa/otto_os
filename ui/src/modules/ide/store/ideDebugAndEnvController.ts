@@ -559,6 +559,9 @@ const TOOL_ARGV_RUNNERS = new Set([
   'go_run', 'go_test', 'go_build', 'cargo_run', 'cargo_test', 'zig_build', 'zig_run', 'zig_test', 'cmake', 'ctest', 'cpp_run', 'make', 'meson', 'unreal', 'dotnet_build', 'dotnet_run', 'dotnet_test', 'pytest', 'npm', 'vitest', 'maven', 'java_junit', 'gradle',
 ]);
 
+import { resolveFrameworkDevDebugLaunch } from './ideDebugLaunchHelpers';
+export { resolveFrameworkDevDebugLaunch };
+
 /** The toolbar/shortcut target when the caller named none (`null` = the caller did). */
 function toolbarLaunchPlan(host: DebugAndEnvHost, opts: { configId?: string; adhoc?: unknown; launch?: unknown }): LaunchPlan | null {
   if (opts.configId || opts.adhoc || opts.launch) return null;
@@ -662,16 +665,22 @@ export async function launchDebugSession(
       ? { SPRING_PROFILES_ACTIVE: host.activeSpringProfiles.join(',') }
       : {};
     const tcEnv: Record<string, string> = host.keepTestcontainersAlive ? { TESTCONTAINERS_RYUK_DISABLED: 'true' } : {};
+    const fwCliDebug = cfg ? resolveFrameworkDevDebugLaunch(cfg) : null;
     const baseLaunch = opts.launch ?? {
-      program,
+      program: fwCliDebug?.program ?? program,
       // A tool runner's args are its own command line (`run ./cmd/x`, `test -v ./...`),
       // not the debuggee's argv; script and custom runners pass theirs through.
       // A config saved with its script as the first argument names it once.
-      args: cfg && !TOOL_ARGV_RUNNERS.has(cfg.runner) ? cfg.args.filter((a, i) => i > 0 || a !== cfg.target_path) : [],
+      args: fwCliDebug
+        ? fwCliDebug.args
+        : (cfg && !TOOL_ARGV_RUNNERS.has(cfg.runner) ? cfg.args.filter((a, i) => i > 0 || a !== cfg.target_path) : []),
       build_flags: cfg?.build_flags ?? [],
       cwd: cfg?.cwd || repoInfo.path || host.target.root,
       test_name: cfg?.test_filter || undefined,
-      env: cfg?.env_overrides ?? {},
+      env: {
+        ...(cfg?.runner === 'dotnet_test' ? { OTTO_DOTNET_TEST_DEBUG: '1' } : {}),
+        ...(cfg?.env_overrides ?? {}),
+      },
       env_file: cfg?.env_file ?? null,
       inherit_shell_env: cfg?.inherit_shell_env ?? host.projectEnv?.inherit_shell_env ?? true,
       sdk_path: cfg?.sdk_path ?? modSdk ?? null,

@@ -386,6 +386,7 @@ fn build_js_test_item(
             ],
         )
     };
+    let supports_node_debug = !matches!(runner, IdeRunnerKind::Playwright | IdeRunnerKind::Karma);
     IdeGutterItem {
         line: line_no,
         kind,
@@ -398,8 +399,8 @@ fn build_js_test_item(
             cwd: Some(cwd),
             target_path: Some(path.to_string()),
             test_filter: Some(title.to_string()),
-            debug_program: Some(path.to_string()),
-            debug_test_name: Some(title.to_string()),
+            debug_program: supports_node_debug.then(|| path.to_string()),
+            debug_test_name: supports_node_debug.then(|| title.to_string()),
         },
     }
 }

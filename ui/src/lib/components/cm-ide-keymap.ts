@@ -30,6 +30,7 @@ const EXT_TO_LSP_LANG: Record<string, string> = {
   html: 'html', htm: 'html', css: 'css', scss: 'scss',
   less: 'less', md: 'markdown', mdx: 'markdown',
   java: 'java', class: 'java', kt: 'kotlin', kts: 'kotlin',
+  svelte: 'svelte', vue: 'vue', cs: 'csharp', csx: 'csharp', fs: 'fsharp', fsx: 'fsharp', fsi: 'fsharp',
   sh: 'shellscript', bash: 'shellscript', zsh: 'shellscript', bats: 'shellscript',
   yaml: 'yaml', yml: 'yaml', graphql: 'graphql', gql: 'graphql', proto: 'protobuf',
 };
@@ -69,6 +70,7 @@ export function lspLanguageIdFor(filePath: string, ideMode: boolean, language?: 
   if (filePath.startsWith('jdt://')) return 'java';
   const clean = filePath.split('?')[0];
   const base = clean.slice(clean.lastIndexOf('/') + 1);
+  if (base.toLowerCase().endsWith('.component.html')) return 'angular';
   const dot = base.lastIndexOf('.');
   const ext = dot < 0 ? '' : base.slice(dot + 1).toLowerCase();
   if (ext === 'csv' || ext === 'tsv') return null;

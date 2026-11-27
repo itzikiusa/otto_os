@@ -43,16 +43,19 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
   DevTools `.reloadtrigger` restart. .NET (C# / F# / Unity / Unreal C#) gets
   highlighting, toolchain discovery/installer, `csharp-ls` / OmniSharp /
   `fsautocomplete`, xUnit/NUnit/MSTest gutter runs, NuGet inspection, and
-  `netcoredbg` / Unity attach. JS/TS web frameworks (Angular, React, Next.js,
+  `netcoredbg` debugging (launch, VSTest test debugging, and explicit PID attach).
+  JS/TS web frameworks (Angular, React, Next.js,
   Svelte/SvelteKit, Vue/Nuxt, Vite) get framework detection, `svelteserver` /
-  `vue-language-server` / `ngserver`, Vitest/Jest/Playwright/Karma runners, and
+  `vue-language-server` (standalone mode) / `ngserver`, Vitest/Jest/Playwright/Karma runners, and
   Node + Browser CDP debugging.
 - **Jupyter notebooks & ML workflow in the IDE.** Open, edit, run and save
-  `.ipynb` notebooks directly in Otto with a persistent Python kernel, inline
-  matplotlib plots and HTML DataFrame tables, kernel selection across `.venv` /
-  `conda` / `uv` / Poetry / Jupyter kernelspecs, interrupt/restart, live
-  Variables view, cell DAP debugging, Apple Silicon MPS / GPU detection, and
-  auto-discovered training and TensorBoard run configurations.
+  `.ipynb` notebooks directly in Otto with a built-in persistent Python kernel
+  (standard Python execution; IPython `%magic` is not supported), inline
+  matplotlib plots and `_repr_html_` tables, interpreter selection across
+  `.venv` / `conda` / `uv` / Poetry / system Python, interrupt/restart, live
+  Variables view, isolated cell DAP debugging, Apple Silicon MPS / GPU
+  detection, and auto-discovered training and loopback TensorBoard run
+  configurations.
 - **Goal progress, loop rounds and waiting threads.** Goal criteria show numeric
   progress (`value / target`), a progress meter, last-3-rounds trends and
   blocker counts across multiple loops on the run page and in chat status

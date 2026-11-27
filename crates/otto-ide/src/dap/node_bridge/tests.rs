@@ -97,6 +97,7 @@ async fn run_if_waiting_dispatched_before_node_waits_still_releases_the_debuggee
             &mut out_rx,
             BridgeGuard::new(),
             String::new(),
+            false,
         )
         .await;
     });

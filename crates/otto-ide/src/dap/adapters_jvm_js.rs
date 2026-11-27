@@ -157,6 +157,9 @@ pub(super) async fn resolve_js_ts_adapter(
     let mut cwd = cwd.to_string();
     if let Some(tname) = req.launch.test_name.as_deref().filter(|s| !s.is_empty()) {
         let pattern = regex::escape(tname);
+        if req.target.kind == IdeTargetKind::Local {
+            check_js_test_debug_supported(&program)?;
+        }
         let runner = (req.target.kind == IdeTargetKind::Local)
             .then(|| js_runner_debug_launch(&program, &pattern))
             .flatten();
@@ -170,7 +173,11 @@ pub(super) async fn resolve_js_ts_adapter(
             }
         }
     } else if req.target.kind == IdeTargetKind::Local {
-        if let Some((entry, fw_args)) = resolve_web_framework_cli_entry(&cwd, &program, &args) {
+        let (effective_prog, effective_args) =
+            unwrap_framework_dev_program(&program, &args, ctx.run_config.as_ref());
+        if let Some((entry, fw_args)) =
+            resolve_web_framework_cli_entry(&cwd, &effective_prog, &effective_args)
+        {
             program = entry;
             args = fw_args;
         }
@@ -213,6 +220,61 @@ pub(super) async fn resolve_js_ts_adapter(
         normalized_cwd: cwd,
         initial_output: Vec::new(),
     })
+}
+
+/// Unwrap a discovered framework dev run configuration (whose target_path may be
+/// `package.json` or a framework CLI name) into `(cli_name, cli_args)` so Node DAP
+/// attaches to the real framework CLI instead of launching `package.json` (BUG-27).
+pub(crate) fn unwrap_framework_dev_program(
+    program: &str,
+    args: &[String],
+    run_config: Option<&crate::types::IdeRunConfig>,
+) -> (String, Vec<String>) {
+    let base = Path::new(program)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(program);
+    if base.eq_ignore_ascii_case("package.json") {
+        if let Some(cfg) = run_config {
+            let mut rest = cfg.args.as_slice();
+            if rest.first().map(String::as_str) == Some("--no-install") {
+                rest = &rest[1..];
+            }
+            if let Some(cli) = rest.first().map(String::as_str) {
+                if matches!(cli, "vite" | "next" | "ng" | "nuxt" | "svelte-kit") {
+                    return (cli.to_string(), rest[1..].to_vec());
+                }
+            }
+        }
+    }
+    (program.to_string(), args.to_vec())
+}
+
+/// Reject Playwright/Karma single-test Node-inspector debugging explicitly (BUG-30):
+/// Playwright executes tests in a child worker process and Karma executes in a browser,
+/// so attaching to the Node CLI launcher will never hit test breakpoints.
+pub(crate) fn check_js_test_debug_supported(file: &str) -> Result<()> {
+    let src = std::fs::read_to_string(file).unwrap_or_default();
+    if src.contains("node:test") {
+        return Ok(());
+    }
+    let pkg = crate::gutter::js_test_package(file);
+    let runner = if src.contains("@playwright/test") {
+        Some(crate::gutter::JsTestRunnerKind::Playwright)
+    } else {
+        pkg.as_ref().map(|p| p.runner)
+    };
+    match runner {
+        Some(crate::gutter::JsTestRunnerKind::Playwright) => Err(Error::Invalid(
+            "Single-test Debug is not supported for Playwright under the built-in Node inspector bridge (Playwright runs tests inside a separate worker process). Use Run or Playwright's inspector (`PWDEBUG=1`)."
+                .into(),
+        )),
+        Some(crate::gutter::JsTestRunnerKind::Karma) => Err(Error::Invalid(
+            "Single-test Debug is not supported for Karma/Angular browser tests under the Node inspector bridge. Use Run or attach a Chrome CDP session."
+                .into(),
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// Resolve a web framework dev/CLI entrypoint (`vite`, `next`, `ng`, `nuxt`, `svelte-kit`)
@@ -972,6 +1034,111 @@ mod tests {
             select_cdp_target_ws_url(&targets).as_deref(),
             Some("ws://127.0.0.1:9222/devtools/page/APP")
         );
+
+        // BUG-28: Requested page URL selects the matching browser tab and fails when absent
+        use crate::dap::node_bridge::cdp::select_cdp_target_ws_url_for;
+        let two_tabs = json!([
+            { "type": "page", "url": "http://localhost:3000/admin", "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/page/ADMIN" },
+            { "type": "page", "url": "http://localhost:5173/dashboard", "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/page/VITE" }
+        ]);
+        assert_eq!(
+            select_cdp_target_ws_url_for(&two_tabs, Some("http://localhost:5173")).as_deref(),
+            Some("ws://127.0.0.1:9222/devtools/page/VITE")
+        );
+        assert_eq!(
+            select_cdp_target_ws_url_for(&two_tabs, Some("http://localhost:4200")),
+            None
+        );
+
+        // BUG-31: Browser attach keeps compiled TS/Svelte/Vue breakpoints unverified when unmapped
+        use crate::dap::node_bridge::is_initial_bp_verified;
+        let loaded_bundle = HashMap::from([("s1".into(), "http://localhost:4200/main.js".into())]);
+        assert!(!is_initial_bp_verified(
+            "/ws/src/app/hero.component.ts",
+            true,
+            &loaded_bundle,
+            "/ws"
+        ));
+        assert!(is_initial_bp_verified(
+            "/ws/src/app/hero.component.ts",
+            false,
+            &loaded_bundle,
+            "/ws"
+        ));
+
+        // BUG-27, BUG-29, BUG-30, BUG-33: Framework dev unwrap, Playwright script preservation,
+        // Playwright/Karma debug rejection, and plain Node index.js fallback
+        let fw_cfg = crate::types::IdeRunConfig {
+            id: "auto:fw-dev".into(),
+            name: "Vite Dev".into(),
+            runner: crate::types::IdeRunnerKind::Npm,
+            command: Some("npx".into()),
+            args: vec![
+                "--no-install".into(),
+                "vite".into(),
+                "--port".into(),
+                "5173".into(),
+            ],
+            ..Default::default()
+        };
+        let (unwrapped_prog, unwrapped_args) =
+            unwrap_framework_dev_program("/ws/package.json", &[], Some(&fw_cfg));
+        assert_eq!(unwrapped_prog, "vite");
+        assert_eq!(unwrapped_args, vec!["--port", "5173"]);
+
+        let tmp_disc = tempfile::tempdir().unwrap();
+        // BUG-29: package.json Playwright report script stays `npm run test:e2e:report`
+        let pw_proj = tmp_disc.path().join("pw-scripts");
+        std::fs::create_dir_all(&pw_proj).unwrap();
+        std::fs::write(
+            pw_proj.join("package.json"),
+            r#"{"scripts":{"test:e2e:report":"playwright show-report"},"devDependencies":{"@playwright/test":"^1.49.0"}}"#,
+        )
+        .unwrap();
+        let pw_cfgs = crate::environments::discover_run_configs(
+            &crate::types::IdeTargetSpec::local(pw_proj.to_string_lossy().into_owned()),
+            &[],
+        );
+        let report_cfg = pw_cfgs
+            .iter()
+            .find(|c| c.args == vec!["run", "test:e2e:report"])
+            .expect("declared playwright report script must keep npm run test:e2e:report");
+        assert_eq!(report_cfg.runner, crate::types::IdeRunnerKind::Npm);
+
+        // BUG-33: Metadata-only package.json + index.js still gets `node index.js`
+        let plain_node = tmp_disc.path().join("plain-node");
+        std::fs::create_dir_all(&plain_node).unwrap();
+        std::fs::write(
+            plain_node.join("package.json"),
+            r#"{"name":"plain","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        std::fs::write(plain_node.join("index.js"), "console.log('hi');\n").unwrap();
+        let plain_cfgs = crate::environments::discover_run_configs(
+            &crate::types::IdeTargetSpec::local(plain_node.to_string_lossy().into_owned()),
+            &[],
+        );
+        assert!(
+            plain_cfgs
+                .iter()
+                .any(|c| c.runner == crate::types::IdeRunnerKind::Node && c.name == "node index.js"),
+            "plain Node app with metadata-only package.json must keep node index.js: {plain_cfgs:?}"
+        );
+
+        // BUG-30: Playwright single-test debug is rejected cleanly and hidden in gutter
+        let pw_spec = pw_proj.join("e2e.spec.ts");
+        std::fs::write(
+            &pw_spec,
+            "import { test } from '@playwright/test';\ntest('hi', async () => {});\n",
+        )
+        .unwrap();
+        assert!(check_js_test_debug_supported(&pw_spec.to_string_lossy()).is_err());
+        let pw_gutter = crate::gutter::detect_gutter_items(
+            &pw_spec.to_string_lossy(),
+            &std::fs::read_to_string(&pw_spec).unwrap(),
+            &[],
+        );
+        assert!(pw_gutter.iter().all(|g| g.run_spec.debug_program.is_none()));
 
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().canonicalize().unwrap();

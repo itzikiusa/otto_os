@@ -61,16 +61,23 @@ pub use wire::{DapEvent, DapMessage, DapReader, DapRequest, DapResponse, DapWrit
 
 /// Owns background child processes, Unix process-group IDs, temp IPC dirs, and SSH tunnels.
 #[derive(Default)]
-pub(crate) struct BridgeGuard {
+pub struct BridgeGuard {
     children: Mutex<Vec<Child>>,
     pgids: Mutex<Vec<u32>>,
     tunnels: Mutex<Vec<SshTunnel>>,
     temp_dirs: Mutex<Vec<PathBuf>>,
+    companions: Mutex<Vec<Arc<BridgeGuard>>>,
 }
 
 impl BridgeGuard {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self::default())
+    }
+
+    pub(crate) fn push_companion(&self, other: Arc<BridgeGuard>) {
+        if let Ok(mut guard) = self.companions.lock() {
+            guard.push(other);
+        }
     }
 
     pub(crate) fn push_child(&self, child: Child) {
@@ -121,6 +128,15 @@ impl BridgeGuard {
             .lock()
             .map(|mut d| d.drain(..).collect())
             .unwrap_or_default();
+
+        let companions_to_kill: Vec<Arc<BridgeGuard>> = self
+            .companions
+            .lock()
+            .map(|mut c| c.drain(..).collect())
+            .unwrap_or_default();
+        for comp in companions_to_kill {
+            comp.kill_all();
+        }
 
         #[cfg(unix)]
         for pgid in pgids_to_kill {

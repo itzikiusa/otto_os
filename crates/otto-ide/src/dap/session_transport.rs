@@ -150,6 +150,34 @@ async fn connect_adapter_transport(
             guard.push_child(child);
             Ok((Box::new(stdout), Box::new(stdin), guard))
         }
+        DapAdapterTransport::StdioWithCompanion {
+            command,
+            args,
+            cwd,
+            env,
+            companion,
+        } => {
+            guard.push_companion(companion);
+            let mut child =
+                spawn_target_process(&req.target, ctx.ssh.as_ref(), &command, &args, &cwd, &env)
+                    .await?;
+            let stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| Error::Internal("missing DAP adapter stdin".into()))?;
+            let stdout = child
+                .stdout
+                .take()
+                .ok_or_else(|| Error::Internal("missing DAP adapter stdout".into()))?;
+            if let Some(stderr) = child.stderr.take() {
+                let entry_err = entry.clone();
+                spawn_line_reader(stderr, move |l| {
+                    entry_err.append_output("stderr", format!("{l}\n"));
+                });
+            }
+            guard.push_child(child);
+            Ok((Box::new(stdout), Box::new(stdin), guard))
+        }
         DapAdapterTransport::TcpListen {
             command,
             args,
@@ -281,6 +309,10 @@ pub(super) async fn handshake_and_run(
         .and_then(|c| c.get("supportsTerminateRequest"))
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let supports_set_variable = caps
+        .and_then(|c| c.get("supportsSetVariable"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let exception_filters: Vec<String> = caps
         .and_then(|c| c.get("exceptionBreakpointFilters"))
         .and_then(Value::as_array)
@@ -295,9 +327,13 @@ pub(super) async fn handshake_and_run(
         wire: wire.clone(),
         guard,
         supports_terminate,
+        supports_set_variable,
         exception_filters,
     });
     *entry.conn.write().unwrap_or_else(|e| e.into_inner()) = Some(active_conn.clone());
+    entry.mutate_and_broadcast(|snap| {
+        snap.supports_set_variable = supports_set_variable;
+    });
 
     let mut launch_rx = wire
         .send_request_nowait(launch_command, Some(launch_args))

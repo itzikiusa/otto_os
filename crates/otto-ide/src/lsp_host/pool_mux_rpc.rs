@@ -88,6 +88,47 @@ fn non_root_zig_settings() -> Value {
     })
 }
 
+/// Svelte LSP untrusted initialization options: prevents automatic execution of
+/// workspace `svelte.config.js` / preprocessors on file open (SEC-7).
+pub(crate) fn svelte_untrusted_init_options() -> Value {
+    json!({
+        "isTrusted": false
+    })
+}
+
+/// Vue Language Server standalone options (`hybridMode: false`) so SFC script/template
+/// features work without a separate `tsserver/request` relay (RED-2).
+pub(crate) fn vue_standalone_init_options(owner_is_root: bool, root: &str) -> Value {
+    let mut opts = json!({
+        "vue": { "hybridMode": false }
+    });
+    if let Some(tsdk) = detect_typescript_tsdk(owner_is_root, root) {
+        opts["typescript"] = json!({ "tsdk": tsdk });
+    }
+    opts
+}
+
+#[allow(clippy::disallowed_methods)]
+fn detect_typescript_tsdk(owner_is_root: bool, root: &str) -> Option<String> {
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    for data in otto_core::secret_paths::otto_data_dirs() {
+        candidates.push(data.join("toolchains/node/lsp/node_modules/typescript/lib"));
+    }
+    if owner_is_root {
+        candidates.push(Path::new(root).join("node_modules/typescript/lib"));
+    }
+    for sys in [
+        "/opt/homebrew/lib/node_modules/typescript/lib",
+        "/usr/local/lib/node_modules/typescript/lib",
+    ] {
+        candidates.push(std::path::PathBuf::from(sys));
+    }
+    candidates
+        .into_iter()
+        .find(|p| p.join("tsserverlibrary.js").is_file() || p.join("typescript.js").is_file())
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
 /// The repo's venv interpreter for pyright (which EXECUTES it to read
 /// `sys.path`). A real venv (it has `pyvenv.cfg`) links `bin/python` to an
 /// installed interpreter; one that resolves inside the repo is a committed
@@ -402,6 +443,29 @@ impl Mux {
                 .filter(|o| self.owner_is_root && o.is_object())
                 .unwrap_or_else(|| json!({}));
             merge_json(&mut opts, json!({ "settings": jdtls_settings() }));
+            params.insert("initializationOptions".into(), opts);
+        } else if norm_lang == "svelte" {
+            // SEC-7: Always initialize svelte-language-server with `isTrusted: false`
+            // so opening a `.svelte` file never auto-executes untrusted `svelte.config.js`
+            // or workspace preprocessors.
+            let mut opts = params
+                .remove("initializationOptions")
+                .filter(|o| self.owner_is_root && o.is_object())
+                .unwrap_or_else(|| json!({}));
+            merge_json(&mut opts, svelte_untrusted_init_options());
+            params.insert("initializationOptions".into(), opts);
+        } else if norm_lang == "vue" {
+            // RED-2: Run `@vue/language-server` in standalone mode (`hybridMode: false`)
+            // with a managed TypeScript `tsdk` when available, since Otto does not relay
+            // hybrid `tsserver/request` notifications.
+            let mut opts = params
+                .remove("initializationOptions")
+                .filter(|o| self.owner_is_root && o.is_object())
+                .unwrap_or_else(|| json!({}));
+            merge_json(
+                &mut opts,
+                vue_standalone_init_options(self.owner_is_root, &self.key.root),
+            );
             params.insert("initializationOptions".into(), opts);
         } else if !self.owner_is_root && norm_lang == "rust" {
             params.insert("initializationOptions".into(), non_root_rust_settings());
@@ -826,5 +890,44 @@ mod python_path_tests {
             std::os::unix::fs::symlink(sys, bin.join("python")).unwrap();
             assert!(super::detect_local_python_path(root).is_some());
         }
+    }
+
+    #[test]
+    fn svelte_init_options_always_disables_trust() {
+        let mut opts = serde_json::json!({ "isTrusted": true, "other": 1 });
+        super::merge_json(&mut opts, super::svelte_untrusted_init_options());
+        assert_eq!(opts["isTrusted"], serde_json::json!(false));
+        assert_eq!(opts["other"], serde_json::json!(1));
+    }
+
+    #[test]
+    fn vue_init_options_forces_standalone_mode_and_finds_root_tsdk() {
+        let ws = tempfile::tempdir().unwrap();
+        let tsdk_dir = ws.path().join("node_modules/typescript/lib");
+        std::fs::create_dir_all(&tsdk_dir).unwrap();
+        std::fs::write(tsdk_dir.join("tsserverlibrary.js"), "// stub").unwrap();
+        let root = ws.path().to_str().unwrap();
+
+        let non_root = super::vue_standalone_init_options(false, root);
+        assert_eq!(non_root["vue"]["hybridMode"], serde_json::json!(false));
+        if let Some(tsdk) = non_root
+            .pointer("/typescript/tsdk")
+            .and_then(|v| v.as_str())
+        {
+            assert!(
+                !tsdk.starts_with(root),
+                "non-root must never load workspace node_modules tsdk: {tsdk}"
+            );
+        }
+
+        let as_root = super::vue_standalone_init_options(true, root);
+        assert_eq!(as_root["vue"]["hybridMode"], serde_json::json!(false));
+        assert!(
+            as_root
+                .pointer("/typescript/tsdk")
+                .and_then(|v| v.as_str())
+                .is_some(),
+            "root should resolve managed or workspace tsdk: {as_root}"
+        );
     }
 }
