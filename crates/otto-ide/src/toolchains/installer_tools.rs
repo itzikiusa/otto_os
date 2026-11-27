@@ -110,7 +110,8 @@ pub(super) async fn install_local_lsp(
             Ok(dest.to_string_lossy().into_owned())
         }
         EcosystemKind::Zig => {
-            // Match ZLS release tag (`0.14.0`, `0.13.0`, ...) to the active Zig major.minor.
+            // Match ZLS release to the active Zig version; prefer releases.zigtools.org
+            // for exact compatibility + SHA-256 verification, falling back to GitHub tag.
             let zig_ver = zig_home
                 .and_then(super::discovery::zig_bin_in_home)
                 .and_then(|b| super::discovery::read_zig_bin_version(&b))
@@ -121,18 +122,28 @@ pub(super) async fn install_local_lsp(
                     )
                     .and_then(|b| super::discovery::read_zig_bin_version(&b))
                 });
-            let zls_ver = zig_ver
+            let lookup_ver = zig_ver
                 .as_deref()
-                .and_then(super::discovery::zig_major_minor)
-                .map(|(maj, min)| format!("{maj}.{min}.0"))
-                .unwrap_or_else(|| EcosystemKind::Zig.default_sdk_version().to_string());
+                .unwrap_or_else(|| EcosystemKind::Zig.default_sdk_version());
+            let (zls_ver, tarball_url, expected_sha256) =
+                if let Some(rel) = mgr.catalog.fetch_zls_release(lookup_ver, platform).await {
+                    (rel.version, rel.url, rel.sha256)
+                } else {
+                    let fallback = zig_ver
+                        .as_deref()
+                        .and_then(super::discovery::zig_major_minor)
+                        .map(|(maj, min)| format!("{maj}.{min}.0"))
+                        .unwrap_or_else(|| EcosystemKind::Zig.default_sdk_version().to_string());
+                    let url = zls_tarball_url(&fallback, platform);
+                    (fallback, url, None)
+                };
             let archive = tmp.join(format!("zls-{zls_ver}.tar.xz"));
             download_https_to_file(
                 mgr,
                 job_id,
-                &zls_tarball_url(&zls_ver, platform),
+                &tarball_url,
                 &archive,
-                None,
+                expected_sha256.as_deref(),
                 65,
             )
             .await?;
