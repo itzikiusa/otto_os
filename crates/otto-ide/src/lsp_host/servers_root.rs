@@ -299,7 +299,9 @@ pub(crate) fn climb_to_build_root(
         if !climb {
             break;
         }
-        if norm_lang != "rust" {
+        // Rust and .NET climb only to find their workspace / `.sln` ancestor (returned
+        // above): a lone member is its own root, never the highest allowed ancestor.
+        if !matches!(norm_lang, "rust" | "csharp" | "fsharp") {
             top = parent.clone();
         }
         cur = parent;

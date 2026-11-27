@@ -199,8 +199,21 @@ pub const TRUST_KOTLIN_LSP_ENV: &str = "OTTO_IDE_TRUST_KOTLIN_LSP";
 /// Project environment key opting a Vue project into automatic standalone `vue-language-server`
 /// startup (Vue 2.2.10 loads project-selected plugins from `tsconfig.json` / `jsconfig.json`).
 pub const TRUST_VUE_LSP_ENV: &str = "OTTO_IDE_TRUST_VUE_LSP";
+/// Project environment key opting a .NET project into automatic `csharp-ls` / `fsautocomplete`
+/// startup (they load the MSBuild project, whose design-time build runs the project's targets).
+pub const TRUST_DOTNET_LSP_ENV: &str = "OTTO_IDE_TRUST_DOTNET_LSP";
 /// Shared project environment key opting a project into trusted build-tool execution.
 pub const TRUST_PROJECT_EXECUTION_ENV: &str = "OTTO_IDE_TRUST_PROJECT_EXECUTION";
+
+fn dotnet_lsp_untrusted() -> LspWsError {
+    LspWsError {
+        status: StatusCode::FORBIDDEN,
+        code: "dotnet_lsp_requires_trust",
+        message: format!(
+            "the .NET language server loads the MSBuild project, whose design-time build runs the project's targets; set {TRUST_DOTNET_LSP_ENV}=1 (or {TRUST_PROJECT_EXECUTION_ENV}=1) in project environment settings to start it"
+        ),
+    }
+}
 
 fn lsp_execution_trusted_for_key(
     envs: &crate::environments::EnvironmentManager,
@@ -455,6 +468,17 @@ pub async fn prepare_lsp_ws_session<C: IdeCtx>(
                 ),
             });
         }
+        if matches!(remote.lang.as_str(), "csharp" | "fsharp")
+            && !lsp_execution_trusted_for_key(
+                &ide.environments,
+                &norm_root,
+                Some(&norm_root),
+                Some(&conn_id),
+                TRUST_DOTNET_LSP_ENV,
+            )
+        {
+            return Err(dotnet_lsp_untrusted());
+        }
         let remote_vue_tsdk = if remote.lang == "vue" {
             let ssh_target = crate::target::ResolvedTarget::Ssh {
                 spec: ssh_spec.clone(),
@@ -624,6 +648,17 @@ pub async fn prepare_lsp_ws_session<C: IdeCtx>(
                 "vue-language-server loads project-configured Vue/TypeScript plugins from tsconfig.json; set {TRUST_VUE_LSP_ENV}=1 (or {TRUST_PROJECT_EXECUTION_ENV}=1) in project environment settings to start it"
             ),
         });
+    }
+    if matches!(resolved.lang.as_str(), "csharp" | "fsharp")
+        && !lsp_execution_trusted_for_key(
+            &ide.environments,
+            &resolved_root,
+            Some(&opened_root),
+            None,
+            TRUST_DOTNET_LSP_ENV,
+        )
+    {
+        return Err(dotnet_lsp_untrusted());
     }
 
     let mut launch_cmd = resolved.command;
@@ -960,7 +995,7 @@ mod root_tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn prepare_lsp_ws_session_enforces_kotlin_trust_locally_over_ssh_and_blocks_ancestor_inheritance(
+    async fn prepare_lsp_ws_session_enforces_kotlin_and_dotnet_trust_locally_over_ssh_and_blocks_ancestor_inheritance(
     ) {
         use std::os::unix::fs::PermissionsExt;
 
@@ -1045,6 +1080,12 @@ mod root_tests {
         std::fs::create_dir_all(fake_kls.parent().unwrap()).unwrap();
         std::fs::write(&fake_kls, "#!/bin/sh\nexit 0\n").unwrap();
         std::fs::set_permissions(&fake_kls, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for dotnet_ls in ["csharp-ls", "fsautocomplete"] {
+            let bin = data_dir.join("toolchains/dotnet/bin").join(dotnet_ls);
+            std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+            std::fs::write(&bin, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
 
         let parent_repo = tmp.path().join("trusted-parent");
         let sub_mod = parent_repo.join("sub-mod");
@@ -1183,8 +1224,14 @@ mod root_tests {
         assert_eq!(err_ssh.status, StatusCode::FORBIDDEN);
         assert_eq!(err_ssh.code, "kotlin_lsp_requires_trust");
 
+        // Trust is stored under the SSH target's own project key (trailing slash trimmed).
+        let ssh_target = crate::types::IdeTargetSpec {
+            kind: crate::types::IdeTargetKind::Ssh,
+            connection_id: Some("ssh-1".into()),
+            ..crate::types::IdeTargetSpec::local("/srv/kt-remote/")
+        };
         ide.environments.seed_snapshot(
-            "ssh:ssh-1:/srv/kt-remote",
+            &ssh_target.project_key(),
             crate::types::IdeProjectEnvironment {
                 env_vars: vec![crate::types::IdeEnvVarEntry {
                     key: TRUST_PROJECT_EXECUTION_ENV.into(),
@@ -1210,6 +1257,64 @@ mod root_tests {
             ok_ssh.is_ok(),
             "trusted SSH Kotlin root should succeed: {ok_ssh:?}"
         );
+
+        // 4. .NET servers load MSBuild projects on open (design-time builds run the
+        //    project's targets): untrusted locally and on another connection's same path.
+        let dotnet_proj = tmp.path().join("dotnet-app");
+        std::fs::create_dir_all(&dotnet_proj).unwrap();
+        std::fs::write(
+            dotnet_proj.join("App.csproj"),
+            "<Project Sdk=\"Microsoft.NET.Sdk\" />\n",
+        )
+        .unwrap();
+        let canon_dotnet = std::fs::canonicalize(&dotnet_proj).unwrap();
+        for lang in ["csharp", "fsharp"] {
+            let q = |root: &str, conn: Option<&str>| LspWsQuery {
+                lang: Some(lang.into()),
+                root: Some(root.into()),
+                file: None,
+                connection_id: conn.map(String::from),
+            };
+            for (root, conn) in [
+                (canon_dotnet.to_string_lossy().into_owned(), None),
+                ("/srv/kt-remote".to_string(), Some("ssh-2")),
+            ] {
+                let err = prepare_lsp_ws_session(&ctx, &root_user, q(&root, conn))
+                    .await
+                    .unwrap_err();
+                assert_eq!(err.status, StatusCode::FORBIDDEN, "{lang} {root} {conn:?}");
+                assert_eq!(err.code, "dotnet_lsp_requires_trust", "{lang} {conn:?}");
+            }
+            let ok =
+                prepare_lsp_ws_session(&ctx, &root_user, q("/srv/kt-remote", Some("ssh-1"))).await;
+            assert!(ok.is_ok(), "trusted SSH {lang} root should succeed: {ok:?}");
+        }
+        // A trusted lone project (no .sln above it) is served at its own directory.
+        ide.environments.seed_snapshot(
+            &format!("local:{}", canon_dotnet.to_string_lossy()),
+            crate::types::IdeProjectEnvironment {
+                env_vars: vec![crate::types::IdeEnvVarEntry {
+                    key: TRUST_DOTNET_LSP_ENV.into(),
+                    value: Some("1".into()),
+                    secret: false,
+                    has_secret: false,
+                }],
+                ..Default::default()
+            },
+        );
+        let ok_local = prepare_lsp_ws_session(
+            &ctx,
+            &root_user,
+            LspWsQuery {
+                lang: Some("csharp".into()),
+                root: Some(canon_dotnet.to_string_lossy().into_owned()),
+                file: None,
+                connection_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(ok_local.key.root, canon_dotnet.to_string_lossy());
     }
 
     #[cfg(unix)]
