@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use otto_core::{Error, Result};
 use otto_state::DbPool;
 use reqwest::header::{HeaderMap, CONTENT_TYPE, SET_COOKIE};
-use reqwest::Url;
+use reqwest::{StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
@@ -170,6 +170,18 @@ pub async fn run(
             result.map_err(|_| Error::Upstream("The passive audit reached its time limit.".into()))??
         }
     };
+    let status = response.status();
+    if !status.is_success() {
+        let reason = if status == StatusCode::METHOD_NOT_ALLOWED {
+            "The confirmed URL does not support HEAD. Confirm a URL that accepts HEAD requests."
+                .into()
+        } else if status.is_redirection() {
+            format!("The confirmed URL responded with HTTP {status}. Otto does not follow redirects. Confirm the final URL.")
+        } else {
+            format!("The confirmed URL responded with HTTP {status}. Use a URL that returns a successful unauthenticated HEAD response.")
+        };
+        return Err(Error::Upstream(reason));
+    }
     let findings = inspect_headers(root, &url, response.headers());
     let sampled = now();
     Ok((
@@ -361,12 +373,9 @@ mod tests {
         assert!(get(&pool, "audit-project").await.unwrap().is_none());
     }
 
-    #[tokio::test]
-    async fn live_passive_audit_sends_one_head_and_masks_cookie_values() {
+    async fn fixture(response: String) -> (Target, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let redirect_target = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let redirect_addr = redirect_target.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut request = Vec::new();
@@ -377,9 +386,7 @@ mod tests {
             assert!(request.starts_with("HEAD /app HTTP/1.1\r\n"));
             assert!(!request.to_ascii_lowercase().contains("authorization:"));
             assert!(!request.to_ascii_lowercase().contains("cookie:"));
-            stream.write_all(format!(
-                "HTTP/1.1 302 Found\r\nLocation: http://{redirect_addr}/\r\nContent-Type: text/html\r\nSet-Cookie: test=masked-test-value\r\nContent-Length: 0\r\n\r\n"
-            ).as_bytes()).await.unwrap();
+            stream.write_all(response.as_bytes()).await.unwrap();
         });
         let target = Target {
             url: format!("http://{addr}/app"),
@@ -388,15 +395,18 @@ mod tests {
             scheduled: false,
             confirmed_at: now(),
         };
+        (target, server)
+    }
+
+    #[tokio::test]
+    async fn live_passive_audit_sends_one_head_and_masks_cookie_values() {
+        let (target, server) = fixture(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nSet-Cookie: test=masked-test-value\r\nContent-Length: 0\r\n\r\n".into()
+        ).await;
         let (run, findings) = run(&target, Path::new("/test"), &CancellationToken::new())
             .await
             .unwrap();
         server.await.unwrap();
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), redirect_target.accept())
-                .await
-                .is_err()
-        );
         assert!(findings
             .iter()
             .any(|item| item.rule == "http.cookie-attributes"));
@@ -407,6 +417,34 @@ mod tests {
             "passive HTTP loopback fixture: wall={} ms, {} findings, one HEAD",
             run.metrics.wall_ms,
             findings.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn reports_unsuccessful_head_status_instead_of_clean_findings() {
+        let redirect = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let redirect_addr = redirect.local_addr().unwrap();
+        for (status, expected) in [
+            ("405 Method Not Allowed", "does not support HEAD"),
+            ("401 Unauthorized", "401"),
+            ("404 Not Found", "404"),
+            ("500 Internal Server Error", "500"),
+            ("302 Found", "redirect"),
+        ] {
+            let (target, server) = fixture(format!(
+                "HTTP/1.1 {status}\r\nLocation: http://{redirect_addr}/\r\nContent-Length: 0\r\n\r\n"
+            )).await;
+            let audit = run(&target, Path::new("/test"), &CancellationToken::new()).await;
+            server.await.unwrap();
+            assert!(
+                matches!(audit, Err(Error::Upstream(message)) if message.contains(expected)),
+                "audit accepted {status} or failed without an actionable message"
+            );
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), redirect.accept())
+                .await
+                .is_err()
         );
     }
 }
