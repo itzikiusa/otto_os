@@ -158,6 +158,37 @@ test('Stop run… asks first; Stop is never beside a primary', async ({ page }) 
   await expect(page.getByTestId('wf-run-page')).toHaveAttribute('data-state', 'canceled', { timeout: 30_000 });
 });
 
+test('picking Files or Output on a live run stays on that tab without a step in the address', async ({ page }) => {
+  const wf = await createWorkflow(api, 'E2E Live tab stay', chain(agentStep('slow', 'Slow step', ['sleep 60000'])));
+  const run = await startRun(api, wf);
+  await waitRun(api, run, (r) => r.status === 'running' && (r.overview?.state ?? 'running') === 'running' && r.nodes.some((n) => n.node_id === 'slow' && n.status === 'running'));
+  await openRun(page, wf, run);
+  await expect(stepPane(page)).toHaveAttribute('data-node-id', 'slow', { timeout: 20_000 });
+
+  const orbitTime = page.getByTestId('wf-run-orbit-time');
+  await expect(orbitTime).toHaveAttribute('aria-label', /^Running for /);
+  await expect(orbitTime).toHaveAttribute('title', /^Running for /);
+  await expect(orbitTime).toContainText('elapsed');
+
+  const filesTab = page.getByTestId('wf-step-tab-files');
+  await filesTab.click();
+  await expect(filesTab).toHaveAttribute('aria-selected', 'true');
+  await expect(page.locator('#wf-step-panel-files')).toBeVisible();
+  await page.waitForTimeout(3000); // ui-guards: allow — absence: proves the Files tab does not reset across live ticks
+  await expect(page.getByTestId('wf-run-page')).toHaveAttribute('data-state', 'running');
+  await expect(filesTab).toHaveAttribute('aria-selected', 'true');
+  await expect(page.locator('#wf-step-panel-files')).toBeVisible();
+
+  const outputTab = page.getByTestId('wf-step-tab-output');
+  await outputTab.click();
+  await expect(outputTab).toHaveAttribute('aria-selected', 'true');
+  await expect(page.locator('#wf-step-panel-output')).toBeVisible();
+  await page.waitForTimeout(3000); // ui-guards: allow — absence: proves the Output tab does not reset across live ticks
+  await expect(page.getByTestId('wf-run-page')).toHaveAttribute('data-state', 'running');
+  await expect(outputTab).toHaveAttribute('aria-selected', 'true');
+  await expect(page.locator('#wf-step-panel-output')).toBeVisible();
+});
+
 test('the old link format and the inbox row both land on the run page', async ({ page }) => {
   const wf = await createWorkflow(api, 'E2E Link', chain(agentStep('one', 'One step')));
   const run = await startRun(api, wf);
