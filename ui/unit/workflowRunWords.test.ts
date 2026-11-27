@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  ago, attentionWord, childWord, deliverableWord, deliverablesInOrder, errorParts, fromHistory, inboxFolds, ordinal, retentionNote, runContext, runLine3, runTitle, runWord,
+  ago, attentionWord, childWord, deliverableWord, deliverablesInOrder, errorParts, fromHistory, inboxFolds, orbitTime, ordinal, retentionNote, runContext, runLine3, runTitle, runWord,
   stepDuration, stepWord, subLine, type InboxRun,
 } from '../src/modules/workflows/runs/runWords.ts';
 import type { RunOverview, RunState } from '../src/lib/api/types';
@@ -159,4 +159,20 @@ test('the conversation note reads the two retention settings', () => {
   assert.equal(retentionNote(24, 168), 'Read-only: this conversation belongs to the run. It is kept for 24 hours after the run ends (7 days if the run fails).');
   assert.equal(retentionNote(1, 36), 'Read-only: this conversation belongs to the run. It is kept for 1 hour after the run ends (36 hours if the run fails).');
   assert.equal(retentionNote(0, 168), 'Read-only: this conversation belongs to the run. It is removed when the step succeeds; a summary stays (7 days if the run fails).');
+});
+
+test('the ring centre time labels elapsed duration unmistakably per state', () => {
+  assert.deepEqual(orbitTime('running', '2m'), { label: 'Running for 2m', sub: 'elapsed' });
+  assert.deepEqual(orbitTime('running', '2m', '25m'), { label: 'Running for 2m (usually about 25m)', sub: 'of ~25m' });
+  assert.deepEqual(orbitTime('waiting', '2m'), { label: 'Waiting 2m', sub: 'waiting' });
+  assert.deepEqual(orbitTime('waiting', '2m', '10m'), { label: 'Waiting 2m (usually about 10m)', sub: 'of ~10m' });
+  assert.deepEqual(orbitTime('needs_you', '3m'), { label: 'Waiting 3m', sub: 'waiting' });
+  assert.deepEqual(orbitTime('blocked', '3m'), { label: 'Waiting 3m', sub: 'waiting' });
+  assert.deepEqual(orbitTime('exhausted', '3m'), { label: 'Waiting 3m', sub: 'waiting' });
+  assert.deepEqual(orbitTime('queued', '30s'), { label: 'Queued 30s', sub: 'queued' });
+  assert.deepEqual(orbitTime('paused', '5m'), { label: 'Paused after 5m', sub: 'paused' });
+  for (const state of ['succeeded', 'failed', 'canceled'] as const) {
+    assert.deepEqual(orbitTime(state, '14m'), { label: 'Took 14m', sub: 'total' }, state);
+  }
+  assert.deepEqual(orbitTime('unknown', '2m'), { label: 'Elapsed 2m', sub: 'elapsed' });
 });

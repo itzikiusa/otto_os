@@ -64,6 +64,38 @@ export function fallbackState(status: string, waitingApproval = false): RunState
 /** The fields of an overview the words read. */
 export type OverviewLike = Pick<RunOverview, 'state' | 'attention' | 'queue'> & Partial<Pick<RunOverview, 'hold'>>;
 
+/** The ring centre's accessible/hover time label and the small word under the
+ *  number, so elapsed time ("2m") never reads like a countdown or timeout.
+ *  `typical`: formatted usual duration (e.g. "25m") when known on a live run. */
+export function orbitTime(state: RunState, span: string, typical?: string): { label: string; sub: string } {
+  switch (state) {
+    case 'running':
+      return {
+        label: typical ? `Running for ${span} (usually about ${typical})` : `Running for ${span}`,
+        sub: typical ? `of ~${typical}` : 'elapsed',
+      };
+    case 'waiting':
+      return {
+        label: typical ? `Waiting ${span} (usually about ${typical})` : `Waiting ${span}`,
+        sub: typical ? `of ~${typical}` : 'waiting',
+      };
+    case 'needs_you':
+    case 'blocked':
+    case 'exhausted':
+      return { label: `Waiting ${span}`, sub: 'waiting' };
+    case 'queued':
+      return { label: `Queued ${span}`, sub: 'queued' };
+    case 'paused':
+      return { label: `Paused after ${span}`, sub: 'paused' };
+    case 'succeeded':
+    case 'failed':
+    case 'canceled':
+      return { label: `Took ${span}`, sub: 'total' };
+    default:
+      return { label: `Elapsed ${span}`, sub: 'elapsed' };
+  }
+}
+
 /** The run's word (ux.md §2.1). `startedAt`/`now` tick "Working 12m". `raw`:
  *  the state as sent, for a state this build does not know. */
 export function runWord(ov: OverviewLike, opts: { startedAt?: string | null; now?: number; raw?: string } = {}): Word {
