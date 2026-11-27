@@ -36,6 +36,9 @@ notify = { version = "8.2.1", default-features = false, features = ["macos_fseve
 bytes = { workspace = true }
 ring = { workspace = true }
 tempfile = { workspace = true }
+# Native Jupyter client (BSD-3-Clause, runtimed): kernelspecs, signed ZeroMQ channels.
+jupyter-zmq-client = { version = "3.0.1", default-features = false, features = ["tokio-runtime", "ring"] }
+jupyter-protocol = "2.0.4"
 
 [dev-dependencies]
 otto-rbac = { workspace = true }
