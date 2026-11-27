@@ -3,7 +3,8 @@
 // selection — runs/stepOrder.ts.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { childCrumb, childNoun, childTrail, defaultSelection, doneFold, entrySteps, loopChildren, mergeStepChildren, orderChildren, orderChildTree, orderSteps, RESULT, runtimeChildStatus, settledNodes, stepNumber, timeBar, topoOrder } from '../src/modules/workflows/runs/stepOrder.ts';
+import { childCrumb, childNoun, childTrail, defaultSelection, doneFold, entrySteps, loopChildren, mergeStepChildren, orderChildren, orderChildTree, orderSteps, resolveThreadSelection, RESULT, runtimeChildStatus, settledNodes, stepNumber, timeBar, topoOrder } from '../src/modules/workflows/runs/stepOrder.ts';
+import { paneTabs } from '../src/modules/workflows/runs/stepTabs.ts';
 import { at, fanoutNodes, node, PR_GRAPH, reviewers, T0 } from './workflowRunFixtures.ts';
 import { stepWord } from '../src/modules/workflows/runs/runWords.ts';
 import type { RuntimeSession, WorkflowGraph } from '../src/lib/api/types';
@@ -308,4 +309,41 @@ test('mergeStepChildren deduplicates repeated recorded sub-threads from a same-t
       ['th-grand', 1, 'c-first'],
     ],
   );
+});
+
+test('goal-loop helper keeps its iteration row as parent and Open parent selects the iteration conversation', () => {
+  // The daemon mirrors the active iteration's thread id on both `node.thread` and the iteration child row.
+  const recorded = [
+    { id: 'iter-2', label: 'Work · iteration 2', provider: 'claude', status: 'running' as const, thread_id: 'th-iter-2' },
+  ];
+  const sessions = [
+    rtSession('th-iter-2', { provider: 'claude', title: 'Work · iteration 2' }),
+    rtSession('th-helper', {
+      provider: 'codex',
+      title: 'Check build',
+      parent_id: 'th-iter-2',
+      status: 'working',
+      meta: { child_of: { id: 'th-iter-2', by: 'agent' } },
+    }),
+  ];
+  const merged = mergeStepChildren(recorded, 'th-iter-2', sessions);
+  assert.deepEqual(
+    merged.map((c) => [c.id, c.depth, c.parent_child_id]),
+    [
+      ['iter-2', 0, null],
+      ['th-helper', 1, 'iter-2'],
+    ],
+  );
+  assert.deepEqual(childTrail(merged, 'th-helper').map((c) => c.id), ['iter-2', 'th-helper']);
+  const tree = orderChildTree(merged);
+  assert.deepEqual(
+    tree.active.map((e) => [e.child.id, e.depth, e.parentLabel]),
+    [['iter-2', 0, null], ['th-helper', 1, 'Work · iteration 2']],
+  );
+  // Clicking "Open parent" inside the helper passes `th-iter-2` -> resolves to `iter-2`, opening Conversation (not Criteria).
+  const target = resolveThreadSelection(merged, 'th-iter-2', 'th-iter-2');
+  assert.equal(target, 'iter-2');
+  assert.equal(paneTabs({ goal: true, child: !!target, kind: 'loop' })[0], 'conversation');
+  // Ordinary agent step whose root thread is NOT a child row still resolves back to `null` (the step root).
+  assert.equal(resolveThreadSelection([], 'th-step', 'th-step'), null);
 });

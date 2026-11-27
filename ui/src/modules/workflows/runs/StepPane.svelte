@@ -29,7 +29,7 @@
   import { reviewIds } from '../reviewAgents';
   import { runReviews } from '../runReviews.svelte';
   import { childWord, errorParts, stepDuration, stepWord } from './runWords';
-  import { childCrumb, childTrail, type StepChild, type StepItem } from './stepOrder';
+  import { childCrumb, childTrail, resolveThreadSelection, type StepChild, type StepItem } from './stepOrder';
   import { paneTabs, phaseSegments, TAB_LABEL, type PaneTab } from './stepTabs';
 
   interface Props {
@@ -64,12 +64,7 @@
   const childKind = $derived(child ? childCrumb(step?.kind, child) : null);
   function selectThread(threadId: string): void {
     if (!onselectchild) return;
-    if (threadId === node?.thread?.thread_id) {
-      onselectchild(null);
-      return;
-    }
-    const match = stepChildren.find((c) => c.id === threadId || c.thread_id === threadId);
-    onselectchild(match?.id ?? threadId);
+    onselectchild(resolveThreadSelection(stepChildren, node?.thread?.thread_id, threadId));
   }
   const tabs = $derived(paneTabs({ result: !step, goal: !!run.overview?.goal, child: !!child, kind: step?.kind, node: node ?? undefined }));
   let picked = $state<PaneTab | null>(null);

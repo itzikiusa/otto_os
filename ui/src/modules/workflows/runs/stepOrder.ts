@@ -332,7 +332,12 @@ export function mergeStepChildren(
     if (c.thread_id) recordedThreadIds.add(c.thread_id);
     const live = c.thread_id ? bySessionId.get(c.thread_id) : bySessionId.get(c.id);
     const opener = live ? openerOf(live) : null;
-    const parentChild = opener && opener !== rootThreadId ? (threadToChildId.get(opener) ?? (bySessionId.has(opener) ? opener : null)) : null;
+    // If an opener thread is also an explicit child row (e.g. a goal loop
+    // mirroring its active iteration thread on `node.thread`), keep that child
+    // row as the parent instead of collapsing to the bare step root.
+    const parentChild = opener
+      ? (threadToChildId.get(opener) ?? (opener !== rootThreadId && bySessionId.has(opener) ? opener : null))
+      : null;
     out.push({
       ...c,
       ...(live && !c.note && c.status === 'running' ? { status: runtimeChildStatus(live) } : {}),
@@ -343,10 +348,10 @@ export function mergeStepChildren(
   for (const s of family) {
     if (recordedIds.has(s.id) || recordedThreadIds.has(s.id)) continue;
     const opener = openerOf(s);
-    const parentChild =
-      opener && opener !== rootThreadId
-        ? (threadToChildId.get(opener) ?? (family.some((f) => f.id === opener) || recordedIds.has(opener) ? opener : null))
-        : null;
+    const parentChild = opener
+      ? (threadToChildId.get(opener) ??
+          (opener !== rootThreadId && (family.some((f) => f.id === opener) || recordedIds.has(opener)) ? opener : null))
+      : null;
     const started = typeof s.meta?.last_turn_started_at === 'string' && s.meta.last_turn_started_at ? s.meta.last_turn_started_at : s.created_at;
     out.push({
       id: s.id,
@@ -442,6 +447,21 @@ export function orderChildTree(children: readonly StepChild[]): NestedChildView 
   }
   for (const e of view.done) view.findings += Number(/(\d+) findings?/.exec(e.child.note ?? '')?.[1] ?? 0);
   return view;
+}
+
+/** Resolve a thread id clicked inside the pane ("Open parent" / sub-thread card)
+ *  to a child id (or `null` for the bare step root). Explicit child rows win
+ *  over `rootThreadId` so a goal loop whose `node.thread` mirrors its active
+ *  iteration row selects the iteration conversation instead of the loop's Criteria tab. */
+export function resolveThreadSelection(
+  children: readonly Pick<StepChild, 'id' | 'thread_id'>[],
+  rootThreadId: string | null | undefined,
+  threadId: string,
+): string | null {
+  const match = children.find((c) => c.id === threadId || c.thread_id === threadId);
+  if (match) return match.id;
+  if (rootThreadId && threadId === rootThreadId) return null;
+  return threadId;
 }
 
 /** Ancestor trail `[topChild, …, currentChild]` for the pane breadcrumb (empty when not found). */
