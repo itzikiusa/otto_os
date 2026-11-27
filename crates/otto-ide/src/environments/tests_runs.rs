@@ -190,6 +190,7 @@ fn streaming_10k_lines_ssh_runner_commands_and_maven_flags_work() {
 /// does: in the module or any folder above it up to the target root, never above the root.
 #[test]
 #[cfg(unix)]
+#[allow(clippy::disallowed_methods)] // a sync test runs the generated script to its end
 fn ssh_jvm_launchers_find_the_wrapper_up_to_the_target_root() {
     use std::os::unix::fs::PermissionsExt;
     let tmp = tempfile::tempdir().unwrap();
