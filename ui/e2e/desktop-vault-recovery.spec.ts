@@ -25,13 +25,13 @@ test.beforeEach(async ({page}) => {
 test('trash restores a file and edit history compares recoverable versions', async ({page}) => {
   await openPage(page, 'vault');
   // History + trash live in the header's ⋯ (the toolbar keeps ≤5 controls).
-  await page.getByRole('button', {name: 'More vault actions', exact: true}).click();
+  await page.getByTestId('page-header').getByRole('button', { name: 'More actions', exact: true }).click();
   await page.getByRole('menuitem', {name: 'Trash and restore'}).click();
   const trash = page.getByRole('region', {name: 'Vault trash'});
   await expect(trash.getByText('recovery.md', {exact: true})).toBeVisible();
   await trash.getByRole('button', {name: 'Restore', exact: true}).click();
   await expect(trash.getByText('The trash is empty.', { exact: false })).toBeVisible();
-  await page.getByRole('button', {name: 'More vault actions', exact: true}).click();
+  await page.getByTestId('page-header').getByRole('button', { name: 'More actions', exact: true }).click();
   await page.getByRole('menuitem', {name: 'Edit history'}).click();
   await page.getByLabel('History file path', {exact: true}).fill('recovery.md');
   await page.getByRole('navigation', {name: 'Saved revisions'}).getByRole('button').first().click();
@@ -49,11 +49,17 @@ test('properties edit preserves note body and the local graph is reachable', asy
   const tree = page.locator('.tree');
   await tree.getByText('services', {exact: true}).click();
   await tree.getByText('auth-api', {exact: true}).click();
+  // Note details is the Detail pane: inline when the note keeps 480 px, else a
+  // sheet that opens on request (this window is too narrow for both).
+  const toggle = page.getByTestId('vault-details-toggle');
+  if ((await toggle.getAttribute('aria-pressed')) !== 'true') await toggle.click();
   await page.locator('.right').getByRole('button', {name: /Properties/}).click();
   await page.getByRole('button', {name: 'Edit properties', exact: true}).click();
   await page.getByLabel('Property description', {exact: true}).fill('Updated through structured properties');
   await page.getByRole('button', {name: 'Save properties'}).click();
   await expect(page.getByRole('button', {name: 'Edit properties', exact: true})).toBeVisible();
+  // A sheet covers the note: close it (Esc) before using the toolbar.
+  if (await page.getByRole('dialog', {name: 'Note details'}).isVisible()) await page.keyboard.press('Escape');
   await page.getByTitle('Graph view', {exact: true}).click();
   await page.getByLabel('Graph scope', {exact: true}).selectOption({label: 'Around current note'});
   await expect(page.locator('.graph-scope')).toContainText('services/auth-api.md');

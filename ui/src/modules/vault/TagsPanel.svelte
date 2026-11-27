@@ -1,7 +1,18 @@
 <script lang="ts">
-  // Tags panel (left sidebar mode): every tag with its count; click → search.
+  // The Vault's Tags view — a ListPane (design.md §3): every tag with its
+  // count; a row runs a tag search (the Search view opens with it).
+  import type { Snippet } from 'svelte';
+  import ListPane from '../../lib/components/side/ListPane.svelte';
+  import SideRow from '../../lib/components/side/SideRow.svelte';
+  import type { IconName } from '../../lib/components/Icon.svelte';
   import { vault } from './vault.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+
+  interface Props {
+    views: Snippet;
+    primary: { icon: IconName; label: string; onclick: () => void };
+  }
+  let { views, primary }: Props = $props();
 
   let filter = $state('');
   const shown = $derived(
@@ -9,8 +20,10 @@
   );
 </script>
 
-<div class="tags">
-  <input dir="ltr" type="search" bind:value={filter} placeholder="Filter tags…" aria-label="Filter tags" />
+<ListPane {views} {primary} count={vault.tags.length || null} testid="vault-tags">
+  {#snippet searchRow()}
+    <input dir="ltr" class="input" type="search" bind:value={filter} placeholder="Filter tags…" aria-label="Filter tags" />
+  {/snippet}
   <LoadState
     what="tags"
     loading={vault.tagsLoading}
@@ -25,69 +38,19 @@
     {#if shown.length === 0}
       <div class="dim">No tags match “{filter}”.</div>
     {/if}
-    <div class="list">
-      {#each shown as t (t.tag)}
-        <button class="tag-row" onclick={() => vault.searchTag(t.tag)}>
-          <span class="tag-name">#{t.tag}</span>
-          <span class="count">{t.count}</span>
-        </button>
-      {/each}
-    </div>
+    {#each shown as t (t.tag)}
+      <SideRow icon="tag" title="#{t.tag}" testid="vault-tag-row" onclick={() => vault.searchTag(t.tag)}>
+        {#snippet trailing()}{t.count}{/snippet}
+      </SideRow>
+    {/each}
   </LoadState>
-</div>
+</ListPane>
 
 <style>
-  .tags {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    min-height: 0;
-    flex: 1;
-    padding: 8px;
-  }
-  input {
-    background: var(--surface-2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    color: var(--text);
-    font-size: var(--fs-s);
-    padding: 6px 10px;
-    width: 100%;
-  }
   .dim {
     color: var(--text-dim);
     font-size: var(--fs-s);
-    padding: 4px 2px;
-  }
-  .list {
-    overflow-y: auto;
-    min-height: 0;
-  }
-  .tag-row {
-    display: flex;
-    width: 100%;
-    align-items: center;
-    justify-content: space-between;
-    background: none;
-    border: none;
-    border-radius: var(--radius-s);
-    padding: 4px 8px;
-    cursor: pointer;
-  }
-  .tag-row:hover {
-    background: var(--hover);
-  }
-  .tag-name {
-    color: var(--accent-text);
-    font-size: var(--fs-s);
-  }
-  .count {
-    color: var(--text-dim);
-    font-size: var(--fs-xs);
-  }
-  @media (pointer: coarse), (max-width: 640px) {
-    .tag-row {
-      min-height: var(--hit-min);
-    }
+    padding-block: 4px;
+    padding-inline: 8px;
   }
 </style>

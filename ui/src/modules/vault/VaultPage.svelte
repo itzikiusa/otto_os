@@ -1,8 +1,10 @@
 <script lang="ts">
   import { loadErrorText } from '../../lib/loadError';
   import { announce, announceShown } from '../../lib/announce.svelte';
-  // Vault v3 — the docs home: Files / Search / Tags sidebar, note or graph center, and Note details as a
-  // Side-panel tab (one right panel). Files on disk are the truth; the daemon keeps a derived index.
+  // Vault v3 — the docs home: a list pane with Files | Search | Tags views
+  // (ListDetail: push on a phone), the note or graph in the content, and Note
+  // details as the page's Detail pane. Files on disk are the truth; the
+  // daemon keeps a derived index.
   import { onMount, untrack } from 'svelte';
   import { focusOnMount } from '../../lib/focusOnMount';
   import Icon from '../../lib/components/Icon.svelte';
@@ -12,14 +14,14 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { lsGet, lsSet } from '../../lib/storage';
-  import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
-  import PaneDivider from '../../lib/components/PaneDivider.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
+  import ListDetail from '../../lib/components/side/ListDetail.svelte';
+  import DetailPane from '../../lib/components/side/DetailPane.svelte';
+  import Tabs from '../../lib/components/Tabs.svelte';
   import { onTabKey } from '../../lib/tabKeys';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
-  import { rightPanel } from '../../lib/stores/rightPanel.svelte';
   import { router } from '../../lib/router.svelte';
   import { registry } from '../../lib/commands.svelte';
   import FileTree from './FileTree.svelte';
@@ -39,53 +41,28 @@
   import PathField from '../../lib/components/PathField.svelte';
   import Modal from '../../lib/components/Modal.svelte';
 
-  // -- pane widths (drag-resizable, persisted) ---------------------------------
-  const LEFT_W_KEY = 'otto_vault_left_w';
-  // Storage is a convenience cache: lsGet/lsSet swallow a blocked accessor or
-  // a full quota, so a private window never blanks the page.
-  let leftW = $state(loadPaneWidth(LEFT_W_KEY, LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
-  // Note details live in the Side panel, as its "Note details" tab. The
-  // Vault's own "show details" preference (default on) is kept SEPARATE from
-  // the panel's saved state: it is applied as the panel's transient view
-  // (ui.rightTransient — never persisted, gone when the Vault unmounts), and
-  // written only by an explicit show / hide of Note details (the ⋯ menu, its
-  // rail icon, collapsing while it is shown). Visiting the Vault therefore
-  // never leaves the panel open on other pages.
-  const DETAILS_TAB = 'page:vault-details' as const;
+  // -- Note details: the page's Detail pane ---------------------------------------
+  // Beside the note (inline) it follows the person's last choice, kept under
+  // otto_vault_right_open (default on). Where it would be a sheet over the
+  // note (a phone, a narrow window) it opens only when asked, and that choice
+  // isn't remembered — a sheet never covers a note by itself.
   const DETAILS_KEY = 'otto_vault_right_open';
-  const rightOpen = $derived(ui.rightOpenNow && rightPanel.shown === DETAILS_TAB);
+  let detailsPref = $state(lsGet(DETAILS_KEY) !== '0');
+  let detailsSheet = $state(false);
+  let sheetOpen = $state(false);
+  const detailsShown = $derived(vault.centerMode === 'note' && !!vault.note && (detailsSheet ? sheetOpen : detailsPref));
+  function setDetails(show: boolean): void {
+    if (detailsSheet) {
+      sheetOpen = show;
+      return;
+    }
+    detailsPref = show;
+    lsSet(DETAILS_KEY, show ? '1' : '0');
+  }
   // a11y-6-01: a backlinks refresh failure is announced at its edge (the status-bar glyph is no live region).
   const backlinksError = $derived(vault.note ? (vault.backlinksError ?? '') : '');
   $effect(() => { if (backlinksError) announce(`Couldn’t refresh the backlinks. ${backlinksError}`); });
   $effect(() => registerVaultPort(vault)); // otto.ui_vault_* drive the store while the page is up (lib/uiCommands/vaultPort.ts)
-  function rememberDetails(shown: boolean): void {
-    lsSet(DETAILS_KEY, shown ? '1' : '0');
-  }
-  let leftOpen = $state(lsGet('otto_vault_left_open') !== '0');
-
-  function toggleLeft(): void {
-    leftOpen = !leftOpen;
-    lsSet('otto_vault_left_open', leftOpen ? '1' : '0');
-  }
-  function toggleRight(): void {
-    const show = !rightOpen;
-    if (ui.rightOverlayMode) ui.setRight(show, DETAILS_TAB);
-    else ui.rightTransient = { open: show, tab: DETAILS_TAB };
-    rememberDetails(show);
-  }
-  $effect(() => {
-    if (vault.centerMode !== 'note') return;
-    // untrack: register reads + writes the page-tab list (no self-dependency).
-    const off = untrack(() => rightPanel.register({ id: DETAILS_TAB, label: 'Note details', icon: 'link', component: RightPanel, onshow: rememberDetails }));
-    untrack(() => {
-      if (lsGet(DETAILS_KEY) !== '0' && !rightOpen) ui.rightTransient = { open: true, tab: DETAILS_TAB };
-    });
-    return () =>
-      untrack(() => {
-        off();
-        if (ui.rightTransient?.tab === DETAILS_TAB) ui.rightTransient = null;
-      });
-  });
 
   let createOpen = $state(false);
   let cName = $state('');
@@ -171,18 +148,39 @@
       : []);
   });
 
-  /** Header ⋯: less-used views and actions + pane toggles (the toolbar keeps ≤5 controls). */
-  function moreMenu(e: MouseEvent): void {
-    const items: MenuItem[] = [
+  /** Header ⋯: less-used views and actions (the toolbar keeps ≤5 controls).
+   *  On a phone list page the toolbar's buttons give way to the pane's
+   *  header, so its views come along here. */
+  function moreItems(): MenuItem[] {
+    if (!vault.current) return [];
+    const listPage = viewport.navDrawer && !phoneOpen;
+    return [
+      ...(listPage
+        ? [
+            { label: 'Graph view', icon: 'share', checked: vault.centerMode === 'graph', action: toggleGraph },
+            { label: 'Docs agent', icon: 'zap', checked: vault.centerMode === 'docs-agents', action: toggleDocsAgents },
+            { label: 'Quick switcher', icon: 'search', hint: '⌘O', action: () => (vault.switcherOpen = true) },
+            { separator: true },
+          ] satisfies MenuItem[]
+        : []),
       { label: 'Edit history', icon: 'clock', action: () => void vault.openHistory() },
       { label: 'Trash and restore', icon: 'trash', action: () => void vault.openTrash() },
       { label: 'Rebuild search index', icon: 'refresh', action: () => void rebuildSearchIndex() },
-      { separator: true },
-      { label: 'File tree', checked: leftOpen, action: toggleLeft },
-      ...(vault.centerMode === 'note' ? [{ label: 'Note details', checked: rightOpen, hint: '⌘J', action: toggleRight }] : []),
     ];
-    ctxMenu.showAt(e.currentTarget as HTMLElement, items, { align: 'end' });
   }
+
+  // The list pane's views (its header): Files | Search | Tags.
+  const MODES = [
+    { id: 'files', label: 'Files' },
+    { id: 'search', label: 'Search' },
+    { id: 'tags', label: 'Tags' },
+  ] as const;
+  const modeLabel = $derived(MODES.find((m) => m.id === vault.leftMode)?.label ?? 'Files');
+  function setMode(id: 'files' | 'search' | 'tags'): void {
+    vault.leftMode = id;
+    if (id === 'tags') void vault.loadTags();
+  }
+  const newNote = { icon: 'plus' as const, label: 'New note (⌘N)', onclick: () => openNewNote('') };
 
   function toggleGraph(): void {
     vault.centerMode = vault.centerMode === 'graph' ? (vault.note ? 'note' : 'empty') : 'graph';
@@ -209,23 +207,27 @@
     }
     return null;
   });
-  let phoneShowSidebar = $state(false);
-  const phoneInSidebar = $derived(
-    viewport.isPhone && (phoneShowSidebar || vault.centerMode === 'empty'),
-  );
+  // Phone push (ListDetail): whatever the content shows is the page; Back
+  // returns to the list with the open note still marked. Opening anything
+  // (a row, a tab, a view) pushes again.
+  let phoneBack = $state(false);
+  const phoneOpen = $derived(vault.centerMode !== 'empty' && !phoneBack);
   $effect(() => {
     void vault.note;
     void vault.filePath;
     void vault.activeTab;
-    const mode = vault.centerMode;
-    untrack(() => {
-      if (mode !== 'empty') phoneShowSidebar = false;
-    });
+    void vault.centerMode;
+    untrack(() => (phoneBack = false));
   });
+  // The empty rule: a vault with nothing in it has no list pane; the
+  // content's "This vault is empty" owns the page.
+  const vaultEmpty = $derived(
+    !!vault.current && vault.roots.length === 0 && !vault.treeLoading && !vault.treeError && (vault.status?.notes ?? vault.current.notes) === 0,
+  );
 
   let autoIndexFor: number | null = null;
   $effect(() => {
-    if (viewport.isPhone) return;
+    if (viewport.navDrawer) return;
     const id = vault.current?.id;
     const path = indexNote;
     if (id == null || !path || autoIndexFor === id) return;
@@ -283,20 +285,7 @@
 <div class="vault-page">
   <!-- Unified header: vault switcher as the title, status chips as badges,
        tools right-aligned (they collapse into ⋯ when the pane is narrow). -->
-  <PageHeader title={vault.current?.name ?? 'Vault'} class="vault-header">
-    {#snippet leading()}
-      {#if viewport.isPhone && !phoneInSidebar && vault.current}
-        <button
-          type="button"
-          class="btn ghost small phone-back-btn"
-          onclick={() => (phoneShowSidebar = true)}
-          aria-label="Back to vault sidebar"
-        >
-          <Icon name="chevronLeft" size={14} />
-          <span>{vault.leftMode === 'search' ? 'Search' : vault.leftMode === 'tags' ? 'Tags' : 'Files'}</span>
-        </button>
-      {/if}
-    {/snippet}
+  <PageHeader title={vault.current?.name ?? 'Vault'} class="vault-header" more={vault.current ? moreItems : undefined}>
     {#snippet titleContent()}
       <button
         class="vault-pick"
@@ -378,24 +367,22 @@
         <button class="icon-btn vh-tool" title="Quick switcher (⌘O)" aria-label="Quick switcher" data-icon="search" onclick={() => (vault.switcherOpen = true)}>
           <Icon name="search" size={14} />
         </button>
-        <button class="btn small primary" title="New note (⌘N)" data-icon="plus" onclick={() => openNewNote('')}>
-          <Icon name="plus" size={13} /> New note
-        </button>
-        <!-- Collapses FIRST (not data-keep): once anything overflows, this
-             menu folds into the header's own ⋯, so a narrow header never
-             shows two ⋯ buttons side by side. -->
-        <button
-          class="icon-btn vh-tool"
-          title="More vault actions"
-          aria-label="More vault actions"
-          aria-haspopup="menu"
-          data-overflow="-10"
-          data-icon="more"
-          data-label="More vault actions…"
-          onclick={moreMenu}
-        >
-          <Icon name="more" size={14} />
-        </button>
+        {#if vault.centerMode === 'note' && vault.note}
+          <!-- The Detail pane's toggle (⌥⌘B): what it holds, not the panel glyph. -->
+          <button
+            class="icon-btn vh-tool"
+            class:active={detailsShown}
+            aria-pressed={detailsShown}
+            title={detailsShown ? 'Hide note details (⌥⌘B)' : 'Show note details: backlinks, outline, properties (⌥⌘B)'}
+            aria-label="Note details"
+            data-icon="info"
+            data-keep
+            data-testid="vault-details-toggle"
+            onclick={() => setDetails(!detailsShown)}
+          >
+            <Icon name="info" size={14} />
+          </button>
+        {/if}
       {/if}
     {/snippet}
   </PageHeader>
@@ -420,61 +407,24 @@
       {@const failed = vault.noteOpenError}
       <div class="note-open-error" data-testid="note-open-error"><LoadState what={failed.path} errorTitle={`Couldn’t open ${failed.path}`} variant="compact" error={failed.message} empty onretry={() => void vault.open(failed.path, failed.opts)}>{#snippet errorActions()}<button class="btn small ghost" onclick={() => (vault.noteOpenError = null)}>Dismiss</button>{/snippet}</LoadState></div>
     {/if}
-    <div class="panes">
-      {#if phoneInSidebar || (!viewport.isPhone && leftOpen)}
-      <aside class="left" style="width:{leftW}px">
-        <div class="left-modes" role="group" aria-label="Sidebar view">
-          <button
-            class="icon-btn vh-tool"
-            class:active={vault.leftMode === 'files'}
-            aria-pressed={vault.leftMode === 'files'}
-            title="Files"
-            aria-label="Files"
-            onclick={() => (vault.leftMode = 'files')}><Icon name="folder" size={14} /></button
-          >
-          <button
-            class="icon-btn vh-tool"
-            class:active={vault.leftMode === 'search'}
-            aria-pressed={vault.leftMode === 'search'}
-            title="Search"
-            aria-label="Search"
-            onclick={() => (vault.leftMode = 'search')}><Icon name="search" size={14} /></button
-          >
-          <button
-            class="icon-btn vh-tool"
-            class:active={vault.leftMode === 'tags'}
-            aria-pressed={vault.leftMode === 'tags'}
-            title="Tags"
-            aria-label="Tags"
-            onclick={() => {
-              vault.leftMode = 'tags';
-              void vault.loadTags();
-            }}><Icon name="tag" size={14} /></button
-          >
-          <div class="spacer"></div>
-          {#if vault.leftMode === 'files'}
-            <button class="icon-btn" title="Collapse all" aria-label="Collapse all" onclick={() => vault.collapseAll()}>
-              <Icon name="minimize" size={13} />
-            </button>
-            <button class="icon-btn" title="Rescan vault" aria-label="Rescan vault" onclick={() => void vault.rescan()}>
-              <Icon name="refresh" size={13} />
-            </button>
-          {/if}
-        </div>
+    <ListDetail
+      module="vault"
+      name={modeLabel}
+      open={phoneOpen}
+      onback={() => (phoneBack = true)}
+      empty={vaultEmpty}
+      legacy={{ w: 'otto_vault_left_w', hidden: () => { const o = lsGet('otto_vault_left_open'); return o === null ? null : o === '0'; } }}
+      testid="vault-panes"
+    >
+      {#snippet list()}
         {#if vault.leftMode === 'files'}
-          <FileTree onNewNote={openNewNote} />
+          <FileTree onNewNote={openNewNote} onpick={() => (phoneBack = false)} {views} primary={newNote} />
         {:else if vault.leftMode === 'search'}
-          <SearchPanel />
+          <SearchPanel {views} primary={newNote} onpick={() => (phoneBack = false)} />
         {:else}
-          <TagsPanel />
+          <TagsPanel {views} primary={newNote} />
         {/if}
-      </aside>
-      {#if !viewport.isPhone}
-        <PaneDivider bind:width={leftW} storageKey={LEFT_W_KEY} label="Resize sidebar" />
-      {/if}
-      {/if}
-
-      {#if !phoneInSidebar}
+      {/snippet}
       <main class="center">
         {#if vault.tabs.length > 0}
           <!-- Each tab is a presentational wrapper around TWO real buttons (the
@@ -554,9 +504,23 @@
           </div>
         {/if}
       </main>
-      {/if}
-
-    </div>
+      {#snippet detail()}
+        {#if vault.centerMode === 'note' && vault.note}
+          <DetailPane
+            module="vault"
+            pane="details"
+            title="Note details"
+            open={detailsShown}
+            onclose={() => setDetails(false)}
+            ontoggle={() => setDetails(!detailsShown)}
+            bind:sheet={detailsSheet}
+            testid="vault-details"
+          >
+            <RightPanel />
+          </DetailPane>
+        {/if}
+      {/snippet}
+    </ListDetail>
 
     <footer class="vault-statusbar">
       <span class="vs-counts">
@@ -582,6 +546,10 @@
     </PageBody>
   {/if}
 </div>
+
+{#snippet views()}
+  <Tabs size="s" label="Vault views" idBase="vault-left" tabs={MODES} value={vault.leftMode} onchange={setMode} testid="vault-left-modes" />
+{/snippet}
 
 {#if createOpen}
   <Modal title="Add a vault" onclose={() => (createOpen = false)}>
@@ -719,7 +687,6 @@
       animation: none;
     }
   }
-  .spacer,
   .grow {
     flex: 1;
   }
@@ -728,24 +695,6 @@
   .vh-tool.active {
     background: var(--accent-soft);
     color: var(--accent-text);
-  }
-  .panes {
-    display: flex;
-    flex: 1;
-    min-height: 0;
-  }
-  .left {
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-    border-inline-end: 1px solid var(--border);
-    flex-shrink: 0;
-  }
-  .left-modes {
-    display: flex;
-    gap: 2px;
-    padding: 6px 8px;
-    border-bottom: 1px solid var(--border);
   }
   .center {
     flex: 1;
@@ -906,10 +855,7 @@
     }
   }
 
-  @media (min-width: 641px) and (max-width: 1024px) { .left { max-width: min(38vw, 240px); } }
   @media (max-width: 640px) {
     .vs-path { display: none; }
-    .panes { flex-direction: column; }
-    .left { flex: 1; width: 100% !important; max-height: none; border-inline-end: none; border-bottom: none; }
   }
 </style>

@@ -166,7 +166,7 @@ test('ui: tree, reading view, wikilink nav, backlinks, status bar', async ({ pag
   await expect(page.locator('.right .item .t', { hasText: 'Auth API' })).toBeVisible();
 });
 
-test('ui: Note details is a Side panel tab; the Vault never leaves the panel open elsewhere', async ({ page }) => {
+test('ui: Note details is the Vault\'s Detail pane; hiding it is remembered', async ({ page }) => {
   await page.addInitScript(() => {
     if (sessionStorage.getItem('nd-seeded')) return;
     sessionStorage.setItem('nd-seeded', '1');
@@ -177,31 +177,32 @@ test('ui: Note details is a Side panel tab; the Vault never leaves the panel ope
   await openPage(page, 'vault');
   // The previous test left auth-api open; the view is restored with it.
   await expect(page.locator('.read')).toBeVisible({ timeout: 15_000 });
-  const details = page.locator('.rstrip').getByRole('button', { name: 'Note details', exact: true });
-  await expect(details).toHaveAttribute('aria-pressed', 'true');
-  await expect(page.locator('.rpanel .rpanel-title')).toHaveText('Note details');
-  await expect(page.locator('.rpanel .right')).toContainText('Backlinks');
-  // Shown by the Vault's own preference — the panel's saved state is untouched…
+  const toggle = page.getByTestId('vault-details-toggle');
+  const pane = page.getByTestId('vault-details');
+  await expect(toggle).toHaveAttribute('aria-pressed', 'true');
+  await expect(pane.getByRole('heading', { name: 'Note details' })).toBeVisible();
+  await expect(pane.locator('.right')).toContainText('Backlinks');
+  // The Detail pane is the page's own: the shell Side panel stays as it was.
   expect(await page.evaluate(() => [localStorage.getItem('otto_right_open'), localStorage.getItem('otto_right_tab')])).toEqual(['0', 'git']);
-  // …so leaving the Vault leaves the panel closed.
   await openPage(page, 'home');
-  await expect(page.locator('.rstrip')).toBeVisible();
   await expect(page.locator('.rpanel')).toHaveCount(0);
   // Back in the Vault the details show again; hiding them is remembered.
   await openPage(page, 'vault');
-  await expect(details).toHaveAttribute('aria-pressed', 'true');
-  await details.click();
-  await expect(page.locator('.rpanel')).toHaveCount(0);
+  await expect(toggle).toHaveAttribute('aria-pressed', 'true');
+  await toggle.click();
+  await expect(pane).toHaveCount(0);
   expect(await page.evaluate(() => localStorage.getItem('otto_vault_right_open'))).toBe('0');
   await page.reload();
   await expect(page.locator('.read')).toBeVisible({ timeout: 15_000 });
-  await expect(details).toHaveAttribute('aria-pressed', 'false');
-  await expect(page.locator('.rpanel')).toHaveCount(0);
-  // The ⋯ menu brings them back (and remembers that).
-  await page.getByRole('button', { name: 'More vault actions', exact: true }).click();
-  await page.locator('.ctx-menu').getByRole('menuitemcheckbox', { name: /Note details/ }).click();
-  await expect(page.locator('.rpanel .rpanel-title')).toHaveText('Note details');
+  await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+  await expect(pane).toHaveCount(0);
+  // The toggle brings them back (and remembers that); the pane's Close hides them.
+  await toggle.click();
+  await expect(pane.getByRole('heading', { name: 'Note details' })).toBeVisible();
   expect(await page.evaluate(() => localStorage.getItem('otto_vault_right_open'))).toBe('1');
+  await pane.getByRole('button', { name: 'Close Note details' }).click();
+  await expect(pane).toHaveCount(0);
+  await toggle.click();
 });
 
 test('ui: edit + autosave persists to disk', async ({ page }) => {
@@ -227,18 +228,21 @@ test('ui: search panel, tags panel, quick switcher', async ({ page }) => {
   await openPage(page, 'vault');
 
   // Search with FTS.
-  await page.locator('.left-modes button[title="Search"]').click();
-  await page.locator('.search input').fill('charging customer');
-  await page.locator('.search input').press('Enter');
+  const views = page.getByRole('tablist', { name: 'Vault views' });
+  await views.getByRole('tab', { name: 'Search' }).click();
+  const query = page.getByRole('searchbox', { name: 'Search this vault' });
+  await query.fill('charging customer');
+  await query.press('Enter');
   await expect(page.locator('.hit .t', { hasText: 'Orders API' })).toBeVisible();
   await page.locator('.hit .t', { hasText: 'Orders API' }).click();
   await expect(page.locator('.crumbs')).toContainText('orders-api');
 
   // Tags panel → tag click runs a tag: search.
-  await page.locator('.left-modes button[title="Tags"]').click();
-  await expect(page.locator('.tag-row .tag-name', { hasText: '#oncall' })).toBeVisible();
-  await page.locator('.tag-row .tag-name', { hasText: '#oncall' }).click();
-  await expect(page.locator('.search input')).toHaveValue('tag:oncall');
+  await views.getByRole('tab', { name: 'Tags' }).click();
+  const tag = page.getByTestId('vault-tag-row').filter({ hasText: '#oncall' });
+  await expect(tag).toBeVisible();
+  await tag.locator('.side-row-main').click();
+  await expect(query).toHaveValue('tag:oncall');
 
   // Quick switcher via alias.
   await page.keyboard.press(process.platform === 'darwin' ? 'Meta+o' : 'Control+o');
