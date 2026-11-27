@@ -59,8 +59,9 @@ test('reopening settings discards an edited draft and restores the saved schedul
 
 test('idle polling is slower and skips unchanged findings and diagnostics', async () => {
   const { diagnostics, latestFileScan, scanDetailChanged } = loadSource(
-    new URL('../src/modules/ide/security/projectSecurity.svelte.ts', import.meta.url),
+    new URL('../src/modules/ide/security/projectSecurityData.ts', import.meta.url),
     { '../../../lib/api/client': { api: {} } },
+    {}, { relative: true },
   );
   let scan = running;
   let diagnosticsUpdates = 0;

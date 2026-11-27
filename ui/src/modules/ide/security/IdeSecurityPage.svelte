@@ -16,7 +16,7 @@
   import PageBody from '../../../lib/components/PageBody.svelte';
   import PageHeader from '../../../lib/components/PageHeader.svelte';
   import type { IdeDiagnostic } from '../store/ideTypes';
-  import { diagnostics, latestFileScan, projectSecurityPath, scanDetailChanged } from './projectSecurity.svelte';
+  import { diagnostics, latestFileScan, projectSecurityPath, scanDetailChanged } from './projectSecurityData';
 
   interface Props {
     projectId: string;

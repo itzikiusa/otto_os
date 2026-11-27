@@ -27,7 +27,7 @@
   import { hintExplorerYield, IdeExplorerRoom } from './ideExplorerRoom';
   import { ideBreakpointsNav } from './debug/ideBreakpointsNav.svelte';
   import { ide } from './ideStore.svelte';
-  import { findingPath, latestSecurityDiagnostics, projectSecurity } from './security/projectSecurity.svelte';
+  import { findingPath, projectSecurity } from './security/projectSecurity.svelte';
   import type { SecurityFinding } from '../../lib/api/types';
   import type { IdeDiagnostic } from './store/ideTypes';
   import IdeWorkspaceSwitcher from './shell/IdeWorkspaceSwitcher.svelte';
@@ -78,8 +78,12 @@
     const controller = new AbortController();
     projectSecurity.problems = [];
     if (allowed && id) {
-      void latestSecurityDiagnostics(id, controller.signal)
-        .then((items) => { if (!controller.signal.aborted) projectSecurity.problems = items; })
+      void import('./security/projectSecurityData')
+        .then(async ({ latestSecurityDiagnostics }) => {
+          if (controller.signal.aborted) return;
+          const items = await latestSecurityDiagnostics(id, controller.signal);
+          if (!controller.signal.aborted) projectSecurity.problems = items;
+        })
         .catch(() => {});
     }
     return () => controller.abort();
