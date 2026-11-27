@@ -196,6 +196,9 @@ pub const TRUST_ZIG_LSP_ENV: &str = "OTTO_IDE_TRUST_ZIG_BUILD";
 /// Project environment key opting a Kotlin project into automatic `kotlin-language-server`
 /// startup (KLS invokes Gradle/Maven build scripts during workspace import).
 pub const TRUST_KOTLIN_LSP_ENV: &str = "OTTO_IDE_TRUST_KOTLIN_LSP";
+/// Project environment key opting a Vue project into automatic standalone `vue-language-server`
+/// startup (Vue 2.2.10 loads project-selected plugins from `tsconfig.json` / `jsconfig.json`).
+pub const TRUST_VUE_LSP_ENV: &str = "OTTO_IDE_TRUST_VUE_LSP";
 /// Shared project environment key opting a project into trusted build-tool execution.
 pub const TRUST_PROJECT_EXECUTION_ENV: &str = "OTTO_IDE_TRUST_PROJECT_EXECUTION";
 
@@ -311,6 +314,34 @@ pub fn kotlin_lsp_execution_trusted(
     kotlin_lsp_execution_trusted_for_project(envs, root, root, ssh_conn_id)
 }
 
+/// Returns `true` only when the opened project root (or a sub-module inside it, NEVER
+/// an ancestor directory outside `opened_project_root` or a synthetic child snapshot
+/// cloned from another parent) explicitly opted in to Vue standalone LSP plugin loading
+/// via `OTTO_IDE_TRUST_VUE_LSP=1` or `OTTO_IDE_TRUST_PROJECT_EXECUTION=1` (`SEC3-2`).
+pub fn vue_lsp_execution_trusted_for_project(
+    envs: &crate::environments::EnvironmentManager,
+    resolved_root: &str,
+    opened_project_root: &str,
+    ssh_conn_id: Option<&str>,
+) -> bool {
+    lsp_execution_trusted_for_key(
+        envs,
+        resolved_root,
+        Some(opened_project_root),
+        ssh_conn_id,
+        TRUST_VUE_LSP_ENV,
+    )
+}
+
+/// Convenience wrapper checking exact project trust on `root` for Vue LSP.
+pub fn vue_lsp_execution_trusted(
+    envs: &crate::environments::EnvironmentManager,
+    root: &str,
+    ssh_conn_id: Option<&str>,
+) -> bool {
+    vue_lsp_execution_trusted_for_project(envs, root, root, ssh_conn_id)
+}
+
 /// Validate query parameters, authorize SSH or local workspace roots, sync
 /// effective Go build tags for `go`, and prepare the [`PoolKey`] + [`SpawnLaunch`].
 pub async fn prepare_lsp_ws_session<C: IdeCtx>(
@@ -413,6 +444,52 @@ pub async fn prepare_lsp_ws_session<C: IdeCtx>(
                 ),
             });
         }
+        if remote.lang == "vue"
+            && !vue_lsp_execution_trusted(&ide.environments, &norm_root, Some(&conn_id))
+        {
+            return Err(LspWsError {
+                status: StatusCode::FORBIDDEN,
+                code: "vue_lsp_requires_trust",
+                message: format!(
+                    "vue-language-server loads project-configured Vue/TypeScript plugins from tsconfig.json; set {TRUST_VUE_LSP_ENV}=1 (or {TRUST_PROJECT_EXECUTION_ENV}=1) in project environment settings to start it"
+                ),
+            });
+        }
+        let remote_vue_tsdk = if remote.lang == "vue" {
+            let ssh_target = crate::target::ResolvedTarget::Ssh {
+                spec: ssh_spec.clone(),
+                root: norm_root.clone(),
+                additional_roots: Vec::new(),
+                actor_id: user.id.to_string(),
+            };
+            let probe = ide
+                .targets
+                .exec_shell(
+                    &ssh_target,
+                    super::pool_spawn::build_remote_vue_tsdk_probe_script(),
+                    None,
+                    &std::collections::BTreeMap::new(),
+                    std::time::Duration::from_secs(5),
+                )
+                .await
+                .ok()
+                .filter(|o| o.success())
+                .and_then(|o| {
+                    o.stdout
+                        .lines()
+                        .map(str::trim)
+                        .find(|l| l.starts_with('/'))
+                        .map(str::to_owned)
+                });
+            let Some(tsdk) = probe else {
+                return Err(LspWsError::unavailable(
+                    "vue-language-server on SSH host requires TypeScript (typescript/lib); install remote Node LSP via Toolchains & SDKs",
+                ));
+            };
+            Some(tsdk)
+        } else {
+            None
+        };
         let remote_zig_home = if remote.lang == "zig" {
             ide.environments
                 .cached_project_env(&format!("ssh:{conn_id}:{norm_root}"))
@@ -437,6 +514,7 @@ pub async fn prepare_lsp_ws_session<C: IdeCtx>(
                 fallback_args: remote.fallback_args,
                 project_root: Some(norm_root),
                 zig_home: remote_zig_home,
+                vue_tsdk: remote_vue_tsdk,
             },
             file_hint,
         });
@@ -531,8 +609,41 @@ pub async fn prepare_lsp_ws_session<C: IdeCtx>(
             ),
         });
     }
+    if resolved.lang == "vue"
+        && !vue_lsp_execution_trusted_for_project(
+            &ide.environments,
+            &resolved_root,
+            &opened_root,
+            None,
+        )
+    {
+        return Err(LspWsError {
+            status: StatusCode::FORBIDDEN,
+            code: "vue_lsp_requires_trust",
+            message: format!(
+                "vue-language-server loads project-configured Vue/TypeScript plugins from tsconfig.json; set {TRUST_VUE_LSP_ENV}=1 (or {TRUST_PROJECT_EXECUTION_ENV}=1) in project environment settings to start it"
+            ),
+        });
+    }
 
     let mut launch_cmd = resolved.command;
+    let local_vue_tsdk = if resolved.lang == "vue" {
+        let data_dir = ide.data_dir.clone();
+        let cmd_cl = launch_cmd.clone();
+        let found = tokio::task::spawn_blocking(move || {
+            servers::detect_local_typescript_tsdk(&data_dir, Some(&cmd_cl))
+        })
+        .await
+        .map_err(|_| LspWsError::internal("local TypeScript SDK lookup failed"))?;
+        let Some(tsdk) = found else {
+            return Err(LspWsError::unavailable(
+                "vue-language-server requires TypeScript (typescript/lib); install Node LSP via Toolchains & SDKs or install typescript globally",
+            ));
+        };
+        Some(tsdk)
+    } else {
+        None
+    };
     if resolved.lang == "zig" {
         if let Some(zig_home) = ide
             .environments
@@ -578,6 +689,7 @@ pub async fn prepare_lsp_ws_session<C: IdeCtx>(
 
     let mut launch = SpawnLaunch::primary(launch_cmd, resolved.args);
     launch.project_root = Some(opened_root);
+    launch.vue_tsdk = local_vue_tsdk;
     Ok(PreparedLspSession {
         key: PoolKey {
             owner: user.id.to_string(),
@@ -1351,5 +1463,230 @@ mod root_tests {
             ok_ssh.launch.zig_home.as_deref(),
             Some("/home/dev/.otto/toolchains/zig/sdks/0.13.0")
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn vue_lsp_requires_explicit_project_trust_local_and_ssh_and_resolves_tsdk() {
+        use std::os::unix::fs::PermissionsExt;
+
+        use otto_core::auth::{BoxFuture, RoleChecker};
+        use otto_core::domain::{User, WorkspaceRole};
+        use otto_core::secrets::SecretStore;
+        use otto_core::{Id, Result};
+
+        #[derive(Default)]
+        struct NoopSecrets;
+        impl SecretStore for NoopSecrets {
+            fn put(&self, _k: &str, _v: &str) -> Result<()> {
+                Ok(())
+            }
+            fn get(&self, _k: &str) -> Result<Option<String>> {
+                Ok(None)
+            }
+            fn delete(&self, _k: &str) -> Result<()> {
+                Ok(())
+            }
+        }
+        struct AllowRoles;
+        impl RoleChecker for AllowRoles {
+            fn check<'a>(
+                &'a self,
+                _user: &'a User,
+                _ws: &'a Id,
+                _min: WorkspaceRole,
+            ) -> BoxFuture<'a, Result<()>> {
+                Box::pin(async { Ok(()) })
+            }
+        }
+        #[derive(Clone)]
+        struct TestVueCtx {
+            ide: Arc<IdeEngine>,
+            pool: otto_state::DbPool,
+            secrets: Arc<dyn SecretStore>,
+            roles: Arc<dyn RoleChecker>,
+            data_dir: PathBuf,
+        }
+        impl IdeCtx for TestVueCtx {
+            fn ide(&self) -> &Arc<IdeEngine> {
+                &self.ide
+            }
+            fn pool(&self) -> otto_state::DbPool {
+                self.pool.clone()
+            }
+            fn secrets(&self) -> &Arc<dyn SecretStore> {
+                &self.secrets
+            }
+            fn data_dir(&self) -> &Path {
+                &self.data_dir
+            }
+            fn roles(&self) -> &Arc<dyn RoleChecker> {
+                &self.roles
+            }
+            fn resolve_ssh_connection<'a>(
+                &'a self,
+                _user: &'a User,
+                connection_id: &'a Id,
+            ) -> BoxFuture<'a, Result<crate::IdeSshSpec>> {
+                let cid = connection_id.to_string();
+                Box::pin(async move {
+                    Ok(crate::IdeSshSpec {
+                        connection_id: cid,
+                        name: "remote".into(),
+                        host: "remote.example".into(),
+                        port: Some(22),
+                        user: "dev".into(),
+                        identity_file: None,
+                        proxy_jump: None,
+                        environment: None,
+                    })
+                })
+            }
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        let node_bin = data_dir.join("toolchains/node/lsp/node_modules/.bin");
+        let managed_tsdk = data_dir.join("toolchains/node/lsp/node_modules/typescript/lib");
+        let parent = tmp.path().join("vue-parent");
+        let sub_mod = parent.join("packages/web");
+        let child = parent.join("untrusted-child");
+        for d in [&node_bin, &managed_tsdk, &sub_mod, &child] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let fake_vue = node_bin.join("vue-language-server");
+        std::fs::write(&fake_vue, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&fake_vue, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(managed_tsdk.join("tsserverlibrary.js"), "// managed").unwrap();
+        std::fs::write(
+            parent.join("package.json"),
+            r#"{"dependencies":{"vue":"^3.4.0"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            sub_mod.join("package.json"),
+            r#"{"dependencies":{"vue":"^3.4.0"}}"#,
+        )
+        .unwrap();
+        std::fs::write(sub_mod.join("App.vue"), "<template><div/></template>").unwrap();
+        std::fs::write(
+            child.join("package.json"),
+            r#"{"dependencies":{"vue":"^3.4.0"}}"#,
+        )
+        .unwrap();
+
+        let canon_parent = std::fs::canonicalize(&parent).unwrap();
+        let canon_sub_vue = std::fs::canonicalize(sub_mod.join("App.vue")).unwrap();
+        let canon_child = std::fs::canonicalize(&child).unwrap();
+        let canon_tsdk = std::fs::canonicalize(&managed_tsdk).unwrap();
+
+        let pool = otto_state::db::open(&tmp.path().join("ide.db"))
+            .await
+            .unwrap();
+        let ide = Arc::new(IdeEngine::new(data_dir.clone()));
+        let ctx = TestVueCtx {
+            ide: Arc::clone(&ide),
+            pool,
+            secrets: Arc::new(NoopSecrets),
+            roles: Arc::new(AllowRoles),
+            data_dir: data_dir.clone(),
+        };
+        let root_user = User {
+            id: "u-root".into(),
+            username: "root".into(),
+            display_name: "Root".into(),
+            is_root: true,
+            disabled: false,
+            created_at: chrono::Utc::now(),
+        };
+
+        // 1. SEC3-2: Untrusted local Vue project is denied with 403 vue_lsp_requires_trust.
+        let err = prepare_lsp_ws_session(
+            &ctx,
+            &root_user,
+            LspWsQuery {
+                lang: Some("vue".into()),
+                root: Some(canon_parent.to_string_lossy().into_owned()),
+                file: None,
+                connection_id: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status, StatusCode::FORBIDDEN);
+        assert_eq!(err.code, "vue_lsp_requires_trust");
+
+        // 2. Trusting `canon_parent` (even with a module_sdks entry pointing at `canon_child`)
+        //    allows `canon_parent` + its `sub_mod` AND resolves `launch.vue_tsdk`, while
+        //    opening `canon_child` independently MUST remain denied with 403!
+        let mut module_sdks = std::collections::BTreeMap::new();
+        module_sdks.insert(
+            canon_child.to_string_lossy().into_owned(),
+            "/fake/node".to_string(),
+        );
+        ide.environments.seed_snapshot(
+            &canon_parent.to_string_lossy(),
+            crate::types::IdeProjectEnvironment {
+                module_sdks,
+                env_vars: vec![crate::types::IdeEnvVarEntry {
+                    key: TRUST_VUE_LSP_ENV.into(),
+                    value: Some("1".into()),
+                    secret: false,
+                    has_secret: false,
+                }],
+                ..Default::default()
+            },
+        );
+        let ok_parent = prepare_lsp_ws_session(
+            &ctx,
+            &root_user,
+            LspWsQuery {
+                lang: Some("vue".into()),
+                root: Some(canon_parent.to_string_lossy().into_owned()),
+                file: Some(canon_sub_vue.to_string_lossy().into_owned()),
+                connection_id: None,
+            },
+        )
+        .await
+        .expect("trusted Vue project should prepare cleanly");
+        assert_eq!(
+            ok_parent.launch.vue_tsdk.as_deref(),
+            Some(canon_tsdk.to_string_lossy().as_ref()),
+            "RED-2: local trusted Vue session must resolve managed typescript/lib"
+        );
+
+        let err_child = prepare_lsp_ws_session(
+            &ctx,
+            &root_user,
+            LspWsQuery {
+                lang: Some("vue".into()),
+                root: Some(canon_child.to_string_lossy().into_owned()),
+                file: None,
+                connection_id: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err_child.status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            err_child.code, "vue_lsp_requires_trust",
+            "SEC3-2: independently opened child must not inherit parent trust even via module_sdks"
+        );
+
+        // 3. SEC3-2 (SSH): Untrusted SSH Vue project is denied with 403 vue_lsp_requires_trust.
+        let err_ssh = prepare_lsp_ws_session(
+            &ctx,
+            &root_user,
+            LspWsQuery {
+                lang: Some("vue".into()),
+                root: Some("/srv/vue-remote".into()),
+                file: None,
+                connection_id: Some("ssh-1".into()),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err_ssh.status, StatusCode::FORBIDDEN);
+        assert_eq!(err_ssh.code, "vue_lsp_requires_trust");
     }
 }
