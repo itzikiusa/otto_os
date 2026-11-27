@@ -89,19 +89,23 @@ zero-rebuild **runtime IDE plugins**.
     standalone `vue-language-server` (loads the plugins the project's
     `tsconfig.json` names) and the .NET servers `csharp-ls` / `fsautocomplete`
     (load the MSBuild project, whose design-time build runs its targets) start
-    only for a project that opted in with a non-secret
-    `OTTO_IDE_TRUST_ZIG_BUILD=1`, `OTTO_IDE_TRUST_KOTLIN_LSP=1`,
-    `OTTO_IDE_TRUST_VUE_LSP=1` or `OTTO_IDE_TRUST_DOTNET_LSP=1`
-    (`OTTO_IDE_TRUST_PROJECT_EXECUTION=1` covers all of them) in its project
-    environment (**Edit run configurations…** →
-    **Project environment** → *Environment variables & Keychain secrets*).
+    only for a project you trust. When one is refused, a one-line notice
+    above the editor says so with **Trust project…** (it confirms what may
+    run, on this Mac or the SSH host, then starts the server); the status
+    strip's "<server> needs trust" item does the same. **Edit run
+    configurations…** → **Project environment** → *Trust this project* turns
+    it off again. (For scripts: the switch is the non-secret
+    `OTTO_IDE_TRUST_PROJECT_EXECUTION=1`; the per-language
+    `OTTO_IDE_TRUST_ZIG_BUILD`, `OTTO_IDE_TRUST_KOTLIN_LSP`,
+    `OTTO_IDE_TRUST_VUE_LSP` and `OTTO_IDE_TRUST_DOTNET_LSP` set to `1` still
+    work as ordinary variables.)
     Local and SSH targets are gated alike. The opt-in is read from the opened
     root or a module inside it, never from a parent folder, and a module
     entry (`module_sdks`) does not copy it to a child checkout. Until then
     `/ws/lsp` answers `403` (`zig_lsp_requires_trust`,
     `kotlin_lsp_requires_trust`, `vue_lsp_requires_trust`,
-    `dotnet_lsp_requires_trust`) and the status
-    strip shows "<server> untrusted / unavailable".
+    `dotnet_lsp_requires_trust`). Trusting a local project needs the
+    root account; an agent session's credential can't.
   - **Network bridge host mappings** bind `127.0.0.1:<from_port>` without
     authentication, like `kubectl port-forward`: any local process (including
     a sandboxed agent session with loopback access) can reach the mapped
