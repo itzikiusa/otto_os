@@ -203,7 +203,7 @@
   {:else if subagents.skip.has(item.id)}
     <!-- Drawn inside its turn's subagent row. -->
   {:else if item.type === 'subagent'}
-    <RuntimeSubagentCard {sessionId} {item} activity={children.get(item.id) ?? EMPTY_ACTIVITY} output={outputMap} />
+    <RuntimeSubagentCard {sessionId} {item} activity={children.get(item.id) ?? EMPTY_ACTIVITY} output={outputMap} startOpen={expandWork} />
   {:else if call}
     <RuntimeThreadCallRow {item} {call} />
   {:else if pending}
@@ -220,6 +220,7 @@
       {onrespond}
       agentId={agentChatId ?? undefined}
       cwd={cwd ?? undefined}
+      startOpen={expandWork}
     />
   {/if}
 {/snippet}
@@ -373,7 +374,7 @@
     </div>
   {/if}
   {#if changesByRow.get(row.kind === 'message' ? row.item.id : row.id)}
-    <RuntimeTurnChanges files={changesByRow.get(row.kind === 'message' ? row.item.id : row.id)!} {onopendiff} />
+    <RuntimeTurnChanges files={changesByRow.get(row.kind === 'message' ? row.item.id : row.id)!} {onopendiff} startOpen={expandWork} />
   {/if}
 {/each}
 

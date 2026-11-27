@@ -64,7 +64,7 @@
   {#if k.kind === 'thread'}
     <RuntimeChildCard id={k.id} hint={k.hint} removed={k.removed} />
   {:else}
-    <RuntimeSubagentCard {sessionId} item={k.item} activity={activity.get(k.item.id) ?? EMPTY} {output} />
+    <RuntimeSubagentCard {sessionId} item={k.item} activity={activity.get(k.item.id) ?? EMPTY} {output} startOpen={expandWork} />
   {/if}
 {/snippet}
 

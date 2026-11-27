@@ -164,11 +164,14 @@ test('full timeline without a fold, live agent-opened sub-thread row, and openin
   await expect(childRow).toHaveAttribute('data-status', 'running');
   await expect(page.getByTestId('wf-run-page')).toHaveAttribute('data-state', 'running');
 
-  // Full timeline stays unfolded (no "N earlier steps", "Worked for …", parallel groups, or subagent group toggles).
+  // Full timeline stays unfolded (no "N earlier steps", "Worked for …", parallel groups, or subagent group toggles)
+  // and individual expandable work rows / changed-file cards start expanded on arrival.
   await expect(conv.getByTestId('runtime-earlier-steps')).toHaveCount(0);
   await expect(conv.locator('[data-testid^="runtime-fold-"]')).toHaveCount(0);
   await expect(conv.locator('[data-testid^="runtime-group-"]')).toHaveCount(0);
   await expect(conv.getByTestId('runtime-child-group')).toHaveCount(0);
+  await expect(conv.locator('[data-testid^="runtime-item-"] button.rw-line[aria-expanded="false"]')).toHaveCount(0);
+  await expect(conv.locator('[data-testid="runtime-turn-changes"] button.tc-toggle[aria-expanded="false"]')).toHaveCount(0);
 
   // Clicking the sub-thread card inside the conversation opens it in the same pane and selects its row.
   const childCardOpen = conv.locator('[data-testid^="runtime-child-"] [data-testid="runtime-item-open"]').first();

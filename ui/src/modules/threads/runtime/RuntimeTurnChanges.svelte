@@ -8,9 +8,9 @@
   import Icon from '../../../lib/components/Icon.svelte';
   import { changeTotals, type FileDelta } from './turnChanges';
 
-  let { files, onopendiff }: { files: FileDelta[]; onopendiff?: (path: string) => void } = $props();
-  // A few files show at once; more than five start folded.
-  let open = $state(untrack(() => files.length <= 5));
+  let { files, onopendiff, startOpen = false }: { files: FileDelta[]; onopendiff?: (path: string) => void; startOpen?: boolean } = $props();
+  // A few files show at once; more than five start folded unless `startOpen` is set.
+  let open = $state(untrack(() => startOpen || files.length <= 5));
   const total = $derived(changeTotals(files));
   const name = $derived(`${files.length} changed ${files.length === 1 ? 'file' : 'files'}`);
 </script>
