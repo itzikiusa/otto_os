@@ -2,6 +2,7 @@
 // inside its content): the pane's name, whether it can be hidden here,
 // whether the content side is on screen, and — on a phone, where the list IS
 // the page — where the pane's header goes (PageHeader draws it, pageNav).
+import type { Snippet } from 'svelte';
 import type { IconName } from '../Icon.svelte';
 import type { MenuItem } from '../../contextmenu.svelte';
 
@@ -13,6 +14,8 @@ export interface PaneHeader {
   count: number | null;
   primary?: { icon: IconName; label: string; onclick: () => void; testid?: string };
   menu?: () => MenuItem[];
+  /** A pane with views: its segmented control takes the title's place. */
+  views?: Snippet;
 }
 
 export interface ListDetailCtx {

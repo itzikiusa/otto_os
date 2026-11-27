@@ -14,8 +14,8 @@
   // ListDetail `empty` drops the pane and the page's EmptyState owns the page.
   // Inside a ListDetail the name comes from it; on its own (a pane that is not
   // a list/detail page) pass `name`. On a phone, where the list is the page,
-  // its header moves into PageHeader (☰ · name count · primary · ⋯); a pane
-  // with `views` keeps its segmented control in the pane.
+  // its header moves into PageHeader (☰ · name count · primary · ⋯, or the
+  // views in the name's place).
   import { getContext, type Snippet } from 'svelte';
   import Icon, { type IconName } from '../Icon.svelte';
   import LoadState from '../LoadState.svelte';
@@ -56,7 +56,7 @@
   const label = $derived(name ?? ld?.name ?? '');
   const canHide = $derived(!!ld?.canHide);
   // A phone showing the list as the page: PageHeader draws this header.
-  $effect(() => ld?.setHeader({ name: label, count, primary, menu }));
+  $effect(() => ld?.setHeader({ name: label, count, primary, menu, views }));
 
   function openMenu(e: MouseEvent): void {
     const items: MenuItem[] = [];
@@ -71,7 +71,7 @@
 <svelte:element this={as} class="side-list" aria-label={label} data-testid={testid}>
   {#if selection}
     <header class="side-pane-head selecting">{@render selection()}</header>
-  {:else if ld?.phoneList && !views}
+  {:else if ld?.phoneList}
     <!-- The page header carries name · count · primary · ⋯ (one row on a phone). -->
   {:else}
     <header class="side-pane-head" class:views={!!views}>

@@ -440,12 +440,13 @@
       {#if icon}<span class="ph-icon" bind:this={iconEl}><Icon name={icon} size={16} /></span>{/if}
       <div class="ph-titles">
         <div class="ph-title-line">
+          {#if listPage?.views}<div class="ph-views">{@render listPage.views()}</div>{:else}
           <h1 class="ph-title" title={listPage?.name ?? title} bind:this={titleEl}>
             {#each listPage ? [] : crumbs as c (c.label)}
               <button class="ph-crumb" onclick={c.onclick}>{c.label}</button><span class="ph-sep" aria-hidden="true">/</span>
             {/each}
             <span class="ph-title-text">{#if listPage}{listPage.name}{:else if titleContent}{@render titleContent()}{:else}{title}{/if}</span>
-          </h1>
+          </h1>{/if}
           {#if listPage}
             {#if listPage.count !== null}<span class="ph-badge" bind:this={badgeEl}>{listPage.count}</span>{/if}
           {:else if badge}<span class="ph-badge" bind:this={badgeEl}>{@render badge()}</span>{/if}
@@ -735,6 +736,12 @@
     max-width: none;
     flex: 1 1 auto;
     padding-inline-start: 4px;
+  }
+  .ph-views {
+    display: flex;
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
   }
   .ph-row :global(.ph-phone-btn) {
     flex: none;
