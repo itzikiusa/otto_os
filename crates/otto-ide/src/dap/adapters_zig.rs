@@ -389,99 +389,104 @@ async fn compile_zig_debug_artifact(
     let is_zig_file = raw_prog.ends_with(".zig") && !raw_prog.ends_with("/build.zig");
 
     if want_test {
-        let build_modules = if has_build_zig {
-            std::fs::read_to_string(Path::new(&zig_cwd).join("build.zig"))
-                .ok()
-                .map(|src| parse_build_zig_modules(&src, Path::new(&zig_cwd)))
-                .unwrap_or_default()
+        let build_zig_src = if has_build_zig {
+            std::fs::read_to_string(Path::new(&zig_cwd).join("build.zig")).ok()
         } else {
-            Vec::new()
+            None
         };
-
-        // Project-wide Debug All Tests (`!is_zig_file`) on a `build.zig` project:
-        // compile via `zig build test` and launch the compiled test artifact from
-        // `.zig-cache/o/*/test` (never the app binary from `zig-out/bin/`).
-        if !is_zig_file && has_build_zig {
-            let before =
-                std::time::SystemTime::now().checked_sub(std::time::Duration::from_secs(2));
-            let mut build_args = vec!["build".to_string(), "test".to_string()];
-            build_args.extend(extra_flags.clone());
-            let _ = run_zig_build_with_macos_fallback(
-                req,
-                ctx,
-                &zig_bin,
-                build_args,
-                &zig_cwd,
-                env,
-                true,
-                initial_output,
-            )
-            .await;
-            if let Some(cached_test_bin) = find_zig_cache_test_executable(&zig_cwd, before) {
-                return Ok(cached_test_bin);
-            }
-        }
-
-        // SSH project-wide Debug All Tests (`!is_zig_file`): run `zig build test`
-        // remotely and pick the newest compiled test binary under `.zig-cache/o`.
-        if !is_zig_file && req.target.kind == IdeTargetKind::Ssh {
-            let mut build_args = vec!["build".to_string(), "test".to_string()];
-            build_args.extend(extra_flags.clone());
-            let _ = run_zig_build_with_macos_fallback(
-                req,
-                ctx,
-                &zig_bin,
-                build_args,
-                &zig_cwd,
-                env,
-                true,
-                initial_output,
-            )
-            .await;
-            let find_out = run_target_command(
-                &req.target,
-                ctx.ssh.as_ref(),
-                "sh",
-                &[
-                    "-c".into(),
-                    "find .zig-cache/o -maxdepth 2 -type f -name test -perm -111 2>/dev/null | head -n 1".into(),
-                ],
-                &zig_cwd,
-                env,
-                crate::proc_group::BUILD_STEP_TIMEOUT,
-            )
-            .await?;
-            let found = String::from_utf8_lossy(&find_out.stdout).trim().to_string();
-            if !found.is_empty() {
-                let full = if found.starts_with('/') {
-                    found
-                } else {
-                    format!("{}/{}", zig_cwd.trim_end_matches('/'), found)
-                };
-                return Ok(full);
-            }
-        }
-
-        let test_file = if is_zig_file {
-            raw_prog.to_string()
-        } else if req.target.kind == IdeTargetKind::Local {
-            let cwd_p = Path::new(&zig_cwd);
-            ["src/main.zig", "src/root.zig", "main.zig"]
+        let build_graph = build_zig_src
+            .as_deref()
+            .map(|src| parse_build_zig_module_graph(src, Path::new(&zig_cwd)))
+            .unwrap_or_default();
+        let has_test_step = build_zig_src.as_deref().is_some_and(|src| {
+            crate::environments::discovery::parse_zig_build_steps(src)
                 .iter()
-                .map(|r| cwd_p.join(r))
-                .find(|p| p.is_file())
-                .map(|p| p.to_string_lossy().into_owned())
-                .ok_or_else(|| {
-                    Error::Invalid(
-                        "Zig test debugging requires a build.zig test step or a .zig file (src/main.zig / src/root.zig)"
-                            .into(),
-                    )
-                })?
-        } else {
+                .any(|s| s == "test")
+        });
+        let selected_filter = req
+            .launch
+            .test_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+
+        // Project-wide Debug All Tests (`!is_zig_file`) or single-test Debug inside a
+        // `build.zig` project with a `test` step: compile via Zig's `--build-runner` hook
+        // with `OTTO_ZIG_TEST_NO_EXEC=1` so the real `build.zig` module graph compiles
+        // WITHOUT executing `addRunArtifact` (BUG2-1), resolves warm-cached binaries of
+        // any age (BUG-5), and applies `compile.filters` when debugging a single test (BUG-35).
+        let try_build_runner = (!is_zig_file
+            && (has_build_zig || req.target.kind == IdeTargetKind::Ssh))
+            || (is_zig_file && has_build_zig && has_test_step);
+        if try_build_runner {
+            if let Some(runner_path) =
+                prepare_zig_build_runner_for_target(req, ctx, &zig_bin, &zig_cwd, env, data_dir)
+                    .await
+            {
+                let mut runner_env = env.clone();
+                runner_env.insert("OTTO_ZIG_TEST_NO_EXEC".into(), "1".into());
+                if let Some(tname) = selected_filter {
+                    runner_env.insert("OTTO_ZIG_TEST_FILTER".into(), tname.to_string());
+                }
+                if is_zig_file {
+                    runner_env.insert("OTTO_ZIG_TEST_FILE".into(), raw_prog.to_string());
+                }
+                let mut build_args = vec![
+                    "build".to_string(),
+                    "--build-runner".to_string(),
+                    runner_path,
+                    "test".to_string(),
+                ];
+                build_args.extend(extra_flags.clone());
+                match run_zig_build_with_macos_fallback(
+                    req,
+                    ctx,
+                    &zig_bin,
+                    build_args,
+                    &zig_cwd,
+                    &runner_env,
+                    true,
+                    initial_output,
+                )
+                .await
+                {
+                    Ok(stdout) => {
+                        let bins = parse_otto_zig_test_bins(&stdout);
+                        if let Some(bin) = bins.into_iter().next() {
+                            let abs = if bin.starts_with('/') {
+                                bin
+                            } else {
+                                format!("{}/{}", zig_cwd.trim_end_matches('/'), bin)
+                            };
+                            return Ok(abs);
+                        }
+                        if !is_zig_file {
+                            return Err(Error::Upstream(format!(
+                                "zig build test did not emit a test executable in '{zig_cwd}'"
+                            )));
+                        }
+                    }
+                    Err(err) if !is_zig_file => return Err(err),
+                    Err(_) => {
+                        // Single-file test in a project whose build.zig test step didn't
+                        // cover this file (or macOS host linker mismatch): fall through to
+                        // direct `zig test --test-no-exec` with the full transitive module graph.
+                    }
+                }
+            } else if !is_zig_file {
+                return Err(Error::Upstream(format!(
+                    "could not prepare Zig no-exec test build runner for '{zig_bin}'; cannot debug project test suite without executing tests first"
+                )));
+            }
+        }
+
+        if !is_zig_file {
             return Err(Error::Invalid(
-                "Zig SSH test debugging could not locate a compiled test executable under .zig-cache/o".into(),
+                "Zig test debugging requires a build.zig test step or a .zig source file".into(),
             ));
-        };
+        }
+
+        let test_file = raw_prog.to_string();
         let out_bin =
             zig_debug_cache_bin_path(data_dir, req.target.kind, &zig_cwd, &test_file, true)?;
         let mut args = vec![
@@ -489,14 +494,14 @@ async fn compile_zig_debug_artifact(
             "--test-no-exec".to_string(),
             format!("-femit-bin={out_bin}"),
         ];
-        if let Some(tname) = req.launch.test_name.as_deref().filter(|s| !s.is_empty()) {
+        if let Some(tname) = selected_filter {
             args.push("--test-filter".into());
             args.push(tname.to_string());
         }
         args.extend(extra_flags);
-        append_zig_source_and_modules(&mut args, &test_file, &build_modules);
+        append_zig_source_and_modules(&mut args, &test_file, &build_graph);
 
-        let direct_res = run_zig_build_with_macos_fallback(
+        run_zig_build_with_macos_fallback(
             req,
             ctx,
             &zig_bin,
@@ -506,30 +511,7 @@ async fn compile_zig_debug_artifact(
             false,
             initial_output,
         )
-        .await;
-        if let Err(err) = direct_res {
-            // If direct `zig test` failed on a `build.zig` project (e.g. external package
-            // dependencies in `build.zig.zon`), fall back to `zig build test` cache binary.
-            if has_build_zig {
-                let before =
-                    std::time::SystemTime::now().checked_sub(std::time::Duration::from_secs(2));
-                let _ = run_zig_build_with_macos_fallback(
-                    req,
-                    ctx,
-                    &zig_bin,
-                    vec!["build".to_string(), "test".to_string()],
-                    &zig_cwd,
-                    env,
-                    true,
-                    initial_output,
-                )
-                .await;
-                if let Some(cached_test_bin) = find_zig_cache_test_executable(&zig_cwd, before) {
-                    return Ok(cached_test_bin);
-                }
-            }
-            return Err(err);
-        }
+        .await?;
         return Ok(out_bin);
     }
 
@@ -554,7 +536,7 @@ async fn compile_zig_debug_artifact(
         )
         .await;
         match build_res {
-            Ok(()) => {
+            Ok(_) => {
                 if let Some(bin) = find_zig_out_executable(&zig_cwd, raw_prog) {
                     return Ok(bin);
                 }
@@ -606,7 +588,7 @@ async fn run_zig_build_with_macos_fallback(
     env: &BTreeMap<String, String>,
     is_zig_build_subcommand: bool,
     initial_output: &mut Vec<IdeDebugOutputEntry>,
-) -> Result<()> {
+) -> Result<String> {
     let out = run_target_command(
         &req.target,
         ctx.ssh.as_ref(),
@@ -617,6 +599,7 @@ async fn run_zig_build_with_macos_fallback(
         crate::proc_group::BUILD_STEP_TIMEOUT,
     )
     .await?;
+    let stdout_txt = String::from_utf8_lossy(&out.stdout).to_string();
     let stderr_txt = String::from_utf8_lossy(&out.stderr).to_string();
     if out.status.success() {
         if !stderr_txt.trim().is_empty() {
@@ -626,7 +609,7 @@ async fn run_zig_build_with_macos_fallback(
                 seq: 0,
             });
         }
-        return Ok(());
+        return Ok(stdout_txt);
     }
 
     // Zig 0.14.x does not ship libc stubs for macOS 26/27 SDKs, causing linker failure
@@ -644,8 +627,11 @@ async fn run_zig_build_with_macos_fallback(
         if is_zig_build_subcommand {
             retry_args.push("-Dtarget=native-macos.15.0".into());
         } else {
-            // Insert before the trailing source file path.
-            let insert_at = retry_args.len().saturating_sub(1);
+            // Insert before the first `--dep` / `-M` / trailing source file path.
+            let insert_at = retry_args
+                .iter()
+                .position(|a| a == "--dep" || a.starts_with("-M"))
+                .unwrap_or_else(|| retry_args.len().saturating_sub(1));
             retry_args.insert(insert_at, "native-macos.15.0".into());
             retry_args.insert(insert_at, "-target".into());
         }
@@ -659,6 +645,7 @@ async fn run_zig_build_with_macos_fallback(
             crate::proc_group::BUILD_STEP_TIMEOUT,
         )
         .await?;
+        let retry_out = String::from_utf8_lossy(&retry.stdout).to_string();
         let retry_err = String::from_utf8_lossy(&retry.stderr).to_string();
         if retry.status.success() {
             initial_output.push(IdeDebugOutputEntry {
@@ -674,7 +661,7 @@ async fn run_zig_build_with_macos_fallback(
                     seq: 0,
                 });
             }
-            return Ok(());
+            return Ok(retry_out);
         }
         return Err(Error::Upstream(format!(
             "zig debug build failed: {}",
@@ -823,112 +810,493 @@ fn find_zig_out_executable(zig_cwd: &str, raw_prog: &str) -> Option<String> {
         .map(|(_, _, p)| p.to_string_lossy().into_owned())
 }
 
-/// Extract named local Zig modules declared in `build.zig` via `b.createModule` +
-/// `addImport("name", var)` or `b.addModule("name", ...)` so single-file `zig test`
-/// debug builds preserve the project's module graph (BUG-35).
+/// Transitive module-graph node extracted from `build.zig` (BUG-35).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ZigModuleNode {
+    pub name: String,
+    pub path: String,
+    pub deps: Vec<String>,
+}
+
+/// Extracted `build.zig` module graph (`root_deps` for `-Mroot`, plus each child module
+/// with its own transitive `deps` so `--dep` flags precede the owning `-M<mod>`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ZigModuleGraph {
+    pub root_deps: Vec<String>,
+    pub modules: Vec<ZigModuleNode>,
+}
+
+/// Extract named local Zig modules and transitive module-to-module imports declared in
+/// `build.zig` (`b.createModule`, `b.addModule`, `.addImport`, inline `.imports = &.{...}`)
+/// so single-file `zig test` builds preserve multi-hop module graphs (BUG-35).
 #[allow(clippy::disallowed_methods)]
-pub(crate) fn parse_build_zig_modules(build_zig: &str, zig_cwd: &Path) -> Vec<(String, String)> {
+pub(crate) fn parse_build_zig_module_graph(build_zig: &str, zig_cwd: &Path) -> ZigModuleGraph {
     use regex::Regex;
     use std::sync::OnceLock;
     static RE_CREATE: OnceLock<Regex> = OnceLock::new();
+    static RE_ADD_MOD_VAR: OnceLock<Regex> = OnceLock::new();
     static RE_ADD_MOD: OnceLock<Regex> = OnceLock::new();
     static RE_ADD_IMPORT: OnceLock<Regex> = OnceLock::new();
+    static RE_INLINE_IMPORT: OnceLock<Regex> = OnceLock::new();
 
     let re_create = RE_CREATE.get_or_init(|| {
-        Regex::new(r#"(?s)const\s+([A-Za-z_]\w*)\s*=\s*b\.createModule\s*\(\.\{[^}]*?\.root_source_file\s*=\s*b\.path\(\s*"([^"]+)"\s*\)"#).unwrap()
+        Regex::new(r#"(?s)const\s+([A-Za-z_]\w*)\s*=\s*b\.createModule\s*\(\.\{(.*?)\}\s*\)"#)
+            .unwrap()
+    });
+    let re_add_mod_var = RE_ADD_MOD_VAR.get_or_init(|| {
+        Regex::new(
+            r#"(?s)const\s+([A-Za-z_]\w*)\s*=\s*b\.addModule\(\s*"([^"]+)"\s*,\s*\.\{(.*?)\}\s*\)"#,
+        )
+        .unwrap()
     });
     let re_add_mod = RE_ADD_MOD.get_or_init(|| {
-        Regex::new(r#"(?s)b\.addModule\(\s*"([^"]+)"\s*,\s*\.\{[^}]*?\.root_source_file\s*=\s*b\.path\(\s*"([^"]+)"\s*\)"#).unwrap()
+        Regex::new(r#"(?s)b\.addModule\(\s*"([^"]+)"\s*,\s*\.\{[^}]*?\.root_source_file\s*=\s*b\.path\(\s*"([^"]+)"\s*\)"#)
+            .unwrap()
     });
+    let re_root_src = Regex::new(r#"\.root_source_file\s*=\s*b\.path\(\s*"([^"]+)"\s*\)"#).unwrap();
     let re_add_import = RE_ADD_IMPORT.get_or_init(|| {
-        Regex::new(r#"\.addImport\(\s*"([^"]+)"\s*,\s*([A-Za-z_]\w*)\s*\)"#).unwrap()
+        Regex::new(r#"([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\.addImport\(\s*"([^"]+)"\s*,\s*([A-Za-z_]\w*)\s*\)"#)
+            .unwrap()
+    });
+    let re_inline_import = RE_INLINE_IMPORT.get_or_init(|| {
+        Regex::new(r#"(?s)\.\{\s*\.name\s*=\s*"([^"]+)"\s*,\s*\.module\s*=\s*([A-Za-z_]\w*)"#)
+            .unwrap()
     });
 
-    let mut vars: BTreeMap<String, String> = BTreeMap::new();
+    // var_name -> (abs_path, canonical_import_name_opt)
+    let mut vars: BTreeMap<String, (String, Option<String>)> = BTreeMap::new();
+    // (owner_var_opt, import_name, target_var)
+    let mut raw_edges: Vec<(Option<String>, String, String)> = Vec::new();
+
     for cap in re_create.captures_iter(build_zig) {
-        vars.insert(cap[1].to_string(), cap[2].to_string());
+        let var_name = cap[1].to_string();
+        let body = &cap[2];
+        if let Some(src_cap) = re_root_src.captures(body) {
+            let abs = zig_cwd.join(&src_cap[1]);
+            if abs.is_file() {
+                vars.insert(var_name.clone(), (abs.to_string_lossy().into_owned(), None));
+            }
+        }
+        for icap in re_inline_import.captures_iter(body) {
+            raw_edges.push((
+                Some(var_name.clone()),
+                icap[1].to_string(),
+                icap[2].to_string(),
+            ));
+        }
+    }
+    for cap in re_add_mod_var.captures_iter(build_zig) {
+        let var_name = cap[1].to_string();
+        let mod_name = cap[2].to_string();
+        let body = &cap[3];
+        if let Some(src_cap) = re_root_src.captures(body) {
+            let abs = zig_cwd.join(&src_cap[1]);
+            if abs.is_file() {
+                vars.insert(
+                    var_name.clone(),
+                    (abs.to_string_lossy().into_owned(), Some(mod_name)),
+                );
+            }
+        }
+        for icap in re_inline_import.captures_iter(body) {
+            raw_edges.push((
+                Some(var_name.clone()),
+                icap[1].to_string(),
+                icap[2].to_string(),
+            ));
+        }
     }
 
-    let mut out: Vec<(String, String)> = Vec::new();
-    let mut push_mod = |name: &str, rel: &str| {
-        if name.is_empty() || out.iter().any(|(n, _)| n == name) {
-            return;
+    for cap in re_add_import.captures_iter(build_zig) {
+        let recv = &cap[1];
+        let imp_name = cap[2].to_string();
+        let target_var = cap[3].to_string();
+        let owner = if !recv.contains('.') && vars.contains_key(recv) {
+            Some(recv.to_string())
+        } else {
+            None
+        };
+        raw_edges.push((owner, imp_name, target_var));
+    }
+
+    // Assign each var its registered import name (defaulting to var_name if unnamed).
+    let mut var_to_mod_name: BTreeMap<String, String> = BTreeMap::new();
+    for (v, (_, explicit_name)) in &vars {
+        if let Some(n) = explicit_name {
+            var_to_mod_name.insert(v.clone(), n.clone());
         }
-        let abs = zig_cwd.join(rel);
-        if abs.is_file() {
-            out.push((name.to_string(), abs.to_string_lossy().into_owned()));
+    }
+    for (_, imp_name, target_var) in &raw_edges {
+        if vars.contains_key(target_var) {
+            var_to_mod_name
+                .entry(target_var.clone())
+                .or_insert_with(|| imp_name.clone());
+        }
+    }
+
+    let mut graph = ZigModuleGraph::default();
+    let ensure_node = |modules: &mut Vec<ZigModuleNode>, name: &str, path: &str| {
+        if !name.is_empty() && !modules.iter().any(|m| m.name == name) {
+            modules.push(ZigModuleNode {
+                name: name.to_string(),
+                path: path.to_string(),
+                deps: Vec::new(),
+            });
         }
     };
+
     for cap in re_add_mod.captures_iter(build_zig) {
-        push_mod(&cap[1], &cap[2]);
-    }
-    for cap in re_add_import.captures_iter(build_zig) {
-        if let Some(rel) = vars.get(&cap[2]) {
-            push_mod(&cap[1], rel);
+        let name = &cap[1];
+        let abs = zig_cwd.join(&cap[2]);
+        if abs.is_file() {
+            ensure_node(&mut graph.modules, name, &abs.to_string_lossy());
+            if !graph.root_deps.iter().any(|d| d == name) {
+                graph.root_deps.push(name.to_string());
+            }
         }
     }
-    out
+
+    for (owner_opt, imp_name, target_var) in raw_edges {
+        let Some((target_path, _)) = vars.get(&target_var) else {
+            continue;
+        };
+        let target_mod_name = var_to_mod_name
+            .get(&target_var)
+            .cloned()
+            .unwrap_or_else(|| imp_name.clone());
+        ensure_node(&mut graph.modules, &target_mod_name, target_path);
+        let dep_spec = if imp_name == target_mod_name {
+            target_mod_name.clone()
+        } else {
+            format!("{imp_name}={target_mod_name}")
+        };
+        if let Some(owner_var) = owner_opt {
+            if let Some((owner_path, _)) = vars.get(&owner_var) {
+                let owner_mod_name = var_to_mod_name
+                    .get(&owner_var)
+                    .cloned()
+                    .unwrap_or(owner_var);
+                ensure_node(&mut graph.modules, &owner_mod_name, owner_path);
+                if let Some(node) = graph.modules.iter_mut().find(|m| m.name == owner_mod_name) {
+                    if !node.deps.iter().any(|d| d == &dep_spec) {
+                        node.deps.push(dep_spec);
+                    }
+                }
+            }
+        } else if !graph.root_deps.iter().any(|d| d == &dep_spec) {
+            graph.root_deps.push(dep_spec);
+        }
+    }
+
+    // If a build.zig created modules and added imports only between them (or on a root_mod var
+    // whose root_source_file matches the main test file), ensure root_deps isn't left empty when
+    // modules exist.
+    if graph.root_deps.is_empty() && !graph.modules.is_empty() {
+        for m in &graph.modules {
+            graph.root_deps.push(m.name.clone());
+        }
+    }
+
+    graph
 }
 
-fn append_zig_source_and_modules(
+/// Append Zig source and full transitive `-M` / `--dep` flags (`--dep` immediately
+/// precedes the `-M<name>` module that owns those imports) (BUG-35).
+pub(crate) fn append_zig_source_and_modules(
     args: &mut Vec<String>,
     root_file: &str,
-    modules: &[(String, String)],
+    graph: &ZigModuleGraph,
 ) {
-    if modules.is_empty() {
+    if graph.modules.is_empty() {
         args.push(root_file.to_string());
         return;
     }
-    for (name, _) in modules {
+    for dep in &graph.root_deps {
         args.push("--dep".into());
-        args.push(name.clone());
+        args.push(dep.clone());
     }
     args.push(format!("-Mroot={root_file}"));
-    for (name, path) in modules {
-        args.push(format!("-M{name}={path}"));
+    for module in &graph.modules {
+        for dep in &module.deps {
+            args.push("--dep".into());
+            args.push(dep.clone());
+        }
+        args.push(format!("-M{}={}", module.name, module.path));
     }
 }
 
-/// Locate the newest compiled Zig test executable under `<zig_cwd>/.zig-cache/o/*/test`
-/// (never an application binary from `zig-out/bin/`).
-#[allow(clippy::disallowed_methods)]
-pub(crate) fn find_zig_cache_test_executable(
-    zig_cwd: &str,
-    min_mtime: Option<std::time::SystemTime>,
-) -> Option<String> {
-    let cache_o = Path::new(zig_cwd).join(".zig-cache").join("o");
-    let entries = std::fs::read_dir(&cache_o).ok()?;
-    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
-    for entry in entries.flatten() {
-        let dir = entry.path();
-        if !dir.is_dir() {
-            continue;
-        }
-        let cand = dir.join("test");
-        if !cand.is_file() {
-            continue;
-        }
-        let Ok(meta) = std::fs::metadata(&cand) else {
-            continue;
+const OTTO_ZIG_RUNNER_PRE_HOOK: &str = r#"
+    var otto_test_compiles = ArrayList(*Step.Compile).init(arena);
+    const otto_no_exec = if (graph.env_map.get("OTTO_ZIG_TEST_NO_EXEC")) |v| mem.eql(u8, v, "1") else false;
+    const otto_filter = graph.env_map.get("OTTO_ZIG_TEST_FILTER");
+    const otto_file = graph.env_map.get("OTTO_ZIG_TEST_FILE");
+    if (otto_no_exec or (otto_filter != null and otto_filter.?.len > 0)) {
+        const OttoWalker = struct {
+            seen: std.AutoHashMap(*Step, void),
+            out: *ArrayList(*Step.Compile),
+            fn visit(self: *@This(), s: *Step) !void {
+                if (self.seen.contains(s)) return;
+                try self.seen.put(s, {});
+                if (s.cast(Step.Compile)) |c| {
+                    if (c.kind == .@"test") {
+                        try self.out.append(c);
+                    }
+                }
+                for (s.dependencies.items) |dep| {
+                    try self.visit(dep);
+                }
+            }
         };
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if meta.permissions().mode() & 0o111 == 0 {
-                continue;
+        var walker = OttoWalker{
+            .seen = std.AutoHashMap(*Step, void).init(arena),
+            .out = &otto_test_compiles,
+        };
+        if (targets.items.len > 0) {
+            for (targets.items) |tname| {
+                if (builder.top_level_steps.get(tname)) |tls| {
+                    try walker.visit(&tls.step);
+                }
+            }
+        } else if (builder.top_level_steps.get("test")) |tls| {
+            try walker.visit(&tls.step);
+        }
+        if (otto_file) |want_file| {
+            if (want_file.len > 0 and otto_test_compiles.items.len > 1) {
+                var matched = ArrayList(*Step.Compile).init(arena);
+                for (otto_test_compiles.items) |c| {
+                    if (c.root_module.root_source_file) |lp| {
+                        const rp = lp.getPath(builder);
+                        if (mem.eql(u8, rp, want_file) or mem.endsWith(u8, want_file, rp) or mem.endsWith(u8, rp, want_file)) {
+                            try matched.append(c);
+                        }
+                    }
+                }
+                if (matched.items.len > 0) {
+                    otto_test_compiles = matched;
+                }
             }
         }
-        let mtime = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-        if let Some(min) = min_mtime {
-            if mtime < min {
-                continue;
+        if (otto_filter) |f| {
+            if (f.len > 0) {
+                const slice = try arena.dupe([]const u8, &.{f});
+                for (otto_test_compiles.items) |c| {
+                    c.filters = slice;
+                }
             }
         }
-        if best.as_ref().is_none_or(|(prev, _)| mtime > *prev) {
-            best = Some((mtime, cand));
+        if (otto_no_exec) {
+            if (otto_test_compiles.items.len == 0) {
+                fatal("otto: no Zig test compile step found in build.zig", .{});
+            }
+            const compile_only = builder.step("__otto_compile_tests", "Compile Zig tests without running");
+            for (otto_test_compiles.items) |c| {
+                compile_only.dependOn(&c.step);
+            }
+            targets.clearRetainingCapacity();
+            try targets.append("__otto_compile_tests");
         }
     }
-    best.map(|(_, p)| p.to_string_lossy().into_owned())
+"#;
+
+const OTTO_ZIG_RUNNER_POST_HOOK: &str = r#"
+        if (otto_no_exec) {
+            for (otto_test_compiles.items) |c| {
+                const bp = c.getEmittedBin().getPath(builder);
+                try stdout_writer.print("OTTO_ZIG_TEST_BIN:{s}\n", .{bp});
+            }
+        }
+"#;
+
+/// Patch Zig's own `compiler/build_runner.zig` so `zig build --build-runner <path> test`
+/// compiles the project's test `Step.Compile` artifact(s) with optional `compile.filters`
+/// WITHOUT executing `Step.Run` (`addRunArtifact`) and prints `OTTO_ZIG_TEST_BIN:<path>`
+/// even on warm cache hits (BUG-5, BUG2-1, BUG-35, BUG2-2).
+pub(crate) fn patch_zig_build_runner(orig_source: &str) -> Option<String> {
+    const PRE_ANCHOR: &str = "if (steps_menu)";
+    const POST_ANCHOR: &str = "if (!watch) return cleanExit();";
+    if !orig_source.contains(PRE_ANCHOR) || !orig_source.contains(POST_ANCHOR) {
+        return None;
+    }
+    let with_pre = orig_source.replacen(
+        PRE_ANCHOR,
+        &format!("{OTTO_ZIG_RUNNER_PRE_HOOK}\n    {PRE_ANCHOR}"),
+        1,
+    );
+    Some(with_pre.replacen(
+        POST_ANCHOR,
+        &format!("{OTTO_ZIG_RUNNER_POST_HOOK}\n        {POST_ANCHOR}"),
+        1,
+    ))
+}
+
+/// Extract emitted test binary paths from `OTTO_ZIG_TEST_BIN:<path>` lines printed by
+/// our patched Zig build runner.
+pub(crate) fn parse_otto_zig_test_bins(stdout: &str) -> Vec<String> {
+    stdout
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("OTTO_ZIG_TEST_BIN:"))
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+fn parse_zig_env_lib_dir(zig_env_stdout: &str) -> Option<String> {
+    for line in zig_env_stdout.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed
+            .strip_prefix("\"lib_dir\":")
+            .or_else(|| trimmed.strip_prefix(".lib_dir ="))
+        {
+            let val = rest.trim().trim_end_matches(',').trim();
+            if let Some(inner) = val.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+                if !inner.is_empty() {
+                    return Some(inner.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Resolve and cache the patched `otto_build_runner.zig` for a local Zig binary.
+#[allow(clippy::disallowed_methods)]
+pub(crate) fn prepare_local_zig_build_runner(zig_bin: &str, cache_dir: &Path) -> Option<PathBuf> {
+    let mut runner_src_path: Option<PathBuf> = None;
+    let bin_p = Path::new(zig_bin);
+    if bin_p.is_absolute() {
+        let resolved = std::fs::canonicalize(bin_p).unwrap_or_else(|_| bin_p.to_path_buf());
+        if let Some(dir) = resolved.parent() {
+            for cand in [
+                dir.join("lib/zig/compiler/build_runner.zig"),
+                dir.join("lib/compiler/build_runner.zig"),
+                dir.parent()
+                    .map(|p| p.join("lib/zig/compiler/build_runner.zig"))
+                    .unwrap_or_default(),
+            ] {
+                if cand.is_file() {
+                    runner_src_path = Some(cand);
+                    break;
+                }
+            }
+        }
+    }
+    if runner_src_path.is_none() {
+        if let Ok(out) = std::process::Command::new(zig_bin).arg("env").output() {
+            if out.status.success() {
+                if let Some(lib_dir) = parse_zig_env_lib_dir(&String::from_utf8_lossy(&out.stdout))
+                {
+                    let cand = PathBuf::from(lib_dir).join("compiler/build_runner.zig");
+                    if cand.is_file() {
+                        runner_src_path = Some(cand);
+                    }
+                }
+            }
+        }
+    }
+    let orig = std::fs::read_to_string(runner_src_path?).ok()?;
+    let patched = patch_zig_build_runner(&orig)?;
+    let mut h = Sha256::new();
+    h.update(patched.as_bytes());
+    let key = hex::encode(h.finalize());
+    let dir = cache_dir.join("zig-build-runners");
+    let _ = std::fs::create_dir_all(&dir);
+    let dest = dir.join(format!("runner-{}.zig", &key[..16]));
+    if !dest.is_file() {
+        let tmp = dir.join(format!(".runner-{}.{}.tmp", &key[..16], std::process::id()));
+        if std::fs::write(&tmp, patched.as_bytes()).is_ok() {
+            let _ = std::fs::rename(&tmp, &dest);
+        }
+    }
+    dest.is_file().then_some(dest)
+}
+
+async fn prepare_zig_build_runner_for_target(
+    req: &IdeStartDebugReq,
+    ctx: &DapStartContext,
+    zig_bin: &str,
+    zig_cwd: &str,
+    env: &BTreeMap<String, String>,
+    data_dir: &Path,
+) -> Option<String> {
+    if req.target.kind == IdeTargetKind::Local {
+        let zb = zig_bin.to_string();
+        let dd = data_dir.to_path_buf();
+        return tokio::task::spawn_blocking(move || prepare_local_zig_build_runner(&zb, &dd))
+            .await
+            .ok()
+            .flatten()
+            .map(|p| p.to_string_lossy().into_owned());
+    }
+    prepare_ssh_zig_build_runner(&req.target, ctx.ssh.as_ref(), zig_bin, zig_cwd, env).await
+}
+
+/// Prepare and cache the patched `otto-zig-runner-*.zig` on an SSH host so remote
+/// `zig build --build-runner` supports both no-exec debug builds (BUG-5/BUG2-1) and
+/// filtered single-test gutter runs (BUG2-2/BUG-35).
+pub(crate) async fn prepare_ssh_zig_build_runner(
+    target: &IdeTargetSpec,
+    ssh: Option<&crate::types::IdeSshSpec>,
+    zig_bin: &str,
+    zig_cwd: &str,
+    env: &BTreeMap<String, String>,
+) -> Option<String> {
+    // Remote SSH: read `<lib_dir>/compiler/build_runner.zig`, patch in Rust, write to remote /tmp.
+    let env_out = run_target_command(
+        target,
+        ssh,
+        zig_bin,
+        &["env".into()],
+        zig_cwd,
+        env,
+        crate::proc_group::BUILD_STEP_TIMEOUT,
+    )
+    .await
+    .ok()?;
+    if !env_out.status.success() {
+        return None;
+    }
+    let lib_dir = parse_zig_env_lib_dir(&String::from_utf8_lossy(&env_out.stdout))?;
+    let remote_orig = format!(
+        "{}/compiler/build_runner.zig",
+        lib_dir.trim_end_matches('/')
+    );
+    let cat_out = run_target_command(
+        target,
+        ssh,
+        "cat",
+        &[remote_orig],
+        zig_cwd,
+        env,
+        crate::proc_group::BUILD_STEP_TIMEOUT,
+    )
+    .await
+    .ok()?;
+    if !cat_out.status.success() {
+        return None;
+    }
+    let orig = String::from_utf8_lossy(&cat_out.stdout);
+    let patched = patch_zig_build_runner(&orig)?;
+    let mut h = Sha256::new();
+    h.update(patched.as_bytes());
+    let key = hex::encode(h.finalize());
+    let remote_dest = format!("/tmp/otto-zig-runner-{}.zig", &key[..16]);
+    let write_script = format!(
+        "if [ ! -f {d} ]; then cat <<'__OTTO_ZIG_RUNNER__' > {d}.$$\n{patched}\n__OTTO_ZIG_RUNNER__\nmv -f {d}.$$ {d}; fi",
+        d = shell_words::quote(&remote_dest),
+    );
+    let wr = run_target_command(
+        target,
+        ssh,
+        "sh",
+        &["-c".into(), write_script],
+        zig_cwd,
+        env,
+        crate::proc_group::BUILD_STEP_TIMEOUT,
+    )
+    .await
+    .ok()?;
+    wr.status.success().then_some(remote_dest)
 }
 
 #[allow(clippy::disallowed_methods)]
@@ -1127,24 +1495,25 @@ test "point sum" {
     }
 
     #[test]
-    fn zig_bug5_bug35_bug36_bug7_regression_suite() {
+    fn zig_bug5_bug35_bug36_bug7_bug2_2_regression_suite() {
         use std::collections::BTreeMap;
-        use std::os::unix::fs::PermissionsExt;
 
         let tmp = tempfile::tempdir().unwrap();
         let proj = tmp.path().join("my_zig_app");
         std::fs::create_dir_all(proj.join("src")).unwrap();
-        std::fs::create_dir_all(proj.join("zig-out/bin")).unwrap();
-        std::fs::create_dir_all(proj.join(".zig-cache/o/abc123")).unwrap();
 
         let build_zig = r#"
 const std = @import("std");
 pub fn build(b: *std.Build) void {
-    const helper_mod = b.createModule(.{
-        .root_source_file = b.path("src/helper.zig"),
+    const leaf_mod = b.createModule(.{
+        .root_source_file = b.path("src/leaf.zig"),
     });
+    const mid_mod = b.createModule(.{
+        .root_source_file = b.path("src/mid.zig"),
+    });
+    mid_mod.addImport("leaf", leaf_mod);
     const exe = b.addExecutable(.{ .name = "my_zig_app", .root_source_file = b.path("src/main.zig") });
-    exe.root_module.addImport("helper", helper_mod);
+    exe.root_module.addImport("mid", mid_mod);
     const run_step = b.step("run", "Run the app");
     const test_step = b.step("test", "Run unit tests");
     _ = .{ run_step, test_step };
@@ -1152,32 +1521,26 @@ pub fn build(b: *std.Build) void {
 "#;
         std::fs::write(proj.join("build.zig"), build_zig).unwrap();
         std::fs::write(
-            proj.join("src/helper.zig"),
+            proj.join("src/leaf.zig"),
             "pub fn val() i32 { return 42; }\n",
         )
         .unwrap();
+        std::fs::write(
+            proj.join("src/mid.zig"),
+            "const leaf = @import(\"leaf\");\npub fn answer() i32 { return leaf.val(); }\n",
+        )
+        .unwrap();
         let main_src = r#"const std = @import("std");
-const helper = @import("helper");
-pub fn main() void { _ = helper.val(); }
-test "uses helper" { try std.testing.expectEqual(@as(i32, 42), helper.val()); }
+const mid = @import("mid");
+pub fn main() void { _ = mid.answer(); }
+test "uses mid" { try std.testing.expectEqual(@as(i32, 42), mid.answer()); }
+test "failing sibling" { try std.testing.expectEqual(@as(i32, 1), 2); }
 "#;
         let main_path = proj.join("src/main.zig");
         std::fs::write(&main_path, main_src).unwrap();
 
-        // BUG-5: Cache test binary finder locates `.zig-cache/o/*/test`, never `zig-out/bin` app.
-        let app_bin = proj.join("zig-out/bin/my_zig_app");
-        let test_bin = proj.join(".zig-cache/o/abc123/test");
-        for p in [&app_bin, &test_bin] {
-            std::fs::write(p, "#!/bin/sh\nexit 0\n").unwrap();
-            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        let found = super::find_zig_cache_test_executable(&proj.to_string_lossy(), None)
-            .expect("cached test binary");
-        assert_eq!(found, test_bin.to_string_lossy());
-        assert_ne!(found, app_bin.to_string_lossy());
-
         // BUG-35: Gutter actions inside a build.zig project use `zig build run` / `zig build test`
-        // (preserving module graph), while standalone files retain direct `zig run` / `zig test`.
+        // while standalone files retain direct `zig run` / `zig test`.
         let proj_gutters =
             crate::gutter::detect_gutter_items(&main_path.to_string_lossy(), main_src, &[]);
         let main_g = proj_gutters.iter().find(|g| g.label == "main").unwrap();
@@ -1186,12 +1549,10 @@ test "uses helper" { try std.testing.expectEqual(@as(i32, 42), helper.val()); }
             crate::types::IdeRunnerKind::ZigBuild
         );
         assert_eq!(main_g.run_spec.args, vec!["build", "run"]);
-        let test_g = proj_gutters
-            .iter()
-            .find(|g| g.label == "uses helper")
-            .unwrap();
+        let test_g = proj_gutters.iter().find(|g| g.label == "uses mid").unwrap();
         assert_eq!(test_g.run_spec.runner, crate::types::IdeRunnerKind::ZigTest);
         assert_eq!(test_g.run_spec.args, vec!["build", "test"]);
+        assert_eq!(test_g.run_spec.test_filter.as_deref(), Some("uses mid"));
 
         let solo_dir = tmp.path().join("standalone");
         std::fs::create_dir_all(&solo_dir).unwrap();
@@ -1206,19 +1567,74 @@ test "uses helper" { try std.testing.expectEqual(@as(i32, 42), helper.val()); }
         );
         assert_eq!(solo_main.run_spec.args[0], "run");
 
-        // BUG-35: Named build.zig modules are extracted and converted to `--dep` / `-M` flags.
-        let mods = super::parse_build_zig_modules(build_zig, &proj);
-        assert_eq!(mods.len(), 1);
-        assert_eq!(mods[0].0, "helper");
+        // BUG-35: Multi-hop transitive module graph (`root -> mid -> leaf`) emits each module's
+        // own `--dep` immediately before its `-M<name>=<path>` (never all `--dep` on root).
+        let graph = super::parse_build_zig_module_graph(build_zig, &proj);
+        assert_eq!(graph.root_deps, vec!["mid"]);
+        let mid_node = graph.modules.iter().find(|m| m.name == "mid").unwrap();
+        assert_eq!(mid_node.deps, vec!["leaf"]);
         let mut argv = vec!["test".to_string(), "--test-no-exec".to_string()];
-        super::append_zig_source_and_modules(&mut argv, &main_path.to_string_lossy(), &mods);
-        assert!(argv.contains(&"--dep".to_string()));
-        assert!(argv.contains(&"helper".to_string()));
-        assert!(argv.iter().any(|a| a.starts_with("-Mroot=")));
-        assert!(argv.iter().any(|a| a.starts_with("-Mhelper=")));
+        super::append_zig_source_and_modules(&mut argv, &main_path.to_string_lossy(), &graph);
+        let root_pos = argv.iter().position(|a| a.starts_with("-Mroot=")).unwrap();
+        let mid_pos = argv.iter().position(|a| a.starts_with("-Mmid=")).unwrap();
+        let leaf_dep_pos = argv.iter().position(|a| a == "leaf").unwrap();
+        assert!(
+            leaf_dep_pos > root_pos && leaf_dep_pos < mid_pos,
+            "leaf dep must belong to mid (between -Mroot and -Mmid), got: {argv:?}"
+        );
 
-        // BUG-36: SSH Run All Tests (remote cwd absent on local disk, no `.zig` file) must
-        // emit `zig build test` rather than bare `zig test`.
+        // BUG2-2: Running a single gutter test in a build.zig project must NOT drop the
+        // selected test case into unfiltered `zig build test` (which would run failing siblings).
+        let gutter_cfg = crate::types::IdeRunConfig {
+            id: "gutter-zig-test".into(),
+            name: "uses mid".into(),
+            runner: crate::types::IdeRunnerKind::ZigTest,
+            args: vec!["build".into(), "test".into()],
+            cwd: Some(proj.to_string_lossy().into_owned()),
+            target_path: Some(main_path.to_string_lossy().into_owned()),
+            test_filter: Some("uses mid".into()),
+            ..Default::default()
+        };
+        let (g_prog, g_args) = crate::environments::runner_cmd::build_zig_runner_cmd(
+            crate::types::IdeRunnerKind::ZigTest,
+            &gutter_cfg,
+            &proj.to_string_lossy(),
+            None,
+            gutter_cfg.args.clone(),
+            vec![],
+            Some("uses mid"),
+        );
+        assert_eq!(g_prog, "zig");
+        assert!(
+            g_args.contains(&"--test-filter".to_string())
+                && g_args.contains(&"uses mid".to_string())
+                && g_args.iter().any(|a| a.starts_with("-Mmid="))
+                && g_args.iter().any(|a| a.starts_with("-Mleaf=")),
+            "BUG2-2: single gutter test must preserve --test-filter and transitive modules, got: {g_args:?}"
+        );
+
+        // When runner.rs injects `--build-runner` (with OTTO_ZIG_TEST_FILTER in env), keep `zig build`.
+        let (_, br_args) = crate::environments::runner_cmd::build_zig_runner_cmd(
+            crate::types::IdeRunnerKind::ZigTest,
+            &gutter_cfg,
+            &proj.to_string_lossy(),
+            None,
+            vec![
+                "build".into(),
+                "--build-runner".into(),
+                "/tmp/runner.zig".into(),
+                "test".into(),
+            ],
+            vec![],
+            Some("uses mid"),
+        );
+        assert_eq!(
+            br_args,
+            vec!["build", "--build-runner", "/tmp/runner.zig", "test"]
+        );
+
+        // BUG-36: SSH Run All Tests (remote cwd absent on local disk, no `.zig` file, no filter)
+        // must emit `zig build test` rather than bare `zig test`.
         let cfg = crate::types::IdeRunConfig {
             id: "ssh-zig-test".into(),
             name: "Test All".into(),
@@ -1249,5 +1665,112 @@ test "uses helper" { try std.testing.expectEqual(@as(i32, 42), helper.val()); }
             ssh_cmd.contains("\"$HOME\"/.otto/toolchains/zig/current"),
             "SSH exec script missing managed zig/current PATH: {ssh_cmd}"
         );
+    }
+
+    #[tokio::test]
+    async fn zig_debug_all_tests_uses_no_exec_build_runner_and_resolves_warm_cached_binary() {
+        use std::collections::BTreeMap;
+        use std::os::unix::fs::PermissionsExt;
+
+        // BUG-5 + BUG2-1: Project-wide Debug All Tests must compile via `--build-runner` with
+        // `OTTO_ZIG_TEST_NO_EXEC=1` (never running `addRunArtifact` before DAP) and return the
+        // emitted test executable even when it is a warm cache hit older than 2 seconds, never
+        // falling back to standalone `src/main.zig` or `zig-out/bin/` app.
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        let fake_zig_dir = tmp.path().join("fake-zig");
+        let fake_lib = fake_zig_dir.join("lib/zig/compiler");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::create_dir_all(&fake_lib).unwrap();
+        std::fs::write(
+            fake_lib.join("build_runner.zig"),
+            "pub fn main() !void {\n    if (steps_menu) return;\n    if (!watch) return cleanExit();\n}\n",
+        )
+        .unwrap();
+
+        let proj = tmp.path().join("proj");
+        std::fs::create_dir_all(proj.join("zig-out/bin")).unwrap();
+        std::fs::create_dir_all(proj.join(".zig-cache/o/warm123")).unwrap();
+        std::fs::write(
+            proj.join("build.zig"),
+            "pub fn build(b: *std.Build) void { _ = b.step(\"test\", \"tests\"); }\n",
+        )
+        .unwrap();
+        let app_bin = proj.join("zig-out/bin/proj");
+        let warm_test_bin = proj.join(".zig-cache/o/warm123/test");
+        for p in [&app_bin, &warm_test_bin] {
+            std::fs::write(p, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        // Make the cached test binary old (1 hour ago) — old 2s mtime scan would reject it!
+        let _ = std::process::Command::new("touch")
+            .args(["-t", "202001010000", &warm_test_bin.to_string_lossy()])
+            .status();
+
+        let fake_zig = fake_zig_dir.join("zig");
+        let marker = tmp.path().join("invoked.txt");
+        let fake_zig_script = format!(
+            "#!/bin/sh\n\
+             printf '%s|%s\\n' \"$OTTO_ZIG_TEST_NO_EXEC\" \"$*\" > \"{}\"\n\
+             if [ \"$OTTO_ZIG_TEST_NO_EXEC\" != \"1\" ]; then echo 'missing NO_EXEC' >&2; exit 2; fi\n\
+             case \"$*\" in *--build-runner*) ;; *) echo 'missing --build-runner' >&2; exit 3 ;; esac\n\
+             echo 'OTTO_ZIG_TEST_BIN:{}'\n",
+            marker.display(),
+            warm_test_bin.display()
+        );
+        std::fs::write(&fake_zig, fake_zig_script).unwrap();
+        std::fs::set_permissions(&fake_zig, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let req = crate::types::IdeStartDebugReq {
+            target: crate::types::IdeTargetSpec::local(proj.to_string_lossy().into_owned()),
+            language: "zig".into(),
+            launch: crate::types::IdeDebugLaunchSpec {
+                program: proj.to_string_lossy().into_owned(),
+                cwd: Some(proj.to_string_lossy().into_owned()),
+                is_test: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut env = BTreeMap::new();
+        env.insert(
+            "ZIG_HOME".into(),
+            fake_zig_dir.to_string_lossy().into_owned(),
+        );
+        env.insert(
+            "PATH".into(),
+            format!("{}:/usr/bin:/bin", fake_zig_dir.display()),
+        );
+        let ctx = super::DapStartContext {
+            caller_is_root: true,
+            ..Default::default()
+        };
+        let mut out = Vec::new();
+        let resolved_bin = super::compile_zig_debug_artifact(
+            &data_dir,
+            &req,
+            &ctx,
+            &proj.to_string_lossy(),
+            &proj.to_string_lossy(),
+            true,
+            &env,
+            &mut out,
+        )
+        .await
+        .expect("no-exec build runner must return warm-cached test binary");
+        assert_eq!(resolved_bin, warm_test_bin.to_string_lossy());
+        assert_ne!(resolved_bin, app_bin.to_string_lossy());
+
+        let invoked = std::fs::read_to_string(&marker).unwrap();
+        assert!(invoked.starts_with("1|build --build-runner "));
+        // Verify the generated runner actually strips Step.Run and emits OTTO_ZIG_TEST_BIN.
+        let runner_path = invoked
+            .split_whitespace()
+            .skip_while(|t| *t != "--build-runner")
+            .nth(1)
+            .expect("runner path in argv");
+        let runner_src = std::fs::read_to_string(runner_path).unwrap();
+        assert!(runner_src.contains("__otto_compile_tests"));
+        assert!(runner_src.contains("OTTO_ZIG_TEST_BIN:"));
     }
 }

@@ -335,6 +335,65 @@ pub(super) async fn execute_run_task(
         } else {
             None
         };
+        // BUG2-2 + BUG-35: When running a single named Zig test in a `build.zig` project,
+        // attach our patched `--build-runner` + `OTTO_ZIG_TEST_FILTER` so `zig build test`
+        // runs only the selected case inside the real module graph (instead of running
+        // unrelated failing sibling tests).
+        if cfg.runner == IdeRunnerKind::ZigTest
+            && cfg.args.first().map(String::as_str) == Some("build")
+            && !cfg.args.iter().any(|a| a == "--build-runner")
+        {
+            if let Some(filter) = cfg
+                .test_filter
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                let zig_prog = cfg
+                    .command
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("zig")
+                    .to_string();
+                let runner_path = if target.kind == IdeTargetKind::Local {
+                    let cache_root = crate::go_build_cache::ide_build_cache_root();
+                    tokio::task::spawn_blocking(move || {
+                        crate::dap::adapters_zig::prepare_local_zig_build_runner(
+                            &zig_prog,
+                            &cache_root,
+                        )
+                    })
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|p| p.to_string_lossy().into_owned())
+                } else {
+                    crate::dap::adapters_zig::prepare_ssh_zig_build_runner(
+                        &target,
+                        ssh.as_ref(),
+                        &zig_prog,
+                        &cwd,
+                        &env_map,
+                    )
+                    .await
+                };
+                if let Some(rp) = runner_path {
+                    env_map.insert("OTTO_ZIG_TEST_FILTER".into(), filter.to_string());
+                    if let Some(tp) = cfg
+                        .target_path
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                    {
+                        env_map.insert("OTTO_ZIG_TEST_FILE".into(), tp.to_string());
+                    }
+                    cfg.args.insert(1, rp);
+                    cfg.args.insert(1, "--build-runner".into());
+                }
+            }
+        }
+
         let (program, args) = match compiled {
             None => build_runner_command(&cfg, target.kind, &cwd, &env_map),
             Some(Some(Ok(built))) => built,
