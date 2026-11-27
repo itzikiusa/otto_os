@@ -654,55 +654,6 @@
   </div>
 </div>
 
-<style>body{margin:6px;font-family:-apple-system,sans-serif;line-height:1.4;color:CanvasText;background:transparent}table{border-collapse:collapse;font-size:inherit}th,td{border:1px solid color-mix(in srgb,CanvasText 20%,transparent);padding:4px 8px;text-align:start}</style></head><body>${out.text}</body></html>`}
-                  ></iframe>
-                {:else}
-                  <pre class="nb-out-pre">{out.text}</pre>
-                {/if}
-              {/each}
-            </div>
-          {/if}
-        </section>
-      {/each}
-
-      <div class="nb-add-row">
-        <button type="button" class="btn small ghost" disabled={readOnly} onclick={() => commitDoc(addNotebookCell(doc, doc.cells.length - 1, 'code'))}>
-          <Icon name="plus" size={12} /> Code cell
-        </button>
-        <button type="button" class="btn small ghost" disabled={readOnly} onclick={() => commitDoc(addNotebookCell(doc, doc.cells.length - 1, 'markdown'))}>
-          <Icon name="plus" size={12} /> Markdown cell
-        </button>
-      </div>
-    </div>
-
-    {#if varsOpen}
-      <aside class="nb-vars" aria-label="Kernel variables" data-testid="ide-nb-vars-pane">
-        <div class="nb-vars-head">
-          <span class="nb-vars-title">Kernel Variables</span>
-          <button type="button" class="icon-btn" onclick={() => (varsOpen = false)} aria-label="Close variables" title="Close variables">
-            <Icon name="x" size={12} />
-          </button>
-        </div>
-        {#if variables.length === 0}
-          <p class="nb-vars-empty">Run a cell to inspect live Python variables, DataFrame shapes, and tensor sizes.</p>
-        {:else}
-          <div class="nb-vars-list">
-            {#each variables as v (v.name)}
-              <div class="nb-var-row">
-                <div class="nb-var-top">
-                  <code class="nb-var-name">{v.name}</code>
-                  <span class="nb-var-type">{v.var_type}{v.shape ? ` (${v.shape})` : ''}</span>
-                </div>
-                <code class="nb-var-prev">{v.preview}</code>
-              </div>
-            {/each}
-          </div>
-        {/if}
-      </aside>
-    {/if}
-  </div>
-</div>
-
 <style>
   .nb-root { display: flex; flex-direction: column; block-size: 100%; min-block-size: 0; background: var(--surface); }
   .nb-bar {
