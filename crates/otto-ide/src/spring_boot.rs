@@ -176,13 +176,26 @@ fn scan_single_spring_module(
     //    document overrides an earlier one, and a `spring.config.activate.on-profile`
     //    document applies only to an active profile (BUG2-8, BUG3-5).
     let mut config_docs: Vec<ConfigFileDocs> = Vec::new();
-    for (group, res_rel) in [
+    let mut locations: Vec<(u8, PathBuf)> = [
         (0, "src/main/resources"),
         (0, "src/main/resources/config"),
         (1, ""),
         (1, "config"),
-    ] {
-        let res_dir = root.join(res_rel);
+    ]
+    .map(|(group, rel)| (group, root.join(rel)))
+    .into();
+    // `file:./config/*/`: each visible subdirectory in path order, so the last one wins.
+    if let Ok(rd) = fs::read_dir(root.join("config")) {
+        let mut subs: Vec<PathBuf> = rd
+            .flatten()
+            .filter(|e| !e.file_name().to_string_lossy().starts_with(".."))
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect();
+        subs.sort();
+        locations.extend(subs.into_iter().map(|p| (1, p)));
+    }
+    for (group, res_dir) in locations {
         let Ok(rd) = fs::read_dir(&res_dir) else {
             continue;
         };
@@ -221,8 +234,13 @@ fn scan_single_spring_module(
                         .get("spring.config.activate.on-profile")
                         .or_else(|| parsed.get("spring.profiles"))
                         .map(|v| v.trim().to_string());
-                    if let Some(names) = on_profile.as_deref().filter(|e| is_profile_list(e)) {
-                        profiles.extend(profile_list(names));
+                    if let Some(expr) = on_profile.as_deref() {
+                        profiles.extend(
+                            expr.split(',')
+                                .flat_map(profile_expr_tokens)
+                                .filter(|t| !"()&|!".contains(*t) && !t.contains("${"))
+                                .map(String::from),
+                        );
                     }
                     (on_profile, parsed)
                 })
@@ -265,15 +283,12 @@ fn scan_single_spring_module(
     } else {
         vec!["default".to_string()]
     };
-    // A profile expression (`!a`, `a & b`) is not evaluated and never matches.
+    // Each comma-separated profile expression of a document; any match activates it.
     let doc_applies = |on_profile: &Option<String>| match on_profile.as_deref() {
         None => true,
-        Some(names) => {
-            is_profile_list(names)
-                && profile_list(names)
-                    .iter()
-                    .any(|p| effective_profiles.contains(p))
-        }
+        Some(exprs) => exprs
+            .split(',')
+            .any(|e| profile_expr_matches(e, &effective_profiles) == Some(true)),
     };
 
     let mut server_port: u16 = 8080;
@@ -367,9 +382,67 @@ fn split_config_documents(raw: &str) -> Vec<String> {
     docs
 }
 
-/// `a` / `a, b`, as opposed to a profile expression (`!a`, `a & b`, `(a | b)`).
-fn is_profile_list(raw: &str) -> bool {
-    !raw.contains(['!', '&', '|', '('])
+/// Spring's profile expression tokens: names and the operators `(`, `)`, `&`, `|`, `!`.
+fn profile_expr_tokens(expr: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    for (i, c) in expr.char_indices() {
+        if "()&|!".contains(c) {
+            out.extend([&expr[start..i], &expr[i..i + 1]]);
+            start = i + 1;
+        }
+    }
+    out.push(&expr[start..]);
+    out.into_iter()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .collect()
+}
+
+/// Whether the profile expression `expr` (`!a`, `a & b`, `a | b`, parentheses) matches
+/// the active profiles; `None` when malformed, e.g. `a & b | c` without parentheses.
+fn profile_expr_matches(expr: &str, active: &[String]) -> Option<bool> {
+    let tokens = profile_expr_tokens(expr);
+    let mut pos = 0;
+    let matched = profile_expr_seq(&tokens, &mut pos, active)?;
+    (pos == tokens.len()).then_some(matched)
+}
+
+/// Operands joined by one operator, up to a `)` or the end.
+fn profile_expr_seq(t: &[&str], pos: &mut usize, active: &[String]) -> Option<bool> {
+    let mut vals = vec![profile_expr_operand(t, pos, active)?];
+    let mut op = None;
+    while let Some(&tok) = t.get(*pos).filter(|tok| **tok != ")") {
+        if !matches!(tok, "&" | "|") || op.is_some_and(|o| o != tok) {
+            return None;
+        }
+        op = Some(tok);
+        *pos += 1;
+        vals.push(profile_expr_operand(t, pos, active)?);
+    }
+    Some(if op == Some("&") {
+        vals.iter().all(|v| *v)
+    } else {
+        vals.iter().any(|v| *v)
+    })
+}
+
+fn profile_expr_operand(t: &[&str], pos: &mut usize, active: &[String]) -> Option<bool> {
+    let tok = *t.get(*pos)?;
+    *pos += 1;
+    match tok {
+        "!" => profile_expr_operand(t, pos, active).map(|v| !v),
+        "(" => {
+            let v = profile_expr_seq(t, pos, active)?;
+            if t.get(*pos) != Some(&")") {
+                return None;
+            }
+            *pos += 1;
+            Some(v)
+        }
+        "&" | "|" | ")" => None,
+        name => Some(active.iter().any(|a| a == name)),
+    }
 }
 
 /// `a, b` -> `["a", "b"]` in declared order, skipping placeholders.

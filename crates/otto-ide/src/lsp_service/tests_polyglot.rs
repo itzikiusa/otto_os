@@ -1362,6 +1362,83 @@ fn spring_boot_config_precedence_multidoc_profile_order_and_actual_parent() {
     );
 }
 
+#[test]
+fn spring_boot_on_profile_expressions_and_config_wildcard_dirs() {
+    use crate::spring_boot::detect_spring_boot_workspace_scoped;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let boot_pom = "<project><dependencies><dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-web</artifactId></dependency></dependencies></project>";
+    let scan = |ws: &std::path::Path| {
+        let canon = ws.canonicalize().unwrap();
+        detect_spring_boot_workspace_scoped(
+            std::slice::from_ref(&canon),
+            std::slice::from_ref(&canon),
+            false,
+        )
+        .expect("Spring Boot module detected")
+    };
+    let write = |p: std::path::PathBuf, body: &str| {
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    };
+
+    // Spring's profile expressions: `!`, `&`, `|` and parentheses; mixing `&` and `|`
+    // without parentheses is malformed and never matches.
+    let expr = tmp.path().join("expr");
+    write(expr.join("pom.xml"), boot_pom);
+    write(
+        expr.join("src/main/resources/application.properties"),
+        "spring.profiles.active=production,eu-central\nserver.port=8080\n\
+         #---\nspring.config.activate.on-profile=!production\nserver.port=1111\n\
+         #---\nspring.config.activate.on-profile=production & (us-east | eu-central)\nmanagement.server.port=9292\n\
+         #---\nspring.config.activate.on-profile=production & eu-central | qa\nmanagement.endpoints.web.base-path=/broken\n\
+         #---\nspring.config.activate.on-profile=(qa | !eu-central) | !(us-east)\nspring.devtools.restart.trigger-file=.reload\n",
+    );
+    let info = scan(&expr);
+    assert_eq!(info.server_port, 8080, "!production is inactive");
+    assert_eq!(
+        info.management_port,
+        Some(9292),
+        "production & (us-east | eu-central) matches"
+    );
+    assert_eq!(
+        info.actuator_base_path, "/actuator",
+        "a & b | c is malformed"
+    );
+    assert_eq!(info.trigger_file.as_deref(), Some(".reload"));
+    assert!(
+        ["us-east", "qa"]
+            .iter()
+            .all(|p| info.profiles.iter().any(|x| x == p)),
+        "{:?}",
+        info.profiles
+    );
+
+    // `file:./config/*/`: each visible subdirectory, alphabetically, after `config/`.
+    let wild = tmp.path().join("wild");
+    write(wild.join("pom.xml"), boot_pom);
+    write(
+        wild.join("config/application.properties"),
+        "server.port=7000\n",
+    );
+    write(
+        wild.join("config/a/application.properties"),
+        "server.port=7101\n",
+    );
+    write(
+        wild.join("config/b/application.properties"),
+        "server.port=7102\nmanagement.server.port=7200\n",
+    );
+    write(
+        wild.join("config/..data/application.properties"),
+        "management.endpoints.web.base-path=/hidden\n",
+    );
+    let info = scan(&wild);
+    assert_eq!(info.server_port, 7102);
+    assert_eq!(info.management_port, Some(7200));
+    assert_eq!(info.actuator_base_path, "/actuator", "..data is skipped");
+}
+
 #[tokio::test]
 async fn spring_boot_actuator_accepts_503_down_health_response() {
     use crate::spring_boot::actuator::inspect_actuator;
