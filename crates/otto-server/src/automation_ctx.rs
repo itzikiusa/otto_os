@@ -51,6 +51,9 @@ impl AutomationCtx for ServerCtx {
     fn scheduled_tasks(&self) -> &ScheduledTasksRepo {
         &self.scheduled_tasks
     }
+    async fn security_scan_tick(&self) -> Result<()> {
+        otto_ide::http::security::scheduled_tick(self).await
+    }
     async fn resolve_provider(
         &self,
         ws: Option<&Workspace>,

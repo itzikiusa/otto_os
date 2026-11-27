@@ -80,6 +80,14 @@ impl SessionManager {
         )
     }
 
+    /// Scanners always defer at the live pressure thresholds, independently
+    /// of whether the user has enabled admission for agent sessions.
+    pub async fn security_scan_busy(&self) -> bool {
+        let policy = self.admission_policy().await;
+        let sample = self.admission.monitor().current().await;
+        admission::pressure_reason(&sample, &policy).is_some()
+    }
+
     /// Machine load, the admission queue and the data volume's free space,
     /// for the UI (`GET /machine/status`). The read is also what notices low
     /// disk: the first read below `machine_low_disk_gb` raises one warning in

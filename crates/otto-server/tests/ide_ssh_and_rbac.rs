@@ -830,3 +830,247 @@ async fn ws_lsp_remote_ssh_guards_and_upgrade_paths() {
     assert_eq!(attached_json["params"]["lang"], "rust");
     assert_eq!(attached_json["params"]["root"], "/srv/repo");
 }
+
+#[tokio::test]
+async fn security_routes_scope_settings_and_history_to_the_named_project() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    let pool = otto_server::test_support::mem_pool().await;
+    let owner = seed_user(&pool, "owner", true).await;
+    let editor = seed_user(&pool, "editor", false).await;
+    seed_workspace(&pool, "proj-workspace", &project).await;
+    add_member(&pool, "proj-workspace", &editor.id, "editor").await;
+    GrantsRepo::new(pool.clone())
+        .set_grants(&editor.id, &[(Feature::Agents, Capability::Edit)])
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO ide_named_projects (id, owner_user_id, name, primary_root)
+         VALUES ('security-project', ?, 'Security project', ?)",
+    )
+    .bind(&owner.id)
+    .bind(project.to_string_lossy().as_ref())
+    .execute(&pool)
+    .await
+    .unwrap();
+    let auth = AuthRepo::new(pool.clone());
+    let owner_token = auth
+        .issue_api_token(&owner.id, Some("test"))
+        .await
+        .unwrap()
+        .0;
+    let editor_token = auth
+        .issue_api_token(&editor.id, Some("test"))
+        .await
+        .unwrap()
+        .0;
+    let ctx = ServerCtx::for_tests(&pool, dir.path().join("data")).await;
+    let (api, root) = otto_server::modules::module_routers(&ctx);
+    let app = otto_server::build_router(ctx, api, root);
+    let path = "/api/v1/ide/projects/security-project/security";
+    let call = |method: &str, path: &str, token: &str, body: &str| {
+        let request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_owned()))
+            .unwrap();
+        let app = app.clone();
+        async move {
+            let response = app.oneshot(request).await.unwrap();
+            let status = response.status();
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            let value = serde_json::from_slice::<Value>(&body).unwrap_or_default();
+            (status, value)
+        }
+    };
+
+    let (status, initial) = call("GET", path, &owner_token, "").await;
+    assert_eq!(status, StatusCode::OK, "{initial}");
+    assert_eq!(initial["settings"]["parallelism"], 1);
+    let (status, _) = call("GET", path, &editor_token, "").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = call("PUT", path, &owner_token, r#"{"parallelism":12}"#).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, saved) = call(
+        "PUT",
+        path,
+        &owner_token,
+        r#"{"checks":["secret"],"parallelism":2}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["checks"], json!(["secret"]));
+
+    sqlx::query(
+        "INSERT INTO ide_security_scans (id, project_id, status, created_at)
+         VALUES ('scan-id', 'security-project', 'queued', '2026-11-27T00:00:00Z')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let scan_path = format!("{path}/scans/scan-id");
+    let (status, read) = call("GET", &scan_path, &owner_token, "").await;
+    assert_eq!(status, StatusCode::OK, "{read}");
+    assert_eq!(read["scan"]["status"], "queued");
+    let (status, _) = call("DELETE", &scan_path, &editor_token, "").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, stopped) = call("DELETE", &scan_path, &owner_token, "").await;
+    assert_eq!(status, StatusCode::OK, "{stopped}");
+    assert_eq!(stopped["status"], "cancelled");
+    let manage = format!("{path}/manage");
+    let (status, schedule) = call(
+        "POST",
+        &manage,
+        &owner_token,
+        r#"{"action":"set_schedule","schedule":{"cron":"0 9 * * 1-5","timezone":"UTC"}}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{schedule}");
+    assert_eq!(schedule["next_runs"].as_array().unwrap().len(), 5);
+    let (status, _) = call(
+        "POST",
+        &manage,
+        &editor_token,
+        r#"{"action":"set_schedule","schedule":null}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, imported) = call(
+        "POST",
+        &manage,
+        &owner_token,
+        r#"{"action":"import_sarif","sarif":{"version":"2.1.0","runs":[{"results":[
+           {"ruleId":"demo","message":{"text":"Review this code."},"locations":[
+             {"physicalLocation":{"artifactLocation":{"uri":"source.rs"},"region":{"startLine":4}}}
+           ]}
+        ]}]}}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{imported}");
+    let id = imported["scan_id"].as_str().unwrap();
+    let imported_path = format!("{path}/scans/{id}");
+    let (_, result) = call("GET", &imported_path, &owner_token, "").await;
+    assert_eq!(result["findings"][0]["line"], 4);
+    let fingerprint = result["findings"][0]["fingerprint"].as_str().unwrap();
+    for command in [
+        json!({"action":"set_suppression","fingerprint":fingerprint,"reason":"Test fixture"}),
+        json!({"action":"set_baseline","scan_id":id}),
+    ] {
+        let (status, result) = call("POST", &manage, &owner_token, &command.to_string()).await;
+        assert_eq!(status, StatusCode::OK, "{result}");
+    }
+    let (_, result) = call("GET", &imported_path, &owner_token, "").await;
+    assert_eq!(
+        result["annotations"]["suppressions"][fingerprint],
+        "Test fixture"
+    );
+    assert_eq!(result["annotations"]["baseline"][0], fingerprint);
+    let (status, exported) = call("GET", &format!("{imported_path}/sarif"), &owner_token, "").await;
+    assert_eq!(status, StatusCode::OK, "{exported}");
+    assert_eq!(
+        exported["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]
+            ["uri"],
+        "source%2Ers"
+    );
+    let restore = json!({"action":"set_suppression","fingerprint":fingerprint,"reason":null});
+    let (status, _) = call("POST", &manage, &owner_token, &restore.to_string()).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, result) = call("GET", &imported_path, &owner_token, "").await;
+    assert!(result["annotations"]["suppressions"][fingerprint].is_null());
+
+    // The listener belongs to this test process and never uses the live daemon port.
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let service = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/dev", service.local_addr().unwrap());
+    let project_root = project.canonicalize().unwrap();
+    let ide_target = json!({"kind":"local","root":project_root});
+    let config_req = json!({
+        "target": ide_target, "name":"Passive fixture", "runner":"custom",
+        "command":"/bin/sleep 25", "inherit_shell_env":false,
+        "env_overrides":{"OTTO_SECURITY_URL":url},
+    });
+    let (status, created) = call(
+        "POST",
+        "/api/v1/ide/run-configs",
+        &owner_token,
+        &config_req.to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let config_id = created["config"]["id"].as_str().unwrap();
+    let dast_path = format!("{path}/dast");
+    let dast_run_path = format!("{dast_path}/run");
+    let (status, choices) = call("GET", &dast_path, &owner_token, "").await;
+    assert_eq!(status, StatusCode::OK, "{choices}");
+    assert_eq!(choices["candidates"][0]["url"], url);
+    let (status, _) = call("POST", &dast_run_path, &owner_token, "").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let confirm =
+        json!({"run_config_id":config_id, "url":url, "allow_public":false, "scheduled":false});
+    let (status, _) = call("PUT", &dast_path, &editor_token, &confirm.to_string()).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, result) = call("PUT", &dast_path, &owner_token, &confirm.to_string()).await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    let (status, _) = call("POST", &dast_run_path, &owner_token, "").await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "consent alone must not launch an audit"
+    );
+    let live = json!({"target":ide_target,"config_id":config_id});
+    let (status, ide_run) = call("POST", "/api/v1/ide/runs", &owner_token, &live.to_string()).await;
+    assert_eq!(status, StatusCode::OK, "{ide_run}");
+    let live_id = ide_run["run"]["id"].as_str().unwrap();
+    let observer = tokio::spawn(async move {
+        let (mut stream, _) = service.accept().await.unwrap();
+        let mut request = Vec::new();
+        while !request.ends_with(b"\r\n\r\n") {
+            request.push(stream.read_u8().await.unwrap());
+        }
+        assert!(request.starts_with(b"HEAD /dev HTTP/1.1\r\n"));
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 0\r\n\r\n")
+            .await
+            .unwrap();
+    });
+    let (status, audit) = call("POST", &dast_run_path, &owner_token, "").await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{audit}");
+    let audit_path = format!("{path}/scans/{}", audit["id"].as_str().unwrap());
+    let finished = tokio::time::timeout(std::time::Duration::from_secs(12), async {
+        loop {
+            let (status, audit) = call("GET", &audit_path, &owner_token, "").await;
+            assert_eq!(status, StatusCode::OK, "{audit}");
+            match audit["scan"]["status"].as_str() {
+                Some("completed") => break audit,
+                Some("failed") => panic!("audit failed: {audit}"),
+                _ => tokio::time::sleep(std::time::Duration::from_millis(25)).await,
+            }
+        }
+    })
+    .await
+    .unwrap();
+    observer.await.unwrap();
+    assert_eq!(finished["scan"]["engines"][0]["name"], "otto-passive-http");
+    assert_eq!(finished["findings"][0]["check"], "dast");
+    assert_eq!(finished["findings"][0]["path"], url);
+    let (status, _) = call("DELETE", &dast_path, &owner_token, "").await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = call("POST", &dast_run_path, &owner_token, "").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let _ = call(
+        "POST",
+        &format!("/api/v1/ide/runs/{live_id}/stop"),
+        &owner_token,
+        "",
+    )
+    .await;
+}

@@ -81,6 +81,9 @@ impl otto_ide::IdeCtx for ServerCtx {
     fn ide(&self) -> &Arc<otto_ide::IdeEngine> {
         &self.ide
     }
+    fn security_scan_busy(&self) -> BoxFuture<'_, bool> {
+        Box::pin(self.manager.security_scan_busy())
+    }
     fn pool(&self) -> otto_state::DbPool {
         self.pool.clone()
     }

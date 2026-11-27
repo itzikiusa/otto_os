@@ -7382,6 +7382,17 @@ Full multi-language IDE over Local (`kind: "local"`) and Remote SSH (`kind: "ssh
 | POST /ide/projects/folders | Agents: Edit | `IdeProjectFolderReq` (`target`, `folder_path`) | `IdeEnvironmentResp` (attaches `folder_path` to `env.additional_roots`) |
 | DELETE /ide/projects/folders?kind=&root=&workspace_id=&connection_id=&folder_path= | Agents: Edit | query `IdeDeleteProjectFolderQuery` | `IdeEnvironmentResp` (detaches `folder_path` from `env.additional_roots`) |
 | POST /ide/projects/folders/bulk | Agents: Edit | `IdeBulkFoldersReq` (`target`, `folder_paths`) | `IdeBulkFoldersResp` (`additional_roots`) |
+| GET /ide/projects/{id}/security | Agents: Edit | — | `ProjectScans` with settings, installed Trivy and Opengrep versions and timestamps, and the 30 most recent scan summaries |
+| PUT /ide/projects/{id}/security | Agents: Edit | `ScanSettings` | saved `ScanSettings` |
+| POST /ide/projects/{id}/security/scans | Agents: Edit | — | HTTP 202 with a queued `ScanSummary`. HTTP 409 if the project already has a scan queued or running |
+| GET /ide/projects/{id}/security/scans/{scan_id} | Agents: Edit | — | `ScanDetail` (summary and normalized findings) |
+| DELETE /ide/projects/{id}/security/scans/{scan_id} | Agents: Edit | — | `ScanSummary` after cancellation, or the pre-existing terminal result if the scan already finished |
+| POST /ide/projects/{id}/security/manage | Agents: Edit | `ManageScan` | Schedule preview/settings, suppression, baseline or SARIF import result |
+| GET /ide/projects/{id}/security/scans/{scan_id}/sarif | Agents: Edit | — | SARIF 2.1.0 JSON using project-relative URIs |
+| GET /ide/projects/{id}/security/dast | Agents: Edit | — | `ProjectPassiveAudit` with eligible saved run configs and optional current confirmation |
+| PUT /ide/projects/{id}/security/dast | human + Agents: Edit | `ConfirmPassiveAudit` | saved `PassiveAuditTarget` |
+| DELETE /ide/projects/{id}/security/dast | human + Agents: Edit | — | HTTP 204 after revoking confirmation |
+| POST /ide/projects/{id}/security/dast/run | human + Agents: Edit | — | HTTP 202 with a queued `ScanSummary` or HTTP 409 when the confirmed run config is not live |
 | POST /ide/deps/inspect | Agents: Edit | `IdeDepsInspectReq` (`target?`, `path`, `content?`) | `IdeDepsInspectResp` (`ecosystem`, `items` across `go.mod`, `pom.xml`, `build.gradle*`, `Cargo.toml`, `build.zig.zon`, `vcpkg.json`, `conanfile.txt`, `CMakeLists.txt`, `*.uproject`/`*.uplugin`, `*.csproj` / `*.fsproj` / `Directory.Packages.props` / `packages.config` (NuGet), `package.json` (parsed as JSON, so a minified file works), `pyproject.toml` (PEP 621 arrays incl. optional-dependencies, Poetry tables)/`requirements.txt` with `latest_version`, `latest_patch`, `deprecated`, `vulnerabilities`, line offsets; `range: true` when `current_version` is only the floor of a range (`^1.0.0`, `>=1.0`) — such items get no OSV lookup) |
 | POST /ide/deps/action | human + Agents: Edit | `IdeDepsActionReq` (`target?`, `path`, `action` [`tidy` \| `vendor` \| `sync` \| `why` \| `merge_directives` \| `maven_sync` \| `maven_tree` \| `gradle_sync` \| `vuln_scan` \| `update_one` \| `update_direct_latest` \| `update_direct_patch` \| `update_all_latest` \| `update_all_patch`], `module?`, `version?`) | `IdeDepsActionResp` (`ok`, `updated_content`, `output`) |
 | POST /ide/build-tools/model | Agents: Edit | `IdeBuildToolsModelReq` (`roots`, `target?`) | `IdeBuildToolsModelResp` (`has_maven`, `has_gradle`, `has_xcode`, `has_android`, `has_flutter`, `has_react_native`, `has_capacitor`, `profiles`, `projects`, `mobile_projects`, `spring_boot?` [`IdeSpringBootInfo`]) |
@@ -7438,6 +7449,22 @@ Full multi-language IDE over Local (`kind: "local"`) and Remote SSH (`kind: "ssh
 | DELETE /ide/db-watch/watches/{id} | Agents: Edit (owner only) | — | `IdeOkResp`. A bound watch also goes 10 min after its debug session / run ended (one last `session_end` checkpoint first, if the target is still up) |
 
 ---
+
+### IDE project security scans
+
+These routes accept named local project IDs. The caller needs access to the project and each of its current roots. A scan ID is scoped to its project.
+
+- `ScanSettings` has `checks` (`vulnerability`, `secret`, `misconfiguration`, `license`, `sast`), `excludes` (root-relative globs), `parallelism` (1–2), `memory_mib` (256–4096) and `timeout_secs` (10–900). Defaults enable vulnerabilities, secrets, misconfiguration, and SAST, with one worker, 1024 MiB and 180 seconds per engine invocation. Include at least one check.
+- `ScanSummary` has `id`, `status` (`queued`, `running`, `completed`, `failed`, `cancelled`), `created_at`, nullable `started_at`, `finished_at`, `engine`, `metrics`, `error`, and `count`. `engines` gives each engine’s name, version, metrics and scan mode (`full`, `incremental`, or `cached`). Timestamps are UTC RFC 3339. Engine metadata includes `version`, `updated_at`, and `checked_at`. Metrics are `wall_ms`, `peak_cpu_percent` relative to one core, and `peak_rss_bytes`.
+- Findings have a `fingerprint`, `engine`, `check`, `severity` (`critical`, `high`, `medium`, `low`, `unknown`), `root`, project-relative `path`, optional one-based `line`, `rule`, `title`, `description`, and `fix`. Secret matches and source snippets are discarded before persistence.
+
+- `ProjectScans.schedule` is nullable and includes `cron`, `timezone` and the next five `next_runs`. `baseline` is the selected completed scan ID or null. `ScanDetail.annotations` includes `existing` fingerprints from the preceding completed scan, `baseline` fingerprints from the selected scan, and `suppressions` keyed by fingerprint.
+- `ManageScan` accepts `{action:"preview_schedule", schedule:{cron,timezone}}` and `{action:"set_schedule", schedule:{cron,timezone}|null}`. Both return the schedule with its next runs. Cron uses the scheduled-task cadence and IANA timezones. A null schedule disables it.
+- `{action:"set_suppression", fingerprint, reason:string|null}` adds or removes a suppression. `{action:"set_baseline", scan_id:string|null}` selects or clears a completed scan for this project. Both return JSON null.
+- `{action:"import_sarif", sarif}` accepts a SARIF 2.1.0 object up to the route's 16 MiB body limit and returns `{scan_id}`. Imported locations must be project-relative. Export uses `ROOT_0`, `ROOT_1` and later project root indices. Unqualified imports use the primary root.
+
+- Passive audit candidates use the explicit `OTTO_SECURITY_URL` from a saved local project run configuration. `ConfirmPassiveAudit` sends `run_config_id`, the exact canonical `url` from the candidate, `allow_public`, and `scheduled`. Public destinations require HTTPS and separate explicit consent. The saved target adds `confirmed_at`.
+- An audit sends one unauthenticated HEAD with no body. Redirects, query parameters and credentials are outside the supported scope. A scheduled audit additionally requires `scheduled: true` and the same running configuration. It shares the project scan queue and stores findings with `check: "dast"` and a response URL as their location.
 
 ## Mobile Simulators & Emulators (`otto-simulators`, `/api/v1/simulators/*`)
 

@@ -793,6 +793,52 @@ impl SandboxPolicy {
         }
     }
 
+    /// Offline source-analysis process with explicitly bounded read and write roots.
+    /// Neither the user's home nor the engine's own installation is writable.
+    pub fn for_offline_scan(project: &Path, tool_dir: &Path, cache: &Path, output: &Path) -> Self {
+        let mut rules = vec![
+            "(deny file-read*)".into(),
+            "(import \"dyld-support.sb\")".into(),
+            "(allow file-read-metadata)".into(),
+            "(deny file-write* (subpath \"/dev\"))".into(),
+            "(allow file-read-data (literal \"/dev/null\" \"/dev/random\" \"/dev/urandom\"))"
+                .into(),
+            "(allow file-write-data (literal \"/dev/null\"))".into(),
+        ];
+        for p in [
+            Path::new("/System/Library"),
+            Path::new("/usr/lib"),
+            Path::new("/usr/bin"),
+            Path::new("/bin"),
+            Path::new("/usr/share/zoneinfo"),
+            tool_dir,
+            cache,
+            output,
+        ] {
+            let p = canonicalize_lenient(p);
+            rules.push(format!(
+                "(allow file-read-data (subpath \"{}\"))",
+                escape(&p)
+            ));
+        }
+        // The IDE authorizes this canonical root before dispatch. Do not
+        // follow a replacement symlink and silently grant a different tree.
+        rules.push(format!(
+            "(allow file-read-data (subpath \"{}\"))",
+            escape(project)
+        ));
+        Self {
+            writable_roots: [cache, output]
+                .into_iter()
+                .map(canonicalize_lenient)
+                .collect(),
+            deny_read: Vec::new(),
+            network: NetworkPolicy::None,
+            mach_services: Some(Vec::new()),
+            trailing_rules: rules,
+        }
+    }
+
     /// Render the macOS Seatbelt (SBPL) profile for this policy.
     pub fn to_sbpl(&self) -> String {
         let mut p = String::new();

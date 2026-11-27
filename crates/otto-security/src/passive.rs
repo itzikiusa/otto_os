@@ -1,0 +1,412 @@
+use std::path::Path;
+use std::time::{Duration, Instant};
+
+use otto_core::{Error, Result};
+use otto_state::DbPool;
+use reqwest::header::{HeaderMap, CONTENT_TYPE, SET_COOKIE};
+use reqwest::Url;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use tokio_util::sync::CancellationToken;
+
+use crate::store::{db_error, now};
+use crate::{Check, EngineRun, EngineVersion, Finding, ScanMetrics, ScanMode, Severity};
+
+pub const CONFIG_KEY: &str = "OTTO_SECURITY_URL";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct Target {
+    pub run_config_id: String,
+    pub url: String,
+    pub allow_public: bool,
+    pub scheduled: bool,
+    pub confirmed_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Candidate {
+    pub run_config_id: String,
+    pub run_config_name: String,
+    pub url: String,
+    pub public: bool,
+}
+
+#[derive(Serialize)]
+pub struct ProjectPassive {
+    pub confirmed: Option<Target>,
+    pub candidates: Vec<Candidate>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfirmTarget {
+    pub run_config_id: String,
+    pub url: String,
+    pub allow_public: bool,
+    pub scheduled: bool,
+}
+
+pub fn parse_url(raw: &str) -> Result<(Url, bool)> {
+    let url =
+        Url::parse(raw.trim()).map_err(|_| Error::Invalid("Enter an HTTP or HTTPS URL.".into()))?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url.as_str().len() > 512
+    {
+        return Err(Error::Invalid(
+            "Use an HTTP or HTTPS URL without credentials, query parameters, or a fragment.".into(),
+        ));
+    }
+    let port = url.port_or_known_default().unwrap_or_default();
+    if port == 0
+        || otto_netguard::is_daemon_port(port)
+        || otto_netguard::metadata_refusal(&url).is_some()
+    {
+        return Err(Error::Forbidden(
+            "This destination is outside the passive audit scope.".into(),
+        ));
+    }
+    let public = !otto_netguard::is_explicit_local_target(&url);
+    if public && url.scheme() != "https" {
+        return Err(Error::Invalid("Public audit targets require HTTPS.".into()));
+    }
+    let permitted = if public {
+        otto_netguard::check_url_literal(&url)
+    } else {
+        otto_netguard::check_url_literal_allow_local(&url)
+    };
+    if !permitted {
+        return Err(Error::Forbidden(
+            "This destination is outside the passive audit scope.".into(),
+        ));
+    }
+    Ok((url, public))
+}
+
+pub async fn get(pool: &DbPool, project: &str) -> Result<Option<Target>> {
+    sqlx::query_as(
+        "SELECT run_config_id, url, allow_public, scheduled, confirmed_at
+                    FROM ide_security_passive_targets WHERE project_id = ?",
+    )
+    .bind(project)
+    .fetch_optional(pool)
+    .await
+    .map_err(db_error)
+}
+
+pub async fn confirm(
+    pool: &DbPool,
+    project: &str,
+    candidate: Candidate,
+    request: ConfirmTarget,
+) -> Result<Target> {
+    if request.url != candidate.url {
+        return Err(Error::Conflict(
+            "The run configuration URL changed. Review the new destination.".into(),
+        ));
+    }
+    if candidate.public && !request.allow_public {
+        return Err(Error::Forbidden(
+            "Confirm this public destination explicitly.".into(),
+        ));
+    }
+    let target = Target {
+        url: candidate.url,
+        run_config_id: candidate.run_config_id,
+        allow_public: candidate.public,
+        scheduled: request.scheduled,
+        confirmed_at: now(),
+    };
+    sqlx::query(
+        "INSERT INTO ide_security_passive_targets (project_id, run_config_id, url, allow_public, scheduled, confirmed_at)
+         VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(project_id) DO UPDATE SET run_config_id = excluded.run_config_id,
+         url = excluded.url, allow_public = excluded.allow_public, scheduled = excluded.scheduled,
+         confirmed_at = excluded.confirmed_at",
+    ).bind(project).bind(&target.run_config_id).bind(&target.url).bind(target.allow_public)
+        .bind(target.scheduled).bind(&target.confirmed_at).execute(pool).await.map_err(db_error)?;
+    Ok(target)
+}
+
+pub async fn revoke(pool: &DbPool, project: &str) -> Result<()> {
+    sqlx::query("DELETE FROM ide_security_passive_targets WHERE project_id = ?")
+        .bind(project)
+        .execute(pool)
+        .await
+        .map_err(db_error)?;
+    Ok(())
+}
+
+pub async fn run(
+    target: &Target,
+    root: &Path,
+    cancel: &CancellationToken,
+) -> Result<(EngineRun, Vec<Finding>)> {
+    let (url, public) = parse_url(&target.url)?;
+    if public != target.allow_public {
+        return Err(Error::Forbidden("Confirm the audit target again.".into()));
+    }
+    let start = Instant::now();
+    let request = async {
+        let client = otto_netguard::pinned_client_builder_for(url.as_str(), !public)
+            .await
+            .map_err(Error::Forbidden)?
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(8))
+            .build()
+            .map_err(|_| Error::Internal("could not construct passive audit client".into()))?;
+        client.head(url.clone()).send().await.map_err(|_| {
+            Error::Upstream("The confirmed service did not answer the passive audit.".into())
+        })
+    };
+    let response = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Err(crate::governor::cancelled()),
+        result = tokio::time::timeout(Duration::from_secs(10), request) => {
+            result.map_err(|_| Error::Upstream("The passive audit reached its time limit.".into()))??
+        }
+    };
+    let findings = inspect_headers(root, &url, response.headers());
+    let sampled = now();
+    Ok((
+        EngineRun {
+            name: "otto-passive-http".into(),
+            version: EngineVersion {
+                version: env!("CARGO_PKG_VERSION").into(),
+                checked_at: sampled,
+                updated_at: target.confirmed_at.clone(),
+            },
+            metrics: ScanMetrics {
+                wall_ms: start.elapsed().as_millis() as u64,
+                ..Default::default()
+            },
+            mode: ScanMode::Full,
+        },
+        findings,
+    ))
+}
+
+fn inspect_headers(root: &Path, url: &Url, headers: &HeaderMap) -> Vec<Finding> {
+    let html = headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.to_ascii_lowercase().starts_with("text/html"));
+    let csp = headers
+        .get("content-security-policy")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    let frame_ancestors = csp.split(';').any(|directive| {
+        directive
+            .split_whitespace()
+            .next()
+            .is_some_and(|name| name.eq_ignore_ascii_case("frame-ancestors"))
+    });
+    let hsts = headers
+        .get("strict-transport-security")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(';')
+                .filter_map(|part| part.split_once('='))
+                .any(|(name, age)| {
+                    name.trim().eq_ignore_ascii_case("max-age")
+                        && age
+                            .trim()
+                            .trim_matches('"')
+                            .parse::<u64>()
+                            .is_ok_and(|seconds| seconds > 0)
+                })
+        });
+    let cookies_insecure = headers
+        .get_all(SET_COOKIE)
+        .iter()
+        .filter_map(|cookie| cookie.to_str().ok())
+        .any(|cookie| {
+            let keys: Vec<_> = cookie
+                .split(';')
+                .skip(1)
+                .map(str::trim)
+                .map(|part| {
+                    part.split('=')
+                        .next()
+                        .unwrap_or_default()
+                        .to_ascii_lowercase()
+                })
+                .collect();
+            !keys.iter().any(|key| key == "samesite")
+                || (url.scheme() == "https" && !keys.iter().any(|key| key == "secure"))
+        });
+    let checks = [
+        (
+            html && csp.is_empty(),
+            "http.content-security-policy",
+            Severity::Medium,
+            "The HTML response has no Content-Security-Policy header.",
+            "Set a Content-Security-Policy appropriate to the application.",
+        ),
+        (
+            html && !headers.contains_key("x-frame-options") && !frame_ancestors,
+            "http.frame-ancestors",
+            Severity::Low,
+            "The HTML response does not restrict browser embedding.",
+            "Set a frame-ancestors policy for the origins you allow.",
+        ),
+        (
+            html && !headers
+                .get("x-content-type-options")
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.trim().eq_ignore_ascii_case("nosniff")),
+            "http.content-type-options",
+            Severity::Low,
+            "The response does not tell browsers to avoid MIME type guessing.",
+            "Send X-Content-Type-Options with the value nosniff.",
+        ),
+        (
+            url.scheme() == "https" && !hsts,
+            "http.strict-transport-security",
+            Severity::Low,
+            "The HTTPS response has no enabled Strict-Transport-Security policy.",
+            "Enable HSTS if this service will always be available over HTTPS.",
+        ),
+        (
+            cookies_insecure,
+            "http.cookie-attributes",
+            Severity::Low,
+            "A response cookie is missing an explicit SameSite policy or HTTPS Secure flag.",
+            "Review cookie attributes and apply SameSite and Secure where appropriate.",
+        ),
+    ];
+    let root = root.to_string_lossy().into_owned();
+    checks
+        .into_iter()
+        .filter(|check| check.0)
+        .map(|(_, rule, severity, description, fix)| {
+            let identity = format!("http\\0{root}\\0{url}\\0{rule}");
+            Finding {
+                fingerprint: hex::encode(Sha256::digest(identity.as_bytes())),
+                engine: "otto-passive-http".into(),
+                check: Check::Dast,
+                severity,
+                root: root.clone(),
+                path: url.to_string(),
+                line: None,
+                rule: rule.into(),
+                title: description.into(),
+                description: description.into(),
+                fix: fix.into(),
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn consent_parser_limits_input_to_an_explicit_safe_destination() {
+        assert!(parse_url("http://127.0.0.1:3000/").is_ok_and(|(_, public)| !public));
+        assert!(parse_url("http://10.0.0.2:3000/").is_ok_and(|(_, public)| !public));
+        assert!(parse_url("https://example.org/").is_ok_and(|(_, public)| public));
+        for url in [
+            "http://169.254.169.254/",
+            "http://127.0.0.1:7700/",
+            "http://example.org/",
+            "http://127.0.0.1:3000/?token=sample",
+            "http://user@127.0.0.1:3000/",
+            "file:///private",
+        ] {
+            assert!(parse_url(url).is_err(), "accepted {url}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_public_url_needs_separate_consent_and_exact_url_match() {
+        let pool = otto_state::db::test_pool().await;
+        sqlx::query("INSERT INTO ide_named_projects (id) VALUES ('audit-project')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let candidate = Candidate {
+            run_config_id: "cfg".into(),
+            run_config_name: "Test".into(),
+            url: "https://example.org/service".into(),
+            public: true,
+        };
+        let mut request = ConfirmTarget {
+            run_config_id: "cfg".into(),
+            url: candidate.url.clone(),
+            allow_public: false,
+            scheduled: false,
+        };
+        assert!(matches!(
+            confirm(&pool, "audit-project", candidate.clone(), request).await,
+            Err(Error::Forbidden(_))
+        ));
+        request = ConfirmTarget {
+            run_config_id: "cfg".into(),
+            url: "https://example.org/changed".into(),
+            allow_public: true,
+            scheduled: false,
+        };
+        assert!(matches!(
+            confirm(&pool, "audit-project", candidate, request).await,
+            Err(Error::Conflict(_))
+        ));
+        assert!(get(&pool, "audit-project").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn live_passive_audit_sends_one_head_and_masks_cookie_values() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let redirect_target = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let redirect_addr = redirect_target.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                request.push(stream.read_u8().await.unwrap());
+            }
+            let request = String::from_utf8(request).unwrap();
+            assert!(request.starts_with("HEAD /app HTTP/1.1\r\n"));
+            assert!(!request.to_ascii_lowercase().contains("authorization:"));
+            assert!(!request.to_ascii_lowercase().contains("cookie:"));
+            stream.write_all(format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://{redirect_addr}/\r\nContent-Type: text/html\r\nSet-Cookie: test=masked-test-value\r\nContent-Length: 0\r\n\r\n"
+            ).as_bytes()).await.unwrap();
+        });
+        let target = Target {
+            url: format!("http://{addr}/app"),
+            run_config_id: "test".into(),
+            allow_public: false,
+            scheduled: false,
+            confirmed_at: now(),
+        };
+        let (run, findings) = run(&target, Path::new("/test"), &CancellationToken::new())
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), redirect_target.accept())
+                .await
+                .is_err()
+        );
+        assert!(findings
+            .iter()
+            .any(|item| item.rule == "http.cookie-attributes"));
+        assert!(!crate::store::encode(&findings)
+            .unwrap()
+            .contains("masked-test-value"));
+        println!(
+            "passive HTTP loopback fixture: wall={} ms, {} findings, one HEAD",
+            run.metrics.wall_ms,
+            findings.len()
+        );
+    }
+}

@@ -58,6 +58,9 @@ pub trait IdeCtx: Clone + Send + Sync + 'static {
     fn secrets(&self) -> &Arc<dyn SecretStore>;
     fn data_dir(&self) -> &Path;
     fn roles(&self) -> &Arc<dyn RoleChecker>;
+    fn security_scan_busy(&self) -> BoxFuture<'_, bool> {
+        Box::pin(async { false })
+    }
     /// The daemon event bus; `None` (contexts without one) disables the live
     /// project-tree watcher ([`fs_watch`]).
     fn events(&self) -> Option<&tokio::sync::broadcast::Sender<otto_core::event::Event>> {
@@ -118,6 +121,7 @@ pub struct IdeEngine {
     pub plugins: plugins::IdePluginRegistry,
     pub history: local_history::LocalHistoryStore,
     pub projects: projects::ProjectStore,
+    pub security: Arc<otto_security::SecurityScans>,
     pub lsp_pool: Arc<lsp_host::pool::LspPool>,
     pub db_watch: db_watch::DbWatchRegistry,
     /// Live DB Watches (`db_watch/watch.rs`).
@@ -159,6 +163,9 @@ impl IdeEngine {
             plugins: plugins::IdePluginRegistry::new(data_dir.clone()),
             history,
             projects,
+            security: Arc::new(otto_security::SecurityScans::new(
+                &data_dir.join("toolchains"),
+            )),
             lsp_pool,
             db_watch: db_watch::DbWatchRegistry::new(),
             watches: db_watch::WatchRegistry::new(),
@@ -241,6 +248,7 @@ impl IdeEngine {
     /// bridge children behind. Helper process groups (builds, `before_launch`)
     /// are killed last, after their owners had the chance to stop them.
     pub async fn shutdown(&self) {
+        self.security.shutdown().await;
         self.lsp_pool.shutdown();
         tokio::join!(
             self.environments.shutdown(),
