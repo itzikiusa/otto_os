@@ -304,4 +304,53 @@ async fn workspace_default_provider_wins_over_global_claude_for_goals_and_explic
         otto_core::agent_runtime::RuntimeProvider::Codex,
         "goal grading must run on workspace default codex, not global claude"
     );
+
+    // Case 3: checks-only launch in a workspace defaulting to codex (no stored
+    // pr_review or repo binding) must load codex reviewers + summarizer + checks,
+    // never global claude; an explicit repo binding is still preserved.
+    let repo = ctx
+        .git_store
+        .create_repo(otto_state::NewRepo {
+            workspace_id: ws.id.clone(),
+            name: "codex-repo".into(),
+            path: dir.path().to_string_lossy().into_owned(),
+            remote_url: None,
+            provider: None,
+            git_account_id: None,
+        })
+        .await
+        .unwrap();
+    let mut inherited = crate::modules::review::load_review_config_for_repo(&ctx, &repo.id).await;
+    otto_review::engine::apply_workflow_review_overlays(
+        &mut inherited,
+        &env.default_provider,
+        &checks_node.params,
+        &checks_plan.check_specs,
+        false,
+    );
+    assert_eq!(
+        inherited.summarizer.provider, "codex",
+        "implicit repo fallback summarizer must use workspace default codex, not global claude"
+    );
+    assert!(
+        inherited.agents.iter().all(|a| a.provider == "codex"),
+        "implicit repo fallback reviewers and required checks must stay on codex, not claude: {:?}",
+        inherited
+            .agents
+            .iter()
+            .map(|a| (&a.name, &a.provider))
+            .collect::<Vec<_>>()
+    );
+    let mut custom = otto_review::engine::default_review_config("agy");
+    custom.summarizer.provider = "agy".into();
+    otto_state::SettingsRepo::new(pool.clone())
+        .put(
+            &otto_review::engine::repo_review_binding_key(&repo.id),
+            &json!({"config": custom}),
+        )
+        .await
+        .unwrap();
+    let bound = crate::modules::review::load_review_config_for_repo(&ctx, &repo.id).await;
+    assert_eq!(bound.summarizer.provider, "agy");
+    assert!(bound.agents.iter().all(|a| a.provider == "agy"));
 }

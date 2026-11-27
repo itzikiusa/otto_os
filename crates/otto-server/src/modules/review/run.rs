@@ -4,22 +4,28 @@
 use super::*;
 
 /// Load ReviewConfig from settings or fall back to the default. The default
-/// config's reviewer agents follow the global default agent
-/// (`default_provider` setting, else "claude"); a stored config is used as-is.
+/// config's reviewers and summarizer follow the resolved default agent; a
+/// stored config is used as-is.
 pub(crate) async fn load_review_config(ctx: &ServerCtx) -> ReviewConfig {
+    load_review_config_with(ctx, None).await
+}
+
+async fn load_review_config_with(ctx: &ServerCtx, fallback: Option<&str>) -> ReviewConfig {
     let repo = otto_state::SettingsRepo::new(ctx.pool.clone());
-    let global_default = repo.get("default_provider").await.ok().flatten();
-    let default_provider =
-        otto_core::provider::resolve_provider(&[otto_core::provider::global_default(
-            global_default.as_ref(),
-        )]);
-    match repo.get("pr_review").await {
-        Ok(Some(v)) => serde_json::from_value(v).unwrap_or_else(|e| {
-            tracing::warn!("failed to deserialize pr_review config: {e}; using default");
-            default_review_config(&default_provider)
-        }),
-        _ => default_review_config(&default_provider),
+    if let Ok(Some(v)) = repo.get("pr_review").await {
+        match serde_json::from_value(v) {
+            Ok(cfg) => return cfg,
+            Err(e) => tracing::warn!("failed to deserialize pr_review config: {e}; using default"),
+        }
     }
+    let dp = match fallback {
+        Some(p) => p.to_string(),
+        None => {
+            ctx.resolve_provider_or_fallback(None, None, "load_review_config")
+                .await
+        }
+    };
+    default_review_config(&dp)
 }
 
 /// Load the named review-config presets (settings key `pr_review_presets`).
@@ -72,7 +78,14 @@ pub(crate) async fn load_review_config_for_repo(ctx: &ServerCtx, repo_id: &Id) -
             tracing::warn!(repo = %repo_id, preset = %pid, "repo review preset missing; using global config");
         }
     }
-    load_review_config(ctx).await
+    let ws_default = match ctx.git_store.get_repo(repo_id).await {
+        Ok(r) => ctx
+            .resolve_provider_for_ws(&r.workspace_id, None)
+            .await
+            .ok(),
+        Err(_) => None,
+    };
+    load_review_config_with(ctx, ws_default.as_deref()).await
 }
 
 /// The review mode a `review_run` step runs with when neither the run

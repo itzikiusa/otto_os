@@ -353,10 +353,16 @@ fn summarizer_only_and_checks_only_do_not_replace_repo_reviewers_or_force_claude
         "codex",
         "checks + goals on codex default must grade goals on codex, not claude"
     );
-    let mut target_cfg = workflow_review_config("codex", &[], &[]);
+    let mut target_cfg = default_review_config("codex");
     apply_workflow_review_overlays(&mut target_cfg, "codex", &p_checks, &checks, false);
-    assert_eq!(target_cfg.summarizer.provider, "codex");
-    assert_eq!(target_cfg.agents.last().unwrap().provider, "codex");
+    assert_eq!(
+        target_cfg.summarizer.provider, "codex",
+        "default_review_config with codex default must not hardcode claude for summarizer"
+    );
+    assert!(
+        target_cfg.agents.iter().all(|a| a.provider == "codex"),
+        "default_review_config + checks overlay must keep every reviewer on codex"
+    );
 }
 
 #[test]

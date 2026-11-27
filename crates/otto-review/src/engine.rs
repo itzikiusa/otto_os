@@ -220,10 +220,9 @@ pub fn reviewer_slots() -> Arc<tokio::sync::Semaphore> {
         .clone()
 }
 
-/// The default config used when no `pr_review` setting has been stored. The
-/// reviewer agents follow the configured default agent (`default_provider`);
-/// the summarizer stays on claude because its run path is hard-wired to the
-/// claude PTY driver (see `run_review_core`).
+/// The default config used when no `pr_review` setting has been stored. Both
+/// reviewer agents and the summarizer follow the configured default agent
+/// (`default_provider`).
 pub fn default_review_config(default_provider: &str) -> ReviewConfig {
     ReviewConfig {
         cross_provider_check: false,
@@ -262,7 +261,7 @@ pub fn default_review_config(default_provider: &str) -> ReviewConfig {
         ],
         summarizer: ReviewAgentCfg {
             name: "Summarizer".to_string(),
-            provider: "claude".to_string(),
+            provider: default_provider.to_string(),
             providers: vec![],
             model: "".to_string(),
             prompt: format!("You are deduplicating and prioritizing code review comments. Output ONLY \
