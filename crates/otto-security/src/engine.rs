@@ -250,12 +250,12 @@ impl Engine {
                 .unwrap_or(false),
             None => false,
         };
-        if last.as_deref().is_some_and(|stamp| fresh(stamp, 24)) {
-            return installed.filter(|_| usable).ok_or_else(|| {
-                upstream("Scanner installation failed today. Otto will check for a release again tomorrow.")
-            });
+        if cancel.is_cancelled() {
+            return Err(cancelled());
         }
-        write_json(&attempt, &crate::store::now()).await?;
+        if usable && last.as_deref().is_some_and(|stamp| fresh(stamp, 24)) {
+            return Ok(installed.expect("installed release"));
+        }
         let update = async {
             let request = async {
                 download::json::<Release>(
@@ -310,8 +310,14 @@ impl Engine {
             Ok(record)
         }
         .await;
+        if cancel.is_cancelled() {
+            return Err(cancelled());
+        }
+        if usable || update.is_ok() {
+            write_json(&attempt, &crate::store::now()).await?;
+        }
         match update {
-            Err(error) if usable && !cancel.is_cancelled() => {
+            Err(error) if usable => {
                 tracing::warn!(%error, "Scanner release refresh failed; keeping installed version");
                 Ok(installed.expect("installed release"))
             }
@@ -655,6 +661,77 @@ fn trivy_args(
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn refresh_release_retries_a_missing_binary_and_leaves_no_attempt_on_cancel() {
+        let tools = tempfile::tempdir().unwrap();
+        let engine = Engine::new(tools.path(), EngineKind::Trivy);
+        tokio::fs::create_dir_all(&engine.dir).await.unwrap();
+        let client = download::client().unwrap();
+        let attempt = engine.dir.join("release-attempt.json");
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let error = engine.refresh_release(&client, &cancel).await.unwrap_err();
+        assert_eq!(error.to_string(), cancelled().to_string());
+        assert!(
+            !attempt.exists(),
+            "a cancelled install recorded a release check"
+        );
+
+        write_json(&attempt, &crate::store::now()).await.unwrap();
+        let error = engine.refresh_release(&client, &cancel).await.unwrap_err();
+        assert_eq!(error.to_string(), cancelled().to_string());
+    }
+
+    #[tokio::test]
+    async fn refresh_release_retries_offline_installs_and_throttles_installed_fallback() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Default)]
+        struct Offline(AtomicUsize);
+        impl reqwest::dns::Resolve for Offline {
+            fn resolve(&self, _: reqwest::dns::Name) -> reqwest::dns::Resolving {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Box::pin(async { Err(std::io::Error::other("offline fixture").into()) })
+            }
+        }
+
+        let tools = tempfile::tempdir().unwrap();
+        let engine = Engine::new(tools.path(), EngineKind::Trivy);
+        tokio::fs::create_dir_all(&engine.dir).await.unwrap();
+        let offline = std::sync::Arc::new(Offline::default());
+        let client = Client::builder()
+            .no_proxy()
+            .dns_resolver(offline.clone())
+            .build()
+            .unwrap();
+        let cancel = CancellationToken::new();
+        for _ in 0..2 {
+            let error = engine.refresh_release(&client, &cancel).await.unwrap_err();
+            assert!(error.to_string().contains("could not be reached"));
+        }
+        assert_eq!(offline.0.load(Ordering::Relaxed), 2);
+
+        let version = EngineVersion {
+            version: "1.2.3".into(),
+            checked_at: crate::store::now(),
+            updated_at: crate::store::now(),
+        };
+        let binary = engine.binary(&version.version).unwrap();
+        tokio::fs::create_dir_all(binary.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(binary, "installed fixture").await.unwrap();
+        write_json(&engine.dir.join("engine.json"), &version)
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            let result = engine.refresh_release(&client, &cancel).await.unwrap();
+            assert_eq!(result.version, version.version);
+        }
+        assert_eq!(offline.0.load(Ordering::Relaxed), 3);
+    }
 
     /// Local acceptance check. Uses only temporary tool state and prints aggregate metrics.
     #[tokio::test]
