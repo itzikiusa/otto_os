@@ -552,13 +552,13 @@ async fn resolve_dotnet_test_debug(
     mut initial_output: Vec<IdeDebugOutputEntry>,
 ) -> Result<ResolvedDapAdapter> {
     let proj_path = match req.target.kind {
-        IdeTargetKind::Local => select_local_dotnet_test_project(norm_program, cwd)?
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|| cwd.to_string()),
-        IdeTargetKind::Ssh => select_ssh_dotnet_build_target(norm_program, cwd)
-            .to_string_lossy()
-            .into_owned(),
-    };
+        IdeTargetKind::Local => select_local_dotnet_test_project(norm_program, cwd)?,
+        IdeTargetKind::Ssh => {
+            select_ssh_dotnet_test_project(req, ctx, norm_program, cwd, &env).await?
+        }
+    }
+    .map(|p| p.to_string_lossy().into_owned())
+    .unwrap_or_else(|| cwd.to_string());
 
     let build_out = run_target_command(
         &req.target,
@@ -615,28 +615,24 @@ async fn resolve_dotnet_test_debug(
         format!("all tests in {name}")
     });
 
-    if req.target.kind == IdeTargetKind::Local {
-        // Use official VSTest debug handshake (`VSTEST_HOST_DEBUG=1`): `dotnet test`
-        // pauses `testhost` and prints `Process Id: <PID>`, then exits once `netcoredbg`
-        // attaches and the test completes. Bind its process group to `BridgeGuard` so
-        // Stop or adapter init failure always cleans up `testhost` (OBS-1).
+    {
+        // Use official VSTest debug handshake (`VSTEST_HOST_DEBUG=1`) on both targets:
+        // `dotnet test` pauses `testhost` and prints `Process Id: <PID>`, then exits once
+        // `netcoredbg` attaches and the test completes (debugging `dotnet test` itself never
+        // reaches the tests). Bind its process group to `BridgeGuard` so Stop or adapter init
+        // failure always cleans up `testhost` (OBS-1).
         use tokio::io::{AsyncBufReadExt, BufReader};
-        let mut cmd = tokio::process::Command::new(&dotnet_bin);
-        cmd.args(&test_args)
-            .current_dir(cwd)
-            .env_clear()
-            .envs(&env)
-            .env("VSTEST_HOST_DEBUG", "1")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
-        #[cfg(unix)]
-        cmd.process_group(0);
-
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| Error::Internal(format!("spawn dotnet test for debugging: {e}")))?;
+        let mut test_env = env.clone();
+        test_env.insert("VSTEST_HOST_DEBUG".into(), "1".into());
+        let mut child = super::spawn_target_process(
+            &req.target,
+            ctx.ssh.as_ref(),
+            &dotnet_bin,
+            &test_args,
+            cwd,
+            &test_env,
+        )
+        .await?;
         let stdout = child
             .stdout
             .take()
@@ -710,38 +706,11 @@ async fn resolve_dotnet_test_debug(
             });
         }
         companion.kill_all();
-        return Err(Error::Invalid(format!(
+        Err(Error::Invalid(format!(
             "dotnet test did not emit VSTEST_HOST_DEBUG Process Id for '{label}': {}",
             captured.trim()
-        )));
+        )))
     }
-
-    // Remote SSH fallback: launch `dotnet test --no-build ...` directly under netcoredbg.
-    Ok(ResolvedDapAdapter {
-        adapter_name: adapter_name.into(),
-        language: language.to_string(),
-        transport: DapAdapterTransport::Stdio {
-            command: adapter_bin,
-            args: vec!["--interpreter=vscode".into()],
-            cwd: cwd.to_string(),
-            env: env.clone(),
-        },
-        initialize_args: dotnet_initialize_args(),
-        launch_command: "launch".into(),
-        launch_args: json!({
-            "name": format!(".NET Test: {label}"),
-            "type": "coreclr",
-            "request": "launch",
-            "program": dotnet_bin,
-            "args": test_args,
-            "cwd": cwd,
-            "env": env,
-            "stopAtEntry": false,
-            "justMyCode": false
-        }),
-        normalized_cwd: cwd.to_string(),
-        initial_output,
-    })
 }
 
 /// Compute launch working directory for a `.NET` app session, preserving the project
@@ -902,9 +871,106 @@ fn multiple_dotnet_test_projects_err(tests: &[PathBuf], root: &Path) -> Error {
         .collect::<Vec<_>>()
         .join(", ");
     Error::Invalid(format!(
-        "Found {} .NET test projects ({names}). A debug session attaches to one test host — pick one project's \".NET Test\" run configuration, or debug a single test from the gutter.",
+        "Found {} .NET test projects ({names}). A debug session attaches to one test host: debug one test from the editor gutter, or debug a .NET Test run configuration whose target is one of these projects (add one in Launch settings if none is listed).",
         tests.len()
     ))
+}
+
+/// Prints the SSH target's `.csproj`/`.fsproj`/`.sln`/`.slnx`/`Directory.Build.props` files that
+/// [`select_local_dotnet_test_project`] reads for `$1` (program) / `$2` (cwd): `D`/`F`/`N`
+/// (program kind), then per file `\x1e<path>\n<content>`.
+const SSH_DOTNET_TEST_SNAPSHOT_SH: &str = r#"p=$1; c=$2; s=
+if [ -d "$p" ]; then echo D; s=$p
+elif [ -f "$p" ]; then echo F; case "$p" in *.sln|*.SLN|*.slnx|*.SLNX) s=$(dirname -- "$p");; esac
+else echo N; fi
+{
+find "$c" ${s:+"$s"} -maxdepth 6 \( -name .git -o -name bin -o -name obj -o -name node_modules -o -name artifacts -o -name .vs -o -name packages \) -prune -o -type f \( -iname '*.csproj' -o -iname '*.fsproj' -o -iname '*.sln' -o -iname '*.slnx' -o -name Directory.Build.props \) -print 2>/dev/null | head -n 500
+d=$(dirname -- "$p"); i=0
+while [ "$i" -lt 8 ]; do
+  for f in "$d"/*.csproj "$d"/*.fsproj "$d"/Directory.Build.props; do [ -f "$f" ] && printf '%s\n' "$f"; done
+  [ "$d" = / ] && break
+  d=$(dirname -- "$d"); i=$((i+1))
+done
+} | sort -u | while IFS= read -r f; do printf '\036%s\n' "$f"; head -c 65536 -- "$f"; printf '\n'; done
+"#;
+
+/// SSH twin of [`select_local_dotnet_test_project`] (BUG-25, BUG3-8): the files it reads are
+/// copied from the target into a local mirror and the same selection runs there, so an SSH
+/// "Debug Tests" picks (or refuses) exactly what a local one does.
+async fn select_ssh_dotnet_test_project(
+    req: &IdeStartDebugReq,
+    ctx: &DapStartContext,
+    norm_program: &str,
+    cwd: &str,
+    env: &BTreeMap<String, String>,
+) -> Result<Option<PathBuf>> {
+    let low = norm_program.to_ascii_lowercase();
+    if low.ends_with(".csproj") || low.ends_with(".fsproj") {
+        return Ok(Some(PathBuf::from(norm_program)));
+    }
+    let program = if norm_program.is_empty() {
+        cwd
+    } else {
+        norm_program
+    };
+    let args = ["-c", SSH_DOTNET_TEST_SNAPSHOT_SH, "sh", program, cwd].map(String::from);
+    let out = run_target_command(
+        &req.target,
+        ctx.ssh.as_ref(),
+        "sh",
+        &args,
+        cwd,
+        env,
+        Duration::from_secs(20),
+    )
+    .await?;
+    let mirror = tempfile::tempdir()
+        .map_err(|e| Error::Internal(format!("dotnet test project mirror: {e}")))?;
+    select_dotnet_test_project_from_snapshot(
+        mirror.path(),
+        &String::from_utf8_lossy(&out.stdout),
+        program,
+        cwd,
+    )
+}
+
+/// Write an [`SSH_DOTNET_TEST_SNAPSHOT_SH`] snapshot under `mirror`, run the local selection
+/// on it and map the pick back to the remote path. Paths with `..` never leave the mirror.
+#[allow(clippy::disallowed_methods)] // small temp mirror written at debug session start
+fn select_dotnet_test_project_from_snapshot(
+    mirror: &Path,
+    snapshot: &str,
+    program: &str,
+    cwd: &str,
+) -> Result<Option<PathBuf>> {
+    let local = |remote: &str| {
+        let rel = Path::new(remote).strip_prefix("/").ok()?;
+        rel.components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)))
+            .then(|| mirror.join(rel))
+    };
+    let io = |e: std::io::Error| Error::Internal(format!("dotnet test project mirror: {e}"));
+    let mut parts = snapshot.split('\u{1e}');
+    let kind = parts.next().unwrap_or_default().trim();
+    for chunk in parts {
+        let (path, body) = chunk.split_once('\n').unwrap_or((chunk, ""));
+        if let Some(dst) = local(path) {
+            std::fs::create_dir_all(dst.parent().unwrap_or(mirror)).map_err(io)?;
+            std::fs::write(&dst, body).map_err(io)?;
+        }
+    }
+    let (Some(prog), Some(cwd)) = (local(program), local(cwd)) else {
+        return Ok(None);
+    };
+    std::fs::create_dir_all(&cwd).map_err(io)?;
+    if kind == "D" {
+        std::fs::create_dir_all(&prog).map_err(io)?;
+    } else if kind == "F" && !prog.exists() {
+        std::fs::create_dir_all(prog.parent().unwrap_or(mirror)).map_err(io)?;
+        std::fs::write(&prog, "").map_err(io)?;
+    }
+    let picked = select_local_dotnet_test_project(&prog.to_string_lossy(), &cwd.to_string_lossy())?;
+    Ok(picked.map(|p| Path::new("/").join(p.strip_prefix(mirror).unwrap_or(&p))))
 }
 
 /// Extract an explicit `.NET` attach PID from `launch.attach_pid` or `DOTNET_ATTACH_PID`
@@ -1616,5 +1682,86 @@ public class MathTests
                 .any(|c| c.target_path.as_deref() == Some("unity://attach")),
             "Unity must not advertise broken Mono SDB DAP attach: {unity_cfgs:?}"
         );
+    }
+
+    /// BUG-25 / BUG3-8 (SSH): the snapshot script runs on the target (here `sh` on a temp
+    /// layout) and the local selection runs on its mirror, so SSH Debug Tests selects or refuses
+    /// exactly like a local one; a snapshot path never escapes the mirror.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // runs the snapshot script synchronously in a unit test
+    fn ssh_dotnet_test_project_selection_reads_the_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let write = |rel: &str, body: &str| {
+            let p = repo.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        let test_sdk = r#"<Project Sdk="Microsoft.NET.Sdk"><ItemGroup><PackageReference Include="Microsoft.NET.Test.Sdk" /></ItemGroup></Project>"#;
+        write("tests/A.Tests/A.Tests.csproj", test_sdk);
+        write("tests/B.Tests/B.Tests.csproj", test_sdk);
+        write(
+            "src/App/App.csproj",
+            r#"<Project Sdk="Microsoft.NET.Sdk" />"#,
+        );
+        write(
+            "All.sln",
+            "Project(\"{FAE04EC0}\") = \"A.Tests\", \"tests\\A.Tests\\A.Tests.csproj\", \"{1}\"\nProject(\"{FAE04EC0}\") = \"B.Tests\", \"tests\\B.Tests\\B.Tests.csproj\", \"{2}\"\n",
+        );
+        write(
+            "tests/A.Tests/Unit/FooTests.cs",
+            "public class FooTests {}\n",
+        );
+        let select = |program: &Path| {
+            let out = std::process::Command::new("sh")
+                .args(["-c", SSH_DOTNET_TEST_SNAPSHOT_SH, "sh"])
+                .arg(program)
+                .arg(&repo)
+                .output()
+                .unwrap();
+            let mirror = tempfile::tempdir().unwrap();
+            select_dotnet_test_project_from_snapshot(
+                mirror.path(),
+                &String::from_utf8_lossy(&out.stdout),
+                &program.to_string_lossy(),
+                &repo.to_string_lossy(),
+            )
+        };
+
+        // Repo-level Debug Tests with two test projects is refused, naming both and saying what to do.
+        let err = select(&repo).unwrap_err().to_string();
+        assert!(
+            err.contains("tests/A.Tests/A.Tests.csproj")
+                && err.contains("tests/B.Tests/B.Tests.csproj"),
+            "{err}"
+        );
+        assert!(
+            err.contains("editor gutter") && err.contains("Launch settings"),
+            "{err}"
+        );
+        // So is an explicit solution referencing both.
+        let err = select(&repo.join("All.sln")).unwrap_err().to_string();
+        assert!(err.contains("B.Tests.csproj"), "{err}");
+        // A gutter test in a nested folder resolves to its own project on the target.
+        assert_eq!(
+            select(&repo.join("tests/A.Tests/Unit/FooTests.cs")).unwrap(),
+            Some(repo.join("tests/A.Tests/A.Tests.csproj"))
+        );
+        // One test project's folder resolves to that project.
+        assert_eq!(
+            select(&repo.join("tests/B.Tests")).unwrap(),
+            Some(repo.join("tests/B.Tests/B.Tests.csproj"))
+        );
+
+        // A snapshot path climbing out of the mirror is never written.
+        let mirror = tempfile::tempdir().unwrap();
+        let snapshot = "N\n\u{1e}/../otto-mirror-escape.csproj\n<Project />\n";
+        let _ = select_dotnet_test_project_from_snapshot(mirror.path(), snapshot, "/srv", "/srv");
+        assert!(!mirror
+            .path()
+            .parent()
+            .unwrap()
+            .join("otto-mirror-escape.csproj")
+            .exists());
     }
 }
