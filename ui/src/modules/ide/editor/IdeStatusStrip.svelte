@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { projectSecurity } from '../security/projectSecurity.svelte';
   // IDE status strip (22px, under the dock): one home for the editor's state, as text. Every
   // item is a button that opens what it describes — the branch menu, Problems, Go to Line,
   // the language's settings, the language server's health. What the store does not know
@@ -45,7 +46,7 @@
     const repo = ideGit.findKnownRepoForPath(path);
     return repo ? (git.statusById[repo.id]?.branch ?? null) : null;
   });
-  const counts = $derived(ideProblemCounts(ide.problems));
+  const counts = $derived(ideProblemCounts([...ide.problems, ...projectSecurity.problems]));
   const langSection = $derived(tab ? ideLanguageSettingsSection(tab.path, tab.language) : null);
   const eol = $derived(tab ? ideEolLabel(tab) : null);
   const lsp = $derived.by(() => {

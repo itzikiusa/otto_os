@@ -4,9 +4,10 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::{Extension, Json};
 use otto_core::auth::AuthUser;
-use otto_core::domain::User;
+use otto_core::domain::{Capability, Feature, User};
 use otto_core::{Error, Result};
-use otto_security::{ProjectScans, ScanDetail, ScanSettings, ScanSummary};
+use otto_security::{ManageScan, ProjectScans, ScanDetail, ScanSettings, ScanSummary};
+use serde_json::{json, Value};
 
 use super::ApiResult;
 use crate::types::IdeTargetSpec;
@@ -78,23 +79,51 @@ pub(super) async fn start<S: IdeCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<String>,
 ) -> ApiResult<(StatusCode, Json<ScanSummary>)> {
-    project_roots(&ctx, &user, &id).await?;
+    let scan = enqueue(&ctx, user, id).await?;
+    Ok((StatusCode::ACCEPTED, Json(scan)))
+}
+
+async fn enqueue<S: IdeCtx>(ctx: &S, user: User, id: String) -> Result<ScanSummary> {
+    project_roots(ctx, &user, &id).await?;
     let service = ctx.ide().security.clone();
     let pool = ctx.pool();
     let job_project = id.clone();
     let host = ctx.clone();
-    let scan = service
+    let load_host = ctx.clone();
+    service
         .enqueue(
             pool,
             id,
             move || async move { project_roots(&host, &user, &job_project).await },
             move || {
-                let ctx = ctx.clone();
+                let ctx = load_host.clone();
                 async move { ctx.security_scan_busy().await }
             },
         )
-        .await?;
-    Ok((StatusCode::ACCEPTED, Json(scan)))
+        .await
+}
+
+/// Called by the existing scheduled-task supervisor. The project owner is
+/// re-authorized at each occurrence and again when the job leaves the queue.
+pub async fn scheduled_tick<S: IdeCtx>(ctx: &S) -> Result<()> {
+    let pool = ctx.pool();
+    let users = otto_state::UsersRepo::new(pool.clone());
+    let grants = otto_state::GrantsRepo::new(pool.clone());
+    for (schedule, fire) in otto_security::schedule::due(&pool, chrono::Utc::now()).await? {
+        let Ok(user) = users.get(&schedule.owner_user_id).await else {
+            continue;
+        };
+        if user.disabled || grants.capability_of(&user, Feature::Agents).await? < Capability::Edit {
+            continue;
+        }
+        let project = schedule.project_id.clone();
+        match enqueue(ctx, user, project.clone()).await {
+            Ok(_) => schedule.settle(&pool, fire).await?,
+            Err(Error::Conflict(_)) => {}
+            Err(error) => tracing::warn!(project, %error, "scheduled security scan deferred"),
+        }
+    }
+    Ok(())
 }
 
 pub(super) async fn detail<S: IdeCtx>(
@@ -128,4 +157,59 @@ pub(super) async fn cancel<S: IdeCtx>(
             .cancel(&ctx.pool(), &id, &scan_id)
             .await?,
     ))
+}
+
+pub(super) async fn manage<S: IdeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<String>,
+    Json(command): Json<ManageScan>,
+) -> ApiResult<Json<Value>> {
+    let roots = project_roots(&ctx, &user, &id).await?;
+    let pool = ctx.pool();
+    let reply = match command {
+        ManageScan::PreviewSchedule { schedule } => json!(otto_security::schedule::preview(
+            schedule,
+            chrono::Utc::now()
+        )?),
+        ManageScan::SetSchedule { schedule } => {
+            json!(otto_security::schedule::save(&pool, &id, schedule).await?)
+        }
+        ManageScan::SetSuppression {
+            fingerprint,
+            reason,
+        } => {
+            otto_security::preferences::set_suppression(
+                &pool,
+                &id,
+                &fingerprint,
+                reason.as_deref(),
+            )
+            .await?;
+            Value::Null
+        }
+        ManageScan::SetBaseline { scan_id } => {
+            otto_security::preferences::set_baseline(&pool, &id, scan_id.as_deref()).await?;
+            Value::Null
+        }
+        ManageScan::ImportSarif { sarif } => {
+            let scan_id = otto_security::sarif::import(&pool, &id, &roots, sarif).await?;
+            json!({"scan_id": scan_id})
+        }
+    };
+    Ok(Json(reply))
+}
+
+pub(super) async fn export<S: IdeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path((id, scan_id)): Path<(String, String)>,
+) -> ApiResult<Json<Value>> {
+    let roots = project_roots(&ctx, &user, &id).await?;
+    let scan = ctx
+        .ide()
+        .security
+        .detail(&ctx.pool(), &id, &scan_id)
+        .await?;
+    Ok(Json(otto_security::sarif::export(&scan, &roots)))
 }

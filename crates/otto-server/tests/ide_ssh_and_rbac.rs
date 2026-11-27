@@ -874,13 +874,13 @@ async fn security_routes_scope_settings_and_history_to_the_named_project() {
     let (api, root) = otto_server::modules::module_routers(&ctx);
     let app = otto_server::build_router(ctx, api, root);
     let path = "/api/v1/ide/projects/security-project/security";
-    let call = |method: &str, path: &str, token: &str, body: &'static str| {
+    let call = |method: &str, path: &str, token: &str, body: &str| {
         let request = Request::builder()
             .method(method)
             .uri(path)
             .header("authorization", format!("Bearer {token}"))
             .header("content-type", "application/json")
-            .body(Body::from(body))
+            .body(Body::from(body.to_owned()))
             .unwrap();
         let app = app.clone();
         async move {
@@ -925,4 +925,65 @@ async fn security_routes_scope_settings_and_history_to_the_named_project() {
     let (status, stopped) = call("DELETE", &scan_path, &owner_token, "").await;
     assert_eq!(status, StatusCode::OK, "{stopped}");
     assert_eq!(stopped["status"], "cancelled");
+    let manage = format!("{path}/manage");
+    let (status, schedule) = call(
+        "POST",
+        &manage,
+        &owner_token,
+        r#"{"action":"set_schedule","schedule":{"cron":"0 9 * * 1-5","timezone":"UTC"}}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{schedule}");
+    assert_eq!(schedule["next_runs"].as_array().unwrap().len(), 5);
+    let (status, _) = call(
+        "POST",
+        &manage,
+        &editor_token,
+        r#"{"action":"set_schedule","schedule":null}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, imported) = call(
+        "POST",
+        &manage,
+        &owner_token,
+        r#"{"action":"import_sarif","sarif":{"version":"2.1.0","runs":[{"results":[
+           {"ruleId":"demo","message":{"text":"Review this code."},"locations":[
+             {"physicalLocation":{"artifactLocation":{"uri":"source.rs"},"region":{"startLine":4}}}
+           ]}
+        ]}]}}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{imported}");
+    let id = imported["scan_id"].as_str().unwrap();
+    let imported_path = format!("{path}/scans/{id}");
+    let (_, result) = call("GET", &imported_path, &owner_token, "").await;
+    assert_eq!(result["findings"][0]["line"], 4);
+    let fingerprint = result["findings"][0]["fingerprint"].as_str().unwrap();
+    for command in [
+        json!({"action":"set_suppression","fingerprint":fingerprint,"reason":"Test fixture"}),
+        json!({"action":"set_baseline","scan_id":id}),
+    ] {
+        let (status, result) = call("POST", &manage, &owner_token, &command.to_string()).await;
+        assert_eq!(status, StatusCode::OK, "{result}");
+    }
+    let (_, result) = call("GET", &imported_path, &owner_token, "").await;
+    assert_eq!(
+        result["annotations"]["suppressions"][fingerprint],
+        "Test fixture"
+    );
+    assert_eq!(result["annotations"]["baseline"][0], fingerprint);
+    let (status, exported) = call("GET", &format!("{imported_path}/sarif"), &owner_token, "").await;
+    assert_eq!(status, StatusCode::OK, "{exported}");
+    assert_eq!(
+        exported["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]
+            ["uri"],
+        "source%2Ers"
+    );
+    let restore = json!({"action":"set_suppression","fingerprint":fingerprint,"reason":null});
+    let (status, _) = call("POST", &manage, &owner_token, &restore.to_string()).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, result) = call("GET", &imported_path, &owner_token, "").await;
+    assert!(result["annotations"]["suppressions"][fingerprint].is_null());
 }

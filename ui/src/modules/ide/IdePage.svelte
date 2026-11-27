@@ -27,6 +27,9 @@
   import { hintExplorerYield, IdeExplorerRoom } from './ideExplorerRoom';
   import { ideBreakpointsNav } from './debug/ideBreakpointsNav.svelte';
   import { ide } from './ideStore.svelte';
+  import { findingPath, latestSecurityDiagnostics, projectSecurity } from './security/projectSecurity.svelte';
+  import type { SecurityFinding } from '../../lib/api/types';
+  import type { IdeDiagnostic } from './store/ideTypes';
   import IdeWorkspaceSwitcher from './shell/IdeWorkspaceSwitcher.svelte';
   import { loadScratchesRoot, newScratchFile, openScratches } from './shell/ideScratches.svelte';
   import IdeHeaderActions from './shell/IdeHeaderActions.svelte';
@@ -45,6 +48,7 @@
 
   const loadShellMenus = () => import('./shell/ideShellMenus');
 
+  const IdeSecurityPageLazy = lazyComponent(() => import('./security/IdeSecurityPage.svelte'));
   const IdeProjectTreeLazy = lazyComponent(() => import('./IdeProjectTree.svelte'));
   const FolderPickerLazy = lazyComponent(() => import('../../lib/components/FolderPicker.svelte'));
   const agentPort = lazyModule(() => import('./agentDebug/ideAgentPort.svelte'));
@@ -67,6 +71,38 @@
   const AGENT_W_KEY = 'otto.ide.agentW';
 
   let quickPrefs = $state(readQuickSchemePrefs());
+  let securityOpen = $state(false);
+  $effect(() => {
+    const id = ide.activeProjectId;
+    const allowed = !!id && !ide.collabIsGuest && ide.target.kind === 'local';
+    const controller = new AbortController();
+    projectSecurity.problems = [];
+    if (allowed && id) {
+      void latestSecurityDiagnostics(id, controller.signal)
+        .then((items) => { if (!controller.signal.aborted) projectSecurity.problems = items; })
+        .catch(() => {});
+    }
+    return () => controller.abort();
+  });
+
+  function openSecurityFinding(finding: SecurityFinding) {
+    securityOpen = false;
+    showPane('editor');
+    void ide.openFile(findingPath(finding), { line: finding.line ?? 1, preview: false });
+  }
+
+  function draftSecurityFix(finding: SecurityFinding) {
+    securityOpen = false;
+    ideAgent.composerText = [
+      ideAgent.composerText.trimEnd(),
+      `Review and propose a fix for ${finding.rule} from ${finding.engine}.`,
+      `File ${findingPath(finding)}${finding.line ? ` at line ${finding.line}` : ''}`,
+      finding.description,
+      finding.fix,
+    ].filter(Boolean).join('\n');
+    showPane('agent');
+    focusAgentComposer();
+  }
   let treeW = $state(loadPaneWidth(TREE_W_KEY, 270, 180, 620));
   let buildToolW = $state(loadPaneWidth(BUILD_TOOL_W_KEY, 310, 240, 720));
   let agentW = $state(loadPaneWidth(AGENT_W_KEY, 360, 260, 760));
@@ -460,6 +496,17 @@
   bind:clientWidth={ideLayout.width}
   bind:clientHeight={ideLayout.height}
 >
+  {#if securityOpen && ide.activeProjectId && ide.activeProject && !ide.collabIsGuest && ide.target.kind === 'local'}
+    {#key ide.activeProjectId}
+      {@const projectId = ide.activeProjectId}
+      <LazyMount lazy={IdeSecurityPageLazy} what="project security" variant="panel" props={{
+        projectId, projectName: ide.activeProject.name,
+        onBack: () => { securityOpen = false; },
+        onOpen: openSecurityFinding, onDraft: draftSecurityFix,
+        onDiagnostics: (items: IdeDiagnostic[]) => { if (ide.activeProjectId === projectId) projectSecurity.problems = items; },
+      }} />
+    {/key}
+  {:else}
   <!-- One toolbar row (G13). Stacked: the pane switcher takes the tabs slot
        (below the bar when the page is tall, inline when it is short); wide, the
        optional project tabs (Settings › Appearance) do, and then carry the
@@ -476,6 +523,11 @@
     {/snippet}
 
     {#snippet actions()}
+      {#if ide.activeProjectId && !ide.collabIsGuest && ide.target.kind === 'local'}
+        <button type="button" class="btn small ghost" data-icon="shield" onclick={() => { securityOpen = true; }}>
+          <Icon name="shield" size={14} /> Security
+        </button>
+      {/if}
       {#if !ide.collabIsGuest}<IdeHeaderActions
         {stack}
         bind:quickPrefs
@@ -594,6 +646,7 @@
       </div>
     {/if}
   </PageBody>
+  {/if}
 
   {#if folderPickerMode}
     <LazyMount

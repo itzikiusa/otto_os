@@ -17,7 +17,7 @@ pub(crate) fn decode<T: DeserializeOwned>(json: &str) -> Result<T> {
     serde_json::from_str(json).map_err(|e| Error::Internal(e.to_string()))
 }
 
-fn db_error(error: sqlx::Error) -> Error {
+pub(crate) fn db_error(error: sqlx::Error) -> Error {
     Error::Internal(format!("security scan storage: {error}"))
 }
 
@@ -132,6 +132,8 @@ pub(crate) async fn list(pool: &DbPool, project: &str) -> Result<ProjectScans> {
         engine: None,
         scans,
         opengrep: None,
+        schedule: crate::schedule::get(pool, project).await?,
+        baseline: crate::preferences::baseline(pool, project).await?,
     })
 }
 
@@ -153,9 +155,12 @@ pub(crate) async fn detail(pool: &DbPool, project: &str, id: &str) -> Result<Sca
         .await
         .map_err(db_error)?
         .ok_or_else(|| Error::NotFound("security scan".into()))?;
+    let scan: ScanSummary = row.row.try_into()?;
+    let annotations = crate::preferences::annotations(pool, project, &scan).await?;
     Ok(ScanDetail {
-        scan: row.row.try_into()?,
+        scan,
         findings: decode(&row.findings)?,
+        annotations,
     })
 }
 

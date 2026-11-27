@@ -120,6 +120,7 @@ pub struct ScanSummary {
 pub struct ScanDetail {
     pub scan: ScanSummary,
     pub findings: Vec<Finding>,
+    pub annotations: FindingAnnotations,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -128,4 +129,48 @@ pub struct ProjectScans {
     pub engine: Option<EngineVersion>,
     pub scans: Vec<ScanSummary>,
     pub opengrep: Option<EngineVersion>,
+    pub schedule: Option<Schedule>,
+    pub baseline: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduleInput {
+    pub cron: String,
+    pub timezone: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Schedule {
+    pub cron: String,
+    pub timezone: String,
+    pub next_runs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FindingAnnotations {
+    pub existing: Vec<String>,
+    pub baseline: Vec<String>,
+    pub suppressions: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ManageScan {
+    PreviewSchedule {
+        schedule: ScheduleInput,
+    },
+    SetSchedule {
+        schedule: Option<ScheduleInput>,
+    },
+    SetSuppression {
+        fingerprint: String,
+        reason: Option<String>,
+    },
+    SetBaseline {
+        scan_id: Option<String>,
+    },
+    ImportSarif {
+        sarif: serde_json::Value,
+    },
 }

@@ -45,6 +45,9 @@ pub trait AutomationCtx: Clone + Send + Sync + 'static {
     /// The headless runner (owner-less scheduled tasks).
     fn orchestrator(&self) -> &Arc<otto_orchestrator::Orchestrator>;
     fn scheduled_tasks(&self) -> &ScheduledTasksRepo;
+    fn security_scan_tick(&self) -> impl Future<Output = Result<()>> + Send {
+        async { Ok(()) }
+    }
 
     // ---- provider resolution ----------------------------------------------
 

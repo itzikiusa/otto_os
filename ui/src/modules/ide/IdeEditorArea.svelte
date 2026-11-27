@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { projectSecurity } from './security/projectSecurity.svelte';
   import { onDestroy, untrack } from 'svelte';
   import CodeEditor, { registerIdeEditorCore } from '../../lib/components/CodeEditor.svelte';
   import type * as CmIdeDepsMod from '../../lib/components/cm-ide-deps';
@@ -530,6 +531,7 @@
             onQuickFix={(ctx) => openIntentionPopoverAt(pTab.path, ctx.line, ctx.column, { x: ctx.clientX, y: ctx.clientY, symbol: ctx.symbol })}
             onRenameSymbol={(ctx) => void ide.openRenameModal(pTab.path, ctx.line, ctx.column, ctx.symbol, ctx.newName)}
             onFormat={() => void ide.formatActiveFile()}
+            securityFindings={projectSecurity.problems.filter((item) => item.path === pTab.path)}
             onDiagnostics={(diags) => ide.setDiagnostics(pTab.path, diags)}
             onAgentAction={(mode, sel) => {
               if (mode === 'inline') ideAgent.openInlineEdit({ path: pTab.path, ...sel });
@@ -605,6 +607,7 @@
                 onQuickFix={(ctx) => openIntentionPopoverAt(sTab.path, ctx.line, ctx.column, { x: ctx.clientX, y: ctx.clientY, symbol: ctx.symbol })}
                 onRenameSymbol={(ctx) => void ide.openRenameModal(sTab.path, ctx.line, ctx.column, ctx.symbol, ctx.newName)}
                 onFormat={() => void ide.formatActiveFile(sTab.path)}
+                securityFindings={projectSecurity.problems.filter((item) => item.path === sTab.path)}
                 onDiagnostics={(diags) => ide.setDiagnostics(sTab.path, diags)}
                 onAgentAction={(mode, sel) => {
                   if (mode === 'inline') ideAgent.openInlineEdit({ path: sTab.path, ...sel });

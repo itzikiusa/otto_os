@@ -53,6 +53,11 @@ export interface SecurityScanSummary {
 export interface SecurityScanDetail {
   scan: SecurityScanSummary;
   findings: SecurityFinding[];
+  annotations: {
+    existing: string[];
+    baseline: string[];
+    suppressions: Record<string, string>;
+  };
 }
 
 export interface ProjectScans {
@@ -60,4 +65,22 @@ export interface ProjectScans {
   engine: SecurityEngineVersion | null;
   scans: SecurityScanSummary[];
   opengrep: SecurityEngineVersion | null;
+  schedule: SecuritySchedule | null;
+  baseline: string | null;
 }
+
+export interface SecurityScheduleInput {
+  cron: string;
+  timezone: string;
+}
+
+export interface SecuritySchedule extends SecurityScheduleInput {
+  next_runs: string[];
+}
+
+export type SecurityManageAction =
+  | { action: 'preview_schedule'; schedule: SecurityScheduleInput }
+  | { action: 'set_schedule'; schedule: SecurityScheduleInput | null }
+  | { action: 'set_suppression'; fingerprint: string; reason: string | null }
+  | { action: 'set_baseline'; scan_id: string | null }
+  | { action: 'import_sarif'; sarif: unknown };

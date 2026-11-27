@@ -16,7 +16,7 @@ mod projects_deps;
 #[path = "http/runtime_debug.rs"]
 mod runtime_debug;
 #[path = "http/security.rs"]
-mod security;
+pub mod security;
 #[path = "http/sse_framing.rs"]
 mod sse_framing;
 #[path = "http/toolchains_env.rs"]
@@ -192,6 +192,14 @@ pub fn api_router<S: IdeCtx>() -> Router<S> {
             .route(
                 "/ide/projects/{id}/security/scans/{scan_id}",
                 get(security::detail::<S>).delete(security::cancel::<S>),
+            )
+            .route(
+                "/ide/projects/{id}/security/manage",
+                post(security::manage::<S>).layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
+            )
+            .route(
+                "/ide/projects/{id}/security/scans/{scan_id}/sarif",
+                get(security::export::<S>),
             )
             .route("/ide/projects/scan-repos", post(scan_repos::<S>))
             .route(

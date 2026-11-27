@@ -4869,6 +4869,7 @@ name = "otto-security"
 version = "0.7.0-rc.4"
 dependencies = [
  "chrono",
+ "chrono-tz",
  "flate2",
  "globset",
  "hex",
@@ -4877,6 +4878,7 @@ dependencies = [
  "otto-core",
  "otto-sandbox",
  "otto-state",
+ "percent-encoding",
  "reqwest",
  "serde",
  "serde_json",

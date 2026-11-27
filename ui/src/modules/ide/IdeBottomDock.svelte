@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { projectSecurity } from './security/projectSecurity.svelte';
   // Collapsible, height-resizable (120px..85vh), maximizable IDE Bottom Tool Dock
   // hosting Terminal, Problems, Git and Run, plus Debug, Usages and DB Watch while they
   // are in use (`ideDockTabs.svelte.ts`).
@@ -165,7 +166,7 @@
       id: 'problems',
       label: 'Problems',
       icon: 'warning',
-      count: ide.problems.length > 0 ? ide.problems.length : undefined,
+      count: (ide.problems.length + projectSecurity.problems.length) || undefined,
       testid: 'ide-tab-problems',
     },
     {

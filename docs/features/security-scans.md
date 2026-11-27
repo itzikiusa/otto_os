@@ -3,17 +3,28 @@
 Otto runs Trivy and Opengrep against local named IDE projects. A project can span several
 folders. They share one settings record, one scan history and one queue entry.
 
-## Set up a project
+## Scan a project
 
-Create or select a named project in the IDE. The security API uses its project
-ID. Open Project Settings to see the folders that belong to it. The
-[IDE security API](../contracts/api.md#ide-project-security-scans) accepts settings,
-starts and cancels scans, and returns their findings.
+Select a named local project in the IDE and open **Security** from the toolbar.
+Select **Scan now**, or open **Settings** to choose checks, excludes and resource
+limits. The IDE project switcher controls which folders the scan includes.
 
-By default Otto checks dependencies for known vulnerabilities, scans for
-credential patterns, checks infrastructure files for misconfigurations and runs static security analysis.
-Enable license checking in the project's settings. Each folder uses the same
-root-relative excludes. Otto skips common build and dependency directories.
+Enter a five-field cron and an IANA timezone to schedule scans. Select
+**Preview next runs** to see the next five occurrences. Clear the cron field
+and save to disable it. Otto's scheduled-task supervisor serves the latest
+missed occurrence when it wakes after sleep.
+
+Choose a completed scan to review findings by severity and location. Open
+a finding's file, suppress it with a reason, or restore it from **Show
+suppressed**. Select **Set baseline** to keep a completed scan as a reference.
+Each finding shows whether it existed in the preceding scan and whether it
+appears in the baseline. The latest unsuppressed file findings also appear in
+Problems and the editor gutter. **Ask an agent to fix** opens a draft for
+review in the IDE agent composer.
+
+Use **Import SARIF** and **Export SARIF** to exchange SARIF 2.1.0 results.
+Imports use project-relative file locations. The [IDE security API](../contracts/api.md#ide-project-security-scans)
+describes the settings and scan routes.
 
 ## Coverage
 
@@ -60,8 +71,7 @@ Otto verifies Opengrep against the upstream release digest, refreshes its
 community rules daily, and runs it offline. The selection favors high-confidence
 community security rules. Source analysis covers files up to 256 KiB with a
 five-second per-rule/file time budget. Remote rule options and cross-file mode
-are disabled. Project users can suppress findings through the Security view
-once available.
+are disabled.
 
 The result cache uses file contents, engine versions, rule and database
 versions, and scan settings. For small Opengrep edits Otto scans changed files
