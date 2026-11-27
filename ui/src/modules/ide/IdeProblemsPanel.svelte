@@ -209,6 +209,9 @@
       fixingKey = null;
     }
   }
+  function hasClearableDiagnostics() {
+    return ide.problems.length > 0;
+  }
 </script>
 
 <div class="prob-root" data-testid="ide-problems-panel">
@@ -293,7 +296,7 @@
       class="icon-btn"
       aria-label="Clear diagnostics"
       title="Clear diagnostics"
-      disabled={ide.problems.length === 0}
+      disabled={!hasClearableDiagnostics()}
       onclick={() => ide.clearProblems()}
     >
       <Icon name="trash" size={13} />

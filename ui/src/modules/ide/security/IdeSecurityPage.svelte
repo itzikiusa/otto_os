@@ -80,6 +80,18 @@
     schedulePreview = saved.schedule;
   }
 
+  function toggleSettings() {
+    showSettings = !showSettings;
+    if (showSettings && overview) {
+      resetSettings(overview);
+      void refreshPassive();
+    }
+  }
+
+  function scanPollMs() {
+    return active ? 3500 : 60_000;
+  }
+
   async function refresh(preferred?: string, signal?: AbortSignal): Promise<void> {
     const current = ++request;
     try {
@@ -117,7 +129,7 @@
     void refreshPassive();
     poller = pollWhileVisible(async (signal) => {
       if (!overview || (active || overview.schedule) && !acting) await refresh(undefined, signal);
-    }, { get ms() { return active ? 3500 : 60_000; } });
+    }, { get ms() { return scanPollMs(); } });
     return () => {
       alive = false;
       poller?.stop();
@@ -299,13 +311,8 @@
     <button type="button" class="btn small ghost" onclick={onBack}>Back to IDE</button>
   {/snippet}
   {#snippet actions()}
-    <button type="button" class="btn small ghost" onclick={() => {
-      showSettings = !showSettings;
-      if (showSettings && overview) {
-        resetSettings(overview);
-        void refreshPassive();
-      }
-    }} disabled={!settings || acting} aria-expanded={showSettings}>Settings</button>
+    <button type="button" class="btn small ghost" onclick={toggleSettings}
+      disabled={!settings || acting} aria-expanded={showSettings}>Settings</button>
     {#if passiveRunReady}
       <button type="button" class="btn small ghost" onclick={runPassive} disabled={acting || passiveLoading || !!active}>Run passive audit</button>
     {/if}
