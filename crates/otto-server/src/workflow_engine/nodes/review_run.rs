@@ -290,9 +290,7 @@ async fn plan_review<'a>(
     (plan, logs)
 }
 
-/// The reviewer config override: the rich `reviewers` form, else the flat
-/// providers/lenses form, else `None` (the stored/default PR-review config) —
-/// plus a dedicated "Required checks" reviewer when checks were given.
+/// The reviewer config override: delegates to [`otto_review::engine::build_workflow_review_config`].
 async fn review_config(
     ctx: &ServerCtx,
     p: &Value,
@@ -301,42 +299,24 @@ async fn review_config(
     lenses: &[String],
     check_specs: &[(String, String)],
 ) -> Option<otto_core::api::ReviewConfig> {
-    let mut cfg_override = if !reviewers.is_empty() {
-        let default_provider = crate::modules::default_review_provider(ctx).await;
-        Some(crate::modules::workflow_review_config_from_json(
-            &default_provider,
-            reviewers,
-            p.get("summarizer"),
-        ))
-    } else if providers.is_empty() && lenses.is_empty() {
-        None
-    } else {
-        let default_provider = crate::modules::default_review_provider(ctx).await;
-        Some(crate::modules::workflow_review_config(
-            &default_provider,
-            providers,
-            lenses,
-        ))
-    };
-    // Append a dedicated "Required checks" reviewer that RUNS the commands
-    // and reports any failure as a blocking (bug) finding — so it drops the
-    // score and the loop keeps fixing until the checks pass. Delegated to
-    // the agent (it has the repo + the implementer's context), not run by us.
-    if !check_specs.is_empty() {
-        let default_provider = crate::modules::default_review_provider(ctx).await;
-        let cfg = cfg_override.get_or_insert_with(|| {
-            crate::modules::workflow_review_config(&default_provider, &[], &[])
-        });
-        cfg.agents
-            .push(checks_review_agent(&default_provider, check_specs));
+    if reviewers.is_empty()
+        && providers.is_empty()
+        && lenses.is_empty()
+        && check_specs.is_empty()
+        && p.get("summarizer").is_none()
+        && !otto_review::engine::has_node_review_params(p)
+    {
+        return None;
     }
-    if otto_review::engine::has_node_review_params(p) {
-        let provider = crate::modules::default_review_provider(ctx).await;
-        let cfg = cfg_override
-            .get_or_insert_with(|| crate::modules::workflow_review_config(&provider, &[], &[]));
-        otto_review::engine::apply_node_review_params(cfg, p);
-    }
-    cfg_override
+    let default_provider = crate::modules::default_review_provider(ctx).await;
+    otto_review::engine::build_workflow_review_config(
+        &default_provider,
+        p,
+        reviewers,
+        providers,
+        lenses,
+        check_specs,
+    )
 }
 
 /// One target whose review was started (or adopted).
@@ -534,12 +514,17 @@ async fn grade_goals(
     // node's consolidating agent), else the first reviewer provider,
     // else the workspace/global default — never a bare hardcoded
     // "claude" that ignores the user's Providers config.
-    let goals_provider = match p
-        .get("summarizer")
-        .and_then(|s| s.get("provider"))
-        .and_then(Value::as_str)
+    let goals_provider = match plan
+        .cfg_override
+        .as_ref()
+        .map(|c| c.summarizer.provider.as_str())
         .filter(|s| !s.trim().is_empty())
-    {
+        .or_else(|| {
+            p.get("summarizer")
+                .and_then(|s| s.get("provider"))
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+        }) {
         Some(s) => s.to_string(),
         None => match plan.providers.first() {
             Some(s) => s.clone(),

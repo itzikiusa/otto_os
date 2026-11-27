@@ -249,6 +249,27 @@ impl WorkflowsRepo {
             .collect()
     }
 
+    /// Frozen `input` of the workflow checkpoint that launched `review_id`.
+    pub async fn review_checkpoint_input(
+        &self,
+        review_id: &str,
+    ) -> Result<Option<serde_json::Value>> {
+        let json: Option<String> = sqlx::query_scalar(
+            "SELECT checkpoint_json FROM workflow_checkpoints \
+             WHERE json_extract(checkpoint_json, '$.output.review_id') = ? LIMIT 1",
+        )
+        .bind(review_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(dberr("read review checkpoint"))?;
+        json.map(|raw| {
+            serde_json::from_str::<WorkflowCheckpoint>(&raw)
+                .map(|cp| cp.input)
+                .map_err(|e| Error::Internal(format!("invalid review checkpoint: {e}")))
+        })
+        .transpose()
+    }
+
     pub async fn save_checkpoint(
         &self,
         run_id: &Id,

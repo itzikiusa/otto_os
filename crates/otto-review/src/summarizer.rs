@@ -12,7 +12,8 @@ pub const DEADLINE_EXCEEDED: &str = "summarizer absolute deadline exceeded";
 pub use crate::handoff::PASTE_INLINE_MAX;
 
 pub struct Attempt {
-    dir: tempfile::TempDir,
+    dir: Option<tempfile::TempDir>,
+    path: PathBuf,
     pub provider: String,
     pub meta: serde_json::Value,
 }
@@ -23,11 +24,11 @@ impl Attempt {
             .prefix("otto-summary-")
             .tempdir()
             .map_err(|e| e.to_string())?;
-        let provider = if provider.trim().is_empty() {
-            "claude"
-        } else {
-            provider.trim()
-        };
+        let path = dir.path().to_path_buf();
+        let provider = provider.trim();
+        if provider.is_empty() {
+            return Err("summarizer provider is not configured".into());
+        }
         // Confined + no project settings, like every reviewer (see
         // `session::review_session_meta`): it runs in the same checkout.
         let mut meta = serde_json::json!({
@@ -39,19 +40,35 @@ impl Attempt {
             meta["model"] = model.trim().into();
         }
         Ok(Self {
-            dir,
+            dir: Some(dir),
+            path,
             provider: provider.into(),
             meta,
         })
     }
+    /// Disarm `TempDir` drop-cleanup so a daemon restart does not delete the
+    /// directory while a detached held summarizer CLI is still writing to it.
+    /// Call [`Self::cleanup`] once the attempt finishes in this process.
+    pub fn persist_for_restart(&mut self) {
+        if let Some(dir) = self.dir.take() {
+            let _ = dir.keep();
+        }
+    }
+    /// Remove a directory previously kept via [`Self::persist_for_restart`].
+    #[allow(clippy::disallowed_methods)]
+    pub fn cleanup(&self) {
+        if self.dir.is_none() {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
     pub fn result_path(&self) -> PathBuf {
-        self.dir.path().join("result.json")
+        self.path.join("result.json")
     }
     pub fn temporary_path(&self) -> PathBuf {
-        self.dir.path().join("result.json.tmp")
+        self.path.join("result.json.tmp")
     }
     pub fn instructions_path(&self) -> PathBuf {
-        self.dir.path().join("instructions.md")
+        self.path.join("instructions.md")
     }
     /// The text typed into the summarizer's terminal. A large brief (every raw
     /// claim plus the run's context — 100+ KB on a big PR) is written to
@@ -201,6 +218,34 @@ where
 mod tests {
     use super::*;
 
+    #[test]
+    fn empty_summarizer_provider_errors_instead_of_falling_back_to_claude() {
+        let err = Attempt::new("", "")
+            .err()
+            .expect("empty provider must error, never silently default to claude");
+        assert!(
+            err.to_lowercase().contains("provider"),
+            "error should name missing provider: {err}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn a_persisted_attempt_keeps_its_dir_across_drop_until_cleanup() {
+        let mut attempt = Attempt::new("claude", "").unwrap();
+        let path = attempt.result_path();
+        let dir = path.parent().unwrap().to_path_buf();
+        attempt.persist_for_restart();
+        std::fs::write(&path, "[]").unwrap();
+        let cleanup_dir = dir.clone();
+        drop(attempt);
+        assert!(
+            path.exists(),
+            "dropping a persisted Attempt must keep its dir for restart"
+        );
+        let _ = std::fs::remove_dir_all(cleanup_dir);
+    }
+
     #[tokio::test]
     async fn a_cancel_is_heard_on_this_reviews_change_and_on_the_flag() {
         use otto_core::event::Event;
@@ -264,16 +309,9 @@ mod tests {
 
     #[tokio::test]
     async fn publishes_pending_sessions_and_cleans_up_for_every_provider() {
-        for provider in ["", "claude", "codex", "agy"] {
+        for provider in ["claude", "codex", "agy"] {
             let spec = Attempt::new(provider, " chosen-model ").unwrap();
-            assert_eq!(
-                spec.provider,
-                if provider.is_empty() {
-                    "claude"
-                } else {
-                    provider
-                }
-            );
+            assert_eq!(spec.provider, provider);
             assert_eq!(spec.meta["model"], "chosen-model");
             let events = Arc::new(Mutex::new(Vec::new()));
             let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();

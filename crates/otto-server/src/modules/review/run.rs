@@ -381,7 +381,7 @@ pub(crate) async fn run_review_core(
     // `read_only` (forced Seatbelt, no shell) with `project_settings: false`
     // (`--setting-sources user`, so a PR's `.claude/settings.json` hooks never
     // load) — see `otto_review::session::review_session_meta`.
-    otto_review::engine::trust_checkout(&agent_runs, repo_path);
+    otto_review::engine::trust_checkout(&agent_runs, &cfg.summarizer.provider, repo_path);
 
     // Where this run reads the code: the source branch scopes local finding
     // resolution (S2-05) and the checkout + head are what a Retry re-enters
@@ -467,11 +467,42 @@ pub(crate) async fn run_review_core(
         .collect();
 
     let threads = review_threads(ctx, Some(&cfg)).await;
+    // Persist every reviewer prompt BEFORE the stagger loop so a restart during
+    // stagger never leaves queued reviewers without a stored prompt.
+    let mut prepared = Vec::with_capacity(agent_runs.len());
+    for (i, run) in otto_review::engine::in_spawn_order(agent_runs) {
+        let prompt_lens = if run.lenses.is_empty() {
+            run.prompt_lens.clone()
+        } else {
+            compose_orchestrator_prompt(
+                &run.lenses,
+                &ctx.manager.cli_family(&run.provider),
+                |slug| otto_review::session::lens_findings_path(review_id.as_str(), i, slug),
+                &otto_review::session::findings_path(review_id.as_str(), i),
+            )
+        };
+        let lens_slugs = run.lens_slugs();
+        let prompt = otto_review::prompts::reviewer_prompt(
+            &branch_ctx,
+            changed_files,
+            changed_lines,
+            &prompt_lens,
+            &user_ctx,
+            &jira_ctx,
+            &diff_path_str,
+        );
+        let _ = tokio::fs::write(otto_review::session::prompt_path(review_id, i), &prompt).await;
+        if let Err(e) = ctx
+            .reviews_store
+            .set_agent_prompt(review_id, i, &prompt)
+            .await
+        {
+            tracing::warn!(review = %review_id, agent = i, "could not persist agent prompt: {e}");
+        }
+        prepared.push((i, run, lens_slugs, prompt));
+    }
     let mut set = tokio::task::JoinSet::new();
-    for (n, (i, run)) in otto_review::engine::in_spawn_order(agent_runs)
-        .into_iter()
-        .enumerate()
-    {
+    for (n, (i, run, lens_slugs, prompt)) in prepared.into_iter().enumerate() {
         // Space the cold starts out (R3), waking immediately on cancel.
         let delay = otto_review::engine::spawn_gap(threads.is_some()) * u32::from(n > 0);
         if !otto_review::scope::stagger_wait(delay, cancel_flag.as_deref()).await {
@@ -486,39 +517,6 @@ pub(crate) async fn run_review_core(
         let cwd = repo_path.to_string();
         let review_id_s = review_id.to_string();
         let review_skills_dir = review_skills_dir.clone();
-        // An orchestrator run composes its lens block HERE: it names one output
-        // path per lens, and those are keyed on this run's index.
-        let prompt_lens = if run.lenses.is_empty() {
-            run.prompt_lens.clone()
-        } else {
-            compose_orchestrator_prompt(
-                &run.lenses,
-                &manager.cli_family(&run.provider),
-                |slug| otto_review::session::lens_findings_path(&review_id_s, i, slug),
-                &otto_review::session::findings_path(&review_id_s, i),
-            )
-        };
-        let lens_slugs = run.lens_slugs();
-        let prompt = otto_review::prompts::reviewer_prompt(
-            &branch_ctx,
-            changed_files,
-            changed_lines,
-            &prompt_lens,
-            &user_ctx,
-            &jira_ctx,
-            &diff_path_str,
-        );
-        // Persist the prompt so a per-agent Retry can re-run exactly this agent:
-        // temp file for the in-flight injection path, DB row (0100) so retry
-        // survives reboots / temp sweeps / daemon redeploys.
-        let _ = tokio::fs::write(otto_review::session::prompt_path(review_id, i), &prompt).await;
-        if let Err(e) = ctx
-            .reviews_store
-            .set_agent_prompt(review_id, i, &prompt)
-            .await
-        {
-            tracing::warn!(review = %review_id, agent = i, "could not persist agent prompt: {e}");
-        }
         let (max_attempts, threads) = (cfg.max_attempts, threads.clone());
         let slots = threads.is_none().then(reviewer_slots);
         set.spawn(async move {

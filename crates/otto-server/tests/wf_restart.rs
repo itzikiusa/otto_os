@@ -718,3 +718,154 @@ fn an_agent_approval_is_answered_on_the_default_stack() {
         ctx.agent_runtime.shutdown().await;
     });
 }
+
+/// Restarting while a `check` step's second turn ("Completion review") is held
+/// must await that review thread instead of letting "Check criteria" steal its
+/// resume entry and spawn a second completion review.
+#[test]
+fn a_check_step_restarted_during_completion_review_awaits_the_review_thread() {
+    on_workers(DEFAULT_STACK, check_completion_review_survived());
+}
+
+async fn check_completion_review_survived() {
+    let rig = Rig::new().await;
+    let ctx = rig.life(None).await;
+    // Placeholder graph to allocate a run_id so the fake scripts can target its
+    // exact handoff files (`step2-step-2.output.json` and `.review.json`).
+    let (mut wf, run_id) = create(
+        &ctx,
+        &graph(
+            "check",
+            json!({"criteria": [{"id": "c1", "text": "x", "verify": "agent"}]}),
+        ),
+    )
+    .await;
+    let ctx_dir = ctx.data_dir.join("workflow-context").join(run_id.as_str());
+    let out_json = ctx_dir.join("step2-step-2.output.json");
+    let rev_json = ctx_dir.join("step2-step-2.review.json");
+    let eval_payload =
+        r#"{"verdict":"achieved","criteria":[{"id":"c1","met":true,"evidence":"verified"}]}"#;
+    let rev_payload = r#"{"approved":true,"findings":[]}"#;
+    let check_params = json!({
+        "evaluator": {"provider": "claude"},
+        "final_review": true,
+        // `instructions` rides both turns; Turn 2 deletes `rev_json` before starting
+        // its fresh turn, then sleeps across the restart before writing `rev_json`.
+        "instructions": format!(
+            "OTTO_FAKE: sleep 2500\nOTTO_FAKE: write {} {rev_payload}\nOTTO_FAKE: reply {rev_payload}",
+            rev_json.display()
+        ),
+        "criteria": [{
+            "id": "c1",
+            "text": "Agent verifies",
+            "verify": "agent",
+            // `how` rides only Turn 1 ("Check criteria"), writing `out_json`.
+            // Prefix a word so `.trim()` keeps the newline before `OTTO_FAKE:`.
+            "how": format!("inspect\nOTTO_FAKE: write {} {eval_payload}", out_json.display())
+        }]
+    });
+    wf.graph = graph("check", check_params);
+    let gjson = serde_json::to_string(&wf.graph).unwrap();
+    sqlx::query("UPDATE workflows SET graph_json = ? WHERE id = ?")
+        .bind(&gjson)
+        .bind(&wf.id)
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE workflow_versions SET graph_json = ? WHERE workflow_id = ?")
+        .bind(&gjson)
+        .bind(&wf.id)
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+    let ws = ctx.workspaces.get(&WS.into()).await.unwrap();
+    let task = tokio::spawn(otto_server::workflow_engine::run_workflow(
+        ctx.clone(),
+        ws,
+        wf,
+        run_id.clone(),
+        json!({}),
+        RunScope::default(),
+        None,
+    ));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM agent_runtime_sessions WHERE title LIKE '%Completion review%'",
+        )
+        .fetch_one(&ctx.pool)
+        .await
+        .unwrap();
+        if count > 0 {
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Completion review thread never started"
+        );
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    task.abort();
+    let _ = task.await;
+    let kept = ctx.agent_runtime.clone();
+    drop(ctx);
+
+    let ctx = rig.life(Some(kept)).await;
+    boot(&ctx).await;
+    let run = settled(&ctx, &run_id, false).await;
+    assert_eq!(
+        run.status,
+        RunStatus::Success,
+        "{:?} {:?}",
+        run.error,
+        run.nodes
+    );
+    let n2 = node(&run, "n2");
+    assert_eq!(
+        n2.output
+            .as_ref()
+            .and_then(|o| o.get("verdict"))
+            .and_then(Value::as_str),
+        Some("achieved"),
+        "output: {:?}",
+        n2.output
+    );
+    assert_eq!(
+        n2.output
+            .as_ref()
+            .and_then(|o| o.get("review"))
+            .and_then(|r| r.get("approved"))
+            .and_then(Value::as_bool),
+        Some(true),
+        "completion review must be recorded: {:?}",
+        n2.output
+    );
+    let review_threads: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_runtime_sessions WHERE title LIKE '%Completion review%'",
+    )
+    .fetch_one(&ctx.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        review_threads, 1,
+        "the held Completion review thread must be awaited, not replaced by a second thread"
+    );
+    let criteria_threads: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_runtime_sessions WHERE title LIKE '%Check criteria%'",
+    )
+    .fetch_one(&ctx.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        criteria_threads, 1,
+        "Check criteria already wrote output.json and must not re-run or steal the review thread"
+    );
+    assert_eq!(
+        turns(&rig).len(),
+        2,
+        "exactly 1 criteria turn + 1 completion-review turn: {:?}",
+        turns(&rig)
+    );
+    ctx.agent_runtime.shutdown().await;
+}

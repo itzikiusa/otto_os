@@ -204,11 +204,7 @@ pub fn mark_summarizer_starting(
     row.score = None;
     row.score_reason.clear();
     row.note = "Starting summarizer".into();
-    row.provider = if summarizer_cfg.provider.trim().is_empty() {
-        "claude".into()
-    } else {
-        summarizer_cfg.provider.trim().into()
-    };
+    row.provider = summarizer_cfg.provider.trim().into();
     row.model = summarizer_cfg.model.trim().into();
 }
 

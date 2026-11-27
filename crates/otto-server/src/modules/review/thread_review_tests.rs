@@ -575,3 +575,317 @@ async fn a_held_review_whose_repo_is_gone_stops_its_threads_and_ends() {
     let done = ctx.reviews_store.get_review(&review.id).await.unwrap();
     assert_eq!(done.status, ReviewStatus::Error);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_held_summarizer_thread_is_awaited_on_restart_without_spawning_a_second() {
+    let (_tmp, ctx, ws, repo) = rig().await;
+    let review = ctx
+        .reviews_store
+        .create_review(&repo.id, LOCAL_REVIEW_PR_NUMBER)
+        .await
+        .unwrap();
+    let owner: String = sqlx::query_scalar("SELECT id FROM users LIMIT 1")
+        .fetch_one(&ctx.pool)
+        .await
+        .unwrap();
+    let mut attempt = crate::review_summarizer::Attempt::new("codex", "gpt-5").unwrap();
+    attempt.persist_for_restart();
+    let result_path = attempt.result_path();
+    let drafts = json!([{
+        "source_ids": [otto_review::engine::raw_claim_id(0, 0)],
+        "path": "src/lib.rs",
+        "line": 1,
+        "severity": "bug",
+        "body": "add subtracts",
+        "category": "correctness",
+        "disposition": "verified",
+        "evidence": "src/lib.rs:1 returns a - b"
+    }]);
+    std::fs::write(&result_path, drafts.to_string()).unwrap();
+    let sum_thread = ctx
+        .agent_runtime
+        .create(
+            &owner,
+            &ws.id,
+            otto_core::agent_runtime::CreateRuntimeSessionReq {
+                provider: Some(otto_core::agent_runtime::RuntimeProvider::Codex),
+                cwd: Some(repo.path.clone()),
+                title: Some("Review summarizer".into()),
+                meta: Some(json!({
+                    "source": "review_summarizer",
+                    "review_id": review.id,
+                    "result_path": result_path.to_string_lossy(),
+                })),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    ctx.agent_runtime
+        .prompt(&sum_thread.id, "summarize")
+        .await
+        .unwrap();
+    // Wait briefly so the scripted agent finishes turn 1 on the held thread.
+    for _ in 0..40 {
+        let s = ctx.agent_runtime.get(&sum_thread.id).await.unwrap();
+        if s.status == otto_core::agent_runtime::RuntimeSessionStatus::Idle {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let rows = [
+        otto_core::domain::ReviewAgentState {
+            name: "Lens 1".into(),
+            provider: "claude".into(),
+            status: "done".into(),
+            findings: vec![otto_core::domain::ReviewFinding {
+                path: Some("src/lib.rs".into()),
+                line: Some(1),
+                line_end: None,
+                severity: "bug".into(),
+                body: "add subtracts".into(),
+                lens: None,
+            }],
+            ..Default::default()
+        },
+        otto_core::domain::ReviewAgentState {
+            name: "Summarizer".into(),
+            provider: "codex".into(),
+            model: "gpt-5".into(),
+            status: "running".into(),
+            thread: true,
+            session_id: Some(sum_thread.id.to_string()),
+            ..Default::default()
+        },
+    ];
+    ctx.reviews_store
+        .set_agents(&review.id, &rows)
+        .await
+        .unwrap();
+    let live = ctx.review_cancels.register(&review.id);
+    resume_held_review(ctx.clone(), review.id.clone(), live).await;
+    let done = ctx.reviews_store.get_review(&review.id).await.unwrap();
+    assert_eq!(done.status, ReviewStatus::Done, "{:?}", done.error);
+    assert_eq!(done.comments.len(), 1);
+    assert_eq!(done.comments[0].body, "add subtracts");
+    let sum_threads = ctx
+        .agent_runtime
+        .list_filtered(&ws.id, None, Some("review_summarizer"), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        sum_threads.len(),
+        1,
+        "held summarizer must be awaited, not replaced by a second summarizer thread"
+    );
+    assert!(
+        !result_path.parent().unwrap().exists(),
+        "held summarizer temp dir cleaned up after resume"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resume_held_review_restores_frozen_workflow_summarizer_provider_and_never_runs_claude() {
+    let (_tmp, ctx, ws, repo) = rig().await;
+    let owner: String = sqlx::query_scalar("SELECT id FROM users LIMIT 1")
+        .fetch_one(&ctx.pool)
+        .await
+        .unwrap();
+    // Global/repo default is claude, while the workflow review step named codex
+    // (no claude anywhere) with custom scope-gate instructions.
+    let wf_repo = otto_state::WorkflowsRepo::new(ctx.pool.clone());
+    let wf = wf_repo
+        .create(
+            &ws.id,
+            "NoClaude",
+            "",
+            "",
+            &otto_core::workflows::WorkflowGraph {
+                nodes: vec![],
+                edges: vec![],
+            },
+            &owner,
+        )
+        .await
+        .unwrap();
+    let run = wf_repo
+        .create_run(&wf.id, &ws.id, &json!({}), None)
+        .await
+        .unwrap();
+    let review = ctx
+        .reviews_store
+        .create_review(&repo.id, LOCAL_REVIEW_PR_NUMBER)
+        .await
+        .unwrap();
+    let mut frozen_cfg = otto_review::engine::workflow_review_config_from_json(
+        "claude",
+        &[json!({"lens": "correctness", "providers": ["codex"]})],
+        Some(&json!({"provider": "codex", "instructions": "SCOPE GATE: server only"})),
+    );
+    frozen_cfg.runner = Some("threads".into());
+    let cp = otto_core::workflows::WorkflowCheckpoint {
+        node_id: "loop_server#review.0".into(),
+        loop_id: "loop_server".into(),
+        iteration: 1,
+        step_index: 0,
+        kind: "review_run".into(),
+        name: "Review".into(),
+        status: otto_core::workflows::NodeStatus::Success,
+        attempts: 1,
+        input: json!({
+            "config": frozen_cfg,
+            "run_context": "prior step brief",
+        }),
+        output: Some(json!({"review_id": review.id})),
+        error: None,
+        logs: vec![],
+        updated_at: chrono::Utc::now(),
+        active_ms: 0,
+        thread_id: None,
+        start_ordinal: None,
+    };
+    wf_repo.save_checkpoint(&run.id, &cp).await.unwrap();
+    // Reviewers are already done; summarizer row has empty provider (or stale claude)
+    // as when a prior bad resume/retry touched it — the frozen workflow checkpoint
+    // config MUST win and run codex, never claude.
+    let rows = [
+        otto_core::domain::ReviewAgentState {
+            name: "Correctness".into(),
+            provider: "codex".into(),
+            status: "done".into(),
+            findings: vec![otto_core::domain::ReviewFinding {
+                path: Some("src/lib.rs".into()),
+                line: Some(1),
+                line_end: None,
+                severity: "bug".into(),
+                body: "add subtracts".into(),
+                lens: None,
+            }],
+            ..Default::default()
+        },
+        otto_core::domain::ReviewAgentState {
+            name: "Summarizer".into(),
+            provider: String::new(),
+            status: "pending".into(),
+            ..Default::default()
+        },
+    ];
+    ctx.reviews_store
+        .set_agents(&review.id, &rows)
+        .await
+        .unwrap();
+    let live = ctx.review_cancels.register(&review.id);
+    resume_held_review(ctx.clone(), review.id.clone(), live).await;
+    let sum_threads = ctx
+        .agent_runtime
+        .list_filtered(&ws.id, None, Some("review_summarizer"), None)
+        .await
+        .unwrap();
+    assert_eq!(sum_threads.len(), 1, "expected one summarizer thread");
+    assert_eq!(
+        sum_threads[0].provider_slug(),
+        "codex",
+        "resumed workflow review must use the workflow's frozen summarizer provider, never claude"
+    );
+    // Also check rerun_summarizer (used by boot summarizer_resume & workflow "Retry step"):
+    // it must likewise restore the frozen workflow summarizer provider and never spawn claude.
+    let done_user = otto_state::UsersRepo::new(ctx.pool.clone())
+        .list()
+        .await
+        .unwrap()
+        .remove(0);
+    ctx.reviews_store
+        .set_status(&review.id, ReviewStatus::Error, Some("summarizer failed"))
+        .await
+        .unwrap();
+    rerun_summarizer(&ctx, &review.id, done_user, None)
+        .await
+        .unwrap();
+    for _ in 0..80 {
+        let r = ctx.reviews_store.get_review(&review.id).await.unwrap();
+        if r.status != ReviewStatus::Running {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let sum_threads = ctx
+        .agent_runtime
+        .list_filtered(&ws.id, None, Some("review_summarizer"), None)
+        .await
+        .unwrap();
+    assert!(
+        sum_threads.len() >= 2 && sum_threads.iter().all(|t| t.provider_slug() == "codex"),
+        "rerun_summarizer must also use frozen workflow provider codex, never claude: {:?}",
+        sum_threads
+            .iter()
+            .map(|t| t.provider_slug())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn summarizer_with_unavailable_named_provider_fails_instead_of_running_claude() {
+    let (_tmp, ctx, ws, repo) = rig().await;
+    let owner = otto_state::UsersRepo::new(ctx.pool.clone())
+        .list()
+        .await
+        .unwrap()
+        .remove(0);
+    let review = ctx
+        .reviews_store
+        .create_review(&repo.id, LOCAL_REVIEW_PR_NUMBER)
+        .await
+        .unwrap();
+    let mut cfg = otto_review::engine::workflow_review_config_from_json(
+        "claude",
+        &[json!({"lens": "correctness", "providers": ["codex"]})],
+        Some(&json!({"provider": "missing-provider"})),
+    );
+    cfg.runner = Some("threads".into());
+    let rows = [
+        otto_core::domain::ReviewAgentState {
+            name: "Correctness".into(),
+            provider: "codex".into(),
+            status: "done".into(),
+            findings: vec![otto_core::domain::ReviewFinding {
+                path: Some("src/lib.rs".into()),
+                line: Some(1),
+                line_end: None,
+                severity: "bug".into(),
+                body: "add subtracts".into(),
+                lens: None,
+            }],
+            ..Default::default()
+        },
+        otto_core::domain::ReviewAgentState {
+            name: "Summarizer".into(),
+            provider: "missing-provider".into(),
+            status: "pending".into(),
+            ..Default::default()
+        },
+    ];
+    ctx.reviews_store
+        .set_agents(&review.id, &rows)
+        .await
+        .unwrap();
+    let findings = vec![rows[0].findings.clone()];
+    let err = summarize_and_persist(
+        &ctx, &review.id, &repo.path, &ws, &owner, &repo.id, 0, &cfg, None, &findings, "", None,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("missing-provider"),
+        "error must name the unavailable provider: {err}"
+    );
+    let sum_threads = ctx
+        .agent_runtime
+        .list_filtered(&ws.id, None, Some("review_summarizer"), None)
+        .await
+        .unwrap();
+    assert!(
+        sum_threads.is_empty(),
+        "unavailable named provider must never fall back to claude; spawned: {sum_threads:?}"
+    );
+}

@@ -91,20 +91,48 @@ pub(in crate::workflow_engine) async fn execute(
         let text = h.and_then(|p| std::fs::read_to_string(p).ok());
         Ok::<_, otto_core::Error>((text, reply))
     };
+    let resuming_final_review = match step_thread::peek_resume(run_id, &node.id) {
+        Some((tid, _)) => ctx
+            .agent_runtime
+            .get(&tid)
+            .await
+            .ok()
+            .is_some_and(|s| s.title.contains("Completion review")),
+        None => false,
+    };
+    let mut deferred_review_resume = None;
     let mut logs = vec![];
     let raw = if cp.needs_agent() {
         let h = handoff("output.json");
-        let path = h
-            .as_ref()
-            .map_or(String::new(), |p| p.display().to_string());
-        let ins = cp.instructions.as_deref();
-        let prompt = criteria::evaluator_prompt(&cp.criteria, &decided, ins, &path);
-        let (text, reply) = turn("Check criteria", &prompt, h).await?;
-        let ev = check_run::evaluation(text.as_deref(), &reply);
-        if ev.is_none() {
-            logs.push(format!("⚠ {}", criteria::NO_VERDICT));
+        let cached = if resuming_final_review {
+            match h.as_ref() {
+                Some(p) => tokio::fs::read_to_string(p)
+                    .await
+                    .ok()
+                    .and_then(|t| check_run::evaluation(Some(&t), "")),
+                None => None,
+            }
+        } else {
+            None
+        };
+        if cached.is_some() {
+            cached
+        } else {
+            if resuming_final_review {
+                deferred_review_resume = step_thread::take_resume(run_id, &node.id);
+            }
+            let path = h
+                .as_ref()
+                .map_or(String::new(), |p| p.display().to_string());
+            let ins = cp.instructions.as_deref();
+            let prompt = criteria::evaluator_prompt(&cp.criteria, &decided, ins, &path);
+            let (text, reply) = turn("Check criteria", &prompt, h).await?;
+            let ev = check_run::evaluation(text.as_deref(), &reply);
+            if ev.is_none() {
+                logs.push(format!("⚠ {}", criteria::NO_VERDICT));
+            }
+            ev
         }
-        ev
     } else {
         None
     };
@@ -139,6 +167,9 @@ pub(in crate::workflow_engine) async fn execute(
     }
     let (mut eval, mut review) = (d.eval, None);
     if cp.final_review && eval.verdict == Verdict::Achieved {
+        if let Some(entry) = deferred_review_resume.take() {
+            step_thread::restore_resume(run_id, &node.id, entry);
+        }
         let h = handoff("review.json");
         let path = h
             .as_ref()

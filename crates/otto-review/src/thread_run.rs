@@ -207,6 +207,59 @@ impl Threads {
         }
     }
 
+    /// Await a summarizer thread that survived a daemon restart in its holder,
+    /// using its persisted `result_path` as the handoff target.
+    pub async fn resume_summarizer_turn(
+        &self,
+        thread_id: &otto_core::Id,
+        result_path: &Path,
+        (brief, cfg, ws, user, cwd): SummarizerBrief<'_>,
+        cancel: Option<&Arc<AtomicBool>>,
+    ) -> Result<String, String> {
+        let mut meta = serde_json::json!({
+            "source": "review_summarizer",
+            "read_only": true,
+            "project_settings": false,
+        });
+        self.meta_into(&mut meta);
+        let provider = cfg.provider.trim();
+        if provider.is_empty() {
+            return Err("summarizer provider is not configured".into());
+        }
+        let turn = StepTurn {
+            user_id: user.id.clone(),
+            workspace_id: ws.id.clone(),
+            provider: provider.to_string(),
+            model: Some(cfg.model.trim().to_string()).filter(|m| !m.is_empty()),
+            effort: Some(cfg.effort.trim().to_string()).filter(|e| !e.is_empty()),
+            cwd: PathBuf::from(cwd),
+            title: "Review summarizer".into(),
+            meta,
+            prompt: brief.to_string(),
+            continue_thread: None,
+            handoff: Some(result_path.to_path_buf()),
+            read_only: true,
+            timeout: None,
+            no_progress: None,
+        };
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let runner = Arc::clone(&self.runner);
+        let tid = thread_id.clone();
+        let o = with_cancel(cancel, |signal| async move {
+            runner.resume(&tid, 0, &turn, tx, signal).await
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        let text = tokio::fs::read_to_string(result_path).await.ok();
+        match text.filter(|t| crate::summarizer::valid_result(t)) {
+            Some(text) => Ok(text),
+            None => Err(o
+                .error
+                .map(|e| e.message)
+                .unwrap_or_else(|| "the resumed summarizer wrote no valid result file".into())),
+        }
+    }
+
     pub(crate) fn meta_into(&self, meta: &mut Value) {
         if let (Some(m), Some(extra)) = (meta.as_object_mut(), self.meta.as_object()) {
             for (k, v) in extra {
