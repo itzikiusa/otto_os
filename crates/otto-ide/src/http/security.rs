@@ -4,7 +4,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::{Extension, Json};
 use otto_core::auth::AuthUser;
-use otto_core::domain::{Capability, Feature, User};
+use otto_core::domain::User;
 use otto_core::{Error, Result};
 use otto_security::{ManageScan, ProjectScans, ScanDetail, ScanSettings, ScanSummary};
 use serde_json::{json, Value};
@@ -107,27 +107,13 @@ async fn enqueue<S: IdeCtx>(ctx: &S, user: User, id: String) -> Result<ScanSumma
         .await
 }
 
-/// Called by the existing scheduled-task supervisor. The project owner is
+/// Called by the existing scheduled-task supervisor. The scheduled user is
 /// re-authorized at each occurrence and again when the job leaves the queue.
 pub async fn scheduled_tick<S: IdeCtx>(ctx: &S) -> Result<()> {
-    let pool = ctx.pool();
-    let users = otto_state::UsersRepo::new(pool.clone());
-    let grants = otto_state::GrantsRepo::new(pool.clone());
-    for (schedule, fire) in otto_security::schedule::due(&pool, chrono::Utc::now()).await? {
-        let Ok(user) = users.get(&schedule.owner_user_id).await else {
-            continue;
-        };
-        if user.disabled || grants.capability_of(&user, Feature::Agents).await? < Capability::Edit {
-            continue;
-        }
-        let project = schedule.project_id.clone();
-        match super::security_dast::enqueue_scheduled(ctx, user, project.clone()).await {
-            Ok(_) => schedule.settle(&pool, fire).await?,
-            Err(Error::Conflict(_)) => {}
-            Err(error) => tracing::warn!(project, %error, "scheduled security scan deferred"),
-        }
-    }
-    Ok(())
+    otto_security::schedule::tick(&ctx.pool(), chrono::Utc::now(), |user, project| {
+        super::security_dast::enqueue_scheduled(ctx, user, project)
+    })
+    .await
 }
 
 pub(super) async fn detail<S: IdeCtx>(
@@ -177,7 +163,7 @@ pub(super) async fn manage<S: IdeCtx>(
             chrono::Utc::now()
         )?),
         ManageScan::SetSchedule { schedule } => {
-            json!(otto_security::schedule::save(&pool, &id, schedule).await?)
+            json!(otto_security::schedule::save(&pool, &id, &user.id, schedule).await?)
         }
         ManageScan::SetSuppression {
             fingerprint,
