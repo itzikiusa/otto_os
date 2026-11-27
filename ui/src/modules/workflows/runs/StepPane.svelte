@@ -269,7 +269,7 @@
     </div>
     <div class="prow">
       <h3 class="name ellipsis" dir="auto">{child?.label ?? step?.name ?? 'final-output.md'}</h3>
-      {#if word?.word}<span class="word {word.tone}">{word.word}</span>{/if}
+      {#if word?.word}<span class="word {word.tone}" title={child?.retried_reason || undefined}>{word.word}</span>{/if}
       <span class="grow"></span>
       {#if modelChip && !showingThread}<span class="chip" title="What ran">{modelChip}</span>{/if}
       {#if onmaximize}
@@ -286,6 +286,8 @@
       </div>
     {:else if node?.wait && node.phase === 'waiting'}
       <p class="wait">{node.wait.text}</p>
+    {:else if child?.retried_reason}
+      <p class="wait" data-testid="wf-child-retry-reason">{child.retried_reason}</p>
     {/if}
     {#if failed}
       <div class="failed" data-testid="wf-step-error">

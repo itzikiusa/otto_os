@@ -3,10 +3,10 @@
 // selection — runs/stepOrder.ts.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { childCrumb, childNoun, childTrail, defaultSelection, doneFold, entrySteps, loopChildren, mergeStepChildren, orderChildren, orderChildTree, orderSteps, resolveThreadSelection, RESULT, runtimeChildStatus, sameStepChildren, settledNodes, stepNumber, timeBar, topoOrder } from '../src/modules/workflows/runs/stepOrder.ts';
+import { annotateRetriedChildren, childCrumb, childNoun, childTrail, defaultSelection, doneFold, entrySteps, loopChildren, mergeStepChildren, orderChildren, orderChildTree, orderSteps, resolveThreadSelection, RESULT, retriedAttemptReason, runtimeChildStatus, sameStepChildren, settledNodes, stepNumber, timeBar, topoOrder } from '../src/modules/workflows/runs/stepOrder.ts';
 import { paneTabs } from '../src/modules/workflows/runs/stepTabs.ts';
 import { at, fanoutNodes, node, PR_GRAPH, reviewers, T0 } from './workflowRunFixtures.ts';
-import { stepWord } from '../src/modules/workflows/runs/runWords.ts';
+import { childWord, stepWord } from '../src/modules/workflows/runs/runWords.ts';
 import type { RuntimeSession, WorkflowGraph } from '../src/lib/api/types';
 
 const NOW = T0 + 12 * 60_000;
@@ -368,4 +368,75 @@ test('sameStepChildren matches structurally identical child arrays and detects s
   assert.equal(sameStepChildren(base, [{ ...base[0], status: 'success' as const }]), false);
   assert.equal(sameStepChildren(base, [{ ...base[0], depth: 1 }]), false);
   assert.equal(sameStepChildren(base, []), false);
+});
+
+test('annotateRetriedChildren marks earlier failed attempts as muted retried rows in the done fold with log reasons', () => {
+  const cp = {
+    node_id: 'loop#1.0',
+    loop_id: 'loop',
+    iteration: 1,
+    step_index: 0,
+    kind: 'agent_prompt',
+    name: 'fix',
+    status: 'success',
+    attempts: 2,
+    input: null,
+    output: null,
+    logs: [
+      'attempt 1: upstream: background work was still running at the limit',
+      '✓ checkpoint saved after attempt 2',
+    ],
+    updated_at: '2026-11-26T10:05:00Z',
+  } as never;
+
+  const children = [
+    { id: 'th-1', label: 'fix · iteration 1', provider: 'claude', status: 'error' as const, thread_id: 'th-1', depth: 0, parent_child_id: null },
+    { id: 'th-2', label: 'fix · iteration 1', provider: 'claude', status: 'running' as const, thread_id: 'th-2', depth: 0, parent_child_id: null },
+  ];
+
+  const annotated = annotateRetriedChildren(children, { loopId: 'loop', checkpoints: [cp] });
+  assert.equal(annotated[0].retried_attempt, 1);
+  assert.equal(annotated[0].retried_reason, 'upstream: background work was still running at the limit');
+  assert.equal(annotated[1].retried_attempt, undefined);
+  assert.equal(annotated[1].retried_reason, undefined);
+
+  // Word is muted ("Attempt 1 failed · retried"), never danger "Failed".
+  assert.deepEqual(childWord(annotated[0], NOW), { word: 'Attempt 1 failed · retried', tone: '' });
+  assert.deepEqual(childWord(annotated[1], NOW), { word: 'Working', tone: '' });
+
+  // Order puts the superseded failed attempt into `done` (the "N threads done" fold), leaving only the live attempt in `active`.
+  const tree = orderChildTree(annotated);
+  assert.deepEqual(tree.active.map((e) => e.child.id), ['th-2']);
+  assert.deepEqual(tree.done.map((e) => e.child.id), ['th-1']);
+  const flat = orderChildren(annotated);
+  assert.deepEqual(flat.active.map((c) => c.id), ['th-2']);
+  assert.deepEqual(flat.done.map((c) => c.id), ['th-1']);
+
+  // Last attempt still keeps danger "Failed" and stays in `active` when every retry failed.
+  const allFailed = annotateRetriedChildren(
+    [
+      { id: 'a1', label: 'fix · iteration 1', provider: 'claude', status: 'error' as const, thread_id: 'a1', depth: 0, parent_child_id: null },
+      { id: 'a2', label: 'fix · iteration 1', provider: 'claude', status: 'error' as const, thread_id: 'a2', depth: 0, parent_child_id: null },
+      { id: 'a3', label: 'fix · iteration 1', provider: 'claude', status: 'error' as const, thread_id: 'a3', depth: 0, parent_child_id: null },
+    ],
+    {
+      nodeLogs: [
+        '  [1/fix] attempt 1: provider overloaded',
+        '  [1/fix] attempt 2: timed out waiting for tool',
+      ],
+    },
+  );
+  assert.deepEqual(childWord(allFailed[0], NOW), { word: 'Attempt 1 failed · retried', tone: '' });
+  assert.equal(allFailed[0].retried_reason, 'provider overloaded');
+  assert.deepEqual(childWord(allFailed[1], NOW), { word: 'Attempt 2 failed · retried', tone: '' });
+  assert.equal(allFailed[1].retried_reason, 'timed out waiting for tool');
+  assert.deepEqual(childWord(allFailed[2], NOW), { word: 'Failed', tone: 'danger' });
+  const allFailedTree = orderChildTree(allFailed);
+  assert.deepEqual(allFailedTree.active.map((e) => e.child.id), ['a3']);
+  assert.deepEqual(allFailedTree.done.map((e) => e.child.id), ['a1', 'a2']);
+
+  // Bare node log fallback works for non-loop steps, and missing logs leave reason null cleanly.
+  assert.equal(retriedAttemptReason('Build', 1, { nodeLogs: ['attempt 1: exit code 1'] }), 'exit code 1');
+  assert.equal(retriedAttemptReason('Build', 2, { nodeLogs: ['attempt 1: exit code 1'] }), null);
+  assert.equal(sameStepChildren(annotated, children), false);
 });

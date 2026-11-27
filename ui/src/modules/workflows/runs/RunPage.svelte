@@ -29,7 +29,7 @@
   import StepPane from './StepPane.svelte';
   import { cancelQueued, pauseRun, rereview, resumeRun, retryStep, steerRun, stopRun } from './runActions';
   import { fallbackState, runTitle, runWord } from './runWords';
-  import { defaultSelection, entrySteps, loopChildren, mergeStepChildren, orderSteps, RESULT, sameStepChildren, settledNodes, stepNumber, type StepChild } from './stepOrder';
+  import { annotateRetriedChildren, defaultSelection, entrySteps, loopChildren, mergeStepChildren, orderSteps, RESULT, sameStepChildren, settledNodes, stepNumber, type StepChild } from './stepOrder';
   import { markRunOpened } from './seenRuns';
   import { registry } from '../../../lib/commands.svelte';
   import { workflowsUi } from '../workflowsUiState.svelte';
@@ -193,17 +193,22 @@
       const merged = rootTid || baseChildren.some((c) => c.thread_id)
         ? mergeStepChildren(baseChildren, rootTid, rtSessions)
         : (baseChildren as StepChild[]);
-      if (merged.length === 0 && !n.children?.length) {
-        next.set(n.node_id, { base: n, children: merged, node: n });
+      const annotated = annotateRetriedChildren(merged, {
+        loopId: n.node_id,
+        checkpoints: run.checkpoints,
+        nodeLogs: n.logs,
+      });
+      if (annotated.length === 0 && !n.children?.length) {
+        next.set(n.node_id, { base: n, children: annotated, node: n });
         return n;
       }
       const prev = prevMerged.get(n.node_id);
-      if (prev && prev.base === n && sameStepChildren(prev.children, merged)) {
+      if (prev && prev.base === n && sameStepChildren(prev.children, annotated)) {
         next.set(n.node_id, prev);
         return prev.node;
       }
-      const wrapped = merged !== n.children ? { ...n, children: merged } : n;
-      next.set(n.node_id, { base: n, children: merged, node: wrapped });
+      const wrapped = annotated !== n.children ? { ...n, children: annotated } : n;
+      next.set(n.node_id, { base: n, children: annotated, node: wrapped });
       return wrapped;
     });
     prevMerged = next;
