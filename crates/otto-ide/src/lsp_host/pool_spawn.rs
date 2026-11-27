@@ -2,7 +2,7 @@
 //! non-root environments, persistent `jdtls` workspace caching, and RSS sampling.
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -60,13 +60,16 @@ pub fn build_remote_lsp_script(root: &str, launch: &SpawnLaunch) -> String {
         "\"$HOME\"/.otto/toolchains/*/bin ",
         "\"$HOME\"/.otto/toolchains/*/current/bin ",
         "\"$HOME\"/.otto/toolchains/*/current ",
+        "\"$HOME\"/.otto/toolchains/dotnet/tools ",
         "\"$HOME\"/.otto/toolchains/*/*/bin ",
         "\"$HOME\"/.otto/toolchains/*/*/*/bin ",
         "\"$HOME\"/.otto/toolchains/*/*/Contents/Home/bin ",
         "\"$HOME\"/.otto/toolchains/*/*/node_modules/.bin ",
         "\"$HOME\"/.otto/toolchains/*/*/lib/node_modules/.bin ",
         "\"$HOME/go/bin\" \"$HOME/.cargo/bin\" \"$HOME/.zvm/bin\" \"$HOME/.dotnet\" \"$HOME/.dotnet/tools\" \"$HOME/.local/bin\"; ",
-        "do [ -d \"$d\" ] && PATH=\"$d:$PATH\"; done; export PATH"
+        "do [ -d \"$d\" ] && PATH=\"$d:$PATH\"; done; export PATH; ",
+        "if [ -z \"${DOTNET_ROOT:-}\" ] && [ -x \"$HOME/.otto/toolchains/dotnet/current/dotnet\" ]; then ",
+        "export DOTNET_ROOT=\"$HOME/.otto/toolchains/dotnet/current\"; fi"
     );
 
     let mem_exports = concat!(
@@ -77,6 +80,30 @@ pub fn build_remote_lsp_script(root: &str, launch: &SpawnLaunch) -> String {
         "*) export NODE_OPTIONS=\"$NODE_OPTIONS --max-old-space-size=384\" ;; esac"
     );
 
+    let is_ngserver = Path::new(&launch.cmd)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n == "ngserver")
+        && !launch
+            .args
+            .iter()
+            .any(|a| a == "--tsProbeLocations" || a.starts_with("--tsProbeLocations="));
+
+    let ng_probe_setup = if is_ngserver {
+        "NG_PROBES=\"\"; \
+         [ -d \"$PWD/node_modules\" ] && NG_PROBES=\"$PWD/node_modules\"; \
+         [ -d \"$HOME/.otto/toolchains/node/lsp/node_modules\" ] && NG_PROBES=\"${NG_PROBES:+$NG_PROBES,}$HOME/.otto/toolchains/node/lsp/node_modules\"; "
+    } else {
+        ""
+    };
+    let invoke_primary = if is_ngserver {
+        format!(
+            "{invoke_primary} ${{NG_PROBES:+--tsProbeLocations \"$NG_PROBES\" --ngProbeLocations \"$NG_PROBES\"}}"
+        )
+    } else {
+        invoke_primary
+    };
+
     let inner = if let Some(fb) = &launch.fallback_cmd {
         let invoke_fb = std::iter::once(posix_quote(fb))
             .chain(launch.fallback_args.iter().map(|a| posix_quote(a)))
@@ -85,13 +112,15 @@ pub fn build_remote_lsp_script(root: &str, launch: &SpawnLaunch) -> String {
         let p_check = posix_quote(&launch.cmd);
         let fb_check = posix_quote(fb);
         format!(
-            "cd {quoted_root} && {path_setup}; {mem_exports}; \
+            "cd {quoted_root} && {path_setup}; {mem_exports}; {ng_probe_setup}\
              if command -v {p_check} >/dev/null 2>&1; then exec {invoke_primary}; \
              elif command -v {fb_check} >/dev/null 2>&1; then exec {invoke_fb}; \
              else echo 'otto-lsp: language server not found on remote host' >&2; exit 127; fi"
         )
     } else {
-        format!("cd {quoted_root} && {path_setup}; {mem_exports}; exec {invoke_primary}")
+        format!(
+            "cd {quoted_root} && {path_setup}; {mem_exports}; {ng_probe_setup}exec {invoke_primary}"
+        )
     };
     crate::target::ssh_exec::wrap_remote_stdio_with_eof_kill(&inner)
 }
@@ -303,27 +332,139 @@ fn pinned_local_lsp_sdk_dirs(
     environments: Option<&EnvironmentManager>,
     owner_is_root: bool,
 ) -> Vec<PathBuf> {
-    if !owner_is_root || servers::normalize_lsp_lang(lang) != "zig" {
+    if !owner_is_root {
         return Vec::new();
     }
     let Some(envs) = environments else {
         return Vec::new();
     };
-    let Some(zig_home) = envs
-        .cached_project_env(root)
-        .and_then(|e| e.zig_home)
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-    else {
-        return Vec::new();
-    };
-    let hp = PathBuf::from(zig_home);
-    if let Some(zig_bin) = crate::toolchains::discovery::zig_bin_in_home(&hp) {
-        if let Some(dir) = zig_bin.parent() {
-            return vec![dir.to_path_buf()];
+    let norm = servers::normalize_lsp_lang(lang);
+    if norm == "zig" {
+        let Some(zig_home) = envs
+            .cached_project_env(root)
+            .and_then(|e| e.zig_home)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        else {
+            return Vec::new();
+        };
+        let hp = PathBuf::from(zig_home);
+        if let Some(zig_bin) = crate::toolchains::discovery::zig_bin_in_home(&hp) {
+            if let Some(dir) = zig_bin.parent() {
+                return vec![dir.to_path_buf()];
+            }
+        }
+    } else if matches!(norm, "csharp" | "fsharp") {
+        if let Some(dr) = pinned_validated_dotnet_root(root, envs) {
+            if let Some(bin) = crate::toolchains::discovery::dotnet_bin_in_root(&dr) {
+                if let Some(dir) = bin.parent() {
+                    return vec![dir.to_path_buf()];
+                }
+            }
         }
     }
     Vec::new()
+}
+
+/// Validate a project-pinned `dotnet_root` directory (must contain an executable
+/// `dotnet` and lie outside the workspace root so untrusted repo contents cannot
+/// hijack `DOTNET_ROOT`).
+#[allow(clippy::disallowed_methods)]
+fn validate_dotnet_root_outside_workspace(
+    candidate: &Path,
+    root_path: &Path,
+    canon_ws: Option<&Path>,
+) -> Option<PathBuf> {
+    if !candidate.is_absolute() {
+        return None;
+    }
+    let dr = crate::toolchains::discovery::resolve_dotnet_root_dir(candidate)?;
+    if dr.starts_with(root_path) {
+        return None;
+    }
+    if let Some(cw) = canon_ws {
+        if dr.starts_with(cw) {
+            return None;
+        }
+        if std::fs::canonicalize(&dr).is_ok_and(|c| c.starts_with(cw)) {
+            return None;
+        }
+    }
+    Some(dr)
+}
+
+fn pinned_validated_dotnet_root(root: &str, envs: &EnvironmentManager) -> Option<PathBuf> {
+    let raw = envs
+        .cached_project_env(root)
+        .and_then(|e| e.dotnet_root)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())?;
+    let root_path = Path::new(root);
+    #[allow(clippy::disallowed_methods)]
+    let canon_ws = std::fs::canonicalize(root_path).ok();
+    validate_dotnet_root_outside_workspace(Path::new(&raw), root_path, canon_ws.as_deref())
+}
+
+/// Resolve a safe, validated `DOTNET_ROOT` for local LSP spawning after
+/// `is_dangerous_loader_env_key` strips untrusted `DOTNET_*` vars (BUG-23).
+pub(crate) fn resolve_local_lsp_dotnet_root(
+    data_dir: &Path,
+    root: &str,
+    pinned_dotnet_root: Option<&Path>,
+    owner_is_root: bool,
+) -> Option<PathBuf> {
+    let root_path = Path::new(root);
+    #[allow(clippy::disallowed_methods)]
+    let canon_ws = std::fs::canonicalize(root_path).ok();
+    if owner_is_root {
+        if let Some(pinned) = pinned_dotnet_root {
+            if let Some(valid) =
+                validate_dotnet_root_outside_workspace(pinned, root_path, canon_ws.as_deref())
+            {
+                return Some(valid);
+            }
+        }
+    }
+    servers::detect_toolchain_dotnet_root(data_dir)
+}
+
+/// Compute `--tsProbeLocations` and `--ngProbeLocations` args for Angular's `ngserver`
+/// when not already supplied by the caller (BUG-32).
+pub(crate) fn angular_ngserver_probe_args(
+    data_dir: &Path,
+    lang: &str,
+    root: &str,
+    cmd: &str,
+    existing_args: &[String],
+    owner_is_root: bool,
+) -> Vec<String> {
+    if servers::normalize_lsp_lang(lang) != "angular" {
+        return Vec::new();
+    }
+    let is_ngserver = Path::new(cmd)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n == "ngserver");
+    if !is_ngserver {
+        return Vec::new();
+    }
+    if existing_args
+        .iter()
+        .any(|a| a == "--tsProbeLocations" || a.starts_with("--tsProbeLocations="))
+    {
+        return Vec::new();
+    }
+    let probes = servers::resolve_angular_probe_locations(data_dir, root, cmd, owner_is_root);
+    if probes.is_empty() {
+        return Vec::new();
+    }
+    let joined = probes.join(",");
+    vec![
+        "--tsProbeLocations".into(),
+        joined.clone(),
+        "--ngProbeLocations".into(),
+        joined,
+    ]
 }
 
 /// Merge pinned project SDK dirs, managed/shell augmented PATH, and effective
@@ -475,6 +616,34 @@ pub(crate) fn build_process_spawner(
                 if let Some(java_home) = servers::detect_toolchain_java_home(&data_dir) {
                     c.env("JAVA_HOME", java_home);
                 }
+            }
+            if matches!(servers::normalize_lsp_lang(&key.lang), "csharp" | "fsharp") {
+                let pinned_dotnet = environments
+                    .as_ref()
+                    .and_then(|e| e.cached_project_env(&key.root))
+                    .and_then(|e| e.dotnet_root)
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .map(PathBuf::from);
+                if let Some(dotnet_root) = resolve_local_lsp_dotnet_root(
+                    &data_dir,
+                    &key.root,
+                    pinned_dotnet.as_deref(),
+                    owner_is_root,
+                ) {
+                    c.env("DOTNET_ROOT", dotnet_root);
+                }
+            }
+            let ng_probe_args = angular_ngserver_probe_args(
+                &data_dir,
+                &key.lang,
+                &key.root,
+                &launch.cmd,
+                &launch.args,
+                owner_is_root,
+            );
+            if !ng_probe_args.is_empty() {
+                c.args(&ng_probe_args);
             }
             apply_language_memory_caps(
                 &mut c,
@@ -760,5 +929,120 @@ mod resource_metric_tests {
             pin_pos < mgr_pos,
             "pinned project Zig ({pin_pos}) must precede managed zig/current ({mgr_pos}): {merged}"
         );
+    }
+
+    #[test]
+    fn remote_lsp_script_includes_dotnet_tools_dotnet_root_and_angular_probes() {
+        let cs_launch = SpawnLaunch {
+            cmd: "csharp-ls".into(),
+            args: vec![],
+            fallback_cmd: None,
+            fallback_args: vec![],
+        };
+        let cs_script = build_remote_lsp_script("/srv/app", &cs_launch);
+        assert!(
+            cs_script.contains("\"$HOME\"/.otto/toolchains/dotnet/tools"),
+            "API-5: remote LSP PATH must include managed dotnet/tools: {cs_script}"
+        );
+        assert!(
+            cs_script.contains("DOTNET_ROOT=\"$HOME/.otto/toolchains/dotnet/current\""),
+            "API-5: remote LSP script must export managed DOTNET_ROOT: {cs_script}"
+        );
+
+        let ng_launch = SpawnLaunch {
+            cmd: "ngserver".into(),
+            args: vec!["--stdio".into()],
+            fallback_cmd: Some("vscode-html-language-server".into()),
+            fallback_args: vec!["--stdio".into()],
+        };
+        let ng_script = build_remote_lsp_script("/srv/ng-app", &ng_launch);
+        assert!(
+            ng_script.contains("--tsProbeLocations") && ng_script.contains("--ngProbeLocations"),
+            "BUG-32: remote ngserver must pass probe locations: {ng_script}"
+        );
+    }
+
+    #[test]
+    fn local_lsp_restores_validated_dotnet_root_and_rejects_workspace_local_dotnet() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("workspace");
+        let ws_dotnet = ws.join("evil-dotnet");
+        let pinned_dotnet = tmp.path().join("sdks/dotnet-9");
+        let data_dir = tmp.path().join("data");
+        let managed_dotnet = data_dir.join("toolchains/dotnet/current");
+        for dir in [&ws_dotnet, &pinned_dotnet, &managed_dotnet] {
+            std::fs::create_dir_all(dir).unwrap();
+            let bin = dir.join("dotnet");
+            std::fs::write(&bin, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let ws_str = ws.to_string_lossy().into_owned();
+
+        // BUG-23: root owner gets validated pinned DOTNET_ROOT outside workspace.
+        let picked = resolve_local_lsp_dotnet_root(&data_dir, &ws_str, Some(&pinned_dotnet), true)
+            .expect("pinned dotnet root");
+        assert_eq!(picked, pinned_dotnet);
+
+        // Workspace-local dotnet_root is rejected and falls back to managed DOTNET_ROOT.
+        let fallback = resolve_local_lsp_dotnet_root(&data_dir, &ws_str, Some(&ws_dotnet), true)
+            .expect("managed dotnet fallback");
+        assert_eq!(fallback, managed_dotnet);
+
+        // Non-root owner gets managed DOTNET_ROOT even if project pinned one.
+        let non_root =
+            resolve_local_lsp_dotnet_root(&data_dir, &ws_str, Some(&pinned_dotnet), false)
+                .expect("managed dotnet for non-root");
+        assert_eq!(non_root, managed_dotnet);
+    }
+
+    #[test]
+    fn angular_ngserver_probe_args_passes_managed_and_workspace_node_modules() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        let managed_nm = data_dir.join("toolchains/node/lsp/node_modules");
+        let ws = tmp.path().join("ng-workspace");
+        let ws_nm = ws.join("node_modules");
+        std::fs::create_dir_all(&managed_nm).unwrap();
+        std::fs::create_dir_all(&ws_nm).unwrap();
+        let ng_bin = managed_nm.join(".bin/ngserver");
+
+        let root_args = angular_ngserver_probe_args(
+            &data_dir,
+            "angular",
+            ws.to_str().unwrap(),
+            ng_bin.to_str().unwrap(),
+            &["--stdio".into()],
+            true,
+        );
+        assert_eq!(root_args.len(), 4);
+        assert_eq!(root_args[0], "--tsProbeLocations");
+        assert_eq!(root_args[2], "--ngProbeLocations");
+        assert!(root_args[1].contains(ws_nm.to_str().unwrap()));
+        assert!(root_args[1].contains(managed_nm.to_str().unwrap()));
+
+        // Non-root must not probe workspace node_modules, only managed node_modules.
+        let non_root_args = angular_ngserver_probe_args(
+            &data_dir,
+            "angular",
+            ws.to_str().unwrap(),
+            ng_bin.to_str().unwrap(),
+            &["--stdio".into()],
+            false,
+        );
+        assert_eq!(non_root_args.len(), 4);
+        assert!(!non_root_args[1].contains(ws_nm.to_str().unwrap()));
+        assert!(non_root_args[1].contains(managed_nm.to_str().unwrap()));
+
+        // Fallback html server must not receive ngserver-only flags.
+        let fb_args = angular_ngserver_probe_args(
+            &data_dir,
+            "angular",
+            ws.to_str().unwrap(),
+            "/usr/local/bin/vscode-html-language-server",
+            &["--stdio".into()],
+            true,
+        );
+        assert!(fb_args.is_empty());
     }
 }

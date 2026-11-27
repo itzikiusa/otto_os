@@ -443,6 +443,77 @@ pub fn detect_toolchain_java_home(data_dir: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Discover a validated `DOTNET_ROOT` candidate inside `<data_dir>/toolchains`
+/// or well-known system .NET SDK locations (BUG-23).
+pub fn detect_toolchain_dotnet_root(data_dir: &Path) -> Option<PathBuf> {
+    let tc_dotnet = data_dir.join("toolchains/dotnet");
+    let current = tc_dotnet.join("current");
+    if let Some(dr) = crate::toolchains::discovery::resolve_dotnet_root_dir(&current) {
+        return Some(dr);
+    }
+    for bin in collect_toolchain_bin_dirs(data_dir) {
+        if bin.join("dotnet").is_file() {
+            if let Some(dr) =
+                crate::toolchains::discovery::dotnet_root_from_bin(&bin.join("dotnet"))
+            {
+                return Some(dr);
+            }
+        }
+    }
+    for fixed in [
+        "/usr/local/share/dotnet",
+        "/opt/homebrew/opt/dotnet/libexec",
+        "/usr/local/opt/dotnet/libexec",
+        "/usr/share/dotnet",
+    ] {
+        let p = PathBuf::from(fixed);
+        if let Some(dr) = crate::toolchains::discovery::resolve_dotnet_root_dir(&p) {
+            return Some(dr);
+        }
+    }
+    None
+}
+
+/// Resolve probe directories (`node_modules`) for Angular's `ngserver`
+/// `--tsProbeLocations` and `--ngProbeLocations` flags (BUG-32).
+///
+/// Order of precedence:
+/// 1. Workspace `<root>/node_modules` when `owner_is_root` (uses the repo's exact Angular/TS).
+/// 2. Managed `<data_dir>/toolchains/node/lsp/node_modules`.
+/// 3. Ancestor `node_modules` derived from `ngserver`'s resolved binary path
+///    (e.g. `<prefix>/node_modules/.bin/ngserver` -> `<prefix>/node_modules`).
+#[allow(clippy::disallowed_methods)]
+pub fn resolve_angular_probe_locations(
+    data_dir: &Path,
+    root: &str,
+    ngserver_cmd: &str,
+    owner_is_root: bool,
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push_dir = |p: PathBuf| {
+        if p.is_dir() {
+            let s = p.to_string_lossy().into_owned();
+            if !out.contains(&s) {
+                out.push(s);
+            }
+        }
+    };
+    if owner_is_root && !root.is_empty() {
+        push_dir(Path::new(root).join("node_modules"));
+    }
+    push_dir(data_dir.join("toolchains/node/lsp/node_modules"));
+    let cmd_path = Path::new(ngserver_cmd);
+    if cmd_path.is_absolute() {
+        for anc in cmd_path.ancestors().skip(1) {
+            if anc.file_name().and_then(|n| n.to_str()) == Some("node_modules") {
+                push_dir(anc.to_path_buf());
+                break;
+            }
+        }
+    }
+    out
+}
+
 fn which_in(executable: &str, extra_dirs: &[PathBuf]) -> Option<String> {
     let exec_path = Path::new(executable);
     if exec_path.is_absolute() {
