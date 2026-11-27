@@ -6,9 +6,9 @@
   import Icon from '../../lib/components/Icon.svelte';
   import { focusAfterRowRemoval, rowListOf } from '../../lib/rowFocus';
   import EmptyState from '../../lib/components/EmptyState.svelte';
-  import LoadState from '../../lib/components/LoadState.svelte';
-  import PaneDivider from '../../lib/components/PaneDivider.svelte';
-  import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
+  import ListDetail from '../../lib/components/side/ListDetail.svelte';
+  import ListPane from '../../lib/components/side/ListPane.svelte';
+  import SideRow from '../../lib/components/side/SideRow.svelte';
   import { plural } from '../../lib/plural';
   import { apiClient } from '../../lib/stores/apiClient.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -24,9 +24,11 @@
   let { initialId = null }: Props = $props();
 
   const canEdit = $derived(ws.myRole !== 'viewer');
-  let listW = $state(loadPaneWidth('api.envListW', LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
   // svelte-ignore state_referenced_locally
   let selectedId = $state<Id | null>(initialId);
+  // Phone: the list is the page until an environment is opened ("‹ Environments").
+  // svelte-ignore state_referenced_locally
+  let phoneOpen = $state(initialId !== null);
   const selected = $derived(
     apiClient.environments.find((e) => e.id === selectedId) ??
       apiClient.environments.find((e) => e.is_active) ??
@@ -88,8 +90,12 @@
   });
 
   async function pick(env: ApiEnvironment): Promise<void> {
-    if (env.id === selected?.id) return;
+    if (env.id === selected?.id) {
+      phoneOpen = true;
+      return;
+    }
     if (!(await approveLeave())) return;
+    phoneOpen = true;
     selectedId = env.id;
     seed(env);
   }
@@ -223,57 +229,50 @@
   const varCount = (env: ApiEnvironment) => Object.keys(env.variables).length + env.secret_keys.length;
 </script>
 
-<div class="envs">
-  <header class="view-head">
-    <div class="vh-text">
-      <h2>Environments</h2>
-      <p>
-        Reusable values such as a base URL or a token. Write <code>{'{{name}}'}</code> in a URL, header, body or auth
-        field and Otto fills in the value from the <strong>active</strong> environment when it sends. Secret values
-        live in the macOS Keychain: they’re never shown again, and only sent to hosts they were used with.
-      </p>
-    </div>
-    {#if canEdit}
-      <button class="btn small" onclick={create}><Icon name="plus" size={12} />New environment</button>
-    {/if}
-  </header>
-
-  {#if apiClient.environments.length === 0 && (apiClient.envLoadError || apiClient.listsPending)}
+<ListDetail
+  module="api"
+  pane="environments"
+  name="Environments"
+  open={phoneOpen}
+  onback={() => (phoneOpen = false)}
+  empty={apiClient.environments.length === 0 && !apiClient.listsPending && !apiClient.envLoadError}
+  legacy={{ w: 'api.envListW' }}
+>
+  {#snippet list()}
     <!-- A failed/in-flight load is not "No environments yet". -->
-    <LoadState
-      what="environments"
-      loading={apiClient.listsPending}
-      error={apiClient.envLoadError}
-      empty
+    <ListPane
+      count={apiClient.environments.length}
+      primary={canEdit ? { icon: 'plus', label: 'New environment', onclick: () => void create(), testid: 'api-new-environment' } : undefined}
+      loading={apiClient.environments.length === 0 && apiClient.listsPending}
+      error={apiClient.environments.length === 0 ? apiClient.envLoadError : null}
       onretry={() => void apiClient.loadAll()}
-    />
-  {:else if apiClient.environments.length === 0}
-    <EmptyState
+    >
+      {#each apiClient.environments as env (env.id)}
+        <SideRow
+          title={env.name}
+          meta="{plural(varCount(env), 'variable')}{env.secret_keys.length ? ` · ${plural(env.secret_keys.length, 'secret')}` : ''}"
+          selected={env.id === selected?.id}
+          testid="api-env-row"
+          onclick={() => void pick(env)}
+        >
+          {#snippet trailing()}{#if env.is_active}<span class="chip ok" title="Used when you send">Active</span>{/if}{/snippet}
+        </SideRow>
+      {/each}
+    </ListPane>
+  {/snippet}
+
+  {#if apiClient.environments.length === 0}
+    {#if !apiClient.listsPending && !apiClient.envLoadError}<EmptyState
+      variant="page"
       icon="globe"
       title="No environments yet"
       body="Create one per place you call, for example Staging and Production, each with its own base_url and api_token."
       actionLabel={canEdit ? 'New environment' : undefined}
       actionIcon="plus"
       onaction={canEdit ? create : undefined}
-    />
+    />{/if}
   {:else}
-    <div class="split">
-      <ul class="env-list" aria-label="Environments" style:--env-list-w="{listW}px">
-        {#each apiClient.environments as env (env.id)}
-          <li class="env-item" class:sel={env.id === selected?.id}>
-            <button class="env-pick" onclick={() => void pick(env)} aria-current={env.id === selected?.id ? 'true' : undefined}>
-              <span class="env-name">{env.name}</span>
-              <span class="env-meta">
-                {plural(varCount(env), 'variable')}{env.secret_keys.length ? ` · ${plural(env.secret_keys.length, 'secret')}` : ''}
-              </span>
-            </button>
-            {#if env.is_active}<span class="chip ok active-chip" title="Used when you send">Active</span>{/if}
-          </li>
-        {/each}
-      </ul>
-      <!-- display:contents slot so the stacked (narrow-container) layout can hide the divider. -->
-      <div class="divider-slot"><PaneDivider bind:width={listW} storageKey="api.envListW" label="Resize the environments list" /></div>
-
+    <div class="envs">
       {#if selected}
         <section class="editor" aria-label="Variables in {selected.name}">
           <div class="ed-head">
@@ -287,6 +286,12 @@
             <button class="icon-btn" onclick={(e) => menu(e, selected)} aria-label="Environment options" title="Environment options"><Icon name="more" size={14} /></button>
             <button class="btn small primary" onclick={save} disabled={!canEdit || !dirty || saving}>{saving ? 'Saving…' : 'Save changes'}</button>
           </div>
+
+          <p class="intro">
+            Reusable values such as a base URL or a token. Write <code>{'{{name}}'}</code> in a URL, header, body or auth
+            field and Otto fills in the value from the <strong>active</strong> environment when it sends. Secret values
+            live in the macOS Keychain: they’re never shown again, and only sent to hosts they were used with.
+          </p>
 
           <div class="var-table">
             <div class="vt-row vt-head">
@@ -329,7 +334,7 @@
       {/if}
     </div>
   {/if}
-</div>
+</ListDetail>
 
 <style>
   .envs {
@@ -340,23 +345,8 @@
     min-height: 0;
     overflow-y: auto;
     flex: 1;
-    container-type: inline-size;
   }
-  .view-head {
-    display: flex;
-    align-items: flex-start;
-    gap: 16px;
-  }
-  .vh-text {
-    flex: 1;
-    min-width: 0;
-  }
-  h2 {
-    margin: 0 0 4px;
-    font-size: var(--fs-l);
-    font-weight: 600;
-  }
-  .view-head p {
+  .intro {
     margin: 0;
     max-width: 760px;
     font-size: var(--fs-s);
@@ -367,87 +357,6 @@
     font-family: var(--font-mono);
     font-size: var(--fs-s);
     color: var(--text);
-  }
-  /* List | divider | editor. The divider stretches to the row's height; the
-     list and editor keep their natural heights. */
-  .split {
-    display: flex;
-    gap: 12px;
-  }
-  .split > .env-list {
-    flex: none;
-    inline-size: var(--env-list-w, 280px);
-    align-self: flex-start;
-  }
-  .split > .editor {
-    flex: 1;
-    min-width: 0;
-    align-self: flex-start;
-  }
-  .divider-slot {
-    display: contents;
-  }
-  @container (max-width: 640px) {
-    .split {
-      flex-direction: column;
-    }
-    .split > .env-list {
-      inline-size: auto;
-      align-self: stretch;
-    }
-    .divider-slot {
-      display: none;
-    }
-  }
-  .env-list {
-    list-style: none;
-    margin: 0;
-    padding: 4px;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    background: var(--surface);
-  }
-  .env-item {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    padding-inline-end: 6px;
-    border-radius: var(--radius-s);
-  }
-  .env-item:hover {
-    background: var(--hover);
-  }
-  .env-item.sel {
-    background: var(--accent-soft);
-  }
-  .env-pick {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 1px;
-    padding: 6px 8px;
-    border: none;
-    background: transparent;
-    color: var(--text);
-    cursor: pointer;
-    text-align: start;
-    border-radius: var(--radius-s);
-  }
-  .env-name {
-    font-size: var(--fs-m);
-    font-weight: 500;
-  }
-  .env-meta {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-  }
-  .active-chip {
-    flex-shrink: 0;
   }
   .editor {
     display: flex;
@@ -509,9 +418,6 @@
   @media (max-width: 640px) {
     .envs {
       padding: 12px 14px 24px;
-    }
-    .view-head {
-      flex-direction: column;
     }
   }
 </style>

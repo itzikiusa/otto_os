@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { scrollBehavior } from '../../lib/motion';
   import { plural } from '../../lib/plural';
   // One automation, edited in the main area: an ordered list of saved requests
   // ("steps"). Each step can CHECK its response (assertions) and SAVE values
@@ -235,8 +236,7 @@
   let reportEl = $state<HTMLElement | null>(null);
   function showReport(): void {
     requestAnimationFrame(() => {
-      const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-      reportEl?.scrollIntoView({ block: 'start', behavior: reduce ? 'auto' : 'smooth' });
+      reportEl?.scrollIntoView({ block: 'start', behavior: scrollBehavior() });
     });
   }
 

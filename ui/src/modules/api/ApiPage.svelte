@@ -10,12 +10,12 @@
   // The left pane only lists things; whatever you EDIT (a request, the
   // environments, an automation) opens in the main area. A brand-new
   // workspace shows an onboarding empty state instead of an empty editor.
-  import { LIST_PANE, loadPaneWidth, paneResizer, RESIZE_TITLE_VERTICAL } from '../../lib/paneResizer';
-  import PaneDivider from '../../lib/components/PaneDivider.svelte';
-  import { onTabKey } from '../../lib/tabKeys';
+  import { paneResizer, RESIZE_TITLE_VERTICAL } from '../../lib/paneResizer';
+  import ListDetail from '../../lib/components/side/ListDetail.svelte';
+  import Tabs from '../../lib/components/Tabs.svelte';
   import { untrack, tick } from 'svelte';
   import { scrollBehavior } from '../../lib/motion';
-  import Icon, { type IconName } from '../../lib/components/Icon.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -46,10 +46,10 @@
 
   type Side = 'collections' | 'automations' | 'history';
   const SIDE_KEY = 'otto_api_side';
-  const SIDES: { id: Side; label: string; icon: IconName }[] = [
-    { id: 'collections', label: 'Collections', icon: 'folder' },
-    { id: 'automations', label: 'Automations', icon: 'zap' },
-    { id: 'history', label: 'History', icon: 'clock' },
+  const SIDES: { id: Side; label: string }[] = [
+    { id: 'collections', label: 'Collections' },
+    { id: 'automations', label: 'Automations' },
+    { id: 'history', label: 'History' },
   ];
   function readSide(): Side {
     try {
@@ -68,8 +68,9 @@
   type View = { kind: 'request' } | { kind: 'environments'; envId: Id | null } | { kind: 'automation'; id: Id };
   let view = $state<View>({ kind: 'request' });
   let builderTab = $state<'params' | 'headers' | 'body' | 'auth' | 'settings' | 'scripts' | 'docs'>('params');
-  // Phone: push navigation between the list and the editor.
-  let phonePane = $state<'list' | 'main'>('main');
+  // Phone: the list is the page until something is opened (pushed, "‹ Collections").
+  // A `#/api/<id>` link opens on the request.
+  let phoneOpen = $state(untrack(() => router.parts[0] === 'api' && !!router.parts[1]));
 
   let automationEditor: { approveLeave: () => Promise<boolean> } | undefined = $state();
   let environmentEditor: { approveLeave: () => Promise<boolean>; create: () => Promise<void> } | undefined = $state();
@@ -82,7 +83,7 @@
     if (view.kind === 'environments' && environmentEditor && !(await environmentEditor.approveLeave())) return false;
     if (generation !== viewTransition) return false;
     view = next;
-    phonePane = 'main';
+    phoneOpen = true;
     return true;
   }
   async function showRequest(): Promise<void> {
@@ -260,13 +261,9 @@
   let importOpen = $state(false);
   let gitOpen = $state(false);
 
-  // ── drag-to-resize: sidebar width + builder height (both persisted) ────────
-  // The sidebar is the shared list pane (PaneDivider + LIST_PANE); it keeps the
-  // old storage key so a width saved before the switch carries over (clamped).
+  // ── drag-to-resize: builder height (persisted) ─────────────────────────────
   // Overlay cursor + one size write per frame + one localStorage write on
   // release (lib/dragCursor.ts) — no per-mousemove persist.
-  const SIDE_W_KEY = 'otto_api_side_width';
-  let sideW = $state(loadPaneWidth(SIDE_W_KEY, LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
   let builderEl: HTMLDivElement | null = $state(null);
   function startBuilderResize(e: MouseEvent): void {
     const startY = e.clientY;
@@ -298,7 +295,7 @@
       { id: 'api.duplicate', title: 'Duplicate API request', group: 'API', shortcut: '⌘D', keywords: 'copy clone', run: () => { apiClient.duplicateDraft(); showRequest(); } },
       { id: 'api.import', title: 'Import into API…', group: 'API', keywords: 'curl postman openapi swagger har', run: () => (importOpen = true) },
       { id: 'api.envs', title: 'Manage API environments', group: 'API', keywords: 'variables base_url staging production secrets', run: () => openEnvironments() },
-      { id: 'api.history', title: 'Show API history', group: 'API', keywords: 'recent sent requests', run: () => { setSide('history'); phonePane = 'list'; } },
+      { id: 'api.history', title: 'Show API history', group: 'API', keywords: 'recent sent requests', run: () => { setSide('history'); phoneOpen = false; } },
     ]);
   });
 
@@ -326,17 +323,26 @@
     if (viewport.isPhone) void tick().then(() => builderEl?.scrollIntoView({ behavior: scrollBehavior(), block: 'start' }));
   }
 
-  const showList = $derived(!viewport.isPhone || phonePane === 'list');
-  const showMain = $derived(!viewport.isPhone || phonePane === 'main');
+  const sideLabel = $derived(SIDES.find((s) => s.id === side)?.label ?? 'Collections');
+  // A phone's list page has no room for the page's buttons: its ⋯ carries them.
+  function phoneMore(): MenuItem[] {
+    return [
+      { label: 'New request', icon: 'plus', hint: '⌘T', action: () => void newRequest() },
+      { label: 'Manage environments…', icon: 'globe', action: () => void openEnvironments() },
+      { label: 'Import…', icon: 'download', action: () => (importOpen = true) },
+      { label: 'Sync with Git…', icon: 'branch', disabled: ws.myRole === 'viewer', action: () => (gitOpen = true) },
+    ];
+  }
 </script>
 
+<!-- The views ARE the pane's header (no room for a + beside them: each view's
+     "New …" is the first row of its ⋯). -->
+{#snippet sideViews()}
+  <Tabs size="s" label="Show" tabs={SIDES} value={side} onchange={setSide} />
+{/snippet}
+
 <div class="api-root">
-  <PageHeader title="API" subtitle="Requests run from Otto’s daemon, not the browser">
-    {#snippet leading()}
-      {#if viewport.isPhone && phonePane === 'main' && !onboarding}
-        <button class="icon-btn" onclick={() => (phonePane = 'list')} aria-label="Show saved requests" title="Show saved requests"><Icon name="chevronLeft" size={16} /></button>
-      {/if}
-    {/snippet}
+  <PageHeader title="API" subtitle="Requests run from Otto’s daemon, not the browser" more={viewport.navDrawer && !phoneOpen && !onboarding ? phoneMore : undefined}>
     {#snippet actions()}
       <button class="btn small env-btn" class:prod-env={activeEnvProd} data-keep onclick={envMenu} aria-haspopup="menu"
         aria-label="Environment: {activeEnvName ?? 'none'}{activeEnvProd ? ' (production)' : ''}" title="Environment: where {'{{variables}}'} get their values">
@@ -378,33 +384,16 @@
            meanwhile, and an untouched empty workspace swaps to onboarding once
            they settle. -->
       <div class="api-page" aria-busy={apiClient.listsPending}>
-        {#if showList}
-          <aside class="api-side" style:width={viewport.isPhone ? null : `${sideW}px`} aria-label="Collections, automations and history">
-            <div class="segmented side-seg" role="tablist" aria-label="Show">
-              {#each SIDES as s (s.id)}
-                <button role="tab" aria-selected={side === s.id} class:active={side === s.id} tabindex={side === s.id ? 0 : -1}
-                  onclick={() => setSide(s.id)} onkeydown={onTabKey} title={s.label}>
-                  <span class="seg-label">{s.label}</span>
-                </button>
-              {/each}
-            </div>
-            <div class="side-body">
-              {#if side === 'collections'}
-                <CollectionsTree onopen={showRequest} />
-              {:else if side === 'automations'}
-                <AutomationsView selectedId={view.kind === 'automation' ? view.id : null} onselect={openAutomation} />
-              {:else}
-                <HistoryList onopen={showRequest} />
-              {/if}
-            </div>
-          </aside>
-
-          {#if !viewport.isPhone}
-            <PaneDivider bind:width={sideW} storageKey={SIDE_W_KEY} label="Resize the sidebar" />
-          {/if}
-        {/if}
-
-        {#if showMain}
+        <ListDetail module="api" name={sideLabel} open={phoneOpen} onback={() => (phoneOpen = false)} legacy={{ w: 'otto_api_side_width' }}>
+          {#snippet list()}
+            {#if side === 'collections'}
+              <CollectionsTree views={sideViews} onopen={showRequest} />
+            {:else if side === 'automations'}
+              <AutomationsView views={sideViews} selectedId={view.kind === 'automation' ? view.id : null} onselect={openAutomation} />
+            {:else}
+              <HistoryList views={sideViews} onopen={showRequest} />
+            {/if}
+          {/snippet}
           <div class="api-main" class:danger-rail={activeEnvProd}>
             <div class="req-tabs">
               <div class="req-tablist scroll-thin">
@@ -468,7 +457,7 @@
               </section>
             {/if}
           </div>
-        {/if}
+        </ListDetail>
       </div>
     {/if}
   </PageBody>
@@ -534,48 +523,6 @@
     flex: 1;
     display: flex;
     min-height: 0;
-  }
-  .api-side {
-    flex-shrink: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    min-height: 0;
-    padding: 12px 10px 10px;
-    background: var(--bg);
-    container-type: inline-size;
-  }
-  /* Three segments sized to their labels, never wrapping; below ~230 px the
-     labels shrink a step (each keeps its tooltip and accessible name). */
-  .side-seg {
-    display: flex;
-    width: 100%;
-    flex-shrink: 0;
-  }
-  .side-seg > button {
-    flex: 1 1 auto;
-    min-width: 0;
-    padding: 0 6px;
-    white-space: nowrap;
-  }
-  .seg-label {
-    display: block;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  @container (max-width: 230px) {
-    .side-seg > button {
-      font-size: var(--fs-xs);
-      padding: 0 4px;
-    }
-  }
-  .side-body {
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
-    overflow-x: hidden;
-    display: flex;
-    flex-direction: column;
   }
   .api-main {
     flex: 1;
@@ -692,21 +639,7 @@
     background: var(--accent-line);
   }
 
-  @media (min-width: 641px) and (max-width: 1024px) {
-    .api-side {
-      max-width: min(35vw, 240px);
-    }
-  }
   @media (max-width: 640px) {
-    .api-page {
-      flex-direction: column;
-    }
-    .api-side {
-      width: 100%;
-      flex: 1;
-      border-inline-end: none;
-      padding: 10px 12px;
-    }
     .builder-pane {
       max-height: none;
       padding: 12px;

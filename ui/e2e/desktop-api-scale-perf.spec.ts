@@ -288,7 +288,7 @@ test('automation editor: 20 steps over 3,000 requests stays under 3k DOM nodes',
     route.request().method() === 'GET' ? route.fulfill({ json: [] }) : route.fallback());
   await page.addInitScript(() => localStorage.setItem('otto_api_side', 'automations'));
   await openPage(page, 'api');
-  await page.locator('.auto-pick', { hasText: 'Big flow' }).click();
+  await page.getByTestId('api-automation-row').filter({ hasText: 'Big flow' }).click();
   await expect(page.getByLabel('Request for step 20')).toBeVisible({ timeout: 30_000 });
   const nodes = await domCount(page, '.auto *');
   expect(nodes, 'automation editor DOM nodes').toBeLessThan(3000);
@@ -334,12 +334,12 @@ test('dragging the API sidebar splitter persists once, on release', async ({ pag
     w.__lsWrites = [];
     const orig = Storage.prototype.setItem;
     Storage.prototype.setItem = function (k: string, v: string) {
-      if (k === 'otto_api_side_width' || k === 'otto_api_builder_h') w.__lsWrites.push(k);
+      if (k === 'otto.pane.api.list.w' || k === 'otto_api_builder_h') w.__lsWrites.push(k);
       return orig.call(this, k, v);
     };
   });
   await openApiEditor(page);
-  const handle = page.getByLabel('Resize the sidebar');
+  const handle = page.getByLabel('Resize Collections');
   const box = await handle.boundingBox();
   expect(box).not.toBeNull();
   const x = box!.x + box!.width / 2;
@@ -351,7 +351,7 @@ test('dragging the API sidebar splitter persists once, on release', async ({ pag
   expect(during, 'localStorage writes while dragging').toBe(0);
   await page.mouse.up();
   const after = await page.evaluate(() => (window as unknown as { __lsWrites: string[] }).__lsWrites);
-  expect(after).toEqual(['otto_api_side_width']);
+  expect(after).toEqual(['otto.pane.api.list.w']);
 });
 
 // perf F4: re-entering the API page within a minute of a successful load
@@ -435,7 +435,7 @@ test('a 500-step run: bounded delta fetches, prompt completion', async ({ page }
   await page.routeWebSocket('**/ws/events*', (socket) => { send = (d) => socket.send(d); });
   await page.addInitScript(() => localStorage.setItem('otto_api_side', 'automations'));
   await openPage(page, 'api');
-  await page.locator('.auto-pick', { hasText: 'Fast flow' }).click();
+  await page.getByTestId('api-automation-row').filter({ hasText: 'Fast flow' }).click();
   await expect.poll(() => !!send).toBe(true);
   await page.getByRole('button', { name: 'Run', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Running…' }).first()).toBeVisible();

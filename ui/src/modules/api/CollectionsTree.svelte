@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import type { Snippet } from 'svelte';
   import { rowMenu } from '../../lib/rowMenu';
   // Saved requests, grouped into collections and nested folders (parent_id).
   // Click a request to open it (an already-open or edited tab is never
@@ -9,8 +9,9 @@
   import { plural } from '../../lib/plural';
   import { toastError } from '../../lib/toastError';
   import EmptyState from '../../lib/components/EmptyState.svelte';
-  import LoadState from '../../lib/components/LoadState.svelte';
   import VirtualList from '../../lib/components/VirtualList.svelte';
+  import ListPane from '../../lib/components/side/ListPane.svelte';
+  import { viewport } from '../../lib/stores/viewport.svelte';
   import MethodTag, { methodWord } from './MethodTag.svelte';
   import { apiClient } from '../../lib/stores/apiClient.svelte';
   import { api } from '../../lib/api/client';
@@ -21,10 +22,12 @@
   import type { ApiCollection, ApiRequestItem as ApiRequest } from '../../lib/api/types';
 
   interface Props {
+    /** The pane's views (Collections | Automations | History), its header. */
+    views?: Snippet;
     /** A request was opened / created (the page shows the editor). */
     onopen?: () => void;
   }
-  let { onopen }: Props = $props();
+  let { views, onopen }: Props = $props();
 
   interface TreeNode {
     col: ApiCollection;
@@ -39,15 +42,8 @@
     | { kind: 'req'; id: string; r: ApiRequest; depth: number }
     | { kind: 'empty'; id: string; col: ApiCollection; depth: number }
     | { kind: 'section'; id: string };
-  let touchRows = $state(false);
-  const ROW_H = $derived(touchRows ? 37 : 29);
-  onMount(() => {
-    const media = window.matchMedia('(pointer: coarse), (max-width: 640px)');
-    const update = () => { touchRows = media.matches; };
-    update();
-    media.addEventListener('change', update);
-    return () => media.removeEventListener('change', update);
-  });
+  // The shared row (30 px, 40 px on touch screens) + a 1 px gap.
+  const ROW_H = $derived(viewport.isMobile ? 41 : 31);
   /** ⌘F text of a tree row — what it shows, in DOM order. */
   function rowFindText(row: Row): string {
     if (row.kind === 'col') return `${row.node.col.name}\n${row.node.count}`;
@@ -291,84 +287,74 @@
   }
 </script>
 
-<div class="tree-wrap" style:--request-row-height={`${ROW_H - 1}px`}>
-  <div class="tree-tools">
-    <label class="search">
-      <Icon name="search" size={12} />
-      <input dir="auto"
-        placeholder="Filter requests…"
-        bind:value={search}
-        aria-label="Search collections and requests"
-        disabled={isEmpty}
-      />
-      {#if search}
-        <button class="icon-btn clear" onclick={() => (search = '')} aria-label="Clear search" title="Clear search"><Icon name="x" size={12} /></button>
-      {/if}
-    </label>
-    {#if canEdit}
-      <button class="icon-btn" title="New collection" aria-label="New collection" onclick={() => newCollection(null)}>
-        <Icon name="folder" size={14} />
-      </button>
+{#snippet searchField()}
+  <label class="input-group">
+    <Icon name="search" size={12} />
+    <input dir="auto" placeholder="Filter requests…" bind:value={search} aria-label="Search collections and requests" />
+    {#if search}
+      <button class="icon-btn clear" onclick={() => (search = '')} aria-label="Clear search" title="Clear search"><Icon name="x" size={12} /></button>
     {/if}
-  </div>
+  </label>
+{/snippet}
 
-  {#if isEmpty && (apiClient.requestsLoadError || apiClient.listsPending)}
-    <LoadState
-      what="saved requests"
-      variant="compact"
-      loading={apiClient.listsPending}
-      error={apiClient.requestsLoadError}
-      empty
-      onretry={() => void apiClient.loadAll()}
-    />
-  {:else if isEmpty}
-    <EmptyState
-      icon="folder"
-      title="No saved requests yet"
-      body="Press ⌘S in a request to save it here. Collections group requests by API or feature."
-    >
-      {#if canEdit}
-        <button class="btn ghost small" onclick={() => newCollection(null)}><Icon name="folder" size={12} />New collection</button>
-      {/if}
-    </EmptyState>
-  {:else if tokens.length > 0 && rows.length === 0}
-    <div class="state no-match">
-      No requests match “{query.trim()}”.
-      <button class="btn ghost small" onclick={() => (search = '')}>Clear search</button>
-    </div>
-  {:else}
-    <VirtualList items={rows} estimateHeight={ROW_H} class="tree" key={(r) => r.id} pinnedIndex={activeIndex} findText={rowFindText}>
-      {#snippet row(item: Row)}
-        {#if item.kind === 'col'}
-          {@render collectionNode(item.node, item.depth, item.open)}
-        {:else if item.kind === 'req'}
-          {@render requestRow(item.r, item.depth)}
-        {:else if item.kind === 'empty'}
-          <div class="vrow">
-            <button class="empty-folder" style:padding-inline-start="{item.depth * 14 + 22}px" onclick={() => newRequestIn(item.col)}>
-              Empty — add a request
-            </button>
-          </div>
-        {:else}
-          <div class="vrow"><div class="section-title ungrouped">Ungrouped</div></div>
+<ListPane
+  {views}
+  menu={canEdit ? () => [{ label: 'New collection…', icon: 'folder', action: () => void newCollection(null) }] : undefined}
+  searchRow={isEmpty ? undefined : searchField}
+  loading={isEmpty && apiClient.listsPending}
+  error={isEmpty ? apiClient.requestsLoadError : null}
+  onretry={() => void apiClient.loadAll()}
+>
+  <div class="tree-wrap" role="tree" aria-label="Collections" style:--request-row-height={`${ROW_H - 1}px`}>
+    {#if isEmpty}
+      <EmptyState
+        icon="folder"
+        title="No saved requests yet"
+        body="Press ⌘S in a request to save it here. Collections group requests by API or feature."
+      >
+        {#if canEdit}
+          <button class="btn ghost small" onclick={() => newCollection(null)}><Icon name="folder" size={12} />New collection</button>
         {/if}
-      {/snippet}
-    </VirtualList>
-  {/if}
-  <!-- Always mounted (A11y-5-15): a live region inserted WITH its text is silent. -->
-  <span class="sr-only" role="status">{tokens.length > 0 ? plural(reqCount, 'matching request') : ''}</span>
-</div>
+      </EmptyState>
+    {:else if tokens.length > 0 && rows.length === 0}
+      <div class="state no-match">
+        No requests match “{query.trim()}”.
+        <button class="btn ghost small" onclick={() => (search = '')}>Clear search</button>
+      </div>
+    {:else}
+      <VirtualList items={rows} estimateHeight={ROW_H} class="tree" key={(r) => r.id} pinnedIndex={activeIndex} findText={rowFindText}>
+        {#snippet row(item: Row)}
+          {#if item.kind === 'col'}
+            {@render collectionNode(item.node, item.depth, item.open)}
+          {:else if item.kind === 'req'}
+            {@render requestRow(item.r, item.depth)}
+          {:else if item.kind === 'empty'}
+            <div class="vrow" role="none">
+              <button class="side-row-main empty-folder" data-side-row style:--side-depth={item.depth + 1} onclick={() => newRequestIn(item.col)}>
+                Empty — add a request
+              </button>
+            </div>
+          {:else}
+            <div class="vrow" role="none"><div class="side-section-head ungrouped"><span class="ssh-title">Ungrouped</span></div></div>
+          {/if}
+        {/snippet}
+      </VirtualList>
+    {/if}
+    <!-- Always mounted (A11y-5-15): a live region inserted WITH its text is silent. -->
+    <span class="sr-only" role="status">{tokens.length > 0 ? plural(reqCount, 'matching request') : ''}</span>
+  </div>
+</ListPane>
 
 {#snippet collectionNode(node: TreeNode, depth: number, isOpen: boolean)}
-  <div class="vrow">
-    <div class="col-head" style:padding-inline-start="{depth * 14 + 2}px">
-      <button use:rowMenu class="col-toggle" onclick={() => toggle(node.col.id)} oncontextmenu={(e) => collectionMenu(e, node.col)} aria-expanded={isOpen}>
+  <div class="vrow" role="none">
+    <div class="side-row col-head" style:--side-depth={depth}>
+      <button use:rowMenu class="side-row-main col-toggle" data-side-row data-side-toggle role="treeitem" aria-level={depth + 1} aria-selected="false" aria-expanded={isOpen} onclick={() => toggle(node.col.id)} oncontextmenu={(e) => collectionMenu(e, node.col)}>
         <Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={12} />
         <Icon name="folder" size={14} />
-        <span class="col-name" title={node.col.name}>{node.col.name}</span>
-        <span class="count" title="{node.count} requests">{node.count}</span>
+        <span class="side-row-title col-name" title={node.col.name}>{node.col.name}</span>
+        <span class="side-row-trailing count" title="{node.count} requests">{node.count}</span>
       </button>
-      <button class="icon-btn row-more" title="Actions for {node.col.name}" aria-label="Actions for {node.col.name}" onclick={(e) => collectionMenu(e, node.col)}>
+      <button class="icon-btn side-row-more" tabindex="-1" title="Actions for {node.col.name}" aria-label="Actions for {node.col.name}" onclick={(e) => collectionMenu(e, node.col)}>
         <Icon name="more" size={14} />
       </button>
     </div>
@@ -376,13 +362,13 @@
 {/snippet}
 
 {#snippet requestRow(r: ApiRequest, depth: number)}
-  <div class="vrow">
-    <div class="req-row" class:active={activeRequestId === r.id} style:padding-inline-start="{depth * 14 + 20}px">
-      <button use:rowMenu class="req-open" onclick={() => openRequest(r)} oncontextmenu={(e) => requestMenu(e, r)} title="{r.method} {r.url}" aria-current={activeRequestId === r.id ? 'true' : undefined}>
+  <div class="vrow" role="none">
+    <div class="side-row req-row" class:selected={activeRequestId === r.id} style:--side-depth={depth + 1}>
+      <button use:rowMenu class="side-row-main req-open" data-side-row role="treeitem" aria-level={depth + 1} aria-selected={activeRequestId === r.id} onclick={() => openRequest(r)} oncontextmenu={(e) => requestMenu(e, r)} title="{r.method} {r.url}">
         <MethodTag method={r.method} fixed />
-        <span class="rname">{r.name}</span>
+        <span class="side-row-title rname">{r.name}</span>
       </button>
-      <button class="icon-btn row-more" title="Actions for {r.name}" aria-label="Actions for {r.name}" onclick={(e) => requestMenu(e, r)}>
+      <button class="icon-btn side-row-more" tabindex="-1" title="Actions for {r.name}" aria-label="Actions for {r.name}" onclick={(e) => requestMenu(e, r)}>
         <Icon name="more" size={14} />
       </button>
     </div>
@@ -393,51 +379,22 @@
   .tree-wrap {
     display: flex;
     flex-direction: column;
+    block-size: 100%;
     min-height: 0;
-    flex: 1;
-    gap: 8px;
-  }
-  .tree-tools {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-  }
-  .search {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    height: 27px;
-    padding-block: 0; padding-inline: 8px 4px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: var(--surface-2);
-    color: var(--text-dim);
-  }
-  .search:focus-within {
-    border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px var(--accent-soft-strong);
-  }
-  .search input {
-    flex: 1;
-    min-width: 0;
-    border: none;
-    background: transparent;
-    color: var(--text);
-    font-size: var(--fs-m);
-    outline: none;
-  }
-  .search input::placeholder {
-    color: var(--text-dim);
   }
   .clear {
-    width: 20px;
-    height: 20px;
+    inline-size: 20px;
+    block-size: 20px;
+  }
+  @media (pointer: coarse) {
+    .clear {
+      inline-size: var(--hit-min);
+      block-size: var(--hit-min);
+    }
   }
   .state {
     font-size: var(--fs-s);
-    padding: 8px 4px;
+    padding: 8px;
   }
   .no-match {
     display: flex;
@@ -446,7 +403,8 @@
     gap: 6px;
     color: var(--text-dim);
   }
-  /* Windowed list: every row is a fixed 29 px slot (28 px + 1 px gap). */
+  /* Windowed list: every row is a fixed slot (the row + 1 px gap), the row's
+     height set here so it always matches the list's estimate. */
   .tree-wrap :global(.tree) {
     flex: 1;
     min-height: 0;
@@ -456,100 +414,29 @@
     padding-bottom: 1px;
     box-sizing: border-box;
   }
+  .vrow .side-row-main {
+    block-size: var(--request-row-height);
+    min-block-size: 0;
+  }
   .ungrouped {
-    display: flex;
     align-items: flex-end;
-    height: 100%;
-    margin: 0;
-    padding-inline-start: 4px;
-    padding-bottom: 4px;
+    block-size: 100%;
+    padding-block-end: 4px;
     box-sizing: border-box;
   }
-  .col-head,
-  .req-row {
-    display: flex;
-    align-items: center;
-    height: var(--request-row-height);
-    padding-inline-end: 2px;
-    border-radius: var(--radius-s);
-  }
-  .col-head:hover,
-  .req-row:hover {
-    background: var(--hover);
-  }
-  .req-row.active {
-    background: var(--accent-soft);
-  }
-  .col-toggle,
-  .req-open {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    height: var(--request-row-height);
-    padding: 0 4px;
-    border: none;
-    background: transparent;
-    color: var(--text);
-    cursor: pointer;
-    text-align: start;
-    font-size: var(--fs-m);
-    border-radius: var(--radius-s);
-  }
-  .col-toggle {
-    color: var(--text-dim);
-  }
   .col-name {
-    color: var(--text);
     font-weight: 500;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
   .count {
     margin-inline-start: auto;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    font-variant-numeric: tabular-nums;
-  }
-  .rname {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .row-more {
-    opacity: 0;
-  }
-  .col-head:hover .row-more,
-  .req-row:hover .row-more,
-  .row-more:focus-visible,
-  .req-row.active .row-more {
-    opacity: 1;
   }
   .empty-folder {
-    width: 100%;
-    height: var(--request-row-height);
-    border: none;
-    background: transparent;
+    inline-size: 100%;
     color: var(--text-dim);
     font-size: var(--fs-s);
-    text-align: start;
-    cursor: pointer;
-    border-radius: var(--radius-s);
   }
   .empty-folder:hover {
     color: var(--accent-text);
     background: var(--hover);
-  }
-  @media (max-width: 1024px) {
-    .row-more {
-      opacity: 1;
-    }
-  }
-  @media (pointer: coarse), (max-width: 640px) {
-    .clear, .row-more { min-width: 36px; min-height: 36px; opacity: 1; }
   }
 </style>

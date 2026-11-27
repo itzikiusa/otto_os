@@ -2,10 +2,11 @@
   // Everything sent from this workspace, newest first: method + path, host,
   // status and when. Opening a row loads its request into a tab (it is NOT
   // re-sent; masked credentials are never sent back — see loadHistoryIntoDraft).
+  import type { Snippet } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import ListPane from '../../lib/components/side/ListPane.svelte';
   import { toastError } from '../../lib/toastError';
   import EmptyState from '../../lib/components/EmptyState.svelte';
-  import LoadState from '../../lib/components/LoadState.svelte';
   import AgentChip from '../../lib/components/AgentChip.svelte';
   import VirtualList from '../../lib/components/VirtualList.svelte';
   import MethodTag, { methodWord } from './MethodTag.svelte';
@@ -15,14 +16,18 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { rel } from '../../lib/stores/now.svelte';
-  import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import type { MenuItem } from '../../lib/contextmenu.svelte';
   import { splitUrl } from '../../lib/api/apiVars';
   import type { ApiHistorySummary } from '../../lib/api/types';
   import { RETENTION_PRESETS, formatBytes, suggestRetention, type RetentionPreset } from './storageGauge';
   import { toasts } from '../../lib/toast.svelte';
 
-  interface Props { onopen?: () => void }
-  let { onopen }: Props = $props();
+  interface Props {
+    /** The pane's views (Collections | Automations | History), its header. */
+    views?: Snippet;
+    onopen?: () => void;
+  }
+  let { views, onopen }: Props = $props();
 
   const canEdit = $derived(ws.myRole !== 'viewer');
   let retentionOpen = $state(false);
@@ -139,12 +144,11 @@
     }
   }
 
-  function menu(e: MouseEvent): void {
-    ctxMenu.show(e, [
+  function menu(): MenuItem[] {
+    return [
       { label: 'Retention…', icon: 'clock', action: () => (retentionOpen = true), disabled: !canEdit },
-      { separator: true },
       { label: 'Clear history…', icon: 'trash', danger: true, disabled: !canEdit || apiClient.history.length === 0, action: () => void clear() },
-    ]);
+    ];
   }
 
   /** ⌘F text of a history row — its cells in DOM order (see the VirtualList). */
@@ -155,17 +159,16 @@
   }
 </script>
 
-<div class="hist-wrap">
-  <div class="tools">
-    <label class="search">
-      <Icon name="search" size={12} />
-      <input dir="auto" placeholder="Filter by URL, method or status…" bind:value={search} aria-label="Search request history" />
-      {#if search}
-        <button class="icon-btn clear" onclick={() => (search = '')} aria-label="Clear search" title="Clear search"><Icon name="x" size={12} /></button>
-      {/if}
-    </label>
-    <button class="icon-btn" onclick={menu} aria-label="History options" title="History options"><Icon name="more" size={14} /></button>
-  </div>
+{#snippet searchField()}
+  <label class="input-group">
+    <Icon name="search" size={12} />
+    <input dir="auto" placeholder="Filter by URL, method or status…" bind:value={search} aria-label="Search request history" />
+    {#if search}
+      <button class="icon-btn clear" onclick={() => (search = '')} aria-label="Clear search" title="Clear search"><Icon name="x" size={12} /></button>
+    {/if}
+  </label>
+{/snippet}
+{#snippet filters()}
   <div class="filters">
     <button
       class="pill-toggle small"
@@ -177,64 +180,70 @@
     >Agent runs only</button>
     <span class="ret" title="History retention (workspace setting)">{retentionText}{#if gauge} · {formatBytes(gauge.history_bytes)}{/if}</span>
   </div>
-  {#if showBanner && gauge}
-    <div class="size-banner">
-      <div class="sb-text">
-        History is using <strong>{formatBytes(gauge.history_bytes + gauge.run_bytes)}</strong>
-        ({gauge.history_rows.toLocaleString()} requests, {gauge.run_rows.toLocaleString()} automation runs). Everything is kept until you set a limit.
-      </div>
-      <div class="sb-actions">
-        {#if canEdit}
-          {#each RETENTION_PRESETS as p (p.label)}
-            <button class="btn small" disabled={applying} onclick={() => void applyPreset(p)}>{p.label}</button>
-          {/each}
-          <button class="btn small ghost" onclick={() => (retentionOpen = true)}>Custom…</button>
-        {/if}
-        <button class="icon-btn sb-dismiss" onclick={dismissBanner} aria-label="Dismiss storage notice" title="Dismiss"><Icon name="x" size={12} /></button>
-      </div>
-    </div>
-  {/if}
+{/snippet}
 
-  {#if apiClient.historyLoadingId}<div class="state"><span class="spinner" style="--spinner-size: 11px" aria-hidden="true"></span> Loading request…</div>{/if}
+<ListPane
+  {views}
+  {menu}
+  searchRow={searchField}
+  filterRow={filters}
+  loading={apiClient.history.length === 0 && !apiClient.historyLoaded && !apiClient.historyLoadError}
+  error={apiClient.history.length === 0 ? apiClient.historyLoadError : null}
+  onretry={() => apiClient.retryHistory()}
+>
+  <div class="hist-wrap">
+    {#if showBanner && gauge}
+      <div class="size-banner">
+        <div class="sb-text">
+          History is using <strong>{formatBytes(gauge.history_bytes + gauge.run_bytes)}</strong>
+          ({gauge.history_rows.toLocaleString()} requests, {gauge.run_rows.toLocaleString()} automation runs). Everything is kept until you set a limit.
+        </div>
+        <div class="sb-actions">
+          {#if canEdit}
+            {#each RETENTION_PRESETS as p (p.label)}
+              <button class="btn small" disabled={applying} onclick={() => void applyPreset(p)}>{p.label}</button>
+            {/each}
+            <button class="btn small ghost" onclick={() => (retentionOpen = true)}>Custom…</button>
+          {/if}
+          <button class="icon-btn sb-dismiss" onclick={dismissBanner} aria-label="Dismiss storage notice" title="Dismiss"><Icon name="x" size={12} /></button>
+        </div>
+      </div>
+    {/if}
 
-  {#if apiClient.history.length === 0 && (apiClient.historyLoadError || !apiClient.historyLoaded)}
-    <LoadState
-      what="history"
-      variant="compact"
-      loading={!apiClient.historyLoaded && !apiClient.historyLoadError}
-      error={apiClient.historyLoadError}
-      empty
-      onretry={() => apiClient.retryHistory()}
-    />
-  {:else if apiClient.history.length === 0}
-    <EmptyState icon="clock" title="Nothing sent yet" body="Every request you send appears here, so you can open it again later." />
-  {:else if filtered.length === 0}
-    <div class="state">
-      {apiClient.historyAgentOnly && !tokens.length ? 'No agent runs yet.' : `No history matches “${search.trim()}”.`}
-    </div>
-  {:else}
-    <!-- findText: the row's text in DOM order (MethodTag's short word, path,
-         host, source chip, status, age), so ⌘F reaches unmounted rows. -->
-    <VirtualList items={filtered} estimateHeight={44} class="hist-vlist" findText={histFindText}>
-      {#snippet row(h: ApiHistorySummary)}
-        {@const src = apiClient.historySource(h)}
-        {@const u = splitUrl(h.url)}
-        <button class="hist-row" data-url={h.url} onclick={() => open(h)} title="{h.method} {h.url}&#10;{new Date(h.executed_at).toLocaleString()}">
-          <span class="l1">
-            <MethodTag method={h.method} fixed />
-            <span class="path mono" dir="ltr">{u.path}</span>
-          </span>
-          <span class="l2">
-            <span class="host" dir="ltr">{u.host || '—'}</span>
-            {#if src?.kind === 'agent'}<AgentChip title="Sent by an agent session" />{/if}
-            <StatusChip status={h.status} small />
-            <span class="when">{rel(h.executed_at)}</span>
-          </span>
-        </button>
-      {/snippet}
-    </VirtualList>
-  {/if}
-</div>
+    {#if apiClient.historyLoadingId}<div class="state"><span class="spinner" style="--spinner-size: 11px" aria-hidden="true"></span> Loading request…</div>{/if}
+
+    {#if apiClient.history.length === 0}
+      <EmptyState icon="clock" title="Nothing sent yet" body="Every request you send appears here, so you can open it again later." />
+    {:else if filtered.length === 0}
+      <div class="state">
+        {apiClient.historyAgentOnly && !tokens.length ? 'No agent runs yet.' : `No history matches “${search.trim()}”.`}
+      </div>
+    {:else}
+      <!-- findText: the row's text in DOM order (MethodTag's short word, path,
+           host, source chip, status, age), so ⌘F reaches unmounted rows. -->
+      <VirtualList items={filtered} estimateHeight={44} class="hist-vlist" findText={histFindText}>
+        {#snippet row(h: ApiHistorySummary)}
+          {@const src = apiClient.historySource(h)}
+          {@const u = splitUrl(h.url)}
+          <div class="side-row two-line">
+            <button class="side-row-main hist-row" data-side-row data-url={h.url} onclick={() => open(h)} title="{h.method} {h.url}&#10;{new Date(h.executed_at).toLocaleString()}">
+              <span class="l1">
+                <MethodTag method={h.method} fixed />
+                <span class="path mono" dir="ltr">{u.path}</span>
+              </span>
+              <span class="l2">
+                <span class="host" dir="ltr">{u.host || '—'}</span>
+                {#if src?.kind === 'agent'}<AgentChip title="Sent by an agent session" />{/if}
+                <StatusChip status={h.status} small />
+                <span class="when">{rel(h.executed_at)}</span>
+              </span>
+            </button>
+          </div>
+        {/snippet}
+      </VirtualList>
+    {/if}
+  </div>
+</ListPane>
 
 {#if retentionOpen}<RetentionDialog onclose={() => (retentionOpen = false)} />{/if}
 
@@ -243,8 +252,6 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
-    margin-block: 4px 6px;
-    margin-inline: 8px;
     padding: 8px 10px;
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
@@ -264,50 +271,16 @@
   .hist-wrap {
     display: flex;
     flex-direction: column;
+    block-size: 100%;
     min-height: 0;
     min-width: 0;
-    flex: 1;
     gap: 8px;
-  }
-  .tools {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-  }
-  .search {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    height: 27px;
-    padding-block: 0; padding-inline: 8px 4px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: var(--surface-2);
-    color: var(--text-dim);
-  }
-  .search:focus-within {
-    border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px var(--accent-soft-strong);
-  }
-  .search input {
-    flex: 1;
-    min-width: 0;
-    border: none;
-    background: transparent;
-    color: var(--text);
-    font-size: var(--fs-m);
-    outline: none;
-  }
-  .search input::placeholder {
-    color: var(--text-dim);
   }
   .clear {
     width: 20px;
     height: 20px;
   }
-  @media (pointer: coarse), (max-width: 640px) {
+  @media (pointer: coarse) {
     .clear {
       width: var(--hit-min);
       height: var(--hit-min);
@@ -340,23 +313,14 @@
     flex: 1;
     min-height: 0;
   }
+  /* Two lines in the shared row's 44 px slot (a fixed height: the list is windowed). */
   .hist-row {
-    display: flex;
     flex-direction: column;
+    align-items: stretch;
     justify-content: center;
     gap: 2px;
-    width: 100%;
-    height: 44px;
-    padding: 0 6px;
-    border: none;
-    background: transparent;
-    color: var(--text);
-    cursor: pointer;
-    text-align: start;
-    border-radius: var(--radius-s);
-  }
-  .hist-row:hover {
-    background: var(--hover);
+    block-size: 44px;
+    min-block-size: 0;
   }
   .l1,
   .l2 {

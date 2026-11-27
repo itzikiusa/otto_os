@@ -15,7 +15,7 @@ for (const revisit of [false, true]) test(`environment pending Save reconciles $
     await openApiEditor(page);
     await page.getByRole('button', {name: /^Environment:/}).click();
     await page.getByRole('menuitem', {name: 'Manage environments…', exact: true}).click();
-    await page.locator('.env-pick').filter({hasText: 'Environment A'}).click();
+    await page.getByTestId('api-env-row').filter({hasText: 'Environment A'}).click();
     const editor = page.getByRole('region', {name: 'Variables in Environment A'});
     const value = editor.getByRole('textbox', {name: 'Value of base_url', exact: true});
     const secretKey = editor.locator('.var-row').filter({has: page.getByLabel('Value of token', {exact: true})}).getByLabel('Variable name', {exact: true});
@@ -32,9 +32,9 @@ for (const revisit of [false, true]) test(`environment pending Save reconciles $
     await editor.getByRole('button', {name: 'Save changes', exact: true}).click();
     await expect.poll(() => writes.length).toBe(1);
     if (revisit) {
-      await page.locator('.env-pick').filter({hasText: 'Environment B'}).click();
+      await page.getByTestId('api-env-row').filter({hasText: 'Environment B'}).click();
       await page.getByRole('dialog').getByRole('button', {name: 'Discard', exact: true}).click();
-      await page.locator('.env-pick').filter({hasText: 'Environment A'}).click();
+      await page.getByTestId('api-env-row').filter({hasText: 'Environment A'}).click();
     } else {
       await value.fill('newer');
       await editor.locator('.var-row').filter({has: page.getByLabel('Value of first_token', {exact: true})}).getByLabel('Variable name', {exact: true}).fill('second_token');

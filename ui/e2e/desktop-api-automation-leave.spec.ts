@@ -20,7 +20,7 @@ test('automation navigation preserves canceled and failed saves, then saves befo
       localStorage.setItem('otto_rail_expanded', '0');
     }, workspaceId);
     await page.goto('/#/api');
-    await page.locator('.auto-pick', { hasText: 'Leave guard flow' }).click();
+    await page.getByTestId('api-automation-row').filter({ hasText: 'Leave guard flow' }).click();
     await page.getByRole('button', { name: 'Add check', exact: true }).click();
     await page.getByLabel('Expected value').fill('201');
     const navigation = page.getByRole('navigation', { name: /^(Navigator|Modules)$/ });
@@ -53,7 +53,7 @@ test('automation navigation preserves canceled and failed saves, then saves befo
     expect(saved.find((row: { id: string }) => row.id === automation.id).steps[0].assertions[0].value).toBe('201');
 
     await navigation.getByRole('button', { name: 'API', exact: true }).click();
-    await page.locator('.auto-pick', { hasText: 'Leave guard flow' }).click();
+    await page.getByTestId('api-automation-row').filter({ hasText: 'Leave guard flow' }).click();
     await page.getByLabel('Expected value').fill('202');
     await home.click();
     await dialog.getByRole('button', { name: 'Discard', exact: true }).click();

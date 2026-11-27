@@ -102,10 +102,15 @@ export async function openApiEditor(page: Page): Promise<void> {
   // only after that, or the onboarding check races the swap.
   const url = page.getByLabel('Request URL', { exact: true });
   const onboarding = page.getByText('Create your first request', { exact: true });
-  await expect(url.or(onboarding).first()).toBeVisible({ timeout: 15_000 });
+  // A phone opens on the list (Collections | Automations | History is the page).
+  const list = page.getByRole('tablist', { name: 'Show' });
+  await expect(url.or(onboarding).or(list).first()).toBeVisible({ timeout: 15_000 });
   await expect(page.locator('.api-page[aria-busy="true"]')).toHaveCount(0, { timeout: 15_000 });
   if (await onboarding.isVisible()) {
     await page.getByRole('button', { name: 'New request', exact: true }).first().click();
+  } else if ((page.viewportSize()?.width ?? 1280) <= 640 && !(await url.isVisible())) {
+    await page.getByRole('button', { name: 'More actions' }).click();
+    await page.getByRole('menuitem', { name: /New request/ }).click();
   }
   await expect(url).toBeVisible();
 }
