@@ -5,7 +5,7 @@
 import { test, expect } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
 import { expectNoHorizontalOverflow } from './helpers';
-import { GOAL_RUN, GOAL_WF, serveGoalRun } from './fixtures/goalRun';
+import { GOAL_RUN, GOAL_WF, MULTI_LOOP_RUN, MULTI_LOOP_WF, serveGoalRun, serveMultiLoopGoalRun } from './fixtures/goalRun';
 
 async function open(page: import('@playwright/test').Page, scheme: 'light' | 'dark', state: Parameters<typeof serveGoalRun>[2]) {
   const { ctx, base } = await apiCtx();
@@ -60,4 +60,27 @@ test('blocked: Resume in the card, a note first, no header primary', async ({ pa
   await expect(page.getByTestId('wf-hold-resume')).toBeVisible();
   await expect(page.getByTestId('wf-hold-note')).toBeVisible();
   await expect(page.getByTestId('wf-run-primary')).toHaveCount(0);
+});
+
+test('two review-and-fix loops with the same criterion id show each meter, trend, blocker, and headline', async ({ page }) => {
+  const { ctx, base } = await apiCtx();
+  const ws = await seedWorkspace(ctx, base);
+  await ctx.dispose();
+  await page.addInitScript((ws) => { localStorage.setItem('otto_workspace', ws); localStorage.setItem('otto_scheme', 'light'); }, ws);
+  await serveMultiLoopGoalRun(page, ws);
+  await page.goto(`/#/workflows/${MULTI_LOOP_WF}/runs/${MULTI_LOOP_RUN}`);
+  await expect(page.getByTestId('wf-run-page')).toHaveAttribute('data-state', 'running');
+  await expect(page.getByTestId('wf-run-page')).toContainText('Round 3 of 5 — UI 72 / 95, server 81 / 95');
+  const rows = page.getByTestId('wf-run-card').getByTestId('wf-goal-criterion');
+  await expect(rows).toHaveCount(2);
+  await expect(rows.nth(0)).toHaveAttribute('data-step-id', 'ui.1');
+  await expect(rows.nth(0).getByTestId('wf-criterion-ratio')).toHaveText('72 / 95');
+  await expect(rows.nth(0).getByTestId('wf-criterion-trend')).toHaveText('35 → 58 → 72');
+  await expect(rows.nth(0).getByTestId('wf-criterion-blocker')).toHaveText('3 must-fix findings left');
+  await expect(rows.nth(0).getByRole('progressbar')).toHaveAttribute('aria-valuenow', '72');
+  await expect(rows.nth(1)).toHaveAttribute('data-step-id', 'server.1');
+  await expect(rows.nth(1).getByTestId('wf-criterion-ratio')).toHaveText('81 / 95');
+  await expect(rows.nth(1).getByTestId('wf-criterion-trend')).toHaveText('60 → 80 → 81');
+  await expect(rows.nth(1).getByTestId('wf-criterion-blocker')).toHaveText('1 must-fix finding left');
+  await expectNoHorizontalOverflow(page);
 });

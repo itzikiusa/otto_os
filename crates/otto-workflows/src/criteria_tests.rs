@@ -134,6 +134,7 @@ fn a_person_is_not_asked_while_automated_criteria_are_unmet() {
         met: false,
         evidence: "verify command failed (exit 1)".into(),
         verified_by: Some("command".into()),
+        progress: None,
     }];
     let d = decide(None, &[c, h], &decided, &[], Some(1));
     assert_eq!(d.park_on, None);
@@ -148,6 +149,7 @@ fn a_command_criterion_is_ground_truth_and_the_checker_cannot_change_it() {
         met,
         evidence,
         verified_by: Some("command".into()),
+        progress: None,
     }];
     let raw = eval(
         Verdict::Achieved,
@@ -166,6 +168,7 @@ fn a_command_criterion_is_ground_truth_and_the_checker_cannot_change_it() {
         met,
         evidence,
         verified_by: None,
+        progress: None,
     }];
     let raw = eval(
         Verdict::Continue,
@@ -331,6 +334,7 @@ fn the_evaluator_prompt_lists_agent_criteria_and_marks_decided_ones() {
         met: true,
         evidence: with_output("verify command exited 0", "ok"),
         verified_by: None,
+        progress: None,
     }];
     let p = evaluator_prompt(
         &[a, crit("c", VerifyKind::Command)],
@@ -365,12 +369,14 @@ fn check_output_renders_a_table_and_caps_the_feedback() {
             met: true,
             evidence: "seen | ok".into(),
             verified_by: Some("agent".into()),
+            progress: None,
         },
         Assessed {
             id: "c".into(),
             met: false,
             evidence: with_output("verify command failed (exit 2)", "boom"),
             verified_by: Some("command".into()),
+            progress: None,
         },
     ];
     let out = CheckOutput::new(&criteria, &e, ("sig".into(), 1), None);

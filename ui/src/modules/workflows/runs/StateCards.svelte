@@ -43,6 +43,7 @@
   import { announceShown } from '../../../lib/announce.svelte';
   import { confirmer } from '../../../lib/confirm.svelte';
   import { extendProblem, extendProposal } from '../goal/goalExtend';
+  import type { ScopedCriterion } from '../goal/goalCheck';
   import { answerRequest, resumeRun, steerRun, verifyCriterion } from './runActions';
   import { isHttpUrl } from '../../../lib/browserDeepLink';
   import { clockTime, deliverablesInOrder, deliverableWord, errorParts } from './runWords';
@@ -55,7 +56,7 @@
     nodeName: (id: string) => string;
     /** Open a step in the pane, on a tab. */
     onopenstep: (nodeId: string, tab?: string) => void;
-    criteria?: readonly Criterion[];
+    criteria?: readonly (Criterion | ScopedCriterion)[];
   }
   let { run, runState, sync, nodeName, onopenstep, criteria = [] }: Props = $props();
 

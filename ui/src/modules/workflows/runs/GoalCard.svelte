@@ -8,13 +8,22 @@
   import { elapsed } from '../../../lib/statusWords';
   import type { Criterion, GoalProgress, WorkflowCheckpoint, WorkflowRun } from '../../../lib/api/types';
   import CriteriaTable from '../goal/CriteriaTable.svelte';
-  import { activeMs, criterionRows, isCheckOutput, latestCheck, metCount, newestCheckpoint, readsCheckpoints } from '../goal/goalCheck';
+  import {
+    activeMs,
+    checksByStep,
+    criterionRows,
+    isCheckOutput,
+    metCount,
+    newestCheckpointsByStep,
+    readsCheckpoints,
+    type ScopedCriterion,
+  } from '../goal/goalCheck';
 
   interface Props {
     goal: GoalProgress;
     run: WorkflowRun;
-    /** The check step's criteria (from the run's graph). */
-    criteria?: readonly Criterion[];
+    /** The check step(s)' criteria (from the run's graph). */
+    criteria?: readonly (Criterion | ScopedCriterion)[];
   }
   let { goal, run, criteria = [] }: Props = $props();
 
@@ -24,7 +33,7 @@
   $effect(() => {
     if (!readsCheckpoints(run, untrack(() => fetched !== null))) return;
     const id = run.id;
-    void [goal.iteration, goal.criteria_met, goal.awaiting?.length, run.status];
+    void [goal.iteration, goal.criteria_met, goal.awaiting?.length, goal.criteria?.length, run.status];
     let alive = true;
     (async () => {
       const all: WorkflowCheckpoint[] = [];
@@ -34,8 +43,14 @@
         all.push(...page.items);
         cursor = page.next_cursor ?? undefined;
       } while (cursor && alive);
-      const cp = newestCheckpoint(all);
-      if (cp && !isCheckOutput(cp.output)) all[all.indexOf(cp)] = (await workflowCheckpointDetail(id, cp.node_id)).body;
+      // Fetch full output for each check step's newest checkpoint when missing.
+      for (const cp of newestCheckpointsByStep(all).values()) {
+        if (!alive) break;
+        if (!isCheckOutput(cp.output)) {
+          const idx = all.indexOf(cp);
+          if (idx >= 0) all[idx] = (await workflowCheckpointDetail(id, cp.node_id)).body;
+        }
+      }
       if (alive) fetched = all;
     })().catch(() => {});
     return () => {
@@ -43,8 +58,9 @@
     };
   });
 
-  const check = $derived(latestCheck(run.nodes, fetched ?? run.checkpoints));
-  const rows = $derived(criterionRows(criteria, check, goal.awaiting ?? []));
+  const checkpoints = $derived(fetched ?? run.checkpoints);
+  const checks = $derived(checksByStep(run.nodes, checkpoints, criteria));
+  const rows = $derived(criterionRows(criteria, checks, goal.awaiting ?? [], goal, checkpoints));
   const count = $derived(metCount(rows, goal));
   const settled = $derived(run.status !== 'pending' && run.status !== 'running');
   const kept = $derived.by(() => {

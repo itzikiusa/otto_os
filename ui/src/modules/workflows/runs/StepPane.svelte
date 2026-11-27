@@ -20,7 +20,7 @@
   import RunFinalOutput from '../RunFinalOutput.svelte';
   import type { RunSync } from '../runSync.svelte';
   import CriteriaTable from '../goal/CriteriaTable.svelte';
-  import { criterionRows, latestCheck } from '../goal/goalCheck';
+  import { criterionRows, latestCheck, type ScopedCriterion } from '../goal/goalCheck';
   import GoalCard from './GoalCard.svelte';
   import { cardKind } from './StateCards.svelte';
   import StepConversation from './StepConversation.svelte';
@@ -46,7 +46,7 @@
     now: number;
     /** A tab a card asked for ("conversation", "preview"). */
     tab?: string | null;
-    criteria?: readonly Criterion[];
+    criteria?: readonly (Criterion | ScopedCriterion)[];
     /** The step whose failure the run's card beside the pane already shows. */
     cardNode?: string | null;
     /** The pane's own Maximize (the run column folds behind "Run"). */
@@ -294,7 +294,8 @@
       {/if}
     {:else if tab === 'criteria'}
       {#if step?.kind === 'check'}
-        <CriteriaTable rows={criterionRows(criteria, latestCheck(body ? [body] : []), node?.attention?.criterion_id ? [node.attention.criterion_id] : [])} />
+        {@const stepCriteria = criteria.filter((c) => 'step_id' in c && c.step_id === step.id)}
+        <CriteriaTable rows={criterionRows(stepCriteria.length ? stepCriteria : criteria, latestCheck(body ? [body] : []), node?.attention?.criterion_id ? [node.attention.criterion_id] : [])} />
       {:else if run.overview?.goal}<GoalCard goal={run.overview.goal} {run} {criteria} />{/if}
     {:else if tab === 'input'}
       {#if attachments.length}

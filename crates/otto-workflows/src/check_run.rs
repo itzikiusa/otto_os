@@ -7,12 +7,13 @@
 //! `nodes/check.rs` only runs the agent turns and waits for a person.
 
 use crate::criteria::{self, Assessed, Evaluation};
+use crate::goal_progress::format_num;
 use crate::script_run::{ScriptHost, ScriptRun};
 use otto_automation::verify_command::{self, End, Spec};
 use otto_core::agent_runtime::{Attention, AttentionKind};
-use otto_core::workflows::{Criterion, HumanEntry, VerifyKind};
-use serde_json::Value;
-use std::collections::HashMap;
+use otto_core::workflows::{Criterion, CriterionProgress, HumanEntry, VerifyKind};
+use serde_json::{json, Value};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -69,14 +70,14 @@ pub async fn decide_commands_and_rules(
 ) -> Result<Vec<Assessed>, String> {
     let mut out = vec![];
     for c in criteria {
-        let (met, evidence, by) = match c.verify {
+        let (met, evidence, progress, by) = match c.verify {
             VerifyKind::Command => {
-                let (met, evidence) = run_command(host, at, c).await?;
-                (met, evidence, "command")
+                let (met, evidence, progress) = run_command(host, at, c).await?;
+                (met, evidence, progress, "command")
             }
             VerifyKind::Expr => {
-                let (met, evidence) = rule(c, ictx);
-                (met, evidence, "rule")
+                let (met, evidence, progress) = rule(c, ictx);
+                (met, evidence, progress, "rule")
             }
             _ => continue,
         };
@@ -85,6 +86,7 @@ pub async fn decide_commands_and_rules(
             met,
             evidence,
             verified_by: Some(by.into()),
+            progress,
         });
     }
     Ok(out)
@@ -94,10 +96,10 @@ async fn run_command(
     host: &dyn ScriptHost,
     at: &ScriptRun<'_>,
     c: &Criterion,
-) -> Result<(bool, String), String> {
+) -> Result<(bool, String, Option<CriterionProgress>), String> {
     let command = c.command.as_deref().unwrap_or("").trim();
     if command.is_empty() {
-        return Ok((false, format!("{}: no command to run", c.id)));
+        return Ok((false, format!("{}: no command to run", c.id), None));
     }
     let mut vars = vec![
         ("OTTO_RUN_ID".to_string(), at.run_id.to_string()),
@@ -127,35 +129,277 @@ async fn run_command(
     // Cancel drops this future, which kills the process group.
     let done = Box::pin(verify_command::execute(&spec, std::future::pending())).await;
     match done.end {
-        End::Exited(code) => Ok(criteria::command_evidence(code, &done.output)),
-        End::TimedOut => Ok((
-            false,
-            criteria::with_output(
-                &format!("verify command timed out after {timeout} s"),
-                &done.output,
-            ),
-        )),
+        End::Exited(code) => {
+            let (met, ev) = criteria::command_evidence(code, &done.output);
+            let prog = criteria::command_progress(code, &done.output);
+            Ok((met, ev, (!prog.is_empty()).then_some(prog)))
+        }
+        End::TimedOut => {
+            let mut values = BTreeMap::new();
+            values.insert("timed_out".into(), json!(true));
+            if let Some(line) = criteria::last_meaningful_line(&done.output) {
+                values.insert("last_line".into(), json!(line));
+            }
+            let prog = CriterionProgress {
+                label: Some(format!("timed out after {timeout} s")),
+                values,
+                ..CriterionProgress::default()
+            };
+            Ok((
+                false,
+                criteria::with_output(
+                    &format!("verify command timed out after {timeout} s"),
+                    &done.output,
+                ),
+                Some(prog),
+            ))
+        }
         End::Canceled => Err(format!("{}: canceled", c.id)),
         End::Failed(m) => Err(format!("{}: could not run the command: {m}", c.id)),
     }
 }
 
-/// A rule criterion: `expr` over the iteration context, with the brief of
-/// a step it names (`steps.review.passed is false — review 72/100 …`).
-fn rule(c: &Criterion, ictx: &Value) -> (bool, String) {
+/// A rule criterion: `expr` over the iteration context, recording the
+/// inspected identifiers and values — and when it reads a review step's
+/// output, its score, threshold, must-fix and should-fix counts.
+pub(crate) fn rule(c: &Criterion, ictx: &Value) -> (bool, String, Option<CriterionProgress>) {
     let expr = c.expr.as_deref().unwrap_or("").trim();
-    let met = otto_core::expr::eval_bool(expr, ictx);
-    let mut evidence = format!("{expr} is {met}");
-    if let Some(steps) = ictx.get("steps").and_then(Value::as_object) {
-        let named = steps
-            .iter()
-            .find(|(name, _)| expr.contains(&format!("steps.{name}")));
-        if let Some(brief) = named.and_then(|(_, out)| crate::step_util::brief_summary(out)) {
-            evidence.push_str(" — ");
-            evidence.push_str(&crate::step_util::truncate_sentences(&brief, 300));
+    let insp = otto_core::expr::inspect_bool(expr, ictx);
+    let met = insp.met;
+    let mut values: BTreeMap<String, Value> = BTreeMap::new();
+    for (path, val) in &insp.paths {
+        values.insert(path.clone(), compact_value(val));
+    }
+
+    let referenced_step = find_referenced_step(&insp.paths, expr, ictx);
+    let mut value = insp.numeric_target.map(|(v, _)| v);
+    let mut target = insp.numeric_target.map(|(_, t)| t);
+    let mut label: Option<String> = None;
+    let mut review_evidence_note: Option<String> = None;
+
+    if let Some(step_out) = referenced_step {
+        if let Some(rev) = extract_review_progress(step_out, met, value, target) {
+            for (k, v) in rev.values {
+                values.insert(k, v);
+            }
+            value = value.or(rev.value);
+            target = target.or(rev.target);
+            label = rev.label;
+            review_evidence_note = rev.evidence_note;
         }
     }
-    (met, evidence)
+
+    if !met && label.is_none() {
+        label = fallback_rule_label(&insp.paths, value, target);
+    }
+
+    let mut evidence = format!("{expr} is {met}");
+    if let Some(brief) = referenced_step.and_then(crate::step_util::brief_summary) {
+        evidence.push_str(" — ");
+        evidence.push_str(&crate::step_util::truncate_sentences(&brief, 300));
+    } else if let Some(note) = review_evidence_note {
+        evidence.push_str(" — ");
+        evidence.push_str(&note);
+    }
+
+    let progress = CriterionProgress {
+        value,
+        target,
+        unit: None,
+        label,
+        values,
+    };
+    (met, evidence, (!progress.is_empty()).then_some(progress))
+}
+
+struct ReviewExtracted {
+    value: Option<f64>,
+    target: Option<f64>,
+    label: Option<String>,
+    evidence_note: Option<String>,
+    values: Vec<(String, Value)>,
+}
+
+fn find_referenced_step<'a>(
+    paths: &[(String, Value)],
+    expr: &str,
+    ictx: &'a Value,
+) -> Option<&'a Value> {
+    if let Some(steps) = ictx.get("steps").and_then(Value::as_object) {
+        for (p, _) in paths {
+            if let Some(rest) = p.strip_prefix("steps.") {
+                let name = rest.split(['.', '[']).next().unwrap_or("");
+                if let Some(out) = steps.get(name) {
+                    return Some(out);
+                }
+            }
+        }
+        if let Some((_, out)) = steps
+            .iter()
+            .find(|(name, _)| expr.contains(&format!("steps.{name}")))
+        {
+            return Some(out);
+        }
+    }
+    if paths
+        .iter()
+        .any(|(p, _)| p == "last" || p.starts_with("last."))
+    {
+        return ictx.get("last").filter(|v| v.is_object());
+    }
+    None
+}
+
+fn extract_review_progress(
+    out: &Value,
+    met: bool,
+    expr_value: Option<f64>,
+    expr_target: Option<f64>,
+) -> Option<ReviewExtracted> {
+    let looks_like_review = out.get("threshold").and_then(Value::as_f64).is_some()
+        || (out.get("score").is_some()
+            && (out.get("severity").is_some()
+                || out.get("blocking").is_some()
+                || out.get("must_fix").is_some()
+                || out.get("outcome").is_some()));
+    if !looks_like_review {
+        return None;
+    }
+
+    let score = out
+        .get("score")
+        .and_then(Value::as_f64)
+        .filter(|n| n.is_finite());
+    let threshold = out
+        .get("threshold")
+        .and_then(Value::as_f64)
+        .filter(|n| n.is_finite());
+    let must_fix = out
+        .pointer("/severity/bug")
+        .and_then(Value::as_u64)
+        .or_else(|| out.get("must_fix").and_then(Value::as_u64))
+        .or_else(|| out.get("blocking").and_then(Value::as_u64));
+    let should_fix = out
+        .pointer("/severity/warn")
+        .and_then(Value::as_u64)
+        .or_else(|| out.get("should_fix").and_then(Value::as_u64))
+        .or_else(|| out.get("advisory").and_then(Value::as_u64));
+
+    let mut values = Vec::new();
+    if let Some(s) = score {
+        values.push(("score".into(), json_number(s)));
+    }
+    if let Some(t) = threshold {
+        values.push(("threshold".into(), json_number(t)));
+    }
+    if let Some(m) = must_fix {
+        values.push(("must_fix".into(), json!(m)));
+    }
+    if let Some(sf) = should_fix {
+        values.push(("should_fix".into(), json!(sf)));
+    }
+
+    let val = expr_value.or(score);
+    let tgt = expr_target.or(threshold);
+
+    let label = if met {
+        None
+    } else if out.get("outcome").and_then(Value::as_str) == Some("incomplete")
+        || out.get("complete").and_then(Value::as_bool) == Some(false)
+    {
+        Some("review incomplete".into())
+    } else if out.get("no_changes").and_then(Value::as_bool) == Some(true) {
+        Some("empty diff — nothing reviewed".into())
+    } else {
+        match (must_fix.unwrap_or(0), should_fix.unwrap_or(0)) {
+            (m, s) if m > 0 && s > 0 => Some(format!(
+                "{m} must-fix, {s} should-fix {} left",
+                if m + s == 1 { "finding" } else { "findings" }
+            )),
+            (m, 0) if m > 0 => Some(format!(
+                "{m} must-fix {} left",
+                if m == 1 { "finding" } else { "findings" }
+            )),
+            (0, s) if s > 0 => Some(format!(
+                "{s} should-fix {} left",
+                if s == 1 { "finding" } else { "findings" }
+            )),
+            _ => match (val, tgt) {
+                (Some(v), Some(t)) if v < t => Some(format!(
+                    "score {} below target {}",
+                    format_num(v),
+                    format_num(t)
+                )),
+                _ => out
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| otto_core::agent_runtime::clip(s, 120)),
+            },
+        }
+    };
+
+    let evidence_note = match (val, tgt, label.as_deref()) {
+        (Some(v), Some(t), Some(l)) => Some(format!("{} / {}, {l}", format_num(v), format_num(t))),
+        (Some(v), Some(t), None) => Some(format!("{} / {}", format_num(v), format_num(t))),
+        (_, _, Some(l)) => Some(l.to_string()),
+        _ => None,
+    };
+
+    Some(ReviewExtracted {
+        value: val,
+        target: tgt,
+        label,
+        evidence_note,
+        values,
+    })
+}
+
+fn fallback_rule_label(
+    paths: &[(String, Value)],
+    value: Option<f64>,
+    target: Option<f64>,
+) -> Option<String> {
+    if let (Some(v), Some(t), Some((p, _))) = (value, target, paths.first()) {
+        return Some(format!(
+            "{p} = {} (target {})",
+            format_num(v),
+            format_num(t)
+        ));
+    }
+    let items: Vec<String> = paths
+        .iter()
+        .take(2)
+        .map(|(p, v)| format!("{p} = {}", format_scalar(v)))
+        .collect();
+    (!items.is_empty()).then(|| items.join(", "))
+}
+
+fn compact_value(v: &Value) -> Value {
+    match v {
+        Value::Bool(_) | Value::Number(_) | Value::Null => v.clone(),
+        Value::String(s) => Value::String(otto_core::agent_runtime::clip(s, 120)),
+        other => Value::String(otto_core::agent_runtime::clip(&other.to_string(), 120)),
+    }
+}
+
+fn format_scalar(v: &Value) -> String {
+    match v {
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::Null => "null".into(),
+        Value::String(s) => otto_core::agent_runtime::clip(s, 60),
+        other => otto_core::agent_runtime::clip(&other.to_string(), 60),
+    }
+}
+
+fn json_number(n: f64) -> Value {
+    if (n - n.round()).abs() < 1e-9 {
+        json!(n.round() as i64)
+    } else {
+        json!(n)
+    }
 }
 
 /// The evaluator's answer: its handoff file, else its reply.

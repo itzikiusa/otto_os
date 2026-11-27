@@ -185,79 +185,11 @@ pub fn run_overview(
             .or_else(|| otto_state::workflow_run_search::subject_from_input(&run.input)),
         elapsed_ms: millis(run.started_at, end),
         typical_ms,
-        goal: goal_progress(run, graph, prev.and_then(|o| o.goal.as_ref())),
+        goal: crate::goal_progress::compute(run, graph, prev.and_then(|o| o.goal.as_ref())),
         hold,
     };
     overview.headline = clip(&headline(run, graph, &overview), MAX_HEADLINE);
     overview
-}
-
-/// A goal run's progress (goal.md §2.7): the graph's loop around a `check`,
-/// read from what the loop left on its node (its output once it stopped,
-/// the person it waits for while it runs).
-fn goal_progress(
-    run: &WorkflowRun,
-    graph: &WorkflowGraph,
-    prev: Option<&otto_core::workflows::GoalProgress>,
-) -> Option<otto_core::workflows::GoalProgress> {
-    let lp = graph.nodes.iter().find(|n| {
-        n.kind == "loop"
-            && n.params["steps"]
-                .as_array()
-                .is_some_and(|s| s.iter().any(|s| s["kind"] == "check"))
-    })?;
-    let st = run.nodes.iter().find(|n| n.node_id == lp.id)?;
-    let awaiting = st
-        .attention
-        .iter()
-        .filter_map(|a| a.criterion_id.clone())
-        .collect();
-    let Some(out) = st.output.as_ref() else {
-        // While the loop runs: the iteration it is in and the newest check's
-        // counts — the check's "m of t criteria met" line as the loop relays
-        // it ("  [2/Check criteria] 2 of 3 criteria met"). When the capped
-        // log no longer has that line the counts are carried from before;
-        // before the first check, none of the check step's criteria is met.
-        let mut g = prev.cloned().unwrap_or_default();
-        if let Some((i, n)) = loop_iteration(st) {
-            (g.iteration, g.max_iterations) = (i, n);
-        }
-        let checked: Option<(u32, u32)> = st.logs.iter().rev().find_map(|l| {
-            let (_, said) = l.strip_prefix("  [")?.split_once("] ")?;
-            let (met, total) = said.strip_suffix(" criteria met")?.split_once(" of ")?;
-            Some((met.parse().ok()?, total.parse().ok()?))
-        });
-        if let Some(counts) = checked {
-            (g.criteria_met, g.criteria_total) = counts;
-        } else if g.criteria_total == 0 {
-            g.criteria_total = lp.params["steps"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter(|s| s["kind"] == "check")
-                .filter_map(|s| s["params"]["criteria"].as_array())
-                .map(Vec::len)
-                .sum::<usize>() as u32;
-        }
-        g.awaiting = awaiting;
-        return (g.max_iterations > 0).then_some(g);
-    };
-    let num = |k: &str| out.get(k).and_then(Value::as_u64);
-    let last_check = out["history"]
-        .as_array()
-        .and_then(|h| h.last())
-        .and_then(|i| i["steps"].as_object())
-        .and_then(|s| s.values().find(|v| v.get("all_met").is_some()));
-    let count = |k: &str| last_check.and_then(|c| c[k].as_u64()).unwrap_or(0) as u32;
-    Some(otto_core::workflows::GoalProgress {
-        iteration: num("iterations").unwrap_or(0) as u32,
-        max_iterations: num("max_iterations").unwrap_or(0) as u32,
-        criteria_met: count("met"),
-        criteria_total: count("total"),
-        active_ms: num("active_ms").unwrap_or(0),
-        max_active_ms: num("max_active_s").map(|s| s * 1000),
-        awaiting,
-    })
 }
 
 /// The one sentence (engine.md §2.3, ux.md §2.3, goal.md §2.3 — first match).
@@ -331,17 +263,25 @@ fn headline(run: &WorkflowRun, graph: &WorkflowGraph, o: &RunOverview) -> String
         RunState::Running => match running.as_slice() {
             [] => "Working".into(),
             [n] => match o.goal.as_ref().filter(|g| g.iteration > 0) {
-                // A goal's loop: which iteration it is in and how far the
-                // goal is (goal.md §3.5), the card's own two numbers.
+                // A goal's loop: which round/iteration it is in and how close
+                // the goal is (goal.md §3.5), the card's own numbers.
                 Some(g) if step_kind(graph, &n.node_id) == "loop" && g.criteria_total > 0 => {
-                    format!(
-                        "Iteration {} of {} — {} of {} criteria met",
-                        g.iteration, g.max_iterations, g.criteria_met, g.criteria_total
-                    )
+                    crate::goal_progress::headline_running(g)
                 }
                 _ => format!("{} — {}", name(&n.node_id), activity(graph, n)),
             },
             several => {
+                // Parallel goal loops (e.g. UI + server review-and-fix): show
+                // the shared goal headline when every running step is a loop.
+                if let Some(g) = o.goal.as_ref().filter(|g| {
+                    g.iteration > 0
+                        && g.criteria_total > 0
+                        && several
+                            .iter()
+                            .all(|n| step_kind(graph, &n.node_id) == "loop")
+                }) {
+                    return crate::goal_progress::headline_running(g);
+                }
                 let names: Vec<String> = several.iter().take(3).map(|n| name(&n.node_id)).collect();
                 let more = if several.len() > 3 { " …" } else { "" };
                 format!(
@@ -383,7 +323,15 @@ fn succeeded(run: &WorkflowRun, graph: &WorkflowGraph, o: &RunOverview) -> Strin
         .as_ref()
         .filter(|g| g.criteria_total > 0 && g.criteria_met == g.criteria_total)
     {
+        let parts = crate::goal_progress::numeric_parts(g);
         let s = if g.iteration == 1 { "" } else { "s" };
+        if !parts.is_empty() {
+            return format!(
+                "Goal reached — {} in {} round{s}",
+                parts.join(", "),
+                g.iteration
+            );
+        }
         return format!(
             "Goal reached — {} of {} criteria met in {} iteration{s}",
             g.criteria_met, g.criteria_total, g.iteration

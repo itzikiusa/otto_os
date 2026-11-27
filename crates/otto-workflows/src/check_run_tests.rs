@@ -139,3 +139,85 @@ async fn a_person_records_only_the_criterion_the_check_waits_for() {
     );
     drop(guard);
 }
+
+#[tokio::test]
+async fn rule_over_review_and_command_record_structured_progress() {
+    let dir = tempfile::tempdir().unwrap();
+    let files = RunContextFiles::create(dir.path(), "run-prog");
+    let cwd = dir.path().to_str().unwrap().to_string();
+    let at = ScriptRun {
+        files: &files,
+        run_id: "run-prog",
+        run_cwd: &cwd,
+        step_base: "step2-check-iter3",
+    };
+    let criteria = vec![
+        crit(
+            "review-passes",
+            "expr",
+            json!({"expr": "steps.review.passed == true"}),
+        ),
+        crit(
+            "coverage",
+            "expr",
+            json!({"expr": "steps.bench.coverage >= 80"}),
+        ),
+        crit(
+            "tests",
+            "command",
+            json!({"command": "printf 'running tests\\n---\\nFAIL: TestCart\\n\\n' && exit 1"}),
+        ),
+    ];
+    let ictx = json!({
+        "iteration": 3,
+        "steps": {
+            "review": {
+                "passed": false,
+                "score": 72,
+                "threshold": 95,
+                "blocking": 3,
+                "advisory": 2,
+                "severity": {"bug": 3, "warn": 2, "info": 1},
+                "complete": true,
+                "outcome": "failed",
+                "reason": "3 must-fix finding(s) remain open"
+            },
+            "bench": {
+                "coverage": 64
+            }
+        }
+    });
+    let d = decide_commands_and_rules(&Host, &at, &criteria, &ictx)
+        .await
+        .unwrap();
+    assert_eq!(d.len(), 3);
+
+    // 1. Rule over a review step captures score, threshold, must-fix, should-fix, and blocker label.
+    let rp = d[0].progress.as_ref().expect("review progress");
+    assert_eq!((rp.value, rp.target), (Some(72.0), Some(95.0)));
+    assert_eq!(
+        rp.label.as_deref(),
+        Some("3 must-fix, 2 should-fix findings left")
+    );
+    assert_eq!(rp.values.get("steps.review.passed"), Some(&json!(false)));
+    assert_eq!(rp.values.get("score"), Some(&json!(72)));
+    assert_eq!(rp.values.get("threshold"), Some(&json!(95)));
+    assert_eq!(rp.values.get("must_fix"), Some(&json!(3)));
+    assert_eq!(rp.values.get("should_fix"), Some(&json!(2)));
+    assert!(
+        d[0].evidence.contains("72 / 95"),
+        "evidence carries score/target: {}",
+        d[0].evidence
+    );
+
+    // 2. Generic numeric rule captures value and target without review-specific fields.
+    let bp = d[1].progress.as_ref().expect("bench progress");
+    assert_eq!((bp.value, bp.target), (Some(64.0), Some(80.0)));
+    assert_eq!(bp.values.get("steps.bench.coverage"), Some(&json!(64)));
+
+    // 3. Command criterion captures exit code and last meaningful line (skipping blank/decor lines).
+    let cp = d[2].progress.as_ref().expect("command progress");
+    assert_eq!(cp.values.get("exit_code"), Some(&json!(1)));
+    assert_eq!(cp.values.get("last_line"), Some(&json!("FAIL: TestCart")));
+    assert_eq!(cp.label.as_deref(), Some("exit 1 — FAIL: TestCart"));
+}
