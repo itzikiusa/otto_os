@@ -15,7 +15,11 @@ pub fn export(scan: &ScanDetail, roots: &[PathBuf]) -> Value {
         let root = roots.iter().position(|root| root == Path::new(&finding.root))?;
         let uri = finding.path.split('/').map(|part| utf8_percent_encode(part, NON_ALPHANUMERIC).to_string())
             .collect::<Vec<_>>().join("/");
-        let artifact = json!({"uri": uri, "uriBaseId": format!("ROOT_{root}")});
+        let artifact = if finding.check == Check::Dast {
+            json!({"uri": finding.path})
+        } else {
+            json!({"uri": uri, "uriBaseId": format!("ROOT_{root}")})
+        };
         let mut physical = json!({"artifactLocation": artifact});
         if let Some(line) = finding.line {
             physical["region"] = json!({"startLine": line});
@@ -101,19 +105,22 @@ fn import_finding(item: &Value, roots: &[PathBuf]) -> Option<Finding> {
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(0);
     let root = roots.get(base)?;
-    let uri = percent_decode_str(artifact["uri"].as_str()?)
-        .decode_utf8()
-        .ok()?;
-    if Path::new(uri.as_ref()).is_absolute()
-        || uri.contains([':', '\\'])
-        || uri.chars().any(char::is_control)
-    {
-        return None;
-    }
-    let path = relative_path(&uri, root)?;
+    let read_check = serde_json::from_value::<Check>(item["properties"]["check"].clone()).ok();
+    let raw_uri = artifact["uri"].as_str()?;
+    let path = if read_check == Some(Check::Dast) {
+        crate::passive::parse_url(raw_uri).ok()?.0.to_string()
+    } else {
+        let uri = percent_decode_str(raw_uri).decode_utf8().ok()?;
+        if Path::new(uri.as_ref()).is_absolute()
+            || uri.contains([':', '\\'])
+            || uri.chars().any(char::is_control)
+        {
+            return None;
+        }
+        relative_path(&uri, root)?
+    };
     let root = root.to_string_lossy().into_owned();
     let rule = text(item["ruleId"].as_str().unwrap_or("sarif"), 180);
-    let read_check = serde_json::from_value::<Check>(item["properties"]["check"].clone()).ok();
     let secret = read_check == Some(Check::Secret)
         || ["secret", "credential", "token", "password"]
             .iter()

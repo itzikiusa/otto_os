@@ -8,6 +8,7 @@ pub enum Check {
     Misconfiguration,
     License,
     Sast,
+    Dast,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

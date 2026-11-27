@@ -10,7 +10,10 @@ use tokio::sync::{Mutex, OnceCell, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 use crate::engine::{Engine, EngineKind};
-use crate::{governor::cancelled, store, ProjectScans, ScanDetail, ScanSettings, ScanSummary};
+use crate::{
+    governor::cancelled, store, EngineRun, Finding, ProjectScans, ScanDetail, ScanSettings,
+    ScanSummary,
+};
 
 pub struct SecurityScans {
     engine: Engine,
@@ -81,6 +84,53 @@ impl SecurityScans {
         R: FnOnce() -> Roots + Send + 'static,
         Roots: Future<Output = Result<Vec<PathBuf>>> + Send,
     {
+        let service = self.clone();
+        self.enqueue_job(pool, project, busy, move |settings, cancel| async move {
+            let roots = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return Err(cancelled()),
+                result = resolve_roots() => result?,
+            };
+            service.scan_sources(&roots, &settings, &cancel).await
+        })
+        .await
+    }
+
+    pub async fn scan_sources(
+        &self,
+        roots: &[PathBuf],
+        settings: &ScanSettings,
+        cancel: &CancellationToken,
+    ) -> Result<(Vec<EngineRun>, Vec<Finding>)> {
+        let mut runs = Vec::new();
+        let mut findings = Vec::new();
+        for (engine, only_sast) in [(&self.engine, false), (&self.sast, true)] {
+            let mut config = settings.clone();
+            config
+                .checks
+                .retain(|check| (*check == crate::Check::Sast) == only_sast);
+            if !config.checks.is_empty() {
+                let (run, mut result) = engine.execute(roots, &config, cancel).await?;
+                runs.push(run);
+                findings.append(&mut result);
+            }
+        }
+        Ok((runs, findings))
+    }
+
+    pub async fn enqueue_job<F, Fut, J, JobFuture>(
+        self: &Arc<Self>,
+        pool: DbPool,
+        project: String,
+        busy: F,
+        job: J,
+    ) -> Result<ScanSummary>
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = bool> + Send,
+        J: FnOnce(ScanSettings, CancellationToken) -> JobFuture + Send + 'static,
+        JobFuture: Future<Output = Result<(Vec<EngineRun>, Vec<Finding>)>> + Send,
+    {
         self.recover(&pool).await?;
         let settings = store::settings(&pool, &project).await?;
         let mut jobs = self.jobs.lock().await;
@@ -117,27 +167,10 @@ impl SecurityScans {
                     _ = cancel.cancelled() => return Err(cancelled()),
                     () = wait_for_idle => {}
                 }
-                let roots = tokio::select! {
-                    biased;
-                    _ = cancel.cancelled() => return Err(cancelled()),
-                    result = resolve_roots() => result?,
-                };
                 if cancel.is_cancelled() || !store::start(&pool, &id).await? {
                     return Err(cancelled());
                 }
-                let mut runs = Vec::new();
-                let mut findings = Vec::new();
-                for (engine, only_sast) in [(&service.engine, false), (&service.sast, true)] {
-                    let mut config = settings.clone();
-                    config
-                        .checks
-                        .retain(|check| (*check == crate::Check::Sast) == only_sast);
-                    if !config.checks.is_empty() {
-                        let (run, mut result) = engine.execute(&roots, &config, &cancel).await?;
-                        runs.push(run);
-                        findings.append(&mut result);
-                    }
-                }
+                let (runs, mut findings) = job(settings, cancel.clone()).await?;
                 findings.sort_unstable_by(|a, b| {
                     a.severity
                         .cmp(&b.severity)
@@ -187,6 +220,7 @@ impl SecurityScans {
 
 fn validate(settings: &mut ScanSettings) -> Result<()> {
     if settings.checks.is_empty()
+        || settings.checks.contains(&crate::Check::Dast)
         || !(1..=2).contains(&settings.parallelism)
         || !(256..=4096).contains(&settings.memory_mib)
         || !(10..=900).contains(&settings.timeout_secs)

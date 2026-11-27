@@ -161,6 +161,7 @@ impl RunStateInner {
 pub(super) struct ActiveRunHandle {
     pub(super) seq: u64,
     pub(super) owner_user_id: String,
+    pub(super) security_audit: Option<(String, String, String)>,
     pub(super) state: Mutex<RunStateInner>,
     pub(super) stop_tx: watch::Sender<bool>,
     pub(super) events_tx: broadcast::Sender<IdeRunState>,

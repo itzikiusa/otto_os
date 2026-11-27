@@ -41,6 +41,7 @@ fn finished_runs_evict_cleanly_past_max_finished_runs_preserving_running() {
         let (events_tx, _) = broadcast::channel(16);
         let id = format!("run_fin_{i:02}");
         let handle = Arc::new(ActiveRunHandle {
+            security_audit: None,
             seq: i,
             owner_user_id: String::new(),
             state: Mutex::new(RunStateInner::new(
@@ -68,6 +69,7 @@ fn finished_runs_evict_cleanly_past_max_finished_runs_preserving_running() {
     mgr.runs.insert(
         "run_active".into(),
         Arc::new(ActiveRunHandle {
+            security_audit: None,
             seq: 100,
             owner_user_id: String::new(),
             state: Mutex::new(RunStateInner::new(
@@ -97,6 +99,7 @@ fn streaming_10k_lines_ssh_runner_commands_and_maven_flags_work() {
     let (stop_tx, _stop_rx) = watch::channel(false);
     let (events_tx, _) = broadcast::channel(16);
     let handle = Arc::new(ActiveRunHandle {
+        security_audit: None,
         seq: 1,
         owner_user_id: String::new(),
         state: Mutex::new(RunStateInner::new(
@@ -206,6 +209,7 @@ async fn stopping_run_kills_entire_unix_process_group_leaving_zero_orphans() {
     let (stop_tx, stop_rx) = watch::channel(false);
     let (events_tx, _) = broadcast::channel(32);
     let handle = Arc::new(ActiveRunHandle {
+        security_audit: None,
         seq: 1,
         owner_user_id: "u_test".into(),
         state: Mutex::new(RunStateInner::new(
@@ -350,6 +354,7 @@ async fn subscribe_run_for_user_streams_live_events_and_enforces_owner_rbac() {
     let (stop_tx, _) = watch::channel(false);
     let (events_tx, _) = broadcast::channel(32);
     let handle = Arc::new(ActiveRunHandle {
+        security_audit: None,
         seq: 1,
         owner_user_id: "alice".into(),
         state: Mutex::new(RunStateInner::new(
@@ -582,6 +587,7 @@ fn local_run_handle(id: &str) -> (RunMap, Arc<ActiveRunHandle>, watch::Receiver<
     let (stop_tx, stop_rx) = watch::channel(false);
     let (events_tx, _) = broadcast::channel(32);
     let handle = Arc::new(ActiveRunHandle {
+        security_audit: None,
         seq: 1,
         owner_user_id: "u_test".into(),
         state: Mutex::new(RunStateInner::new(
@@ -1246,6 +1252,7 @@ fn running_titles_lists_only_runs_still_running() {
         let (stop_tx, _) = watch::channel(false);
         let (events_tx, _) = broadcast::channel(4);
         let handle = Arc::new(ActiveRunHandle {
+            security_audit: None,
             seq: 1,
             owner_user_id: String::new(),
             state: Mutex::new(RunStateInner::new(

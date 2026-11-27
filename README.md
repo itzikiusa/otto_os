@@ -274,7 +274,7 @@ rounds over the last three releases.
   history, dependency and vulnerability views, live shared editing and IDE
   plugins. Chat with an agent about the open project from the IDE itself.
 - **Project security scans.** Run or schedule local Trivy and Opengrep checks in
-  the IDE Security view. Review findings, manage suppressions, and exchange SARIF reports. [Security scans](docs/features/security-scans.md).
+  the IDE Security view. Review findings, exchange SARIF reports, and passively audit confirmed development URLs. [Security scans](docs/features/security-scans.md).
 - **Threads: every agent, fully.** Claude, Codex, Antigravity, Gemini, Grok,
   OpenCode, pi and Muse run as structured agents. Each one reports what it
   can do (images, files, plan mode, effort, steering) and Threads offers

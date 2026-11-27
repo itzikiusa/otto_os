@@ -1,4 +1,4 @@
-export type SecurityCheck = 'vulnerability' | 'secret' | 'misconfiguration' | 'license' | 'sast';
+export type SecurityCheck = 'vulnerability' | 'secret' | 'misconfiguration' | 'license' | 'sast' | 'dast';
 export type SecuritySeverity = 'critical' | 'high' | 'medium' | 'low' | 'unknown';
 export type SecurityScanStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
 
@@ -84,3 +84,25 @@ export type SecurityManageAction =
   | { action: 'set_suppression'; fingerprint: string; reason: string | null }
   | { action: 'set_baseline'; scan_id: string | null }
   | { action: 'import_sarif'; sarif: unknown };
+
+export interface PassiveAuditCandidate {
+  run_config_id: string;
+  run_config_name: string;
+  url: string;
+  public: boolean;
+}
+
+export interface PassiveAuditTarget {
+  run_config_id: string;
+  url: string;
+  allow_public: boolean;
+  scheduled: boolean;
+  confirmed_at: string;
+}
+
+export interface ProjectPassiveAudit {
+  confirmed: PassiveAuditTarget | null;
+  candidates: PassiveAuditCandidate[];
+}
+
+export type ConfirmPassiveAudit = Omit<PassiveAuditTarget, 'confirmed_at'>;

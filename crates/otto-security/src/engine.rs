@@ -598,7 +598,7 @@ fn trivy_args(
             Check::Secret => "secret",
             Check::Misconfiguration => "misconfig",
             Check::License => "license",
-            Check::Sast => unreachable!("Trivy receives only Trivy checks"),
+            Check::Sast | Check::Dast => unreachable!("Trivy receives only Trivy checks"),
         })
         .collect::<Vec<_>>()
         .join(",");

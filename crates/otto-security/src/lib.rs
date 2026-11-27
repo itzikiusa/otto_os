@@ -4,6 +4,7 @@ mod download;
 mod engine;
 mod governor;
 mod incremental;
+pub mod passive;
 pub mod preferences;
 mod report;
 pub mod sarif;

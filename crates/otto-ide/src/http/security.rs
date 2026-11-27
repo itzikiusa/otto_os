@@ -13,7 +13,11 @@ use super::ApiResult;
 use crate::types::IdeTargetSpec;
 use crate::IdeCtx;
 
-async fn project_roots<S: IdeCtx>(ctx: &S, user: &User, id: &str) -> Result<Vec<PathBuf>> {
+pub(super) async fn project_roots<S: IdeCtx>(
+    ctx: &S,
+    user: &User,
+    id: &str,
+) -> Result<Vec<PathBuf>> {
     let project = ctx
         .ide()
         .projects
@@ -117,7 +121,7 @@ pub async fn scheduled_tick<S: IdeCtx>(ctx: &S) -> Result<()> {
             continue;
         }
         let project = schedule.project_id.clone();
-        match enqueue(ctx, user, project.clone()).await {
+        match super::security_dast::enqueue_scheduled(ctx, user, project.clone()).await {
             Ok(_) => schedule.settle(&pool, fire).await?,
             Err(Error::Conflict(_)) => {}
             Err(error) => tracing::warn!(project, %error, "scheduled security scan deferred"),

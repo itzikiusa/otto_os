@@ -986,4 +986,91 @@ async fn security_routes_scope_settings_and_history_to_the_named_project() {
     assert_eq!(status, StatusCode::OK);
     let (_, result) = call("GET", &imported_path, &owner_token, "").await;
     assert!(result["annotations"]["suppressions"][fingerprint].is_null());
+
+    // The listener belongs to this test process and never uses the live daemon port.
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let service = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/dev", service.local_addr().unwrap());
+    let project_root = project.canonicalize().unwrap();
+    let ide_target = json!({"kind":"local","root":project_root});
+    let config_req = json!({
+        "target": ide_target, "name":"Passive fixture", "runner":"custom",
+        "command":"/bin/sleep 25", "inherit_shell_env":false,
+        "env_overrides":{"OTTO_SECURITY_URL":url},
+    });
+    let (status, created) = call(
+        "POST",
+        "/api/v1/ide/run-configs",
+        &owner_token,
+        &config_req.to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let config_id = created["config"]["id"].as_str().unwrap();
+    let dast_path = format!("{path}/dast");
+    let dast_run_path = format!("{dast_path}/run");
+    let (status, choices) = call("GET", &dast_path, &owner_token, "").await;
+    assert_eq!(status, StatusCode::OK, "{choices}");
+    assert_eq!(choices["candidates"][0]["url"], url);
+    let (status, _) = call("POST", &dast_run_path, &owner_token, "").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let confirm =
+        json!({"run_config_id":config_id, "url":url, "allow_public":false, "scheduled":false});
+    let (status, _) = call("PUT", &dast_path, &editor_token, &confirm.to_string()).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, result) = call("PUT", &dast_path, &owner_token, &confirm.to_string()).await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    let (status, _) = call("POST", &dast_run_path, &owner_token, "").await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "consent alone must not launch an audit"
+    );
+    let live = json!({"target":ide_target,"config_id":config_id});
+    let (status, ide_run) = call("POST", "/api/v1/ide/runs", &owner_token, &live.to_string()).await;
+    assert_eq!(status, StatusCode::OK, "{ide_run}");
+    let live_id = ide_run["run"]["id"].as_str().unwrap();
+    let observer = tokio::spawn(async move {
+        let (mut stream, _) = service.accept().await.unwrap();
+        let mut request = Vec::new();
+        while !request.ends_with(b"\r\n\r\n") {
+            request.push(stream.read_u8().await.unwrap());
+        }
+        assert!(request.starts_with(b"HEAD /dev HTTP/1.1\r\n"));
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 0\r\n\r\n")
+            .await
+            .unwrap();
+    });
+    let (status, audit) = call("POST", &dast_run_path, &owner_token, "").await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{audit}");
+    let audit_path = format!("{path}/scans/{}", audit["id"].as_str().unwrap());
+    let finished = tokio::time::timeout(std::time::Duration::from_secs(12), async {
+        loop {
+            let (status, audit) = call("GET", &audit_path, &owner_token, "").await;
+            assert_eq!(status, StatusCode::OK, "{audit}");
+            match audit["scan"]["status"].as_str() {
+                Some("completed") => break audit,
+                Some("failed") => panic!("audit failed: {audit}"),
+                _ => tokio::time::sleep(std::time::Duration::from_millis(25)).await,
+            }
+        }
+    })
+    .await
+    .unwrap();
+    observer.await.unwrap();
+    assert_eq!(finished["scan"]["engines"][0]["name"], "otto-passive-http");
+    assert_eq!(finished["findings"][0]["check"], "dast");
+    assert_eq!(finished["findings"][0]["path"], url);
+    let (status, _) = call("DELETE", &dast_path, &owner_token, "").await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = call("POST", &dast_run_path, &owner_token, "").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let _ = call(
+        "POST",
+        &format!("/api/v1/ide/runs/{live_id}/stop"),
+        &owner_token,
+        "",
+    )
+    .await;
 }

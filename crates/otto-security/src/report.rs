@@ -156,7 +156,7 @@ fn normalize(root: &Path, path: &str, check: Check, issue: Issue) -> Finding {
             text(&issue.description, 900),
             text(&issue.resolution, 600),
         ),
-        Check::Sast => unreachable!("Trivy cannot report SAST findings"),
+        Check::Sast | Check::Dast => unreachable!("Trivy reports its own scan findings"),
         Check::License => (
             format!("{} license", text(&issue.name, 160)),
             format!(

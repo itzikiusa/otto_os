@@ -1563,6 +1563,15 @@ pub fn route_class(method: &Method, matched_path: &str) -> Option<RouteClass> {
     let read = method == Method::GET || method == Method::HEAD || method == Method::OPTIONS;
     let write = !read;
 
+    if write
+        && matches!(
+            p,
+            "/ide/projects/{id}/security/dast" | "/ide/projects/{id}/security/dast/run"
+        )
+    {
+        return Some(O);
+    }
+
     // --- Secret: plaintext credentials / credential minting (any method). ---
     if matches!(
         p,

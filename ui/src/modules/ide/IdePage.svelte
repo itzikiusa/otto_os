@@ -96,7 +96,7 @@
     ideAgent.composerText = [
       ideAgent.composerText.trimEnd(),
       `Review and propose a fix for ${finding.rule} from ${finding.engine}.`,
-      `File ${findingPath(finding)}${finding.line ? ` at line ${finding.line}` : ''}`,
+      finding.check === 'dast' ? `URL ${finding.path}` : `File ${findingPath(finding)}${finding.line ? ` at line ${finding.line}` : ''}`,
       finding.description,
       finding.fix,
     ].filter(Boolean).join('\n');

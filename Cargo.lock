@@ -4876,6 +4876,7 @@ dependencies = [
  "ignore",
  "libc",
  "otto-core",
+ "otto-netguard",
  "otto-sandbox",
  "otto-state",
  "percent-encoding",

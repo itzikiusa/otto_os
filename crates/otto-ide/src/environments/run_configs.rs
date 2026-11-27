@@ -322,6 +322,28 @@ impl EnvironmentManager {
             .ok_or_else(|| Error::NotFound(format!("IDE run '{run_id}'")))
     }
 
+    pub fn has_live_security_run(
+        &self,
+        user: &User,
+        spec: &IdeTargetSpec,
+        config_id: &str,
+        raw_url: &str,
+    ) -> bool {
+        let key = spec.project_key();
+        self.runs.iter().any(|entry| {
+            let run = entry.value();
+            run.security_audit
+                .as_ref()
+                .is_some_and(|(root, config, url)| {
+                    root == &key
+                        && config == config_id
+                        && url == raw_url
+                        && can_access_run(run, user)
+                        && run.finished_sort_key().is_none()
+                })
+        })
+    }
+
     pub fn get_run_for_user(
         &self,
         user: &User,
@@ -414,6 +436,7 @@ impl EnvironmentManager {
         self.enrich_target_roots(pool, projects, user, &mut req.target)
             .await;
 
+        let saved_config = req.config_id.clone().filter(|_| req.adhoc.is_none());
         let mut cfg = if let Some(adhoc) = req.adhoc {
             adhoc
         } else if let Some(cid) = req.config_id.as_deref().filter(|s| !s.is_empty()) {
@@ -551,9 +574,18 @@ impl EnvironmentManager {
         let (stop_tx, stop_rx) = watch::channel(false);
         let (events_tx, _) = broadcast::channel(256);
         let owner_user_id = user.map(|u| u.id.clone()).unwrap_or_default();
+        let security_audit = saved_config
+            .as_ref()
+            .filter(|_| req.target.kind == IdeTargetKind::Local)
+            .and_then(|config_id| {
+                cfg.env_overrides
+                    .get(otto_security::passive::CONFIG_KEY)
+                    .map(|url| (req.target.project_key(), config_id.clone(), url.clone()))
+            });
         let handle = Arc::new(ActiveRunHandle {
             seq,
             owner_user_id,
+            security_audit,
             state: Mutex::new(RunStateInner::new(
                 run_id.clone(),
                 title,

@@ -13,6 +13,7 @@ globset = "0.4"
 ignore = { workspace = true }
 hex = { workspace = true }
 otto-core = { workspace = true }
+otto-netguard = { workspace = true }
 otto-sandbox = { workspace = true }
 otto-state = { workspace = true }
 percent-encoding = "2.3"

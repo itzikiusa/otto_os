@@ -6,7 +6,7 @@
   import { announceShown } from '../../../lib/announce.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
   import type {
-    ProjectScans, ScanSettings, SecurityCheck, SecurityFinding, SecurityManageAction,
+    ConfirmPassiveAudit, PassiveAuditTarget, ProjectPassiveAudit, ProjectScans, ScanSettings, SecurityCheck, SecurityFinding, SecurityManageAction,
     SecurityScanDetail, SecuritySchedule,
   } from '../../../lib/api/types';
   import { confirmer } from '../../../lib/confirm.svelte';
@@ -15,7 +15,7 @@
   import PageBody from '../../../lib/components/PageBody.svelte';
   import PageHeader from '../../../lib/components/PageHeader.svelte';
   import type { IdeDiagnostic } from '../store/ideTypes';
-  import { diagnostics, projectSecurityPath } from './projectSecurity.svelte';
+  import { diagnostics, latestFileScan, projectSecurityPath } from './projectSecurity.svelte';
 
   interface Props {
     projectId: string;
@@ -46,11 +46,19 @@
   let timezone = $state('UTC');
   let excludes = $state('');
   let schedulePreview = $state<SecuritySchedule | null>(null);
+  let passive = $state<ProjectPassiveAudit | null>(null);
+  let passiveConfig = $state('');
+  let passiveScheduled = $state(false);
+  let passiveError = $state('');
+  let passiveLoading = $state(false);
   let importInput = $state<HTMLInputElement>();
   let request = 0;
   let alive = true;
 
   const base = $derived(projectSecurityPath(projectId));
+  const passiveCandidate = $derived(passive?.candidates.find((candidate) => candidate.run_config_id === passiveConfig));
+  const passiveRunReady = $derived(!!passive?.confirmed && passive.candidates.some((candidate) =>
+    candidate.run_config_id === passive?.confirmed?.run_config_id && candidate.url === passive?.confirmed?.url));
   const active = $derived(overview?.scans.find((scan) => scan.status === 'running' || scan.status === 'queued'));
   const visible = $derived((detail?.findings ?? []).filter((finding) =>
     (severity === 'all' || finding.severity === severity)
@@ -68,7 +76,7 @@
       if (!alive || current !== request) return;
       const id = preferred || selected;
       const choice = next.scans.find((item) => item.id === id) ?? next.scans[0];
-      const last = next.scans.find((item) => item.status === 'completed');
+      const last = latestFileScan(next.scans);
       overview = next;
       if (!settings) {
         settings = next.settings;
@@ -93,6 +101,7 @@
   }
 
   onMount(() => {
+    void refreshPassive();
     const poller = pollWhileVisible(async (signal) => {
       if (!overview || (active || overview.schedule) && !acting) await refresh(undefined, signal);
     }, { ms: 3500 });
@@ -112,6 +121,61 @@
 
   function manage<T>(command: SecurityManageAction): Promise<T> {
     return api.post<T>(`${base}/manage`, command);
+  }
+
+  async function refreshPassive() {
+    if (passiveLoading) return;
+    passiveLoading = true;
+    try {
+      const result = await api.bg.get<ProjectPassiveAudit>(`${base}/dast`);
+      if (!alive) return;
+      passive = result;
+      passiveConfig = result.confirmed?.run_config_id ?? result.candidates[0]?.run_config_id ?? '';
+      passiveScheduled = result.confirmed?.scheduled ?? false;
+      passiveError = '';
+    } catch (e) {
+      if (alive) passiveError = loadErrorText(e);
+    } finally {
+      if (alive) passiveLoading = false;
+    }
+  }
+
+  async function confirmPassive() {
+    const candidate = passiveCandidate;
+    if (!candidate) return;
+    const scheduled = passiveScheduled;
+    const accepted = await confirmer.ask([
+      `Audit destination ${candidate.url}`,
+      'Otto sends one HTTP HEAD request without credentials, cookies, or a request body. Redirects are disabled.',
+      candidate.public ? 'This is a public destination.' : '',
+      scheduled ? 'Also allow scheduled audits while the saved run configuration is running.' : '',
+    ].filter(Boolean).join('\n\n'), {
+      title: candidate.public ? 'Confirm public audit target' : 'Confirm passive audit target',
+      confirmLabel: candidate.public ? 'Confirm public URL' : 'Confirm URL',
+    });
+    if (!accepted) return;
+    const command: ConfirmPassiveAudit = {
+      run_config_id: candidate.run_config_id, url: candidate.url,
+      allow_public: candidate.public, scheduled,
+    };
+    await action(async () => {
+      await api.put<PassiveAuditTarget>(`${base}/dast`, command);
+      await refreshPassive();
+    });
+  }
+
+  function revokePassive() {
+    void action(async () => {
+      await api.del(`${base}/dast`);
+      await refreshPassive();
+    });
+  }
+
+  function runPassive() {
+    void action(async () => {
+      const scan = await api.post<{ id: string }>(`${base}/dast/run`);
+      await refresh(scan.id);
+    });
   }
 
   function scanNow() {
@@ -211,8 +275,13 @@
     <button type="button" class="btn small ghost" onclick={onBack}>Back to IDE</button>
   {/snippet}
   {#snippet actions()}
-    <button type="button" class="btn small ghost" onclick={() => showSettings = !showSettings} disabled={!settings}
-      aria-expanded={showSettings}>Settings</button>
+    <button type="button" class="btn small ghost" onclick={() => {
+      showSettings = !showSettings;
+      if (showSettings) void refreshPassive();
+    }} disabled={!settings || acting} aria-expanded={showSettings}>Settings</button>
+    {#if passiveRunReady}
+      <button type="button" class="btn small ghost" onclick={runPassive} disabled={acting || passiveLoading || !!active}>Run passive audit</button>
+    {/if}
     <button type="button" class="btn small ghost" onclick={() => importInput?.click()} disabled={acting}>Import SARIF</button>
     <button type="button" class="btn small ghost" onclick={exportSarif} disabled={acting || detail?.scan.status !== 'completed'}>Export SARIF</button>
     <button type="button" class="btn small ghost" onclick={selectBaseline} disabled={acting || detail?.scan.status !== 'completed'}>
@@ -267,6 +336,40 @@
             </ul>
           {/if}
         </form>
+        <section class="settings" aria-label="Passive HTTP audit">
+          <h2>Passive HTTP audit</h2>
+          {#if !passiveLoading && passiveError}
+            <LoadState what="audit targets" variant="compact" error={passiveError} empty onretry={() => void refreshPassive()} />
+          {:else if passiveLoading || !passive}
+            <LoadState what="audit targets" variant="compact" loading empty />
+          {:else if passive.candidates.length}
+            <label>Saved run configuration<select bind:value={passiveConfig}>
+              {#each passive.candidates as candidate (candidate.run_config_id)}
+                <option value={candidate.run_config_id}>{candidate.run_config_name}</option>
+              {/each}
+            </select></label>
+            {#if passiveCandidate}
+              <p class="audit-url" dir="ltr">{passiveCandidate.url}</p>
+            {/if}
+            <label class="audit-toggle"><input type="checkbox" bind:checked={passiveScheduled} /> Include in scheduled scans</label>
+            <div class="actions">
+              <button type="button" class="btn small" onclick={() => void confirmPassive()} disabled={acting || !passiveCandidate}>
+                {passive?.confirmed ? 'Update confirmation' : 'Review and confirm'}
+              </button>
+              {#if passive?.confirmed}
+                <button type="button" class="btn small ghost" onclick={revokePassive} disabled={acting}>Revoke confirmation</button>
+              {/if}
+            </div>
+            {#if passive?.confirmed}
+              <p class="muted">Confirmed {passive.confirmed.url} · {when(passive.confirmed.confirmed_at)}</p>
+            {/if}
+          {:else}
+            <p class="muted">Set OTTO_SECURITY_URL in a saved run configuration for this project.</p>
+            {#if passive.confirmed}
+              <button type="button" class="btn small ghost" onclick={revokePassive} disabled={acting}>Revoke confirmation</button>
+            {/if}
+          {/if}
+        </section>
       {/if}
 
       {#if overview?.schedule && !showSettings}
@@ -323,9 +426,13 @@
                 {@const reason = detail.annotations.suppressions[finding.fingerprint]}
                 <li>
                   <div class="finding-head">
-                    <button type="button" class="location" onclick={() => onOpen(finding)}>
-                      {finding.path}{finding.line ? `:${finding.line}` : ''}
-                    </button>
+                    {#if finding.check === 'dast'}
+                      <span dir="ltr">{finding.path}</span>
+                    {:else}
+                      <button type="button" class="location" onclick={() => onOpen(finding)}>
+                        {finding.path}{finding.line ? `:${finding.line}` : ''}
+                      </button>
+                    {/if}
                     <span class="severity" data-level={finding.severity}>{finding.severity}</span>
                   </div>
                   <div class="muted">{finding.rule} · {finding.engine} · {existing.has(finding.fingerprint) ? 'Existing' : 'New'}
@@ -371,7 +478,7 @@
   .settings fieldset { margin: 0; padding: 8px; border: 1px solid var(--border); }
   .settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; }
   .settings label, .scan-controls label { display: grid; gap: 4px; min-inline-size: 0; }
-  .settings input:not([type='checkbox']), .settings textarea, .scan-controls select {
+  .settings input:not([type='checkbox']), .settings textarea, .settings select, .scan-controls select {
     inline-size: 100%; min-inline-size: 0; color: var(--text); background: var(--surface-2);
     border: 1px solid var(--border); border-radius: var(--radius-s); padding: 6px;
   }
@@ -391,4 +498,7 @@
   .trend li { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding-block: 4px; }
   .trend meter { min-inline-size: 50px; flex: 1; }
   .moments { margin: 0; }
+  .settings h2 { margin: 0; font-size: var(--fs-m); }
+  .settings .audit-toggle { display: flex; align-items: center; }
+  .audit-url { margin: 0; overflow-wrap: anywhere; }
 </style>

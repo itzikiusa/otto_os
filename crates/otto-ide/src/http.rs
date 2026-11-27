@@ -17,6 +17,8 @@ mod projects_deps;
 mod runtime_debug;
 #[path = "http/security.rs"]
 pub mod security;
+#[path = "http/security_dast.rs"]
+mod security_dast;
 #[path = "http/sse_framing.rs"]
 mod sse_framing;
 #[path = "http/toolchains_env.rs"]
@@ -200,6 +202,16 @@ pub fn api_router<S: IdeCtx>() -> Router<S> {
             .route(
                 "/ide/projects/{id}/security/scans/{scan_id}/sarif",
                 get(security::export::<S>),
+            )
+            .route(
+                "/ide/projects/{id}/security/dast",
+                get(security_dast::config::<S>)
+                    .put(security_dast::confirm::<S>)
+                    .delete(security_dast::revoke::<S>),
+            )
+            .route(
+                "/ide/projects/{id}/security/dast/run",
+                post(security_dast::start::<S>),
             )
             .route("/ide/projects/scan-repos", post(scan_repos::<S>))
             .route(

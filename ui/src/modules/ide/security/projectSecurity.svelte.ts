@@ -1,5 +1,5 @@
 import { api } from '../../../lib/api/client';
-import type { ProjectScans, SecurityFinding, SecurityScanDetail } from '../../../lib/api/types';
+import type { ProjectScans, SecurityFinding, SecurityScanDetail, SecurityScanSummary } from '../../../lib/api/types';
 import type { IdeDiagnostic } from '../store/ideTypes';
 
 export const projectSecurity = $state<{ problems: IdeDiagnostic[] }>({ problems: [] });
@@ -20,10 +20,15 @@ export function diagnostics(detail: SecurityScanDetail): IdeDiagnostic[] {
   });
 }
 
+export function latestFileScan(scans: SecurityScanSummary[]): SecurityScanSummary | undefined {
+  return scans.find((scan) => scan.status === 'completed'
+    && (scan.engines.length === 0 || scan.engines.some((engine) => engine.name !== 'otto-passive-http')));
+}
+
 export async function latestSecurityDiagnostics(id: string, signal: AbortSignal): Promise<IdeDiagnostic[]> {
   const base = projectSecurityPath(id);
   const overview = await api.bg.get<ProjectScans>(base, signal);
-  const scan = overview.scans.find((row) => row.status === 'completed');
+  const scan = latestFileScan(overview.scans);
   if (!scan) return [];
   return diagnostics(await api.bg.get<SecurityScanDetail>(`${base}/scans/${encodeURIComponent(scan.id)}`, signal));
 }

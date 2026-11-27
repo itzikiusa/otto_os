@@ -26,6 +26,27 @@ Use **Import SARIF** and **Export SARIF** to exchange SARIF 2.1.0 results.
 Imports use project-relative file locations. The [IDE security API](../contracts/api.md#ide-project-security-scans)
 describes the settings and scan routes.
 
+## Audit a running HTTP service
+
+For a saved local project run configuration, set `OTTO_SECURITY_URL` in its
+environment overrides to the exact HTTP or HTTPS URL it serves. Start that
+configuration. In **Security → Settings → Passive HTTP audit**, select the
+configuration and review the destination before confirming it. Public
+destinations require HTTPS and an explicit public-target confirmation.
+
+**Run passive audit** sends one HEAD request without credentials, cookies, a
+query string, or a body. The audit stays at the confirmed URL and checks the
+response's browser security headers and cookie attributes. The audit stores
+rule descriptions and fix hints without saving cookie values. It uses a
+ten-second deadline and the project scan queue.
+
+Enable **Include in scheduled scans** when confirming the URL to allow future
+scheduled audits while the same configuration is running. A changed URL,
+changed live configuration, or revoked confirmation prevents the previous
+approval from being used. Scheduled source scans can proceed when the service
+is unavailable. The built-in HTTP audit ships with Otto and has no separate
+runtime or database install.
+
 ## Coverage
 
 | IDE language | Trivy dependency coverage | Opengrep static analysis |
@@ -91,6 +112,11 @@ and, for the first run, engine and rules or database preparation.
 | Opengrep 2.1.0, unchanged cache | 0 s | 0.820 s | — | — |
 | Trivy 0.76.2, full | 14.442 s | 64.421 s | 99.7% | 211 MiB |
 | Trivy 0.76.2, unchanged cache | 0 s | 0.939 s | — | — |
+| Otto HTTP audit, one loopback request | 0.002 s | — | — | — |
+
+Each HTTP audit reads the current response. The loopback fixture measured
+request and header analysis time. Per-audit CPU and RSS were unmeasured
+because the audit runs inside the daemon.
 
 ```sh
 CARGO_INCREMENTAL=0 cargo test -j 2 -p otto-security --lib live_incremental_engines_on_otto_worktree -- --ignored --nocapture

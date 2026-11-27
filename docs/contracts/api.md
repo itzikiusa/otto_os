@@ -7382,6 +7382,10 @@ Full multi-language IDE over Local (`kind: "local"`) and Remote SSH (`kind: "ssh
 | DELETE /ide/projects/{id}/security/scans/{scan_id} | Agents: Edit | — | `ScanSummary` after cancellation, or the pre-existing terminal result if the scan already finished |
 | POST /ide/projects/{id}/security/manage | Agents: Edit | `ManageScan` | Schedule preview/settings, suppression, baseline or SARIF import result |
 | GET /ide/projects/{id}/security/scans/{scan_id}/sarif | Agents: Edit | — | SARIF 2.1.0 JSON using project-relative URIs |
+| GET /ide/projects/{id}/security/dast | Agents: Edit | — | `ProjectPassiveAudit` with eligible saved run configs and optional current confirmation |
+| PUT /ide/projects/{id}/security/dast | human + Agents: Edit | `ConfirmPassiveAudit` | saved `PassiveAuditTarget` |
+| DELETE /ide/projects/{id}/security/dast | human + Agents: Edit | — | HTTP 204 after revoking confirmation |
+| POST /ide/projects/{id}/security/dast/run | human + Agents: Edit | — | HTTP 202 with a queued `ScanSummary` or HTTP 409 when the confirmed run config is not live |
 | POST /ide/deps/inspect | Agents: Edit | `IdeDepsInspectReq` (`target?`, `path`, `content?`) | `IdeDepsInspectResp` (`ecosystem`, `items` across `go.mod`, `pom.xml`, `build.gradle*`, `Cargo.toml`, `package.json` (parsed as JSON, so a minified file works), `pyproject.toml` (PEP 621 arrays incl. optional-dependencies, Poetry tables)/`requirements.txt` with `latest_version`, `latest_patch`, `deprecated`, `vulnerabilities`, line offsets; `range: true` when `current_version` is only the floor of a range (`^1.0.0`, `>=1.0`) — such items get no OSV lookup) |
 | POST /ide/deps/action | human + Agents: Edit | `IdeDepsActionReq` (`target?`, `path`, `action` [`tidy` \| `vendor` \| `sync` \| `why` \| `merge_directives` \| `maven_sync` \| `maven_tree` \| `gradle_sync` \| `vuln_scan` \| `update_one` \| `update_direct_latest` \| `update_direct_patch` \| `update_all_latest` \| `update_all_patch`], `module?`, `version?`) | `IdeDepsActionResp` (`ok`, `updated_content`, `output`) |
 | POST /ide/build-tools/model | Agents: Edit | `IdeBuildToolsModelReq` (`roots`, `target?`) | `IdeBuildToolsModelResp` (`has_maven`, `has_gradle`, `has_xcode`, `has_android`, `has_flutter`, `has_react_native`, `has_capacitor`, `profiles`, `projects`, `mobile_projects`) |
@@ -7443,6 +7447,9 @@ These routes accept named local project IDs. The caller needs access to the proj
 - `ManageScan` accepts `{action:"preview_schedule", schedule:{cron,timezone}}` and `{action:"set_schedule", schedule:{cron,timezone}|null}`. Both return the schedule with its next runs. Cron uses the scheduled-task cadence and IANA timezones. A null schedule disables it.
 - `{action:"set_suppression", fingerprint, reason:string|null}` adds or removes a suppression. `{action:"set_baseline", scan_id:string|null}` selects or clears a completed scan for this project. Both return JSON null.
 - `{action:"import_sarif", sarif}` accepts a SARIF 2.1.0 object up to the route's 16 MiB body limit and returns `{scan_id}`. Imported locations must be project-relative. Export uses `ROOT_0`, `ROOT_1` and later project root indices. Unqualified imports use the primary root.
+
+- Passive audit candidates use the explicit `OTTO_SECURITY_URL` from a saved local project run configuration. `ConfirmPassiveAudit` sends `run_config_id`, the exact canonical `url` from the candidate, `allow_public`, and `scheduled`. Public destinations require HTTPS and separate explicit consent. The saved target adds `confirmed_at`.
+- An audit sends one unauthenticated HEAD with no body. Redirects, query parameters and credentials are outside the supported scope. A scheduled audit additionally requires `scheduled: true` and the same running configuration. It shares the project scan queue and stores findings with `check: "dast"` and a response URL as their location.
 
 ## Mobile Simulators & Emulators (`otto-simulators`, `/api/v1/simulators/*`)
 
