@@ -3,6 +3,7 @@
 // kept for an inline card (I2-10), copy for failed commands (I2-22), per-runner
 // configuration fields (I2-15), and the session-scoped resets (I2-19, I2-23).
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 import { loadSource } from './sourceHarness.ts';
 
@@ -181,6 +182,23 @@ describe('I2-01 the controller launches what the selector shows', () => {
     await m.ctl.launchDebugSession(debugHost({ activeTab: readme, activePath: readme.path }), {}, null, () => {});
     assert.match(m.launch.ideDebugLaunch.startError?.message ?? '', /README\.md can’t be run or debugged/);
   });
+});
+
+describe('BUG-30 Karma / Playwright configs are run-only', () => {
+  const karma = { id: 'auto:karma', name: 'Karma / Angular Test', runner: 'karma', command: 'npx', args: ['--no-install', 'ng', 'test', '--watch=false'], env_overrides: {}, target_path: 'package.json', auto_detected: true };
+  const pw = { id: 'auto:pw', name: 'Playwright E2E', runner: 'playwright', command: 'npx', args: ['--no-install', 'playwright', 'test'], env_overrides: {}, target_path: 'package.json', auto_detected: true };
+  const daemonSrc = readFileSync(new URL('../../crates/otto-ide/src/dap/adapters_jvm_js.rs', import.meta.url), 'utf8');
+
+  for (const [cfg, tool] of [[karma, 'Karma'], [pw, 'Playwright']] as const) {
+    it(`toolbar Debug on "${cfg.name}" is refused with the daemon's text, whatever tab is focused`, async () => {
+      const m = modules({ post: async () => { throw new Error('must not launch'); } });
+      // A Python tab is focused: the request would otherwise go to the Python adapter.
+      await m.ctl.launchDebugSession(debugHost({ runConfigs: [cfg], selectedConfigId: cfg.id }), {}, null, () => {});
+      const message = m.launch.ideDebugLaunch.startError?.message ?? '';
+      assert.match(message, new RegExp(`^Debug is not supported for ${tool}`));
+      assert.ok(daemonSrc.includes(JSON.stringify(message).slice(1, -1)), `daemon refusal differs: ${message}`);
+    });
+  }
 });
 
 describe('I2-03 one live debug session, never an orphan', () => {

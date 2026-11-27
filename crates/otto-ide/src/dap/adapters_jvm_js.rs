@@ -309,7 +309,7 @@ enum UnsupportedJsRunner {
 fn unsupported_js_runner_error(kind: UnsupportedJsRunner) -> Error {
     match kind {
         UnsupportedJsRunner::Playwright => Error::Invalid(
-            "Debug is not supported for Playwright under the Node inspector bridge (Playwright runs tests inside a separate worker process). Use Run or Playwright's inspector (`PWDEBUG=1`)."
+            "Debug is not supported for Playwright under the Node inspector bridge (Playwright runs tests inside a separate worker process). Use Run or the Playwright Inspector (`PWDEBUG=1`)."
                 .into(),
         ),
         UnsupportedJsRunner::Karma => Error::Invalid(

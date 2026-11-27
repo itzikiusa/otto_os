@@ -560,7 +560,7 @@ const TOOL_ARGV_RUNNERS = new Set([
   'go_run', 'go_test', 'go_build', 'cargo_run', 'cargo_test', 'zig_build', 'zig_run', 'zig_test', 'cmake', 'ctest', 'cpp_run', 'make', 'meson', 'unreal', 'dotnet_build', 'dotnet_run', 'dotnet_test', 'pytest', 'npm', 'vitest', 'maven', 'java_junit', 'gradle',
 ]);
 
-import { resolveFrameworkDevDebugLaunch } from './ideDebugLaunchHelpers';
+import { resolveFrameworkDevDebugLaunch, runOnlyDebugRefusal } from './ideDebugLaunchHelpers';
 export { resolveFrameworkDevDebugLaunch };
 
 /** The toolbar/shortcut target when the caller named none (`null` = the caller did). */
@@ -650,13 +650,13 @@ export async function launchDebugSession(
   const rawCfgId = opts.configId ?? (plan?.kind === 'config' ? plan.configId : undefined);
   const cfg = rawCfgId ? host.runConfigs.find((c) => c.id === rawCfgId) : undefined;
   const unrealSub = cfg?.runner === 'unreal' ? (cfg.args?.[0] ?? '').trim() : '';
-  if (unrealSub === 'build' || unrealSub === 'gen-cdb' || unrealSub === 'build-plugin') {
+  // Build-only and run-only (BUG-30, the daemon's own text) configurations, whatever tab is focused.
+  const refusal = unrealSub === 'build' || unrealSub === 'gen-cdb' || unrealSub === 'build-plugin'
+    ? `Unreal '${unrealSub}' run configuration is build-only; start Debug on the Unreal Editor launch configuration instead`
+    : runOnlyDebugRefusal(cfg?.runner);
+  if (refusal) {
     host.openBottomTab('debug');
-    ideDebugLaunch.startError = {
-      message: `Unreal '${unrealSub}' run configuration is build-only; start Debug on the Unreal Editor launch configuration instead`,
-      kind: null,
-      ecosystem: null,
-    };
+    ideDebugLaunch.startError = { message: refusal, kind: null, ecosystem: null };
     return prevCtl;
   }
   const fallbackLang = host.activeTab?.language || 'go';
