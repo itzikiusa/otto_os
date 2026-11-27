@@ -149,15 +149,22 @@ async function showGraph(page: Page): Promise<void> {
   await expect(graph).toBeVisible({ timeout: 25_000 });
 }
 
-/** The WIP panel: History lands on it only where its Detail pane fits beside
- *  the graph; on a phone or a narrow tablet tap the WIP row (a sheet opens). */
+/** History opens on the WIP row of a dirty tree: the WIP panel in the Detail
+ *  pane (a sheet over the Branches list on a phone, over the graph on a tablet). */
 async function openWip(page: Page): Promise<void> {
   await page.goto(`/#/git/${dirtyRepoId}/graph`);
-  await expect(page.locator('.gitpage')).toBeVisible({ timeout: 30_000 });
-  await showGraph(page);
-  const wip = page.locator('.wip-row');
-  if ((await wip.getAttribute('aria-pressed')) !== 'true') await wip.tap();
+  await expect(page.locator('.wip-row')).toHaveAttribute('aria-pressed', 'true', { timeout: 25_000 });
   await expect(page.locator('.wip-panel')).toBeVisible({ timeout: 15_000 });
+}
+
+/** Tap a commit: its detail opens in the Detail pane — beside the graph, or a
+ *  sheet that slides in (measure once it has landed). */
+async function openCommitDetail(page: Page): Promise<void> {
+  await page.locator('.graph-row').nth(1).click();
+  const pane = page.locator('.detail-panel');
+  await expect(pane).toBeVisible({ timeout: 15_000 });
+  const vw = page.viewportSize()!.width;
+  await expect.poll(async () => { const b = await pane.boundingBox(); return b ? Math.round(b.x + b.width) : vw * 2; }).toBeLessThanOrEqual(vw + 1);
 }
 
 /** A phone (or a phone on its side): the list pushes its content. */
@@ -179,8 +186,7 @@ test('graph: lists commits and fits the viewport', async ({ page }) => {
 
 test('graph: commit drill shows a multi-file diff that scrolls and fits', async ({ page }) => {
   await openGraph(page);
-  await page.locator('.graph-row').nth(1).click();
-  await expect(page.locator('.detail-panel')).toBeVisible({ timeout: 15_000 });
+  await openCommitDetail(page);
 
   // The file list shows every changed file and opens the first one's diff.
   const fileRows = page.locator('.detail-diff .cf-row[data-path]');
@@ -376,8 +382,7 @@ for (const vw of [834, 932]) {
   test(`landscape ${vw}: commit diff code is reachable (not cut off)`, async ({ page }) => {
     await page.setViewportSize({ width: vw, height: 430 });
     await openGraph(page);
-    await page.locator('.graph-row').nth(1).click();
-    await expect(page.locator('.detail-panel')).toBeVisible({ timeout: 15_000 });
+    await openCommitDetail(page);
     await expect(page.locator('.detail-diff .df-block').first()).toBeVisible({ timeout: 15_000 });
     await expectFitsWidth(page);
     await expectDiffCodeReachable(page);
@@ -626,8 +631,7 @@ test('320px: commit diff code is reachable + conflict resolver fits', async ({ p
 
   // Commit diff: long lines wrap, code reachable.
   await openGraph(page);
-  await page.locator('.graph-row').nth(1).click();
-  await expect(page.locator('.detail-panel')).toBeVisible({ timeout: 15_000 });
+  await openCommitDetail(page);
   await expect(page.locator('.detail-diff .df-block').first()).toBeVisible({ timeout: 15_000 });
   await expectFitsWidth(page);
   await expectDiffCodeReachable(page);
