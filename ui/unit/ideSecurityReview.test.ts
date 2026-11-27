@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { ProjectScans, SecurityScanSummary } from '../src/lib/api/types/ide-security.ts';
+import type { ProjectScans, RunDastRequest, SecurityScanSummary } from '../src/lib/api/types/ide-security.ts';
 import { componentFunctions } from './componentFunctions.ts';
 import { loadSource } from './sourceHarness.ts';
 
@@ -226,4 +226,28 @@ test('latestFileScan ignores both passive HTTP and Nuclei DAST-only scans', () =
   const sastScan: SecurityScanSummary = { ...completed, id: 's1', engines: [engine('opengrep')] };
   assert.equal(latestFileScan([nucleiOnly, passiveOnly, sastScan])?.id, 's1');
   assert.equal(latestFileScan([nucleiOnly, passiveOnly]), undefined);
+});
+
+test('RunDastRequest requires full confirmation identity when active is true', () => {
+  const validActive: RunDastRequest = {
+    active: true,
+    run_config_id: 'cfg-1',
+    url: 'http://127.0.0.1:3000/app',
+    confirmed_at: '2026-11-27T12:00:00.000Z',
+  };
+  const validPassiveEmpty: RunDastRequest = {};
+  const validPassiveFalse: RunDastRequest = { active: false };
+  // @ts-expect-error bare active request is rejected by the server with HTTP 400
+  const invalidBareActive: RunDastRequest = { active: true };
+  // @ts-expect-error active request missing confirmed_at is rejected with HTTP 400
+  const invalidPartialActive: RunDastRequest = {
+    active: true,
+    run_config_id: 'cfg-1',
+    url: 'http://127.0.0.1:3000/app',
+  };
+  assert.equal(validActive.active, true);
+  assert.equal(validPassiveEmpty.active, undefined);
+  assert.equal(validPassiveFalse.active, false);
+  assert.equal(invalidBareActive.active, true);
+  assert.equal(invalidPartialActive.active, true);
 });

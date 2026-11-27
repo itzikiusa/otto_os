@@ -62,6 +62,11 @@ impl EngineKind {
     }
 }
 
+#[cfg(all(test, target_os = "macos"))]
+tokio::task_local! {
+    static RUN_PREPARATION_CALLS: std::sync::Arc<std::sync::atomic::AtomicUsize>;
+}
+
 async fn run_preparation<T, F, Fut>(
     timeout: Duration,
     cancel: &CancellationToken,
@@ -71,6 +76,9 @@ where
     F: FnOnce(CancellationToken) -> Fut,
     Fut: Future<Output = Result<T>>,
 {
+    #[cfg(all(test, target_os = "macos"))]
+    let _ = RUN_PREPARATION_CALLS
+        .try_with(|calls| calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst));
     let updates = cancel.child_token();
     let prepared = prepare(updates.clone());
     tokio::pin!(prepared);
@@ -950,6 +958,106 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.to_string(), cancelled().to_string());
         assert!(drained_cancel.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn prepare_binary_and_execute_both_route_through_shared_run_preparation() {
+        // DUP-1: verify that both Engine::prepare_binary (Nuclei) and
+        // Engine::execute (source scanners) actually call run_preparation and
+        // would fail this test if either caller inlined its own preparation loop.
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+
+        let tools = tempfile::tempdir().unwrap();
+        let root = tools.path().canonicalize().unwrap();
+        let stamp = crate::store::now();
+
+        let nuclei = Engine::new(&root, EngineKind::Nuclei);
+        let nuclei_bin = nuclei.binary("3.11.1").unwrap();
+        tokio::fs::create_dir_all(nuclei_bin.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&nuclei_bin, "#!/bin/sh\n").await.unwrap();
+        write_json(
+            &nuclei.dir.join("engine.json"),
+            &EngineVersion {
+                version: "3.11.1".into(),
+                checked_at: stamp.clone(),
+                updated_at: stamp.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        write_json(&nuclei.dir.join("release-attempt.json"), &stamp)
+            .await
+            .unwrap();
+
+        let trivy = Engine::new(&root, EngineKind::Trivy);
+        let trivy_bin = trivy.binary("1.2.3").unwrap();
+        tokio::fs::create_dir_all(trivy_bin.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&trivy_bin, "#!/bin/sh\n").await.unwrap();
+        write_json(
+            &trivy.dir.join("engine.json"),
+            &EngineVersion {
+                version: "1.2.3".into(),
+                checked_at: stamp.clone(),
+                updated_at: stamp.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        write_json(&trivy.dir.join("release-attempt.json"), &stamp)
+            .await
+            .unwrap();
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        RUN_PREPARATION_CALLS
+            .scope(calls.clone(), async {
+                let cancel = CancellationToken::new();
+                let (ver, bin) = nuclei
+                    .prepare_binary(Duration::from_secs(5), &cancel)
+                    .await
+                    .unwrap();
+                assert_eq!(ver.version, "3.11.1");
+                assert_eq!(bin, nuclei_bin);
+                assert_eq!(
+                    calls.load(Ordering::SeqCst),
+                    1,
+                    "Engine::prepare_binary must invoke shared run_preparation"
+                );
+
+                // Cancelled prepare_binary propagates cancellation through run_preparation.
+                let cancelled_tok = CancellationToken::new();
+                cancelled_tok.cancel();
+                let err = nuclei
+                    .prepare_binary(Duration::from_secs(5), &cancelled_tok)
+                    .await
+                    .unwrap_err();
+                assert_eq!(err.to_string(), cancelled().to_string());
+                assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+                // Engine::execute with empty roots completes preparation without spawning a scanner.
+                let settings = ScanSettings {
+                    checks: vec![Check::Secret],
+                    ..Default::default()
+                };
+                let (run, findings) = trivy
+                    .execute(&[], &settings, &cancel, &|| async { false })
+                    .await
+                    .unwrap();
+                assert_eq!(run.name, "trivy");
+                assert!(findings.is_empty());
+                assert_eq!(
+                    calls.load(Ordering::SeqCst),
+                    3,
+                    "Engine::execute must invoke shared run_preparation"
+                );
+            })
+            .await;
     }
 
     fn print_metrics(run: &crate::EngineRun, start: std::time::Instant) {

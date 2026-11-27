@@ -108,9 +108,16 @@ export interface ProjectPassiveAudit {
 
 export type ConfirmPassiveAudit = Omit<PassiveAuditTarget, 'confirmed_at'>;
 
-export interface RunDastRequest {
-  active?: boolean;
-  run_config_id?: string;
-  url?: string;
-  confirmed_at?: string;
-}
+export type RunDastRequest =
+  | {
+      active: true;
+      run_config_id: string;
+      url: string;
+      confirmed_at: string;
+    }
+  | {
+      active?: false;
+      run_config_id?: string;
+      url?: string;
+      confirmed_at?: string;
+    };

@@ -273,46 +273,57 @@ mod tests {
 
         // A single line exceeding MAX_STDOUT_LINE_BYTES fails closed and kills the group.
         let marker = output.join("pid");
+        let marker_tmp = output.join("pid.tmp");
         let oversize_args = vec![
             "-c".into(),
             format!(
-                "sleep 60 & echo $! > '{}'; \
+                "sleep 60 & echo $! > '{}' && mv '{}' '{}' || exit 12; \
                  s='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'; \
                  s=\"$s$s$s$s$s$s$s$s$s$s$s$s$s$s$s$s\"; \
                  s=\"$s$s$s$s$s$s$s$s$s$s$s$s$s$s$s$s\"; \
                  i=0; while [ $i -lt 70 ]; do printf '%s' \"$s\"; i=$((i+1)); done; \
                  wait",
+                marker_tmp.display(),
+                marker_tmp.display(),
                 marker.display()
             ),
         ];
-        let err = run_with_network_lines(
-            Path::new("/bin/sh"),
-            &oversize_args,
-            &project,
-            &templates,
-            &output,
-            &settings,
-            NetworkScope::LoopbackPort(port),
-            &token,
-            |_| Ok(()),
+        let err = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run_with_network_lines(
+                Path::new("/bin/sh"),
+                &oversize_args,
+                &project,
+                &templates,
+                &output,
+                &settings,
+                NetworkScope::LoopbackPort(port),
+                &token,
+                |_| Ok(()),
+            ),
         )
         .await
+        .expect("oversized stdout must abort promptly before descendant sleep completes")
         .unwrap_err();
         assert!(
             err.to_string().contains("maximum allowed size")
                 || err.to_string().contains("report limit"),
             "unexpected error: {err}"
         );
-        if let Ok(text) = tokio::fs::read_to_string(&marker).await {
-            if let Ok(pid) = text.trim().parse::<libc::pid_t>() {
-                for _ in 0..100 {
-                    if unsafe { libc::kill(pid, 0) } == -1 {
-                        return;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-                }
-                panic!("child descendant survived stdout limit breach");
+        let text = tokio::fs::read_to_string(&marker)
+            .await
+            .expect("descendant PID marker must exist before oversized output begins");
+        let pid: libc::pid_t = text
+            .trim()
+            .parse()
+            .expect("descendant PID marker must contain a valid PID");
+        assert!(pid > 0, "descendant PID must be positive, got {pid}");
+        for _ in 0..100 {
+            if unsafe { libc::kill(pid, 0) } == -1 {
+                return;
             }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
+        panic!("child descendant survived stdout limit breach");
     }
 }

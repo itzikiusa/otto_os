@@ -64,6 +64,33 @@ where
     V: Fn() -> Fut,
     Fut: Future<Output = Result<()>>,
 {
+    run_with_resolver(
+        engine,
+        target,
+        root,
+        settings,
+        cancel,
+        verify_before_spawn,
+        |raw, allow_local| async move { otto_netguard::resolve_checked_for(&raw, allow_local).await },
+    )
+    .await
+}
+
+async fn run_with_resolver<V, Fut, R, RFut>(
+    engine: &Engine,
+    target: &Target,
+    root: &Path,
+    settings: &ScanSettings,
+    cancel: &CancellationToken,
+    verify_before_spawn: V,
+    resolve: R,
+) -> Result<(EngineRun, Vec<Finding>)>
+where
+    V: Fn() -> Fut,
+    Fut: Future<Output = Result<()>>,
+    R: Fn(String, bool) -> RFut,
+    RFut: Future<Output = std::result::Result<(String, Vec<SocketAddr>), String>>,
+{
     if !cfg!(target_os = "macos") {
         return Err(Error::Invalid(
             "Active DAST scans require macOS Seatbelt.".into(),
@@ -77,7 +104,7 @@ where
         .port_or_known_default()
         .ok_or_else(|| Error::Invalid("Enter an HTTP or HTTPS URL.".into()))?;
     // Fail fast on blocked/unreachable targets before initializing or downloading Nuclei.
-    let _ = otto_netguard::resolve_checked_for(url.as_str(), !public)
+    let _ = resolve(url.as_str().to_string(), !public)
         .await
         .map_err(Error::Forbidden)?;
 
@@ -89,22 +116,30 @@ where
         .map_err(io_error)?;
     let template_dirs = allowlisted_template_dirs(&templates).await?;
 
-    // Single probe-boundary consent gate: re-verify that human consent for this
-    // exact target and its live run configuration still holds AFTER binary and
-    // template preparation, immediately before opening the proxy or spawning Nuclei.
-    if cancel.is_cancelled() {
-        return Err(cancelled());
-    }
-    verify_before_spawn().await?;
-    let (host, addrs) = otto_netguard::resolve_checked_for(url.as_str(), !public)
+    // Finish guarded address resolution and scratch preparation BEFORE the final
+    // consent gate so revoking consent during DNS lookup or prep cannot race
+    // past the check and still spawn Nuclei.
+    let (host, addrs) = resolve(url.as_str().to_string(), !public)
         .await
         .map_err(Error::Forbidden)?;
-
-    let proxy = PinnedTargetProxy::start(host, port, addrs, cancel.child_token()).await?;
     let scratch = tempfile::tempdir_in(engine.dir()).map_err(io_error)?;
     let output = tokio::fs::canonicalize(scratch.path())
         .await
         .map_err(io_error)?;
+
+    // Single probe-boundary consent gate: re-verify that human consent for this
+    // exact target and its live run configuration still holds AFTER binary,
+    // template, DNS, and scratch preparation, immediately before opening the
+    // proxy and spawning Nuclei.
+    if cancel.is_cancelled() {
+        return Err(cancelled());
+    }
+    verify_before_spawn().await?;
+    if cancel.is_cancelled() {
+        return Err(cancelled());
+    }
+
+    let proxy = PinnedTargetProxy::start(host, port, addrs, cancel.child_token()).await?;
     let args = nuclei_args(&url, &template_dirs, proxy.port(), settings);
 
     let findings = Arc::new(Mutex::new(Vec::new()));
@@ -1091,19 +1126,73 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[tokio::test]
-    async fn revoking_consent_during_preparation_blocks_nuclei_spawn() {
-        // CONC-1: consent is valid before preparation starts, then revoked before
-        // Nuclei is spawned. The probe-boundary verify callback must prevent
+    async fn revoking_consent_during_preparation_or_resolution_blocks_nuclei_spawn() {
+        // CONC-1 / RC5-006: consent is valid at dispatch, then revoked while
+        // (1) template preparation is in flight and (2) the post-preparation
+        // guarded DNS lookup is pending. In both cases the probe-boundary
+        // verify callback must run AFTER preparation and resolution, blocking
         // Nuclei from spawning or touching the target.
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use tokio::sync::Notify;
 
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
         let tools = root.join("tools");
-        let spawn_marker = root.join("nuclei-spawned");
-        let script = format!("#!/bin/sh\ntouch '{}'\n", spawn_marker.display());
-        let (nuclei_dir, _) = setup_cached_nuclei(&tools, &script, true);
-        write_fresh_nuclei_markers(&nuclei_dir).await;
+        let templates_dir = tools.join("security-nuclei/templates");
+        let prep_started = templates_dir.join("prep-started");
+        let prep_release = templates_dir.join("prep-release");
+        // Stub handles both template refresh (-ut, where templates dir is writable)
+        // and active probing (connects through -proxy and emits a JSONL finding on
+        // stdout, proving inside Seatbelt that a spawned child would succeed and
+        // reach the target).
+        let script = format!(
+            r#"#!/bin/sh
+IS_UPDATE=0
+TARGET=""
+PROXY=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -ut) IS_UPDATE=1; shift ;;
+    -u) TARGET="$2"; shift 2 ;;
+    -proxy) PROXY="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [ "$IS_UPDATE" -eq 1 ]; then
+  touch '{prep_started}'
+  i=0
+  while [ ! -f '{prep_release}' ] && [ "$i" -lt 200 ]; do
+    sleep 0.02
+    i=$((i+1))
+  done
+  for sub in http/exposures/configs http/exposures/files http/exposures/apis http/exposures/logs; do
+    mkdir -p "$NUCLEI_TEMPLATES_DIR/$sub"
+    printf 'id: stub\n' > "$NUCLEI_TEMPLATES_DIR/$sub/stub.yaml"
+  done
+  exit 0
+fi
+PROXY_PORT="${{PROXY##*:}}"
+printf 'GET %s HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n' "$TARGET" | nc -w 2 127.0.0.1 "$PROXY_PORT" >/dev/null 2>&1 || true
+printf '%s\n' '{{"template-id":"probe-ran","matched-at":"'"$TARGET"'/probe","info":{{"name":"Probe Ran","severity":"low","description":"stub"}}}}'
+"#,
+            prep_started = prep_started.display(),
+            prep_release = prep_release.display(),
+        );
+        let (nuclei_dir, _) = setup_cached_nuclei(&tools, &script, false);
+        let stamp = store::now();
+        write_json(
+            &nuclei_dir.join("engine.json"),
+            &crate::EngineVersion {
+                version: "3.11.1".into(),
+                checked_at: stamp.clone(),
+                updated_at: stamp.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        write_json(&nuclei_dir.join("release-attempt.json"), &stamp)
+            .await
+            .unwrap();
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1116,45 +1205,168 @@ mod tests {
             confirmed_at: store::now(),
         };
 
-        let revoked = Arc::new(AtomicBool::new(true));
+        // 1. Consent is VALID at dispatch and revoked WHILE template refresh (-ut) is pending.
+        let revoked = Arc::new(AtomicBool::new(false));
         let checks = Arc::new(AtomicUsize::new(0));
-        let revoked_flag = revoked.clone();
-        let checks_counter = checks.clone();
+        let revoker = {
+            let revoked = revoked.clone();
+            let prep_started = prep_started.clone();
+            let prep_release = prep_release.clone();
+            tokio::spawn(async move {
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while !prep_started.exists() {
+                        tokio::time::sleep(Duration::from_millis(15)).await;
+                    }
+                })
+                .await
+                .expect("template refresh stub never started");
+                revoked.store(true, Ordering::SeqCst);
+                tokio::fs::write(&prep_release, b"revoked").await.unwrap();
+            })
+        };
         let err = run(
             &engine,
             &target,
             &root,
             &ScanSettings::default(),
             &CancellationToken::new(),
-            move || {
-                let revoked = revoked_flag.clone();
-                let checks = checks_counter.clone();
-                async move {
-                    checks.fetch_add(1, Ordering::SeqCst);
-                    if revoked.load(Ordering::SeqCst) {
-                        Err(Error::Conflict(
-                            "The confirmed target or its running configuration changed.".into(),
-                        ))
-                    } else {
-                        Ok(())
+            {
+                let revoked = revoked.clone();
+                let checks = checks.clone();
+                move || {
+                    let revoked = revoked.clone();
+                    let checks = checks.clone();
+                    async move {
+                        checks.fetch_add(1, Ordering::SeqCst);
+                        if revoked.load(Ordering::SeqCst) {
+                            Err(Error::Conflict(
+                                "The confirmed target or its running configuration changed.".into(),
+                            ))
+                        } else {
+                            Ok(())
+                        }
                     }
                 }
             },
         )
         .await
         .unwrap_err();
+        revoker.await.unwrap();
         assert!(matches!(err, Error::Conflict(_)), "got {err:?}");
         assert_eq!(checks.load(Ordering::SeqCst), 1);
-        assert!(
-            !spawn_marker.exists(),
-            "Nuclei must not spawn after consent is revoked during preparation"
-        );
         assert!(
             tokio::time::timeout(Duration::from_millis(80), listener.accept())
                 .await
                 .is_err(),
-            "target must receive zero connections when spawn-boundary consent fails"
+            "target must receive zero connections when consent is revoked during preparation"
         );
+
+        // 2. Consent is VALID at dispatch and throughout preparation, then revoked
+        //    WHILE the post-preparation guarded DNS lookup is pending.
+        let revoked_dns = Arc::new(AtomicBool::new(false));
+        let dns_checks = Arc::new(AtomicUsize::new(0));
+        let resolve_calls = Arc::new(AtomicUsize::new(0));
+        let dns_started = Arc::new(Notify::new());
+        let dns_release = Arc::new(Notify::new());
+        let dns_revoker = {
+            let revoked_dns = revoked_dns.clone();
+            let dns_started = dns_started.clone();
+            let dns_release = dns_release.clone();
+            tokio::spawn(async move {
+                tokio::time::timeout(Duration::from_secs(5), dns_started.notified())
+                    .await
+                    .expect("post-preparation DNS lookup never started");
+                revoked_dns.store(true, Ordering::SeqCst);
+                dns_release.notify_one();
+            })
+        };
+        let err = run_with_resolver(
+            &engine,
+            &target,
+            &root,
+            &ScanSettings::default(),
+            &CancellationToken::new(),
+            {
+                let revoked_dns = revoked_dns.clone();
+                let dns_checks = dns_checks.clone();
+                move || {
+                    let revoked_dns = revoked_dns.clone();
+                    let dns_checks = dns_checks.clone();
+                    async move {
+                        dns_checks.fetch_add(1, Ordering::SeqCst);
+                        if revoked_dns.load(Ordering::SeqCst) {
+                            Err(Error::Conflict(
+                                "The confirmed target or its running configuration changed.".into(),
+                            ))
+                        } else {
+                            Ok(())
+                        }
+                    }
+                }
+            },
+            {
+                let resolve_calls = resolve_calls.clone();
+                let dns_started = dns_started.clone();
+                let dns_release = dns_release.clone();
+                move |raw, allow_local| {
+                    let call = resolve_calls.fetch_add(1, Ordering::SeqCst);
+                    let dns_started = dns_started.clone();
+                    let dns_release = dns_release.clone();
+                    async move {
+                        if call == 1 {
+                            // Post-preparation lookup: suspend until the user revokes consent.
+                            dns_started.notify_one();
+                            tokio::time::timeout(Duration::from_secs(5), dns_release.notified())
+                                .await
+                                .expect("test never released post-preparation DNS lookup");
+                        }
+                        otto_netguard::resolve_checked_for(&raw, allow_local).await
+                    }
+                }
+            },
+        )
+        .await
+        .unwrap_err();
+        dns_revoker.await.unwrap();
+        assert!(
+            matches!(err, Error::Conflict(_)),
+            "revoking consent during final DNS lookup must abort before spawn, got: {err:?}"
+        );
+        assert_eq!(resolve_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(dns_checks.load(Ordering::SeqCst), 1);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(80), listener.accept())
+                .await
+                .is_err(),
+            "target must receive zero connections when consent is revoked during DNS lookup"
+        );
+
+        // 3. Positive control: when consent stays valid, the sandboxed stub
+        //    actually runs, reaches the target through the proxy, and emits a finding.
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+                .await
+                .expect("positive control probe never reached target")
+                .unwrap();
+            let mut buf = [0u8; 256];
+            let _ = stream.read(&mut buf).await;
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await;
+        });
+        let (_, findings) = run(
+            &engine,
+            &target,
+            &root,
+            &ScanSettings::default(),
+            &CancellationToken::new(),
+            || async { Ok(()) },
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule, "probe-ran");
     }
 
     #[cfg(target_os = "macos")]

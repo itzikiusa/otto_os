@@ -6,7 +6,8 @@
   import { announceShown } from '../../../lib/announce.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
   import type {
-    ConfirmPassiveAudit, PassiveAuditTarget, ProjectPassiveAudit, ProjectScans, ScanSettings, SecurityCheck, SecurityFinding, SecurityManageAction,
+    ConfirmPassiveAudit, PassiveAuditTarget, ProjectPassiveAudit, ProjectScans, RunDastRequest,
+    ScanSettings, SecurityCheck, SecurityFinding, SecurityManageAction,
     SecurityScanDetail, SecurityScanSummary, SecuritySchedule,
   } from '../../../lib/api/types';
   import { confirmer } from '../../../lib/confirm.svelte';
@@ -215,13 +216,14 @@
       confirmLabel: 'Run active scan',
     });
     if (!accepted) return;
+    const body: RunDastRequest = {
+      active: true,
+      run_config_id: confirmed.run_config_id,
+      url: confirmed.url,
+      confirmed_at: confirmed.confirmed_at,
+    };
     await action(async () => {
-      const scan = await api.post<{ id: string }>(`${base}/dast/run`, {
-        active: true,
-        run_config_id: confirmed.run_config_id,
-        url: confirmed.url,
-        confirmed_at: confirmed.confirmed_at,
-      });
+      const scan = await api.post<{ id: string }>(`${base}/dast/run`, body);
       await refresh(scan.id);
     });
   }
