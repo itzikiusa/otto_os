@@ -329,6 +329,7 @@ pub(super) async fn handshake_and_run(
         supports_terminate,
         supports_set_variable,
         exception_filters,
+        attached: launch_command == "attach",
     });
     *entry.conn.write().unwrap_or_else(|e| e.into_inner()) = Some(active_conn.clone());
     entry.mutate_and_broadcast(|snap| {

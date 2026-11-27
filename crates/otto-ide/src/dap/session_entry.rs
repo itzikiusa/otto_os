@@ -181,6 +181,9 @@ pub(super) struct ActiveConnection {
     pub(super) supports_terminate: bool,
     pub(super) supports_set_variable: bool,
     pub(super) exception_filters: Vec<String>,
+    /// Booted with DAP `attach`: Stop detaches and never ends a debuggee Otto
+    /// did not start (the guard still kills Otto's own adapter and companions).
+    pub(super) attached: bool,
 }
 
 impl ActiveConnection {

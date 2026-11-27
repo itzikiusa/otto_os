@@ -415,6 +415,12 @@ or built-in `otto-node-cdp` (`node --inspect-brk=0` CDP), `codelldb` /
 `lldb-dap` or built-in `otto-lldb-dap` (`/usr/bin/lldb` for Rust, Zig, and C/C++ / Unreal, with Zig, C++ STL, and Unreal LLDB pretty-printers, PID/process-name attach, post-mortem core-dump loading, `POST /ide/debug/sessions/{id}/set-variable`, and Zig panic / C++ `__cxa_throw` exception breakpoints), and
 `otto-sh-dap` (`DEBUG` trap for Bash/Zsh), plus a deterministic mock adapter.
 
+**Stop** on an attach session (a PID, port or gdb-remote attach) detaches: Otto
+sends `disconnect` with `terminateDebuggee: false` and never `terminate`, and
+the built-in Java bridge sends JDWP `Dispose` instead of `Exit`, so the process
+keeps running. Only Otto's own processes (the adapter, a `dotnet test` it
+started) are ended.
+
 Some starts are refused with a message instead of opening a session: Debug of
 a Playwright or Karma / Angular test run (Playwright runs tests in a separate
 worker process, Karma in a browser; use Run, `PWDEBUG=1` or a Chrome CDP

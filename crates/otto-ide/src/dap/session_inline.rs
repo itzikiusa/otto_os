@@ -484,7 +484,7 @@ async fn teardown_connection(entry: &SessionEntry) {
     let old = entry.conn.write().unwrap_or_else(|e| e.into_inner()).take();
     if let Some(conn) = old {
         conn.wire.retire();
-        if conn.supports_terminate {
+        if conn.supports_terminate && !conn.attached {
             let _ = tokio::time::timeout(
                 Duration::from_millis(800),
                 conn.wire.request("terminate", Some(json!({}))),
@@ -493,8 +493,10 @@ async fn teardown_connection(entry: &SessionEntry) {
         }
         let _ = tokio::time::timeout(
             Duration::from_millis(900),
-            conn.wire
-                .request("disconnect", Some(json!({ "terminateDebuggee": true }))),
+            conn.wire.request(
+                "disconnect",
+                Some(json!({ "terminateDebuggee": !conn.attached })),
+            ),
         )
         .await;
         conn.wire.abort_pending();

@@ -442,6 +442,11 @@ impl JdwpClient {
         Ok(())
     }
 
+    /// `VirtualMachine.Dispose`: drop every event request, resume and detach.
+    pub async fn vm_dispose(&self) {
+        let _ = tokio::time::timeout(Duration::from_millis(300), self.cmd(1, 6, &[])).await;
+    }
+
     pub async fn vm_exit(&self, code: i32) {
         let mut b = JdwpBuf::new();
         b.put_i32(code);

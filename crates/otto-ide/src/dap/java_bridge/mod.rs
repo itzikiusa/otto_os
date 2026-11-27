@@ -985,7 +985,12 @@ async fn handle_dap_request<W: AsyncWrite + Unpin>(
                 .await?;
         }
         "disconnect" | "terminate" => {
-            client.vm_exit(0).await;
+            // An attached JVM is not Otto's: detach (Dispose) and leave it running.
+            if st.is_attach {
+                client.vm_dispose().await;
+            } else {
+                client.vm_exit(0).await;
+            }
             guard.kill_all();
             dap_w
                 .send_response(req.seq, &req.command, Ok(Some(json!({}))))
