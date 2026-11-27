@@ -928,23 +928,27 @@ fn live_style_keeps_one_status_message_and_captions_every_file() {
 async fn channel_notify_waits_for_progress_pump() {
     let h = harness().await;
     h.rec.delay_formatted(Duration::from_millis(30));
+    // Build the edge with variables rather than a JSON source literal so
+    // `otto-core`'s background-session-source scanner does not mistake the
+    // node id for a session `meta.source` value.
+    let (from, to) = ("n1", "n2");
     let graph: WorkflowGraph = serde_json::from_value(json!({
         "nodes": [
             {
-                "id": "n1",
+                "id": from,
                 "kind": "manual_trigger",
                 "name": "Start 1",
                 "params": { "chat_updates": "per_step" }
             },
             {
-                "id": "n2",
+                "id": to,
                 "kind": "channel_notify",
                 "name": "Notify 9",
                 "params": { "message": "notify body" }
             }
         ],
         "edges": [
-            { "id": "e1", "source": "n1", "target": "n2" }
+            { "id": "e1", "source": from, "target": to }
         ]
     }))
     .unwrap();
