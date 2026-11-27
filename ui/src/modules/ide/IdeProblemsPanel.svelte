@@ -293,7 +293,7 @@
       class="icon-btn"
       aria-label="Clear diagnostics"
       title="Clear diagnostics"
-      disabled={allProblems.length === 0}
+      disabled={ide.problems.length === 0}
       onclick={() => ide.clearProblems()}
     >
       <Icon name="trash" size={13} />

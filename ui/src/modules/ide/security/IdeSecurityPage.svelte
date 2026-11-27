@@ -2,20 +2,21 @@
   import { onMount } from 'svelte';
   import { api } from '../../../lib/api/client';
   import { loadErrorText } from '../../../lib/loadError';
-  import { pollWhileVisible } from '../../../lib/poll';
+  import { pollWhileVisible, type Poller } from '../../../lib/poll';
   import { announceShown } from '../../../lib/announce.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
   import type {
     ConfirmPassiveAudit, PassiveAuditTarget, ProjectPassiveAudit, ProjectScans, ScanSettings, SecurityCheck, SecurityFinding, SecurityManageAction,
-    SecurityScanDetail, SecuritySchedule,
+    SecurityScanDetail, SecurityScanSummary, SecuritySchedule,
   } from '../../../lib/api/types';
   import { confirmer } from '../../../lib/confirm.svelte';
+  import type { MenuItem } from '../../../lib/contextmenu.svelte';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import PageBody from '../../../lib/components/PageBody.svelte';
   import PageHeader from '../../../lib/components/PageHeader.svelte';
   import type { IdeDiagnostic } from '../store/ideTypes';
-  import { diagnostics, latestFileScan, projectSecurityPath } from './projectSecurity.svelte';
+  import { diagnostics, latestFileScan, projectSecurityPath, scanDetailChanged } from './projectSecurity.svelte';
 
   interface Props {
     projectId: string;
@@ -54,6 +55,8 @@
   let importInput = $state<HTMLInputElement>();
   let request = 0;
   let alive = true;
+  let poller: Poller | undefined;
+  let lastDiagnostics: SecurityScanSummary | undefined;
 
   const base = $derived(projectSecurityPath(projectId));
   const passiveCandidate = $derived(passive?.candidates.find((candidate) => candidate.run_config_id === passiveConfig));
@@ -69,6 +72,14 @@
   const maxTrend = $derived(Math.max(1, ...completed.slice(0, 8).map((scan) => scan.count)));
   const when = (date: string, timeZone?: string) => new Date(date).toLocaleString(undefined, { timeZone });
 
+  function resetSettings(saved: ProjectScans) {
+    settings = { ...saved.settings, checks: [...saved.settings.checks], excludes: [...saved.settings.excludes] };
+    excludes = saved.settings.excludes.join('\n');
+    cron = saved.schedule?.cron ?? '';
+    timezone = saved.schedule?.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone ?? 'UTC';
+    schedulePreview = saved.schedule;
+  }
+
   async function refresh(preferred?: string, signal?: AbortSignal): Promise<void> {
     const current = ++request;
     try {
@@ -77,21 +88,23 @@
       const id = preferred || selected;
       const choice = next.scans.find((item) => item.id === id) ?? next.scans[0];
       const last = latestFileScan(next.scans);
+      const wasActive = !!active;
       overview = next;
-      if (!settings) {
-        settings = next.settings;
-        excludes = next.settings.excludes.join('\n');
-        cron = next.schedule?.cron ?? '';
-        timezone = next.schedule?.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone ?? 'UTC';
-        schedulePreview = next.schedule;
-      }
+      if (wasActive !== !!active) poller?.reschedule?.();
+      if (!settings) resetSettings(next);
       selected = choice?.id ?? '';
-      const scan = choice ? await api.get<SecurityScanDetail>(`${base}/scans/${choice.id}`, signal) : null;
-      const diagnosticScan = !last ? null : last.id === scan?.scan.id ? scan
+      const readDetail = !signal || scanDetailChanged(detail?.scan, choice);
+      const readDiagnostics = !signal || scanDetailChanged(lastDiagnostics, last);
+      const scan = !readDetail ? detail : choice
+        ? await api.get<SecurityScanDetail>(`${base}/scans/${choice.id}`, signal) : null;
+      const diagnosticScan = !readDiagnostics || !last ? null : last.id === scan?.scan.id ? scan
         : await api.bg.get<SecurityScanDetail>(`${base}/scans/${last.id}`, signal);
       if (!alive || current !== request) return;
-      detail = scan;
-      onDiagnostics(diagnosticScan ? diagnostics(diagnosticScan) : []);
+      if (readDetail) detail = scan;
+      if (readDiagnostics) {
+        onDiagnostics(diagnosticScan ? diagnostics(diagnosticScan) : []);
+        lastDiagnostics = last;
+      }
       error = '';
     } catch (e) {
       if (alive && current === request) error = loadErrorText(e);
@@ -102,12 +115,12 @@
 
   onMount(() => {
     void refreshPassive();
-    const poller = pollWhileVisible(async (signal) => {
+    poller = pollWhileVisible(async (signal) => {
       if (!overview || (active || overview.schedule) && !acting) await refresh(undefined, signal);
-    }, { ms: 3500 });
+    }, { get ms() { return active ? 3500 : 60_000; } });
     return () => {
       alive = false;
-      poller.stop();
+      poller?.stop();
     };
   });
 
@@ -212,7 +225,8 @@
     const schedule = cron.trim() ? { cron, timezone } : null;
     void action(async () => {
       if (schedule) await manage({ action: 'preview_schedule', schedule });
-      settings = await api.put<ScanSettings>(base, config);
+      const saved = await api.put<ScanSettings>(base, config);
+      if (overview) overview.settings = saved;
       schedulePreview = await manage<SecuritySchedule | null>({ action: 'set_schedule', schedule });
       await refresh();
       if (!error) showSettings = false;
@@ -268,25 +282,33 @@
       await refresh(result.scan_id);
     });
   }
+
+  function securityMore(): MenuItem[] {
+    const completed = detail?.scan.status === 'completed';
+    return [
+      { label: 'Import SARIF', disabled: acting, action: () => importInput?.click() },
+      { label: 'Export SARIF', disabled: acting || !completed, action: exportSarif },
+      { label: overview?.baseline && overview.baseline === detail?.scan.id ? 'Clear baseline' : 'Set baseline',
+        disabled: acting || !completed, action: selectBaseline },
+    ];
+  }
 </script>
 
-<PageHeader title="Security" subtitle={projectName} icon="shield">
+<PageHeader title="Security" subtitle={projectName} icon="shield" more={securityMore}>
   {#snippet leading()}
     <button type="button" class="btn small ghost" onclick={onBack}>Back to IDE</button>
   {/snippet}
   {#snippet actions()}
     <button type="button" class="btn small ghost" onclick={() => {
       showSettings = !showSettings;
-      if (showSettings) void refreshPassive();
+      if (showSettings && overview) {
+        resetSettings(overview);
+        void refreshPassive();
+      }
     }} disabled={!settings || acting} aria-expanded={showSettings}>Settings</button>
     {#if passiveRunReady}
       <button type="button" class="btn small ghost" onclick={runPassive} disabled={acting || passiveLoading || !!active}>Run passive audit</button>
     {/if}
-    <button type="button" class="btn small ghost" onclick={() => importInput?.click()} disabled={acting}>Import SARIF</button>
-    <button type="button" class="btn small ghost" onclick={exportSarif} disabled={acting || detail?.scan.status !== 'completed'}>Export SARIF</button>
-    <button type="button" class="btn small ghost" onclick={selectBaseline} disabled={acting || detail?.scan.status !== 'completed'}>
-      {overview?.baseline && overview.baseline === detail?.scan.id ? 'Clear baseline' : 'Set baseline'}
-    </button>
     {#if active}
       <button type="button" class="btn small" onclick={cancel} disabled={acting}>Cancel scan</button>
     {:else if overview?.scans.length}
