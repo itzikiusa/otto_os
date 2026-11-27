@@ -103,8 +103,11 @@ The result cache uses file contents, engine versions, rule and database
 versions, and scan settings. For small Opengrep edits Otto scans changed files
 and drops results from deleted files. Trivy reuses results for unchanged
 content and reruns a full scan after changes. Broad edits, rule and ignore-file
-changes, and a missing snapshot trigger full scans. Symlinks, unreadable files,
-and scopes beyond 100,000 files or 512 MiB bypass result reuse.
+changes, and a missing snapshot trigger full scans. Links to regular files
+already included in the snapshot reuse those files’ digests. A changed or
+deleted link triggers a full Opengrep scan when the project has an ignore file.
+Links to other targets, unreadable files, and scopes beyond 100,000 files or
+512 MiB bypass result reuse.
 
 Measured on the Otto worktree on Apple Silicon with one engine worker. CPU
 percentages are sampled relative to one core. The total includes cache lookup

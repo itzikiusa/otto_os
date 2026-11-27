@@ -12,6 +12,7 @@ use crate::engine::{read_json, write_json, EngineKind, BASE_EXCLUDED_DIRS};
 use crate::{Finding, ScanMode, ScanSettings};
 
 type Snapshot = BTreeMap<String, String>;
+const LINK_PREFIX: &str = "link:";
 
 #[derive(Serialize, Deserialize)]
 struct Cache {
@@ -125,15 +126,26 @@ fn plan(cached: Option<Cache>, files: Option<Snapshot>, key: &str, kind: EngineK
                 .filter(|(path, hash)| cache.files.get(*path) != Some(*hash))
                 .map(|(path, _)| path.clone())
                 .collect();
-            let renamed_ignore = cache
+            // An ignore file can include an alias under an arbitrary name.
+            let has_ignore_file = current.keys().any(|path| path.ends_with(".semgrepignore"));
+            let scope_input = |path: &str, hash: &str| {
+                path.ends_with(".semgrepignore")
+                    || (has_ignore_file && hash.starts_with(LINK_PREFIX))
+            };
+            let removed_scope_input = cache
                 .files
-                .keys()
-                .any(|path| path.ends_with(".semgrepignore") && !current.contains_key(path));
-            if !renamed_ignore
+                .iter()
+                .any(|(path, hash)| scope_input(path, hash) && !current.contains_key(path));
+            if !removed_scope_input
                 && changed.len() <= 64
-                && changed
-                    .iter()
-                    .all(|p| !p.ends_with(".semgrepignore") && include_safe(p))
+                && changed.iter().all(|path| {
+                    include_safe(path)
+                        && !scope_input(path, &current[path])
+                        && !cache
+                            .files
+                            .get(path)
+                            .is_some_and(|hash| scope_input(path, hash))
+                })
             {
                 let changed_paths: HashSet<_> = changed.iter().map(String::as_str).collect();
                 let previous = cache
@@ -221,6 +233,7 @@ fn collect(root: &Path, excludes: GlobSet, cancel: &CancellationToken) -> Option
     });
     let mut total = 0u64;
     let mut files = BTreeMap::new();
+    let mut links = Vec::new();
     let mut buffer = [0; 64 * 1024];
     for entry in walk.build() {
         if cancel.is_cancelled() {
@@ -231,11 +244,17 @@ fn collect(root: &Path, excludes: GlobSet, cancel: &CancellationToken) -> Option
         if kind.is_dir() {
             continue;
         }
-        if !kind.is_file() || files.len() >= 100_000 {
-            // Symlinks and special files make the scan's inputs ambiguous.
+        if files.len() + links.len() >= 100_000 {
             return None;
         }
         let relative = entry.path().strip_prefix(root).ok()?.to_str()?;
+        if kind.is_symlink() {
+            links.push((relative.to_owned(), entry.path().to_owned()));
+            continue;
+        }
+        if !kind.is_file() {
+            return None;
+        }
         let mut file = open_file(entry.path()).ok()?;
         let mut hash = Sha256::new();
         loop {
@@ -253,6 +272,17 @@ fn collect(root: &Path, excludes: GlobSet, cancel: &CancellationToken) -> Option
             hash.update(&buffer[..length]);
         }
         files.insert(relative.to_owned(), hex::encode(hash.finalize()));
+    }
+    for (relative, link) in links {
+        if cancel.is_cancelled() {
+            return None;
+        }
+        // Reuse the digest of the in-scope regular file. Never open an alias as
+        // an input or assume that a link to an untracked target captures its bytes.
+        let target = link.canonicalize().ok()?;
+        let name = target.strip_prefix(root).ok()?.to_str()?;
+        let hash = files.get(name)?;
+        files.insert(relative, format!("{LINK_PREFIX}{name}:{hash}"));
     }
     Some(files)
 }
@@ -276,6 +306,118 @@ fn open_file(path: &Path) -> io::Result<std::fs::File> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn local_file_symlinks_keep_result_reuse_but_invalidate_changed_inputs() {
+        use std::fs;
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        fs::write(root.join("real.go"), "package one").unwrap();
+        fs::write(root.join("other.go"), "package one").unwrap();
+        symlink("real.go", root.join("alias.go")).unwrap();
+        let take = || collect(&root, GlobSet::empty(), &CancellationToken::new());
+        let initial = take().expect("a local file alias should be cacheable");
+        let cached = || Cache {
+            key: "k".into(),
+            files: initial.clone(),
+            findings: Vec::new(),
+        };
+        for kind in [EngineKind::Trivy, EngineKind::Opengrep] {
+            assert_eq!(
+                plan(Some(cached()), take(), "k", kind).mode,
+                ScanMode::Cached
+            );
+        }
+
+        fs::write(root.join("real.go"), "package two").unwrap();
+        let changed = plan(Some(cached()), take(), "k", EngineKind::Opengrep);
+        assert!(
+            matches!(changed.selection, Selection::Files(files) if files == ["alias.go", "real.go"])
+        );
+        fs::write(root.join("real.go"), "package one").unwrap();
+        fs::remove_file(root.join("alias.go")).unwrap();
+        symlink("other.go", root.join("alias.go")).unwrap();
+        assert_ne!(take(), Some(initial));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_linked_ignore_inputs_require_a_full_scan_after_edits_or_deletion() {
+        use std::fs;
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        fs::write(root.join("ignore-patterns"), "generated.go\n").unwrap();
+        symlink("ignore-patterns", root.join(".semgrepignore")).unwrap();
+        let take = || collect(&root, GlobSet::empty(), &CancellationToken::new());
+        let initial = take().expect("linked ignore content is in the scan scope");
+        let cached = || Cache {
+            key: "k".into(),
+            files: initial.clone(),
+            findings: Vec::new(),
+        };
+        fs::write(root.join("ignore-patterns"), "another.go\n").unwrap();
+        assert_eq!(
+            plan(Some(cached()), take(), "k", EngineKind::Opengrep).mode,
+            ScanMode::Full
+        );
+        fs::remove_file(root.join(".semgrepignore")).unwrap();
+        assert_eq!(
+            plan(Some(cached()), take(), "k", EngineKind::Opengrep).mode,
+            ScanMode::Full
+        );
+
+        fs::write(root.join(".semgrepignore"), ":include linked-patterns\n").unwrap();
+        symlink("ignore-patterns", root.join("linked-patterns")).unwrap();
+        let initial = take().unwrap();
+        fs::remove_file(root.join("linked-patterns")).unwrap();
+        let cache = Cache {
+            key: "k".into(),
+            files: initial,
+            findings: Vec::new(),
+        };
+        assert_eq!(
+            plan(Some(cache), take(), "k", EngineKind::Opengrep).mode,
+            ScanMode::Full
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_symlinks_cannot_reuse_results_for_unhashed_targets() {
+        use std::fs;
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir(&project).unwrap();
+        let root = project.canonicalize().unwrap();
+        let target = root.join("excluded.txt");
+        fs::write(&target, "excluded").unwrap();
+        let settings = ScanSettings {
+            excludes: vec!["excluded.txt".into()],
+            ..Default::default()
+        };
+        symlink(&target, root.join("alias")).unwrap();
+        let take = || {
+            collect(
+                &root,
+                exclude_globs(&settings).unwrap(),
+                &CancellationToken::new(),
+            )
+        };
+        assert!(take().is_none());
+
+        let outside = dir.path().join("outside.txt");
+        fs::write(&outside, "outside").unwrap();
+        fs::remove_file(root.join("alias")).unwrap();
+        symlink(outside, root.join("alias")).unwrap();
+        assert!(take().is_none());
+    }
 
     #[test]
     fn changed_or_removed_files_invalidate_only_sast_findings() {
