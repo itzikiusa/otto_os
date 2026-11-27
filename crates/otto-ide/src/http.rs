@@ -19,6 +19,8 @@ mod projects_deps;
 mod runtime_debug;
 #[path = "http/security.rs"]
 pub mod security;
+#[path = "http/security_active.rs"]
+mod security_active;
 #[path = "http/security_dast.rs"]
 mod security_dast;
 #[path = "http/spring_boot.rs"]
@@ -221,6 +223,10 @@ pub fn api_router<S: IdeCtx>() -> Router<S> {
             .route(
                 "/ide/projects/{id}/security/dast/run",
                 post(security_dast::start::<S>),
+            )
+            .route(
+                "/ide/projects/{id}/security/dast/schedule",
+                put(security_active::allow::<S>).delete(security_active::revoke::<S>),
             )
             .route("/ide/projects/scan-repos", post(scan_repos::<S>))
             .route(

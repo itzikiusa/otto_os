@@ -533,6 +533,15 @@ async fn agent_credentials_are_refused_on_every_admin_and_secret_route() {
         (Method::POST, "/api/v1/browser/credentials/x1/reveal"),
         (Method::POST, "/api/v1/sessions/x1/share"),
         (Method::POST, "/api/v1/workflow-runs/x1/approve"),
+        // Scheduled active security checks: only a person may allow or revoke.
+        (
+            Method::PUT,
+            "/api/v1/ide/projects/x1/security/dast/schedule",
+        ),
+        (
+            Method::DELETE,
+            "/api/v1/ide/projects/x1/security/dast/schedule",
+        ),
     ] {
         assert!(
             privileged_routes
@@ -568,6 +577,29 @@ async fn agent_credentials_are_refused_on_every_admin_and_secret_route() {
         "credential-class gate:\n{}",
         wrong.join("\n")
     );
+}
+
+/// Every write route under `/security/dast` (target consent, active scans,
+/// the scheduled active-check grant) is person-only, by prefix, so a DAST
+/// route added later cannot be reached with an agent's own credential.
+#[test]
+fn every_dast_write_route_is_person_only() {
+    use otto_server::policy::{route_class, RouteClass};
+    let root = super::policy_coverage::repo_root();
+    let dast: Vec<_> = super::policy_coverage::registered_routes(&root)
+        .into_iter()
+        .filter(|t| t.starts_with("/ide/projects/{id}/security/dast"))
+        .collect();
+    assert!(dast.len() >= 3, "scanner found only {dast:?}");
+    for template in dast {
+        for m in [Method::POST, Method::PUT, Method::PATCH, Method::DELETE] {
+            assert_eq!(
+                route_class(&m, &format!("/api/v1{template}")),
+                Some(RouteClass::Admin),
+                "{m} {template}"
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

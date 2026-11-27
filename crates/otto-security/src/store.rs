@@ -3,7 +3,29 @@ use otto_core::{Error, Result};
 use otto_state::DbPool;
 use serde::{de::DeserializeOwned, Serialize};
 
-use crate::{ProjectScans, ScanDetail, ScanSettings, ScanStatus, ScanSummary};
+use crate::{
+    EngineNote, EngineRun, Finding, ProjectScans, ScanDetail, ScanSettings, ScanStatus,
+    ScanSummary, ScanTrigger,
+};
+
+/// What a finished scan job produced: engine runs and findings, plus the
+/// engines that were refused or failed without failing the whole scan.
+#[derive(Default)]
+pub struct JobOutput {
+    pub runs: Vec<EngineRun>,
+    pub findings: Vec<Finding>,
+    pub skipped: Vec<EngineNote>,
+}
+
+impl From<(Vec<EngineRun>, Vec<Finding>)> for JobOutput {
+    fn from((runs, findings): (Vec<EngineRun>, Vec<Finding>)) -> Self {
+        Self {
+            runs,
+            findings,
+            skipped: Vec::new(),
+        }
+    }
+}
 
 pub(crate) fn now() -> String {
     Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
@@ -33,6 +55,8 @@ struct Row {
     error: Option<String>,
     count: u32,
     engines: String,
+    trigger: String,
+    skipped: Option<String>,
 }
 
 impl TryFrom<Row> for ScanSummary {
@@ -58,6 +82,17 @@ impl TryFrom<Row> for ScanSummary {
             error: row.error,
             count: row.count,
             engines: decode(&row.engines)?,
+            trigger: if row.trigger == "scheduled" {
+                ScanTrigger::Scheduled
+            } else {
+                ScanTrigger::Manual
+            },
+            skipped: row
+                .skipped
+                .as_deref()
+                .map(decode)
+                .transpose()?
+                .unwrap_or_default(),
         })
     }
 }
@@ -66,7 +101,7 @@ macro_rules! summary_query {
     ($prefix:literal, $suffix:literal) => {
         concat!(
             $prefix,
-            "id, status, created_at, started_at, finished_at, engine, metrics, error, count, engines",
+            "id, status, created_at, started_at, finished_at, engine, metrics, error, count, engines, trigger, skipped",
             $suffix,
         )
     };
@@ -165,16 +200,24 @@ pub(crate) async fn detail(pool: &DbPool, project: &str, id: &str) -> Result<Sca
     })
 }
 
-pub(crate) async fn insert(pool: &DbPool, project: &str) -> Result<ScanSummary> {
+pub(crate) async fn insert(
+    pool: &DbPool,
+    project: &str,
+    trigger: ScanTrigger,
+) -> Result<ScanSummary> {
     let id = otto_core::new_id().to_string();
     let query = summary_query!(
-        "INSERT INTO ide_security_scans (id, project_id, status, created_at) VALUES (?, ?, 'queued', ?) RETURNING ",
+        "INSERT INTO ide_security_scans (id, project_id, status, created_at, trigger) VALUES (?, ?, 'queued', ?, ?) RETURNING ",
         ""
     );
     sqlx::query_as::<_, Row>(query)
         .bind(id)
         .bind(project)
         .bind(now())
+        .bind(match trigger {
+            ScanTrigger::Manual => "manual",
+            ScanTrigger::Scheduled => "scheduled",
+        })
         .fetch_one(pool)
         .await
         .map_err(|e| {
@@ -201,13 +244,13 @@ pub(crate) async fn start(pool: &DbPool, id: &str) -> Result<bool> {
     Ok(updated.rows_affected() == 1)
 }
 
-pub(crate) async fn finish(
-    pool: &DbPool,
-    id: &str,
-    result: Result<(Vec<crate::EngineRun>, Vec<crate::Finding>)>,
-) -> Result<()> {
-    let (status, engine, metrics, error, count, findings, engines) = match result {
-        Ok((engines, findings)) => {
+pub(crate) async fn finish(pool: &DbPool, id: &str, result: Result<JobOutput>) -> Result<()> {
+    let (status, engine, metrics, error, count, findings, engines, skipped) = match result {
+        Ok(JobOutput {
+            runs: engines,
+            findings,
+            skipped,
+        }) => {
             let primary = engines
                 .first()
                 .map(|run| encode(&run.version))
@@ -227,6 +270,9 @@ pub(crate) async fn finish(
                 findings.len(),
                 encode(&findings)?,
                 encode(&engines)?,
+                (!skipped.is_empty())
+                    .then(|| encode(&skipped))
+                    .transpose()?,
             )
         }
         Err(error) => (
@@ -237,10 +283,11 @@ pub(crate) async fn finish(
             0,
             "[]".into(),
             "[]".into(),
+            None,
         ),
     };
     sqlx::query(
-        "UPDATE ide_security_scans          SET status = ?, finished_at = ?, engine = ?, metrics = ?, error = ?, count = ?, findings = ?, engines = ?          WHERE id = ? AND status IN ('queued', 'running')",
+        "UPDATE ide_security_scans          SET status = ?, finished_at = ?, engine = ?, metrics = ?, error = ?, count = ?, findings = ?, engines = ?, skipped = ?          WHERE id = ? AND status IN ('queued', 'running')",
     )
     .bind(status)
     .bind(now())
@@ -250,6 +297,7 @@ pub(crate) async fn finish(
     .bind(count as u32)
     .bind(findings)
     .bind(engines)
+    .bind(skipped)
     .bind(id)
     .execute(pool)
     .await
@@ -297,9 +345,9 @@ mod tests {
     #[tokio::test]
     async fn isolates_projects_and_only_allows_one_queued_or_running_scan_per_project() {
         let pool = database().await;
-        let scan = insert(&pool, "project").await.unwrap();
+        let scan = insert(&pool, "project", ScanTrigger::Manual).await.unwrap();
         assert!(matches!(
-            insert(&pool, "project").await,
+            insert(&pool, "project", ScanTrigger::Manual).await,
             Err(Error::Conflict(_))
         ));
         assert!(matches!(
@@ -334,19 +382,19 @@ mod tests {
                 .status,
             ScanStatus::Cancelled
         );
-        assert!(insert(&pool, "project").await.is_ok());
+        assert!(insert(&pool, "project", ScanTrigger::Manual).await.is_ok());
     }
 
     #[tokio::test]
     async fn recovery_ends_orphaned_scans_and_preserves_history() {
         let pool = database().await;
-        let interrupted = insert(&pool, "project").await.unwrap();
+        let interrupted = insert(&pool, "project", ScanTrigger::Manual).await.unwrap();
         recover(&pool).await.unwrap();
         let status = list(&pool, "project").await.unwrap();
         assert_eq!(status.scans.len(), 1);
         assert_eq!(status.scans[0].id, interrupted.id);
         assert_eq!(status.scans[0].status, ScanStatus::Failed);
-        assert!(insert(&pool, "project").await.is_ok());
+        assert!(insert(&pool, "project", ScanTrigger::Manual).await.is_ok());
     }
 
     #[tokio::test]

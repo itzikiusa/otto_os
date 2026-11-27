@@ -1,5 +1,6 @@
 //! Security scans for named local IDE projects.
 
+pub mod active_grant;
 mod dast;
 mod download;
 mod engine;
@@ -15,5 +16,6 @@ mod service;
 mod store;
 mod types;
 
-pub use service::{wait_for_idle, SecurityScans};
+pub use service::{wait_for_idle, JobOutput, SecurityScans};
+pub use tokio_util::sync::CancellationToken;
 pub use types::*;

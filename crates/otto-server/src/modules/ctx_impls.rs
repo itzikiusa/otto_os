@@ -84,6 +84,27 @@ impl otto_ide::IdeCtx for ServerCtx {
     fn security_scan_busy(&self) -> BoxFuture<'_, bool> {
         Box::pin(self.manager.security_scan_busy())
     }
+    fn post_notice(&self, n: otto_ide::IdeNotice, streak: bool) -> BoxFuture<'_, ()> {
+        let n = crate::run_notices::RunNotice {
+            key: n.key,
+            severity: n.severity,
+            title: n.title,
+            body: n.body,
+            route: "ide".into(),
+            workspace_id: None,
+            user_id: Some(n.user_id),
+        };
+        Box::pin(async move {
+            if streak {
+                crate::run_notices::notify_failure(self, n).await
+            } else {
+                crate::run_notices::post(self, n).await
+            }
+        })
+    }
+    fn end_notice_streak(&self, key: &str) {
+        crate::run_notices::clear_streak(key)
+    }
     fn pool(&self) -> otto_state::DbPool {
         self.pool.clone()
     }

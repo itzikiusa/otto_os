@@ -10,19 +10,22 @@ use otto_core::{Error, Result};
 use otto_security::passive::{
     self, Candidate, ConfirmTarget, ProjectPassive, RunDastRequest, Target,
 };
-use otto_security::ScanSummary;
+use otto_security::{JobOutput, ScanSummary, ScanTrigger};
 
 use super::{security::project_roots, ApiResult};
 use crate::types::IdeTargetSpec;
 use crate::IdeCtx;
 
-struct ProjectCandidate {
-    root: PathBuf,
-    raw_url: String,
-    candidate: Candidate,
+pub(super) struct ProjectCandidate {
+    pub(super) root: PathBuf,
+    pub(super) raw_url: String,
+    pub(super) candidate: Candidate,
 }
 
-async fn candidates<S: IdeCtx>(ctx: &S, roots: &[PathBuf]) -> Result<Vec<ProjectCandidate>> {
+pub(super) async fn candidates<S: IdeCtx>(
+    ctx: &S,
+    roots: &[PathBuf],
+) -> Result<Vec<ProjectCandidate>> {
     let mut candidates = Vec::new();
     for root in roots {
         let spec = IdeTargetSpec::local(root.to_string_lossy());
@@ -106,9 +109,11 @@ pub(super) async fn config<S: IdeCtx>(
         .into_iter()
         .map(|entry| entry.candidate)
         .collect();
+    let active_schedule = super::security_active::view(&ctx, &user, &id, &roots).await?;
     Ok(Json(ProjectPassive {
         confirmed,
         candidates,
+        active_schedule,
     }))
 }
 
@@ -187,6 +192,7 @@ pub(super) async fn start<S: IdeCtx>(
         .enqueue_job(
             ctx.pool(),
             id,
+            ScanTrigger::Manual,
             move || {
                 let ctx = ctx.clone();
                 async move { ctx.security_scan_busy().await }
@@ -202,7 +208,7 @@ pub(super) async fn start<S: IdeCtx>(
                 let verify_expected = expected.clone();
                 let verify_root = root.clone();
                 let (run, findings) = runner
-                    .run_dast(&target, &root, &settings, active, &cancel, move || {
+                    .run_dast(&target, &root, &settings, active, &cancel, move |_| {
                         let ctx = verify_ctx.clone();
                         let user = verify_user.clone();
                         let project = verify_project.clone();
@@ -235,9 +241,9 @@ pub(super) async fn start<S: IdeCtx>(
     Ok((StatusCode::ACCEPTED, Json(scan)))
 }
 
-/// Scheduled scans run source checks and, when explicitly opted in, passive
-/// HTTP header audits only. Active Nuclei checks are never scheduled — they
-/// require an explicit per-scan human request through `POST .../dast/run`.
+/// Scheduled scans run source checks, the passive HTTP header audit when the
+/// target opted in, and active Nuclei checks only under a person's grant that
+/// still matches live state ([`super::security_active::scheduled`]).
 pub(super) async fn enqueue_scheduled<S: IdeCtx>(
     ctx: &S,
     user: User,
@@ -254,6 +260,7 @@ pub(super) async fn enqueue_scheduled<S: IdeCtx>(
         .enqueue_job(
             ctx.pool(),
             id,
+            ScanTrigger::Scheduled,
             move || {
                 let ctx = load_ctx.clone();
                 async move { ctx.security_scan_busy().await }
@@ -286,14 +293,24 @@ pub(super) async fn enqueue_scheduled<S: IdeCtx>(
                         }
                     }
                 }
-                Ok((runs, findings))
+                let (run, mut extra, note) = super::security_active::scheduled(
+                    &job_ctx, &project, &roots, &settings, &cancel, &busy, &worker,
+                )
+                .await?;
+                runs.extend(run);
+                findings.append(&mut extra);
+                Ok(JobOutput {
+                    runs,
+                    findings,
+                    skipped: note.into_iter().collect(),
+                })
             },
         )
         .await
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
@@ -337,7 +354,7 @@ mod tests {
     }
 
     #[derive(Clone)]
-    struct TestSecurityCtx {
+    pub(crate) struct TestSecurityCtx {
         ide: Arc<IdeEngine>,
         pool: DbPool,
         secrets: Arc<dyn SecretStore>,
@@ -378,7 +395,7 @@ mod tests {
         }
     }
 
-    async fn send_json(
+    pub(crate) async fn send_json(
         app: &axum::Router,
         user: &User,
         method: Method,
@@ -409,7 +426,7 @@ mod tests {
         (status, parsed)
     }
 
-    async fn setup_fixture() -> (
+    pub(crate) async fn setup_fixture() -> (
         tempfile::TempDir,
         PathBuf,
         TestSecurityCtx,
@@ -440,7 +457,7 @@ mod tests {
         (tmp, ws, ctx, app, user)
     }
 
-    async fn create_project_and_live_run(
+    pub(crate) async fn create_project_and_live_run(
         app: &axum::Router,
         user: &User,
         ws: &Path,
@@ -637,7 +654,7 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
-    fn seed_stub_scanners(toolchains: &Path) {
+    pub(crate) fn seed_stub_scanners(toolchains: &Path) {
         use std::os::unix::fs::PermissionsExt;
 
         let stamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);

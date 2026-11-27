@@ -117,8 +117,9 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
   Seatbelt confinement. Review findings in Problems and the editor gutter,
   manage suppressions and baselines, import or export SARIF 2.1.0, and audit
   an explicitly confirmed development run target with passive HTTP header
-  checks. An active Nuclei DAST scan of that target runs only when a person
-  starts it by hand; schedules run the passive checks only
+  checks. An active Nuclei DAST scan of that target runs when a person starts
+  it by hand, or on the schedule for a localhost target the person allowed
+  (30 days, re-checked before every run, paused by any change)
   ([Security scans](docs/features/security-scans.md)).
 - **Chat.** A run started from chat keeps one live status message in its
   thread instead of a message per step, and flushes pending chat progress

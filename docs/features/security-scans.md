@@ -70,10 +70,53 @@ discarded in memory without writing a temporary report file to disk.
 
 Enable **Include passive audit in scheduled scans** when confirming the URL to
 allow future scheduled passive audits while the same configuration is running.
-Scheduled scans stay passive-only (active Nuclei checks are never scheduled and
-require an explicit manual opt-in). A changed URL, changed live configuration,
-or revoked confirmation prevents the previous approval from being used.
-Scheduled source scans can proceed when the service is unavailable.
+A changed URL, changed live configuration, or revoked confirmation prevents the
+previous approval from being used. Scheduled source scans can proceed when the
+service is unavailable.
+
+### Scheduled active checks
+
+Scheduled scans can also run the active Nuclei check, but only after you allow
+it yourself. In **Settings → HTTP audit & DAST**, turn on **Also run the active
+check on this schedule**. The confirmation names exactly what you allow: the
+target URL and run configuration, the addresses it resolves to, the schedule,
+the checks, and the date the approval ends. The line below the switch shows
+the state: **On for … until …**, **Paused: …** with the reason, or **Off** with
+the one condition that is missing.
+
+The switch is available only when all of these hold:
+
+- the target is confirmed with **Include passive audit in scheduled scans**;
+- the target is `localhost`, `127.0.0.0/8` or `::1`, and resolves only to
+  loopback addresses (other targets stay manual: an unattended scan must not
+  touch another machine);
+- a schedule is saved and runs at most once an hour;
+- the saved run configuration is running;
+- you are the person the schedule runs as (the project owner).
+
+The approval is bound to the exact confirmed target, its addresses, the exact
+saved schedule, the template policy of this Otto version and you, and it ends
+after 30 days. Each scheduled run checks all of it twice: when the active part
+starts and again right before Nuclei starts, after the binary, templates and
+address lookup are ready. If anything changed — the target was re-confirmed or
+its run configuration's URL edited, the schedule was changed or saved again,
+the host resolves to another address, the run-as person changed or lost
+access, the approval expired, or a new Otto version ships different checks —
+the source checks and the passive audit still run, the active part is skipped,
+and the approval is paused for good. The scan shows **Active checks skipped:**
+with the reason, the switch shows **Paused**, the notification center shows one
+notice, and the audit log records it. Turn the switch on again to allow the
+current values. A stopped run configuration skips the active part without
+pausing the approval.
+
+Only a person signed in to Otto can turn the switch on or off: agent session
+tokens, MCP credentials, share links and paired phones are refused on that
+route. An agent can still change the schedule, which pauses scheduled active
+checks; it can never allow, extend or retarget them. If Nuclei fails or times
+out on a scheduled run, the scan still completes with its other results and
+shows **Active checks failed:** with the reason; the first failure of a streak
+posts a notice. High or critical active findings post a notice too. Scan
+history marks scheduled scans and scans where Nuclei ran.
 
 ## Coverage
 
