@@ -93,12 +93,9 @@ pub(crate) async fn summarize_and_persist(
     let now = Instant::now();
     let remaining = review_deadline.map(|at| Instant::from_std(at).saturating_duration_since(now));
     let budget = summarizer_budget(total_findings, remaining);
-    let budget = remaining.map_or(budget, |left| {
-        budget.min(left.saturating_sub(SUMMARIZER_PUBLISH_MARGIN))
-    });
     tracing::info!(
         review = %review_id,
-        "running summarizer agent ({total_findings} findings in, {}s budget)",
+        "running summarizer agent ({total_findings} input findings, {}s shared budget)",
         budget.as_secs()
     );
     // The shared summarizer step (`otto_agent_run::fanout::summarize`): the

@@ -212,11 +212,10 @@ hours above that. `timeout_secs` overrides this. These are failure ceilings, not
 expected durations. Waiting is signaled after about two minutes of idle time;
 about fifteen minutes of silence triggers stuck recovery.
 
-The verifier gets 5 minutes plus 3 seconds per input finding. Its ceiling is 2
-hours without a workflow step deadline. With a deadline, the ceiling is the
-time left minus 30 seconds for saving results, with a 30-minute minimum ceiling.
-The verifier still stops 30 seconds before the step deadline if that comes
-sooner. Startup, queueing, and both attempts share this budget.
+The verifier budget is 5 minutes plus 30 seconds per input finding, with a
+10-minute floor. The budget is capped at the time left in the workflow step
+minus 30 seconds for saving results. Without a step deadline, the cap is
+2 hours. Startup, queueing, and both attempts share this budget.
 A timeout, provider failure or malformed response can preserve a deterministic
 fallback, but that fallback is not independent verification: the review remains
 incomplete. Cancellation is terminal and does not start a fallback attempt.

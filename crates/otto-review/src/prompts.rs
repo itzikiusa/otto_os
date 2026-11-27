@@ -149,19 +149,21 @@ pub fn reviewer_prompt(
         )
 }
 
-const MIN_SUMMARIZER_CEILING: Duration = Duration::from_secs(30 * 60);
+const SUMMARIZER_SECONDS_PER_FINDING: u64 = 30;
+const MIN_SUMMARIZER_BUDGET: Duration = Duration::from_secs(10 * 60);
 pub const STANDALONE_SUMMARIZER_CEILING: Duration = Duration::from_secs(2 * 60 * 60);
-pub const SUMMARIZER_PUBLISH_MARGIN: Duration = Duration::from_secs(30);
+const SUMMARIZER_PUBLISH_MARGIN: Duration = Duration::from_secs(30);
 
-/// The finding-count budget. An enclosing review deadline can cut it short.
+/// The shared budget for all verifier attempts, including startup and queueing.
 pub fn summarizer_budget(total_findings: usize, review_remaining: Option<Duration>) -> Duration {
     let ceiling = review_remaining.map_or(STANDALONE_SUMMARIZER_CEILING, |remaining| {
-        remaining
-            .saturating_sub(SUMMARIZER_PUBLISH_MARGIN)
-            .max(MIN_SUMMARIZER_CEILING)
+        remaining.saturating_sub(SUMMARIZER_PUBLISH_MARGIN)
     });
-    let work = 300_u64.saturating_add(3_u64.saturating_mul(total_findings as u64));
-    Duration::from_secs(work).min(ceiling)
+    let work = 300_u64
+        .saturating_add(SUMMARIZER_SECONDS_PER_FINDING.saturating_mul(total_findings as u64));
+    Duration::from_secs(work)
+        .max(MIN_SUMMARIZER_BUDGET)
+        .min(ceiling)
 }
 
 /// The summarizer row once the summary is in: done, its comment count, and
@@ -348,22 +350,37 @@ mod tests {
 
     #[test]
     fn summarizer_budget_scales_with_findings_and_review_time() {
-        for (review_remaining, expected) in [
-            (
-                Some(Duration::from_secs(5 * 60 * 60)),
-                [330, 801, 6_300, 17_970],
-            ),
-            // 30 minutes is the floor on the finding-count budget's ceiling.
-            (Some(Duration::from_secs(20 * 60)), [330, 801, 1_800, 1_800]),
-            (None, [330, 801, 6_300, 7_200]),
+        let five_hours = Some(Duration::from_secs(5 * 60 * 60));
+        let twenty_minutes = Some(Duration::from_secs(20 * 60));
+        for (findings, review_remaining, seconds) in [
+            (10, five_hours, 600),
+            (167, five_hours, 5_310),
+            (2_000, five_hours, 17_970),
+            (10, twenty_minutes, 600),
+            (167, twenty_minutes, 1_170),
+            (2_000, twenty_minutes, 1_170),
+            (10, None, 600),
+            (167, None, 5_310),
+            (2_000, None, 7_200),
         ] {
-            for (findings, seconds) in [10, 167, 2_000, 6_000].into_iter().zip(expected) {
-                assert_eq!(
-                    summarizer_budget(findings, review_remaining),
-                    Duration::from_secs(seconds),
-                    "{findings} findings, {review_remaining:?} remaining"
-                );
-            }
+            assert_eq!(
+                summarizer_budget(findings, review_remaining),
+                Duration::from_secs(seconds),
+                "{findings} findings, {review_remaining:?} remaining"
+            );
         }
+    }
+
+    #[test]
+    fn summarizer_budget_applies_the_floor_before_the_deadline_cap() {
+        assert_eq!(summarizer_budget(0, None), Duration::from_secs(600));
+        assert_eq!(
+            summarizer_budget(0, Some(Duration::from_secs(45))),
+            Duration::from_secs(15)
+        );
+        assert_eq!(
+            summarizer_budget(0, Some(Duration::from_secs(30))),
+            Duration::ZERO
+        );
     }
 }

@@ -671,11 +671,10 @@ the review association and current summarizer. Reviewer and summarizer threads
 are engine threads (§3): closed when their turn ends, kept for the run's
 retention period, never in your Threads lists.
 
-The verifier gets 5 minutes plus 3 seconds per input finding. In an awaited
-review step, its ceiling is the time left minus 30 seconds for saving results,
-with a 30-minute minimum ceiling. Both attempts share the same deadline and
-stop 30 seconds before the step expires if that comes sooner. Without a step
-deadline, the ceiling is 2 hours.
+The verifier budget is 5 minutes plus 30 seconds per input finding, with a
+10-minute floor. In an awaited review step, the budget is capped at the time
+left minus 30 seconds for saving results. Without a step deadline, the cap
+is 2 hours. Both attempts share one deadline.
 
 Failures, verifier timeouts, and empty summaries when findings exist can
 preserve a **Deterministic fallback**. The review remains incomplete until
