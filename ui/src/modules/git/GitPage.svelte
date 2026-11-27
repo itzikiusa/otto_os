@@ -14,6 +14,7 @@
   import { git } from '../../lib/stores/git.svelte';
   import GitTabs from './GitTabs.svelte';
   import { focusPath, parseGitRoute } from './gitRoute';
+  import { gitPhoneMenu } from './gitPhoneMenu.svelte';
   import { prWorkspace } from './prWorkspaceStore.svelte';
   import { gitBridge } from '../../lib/diff/gitBridge.svelte';
   import { registry } from '../../lib/commands.svelte';
@@ -177,6 +178,28 @@
       ...rest.map((r) => ({ label: r.name, icon: 'branch', action: () => openRepo(r.id) })),
     ], rest.length > 8 ? { filter: true, filterPlaceholder: 'Open a repository…', maxVisible: 12 } : undefined);
   }
+
+  // A phone list page draws the list pane's header in this one row: the
+  // repository switcher and the view switch move under its ⋯ (gitPhoneMenu).
+  $effect(() =>
+    gitPhoneMenu.set(() => {
+      const open = git.openRepoIds.map((id) => git.allRepos.find((r) => r.id === id)).filter((r) => !!r);
+      const v = repoView?.viewState();
+      return [
+        ...(v && !v.resolving ? [{ label: 'View', icon: 'eye' as const, children: VIEWS.map((t) => ({ label: t.label, icon: t.icon, checked: t.id === v.tab, action: () => repoView?.selectTab(t.id) })) }] : []),
+        {
+          label: 'Repository',
+          icon: 'branch',
+          children: [
+            { label: 'Focus', icon: 'zap', checked: focusView, action: () => setFocus(true) },
+            ...open.map((r) => ({ label: r.name, icon: 'branch' as const, checked: !focusView && r.id === git.activeRepoId, action: () => openRepo(r.id) })),
+            { separator: true },
+            { label: 'Add or clone a repository…', icon: 'plus', action: () => { addMode = 'register'; addOpen = true; } },
+          ],
+        },
+      ];
+    }),
+  );
 
   function openRepo(repoId: string): void {
     git.openRepoTab(repoId);
