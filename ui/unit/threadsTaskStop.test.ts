@@ -135,6 +135,7 @@ function harness(get: (p: string) => Promise<unknown>, post = async (_p: string,
     '../../../lib/stores/uiControl.svelte': { uiControl: { addSource: () => {} } },
     '../threadsStore.svelte': { threads: {} },
     '../../../lib/stores/runtimeDrafts.svelte': { runtimeDrafts: { forget: () => () => {} } },
+    './childThreads': { inWatchedFamily: ct.inWatchedFamily, isEngineThread: ct.isEngineThread },
     '../../../lib/providers': { isRuntimeProvider: () => true, RUNTIME_PROVIDERS: ['claude'], sessionProviderSlug: (r: { provider: string }) => r.provider },
   };
 }
@@ -228,4 +229,86 @@ test('a thread started in Plan keeps asking for a plan until the person leaves i
   runtimeThreads.planIds.T = false;
   await runtimeThreads.prompt('T', { text: 'go' });
   assert.equal(posts.at(-1)!.body.plan, undefined, 'leaving Plan stops asking for one');
+});
+
+test('resync keeps watched workflow families (root + children + grandchildren) and refreshes their peers', async () => {
+  const gets: string[] = [];
+  const root = { id: 'wf-root', workspace_id: 'ws', status: 'working', title: 'Step', meta: { source: 'workflow' }, last_active_at: '2026-11-26T10:00:00Z' };
+  const kid = { id: 'wf-kid', workspace_id: 'ws', parent_id: 'wf-root', status: 'working', title: 'Sub', meta: { source: 'workflow', child_of: { id: 'wf-root', by: 'agent' } }, last_active_at: '2026-11-26T10:01:00Z' };
+  const grand = { id: 'wf-grand', workspace_id: 'ws', parent_id: 'wf-root', status: 'working', title: 'Grand', meta: { source: 'workflow', child_of: { id: 'wf-kid', by: 'agent' } }, last_active_at: '2026-11-26T10:02:00Z' };
+  const updatedKid = { ...kid, status: 'idle', last_turn_status: 'completed' };
+  const { runtimeThreads } = loadSource(
+    new URL('../src/modules/threads/runtime/runtimeThreads.svelte.ts', import.meta.url),
+    harness(async (p) => {
+      gets.push(p);
+      if (p === '/workspaces/ws/runtime-sessions' || p === '/runtime-sessions') return [];
+      if (p === '/runtime-sessions/wf-root') return root;
+      if (p === '/runtime-sessions/wf-root/peers') return [{ id: 'wf-kid' }, { id: 'wf-grand' }];
+      if (p === '/runtime-sessions/wf-kid') return updatedKid;
+      if (p === '/runtime-sessions/wf-grand') return grand;
+      return [];
+    }),
+  );
+  runtimeThreads.byId = { 'wf-root': root, 'wf-kid': kid, 'wf-grand': grand };
+  runtimeThreads.loaded = { ws: true };
+  const stopWatching = runtimeThreads.watchGroup('wf-root');
+  await runtimeThreads.resync();
+  assert.ok(runtimeThreads.byId['wf-root'], 'watched engine root survives workspace reload');
+  assert.ok(runtimeThreads.byId['wf-kid'], 'watched engine child survives workspace reload');
+  assert.ok(runtimeThreads.byId['wf-grand'], 'watched engine grandchild survives workspace reload');
+  assert.equal(runtimeThreads.byId['wf-kid'].status, 'idle', 'resync refreshes engine peer status');
+  assert.ok(gets.includes('/runtime-sessions/wf-root/peers'), 'resync re-reads watched family peers');
+  assert.equal(runtimeThreads.live(false).length, 0, 'engine rows stay hidden from Threads lists');
+  stopWatching();
+  await runtimeThreads.load('ws');
+  assert.equal(runtimeThreads.byId['wf-root'], undefined, 'unwatched engine rows clear on next workspace reload');
+  assert.equal(runtimeThreads.byId['wf-kid'], undefined);
+  assert.equal(runtimeThreads.byId['wf-grand'], undefined);
+});
+
+test('a failed loadLinked does not cache completion and retries cleanly', async () => {
+  let calls = 0;
+  const { runtimeThreads } = loadSource(
+    new URL('../src/modules/threads/runtime/runtimeThreads.svelte.ts', import.meta.url),
+    harness(async (p) => {
+      if (p === '/runtime-sessions/wf-root/peers') {
+        calls++;
+        if (calls === 1) throw new Error('temporary network blip');
+        return [{ id: 'wf-kid' }];
+      }
+      if (p === '/runtime-sessions/wf-kid') return { id: 'wf-kid', workspace_id: 'ws', status: 'working', title: 'Sub', meta: { source: 'workflow' }, last_active_at: '2026-11-26T10:01:00Z' };
+      return [];
+    }),
+  );
+  await assert.rejects(runtimeThreads.loadLinked('wf-root', 60_000), /temporary network blip/);
+  await runtimeThreads.loadLinked('wf-root', 60_000);
+  assert.equal(calls, 2, 'retry after failure is not suppressed by ms throttle');
+  await runtimeThreads.loadLinked('wf-root', 60_000);
+  assert.equal(calls, 2, 'successful read respects ms throttle');
+});
+
+test('resync refreshes cached workflow children omitted from open peers (keeps closed, clears 404)', async () => {
+  const root = { id: 'wf-root', workspace_id: 'ws', status: 'working', title: 'Step', meta: { source: 'workflow' }, last_active_at: '2026-11-26T10:00:00Z' };
+  const closedKid = { id: 'wf-closed', workspace_id: 'ws', parent_id: 'wf-root', status: 'working', title: 'Closed sub', meta: { source: 'workflow', child_of: { id: 'wf-root', by: 'agent' } }, last_active_at: '2026-11-26T10:01:00Z' };
+  const deletedKid = { id: 'wf-gone', workspace_id: 'ws', parent_id: 'wf-root', status: 'working', title: 'Deleted sub', meta: { source: 'workflow', child_of: { id: 'wf-root', by: 'agent' } }, last_active_at: '2026-11-26T10:02:00Z' };
+  const notFound = Object.assign(new Error('not found'), { status: 404 });
+  const { runtimeThreads } = loadSource(
+    new URL('../src/modules/threads/runtime/runtimeThreads.svelte.ts', import.meta.url),
+    harness(async (p) => {
+      if (p === '/workspaces/ws/runtime-sessions' || p === '/runtime-sessions') return [];
+      if (p === '/runtime-sessions/wf-root') return root;
+      // Daemon omits closed/deleted children from open `/peers`.
+      if (p === '/runtime-sessions/wf-root/peers') return [];
+      if (p === '/runtime-sessions/wf-closed') return { ...closedKid, status: 'closed', last_turn_status: 'completed' };
+      if (p === '/runtime-sessions/wf-gone') throw notFound;
+      return [];
+    }),
+  );
+  runtimeThreads.byId = { 'wf-root': root, 'wf-closed': closedKid, 'wf-gone': deletedKid };
+  runtimeThreads.loaded = { ws: true };
+  const stop = runtimeThreads.watchGroup('wf-root');
+  await runtimeThreads.resync();
+  assert.equal(runtimeThreads.byId['wf-closed']?.status, 'closed', 'closed child omitted from peers is refreshed by ID and kept');
+  assert.equal(runtimeThreads.byId['wf-gone'], undefined, 'confirmed 404 deletion is pruned from cache');
+  stop();
 });

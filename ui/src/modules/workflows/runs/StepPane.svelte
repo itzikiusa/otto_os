@@ -16,7 +16,7 @@
   import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
   import { readRunContext, workflowNodeDetail } from '../../../lib/api/workflows';
   import { loadErrorText } from '../../../lib/loadError';
-  import type { AttachmentRef, ChildThread, Criterion, NodeRunState, RunState, StepThread, WorkflowRun } from '../../../lib/api/types';
+  import type { AttachmentRef, Criterion, NodeRunState, RunState, StepThread, WorkflowRun } from '../../../lib/api/types';
   import RunFinalOutput from '../RunFinalOutput.svelte';
   import type { RunSync } from '../runSync.svelte';
   import CriteriaTable from '../goal/CriteriaTable.svelte';
@@ -29,7 +29,7 @@
   import { reviewIds } from '../reviewAgents';
   import { runReviews } from '../runReviews.svelte';
   import { childWord, errorParts, stepDuration, stepWord } from './runWords';
-  import { childCrumb, type StepItem } from './stepOrder';
+  import { childCrumb, childTrail, resolveThreadSelection, type StepChild, type StepItem } from './stepOrder';
   import { paneTabs, phaseSegments, TAB_LABEL, type PaneTab } from './stepTabs';
 
   interface Props {
@@ -52,12 +52,20 @@
     /** The pane's own Maximize (the run column folds behind "Run"). */
     maximized?: boolean;
     onmaximize?: () => void;
+    /** Select a sub-thread row (or null to return to the parent step). */
+    onselectchild?: (childId: string | null) => void;
   }
-  let { run, sync, workspaceId, runState, step, childId, stepNo = null, stepCount, now, tab: asked = null, criteria = [], cardNode = null, maximized = false, onmaximize }: Props = $props();
+  let { run, sync, workspaceId, runState, step, childId, stepNo = null, stepCount, now, tab: asked = null, criteria = [], cardNode = null, maximized = false, onmaximize, onselectchild }: Props = $props();
 
   const node = $derived(step?.node ?? null);
-  const child = $derived<ChildThread | null>(node?.children?.find((c) => c.id === childId) ?? null);
+  const stepChildren = $derived((node?.children ?? []) as StepChild[]);
+  const child = $derived<StepChild | null>(stepChildren.find((c) => c.id === childId || (!!c.thread_id && c.thread_id === childId)) ?? null);
+  const trail = $derived(child ? childTrail(stepChildren, child.id) : []);
   const childKind = $derived(child ? childCrumb(step?.kind, child) : null);
+  function selectThread(threadId: string): void {
+    if (!onselectchild) return;
+    onselectchild(resolveThreadSelection(stepChildren, node?.thread?.thread_id, threadId));
+  }
   const tabs = $derived(paneTabs({ result: !step, goal: !!run.overview?.goal, child: !!child, kind: step?.kind, node: node ?? undefined }));
   let picked = $state<PaneTab | null>(null);
   // Another step, child or asked-for tab starts over; a live update of the
@@ -65,10 +73,12 @@
   // person picked. An asked tab the step does not offer yet falls back to the
   // first (`tab` below).
   const stepId = $derived(step?.id);
+  const kid = $derived(childId);
+  const want = $derived((asked ?? null) as PaneTab | null);
   $effect(() => {
     void stepId;
-    void childId;
-    picked = (asked ?? null) as PaneTab | null;
+    void kid;
+    picked = want;
   });
   const tab = $derived(picked && tabs.includes(picked) ? picked : tabs[0]);
 
@@ -77,14 +87,22 @@
   let detailError = $state<string | null>(null);
   let retry = $state(0);
   let lastFetch = 0;
+  const nodeId = $derived(node?.node_id ?? null);
+  const nodeAttempts = $derived(node?.attempts ?? 0);
+  const nodeStartedAt = $derived(node?.started_at ?? null);
+  const detailVersion = $derived(node?.detail_version);
   const needsBody = $derived(!!node && !child && (['output', 'log', 'summary', 'preview', 'conversation'].includes(tab) || (tab === 'criteria' && step?.kind === 'check')));
   $effect(() => {
-    const id = node?.node_id;
-    void node?.detail_version;
+    const id = nodeId;
+    const att = nodeAttempts;
+    const started = nodeStartedAt;
+    void detailVersion;
     void retry;
     if (!id || !needsBody) return;
-    // Another step's error never shows while this one's body loads.
-    if (untrack(() => detail?.node_id) !== id) detailError = null;
+    // Another step's (or an earlier retry attempt's) error never shows while this one's body loads.
+    if (untrack(() => detail?.node_id !== id || detail?.attempts !== att || (detail?.started_at ?? null) !== started)) {
+      detailError = null;
+    }
     const ac = new AbortController();
     const t = setTimeout(() => {
       lastFetch = Date.now();
@@ -103,23 +121,43 @@
       ac.abort();
     };
   });
-  const body = $derived(detail?.node_id === node?.node_id ? detail : null);
+  // Bind cached detail to the current execution identity (node, attempt, start
+  // timestamp, and associated thread) so a manual Retry (which resets attempts
+  // to 1) never flashes a previous attempt's body or thread.
+  const body = $derived(
+    detail &&
+      node &&
+      detail.node_id === node.node_id &&
+      detail.attempts === node.attempts &&
+      (detail.started_at ?? null) === (node.started_at ?? null) &&
+      (!detail.thread?.thread_id || !node.thread?.thread_id || detail.thread.thread_id === node.thread.thread_id)
+      ? detail
+      : null,
+  );
 
   const word = $derived(child ? childWord(child, now) : node ? stepWord(node, { now, run: runState, kind: step?.kind }) : null);
   const thread = $derived<StepThread | null>(
     child
       ? child.thread_id ? { thread_id: child.thread_id, runner: 'threads', provider: child.provider, model: child.model, effort: child.effort, turns: 0, usage: {} as StepThread['usage'] } : null
-      : (body?.thread ?? node?.thread ?? null),
+      : (node?.thread
+          ? (body?.thread?.thread_id === node.thread.thread_id ? body.thread : node.thread)
+          : null),
   );
   const modelChip = $derived(thread ? [thread.provider, thread.model || 'Default', thread.effort || 'Default'].join(' · ') : null);
   const segs = $derived(!child && node?.phases?.length ? phaseSegments(node.phases, node.status === 'running' ? now : Date.parse(node.started_at ?? '') + (node.duration_ms ?? 0)) : []);
   const segTotal = $derived(Math.max(1, segs.reduce((s, x) => s + x.ms, 0)));
   const summarizer = $derived(node?.children?.find((c) => /^summar/i.test(c.label) || c.id === 'summarizer') ?? null);
+  /** The conversation tab mounts Threads' own header (provider · model · tokens), so don't repeat the model chip above it. */
+  const showingThread = $derived(
+    (tab === 'conversation' && thread?.runner === 'threads' && thread.available !== false) ||
+    (tab === 'summarizer' && !!summarizer?.thread_id),
+  );
   const output = $derived(body?.output);
   const reviewOut = $derived((output ?? {}) as { score_text?: string; outcome?: string; blocking?: unknown[]; advisory?: unknown[]; findings?: unknown[] });
   // A review step's records: the reviewer's own findings, "Open review".
   const reviews = $derived(step?.kind === 'review_run' && node ? reviewIds(body ?? node) : []);
-  $effect(() => runReviews.watch(child || tab === 'summary' ? reviews : []));
+  const reviewKey = $derived(child || tab === 'summary' ? reviews.join(',') : '');
+  $effect(() => runReviews.watch(reviewKey ? reviewKey.split(',') : []));
   const agent = $derived(child ? reviews.flatMap((id) => runReviews.reviews[id]?.agents ?? []).find((a) => a.name === child.id || a.name === child.label || (!!child.thread_id && a.session_id === child.thread_id)) ?? null : null);
   const findings = $derived(agent?.findings ?? []);
   /** The summary came from the deterministic fallback, not a verified summarizer. */
@@ -170,16 +208,31 @@
   }
 </script>
 
-<section class="pane" data-testid="wf-step-pane" data-node-id={step?.id ?? '_result'} aria-label={child?.label ?? step?.name ?? 'Run result'}>
+<section class="pane" data-testid="wf-step-pane" data-node-id={step?.id ?? '_result'} data-child-id={child?.id ?? undefined} aria-label={child?.label ?? step?.name ?? 'Run result'}>
   <header class="ph">
-    <div class="crumb">
-      {#if child}{step?.name}{#if childKind}<Icon name="chevronRight" size={12} />{childKind}{/if}{:else if step}Step {stepNo ?? node?.step_no ?? '–'} of {stepCount}{:else}Run result{/if}
+    <div class="crumb" data-testid="wf-step-crumb">
+      {#if child}
+        {#if onselectchild}
+          <button type="button" class="crumb-link" data-testid="wf-crumb-parent" onclick={() => onselectchild(null)}>{step?.name}</button>
+        {:else}
+          <span>{step?.name}</span>
+        {/if}
+        {#each trail.slice(0, -1) as anc (anc.id)}
+          <Icon name="chevronRight" size={12} />
+          {#if onselectchild}
+            <button type="button" class="crumb-link" data-testid="wf-crumb-ancestor" onclick={() => onselectchild(anc.id)}>{anc.label}</button>
+          {:else}
+            <span>{anc.label}</span>
+          {/if}
+        {/each}
+        {#if childKind}<Icon name="chevronRight" size={12} />{childKind}{/if}
+      {:else if step}Step {stepNo ?? node?.step_no ?? '–'} of {stepCount}{:else}Run result{/if}
     </div>
     <div class="prow">
       <h3 class="name ellipsis" dir="auto">{child?.label ?? step?.name ?? 'final-output.md'}</h3>
       {#if word?.word}<span class="word {word.tone}">{word.word}</span>{/if}
       <span class="grow"></span>
-      {#if modelChip}<span class="chip" title="What ran">{modelChip}</span>{/if}
+      {#if modelChip && !showingThread}<span class="chip" title="What ran">{modelChip}</span>{/if}
       {#if onmaximize}
         <button type="button" class="icon-btn" aria-label={maximized ? 'Show the run' : 'Maximize conversation'} title={maximized ? 'Show the run' : 'Maximize conversation'} onclick={onmaximize}><Icon name={maximized ? 'minimize' : 'maximize'} size={13} /></button>
       {/if}
@@ -207,13 +260,13 @@
     <Tabs label="Step details" tabs={tabs.map((id) => ({ id, label: TAB_LABEL[id], testid: `wf-step-tab-${id}`, count: id === 'findings' && findings.length ? findings.length : undefined }))} value={tab} onchange={(id) => (picked = id)} idBase="wf-step" />
   {/if}
 
-  <div class="body" role="tabpanel" id="wf-step-panel-{tab}" aria-labelledby="wf-step-tab-{tab}">
+  <div class="body" class:conv={showingThread} role="tabpanel" id="wf-step-panel-{tab}" aria-labelledby="wf-step-tab-{tab}">
     {#if tab === 'conversation'}
       <!-- A reviewer keeps no digest file of its own: no nodeId, so it never reads the step's. -->
-      <StepConversation {thread} sessions={child ? [] : (node?.sessions ?? [])} digest={child ? null : (body?.thread?.digest ?? null)} {workspaceId} runId={run.id} nodeId={child ? '' : (node?.node_id ?? '')} attempt={node?.attempts ?? 1} />
+      <StepConversation {thread} sessions={child ? [] : (node?.sessions ?? [])} digest={child ? null : (body?.thread?.digest ?? null)} {workspaceId} runId={run.id} nodeId={child ? '' : (node?.node_id ?? '')} attempt={node?.attempts ?? 1} onselectthread={onselectchild ? selectThread : undefined} />
     {:else if tab === 'summarizer'}
       {#if summarizer?.thread_id}
-        <StepConversation thread={{ thread_id: summarizer.thread_id, runner: 'threads', provider: summarizer.provider, turns: 0, usage: {} as StepThread['usage'] }} {workspaceId} runId={run.id} nodeId="" attempt={node?.attempts ?? 1} />
+        <StepConversation thread={{ thread_id: summarizer.thread_id, runner: 'threads', provider: summarizer.provider, turns: 0, usage: {} as StepThread['usage'] }} {workspaceId} runId={run.id} nodeId="" attempt={node?.attempts ?? 1} onselectthread={onselectchild ? selectThread : undefined} />
       {:else}
         <p class="none">The summarizer starts after the reviewers.</p>
       {/if}
@@ -229,7 +282,7 @@
         <p class="none">{child?.status === 'success' ? 'This reviewer reported no findings.' : agent ? 'Findings appear when this reviewer finishes.' : 'No findings recorded for this reviewer.'}</p>
       {/if}
     {:else if tab === 'files'}
-      <StepFiles runId={run.id} contextDir={run.context_dir} stepFile={step ? (node?.step_file ?? null) : null} />
+      <StepFiles runId={run.id} contextDir={run.context_dir} stepFile={node?.step_file ?? null} />
     {:else if tab === 'result'}
       <!-- A goal run whose card is taken by a hold, a person or an error: its criteria head the Result. -->
       {#if run.overview?.goal && cardKind(run, runState) !== 'goal'}<GoalCard goal={run.overview.goal} {run} {criteria} />{/if}
@@ -302,16 +355,34 @@
   .pane {
     display: flex;
     flex-direction: column;
+    flex: 1;
     gap: var(--sp-4);
     min-inline-size: 0;
     min-block-size: 0;
   }
   .crumb {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: var(--sp-2);
     font-size: var(--fs-s);
     color: var(--text-dim);
+  }
+  .crumb-link {
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--accent-text);
+    font: inherit;
+    cursor: pointer;
+  }
+  .crumb-link:hover {
+    text-decoration: underline;
+  }
+  .crumb-link:focus-visible {
+    outline: 2px solid var(--accent-text);
+    outline-offset: 2px;
+    border-radius: var(--radius-s);
   }
   .prow {
     display: flex;
@@ -392,6 +463,11 @@
   .body {
     min-block-size: 0;
     min-inline-size: 0;
+  }
+  .body.conv {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
   }
   .none,
   .dim {

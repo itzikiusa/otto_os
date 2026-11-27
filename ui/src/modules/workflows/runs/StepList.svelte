@@ -10,7 +10,7 @@
   import { plural } from '../../../lib/plural';
   import type { RunState } from '../../../lib/api/types';
   import { childWord, stepDuration, stepLine2, stepWord, type StepGlyph } from './runWords';
-  import { childNoun, doneFold, orderChildren, RESULT, timeBar, type StepEntry, type StepItem } from './stepOrder';
+  import { childNoun, doneFold, orderChildTree, RESULT, timeBar, type StepChild, type StepEntry, type StepItem } from './stepOrder';
 
   interface Props {
     entries: readonly StepEntry[];
@@ -57,40 +57,41 @@
   {:else}<span class="g"><span class="hollow"></span></span>{/if}
 {/snippet}
 
-{#snippet childRow(stepId: string, c: import('../../../lib/api/types').ChildThread, after?: string)}
+{#snippet childRow(stepId: string, c: StepChild, depth = 0, parentLabel: string | null = null, after?: string)}
   {@const w = childWord(c, now)}
-  <li>
-    <button type="button" class="child" class:on={selected.node === stepId && selected.child === c.id} data-nav {onkeydown} data-testid="wf-step-child" data-child-id={c.id} data-status={c.status} aria-current={selected.node === stepId && selected.child === c.id ? 'true' : undefined} onclick={() => onselect(stepId, c.id)}>
+  {@const active = selected.node === stepId && (selected.child === c.id || (!!c.thread_id && selected.child === c.thread_id))}
+  <li class="kid-item" style:--depth={depth}>
+    <button type="button" class="child" class:on={active} data-nav {onkeydown} data-testid="wf-step-child" data-child-id={c.id} data-thread-id={c.thread_id} data-depth={depth} data-status={c.status} aria-current={active ? 'true' : undefined} onclick={() => onselect(stepId, c.id)}>
       <ProviderIcon provider={c.provider} size={14} />
-      <span class="name ellipsis" dir="auto">{c.label}</span>
+      <span class="name ellipsis" dir="auto">{c.label}{#if depth > 0 && parentLabel}<span class="sr-only"> (sub-thread of {parentLabel})</span>{/if}</span>
       <span class="word {w.tone}">{after ?? w.word}</span>
     </button>
   </li>
 {/snippet}
 
 {#snippet children(s: StepItem)}
-  {@const v = orderChildren(s.node.children ?? [])}
+  {@const v = orderChildTree((s.node.children ?? []) as StepChild[])}
   {@const doneOpen = openDone[s.id] ?? s.node.status === 'error'}
   {@const queuedOpen = openQueued[s.id] ?? v.queued.length <= 3}
   <ol class="kids">
-    {#each v.active as c (c.id)}{@render childRow(s.id, c)}{/each}
+    {#each v.active as e (e.child.id)}{@render childRow(s.id, e.child, e.depth, e.parentLabel)}{/each}
     {#if v.queued.length}
       {#if queuedOpen}
-        {#each v.queued as c (c.id)}{@render childRow(s.id, c)}{/each}
+        {#each v.queued as e (e.child.id)}{@render childRow(s.id, e.child, e.depth, e.parentLabel)}{/each}
       {:else}
-        <li><button type="button" class="kfold" data-nav {onkeydown} aria-expanded="false" onclick={() => (openQueued[s.id] = true)}><Icon name="chevronRight" size={12} />{plural(v.queued.length, childNoun(s.kind, v.queued[0]))} queued</button></li>
+        <li><button type="button" class="kfold" data-nav {onkeydown} aria-expanded="false" onclick={() => (openQueued[s.id] = true)}><Icon name="chevronRight" size={12} />{plural(v.queued.length, childNoun(s.kind, v.queued[0].child))} queued</button></li>
       {/if}
     {/if}
     {#if v.done.length}
       <li>
         <button type="button" class="kfold" data-nav {onkeydown} aria-expanded={doneOpen} onclick={() => (openDone[s.id] = !doneOpen)}>
-          <Icon name={doneOpen ? 'chevronDown' : 'chevronRight'} size={12} />{plural(v.done.length, childNoun(s.kind, v.done[0]))} done{v.findings ? ` · ${plural(v.findings, 'finding')}` : ''}
+          <Icon name={doneOpen ? 'chevronDown' : 'chevronRight'} size={12} />{plural(v.done.length, childNoun(s.kind, v.done[0].child))} done{v.findings ? ` · ${plural(v.findings, 'finding')}` : ''}
         </button>
       </li>
-      {#if doneOpen}{#each v.done as c (c.id)}{@render childRow(s.id, c)}{/each}{/if}
+      {#if doneOpen}{#each v.done as e (e.child.id)}{@render childRow(s.id, e.child, e.depth, e.parentLabel)}{/each}{/if}
     {/if}
-    {#each v.trailing as c (c.id)}
-      {@render childRow(s.id, c, c.status === 'queued' || c.status === 'pending' ? (v.active.length || v.queued.length ? 'After reviewers' : undefined) : undefined)}
+    {#each v.trailing as e (e.child.id)}
+      {@render childRow(s.id, e.child, e.depth, e.parentLabel, e.child.status === 'queued' || e.child.status === 'pending' ? (v.active.length || v.queued.length ? 'After reviewers' : undefined) : undefined)}
     {/each}
   </ol>
 {/snippet}
@@ -294,6 +295,9 @@
   }
   .kids {
     margin-inline-start: var(--sp-8);
+  }
+  .kid-item {
+    padding-inline-start: calc(var(--depth, 0) * var(--sp-6));
   }
   .child,
   .kfold {

@@ -25,7 +25,7 @@
   import { activityOf, answerOf, childOf, childState, elapsedMs, firstLine, removedLine, removedState, rowTone, type RemovedKid } from './childThreads';
   import { answerHandoff } from './askAgents';
   import { stopThreadWork } from './taskStops.svelte';
-  import { mainViewKey, openChildThread, READ_ONLY_CTX } from './childNav';
+  import { mainViewKey, OPEN_CHILD_CTX, openChildThread, READ_ONLY_CTX } from './childNav';
   import RuntimeAgentRow from './RuntimeAgentRow.svelte';
   import { runtimeThreads } from './runtimeThreads.svelte';
   import { runtimeViews } from './runtimeView.svelte';
@@ -39,8 +39,11 @@
     removed?: RemovedKid;
   }
   let { id, hint = {}, removed }: Props = $props();
-  /** In a read-only host (a workflow step) the card only shows: no Open, Stop or hand-over. */
+  /** In a read-only host (a workflow step) the card doesn't stop or hand over;
+   *  when the host opts in via `OPEN_CHILD_CTX`, clicking opens the sub-thread in-pane. */
   const readOnly = getContext<(() => boolean) | undefined>(READ_ONLY_CTX);
+  const openChild = getContext<(() => ((id: string) => void) | undefined) | undefined>(OPEN_CHILD_CTX);
+  const hostOpen = $derived(openChild?.());
 
   let gone = $state(false);
   let open = $state(false);
@@ -127,7 +130,7 @@
     expanded={open}
     ontoggle={answer ? () => { open = !open; if (open) threadMeta.markSeen(id); } : undefined}
     onstop={live && !gone && s?.status !== 'closed' && !stopping && !readOnly?.() ? () => void stop() : undefined}
-    onrow={gone || readOnly?.() ? undefined : (e) => openChildThread(id, mainViewKey(e))}
+    onrow={gone || (!hostOpen && readOnly?.()) ? undefined : (e) => (hostOpen ? hostOpen(id) : openChildThread(id, mainViewKey(e)))}
     testid="runtime-child-row-{id}"
   />
   {#if parentRow && parentRow.status !== 'closed' && answer && !live && !gone && !readOnly?.()}

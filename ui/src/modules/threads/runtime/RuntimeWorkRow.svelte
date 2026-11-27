@@ -245,7 +245,7 @@
   {#if tail && !open}
     <p class="rw-tail ellipsis mono" dir="auto">{tail}</p>
   {/if}
-  {#if open}
+  {#if open && (hasDetail || item.detail_omitted)}
     <div class="rw-detail">
       {#if error}
         <pre class="rw-pre rw-failure" data-testid="runtime-item-error">{error}</pre>

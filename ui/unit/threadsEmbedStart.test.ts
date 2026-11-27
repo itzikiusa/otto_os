@@ -23,6 +23,7 @@ function loadStore(handler: (method: string, path: string, body?: unknown) => un
     '../../../lib/stores/uiControl.svelte': { uiControl: { addSource: () => {} } },
     '../threadsStore.svelte': { threads: {} },
     '../../../lib/stores/runtimeDrafts.svelte': { runtimeDrafts: { forget: () => () => {} } },
+    './childThreads': { inWatchedFamily: () => false, isEngineThread: () => false },
     '../../../lib/loadError': { loadErrorText: (e: unknown) => String(e) },
     '../../../lib/providers': { isRuntimeProvider: () => true, RUNTIME_PROVIDERS: ['claude'], sessionProviderSlug: (r: { provider: string }) => r.provider },
   });

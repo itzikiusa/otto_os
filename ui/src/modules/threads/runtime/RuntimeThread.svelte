@@ -45,7 +45,7 @@
   import { threadPrefs } from './threadPrefs.svelte';
   import { recallPrompt, sentPrompts, type HistoryState } from './promptHistory';
   import { dropAttachments, fileDrop } from './composerDrop';
-  import { READ_ONLY_CTX } from './childNav';
+  import { OPEN_CHILD_CTX, READ_ONLY_CTX } from './childNav';
   import RuntimeModelControl from './RuntimeModelControl.svelte';
   import { switchPromptFields } from './providerSwitch';
   import RuntimeNextLine from './RuntimeNextLine.svelte';
@@ -91,11 +91,15 @@
     sessionId: string;
     focused: boolean;
     onswitch?: (id: string) => void;
+    /** Opt-in host handler for clicking a sub-thread card inside an embed (stays in-pane; never opens Threads). */
+    onopenchild?: (id: string) => void;
     agentChat?: string;
     hostCommands?: RuntimeHostCommands;
     compact?: boolean;
     /** No composer: another feature drives this thread (its cards stay answerable). */
     readOnly?: boolean;
+    /** Keep every work step unfolded (no "N earlier steps" / "Worked for …" collapse). */
+    expandWork?: boolean;
     accessModeOverride?: RuntimeAccessMode | null;
     onaccessmodechange?: (mode: RuntimeAccessMode) => void;
     fallbackCwd?: string | null;
@@ -113,7 +117,7 @@
   }
 
   let {
-    sessionId, focused, onswitch, agentChat, hostCommands, compact = false, readOnly = false, accessModeOverride = null,
+    sessionId, focused, onswitch, onopenchild, agentChat, hostCommands, compact = false, readOnly = false, expandWork = false, accessModeOverride = null,
     onaccessmodechange, fallbackCwd = null, hasExternalContext = false, transformOutgoingText,
     transformRestoredQueuedText, onExternalContextConsumed, onopenpath, formatAssistantText,
     assistantFooter, composerTopSlot, composerFootLeadSlot, testIds,
@@ -131,8 +135,10 @@
   const session = $derived(runtimeThreads.get(sessionId));
   const effectiveCwd = $derived(session?.cwd ?? fallbackCwd ?? null);
   setContext(PATH_LINK_CTX, () => ({ sessionId, cwd: effectiveCwd, workspaceId: session?.workspace_id }));
-  // Another feature drives a read-only thread: its sub-thread cards neither open nor stop.
+  // Another feature drives a read-only thread: its sub-thread cards don't stop or hand over.
+  // Only hosts that opt in via `onopenchild` intercept child-card clicks in-pane.
   setContext(READ_ONLY_CTX, () => readOnly);
+  setContext(OPEN_CHILD_CTX, () => onopenchild);
 
   const p = $derived(runtimeViews.projections[sessionId] ?? null);
   const loadError = $derived(runtimeViews.loadError[sessionId] ?? null);
@@ -488,6 +494,7 @@
               onopendiff={hostCommands?.openDiff ? (path) => hostCommands.openDiff!(sessionId, path) : undefined}
               {formatAssistantText}
               {assistantFooter}
+              {expandWork}
             />
           {/if}
           <RuntimeTurnStatus

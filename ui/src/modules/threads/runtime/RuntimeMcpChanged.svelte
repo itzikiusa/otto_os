@@ -14,7 +14,7 @@
   import { mcpChanged } from './mcpServers';
   import { nativeServerNames } from './nativeServers';
   import { mcpAsks } from './mcpAsksStore.svelte';
-  import { runtimeThreads } from './runtimeThreads.svelte';
+  import { isEngineThread, runtimeThreads } from './runtimeThreads.svelte';
   import { runtimeViews } from './runtimeView.svelte';
 
   const NONE: McpServerStatus[] = [];
@@ -30,6 +30,7 @@
    *  the agent reports its servers again, never per stream batch. */
   const servers = $derived(runtimeViews.projections[sessionId]?.mcpServers ?? NONE);
   const readOnly = getContext<(() => boolean) | undefined>(READ_ONLY_CTX);
+  const engineOwned = $derived(isEngineThread(runtimeThreads.get(sessionId)?.meta));
   let enabled = $state<string[] | null>(null);
   // Keeps the thread's MCP approval cards live (its dock shows them).
   $effect(() => mcpAsks.hold());
@@ -38,7 +39,7 @@
   $effect(() => {
     void servers;
     const ws = workspaceId;
-    if (!ws || readOnly?.()) return;
+    if (!ws || readOnly?.() || engineOwned) return;
     let live = true;
     void nativeServerNames(ws, (path) => api.get(path)).then((n) => { if (live) enabled = n; });
     return () => { live = false; };

@@ -135,3 +135,33 @@ test('a summary merge keeps the run read\'s input and attachments (CR1-018)',()=
   assert.equal(current.attachments,attachments);
   assert.equal(current.rev,2);
 });
+test('retried node summaries clear stale thread and children omitted by the server',()=>{
+  const {mergeRunProgress,applyLiveNode}=helpers();
+  const failedNode={
+    node_id:'work',status:'error',attempts:1,started_at:'2026-11-26T10:00:00Z',detail_version:'v1',
+    thread:{thread_id:'th-old',runner:'threads',provider:'claude'},
+    children:[{id:'c-old',label:'Old sub',provider:'codex',status:'success',thread_id:'th-sub-old'}],
+  };
+  const current={id:'r',rev:2,status:'error',summary:true,checkpoint_rev:0,checkpoint_generation:0,nodes:[{...failedNode}]};
+  // Manual retry resets attempts to 1 and omits thread & children until the new attempt creates them.
+  mergeRunProgress(current,{
+    id:'r',rev:3,status:'running',summary:true,checkpoint_generation:0,
+    nodes:[{node_id:'work',status:'running',attempts:1,started_at:'2026-11-26T10:05:00Z',detail_version:'v2'}],
+  });
+  assert.equal(current.nodes[0].thread,undefined,'old thread is cleared when omitted on retry');
+  assert.equal(current.nodes[0].children,undefined,'old children are cleared when omitted on retry');
+
+  // Same for live single-node summaries via applyLiveNode.
+  const liveRun={
+    id:'r',rev:4,status:'running',summary:true,checkpoint_rev:0,waiting_approval:false,
+    overview:{rev:4,state:'running'},
+    nodes:[{...failedNode,status:'running',detail_version:'v3'}],
+  };
+  const applied=applyLiveNode(liveRun,{
+    rev:5,status:'running',waitingApproval:false,overview:{rev:5,state:'running'},
+    node:{node_id:'work',status:'running',attempts:1,started_at:'2026-11-26T10:06:00Z',detail_version:'v4'},
+  });
+  assert.equal(applied,true);
+  assert.equal(liveRun.nodes[0].thread,undefined);
+  assert.equal(liveRun.nodes[0].children,undefined);
+});

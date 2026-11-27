@@ -3,10 +3,11 @@
 // selection — runs/stepOrder.ts.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { childCrumb, childNoun, defaultSelection, doneFold, entrySteps, loopChildren, orderChildren, orderSteps, RESULT, settledNodes, stepNumber, timeBar, topoOrder } from '../src/modules/workflows/runs/stepOrder.ts';
+import { childCrumb, childNoun, childTrail, defaultSelection, doneFold, entrySteps, loopChildren, mergeStepChildren, orderChildren, orderChildTree, orderSteps, resolveThreadSelection, RESULT, runtimeChildStatus, settledNodes, stepNumber, timeBar, topoOrder } from '../src/modules/workflows/runs/stepOrder.ts';
+import { paneTabs } from '../src/modules/workflows/runs/stepTabs.ts';
 import { at, fanoutNodes, node, PR_GRAPH, reviewers, T0 } from './workflowRunFixtures.ts';
 import { stepWord } from '../src/modules/workflows/runs/runWords.ts';
-import type { WorkflowGraph } from '../src/lib/api/types';
+import type { RuntimeSession, WorkflowGraph } from '../src/lib/api/types';
 
 const NOW = T0 + 12 * 60_000;
 const shape = (entries: ReturnType<typeof orderSteps>) => entries.map((e) => (e.type === 'group' ? e.steps.map((s) => s.id) : e.step.id));
@@ -146,4 +147,203 @@ test('a step\'s time bar stays inside the run\'s clock (CR1-062)', () => {
     assert.ok(b.at >= 0 && b.at + b.w <= 100 + 1e-9, JSON.stringify(b));
     assert.ok(b.w > 0, 'still a visible sliver');
   }
+});
+
+const rtSession = (id: string, extra: Partial<RuntimeSession> = {}): RuntimeSession => ({
+  id,
+  workspace_id: 'ws',
+  provider: 'codex',
+  title: `Thread ${id}`,
+  cwd: '/tmp',
+  access_mode: 'approval-required',
+  capabilities: {} as RuntimeSession['capabilities'],
+  status: 'working',
+  created_by: 'u1',
+  created_at: `2026-11-26T10:00:00Z`,
+  last_active_at: `2026-11-26T10:00:00Z`,
+  last_sequence: 1,
+  ...extra,
+});
+
+test('runtimeChildStatus maps live runtime session states into step-list words', () => {
+  assert.equal(runtimeChildStatus(rtSession('a', { status: 'working' })), 'running');
+  assert.equal(runtimeChildStatus(rtSession('a', { status: 'starting' })), 'running');
+  assert.equal(runtimeChildStatus(rtSession('a', { status: 'awaiting_permission' })), 'needs_you');
+  assert.equal(runtimeChildStatus(rtSession('a', { status: 'idle', background_tasks: [{ id: 'bg', label: 'cmd', kind: 'command', started_at: at(0) }] })), 'running');
+  assert.equal(runtimeChildStatus(rtSession('a', { status: 'idle', last_turn_status: 'completed' })), 'success');
+  assert.equal(runtimeChildStatus(rtSession('a', { status: 'idle', last_turn_status: 'failed' })), 'error');
+  assert.equal(runtimeChildStatus(rtSession('a', { status: 'idle', last_turn_status: 'interrupted' })), 'skipped');
+  assert.equal(runtimeChildStatus(rtSession('a', { status: 'closed' })), 'success');
+  assert.equal(runtimeChildStatus(rtSession('a', { status: 'dormant' })), 'skipped');
+});
+
+test('mergeStepChildren merges live multi-generation sub-threads with recorded rows', () => {
+  const sessions: RuntimeSession[] = [
+    rtSession('th-root', { provider: 'claude', title: 'Step thread' }),
+    rtSession('th-kid', {
+      provider: 'codex',
+      title: 'Check tests',
+      parent_id: 'th-root',
+      status: 'idle',
+      last_turn_status: 'completed',
+      created_at: '2026-11-26T10:01:00Z',
+      meta: { child_of: { id: 'th-root', by: 'agent' } },
+    }),
+    rtSession('th-grand', {
+      provider: 'claude',
+      title: 'Inspect helper',
+      parent_id: 'th-root',
+      status: 'working',
+      created_at: '2026-11-26T10:02:00Z',
+      meta: { child_of: { id: 'th-kid', by: 'agent' }, provider_slug: 'claude-work' },
+    }),
+    rtSession('th-other', { provider: 'claude', title: 'Unrelated thread', parent_id: 'th-else' }),
+  ];
+
+  const merged = mergeStepChildren([], 'th-root', sessions);
+  assert.deepEqual(
+    merged.map((c) => [c.id, c.label, c.provider, c.status, c.depth, c.parent_child_id]),
+    [
+      ['th-kid', 'Check tests', 'codex', 'success', 0, null],
+      ['th-grand', 'Inspect helper', 'claude-work', 'running', 1, 'th-kid'],
+    ],
+  );
+
+  // Ordering keeps the done parent in `active` because its grandchild is still running,
+  // and records each nested row's parent label for screen-reader context.
+  const tree = orderChildTree(merged);
+  assert.deepEqual(
+    tree.active.map((e) => [e.child.id, e.depth, e.parentLabel]),
+    [['th-kid', 0, null], ['th-grand', 1, 'Check tests']],
+  );
+  assert.equal(tree.done.length, 0);
+
+  // Breadcrumb trail walks parent_child_id from top child down to the open grandchild.
+  assert.deepEqual(childTrail(merged, 'th-grand').map((c) => c.id), ['th-kid', 'th-grand']);
+  assert.deepEqual(childTrail(merged, 'th-kid').map((c) => c.id), ['th-kid']);
+  assert.deepEqual(childTrail(merged, 'missing'), []);
+});
+
+test('mergeStepChildren attaches agent-opened sub-threads underneath a recorded reviewer', () => {
+  const recorded = [
+    { id: 'lens-1', label: 'Correctness · Codex', provider: 'codex', status: 'running' as const, thread_id: 'th-rev-1' },
+    { id: 'summarizer', label: 'Summarizer', provider: 'claude', status: 'queued' as const },
+  ];
+  const sessions = [
+    rtSession('th-rev-1', { provider: 'codex', title: 'Correctness' }),
+    rtSession('th-sub', {
+      provider: 'claude',
+      title: 'Verify edge case',
+      parent_id: 'th-rev-1',
+      status: 'working',
+      meta: { child_of: { id: 'th-rev-1', by: 'agent' } },
+    }),
+  ];
+  const merged = mergeStepChildren(recorded, null, sessions);
+  const tree = orderChildTree(merged);
+  assert.deepEqual(
+    tree.active.map((e) => [e.child.id, e.depth]),
+    [['lens-1', 0], ['th-sub', 1]],
+  );
+  assert.deepEqual(tree.trailing.map((e) => e.child.id), ['summarizer']);
+  assert.deepEqual(childTrail(merged, 'th-sub').map((c) => c.id), ['lens-1', 'th-sub']);
+});
+
+test('defaultSelection stays on an agent step with its own thread even while a sub-thread runs', () => {
+  const stepWithSub = node('n3', 'running', 1, null, {
+    thread: { thread_id: 'th-root', runner: 'threads', provider: 'claude', turns: 0, usage: {} as never },
+    children: [{ id: 'th-kid', label: 'Check tests', provider: 'codex', status: 'running', thread_id: 'th-kid' }],
+  });
+  const entries = orderSteps([node('n1', 'success', 0, 0), stepWithSub], PR_GRAPH, NOW);
+  assert.deepEqual(defaultSelection('running', entries), { node: 'n3', child: null });
+});
+
+test('defaultSelection still hops into a running inner child on a loop step that also has a thread', () => {
+  const loopGraph: WorkflowGraph = {
+    nodes: [
+      { id: 'start', kind: 'manual_trigger', name: 'Start', x: 0, y: 0, params: {} },
+      { id: 'goal', kind: 'loop', name: 'Work toward the goal', x: 100, y: 0, params: {} },
+    ],
+    edges: [{ id: 'e1', source: 'start', target: 'goal' }],
+  };
+  const loopNode = node('goal', 'running', 1, null, {
+    thread: { thread_id: 'th-loop', runner: 'threads', provider: 'claude', turns: 0, usage: {} as never },
+    children: [{ id: 'iter-2', label: 'Work · iteration 2', provider: 'claude', status: 'running', thread_id: 'th-iter-2' }],
+  });
+  const entries = orderSteps([node('start', 'success', 0, 0), loopNode], loopGraph, NOW);
+  assert.deepEqual(defaultSelection('running', entries), { node: 'goal', child: 'iter-2' });
+});
+
+test('mergeStepChildren deduplicates repeated recorded sub-threads from a same-thread loop', () => {
+  const recorded = [
+    { id: 'c-first', label: 'Helper', provider: 'codex', status: 'running' as const, thread_id: 'th-helper' },
+    { id: 'c-other', label: 'Other', provider: 'claude', status: 'success' as const, thread_id: 'th-other' },
+    { id: 'c-second', label: 'Helper', provider: 'codex', status: 'success' as const, thread_id: 'th-helper', ended_at: '2026-11-26T10:05:00Z' },
+  ];
+  // Deduplicates even with no live runtime sessions loaded yet.
+  const offline = mergeStepChildren(recorded, 'th-root', []);
+  assert.deepEqual(
+    offline.map((c) => [c.id, c.thread_id, c.status, c.ended_at ?? null]),
+    [
+      ['c-first', 'th-helper', 'success', '2026-11-26T10:05:00Z'],
+      ['c-other', 'th-other', 'success', null],
+    ],
+  );
+  // And attaches grandchildren to the canonical deduplicated parent row.
+  const sessions = [
+    rtSession('th-helper', { provider: 'codex', title: 'Helper', parent_id: 'th-root', status: 'idle', last_turn_status: 'completed' }),
+    rtSession('th-grand', {
+      provider: 'claude',
+      title: 'Deep check',
+      parent_id: 'th-root',
+      status: 'working',
+      meta: { child_of: { id: 'th-helper', by: 'agent' } },
+    }),
+  ];
+  const merged = mergeStepChildren(recorded, 'th-root', sessions);
+  assert.deepEqual(
+    merged.map((c) => [c.id, c.depth, c.parent_child_id]),
+    [
+      ['c-first', 0, null],
+      ['c-other', 0, null],
+      ['th-grand', 1, 'c-first'],
+    ],
+  );
+});
+
+test('goal-loop helper keeps its iteration row as parent and Open parent selects the iteration conversation', () => {
+  // The daemon mirrors the active iteration's thread id on both `node.thread` and the iteration child row.
+  const recorded = [
+    { id: 'iter-2', label: 'Work · iteration 2', provider: 'claude', status: 'running' as const, thread_id: 'th-iter-2' },
+  ];
+  const sessions = [
+    rtSession('th-iter-2', { provider: 'claude', title: 'Work · iteration 2' }),
+    rtSession('th-helper', {
+      provider: 'codex',
+      title: 'Check build',
+      parent_id: 'th-iter-2',
+      status: 'working',
+      meta: { child_of: { id: 'th-iter-2', by: 'agent' } },
+    }),
+  ];
+  const merged = mergeStepChildren(recorded, 'th-iter-2', sessions);
+  assert.deepEqual(
+    merged.map((c) => [c.id, c.depth, c.parent_child_id]),
+    [
+      ['iter-2', 0, null],
+      ['th-helper', 1, 'iter-2'],
+    ],
+  );
+  assert.deepEqual(childTrail(merged, 'th-helper').map((c) => c.id), ['iter-2', 'th-helper']);
+  const tree = orderChildTree(merged);
+  assert.deepEqual(
+    tree.active.map((e) => [e.child.id, e.depth, e.parentLabel]),
+    [['iter-2', 0, null], ['th-helper', 1, 'Work · iteration 2']],
+  );
+  // Clicking "Open parent" inside the helper passes `th-iter-2` -> resolves to `iter-2`, opening Conversation (not Criteria).
+  const target = resolveThreadSelection(merged, 'th-iter-2', 'th-iter-2');
+  assert.equal(target, 'iter-2');
+  assert.equal(paneTabs({ goal: true, child: !!target, kind: 'loop' })[0], 'conversation');
+  // Ordinary agent step whose root thread is NOT a child row still resolves back to `null` (the step root).
+  assert.equal(resolveThreadSelection([], 'th-step', 'th-step'), null);
 });

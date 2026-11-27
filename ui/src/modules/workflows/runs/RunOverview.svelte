@@ -10,7 +10,7 @@
   import { runOrigin } from '../runRoute';
   import RunOrbit from './RunOrbit.svelte';
   import StateCards from './StateCards.svelte';
-  import { ago, clockTime, headline, subLine } from './runWords';
+  import { ago, clockTime, headline, orbitTime, subLine } from './runWords';
   import { isHttpUrl } from '../../../lib/browserDeepLink';
   /** An outside link only when it is http(s): these come from integrations and step outputs. */
   const web = (u: string | null | undefined): u is string => !!u && isHttpUrl(u);
@@ -42,7 +42,8 @@
       ? subLine(ov, { startedAt: run.started_at, finishedAt: run.finished_at, now, waitingSteps: run.nodes.filter((n) => n.phase === 'waiting').length })
       : live ? `Started at ${clockTime(run.started_at)}` : `After ${elapsed(total)}`,
   );
-  const typical = $derived(ov?.typical_ms ? `of ~${elapsed(ov.typical_ms)}` : '');
+  const span = $derived(elapsed(total));
+  const time = $derived(orbitTime(runState, span, live && ov?.typical_ms ? elapsed(ov.typical_ms) : undefined));
   const chat = $derived(runOrigin(run.input));
   const origin = $derived(ov?.origin);
   const subject = $derived(ov?.subject);
@@ -51,7 +52,7 @@
 </script>
 
 <div class="top">
-  <RunOrbit {entries} {runState} {word} centre={elapsed(total)} sub={live ? typical : ''} />
+  <RunOrbit {entries} {runState} {word} centre={span} sub={time.sub} timeLabel={time.label} />
   <div class="sentence">
     <h2 class="headline" aria-live="polite" data-testid="wf-run-headline" dir="auto">{text}</h2>
     <p class="sub" data-testid="wf-run-sub">{sub}</p>

@@ -23,6 +23,11 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
   and each agent step's conversation beside the list. **Pause**, **Resume**,
   *Skip this step* and *Add a note for the next step…* work while it runs. The
   same pages work on the phone, with touch.
+- **A step's conversation is the Threads view.** On the run page a step's
+  Conversation is the same conversation Threads shows, with nothing folded,
+  and every sub-session the step creates (reviewers, loop rounds, threads an
+  agent opens) is listed under it while it is still working and opens in the
+  same pane. The run's ring says what its time is ("Running for 2m").
 - **Agent steps run as threads, side by side.** An agent step is a thread, as
   in Threads, instead of a terminal session, and steps that do not depend on
   each other run at the same time (up to 4 per run). The fixed wait before

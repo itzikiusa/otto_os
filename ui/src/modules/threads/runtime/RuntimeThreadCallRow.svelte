@@ -4,6 +4,7 @@
   // messaged, its provider, model and effort, its live status, the opening
   // prompt / message, and Open (⇧-click: beside). A failed or gated call keeps
   // the ordinary work row, so its error or approval stays in sight.
+  import { getContext } from 'svelte';
   import type { TurnItem } from '../../../lib/api/types';
   import { harnessLabel } from '../../../lib/providers';
   import { router } from '../../../lib/router.svelte';
@@ -11,11 +12,15 @@
   import { relatedStatus } from '../relatedThreads';
   import { threads } from '../threadsStore.svelte';
   import { elapsedBetween, type ThreadCall } from './agentRows';
+  import { OPEN_CHILD_CTX, READ_ONLY_CTX } from './childNav';
   import RuntimeAgentRow from './RuntimeAgentRow.svelte';
   import RuntimeChildCard from './RuntimeChildCard.svelte';
   import { runtimeThreads } from './runtimeThreads.svelte';
 
   let { item, call }: { item: TurnItem; call: ThreadCall } = $props();
+  const readOnly = getContext<(() => boolean) | undefined>(READ_ONLY_CTX);
+  const openChild = getContext<(() => ((id: string) => void) | undefined) | undefined>(OPEN_CHILD_CTX);
+  const hostOpen = $derived(openChild?.());
 
   const target = $derived(call.targetId ? runtimeThreads.get(call.targetId) : null);
   const running = $derived(item.status === 'running' || item.status === 'pending');
@@ -32,6 +37,10 @@
 
   function open(e: MouseEvent): void {
     if (!call.targetId) return;
+    if (hostOpen) {
+      hostOpen(call.targetId);
+      return;
+    }
     if (router.module !== 'threads') router.go(`threads/${call.targetId}`);
     else threads.selectThread(call.targetId, { split: e.shiftKey });
   }
@@ -49,7 +58,7 @@
   status={st.text}
   {elapsed}
   result={call.text}
-  onopen={call.targetId ? open : undefined}
+  onopen={call.targetId && (hostOpen || !readOnly?.()) ? open : undefined}
   openLabel="Open thread"
   testid="runtime-thread-call-{item.id}"
 />

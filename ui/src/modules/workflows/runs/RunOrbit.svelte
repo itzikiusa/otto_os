@@ -15,8 +15,10 @@
     word: string;
     centre: string;
     sub?: string;
+    /** Accessible name and hover text for the centre time ("Running for 2m", "Took 14m"). */
+    timeLabel?: string;
   }
-  let { entries, runState, word, centre, sub = '' }: Props = $props();
+  let { entries, runState, word, centre, sub = '', timeLabel = '' }: Props = $props();
   const orbit = $derived(buildOrbit(entries, runState));
   const label = $derived(orbitLabel(entries, word));
   const nameOf = (slot: number) => entrySteps(entries[slot]).map((s) => s.name).join(', ');
@@ -30,7 +32,11 @@
       <path class="arc {arc.state}" d={arc.d} stroke-width={arc.width}><title>{nameOf(arc.slot)}</title></path>
     {/each}
   </svg>
-  <span class="centre"><span class="t">{centre}</span>{#if sub}<span class="of">{sub}</span>{/if}</span>
+  <span class="centre">
+    <span class="time" data-testid="wf-run-orbit-time" role={timeLabel ? 'group' : undefined} title={timeLabel || undefined} aria-label={timeLabel || undefined}>
+      <span class="t">{centre}</span>{#if sub}<span class="of">{sub}</span>{/if}
+    </span>
+  </span>
 </div>
 
 <style>
@@ -98,6 +104,13 @@
     align-items: center;
     justify-content: center;
     pointer-events: none;
+  }
+  .time {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    line-height: 1.15;
+    pointer-events: auto;
   }
   .t {
     font-size: var(--fs-xl);

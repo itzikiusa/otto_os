@@ -195,7 +195,13 @@ export type RuntimeThreadViewProps = {
   /** Notifies the host when the user picks an access mode inside the embed chip. */
   onaccessmodechange?: (mode: RuntimeAccessMode) => void;
   hideEmbedBarWhenUnlinked?: boolean;
-  /** No composer and no "Open in Threads" (a thread another feature drives). */
+  /** Always show the Threads header bar (status, provider, title, model, tokens). */
+  showHeader?: boolean;
+  /** Show every tool call in the timeline without collapsing into "N earlier steps" / "Worked for …". */
+  expandWork?: boolean;
+  /** Host-controlled thread switching (sub-thread card / linked strip / Back to parent). */
+  onselectthread?: (sessionId: string) => void;
+  /** No composer (a thread another feature drives, or a settled step). */
   readOnly?: boolean;
   onunavailable?: (reason: RuntimeEmbedUnavailable) => void;
   fallbackCwd?: string | null;
@@ -324,10 +330,11 @@ export interface RuntimeSessionPort {
     live(closed?: boolean): RuntimeSession[];
     mount(): () => void;
     watch(id: string): () => void;
+    watchGroup(id: string): () => void;
     load(workspaceId: string): Promise<void>;
     loadAll(): Promise<void>;
     loadOne(id: string): Promise<RuntimeSession>;
-    loadLinked(id: string): Promise<void>;
+    loadLinked(id: string, ms?: number): Promise<void>;
     start(
       workspaceId: string,
       req: {

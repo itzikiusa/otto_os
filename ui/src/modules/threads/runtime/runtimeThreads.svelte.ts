@@ -36,8 +36,9 @@ import type {
 } from '../../../lib/api/types';
 import { isRuntimeProvider, RUNTIME_PROVIDERS, sessionProviderSlug } from '../../../lib/providers';
 import { threads } from '../threadsStore.svelte';
+import { inWatchedFamily, isEngineThread } from './childThreads';
 
-export { isRuntimeProvider, RUNTIME_PROVIDERS };
+export { isEngineThread, isRuntimeProvider, RUNTIME_PROVIDERS };
 
 type QueuedAttachment = { name: string; mime: string; data_base64: string };
 
@@ -167,10 +168,14 @@ class RuntimeThreads {
   unread = $state<Record<string, true>>({});
   /** Threads shown by an embed outside Threads (a turn ending there is seen). */
   private embedded = new Map<string, number>();
+  /** Thread families watched by a host (e.g. workflow run page) so workspace
+   *  reloads keep their engine rows and socket reconnects refresh their peers. */
+  private watchedGroups = new Map<string, number>();
   /** When `loadOne` last read each row (ms) — see `readRecently`. */
   private readAt = new Map<string, number>();
-  /** In-flight `loadOne` reads (two panes mounting share one) and when `loadLinked` last read. */
+  /** In-flight `loadOne` / `loadLinked` reads (shared across callers) and when `loadLinked` last succeeded. */
   private reading = new Map<string, Promise<RuntimeSession>>();
+  private linking = new Map<string, Promise<void>>();
   private linkedAt = new Map<string, number>();
   /** Original composer attachments keyed by `queued_id` so Edit preserves filenames even before server hydration. */
   private queuedAttachments = new Map<string, { name: string; mime: string; data_base64: string }[]>();
@@ -211,10 +216,12 @@ class RuntimeThreads {
     return id ? (this.byId[id] ?? null) : null;
   }
 
-  /** Live (or, with `closed`, closed) sessions, newest activity first. */
+  /** Live (or, with `closed`, closed) user-facing sessions, newest activity first.
+   *  Engine threads (workflows / reviews) stay out of Threads' lists even when
+   *  loaded into `byId` for viewing. */
   live(closed = false): RuntimeSession[] {
     return Object.values(this.byId)
-      .filter((s) => (s.status === 'closed') === closed)
+      .filter((s) => !isEngineThread(s.meta) && (s.status === 'closed') === closed)
       .sort((a, b) => b.last_active_at.localeCompare(a.last_active_at));
   }
 
@@ -228,8 +235,17 @@ class RuntimeThreads {
   async load(workspaceId: string): Promise<void> {
     try {
       const rows = await api.get<RuntimeSession[]>(`/workspaces/${workspaceId}/runtime-sessions`);
-      const next = { ...this.byId };
-      for (const id of Object.keys(next)) if (next[id].workspace_id === workspaceId) delete next[id];
+      const prev = this.byId;
+      const next = { ...prev };
+      const keptRoots = new Set<string>([...this.embedded.keys(), ...this.watchedGroups.keys()]);
+      for (const id of Object.keys(next)) {
+        const cur = next[id];
+        if (cur.workspace_id !== workspaceId) continue;
+        // Engine threads aren't returned by `/workspaces/{id}/runtime-sessions`:
+        // keep ones actively viewed or belonging to a watched step family.
+        if (isEngineThread(cur.meta) && inWatchedFamily(cur, prev, keptRoots)) continue;
+        delete next[id];
+      }
       for (const r of rows) {
         next[r.id] = keepOutcome(r, this.byId[r.id]);
         noteRuntimeWaiting(r.id, r.status === 'awaiting_permission', r.title);
@@ -287,23 +303,55 @@ class RuntimeThreads {
     return !!this.byId[id] && at !== undefined && Date.now() - at < ms;
   }
 
-  /** Fetch the rows of `id`'s linked group not held yet (its chips); none when read in the last `ms`. */
-  async loadLinked(id: string, ms = 0): Promise<void> {
-    if (Date.now() - (this.linkedAt.get(id) ?? -Infinity) < ms) return;
-    const peers = await api.get<PeerInfo[]>(`/runtime-sessions/${id}/peers`);
-    this.linkedAt.set(id, Date.now());
-    for (const peer of peers) if (!this.byId[peer.id]) this.adopt(peer.id);
+  /** Fetch the rows of `id`'s linked group not held yet; none when succeeded in
+   *  the last `ms`. With `refresh`, re-reads held engine peers AND cached family
+   *  members omitted from open `/peers` (preserving closed rows, pruning 404s). */
+  loadLinked(id: string, ms = 0, refresh = false): Promise<void> {
+    if (!refresh && ms > 0 && Date.now() - (this.linkedAt.get(id) ?? -Infinity) < ms) return Promise.resolve();
+    const busy = !refresh ? this.linking.get(id) : undefined;
+    if (busy) return busy;
+    const refreshOne = (cid: string): Promise<unknown> =>
+      this.loadOne(cid).catch((e: unknown) => {
+        if ((e as { status?: unknown } | null)?.status !== 404 || !this.byId[cid]) return;
+        const { [cid]: _gone, ...rest } = this.byId;
+        this.byId = rest;
+      });
+    const read = api
+      .get<PeerInfo[]>(`/runtime-sessions/${id}/peers`)
+      .then(async (peers) => {
+        this.linkedAt.set(id, Date.now());
+        const seen = new Set(peers.map((p) => p.id));
+        const pending: Promise<unknown>[] = [];
+        for (const peer of peers) {
+          const held = this.byId[peer.id];
+          if (!held) this.adopt(peer.id);
+          else if (refresh && isEngineThread(held.meta)) pending.push(refreshOne(peer.id));
+        }
+        if (refresh) {
+          const root = new Set([id]);
+          const snap = this.byId;
+          for (const cur of Object.values(snap)) {
+            if (cur.id !== id && !seen.has(cur.id) && isEngineThread(cur.meta) && inWatchedFamily(cur, snap, root)) pending.push(refreshOne(cur.id));
+          }
+          if (pending.length) await Promise.allSettled(pending);
+        }
+      })
+      .finally(() => { if (this.linking.get(id) === read) this.linking.delete(id); });
+    this.linking.set(id, read);
+    return read;
   }
 
   /** An embed shows `id` while mounted (its finished turns are seen); returns the release. */
   watch(id: string): () => void {
     this.embedded.set(id, (this.embedded.get(id) ?? 0) + 1);
     this.markRead(id);
-    return () => {
-      const n = (this.embedded.get(id) ?? 1) - 1;
-      if (n > 0) this.embedded.set(id, n);
-      else this.embedded.delete(id);
-    };
+    return () => { const n = (this.embedded.get(id) ?? 1) - 1; if (n > 0) this.embedded.set(id, n); else this.embedded.delete(id); };
+  }
+
+  /** A host watches `id`'s thread family so reloads keep its engine rows and reconnects refresh its peers. */
+  watchGroup(id: string): () => void {
+    this.watchedGroups.set(id, (this.watchedGroups.get(id) ?? 0) + 1);
+    return () => { const n = (this.watchedGroups.get(id) ?? 1) - 1; if (n > 0) this.watchedGroups.set(id, n); else this.watchedGroups.delete(id); };
   }
 
   markRead(id: string): void {
@@ -336,10 +384,20 @@ class RuntimeThreads {
     };
   }
 
-  /** Re-read every loaded workspace's rows and the cross-workspace list. */
+  /** Re-read every loaded workspace's rows, the cross-workspace list, and any
+   *  watched/embedded engine families whose rows are omitted from workspace lists. */
   async resync(): Promise<void> {
     const loaded = Object.keys(this.loaded).filter((w) => this.loaded[w]);
-    await Promise.allSettled([...loaded.map((w) => this.load(w)), this.loadAll()]);
+    const watched = [...new Set([...this.watchedGroups.keys(), ...this.embedded.keys()])];
+    await Promise.allSettled([
+      ...loaded.map((w) => this.load(w)),
+      this.loadAll(),
+      ...watched.map((id) =>
+        this.loadOne(id)
+          .catch(() => undefined)
+          .then(() => this.loadLinked(id, 0, true)),
+      ),
+    ]);
   }
 
   /** Release cached attachments of `id`'s queued messages that left its

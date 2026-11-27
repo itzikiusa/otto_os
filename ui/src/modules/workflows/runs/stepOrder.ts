@@ -6,7 +6,7 @@
 // pane's default selection per run state (§4.4). The ring (runOrbit.ts) is
 // built from the same entries, so the two never disagree. Pure; unit-tested in
 // ui/unit/workflowStepOrder.test.ts.
-import type { ChildThread, ChildThreadStatus, NodeRunState, RunState, WorkflowCheckpoint, WorkflowGraph } from '../../../lib/api/types';
+import type { ChildThread, ChildThreadStatus, NodeRunState, RunState, RuntimeSession, WorkflowCheckpoint, WorkflowGraph } from '../../../lib/api/types';
 
 /** A step's time bar inside the run's clock, in percent; clamped so a retry
  *  that ran past the clock or a skewed start never leaves the track. */
@@ -212,7 +212,13 @@ export function defaultSelection(state: RunState, entries: readonly StepEntry[],
     case 'running': {
       const s = steps.find((x) => x.node.status === 'running' && x.node.phase !== 'waiting' && x.node.phase !== 'queued')
         ?? steps.find((x) => x.node.status === 'running');
-      const child = s?.node.children?.find((c) => c.status === 'running');
+      // Container steps (review_run, loop) open their active child even when a
+      // loop carries a thread; an agent step stays on its own conversation
+      // even while its agent runs sub-threads.
+      const child =
+        s && (s.kind === 'review_run' || s.kind === 'loop' || !s.node.thread)
+          ? s.node.children?.find((c) => c.status === 'running')
+          : undefined;
       return s ? { node: s.id, child: child?.id ?? null } : pick(trigger);
     }
     case 'waiting':
@@ -226,6 +232,253 @@ export function defaultSelection(state: RunState, entries: readonly StepEntry[],
     default:
       return { node: RESULT, child: null };
   }
+}
+
+/** A child row under a step: a reviewer, summarizer, loop iteration, or
+ *  agent-opened sub-thread, optionally nested under another child row. */
+export interface StepChild extends ChildThread {
+  /** Nesting depth under the step (0 = direct child, 1 = grandchild, …). */
+  depth?: number;
+  /** Parent child id when nested (`depth > 0`); null/undefined for a direct child of the step. */
+  parent_child_id?: string | null;
+}
+
+/** A live `RuntimeSession` status mapped to the step list's child status vocabulary. */
+export function runtimeChildStatus(
+  s: Pick<RuntimeSession, 'status' | 'last_turn_status' | 'background_tasks'>,
+): ChildThreadStatus {
+  if (s.status === 'awaiting_permission') return 'needs_you';
+  if (s.status === 'working' || s.status === 'starting') return 'running';
+  if (s.status !== 'closed' && (s.background_tasks?.length ?? 0) > 0) return 'running';
+  if (s.last_turn_status === 'failed') return 'error';
+  if (s.last_turn_status === 'interrupted') return 'skipped';
+  if (s.last_turn_status === 'completed' || s.status === 'closed') return 'success';
+  return s.status === 'dormant' ? 'skipped' : 'running';
+}
+
+function openerOf(s: Pick<RuntimeSession, 'meta'>): string | null {
+  const co = s.meta?.child_of as { id?: unknown } | undefined;
+  return typeof co?.id === 'string' && co.id ? co.id : null;
+}
+
+function providerSlugOf(s: Pick<RuntimeSession, 'provider' | 'meta'>): string {
+  const slug = s.meta?.provider_slug;
+  return typeof slug === 'string' && slug ? slug : s.provider;
+}
+
+/** Merge a step's recorded children (`NodeRunState.children`: reviewers,
+ *  summarizer, loop iterations, settled sub-threads) with EVERY live/known
+ *  runtime sub-thread belonging to that step's thread family (including
+ *  multi-generation grandchildren), preserving parent→child nesting. */
+export function mergeStepChildren(
+  recorded: readonly ChildThread[],
+  rootThreadId: string | null | undefined,
+  sessions: readonly RuntimeSession[],
+): StepChild[] {
+  // A same-thread loop can record the same sub-thread across multiple iterations:
+  // keep one canonical row per thread_id (or id) in first-seen order with the latest fields.
+  const deduped: ChildThread[] = [];
+  const seenKey = new Map<string, number>();
+  for (const c of recorded) {
+    const key = c.thread_id ? `t:${c.thread_id}` : `i:${c.id}`;
+    const at = seenKey.get(key);
+    if (at === undefined) {
+      seenKey.set(key, deduped.length);
+      deduped.push(c);
+    } else {
+      const prev = deduped[at];
+      deduped[at] = { ...prev, ...c, id: prev.id };
+    }
+  }
+  if (sessions.length === 0) return deduped.map((c) => ({ ...c, depth: 0, parent_child_id: null }));
+
+  const bySessionId = new Map<string, RuntimeSession>();
+  for (const s of sessions) bySessionId.set(s.id, s);
+
+  const rootIds = new Set<string>();
+  if (rootThreadId) rootIds.add(rootThreadId);
+  const threadToChildId = new Map<string, string>();
+  for (const c of deduped) {
+    if (c.thread_id) {
+      rootIds.add(c.thread_id);
+      threadToChildId.set(c.thread_id, c.id);
+    }
+  }
+  if (rootIds.size === 0) return deduped.map((c) => ({ ...c, depth: 0, parent_child_id: null }));
+
+  const belongsToStep = (s: RuntimeSession): boolean => {
+    if (rootThreadId && s.id === rootThreadId) return false;
+    if (s.parent_id && rootIds.has(s.parent_id)) return true;
+    const seen = new Set<string>([s.id]);
+    let cur: string | null = openerOf(s);
+    while (cur && !seen.has(cur)) {
+      if (rootIds.has(cur)) return true;
+      seen.add(cur);
+      const next = bySessionId.get(cur);
+      if (!next) return false;
+      if (next.parent_id && rootIds.has(next.parent_id)) return true;
+      cur = openerOf(next);
+    }
+    return false;
+  };
+
+  const family = sessions.filter(belongsToStep).sort((a, b) => a.created_at.localeCompare(b.created_at));
+  const out: StepChild[] = [];
+  const recordedIds = new Set<string>();
+  const recordedThreadIds = new Set<string>();
+
+  for (const c of deduped) {
+    recordedIds.add(c.id);
+    if (c.thread_id) recordedThreadIds.add(c.thread_id);
+    const live = c.thread_id ? bySessionId.get(c.thread_id) : bySessionId.get(c.id);
+    const opener = live ? openerOf(live) : null;
+    // If an opener thread is also an explicit child row (e.g. a goal loop
+    // mirroring its active iteration thread on `node.thread`), keep that child
+    // row as the parent instead of collapsing to the bare step root.
+    const parentChild = opener
+      ? (threadToChildId.get(opener) ?? (opener !== rootThreadId && bySessionId.has(opener) ? opener : null))
+      : null;
+    out.push({
+      ...c,
+      ...(live && !c.note && c.status === 'running' ? { status: runtimeChildStatus(live) } : {}),
+      parent_child_id: parentChild && parentChild !== c.id ? parentChild : null,
+    });
+  }
+
+  for (const s of family) {
+    if (recordedIds.has(s.id) || recordedThreadIds.has(s.id)) continue;
+    const opener = openerOf(s);
+    const parentChild = opener
+      ? (threadToChildId.get(opener) ??
+          (opener !== rootThreadId && (family.some((f) => f.id === opener) || recordedIds.has(opener)) ? opener : null))
+      : null;
+    const started = typeof s.meta?.last_turn_started_at === 'string' && s.meta.last_turn_started_at ? s.meta.last_turn_started_at : s.created_at;
+    out.push({
+      id: s.id,
+      label: s.title || providerSlugOf(s),
+      provider: providerSlugOf(s),
+      status: runtimeChildStatus(s),
+      thread_id: s.id,
+      ...(s.model ? { model: s.model } : {}),
+      ...(s.effort ? { effort: s.effort } : {}),
+      ...(started ? { started_at: started } : {}),
+      parent_child_id: parentChild && parentChild !== s.id ? parentChild : null,
+    });
+  }
+
+  const byId = new Map(out.map((c) => [c.id, c] as const));
+  for (const c of out) {
+    let depth = 0;
+    const seen = new Set<string>([c.id]);
+    let pid = c.parent_child_id ?? null;
+    while (pid && !seen.has(pid) && byId.has(pid) && depth < 8) {
+      seen.add(pid);
+      depth++;
+      pid = byId.get(pid)!.parent_child_id ?? null;
+    }
+    if (!c.parent_child_id || !byId.has(c.parent_child_id)) c.parent_child_id = null;
+    c.depth = depth;
+  }
+  return out;
+}
+
+export interface NestedChildEntry {
+  child: StepChild;
+  depth: number;
+  /** Direct parent child's label when nested (`depth > 0`); null for direct children of the step. */
+  parentLabel: string | null;
+}
+
+export interface NestedChildView {
+  active: NestedChildEntry[];
+  queued: NestedChildEntry[];
+  done: NestedChildEntry[];
+  findings: number;
+  trailing: NestedChildEntry[];
+}
+
+/** Order a step's children (same buckets as {@link orderChildren}) while
+ *  nesting each child's descendants immediately below it, one level per
+ *  generation. A finished parent with a live descendant stays in `active` so
+ *  working sub-threads are never hidden inside the done fold. */
+export function orderChildTree(children: readonly StepChild[]): NestedChildView {
+  const byId = new Map(children.map((c) => [c.id, c] as const));
+  const kidsOf = new Map<string, StepChild[]>();
+  const roots: StepChild[] = [];
+  for (const c of children) {
+    const pid = c.parent_child_id;
+    if (pid && pid !== c.id && byId.has(pid)) {
+      const list = kidsOf.get(pid);
+      if (list) list.push(c);
+      else kidsOf.set(pid, [c]);
+    } else {
+      roots.push(c);
+    }
+  }
+  const hasLiveDescendant = (id: string, seen = new Set<string>()): boolean => {
+    for (const k of kidsOf.get(id) ?? []) {
+      if (seen.has(k.id)) continue;
+      seen.add(k.id);
+      if (k.status === 'running' || k.status === 'needs_you' || k.status === 'error') return true;
+      if (hasLiveDescendant(k.id, seen)) return true;
+    }
+    return false;
+  };
+  const expand = (root: StepChild): NestedChildEntry[] => {
+    const res: NestedChildEntry[] = [];
+    const seen = new Set<string>();
+    const visit = (c: StepChild, depth: number, parentLabel: string | null): void => {
+      if (seen.has(c.id) || depth > 8) return;
+      seen.add(c.id);
+      res.push({ child: c, depth, parentLabel });
+      for (const k of kidsOf.get(c.id) ?? []) visit(k, depth + 1, c.label);
+    };
+    visit(root, 0, null);
+    return res;
+  };
+
+  const view: NestedChildView = { active: [], queued: [], done: [], findings: 0, trailing: [] };
+  for (const r of roots) {
+    const branch = expand(r);
+    if (isSummarizer(r)) view.trailing.push(...branch);
+    else if (r.status === 'running' || r.status === 'needs_you' || r.status === 'error' || hasLiveDescendant(r.id)) view.active.push(...branch);
+    else if (r.status === 'queued' || r.status === 'pending') view.queued.push(...branch);
+    else view.done.push(...branch);
+  }
+  for (const e of view.done) view.findings += Number(/(\d+) findings?/.exec(e.child.note ?? '')?.[1] ?? 0);
+  return view;
+}
+
+/** Resolve a thread id clicked inside the pane ("Open parent" / sub-thread card)
+ *  to a child id (or `null` for the bare step root). Explicit child rows win
+ *  over `rootThreadId` so a goal loop whose `node.thread` mirrors its active
+ *  iteration row selects the iteration conversation instead of the loop's Criteria tab. */
+export function resolveThreadSelection(
+  children: readonly Pick<StepChild, 'id' | 'thread_id'>[],
+  rootThreadId: string | null | undefined,
+  threadId: string,
+): string | null {
+  const match = children.find((c) => c.id === threadId || c.thread_id === threadId);
+  if (match) return match.id;
+  if (rootThreadId && threadId === rootThreadId) return null;
+  return threadId;
+}
+
+/** Ancestor trail `[topChild, …, currentChild]` for the pane breadcrumb (empty when not found). */
+export function childTrail(children: readonly StepChild[], childId: string | null | undefined): StepChild[] {
+  if (!childId) return [];
+  const cur = children.find((c) => c.id === childId || c.thread_id === childId);
+  if (!cur) return [];
+  const byId = new Map(children.map((c) => [c.id, c] as const));
+  const chain: StepChild[] = [];
+  const seen = new Set<string>();
+  let node: StepChild | undefined = cur;
+  while (node && !seen.has(node.id) && chain.length < 9) {
+    seen.add(node.id);
+    chain.push(node);
+    node = node.parent_child_id ? byId.get(node.parent_child_id) : undefined;
+  }
+  return chain.reverse();
 }
 
 /** A loop step's iterations as child rows (goal.md §3.5), newest first —

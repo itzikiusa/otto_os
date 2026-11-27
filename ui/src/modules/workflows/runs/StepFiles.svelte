@@ -29,20 +29,25 @@
   let reload = $state(0);
 
   // Another step's files: its open preview and folder go with it.
+  // Depend on derived primitives, not prop getters backed by re-created objects.
+  const currentRunId = $derived(runId);
+  const currentStepFile = $derived(stepFile);
   $effect(() => {
-    void [runId, stepFile];
+    void currentRunId;
+    void currentStepFile;
     open = null;
     all = false;
     dir = '';
   });
   $effect(() => {
-    const prefix = all ? null : stepFile;
+    const id = currentRunId;
+    const prefix = all ? null : currentStepFile;
     const path = all ? dir : '';
     void reload;
     files = null;
     error = null;
     const ac = new AbortController();
-    browseRunContext(runId, path, ac.signal).then(
+    browseRunContext(id, path, ac.signal).then(
       (b) => (files = b.entries.filter((e) => (prefix ? !e.is_dir && e.name.startsWith(prefix) : !e.name.startsWith('.')))),
       (e) => {
         if (!ac.signal.aborted) error = loadErrorText(e);

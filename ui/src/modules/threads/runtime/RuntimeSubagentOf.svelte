@@ -14,7 +14,7 @@
   import { runtimeViews } from './runtimeView.svelte';
   import { messageAttribution } from './timeline';
 
-  let { threadId }: { threadId: string } = $props();
+  let { threadId, onopenparent }: { threadId: string; onopenparent?: (parentId: string) => void } = $props();
 
   const me = $derived(runtimeThreads.get(threadId));
   /** A compared thread counts as a subagent of the first one. */
@@ -23,6 +23,10 @@
   const parent = $derived(of ? runtimeThreads.get(of.id) : null);
   /** Back to the parent: shown in a tab or sheet, that closes first. */
   function openParent(pid: string): void {
+    if (onopenparent) {
+      onopenparent(pid);
+      return;
+    }
     if (threadsChrome.subagentId === threadId) {
       threadsChrome.closeSurface('subagent');
       threadsChrome.subagentId = null;

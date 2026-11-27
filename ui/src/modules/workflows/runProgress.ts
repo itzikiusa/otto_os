@@ -1,5 +1,13 @@
 import type {NodeRunState, RunOverview, WorkflowRun} from '../../lib/api/types';
 
+/** Apply an authoritative node summary onto an existing node object, clearing
+ *  `thread` and `children` when the summary omits them (e.g. after a retry). */
+function applyNodeSummary(old: NodeRunState, node: NodeRunState): void {
+  Object.assign(old, node);
+  if (node.thread === undefined) delete old.thread;
+  if (node.children === undefined) delete old.children;
+}
+
 /** Summary freshness is independent of lazily loaded checkpoint pages/bodies. */
 export function mergeRunProgress(current: WorkflowRun, next: WorkflowRun): boolean {
   if (current.id !== next.id || (next.rev ?? 0) < (current.rev ?? 0)) return false;
@@ -23,7 +31,7 @@ export function mergeRunProgress(current: WorkflowRun, next: WorkflowRun): boole
     // fresh logs/sessions/activity objects (and re-rendered the step) on every
     // merge (backlog B6 / W4).
     if (node.detail_version && old.detail_version === node.detail_version && old.status === node.status) return old;
-    Object.assign(old, node);
+    applyNodeSummary(old, node);
     return old;
   });
   if (next.summary) current.checkpoints = generation === next.checkpoint_generation ? checkpoints : [];
@@ -56,7 +64,7 @@ export function applyLiveNode(run: WorkflowRun, ev: LiveRunEvent): boolean {
   if (!old) return false;
   // Same `detail_version` + status ⇒ nothing to rewrite (see mergeRunProgress).
   if (!(node.detail_version && old.detail_version === node.detail_version && old.status === node.status)) {
-    Object.assign(old, node);
+    applyNodeSummary(old, node);
   }
   run.rev = ev.rev;
   run.waiting_approval = ev.waitingApproval;

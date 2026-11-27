@@ -11,16 +11,26 @@
   import { onMount, untrack } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
+  import ProviderIcon, { hasProviderIcon } from '../../../lib/components/ProviderIcon.svelte';
+  import StatusDot from '../../../lib/components/StatusDot.svelte';
+  import { events } from '../../../lib/events.svelte';
   import { loadErrorText } from '../../../lib/loadError';
+  import { formatEffortShort, formatModelLabel } from '../../../lib/providerModels';
+  import { sessionProviderSlug } from '../../../lib/providers';
   import { EMBED_DEFAULTS, openInThreads, type RuntimeEmbedHandle, type RuntimeEmbedUnavailable, type RuntimeThreadViewProps } from '../../../lib/runtimeThreadPort';
+  import { sessionState } from '../../../lib/status';
+  import { auth } from '../../../lib/stores/auth.svelte';
   import type { RuntimeAccessMode } from '../../../lib/api/types';
   import { runtimeDrafts } from '../../../lib/stores/runtimeDrafts.svelte';
+  import { childOf } from './childThreads';
   import EmbeddedRuntimeDraft from './EmbeddedRuntimeDraft.svelte';
   import { embedStatus } from './embedStatus';
+  import RuntimeSubagentOf from './RuntimeSubagentOf.svelte';
   import RuntimeThread from './RuntimeThread.svelte';
-  import { runtimeThreads } from './runtimeThreads.svelte';
+  import { asThreadSession, runtimeThreads } from './runtimeThreads.svelte';
   import { runtimeViews } from './runtimeView.svelte';
   import { isRunning } from './timeline';
+  import { formatTokens, threadTokenTotal } from './turnUsage';
 
   let {
     sessionId,
@@ -37,6 +47,9 @@
     accessModeOverride = null,
     onaccessmodechange,
     hideEmbedBarWhenUnlinked = false,
+    showHeader = false,
+    expandWork = false,
+    onselectthread,
     readOnly = false,
     onunavailable,
     fallbackCwd = null,
@@ -59,8 +72,23 @@
   // on: an Agents pane read its thread at network speed).
   const sid = $derived(sessionId);
   let picked = $state<string | null>(null);
-  const shown = $derived(picked && runtimeThreads.group(sessionId).some((t) => t.id === picked) ? picked : sessionId);
+  const shown = $derived(!onselectthread && picked && runtimeThreads.group(sessionId).some((t) => t.id === picked) ? picked : sessionId);
   const current = $derived(runtimeThreads.get(shown));
+  const currentSession = $derived(current ? asThreadSession(current) : null);
+  const headerState = $derived(currentSession ? sessionState(currentSession, currentSession.status, current?.status === 'awaiting_permission', { stale: events.state !== 'connected' }) : null);
+  const currentProvider = $derived(current ? sessionProviderSlug(current) : '');
+  const headerModel = $derived.by(() => {
+    if (!current) return '';
+    const m = current.model ? formatModelLabel(currentProvider, current.model, auth.meta) : '';
+    const e = current.effort ? formatEffortShort(current.effort) : '';
+    return [m, e].filter(Boolean).join(' · ');
+  });
+  const headerTokens = $derived(shown ? formatTokens(threadTokenTotal(runtimeViews.projections[shown]?.turns ?? [])) : '');
+  const isSubagent = $derived(!!childOf(current));
+  function switchTo(id: string): void {
+    if (onselectthread) onselectthread(id);
+    else picked = id === sessionId ? null : id;
+  }
   let rowError = $state<string | null>(null);
   let attempt = $state(0);
   // Gone (404, or removed while shown) or not readable (403): a host with
@@ -82,7 +110,7 @@
     untrack(() => onunavailable?.(r));
   });
   const linked = $derived(shown !== sessionId);
-  const chrome = $derived(!!sessionId && (linked || (!hideEmbedBarWhenUnlinked && (compact || !!onmaximize || !!ondetach))));
+  const chrome = $derived(!!sessionId && (showHeader || linked || (!hideEmbedBarWhenUnlinked && (compact || !!onmaximize || !!ondetach))));
   const detach = (): void => {
     if (shown) (ondetach ?? openInThreads)(shown);
   };
@@ -180,11 +208,15 @@
 
 <div class="rt-embed" class:compact data-testid="embedded-runtime-thread">
   {#if chrome}
-    <div class="rt-embed-bar">
-      <span class="ellipsis" dir="auto" title={current?.title ?? ''}>{current?.title ?? 'Thread'}</span>
-      {#if linked}
+    <div class="rt-embed-bar" data-testid="embedded-thread-header">
+      {#if showHeader && headerState}<StatusDot state={headerState} />{/if}
+      {#if showHeader && currentProvider && hasProviderIcon(currentProvider)}<ProviderIcon provider={currentProvider} size={14} />{/if}
+      <span class="rt-embed-title ellipsis" dir="auto" title={current?.title ?? ''}>{current?.title ?? 'Thread'}</span>
+      {#if showHeader && headerModel}<span class="rt-embed-meta ellipsis" data-testid="embedded-thread-model">{headerModel}</span>{/if}
+      {#if showHeader && headerTokens}<span class="rt-embed-meta" data-testid="embedded-thread-tokens">{headerTokens}</span>{/if}
+      {#if linked && !isSubagent}
         <button type="button" class="btn small" onclick={() => (picked = null)}>{agentName ? 'Back to chat' : 'Back'}</button>
-      {:else if hostCommands?.newThread}
+      {:else if !linked && hostCommands?.newThread}
         {@const id = sessionId}
         <button type="button" class="icon-btn" aria-label="New thread" title="New thread — pick the agent again (/new)" data-testid="embedded-thread-new"
           onclick={() => { if (id) hostCommands?.newThread?.(id, false); }}>
@@ -207,6 +239,9 @@
       {/if}
     </div>
   {/if}
+  {#if shown && isSubagent}
+    <RuntimeSubagentOf threadId={shown} onopenparent={switchTo} />
+  {/if}
   <div class="rt-embed-body">
     {#if !sessionId || !shown}
       {#if draft}
@@ -225,6 +260,7 @@
           focused={focusOnMount}
           {compact}
           {readOnly}
+          {expandWork}
           {hostCommands}
           {accessModeOverride}
           {onaccessmodechange}
@@ -240,7 +276,8 @@
           {composerFootLeadSlot}
           {testIds}
           agentChat={shown === sessionId ? agentName : undefined}
-          onswitch={(id) => (picked = id === sessionId ? null : id)}
+          onswitch={switchTo}
+          onopenchild={onselectthread}
         />
       {/key}
     {/if}
@@ -259,20 +296,31 @@
   .rt-embed-bar {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 6px 12px;
+    gap: var(--sp-4);
+    padding: var(--sp-3) var(--sp-5);
     border-block-end: 1px solid var(--border);
+    background: var(--surface);
     color: var(--text-dim);
     font-size: var(--fs-s);
     flex: none;
   }
   .rt-embed.compact .rt-embed-bar {
-    gap: 4px;
-    padding: 4px 8px;
+    gap: var(--sp-2);
+    padding: var(--sp-2) var(--sp-4);
   }
-  .rt-embed-bar > span {
+  .rt-embed-title {
     flex: 1;
     min-inline-size: 0;
+    color: var(--text);
+    font-weight: 500;
+  }
+  .rt-embed-meta {
+    flex: none;
+    max-inline-size: 200px;
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
   }
   .rt-embed-body {
     flex: 1;

@@ -70,6 +70,8 @@
     assistantFooter?: Snippet<[Extract<TurnItem, { type: 'assistant_message' }>]>;
     /** Open the thread's Changes surface on a file (the turn changes card). */
     onopendiff?: (path: string) => void;
+    /** Keep every work step expanded (no "N earlier steps" or "Worked for …" folds). */
+    expandWork?: boolean;
   }
 
   let {
@@ -87,6 +89,7 @@
     formatAssistantText,
     assistantFooter,
     onopendiff,
+    expandWork = false,
   }: Props = $props();
 
   /** Edit as new message: only on the person's latest message (less chrome). */
@@ -196,11 +199,11 @@
   {#if item.id === hideItemId}
     <!-- Said once, by the failed turn's block under the timeline. -->
   {:else if subagents.groups.has(item.id)}
-    <RuntimeChildGroup kids={subagents.groups.get(item.id) ?? []} {sessionId} activity={children} output={outputMap} />
+    <RuntimeChildGroup kids={subagents.groups.get(item.id) ?? []} {sessionId} activity={children} output={outputMap} {expandWork} />
   {:else if subagents.skip.has(item.id)}
     <!-- Drawn inside its turn's subagent row. -->
   {:else if item.type === 'subagent'}
-    <RuntimeSubagentCard {sessionId} {item} activity={children.get(item.id) ?? EMPTY_ACTIVITY} output={outputMap} />
+    <RuntimeSubagentCard {sessionId} {item} activity={children.get(item.id) ?? EMPTY_ACTIVITY} output={outputMap} startOpen={expandWork} />
   {:else if call}
     <RuntimeThreadCallRow {item} {call} />
   {:else if pending}
@@ -217,6 +220,7 @@
       {onrespond}
       agentId={agentChatId ?? undefined}
       cwd={cwd ?? undefined}
+      startOpen={expandWork}
     />
   {/if}
 {/snippet}
@@ -224,6 +228,8 @@
 {#snippet workPart(part: WorkPart)}
   {#if part.kind === 'item'}
     {@render entryRow(part.entry)}
+  {:else if expandWork}
+    {#each part.entries as e (e.item.id)}{@render entryRow(e)}{/each}
   {:else}
     <RuntimeWorkGroup id={part.id} entries={part.entries} cwd={cwd ?? undefined} open={part.entries.some((e) => e.approval && approvals.has(e.approval.request_id))}>
       {#each part.entries as e (e.item.id)}{@render entryRow(e)}{/each}
@@ -256,7 +262,7 @@
     {@const a = messageAttribution(row.item.text)!}
     {@const peerIso = row.item.started_at ?? row.item.updated_at}
     {@const peerClock = formatMessageClock(peerIso)}
-    {@const foldable = longBody(a.body)}
+    {@const foldable = !expandWork && longBody(a.body)}
     {@const folded = foldable && !openedFrom.has(row.item.id)}
     <div class="rt-from" class:reply={a.reply} data-testid="rt-from" data-reply={a.reply ? 'true' : undefined} data-rt-msg={row.item.id}>
       <span class="rt-from-h">
@@ -352,8 +358,8 @@
     </div>
   {:else if row.kind === 'work'}
     {@const flat = workRowEntries(row)}
-    {@const fold = shouldFold(flat, turns, pendingIds, turnById)}
-    {@const earlier = fold ? 0 : earlierSteps(row.parts, pendingIds, !stretchDone(flat, turns, turnById), keptOpen)}
+    {@const fold = expandWork ? false : shouldFold(flat, turns, pendingIds, turnById)}
+    {@const earlier = expandWork || fold ? 0 : earlierSteps(row.parts, pendingIds, !stretchDone(flat, turns, turnById), keptOpen)}
     <div class="rt-work">
       <RuntimeWorkFold id={row.id} entries={flat} {fold} keepOpen={row.parts.some(keptOpen)} tokens={tokensByRow.get(row.id) ?? ''}>
         {#if earlier}
@@ -368,7 +374,7 @@
     </div>
   {/if}
   {#if changesByRow.get(row.kind === 'message' ? row.item.id : row.id)}
-    <RuntimeTurnChanges files={changesByRow.get(row.kind === 'message' ? row.item.id : row.id)!} {onopendiff} />
+    <RuntimeTurnChanges files={changesByRow.get(row.kind === 'message' ? row.item.id : row.id)!} {onopendiff} startOpen={expandWork} />
   {/if}
 {/each}
 
