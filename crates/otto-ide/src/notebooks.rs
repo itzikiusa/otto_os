@@ -1,5 +1,5 @@
-//! Jupyter / Python Notebook kernel execution engine, kernelspec & interpreter
-//! discovery (venv / uv / conda / poetry / Jupyter kernelspecs), live variable
+//! Jupyter / Python Notebook kernel execution engine, Python interpreter
+//! discovery (venv / uv / conda / poetry / system Python), live variable
 //! inspection, interrupt / restart lifecycle, and GPU / MPS accelerator detection.
 //!
 //! Runs a lightweight, zero-install persistent Python kernel subprocess over
@@ -11,6 +11,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
@@ -38,7 +39,7 @@ pub struct IdeNotebookKernelInfo {
     pub display_name: String,
     pub language: String,
     pub interpreter: String,
-    /// `"venv"` | `"uv"` | `"conda"` | `"poetry"` | `"kernelspec"` | `"system"`.
+    /// `"venv"` | `"uv"` | `"conda"` | `"poetry"` | `"system"`.
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
@@ -142,22 +143,25 @@ try:
 except Exception:
     pass
 
-# Keep stable Python stdout/stderr wrappers across cells (BUG2-12) so libraries and
+# Keep stable Python stdout/stderr wrappers across cells (BUG2-12, BUG3-11) so libraries and
 # logging.StreamHandler instances that retain a reference to sys.stdout/sys.stderr never
-# hit "ValueError: I/O operation on closed file" in later cells. Per-cell capture swaps
-# only the underlying OS fds 1 and 2 via os.dup2.
-sys.stdout = io.TextIOWrapper(
+# hit "ValueError: I/O operation on closed file" in later cells, AND if a cell temporarily
+# reassigns sys.stdout/sys.stderr (e.g. to a file closed by a `with` block), _exec_cell
+# restores both bindings to these persistent wrappers without closing them.
+_OTTO_STDOUT = io.TextIOWrapper(
     os.fdopen(1, "wb", buffering=0, closefd=False),
     encoding="utf-8",
     errors="replace",
     line_buffering=True,
 )
-sys.stderr = io.TextIOWrapper(
+_OTTO_STDERR = io.TextIOWrapper(
     os.fdopen(2, "wb", buffering=0, closefd=False),
     encoding="utf-8",
     errors="replace",
     line_buffering=True,
 )
+sys.stdout = _OTTO_STDOUT
+sys.stderr = _OTTO_STDERR
 
 _MAX_STREAM_BYTES = 2 * 1024 * 1024
 
@@ -307,14 +311,15 @@ def _exec_cell(code):
             "traceback": tb[-40:],
         })
     finally:
-        try:
-            sys.stdout.flush()
-        except Exception:
-            pass
-        try:
-            sys.stderr.flush()
-        except Exception:
-            pass
+        for _s in (sys.stdout, sys.stderr, _OTTO_STDOUT, _OTTO_STDERR):
+            try:
+                _s.flush()
+            except Exception:
+                pass
+        # BUG3-11: Restore harness-owned wrappers after each cell without closing them so
+        # a temporary `sys.stdout = f` inside a `with` block cannot break later cells.
+        sys.stdout = _OTTO_STDOUT
+        sys.stderr = _OTTO_STDERR
         try:
             os.dup2(_DEVNULL_FD, 1)
             os.dup2(_DEVNULL_FD, 2)
@@ -602,7 +607,25 @@ struct KernelKey {
     notebook_path: String,
 }
 
-type KernelSlot = Arc<TokioMutex<Option<KernelProc>>>;
+/// Per-notebook kernel slot owning both its async mutex and its own active child PID.
+/// Storing the PID per slot (`AtomicU32`, `0` while spawning/stopped) makes cross-slot
+/// PID interference structurally impossible across both delayed teardown (`CONC2-1`) and
+/// pre-ready replacement startup (`CONC3-1`).
+struct KernelSlotInner {
+    proc: TokioMutex<Option<KernelProc>>,
+    pid: AtomicU32,
+}
+
+impl KernelSlotInner {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            proc: TokioMutex::new(None),
+            pid: AtomicU32::new(0),
+        })
+    }
+}
+
+type KernelSlot = Arc<KernelSlotInner>;
 
 /// Manages persistent per-notebook Python kernel processes for the IDE.
 #[derive(Clone, Default)]
@@ -629,7 +652,7 @@ impl NotebookManager {
         let guard = self.sessions.lock().ok()?;
         let slot = guard.get(&key)?.clone();
         drop(guard);
-        slot.try_lock().ok().and_then(|opt| {
+        slot.proc.try_lock().ok().and_then(|opt| {
             opt.as_ref().map(|k| {
                 (
                     k.session_id.clone(),
@@ -659,8 +682,8 @@ impl NotebookManager {
             notebook_path: notebook_path.to_string(),
         };
         let slot = self.get_or_create_slot(&key).await?;
-        let mut slot_guard = slot.lock().await;
-        ensure_slot_kernel(&key, &mut slot_guard, interpreter, cwd, env).await?;
+        let mut slot_guard = slot.proc.lock().await;
+        ensure_slot_kernel(&slot, &mut slot_guard, interpreter, cwd, env).await?;
         let proc = slot_guard
             .as_mut()
             .ok_or_else(|| Error::Internal("notebook kernel missing after spawn".into()))?;
@@ -672,7 +695,7 @@ impl NotebookManager {
             Ok(v) => v,
             Err(e) => {
                 // Evict broken kernel so the next run spawns cleanly.
-                clear_slot_kernel(&key, &mut slot_guard);
+                clear_slot_kernel(&slot, &mut slot_guard);
                 return Err(e);
             }
         };
@@ -721,7 +744,7 @@ impl NotebookManager {
                 variables: Vec::new(),
             });
         };
-        let mut slot_guard = slot.lock().await;
+        let mut slot_guard = slot.proc.lock().await;
         let Some(proc) = slot_guard.as_mut() else {
             return Ok(IdeNotebookVariablesResp {
                 session_id: None,
@@ -741,16 +764,27 @@ impl NotebookManager {
         })
     }
 
-    /// Send `SIGINT` to the active kernel process group without destroying the session.
+    /// Send `SIGINT` only to the current active slot's kernel process without destroying the session.
     pub fn interrupt(&self, owner: &str, project_key: &str, notebook_path: &str) -> bool {
-        let Some(_slot) = self.get_existing_slot(owner, project_key, notebook_path) else {
+        let Some(slot) = self.get_existing_slot(owner, project_key, notebook_path) else {
             return false;
         };
-        self.send_sigint_by_key(&KernelKey {
-            owner: owner.to_string(),
-            project_key: project_key.to_string(),
-            notebook_path: notebook_path.to_string(),
-        })
+        let pid = slot.pid.load(Ordering::Acquire);
+        if pid == 0 {
+            return false;
+        }
+        // BUG2-11: Interrupt signals only the Python kernel process (SIGINT to `pid`),
+        // leaving independent background workers started by earlier cells running.
+        // Restart and shutdown continue to terminate the entire process group (`-pid`).
+        #[cfg(unix)]
+        {
+            send_unix_signal_pid(pid, 2 /* SIGINT */)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = pid;
+            false
+        }
     }
 
     pub async fn restart(
@@ -768,9 +802,9 @@ impl NotebookManager {
             notebook_path: notebook_path.to_string(),
         };
         let slot = self.get_or_create_slot(&key).await?;
-        let mut slot_guard = slot.lock().await;
-        clear_slot_kernel(&key, &mut slot_guard);
-        ensure_slot_kernel(&key, &mut slot_guard, interpreter, cwd, env).await?;
+        let mut slot_guard = slot.proc.lock().await;
+        clear_slot_kernel(&slot, &mut slot_guard);
+        ensure_slot_kernel(&slot, &mut slot_guard, interpreter, cwd, env).await?;
         let proc = slot_guard
             .as_ref()
             .ok_or_else(|| Error::Internal("notebook kernel missing after restart".into()))?;
@@ -784,8 +818,8 @@ impl NotebookManager {
             notebook_path: notebook_path.to_string(),
         };
         if let Some(slot) = self.remove_slot(&key) {
-            let mut slot_guard = slot.lock().await;
-            clear_slot_kernel(&key, &mut slot_guard);
+            let mut slot_guard = slot.proc.lock().await;
+            clear_slot_kernel(&slot, &mut slot_guard);
         }
     }
 
@@ -807,29 +841,10 @@ impl NotebookManager {
         self.sessions.lock().ok()?.remove(key)
     }
 
-    fn send_sigint_by_key(&self, key: &KernelKey) -> bool {
-        let pid = kernel_pids().lock().ok().and_then(|m| m.get(key).copied());
-        let Some(pid) = pid else {
-            return false;
-        };
-        // BUG2-11: Interrupt signals only the Python kernel process (SIGINT to `pid`),
-        // leaving independent background workers started by earlier cells running.
-        // Restart and shutdown continue to terminate the entire process group (`-pid`).
-        #[cfg(unix)]
-        {
-            send_unix_signal_pid(pid, 2 /* SIGINT */)
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = pid;
-            false
-        }
-    }
-
     /// Atomically returns the per-notebook slot mutex so concurrent first runs
     /// serialize kernel creation and share a single kernel process.
     async fn get_or_create_slot(&self, key: &KernelKey) -> Result<KernelSlot> {
-        let mut evicted: Option<(KernelKey, KernelSlot)> = None;
+        let mut evicted: Option<KernelSlot> = None;
         let slot = {
             let mut guard = self
                 .sessions
@@ -841,44 +856,32 @@ impl NotebookManager {
                 if guard.len() >= MAX_ACTIVE_KERNELS {
                     if let Some(oldest_key) = guard.keys().next().cloned() {
                         if let Some(old_slot) = guard.remove(&oldest_key) {
-                            evicted = Some((oldest_key, old_slot));
+                            evicted = Some(old_slot);
                         }
                     }
                 }
-                let fresh: KernelSlot = Arc::new(TokioMutex::new(None));
+                let fresh = KernelSlotInner::new();
                 guard.insert(key.clone(), Arc::clone(&fresh));
                 fresh
             }
         };
-        if let Some((old_key, old_slot)) = evicted {
-            let mut g = old_slot.lock().await;
-            clear_slot_kernel(&old_key, &mut g);
+        if let Some(old_slot) = evicted {
+            let mut g = old_slot.proc.lock().await;
+            clear_slot_kernel(&old_slot, &mut g);
         }
         Ok(slot)
     }
 }
 
-/// Remove `key` from the active PID registry only if it still points to `expected_pid`,
-/// preventing a delayed shutdown cleanup from unregistering a replacement kernel (CONC2-1).
-fn remove_pid_if_matches(key: &KernelKey, expected_pid: u32) {
-    if let Ok(mut pids) = kernel_pids().lock() {
-        if pids.get(key).copied() == Some(expected_pid) {
-            pids.remove(key);
-        }
-    }
-}
-
-fn clear_slot_kernel(key: &KernelKey, slot_guard: &mut Option<KernelProc>) {
+fn clear_slot_kernel(slot: &KernelSlot, slot_guard: &mut Option<KernelProc>) {
+    slot.pid.store(0, Ordering::Release);
     if let Some(mut proc) = slot_guard.take() {
-        if let Some(expected_pid) = proc.pid {
-            remove_pid_if_matches(key, expected_pid);
-        }
         proc.terminate_tree();
     }
 }
 
 async fn ensure_slot_kernel(
-    key: &KernelKey,
+    slot: &KernelSlot,
     slot_guard: &mut Option<KernelProc>,
     interpreter: &str,
     cwd: &str,
@@ -893,21 +896,11 @@ async fn ensure_slot_kernel(
     if reuse {
         return Ok(());
     }
-    clear_slot_kernel(key, slot_guard);
+    clear_slot_kernel(slot, slot_guard);
     let proc = spawn_python_kernel(interpreter, cwd, env).await?;
-    if let Some(p) = proc.pid {
-        if let Ok(mut pids) = kernel_pids().lock() {
-            pids.insert(key.clone(), p);
-        }
-    }
+    slot.pid.store(proc.pid.unwrap_or(0), Ordering::Release);
     *slot_guard = Some(proc);
     Ok(())
-}
-
-fn kernel_pids() -> &'static StdMutex<HashMap<KernelKey, u32>> {
-    static PIDS: std::sync::OnceLock<StdMutex<HashMap<KernelKey, u32>>> =
-        std::sync::OnceLock::new();
-    PIDS.get_or_init(|| StdMutex::new(HashMap::new()))
 }
 
 #[cfg(unix)]
@@ -1388,6 +1381,57 @@ mod tests {
                 && err_stream_text.contains("logged-warning-cell2"),
             "BUG2-12: retained stderr writes must be captured in cell 2: {r_log_use:?}"
         );
+
+        // BUG3-11: A cell that temporarily reassigns sys.stdout to a file closed by a `with`
+        // block must NOT break subsequent cells' `print(...)` calls.
+        let r_rebind = mgr
+            .execute_cell(
+                "u1",
+                "local:/tmp/nb-streams",
+                "streams.ipynb",
+                &cwd,
+                &py_str,
+                &BTreeMap::new(),
+                "import os, sys\nwith open(os.devnull, 'w') as _f:\n    sys.stdout = _f\n    print('to-devnull')\n",
+                Duration::from_secs(10),
+            )
+            .await
+            .expect("rebind stdout cell");
+        assert_eq!(r_rebind.status, "ok", "rebind cell failed: {r_rebind:?}");
+        let r_after_rebind = mgr
+            .execute_cell(
+                "u1",
+                "local:/tmp/nb-streams",
+                "streams.ipynb",
+                &cwd,
+                &py_str,
+                &BTreeMap::new(),
+                "print('restored-stdout-ok')\n",
+                Duration::from_secs(10),
+            )
+            .await
+            .expect("cell after stdout rebind");
+        assert_eq!(
+            r_after_rebind.status, "ok",
+            "BUG3-11: cell after temporary sys.stdout reassignment must succeed: {r_after_rebind:?}"
+        );
+        let restored_out: String = r_after_rebind
+            .outputs
+            .iter()
+            .filter(|o| o.get("output_type").and_then(|v| v.as_str()) == Some("stream"))
+            .filter_map(|o| o.get("text"))
+            .map(|t| match t {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Array(arr) => {
+                    arr.iter().filter_map(|v| v.as_str()).collect::<String>()
+                }
+                _ => String::new(),
+            })
+            .collect();
+        assert!(
+            restored_out.contains("restored-stdout-ok"),
+            "BUG3-11: expected captured stdout after rebind restore, got: {r_after_rebind:?}"
+        );
         mgr.shutdown_session("u1", "local:/tmp/nb-streams", "streams.ipynb")
             .await;
 
@@ -1465,25 +1509,36 @@ mod tests {
             );
         }
 
-        // CONC2-1: Old kernel cleanup must NOT delete a replacement kernel's PID entry.
+        // CONC2-1 + CONC3-1: Per-slot PID ownership guarantees that:
+        // (1) while a replacement slot is published before its interpreter finishes spawning
+        //     (`pid == 0`), `interrupt()` returns `false` and NEVER signals the detached old kernel;
+        // (2) delayed teardown of the old slot NEVER clears the replacement slot's PID.
         let conc_key = KernelKey {
             owner: "u1".into(),
             project_key: "local:/tmp/nb-conc2".into(),
             notebook_path: "replace.ipynb".into(),
         };
-        {
-            let mut pids = kernel_pids().lock().unwrap();
-            pids.insert(conc_key.clone(), 999_002);
-        }
-        // Old kernel had PID 999_001; cleanup must preserve replacement PID 999_002.
-        remove_pid_if_matches(&conc_key, 999_001);
-        assert_eq!(
-            kernel_pids().lock().unwrap().get(&conc_key).copied(),
-            Some(999_002),
-            "CONC2-1: old kernel cleanup must not unregister replacement PID"
+        let old_slot = mgr.get_or_create_slot(&conc_key).await.unwrap();
+        old_slot.pid.store(std::process::id(), Ordering::Release);
+        let detached = mgr.remove_slot(&conc_key).expect("detach old slot");
+        let replacement_slot = mgr.get_or_create_slot(&conc_key).await.unwrap();
+        assert_eq!(replacement_slot.pid.load(Ordering::Acquire), 0);
+        assert!(
+            !mgr.interrupt("u1", "local:/tmp/nb-conc2", "replace.ipynb"),
+            "CONC3-1: interrupt during replacement startup must return false and never signal detached old kernel"
         );
-        remove_pid_if_matches(&conc_key, 999_002);
-        assert_eq!(kernel_pids().lock().unwrap().get(&conc_key).copied(), None);
+        replacement_slot.pid.store(999_002, Ordering::Release);
+        {
+            let mut old_guard = detached.proc.lock().await;
+            clear_slot_kernel(&detached, &mut old_guard);
+        }
+        assert_eq!(
+            replacement_slot.pid.load(Ordering::Acquire),
+            999_002,
+            "CONC2-1: old slot teardown must never clear replacement slot PID"
+        );
+        mgr.shutdown_session("u1", "local:/tmp/nb-conc2", "replace.ipynb")
+            .await;
     }
 
     #[test]
@@ -1495,8 +1550,26 @@ mod tests {
         let _ = accels;
 
         let tmp = tempfile::tempdir().unwrap();
-        // RED-5: Even when a Jupyter kernelspec directory exists on disk, the built-in
-        // standard Python runner must not advertise unsupported Jupyter kernelspecs.
+        // RED-5: Even when Python and non-Python Jupyter kernelspec directories exist on disk
+        // (including a valid executable Python kernelspec that the old scanner advertised),
+        // the built-in standard Python runner must emit zero `kernelspec` entries.
+        let search = crate::toolchains::system_search_dirs();
+        let real_py = crate::toolchains::find_executable_in(&search, &["python3"])
+            .unwrap_or_else(|| "/usr/bin/python3".into());
+        let py_kspec = tmp
+            .path()
+            .join(".venv/share/jupyter/kernels/python3-custom");
+        std::fs::create_dir_all(&py_kspec).unwrap();
+        std::fs::write(
+            py_kspec.join("kernel.json"),
+            serde_json::json!({
+                "argv": [real_py, "-m", "ipykernel_launcher", "-f", "{connection_file}"],
+                "display_name": "Custom Py Kernelspec",
+                "language": "python"
+            })
+            .to_string(),
+        )
+        .unwrap();
         let fake_kspec = tmp.path().join(".venv/share/jupyter/kernels/ir");
         std::fs::create_dir_all(&fake_kspec).unwrap();
         std::fs::write(
@@ -1517,9 +1590,11 @@ mod tests {
             "expected at least system python3 kernel on host"
         );
         assert!(
-            !kernels
-                .iter()
-                .any(|k| k.kind == "kernelspec" || k.id.starts_with("kernelspec:")),
+            !kernels.iter().any(|k| {
+                k.kind == "kernelspec"
+                    || k.id.starts_with("kernelspec:")
+                    || k.display_name == "Custom Py Kernelspec"
+            }),
             "built-in Python runner must not advertise Jupyter kernelspec protocol: {kernels:?}"
         );
 

@@ -381,12 +381,14 @@ mod tests {
         let root_str = ws.to_string_lossy().into_owned();
 
         // SEC-8: Non-root workspace editor must receive 403 Forbidden from routed
-        // POST /notebooks/execute and POST /notebooks/restart before any interpreter runs.
+        // POST /ide/notebooks/{execute,restart,interrupt} specifically from the root
+        // host-execution gate (passing `interpreter: null` so auto-discovery would
+        // otherwise succeed and NOT trip the unknown-interpreter 403 check).
         let exec_body = serde_json::json!({
             "target": { "kind": "local", "root": root_str },
             "notebook_path": ws.join("demo.ipynb").to_string_lossy(),
             "code": "1 + 1",
-            "interpreter": "/nonexistent/must-never-be-resolved"
+            "interpreter": null
         });
         let exec_req = Request::builder()
             .method("POST")
@@ -401,11 +403,21 @@ mod tests {
             StatusCode::FORBIDDEN,
             "SEC-8: routed /ide/notebooks/execute must reject non-root editor with 403"
         );
+        let exec_err_text = String::from_utf8_lossy(
+            &axum::body::to_bytes(exec_resp.into_body(), 65536)
+                .await
+                .unwrap(),
+        )
+        .to_ascii_lowercase();
+        assert!(
+            exec_err_text.contains("root") && !exec_err_text.contains("discovered python kernel"),
+            "SEC-8: 403 must come from the root host-execution gate, got: {exec_err_text}"
+        );
 
         let restart_body = serde_json::json!({
             "target": { "kind": "local", "root": ws.to_string_lossy() },
             "notebook_path": ws.join("demo.ipynb").to_string_lossy(),
-            "interpreter": "/nonexistent/must-never-be-resolved"
+            "interpreter": null
         });
         let restart_req = Request::builder()
             .method("POST")
@@ -420,6 +432,17 @@ mod tests {
             StatusCode::FORBIDDEN,
             "SEC-8: routed /ide/notebooks/restart must reject non-root editor with 403"
         );
+        let restart_err_text = String::from_utf8_lossy(
+            &axum::body::to_bytes(restart_resp.into_body(), 65536)
+                .await
+                .unwrap(),
+        )
+        .to_ascii_lowercase();
+        assert!(
+            restart_err_text.contains("root")
+                && !restart_err_text.contains("discovered python kernel"),
+            "SEC-8: restart 403 must come from the root host-execution gate, got: {restart_err_text}"
+        );
 
         let interrupt_req = Request::builder()
             .method("POST")
@@ -432,7 +455,17 @@ mod tests {
         assert_eq!(
             interrupt_resp.status(),
             StatusCode::FORBIDDEN,
-            "SEC-8: routed /notebooks/interrupt must reject non-root editor with 403"
+            "SEC-8: routed /ide/notebooks/interrupt must reject non-root editor with 403"
+        );
+        let interrupt_err_text = String::from_utf8_lossy(
+            &axum::body::to_bytes(interrupt_resp.into_body(), 65536)
+                .await
+                .unwrap(),
+        )
+        .to_ascii_lowercase();
+        assert!(
+            interrupt_err_text.contains("root"),
+            "SEC-8: interrupt 403 must come from the root host-execution gate, got: {interrupt_err_text}"
         );
 
         assert!(require_notebook_exec_authority(&make_user(true)).is_ok());

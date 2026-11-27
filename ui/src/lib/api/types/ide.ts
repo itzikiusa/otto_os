@@ -504,7 +504,7 @@ export interface IdeNotebookKernelInfo {
   display_name: string;
   language: string;
   interpreter: string;
-  kind: 'venv' | 'uv' | 'conda' | 'poetry' | 'kernelspec' | 'system' | string;
+  kind: 'venv' | 'uv' | 'conda' | 'poetry' | 'system' | string;
   version?: string | null;
   active: boolean;
 }
