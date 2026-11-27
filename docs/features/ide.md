@@ -901,8 +901,8 @@ Full schemas and route tables live in [`docs/contracts/api.md`](../contracts/api
   editor reconnects automatically once the install job finishes. A rustup
   `rust-analyzer` proxy only counts as installed once `rust-analyzer --version`
   succeeds (`rustup component add rust-analyzer`).
-- **"untrusted / unavailable" for `zls`, `kotlin-language-server` or
-  `vue-language-server`:** the project has not opted in to running its build
+- **"untrusted / unavailable" for `zls`, `kotlin-language-server`,
+  `vue-language-server` or a .NET language server:** the project has not opted in to running its build
   or plugins; add the trust variable described under *Language servers that
   run project code* above, or install the server if it is missing.
 - **One language server per build:** `jdtls` is rooted at the Maven reactor
