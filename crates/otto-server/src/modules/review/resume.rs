@@ -5,20 +5,21 @@
 
 use super::*;
 
-pub(super) fn restore_summarizer_row(
-    cfg: &mut ReviewConfig,
+pub(super) async fn load_resumed_review_config(
+    ctx: &ServerCtx,
+    review_id: &Id,
+    repo_id: &Id,
     agents: &[otto_core::domain::ReviewAgentState],
-) {
-    let Some(sum) = agents.last() else { return };
-    if !sum.provider.trim().is_empty() {
-        cfg.summarizer.provider = sum.provider.clone();
+) -> Result<(ReviewConfig, String)> {
+    if let Some(input) = otto_state::WorkflowsRepo::new(ctx.pool.clone())
+        .review_checkpoint_input(review_id)
+        .await?
+    {
+        return otto_review::engine::checkpoint_review_config(&input).map_err(Error::Invalid);
     }
-    if !sum.model.trim().is_empty() {
-        cfg.summarizer.model = sum.model.clone();
-    }
-    if !sum.effort.trim().is_empty() {
-        cfg.summarizer.effort = sum.effort.clone();
-    }
+    let mut cfg = load_review_config_for_repo(ctx, repo_id).await;
+    otto_review::engine::apply_summarizer_row(&mut cfg, agents);
+    Ok((cfg, String::new()))
 }
 
 /// `live`: the review's cancel flag, registered by boot before this task
@@ -61,22 +62,24 @@ pub(crate) async fn resume_held_review(
         let ws = ctx.workspaces.get(&repo.workspace_id).await?;
         let user = otto_review::restart::review_user(&otto_state::UsersRepo::new(ctx.pool.clone()))
             .await?;
-        let mut cfg = load_review_config_for_repo(&ctx, &repo.id).await;
-        restore_summarizer_row(&mut cfg, &review.agents);
-        for sid in review
-            .agents
-            .iter()
-            .filter(|a| a.thread)
-            .filter_map(|a| a.session_id.as_deref())
-        {
-            if let Ok(Some(meta)) = ctx.agent_runtime.get(&sid.into()).await.map(|s| s.meta) {
-                let kept: serde_json::Map<_, _> = ["run_id", "node_id", "work"]
-                    .into_iter()
-                    .filter_map(|k| meta.get(k).map(|v| (k.into(), v.clone())))
-                    .collect();
-                if !kept.is_empty() {
-                    cfg.thread_meta = serde_json::Value::Object(kept);
-                    break;
+        let (mut cfg, context) =
+            load_resumed_review_config(&ctx, &review_id, &repo.id, &review.agents).await?;
+        if cfg.thread_meta.is_null() {
+            for sid in review
+                .agents
+                .iter()
+                .filter(|a| a.thread)
+                .filter_map(|a| a.session_id.as_deref())
+            {
+                if let Ok(Some(meta)) = ctx.agent_runtime.get(&sid.into()).await.map(|s| s.meta) {
+                    let kept: serde_json::Map<_, _> = ["run_id", "node_id", "work"]
+                        .into_iter()
+                        .filter_map(|k| meta.get(k).map(|v| (k.into(), v.clone())))
+                        .collect();
+                    if !kept.is_empty() {
+                        cfg.thread_meta = serde_json::Value::Object(kept);
+                        break;
+                    }
                 }
             }
         }
@@ -109,7 +112,8 @@ pub(crate) async fn resume_held_review(
         let blocker = Some(otto_review::verification::SUMMARIZER_RETRY_BLOCKER);
         let pr = review.pr_number;
         summarize_and_persist(
-            &ctx, &review_id, &cwd, &ws, &user, &repo.id, pr, &cfg, None, &findings, "", blocker,
+            &ctx, &review_id, &cwd, &ws, &user, &repo.id, pr, &cfg, None, &findings, &context,
+            blocker,
         )
         .await?;
         // A finished review's threads are kept for the success period.

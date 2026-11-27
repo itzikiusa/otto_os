@@ -46,10 +46,7 @@ use otto_review::engine::{
     review_agent_cancel_key, review_agent_timeout, reviewer_slots, same_draft_comment,
     severity_rank, ReviewBranches,
 };
-pub(crate) use otto_review::engine::{
-    resolve_skill_inline, workflow_review_config, workflow_review_config_from_json,
-    CHECKS_REVIEWER_NAME,
-};
+pub(crate) use otto_review::engine::{resolve_skill_inline, CHECKS_REVIEWER_NAME};
 use otto_review::worktree::{teardown_pr_worktree, PrWorktree};
 
 // The split-out concerns. Each child sees this module's imports and items

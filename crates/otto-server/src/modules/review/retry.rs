@@ -515,9 +515,31 @@ pub(crate) async fn rerun_summarizer(
             // user's checkout holds other line text and would re-key nothing.
             branch_retry_checkout(&ctx_bg, &repo, &review_id_bg, "-sum").await
         };
-        // Preserve any per-run provider/model/effort override recorded on the summarizer row.
-        let mut cfg = load_review_config_for_repo(&ctx_bg, &repo_id).await;
-        super::resume::restore_summarizer_row(&mut cfg, &settled.agents);
+        let (cfg, context) = match super::resume::load_resumed_review_config(
+            &ctx_bg,
+            &review_id_bg,
+            &repo_id,
+            &settled.agents,
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(error) => {
+                if let Some(wt) = pr_wt {
+                    teardown_pr_worktree(&repo.path, wt).await;
+                }
+                let msg = error.to_string();
+                let _ = transition(
+                    &ctx_bg,
+                    &workspace.id,
+                    &review_id_bg,
+                    ReviewStatus::Error,
+                    Some(&msg),
+                )
+                .await;
+                return;
+            }
+        };
         // A re-run replaces the previous draft comments; posted/approved/
         // declined ones are user decisions and stay untouched.
         match ctx_bg
@@ -544,10 +566,7 @@ pub(crate) async fn rerun_summarizer(
             &cfg,
             review_deadline,
             &agent_findings,
-            // A retry re-runs ONLY this stage, from findings stored earlier; the
-            // run that produced them is long gone, so there is no context to
-            // re-render. The findings themselves are unchanged either way.
-            "",
+            &context,
             // The original run's cwd/head is gone (a PR worktree is torn down
             // after the run; the head may have moved since), so this attempt
             // cannot prove a finding absent — it only re-summarizes.

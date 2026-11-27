@@ -19,6 +19,7 @@
 //! `RUN_WALL_CLOCK_TIMEOUT` before re-adding anything like it.
 //! `workflow_node_cache` is a dormant table.
 
+#[cfg(test)]
 use otto_review::engine::checks_review_agent;
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;

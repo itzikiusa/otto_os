@@ -53,6 +53,11 @@ pub(crate) async fn summarize_and_persist(
     };
     let is_cancelled = || async { flag_tripped() || review_is_cancelled(ctx, review_id).await };
     let (summarizer_cfg, threads) = (&cfg.summarizer, review_threads(ctx, Some(cfg)).await);
+    if summarizer_cfg.provider.trim().is_empty() {
+        return Err(Error::Invalid(
+            "summarizer provider is not configured".into(),
+        ));
+    }
     let mut agent_states = ctx.reviews_store.get_review(review_id).await?.agents;
     let summarizer_idx = agent_states
         .len()

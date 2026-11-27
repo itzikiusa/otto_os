@@ -222,11 +222,10 @@ impl Threads {
             "project_settings": false,
         });
         self.meta_into(&mut meta);
-        let provider = if cfg.provider.trim().is_empty() {
-            "claude"
-        } else {
-            cfg.provider.trim()
-        };
+        let provider = cfg.provider.trim();
+        if provider.is_empty() {
+            return Err("summarizer provider is not configured".into());
+        }
         let turn = StepTurn {
             user_id: user.id.clone(),
             workspace_id: ws.id.clone(),

@@ -25,11 +25,10 @@ impl Attempt {
             .tempdir()
             .map_err(|e| e.to_string())?;
         let path = dir.path().to_path_buf();
-        let provider = if provider.trim().is_empty() {
-            "claude"
-        } else {
-            provider.trim()
-        };
+        let provider = provider.trim();
+        if provider.is_empty() {
+            return Err("summarizer provider is not configured".into());
+        }
         // Confined + no project settings, like every reviewer (see
         // `session::review_session_meta`): it runs in the same checkout.
         let mut meta = serde_json::json!({
@@ -220,6 +219,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn empty_summarizer_provider_errors_instead_of_falling_back_to_claude() {
+        let err = Attempt::new("", "")
+            .err()
+            .expect("empty provider must error, never silently default to claude");
+        assert!(
+            err.to_lowercase().contains("provider"),
+            "error should name missing provider: {err}"
+        );
+    }
+
+    #[test]
     #[allow(clippy::disallowed_methods)]
     fn a_persisted_attempt_keeps_its_dir_across_drop_until_cleanup() {
         let mut attempt = Attempt::new("claude", "").unwrap();
@@ -299,16 +309,9 @@ mod tests {
 
     #[tokio::test]
     async fn publishes_pending_sessions_and_cleans_up_for_every_provider() {
-        for provider in ["", "claude", "codex", "agy"] {
+        for provider in ["claude", "codex", "agy"] {
             let spec = Attempt::new(provider, " chosen-model ").unwrap();
-            assert_eq!(
-                spec.provider,
-                if provider.is_empty() {
-                    "claude"
-                } else {
-                    provider
-                }
-            );
+            assert_eq!(spec.provider, provider);
             assert_eq!(spec.meta["model"], "chosen-model");
             let events = Arc::new(Mutex::new(Vec::new()));
             let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();

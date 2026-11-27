@@ -253,6 +253,57 @@ fn workflow_reviewers_carry_effort_and_picks_and_the_summarizer_its_effort() {
 }
 
 #[test]
+fn workflow_review_configs_never_introduce_claude_when_step_names_other_providers() {
+    let flat = workflow_review_config(
+        "claude",
+        &["agy".into(), "codex".into()],
+        &["correctness".into()],
+    );
+    assert_eq!(
+        flat.summarizer.provider, "agy",
+        "flat workflow providers must not leave summarizer on hardcoded claude"
+    );
+
+    let reviewers = vec![json!({"lens": "grill", "providers": ["agy", "codex"]})];
+    let rich_no_sum = workflow_review_config_from_json("claude", &reviewers, None);
+    assert_eq!(
+        rich_no_sum.summarizer.provider, "agy",
+        "rich workflow reviewers without explicit summarizer must not fall back to claude"
+    );
+
+    let rich_empty_sum = workflow_review_config_from_json(
+        "claude",
+        &reviewers,
+        Some(&json!({"instructions": "scope"})),
+    );
+    assert_eq!(
+        rich_empty_sum.summarizer.provider, "agy",
+        "summarizer block without provider must stay on a step-named provider, not claude"
+    );
+
+    let checks = vec![("unit".into(), "cargo test".into())];
+    let with_checks = build_workflow_review_config(
+        "claude",
+        &json!({"summarizer": {"provider": "agy"}}),
+        &[],
+        &["codex".into()],
+        &["correctness".into()],
+        &checks,
+    )
+    .unwrap();
+    assert_eq!(with_checks.summarizer.provider, "agy");
+    assert!(
+        with_checks.agents.iter().all(|a| a.provider == "codex"),
+        "checks reviewer must use step-named provider, not claude: {:?}",
+        with_checks
+            .agents
+            .iter()
+            .map(|a| (&a.name, &a.provider))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn codex_reviewers_start_first_and_rows_keep_their_order() {
     let c = cfg(vec![
         lens("A", &["claude", "codex"], "", ""),

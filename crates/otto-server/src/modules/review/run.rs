@@ -381,7 +381,7 @@ pub(crate) async fn run_review_core(
     // `read_only` (forced Seatbelt, no shell) with `project_settings: false`
     // (`--setting-sources user`, so a PR's `.claude/settings.json` hooks never
     // load) — see `otto_review::session::review_session_meta`.
-    otto_review::engine::trust_checkout(&agent_runs, repo_path);
+    otto_review::engine::trust_checkout(&agent_runs, &cfg.summarizer.provider, repo_path);
 
     // Where this run reads the code: the source branch scopes local finding
     // resolution (S2-05) and the checkout + head are what a Retry re-enters
