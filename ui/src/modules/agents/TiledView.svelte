@@ -13,7 +13,7 @@
   // attached. Off-screen / over-budget tiles render a lightweight placeholder
   // ("click to attach") and open no socket. Demoting a tile unmounts its
   // SessionView → Terminal's cleanup closes the WS → memory is reclaimed.
-  import { onDestroy, untrack } from 'svelte';
+  import { onDestroy } from 'svelte';
   import SessionView from './SessionView.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
@@ -32,8 +32,7 @@
   import { MAX_PANES, applyTileOrder } from '../../lib/stores/splitLayout';
   import { layout } from '../../lib/stores/splitLayout.svelte';
   import { liveTracks, type Tracks } from './tileTracks';
-  import { selectLiveTiles } from './paneMountQueue';
-  import { createPaneMountState } from './paneMountQueue.svelte';
+  import { createTiledMountState } from './paneMountQueue.svelte';
 
   // Max number of tiles allowed to hold a live terminal/WS at once. Visible,
   // recently-focused tiles win the budget; everything else stays a placeholder.
@@ -363,28 +362,21 @@
     for (const id of [...visible]) if (!ids.has(id)) visible.delete(id);
   });
 
-  // Frame 0 mounts only the priority tile; remaining live tiles hydrate one by one.
-  // Declared before `liveOrder` so already-mounted tiles stay retained across exit.
-  const tileMounts = createPaneMountState(() => ws.currentId, () => liveOrder, () => priorityTileId);
-  const mountedIds: ReadonlySet<string> = $derived(tileMounts.mounted);
-  // Decide which tiles get a live terminal (active, pinned, then live visible —
-  // keeping already-mounted visible tiles across exit while skipping cold
-  // suspended/exited sessions and threads), capped at MAX_LIVE_TILES.
-  const liveOrder: string[] = $derived(
-    selectLiveTiles(ordered, {
-      activeId: ws.activeSessionId,
-      pinned,
-      visible,
-      retained: untrack(() => mountedIds),
-      isThread: (s) => 'thread' in s,
-      isInactive: (s) => !('thread' in s) && tileState(s).inactive,
-      maxLive: MAX_LIVE_TILES,
-    }),
-  );
-  const liveIds = $derived(new Set(liveOrder));
-  const priorityTileId: string | null = $derived(
-    ws.activeSessionId && liveIds.has(ws.activeSessionId) ? ws.activeSessionId : (liveOrder[0] ?? null),
-  );
+  // One-directional tiled mount selection: Frame 0 mounts only the priority tile,
+  // remaining live tiles hydrate one by one, and already-mounted visible tiles
+  // stay mounted across exit until scrolled off or evicted (BUG-18, OBS-1).
+  const tileMounts = createTiledMountState({
+    getWorkspaceId: () => ws.currentId,
+    getOrdered: () => ordered,
+    getActiveId: () => ws.activeSessionId,
+    getPinned: () => pinned,
+    getVisible: () => visible,
+    isThread: (s) => 'thread' in s,
+    isInactive: (s) => !('thread' in s) && tileState(s).inactive,
+    maxLive: MAX_LIVE_TILES,
+  });
+  const liveIds = $derived(tileMounts.liveIds);
+  const mountedIds = $derived(tileMounts.mountedIds);
 
   // True when the live budget is full and some visible tiles had to stay
   // placeholders — surfaced as a hint on those tiles.
