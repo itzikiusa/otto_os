@@ -238,7 +238,7 @@ pub(crate) fn push_unique(vec: &mut Vec<String>, item: String) {
     }
 }
 
-pub(super) fn apply_run_config_sdk_override(
+pub(crate) fn apply_run_config_sdk_override(
     runner: IdeRunnerKind,
     sdk_path: &str,
     target_kind: IdeTargetKind,
@@ -277,10 +277,7 @@ pub(super) fn apply_run_config_sdk_override(
         | IdeRunnerKind::Make
         | IdeRunnerKind::Meson
         | IdeRunnerKind::Unreal => {
-            if trimmed.starts_with('/') {
-                push_unique(path_dirs, format!("{trimmed}/bin"));
-                push_unique(path_dirs, trimmed.to_string());
-            }
+            super::env_layers::apply_cpp_toolchain_env(trimmed, target_kind, map, path_dirs);
         }
         IdeRunnerKind::DotnetBuild | IdeRunnerKind::DotnetRun | IdeRunnerKind::DotnetTest => {
             if trimmed.starts_with('/') {

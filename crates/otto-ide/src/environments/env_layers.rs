@@ -75,6 +75,44 @@ pub(crate) fn extend_from_dotenv_str(map: &mut BTreeMap<String, String>, raw: &s
     }
 }
 
+/// Apply a C/C++ toolchain home (project-level or per-run override) onto `PATH`, `CC`, and `CXX`.
+pub(super) fn apply_cpp_toolchain_env(
+    toolchain_path: &str,
+    target_kind: IdeTargetKind,
+    map: &mut BTreeMap<String, String>,
+    path_dirs: &mut Vec<String>,
+) {
+    let base = toolchain_path.trim().trim_end_matches('/');
+    if base.is_empty() || !base.starts_with('/') {
+        return;
+    }
+    let bin_dir = if base.ends_with("/bin") {
+        base.to_string()
+    } else {
+        format!("{base}/bin")
+    };
+    push_unique(path_dirs, bin_dir.clone());
+    if !base.ends_with("/bin") {
+        push_unique(path_dirs, base.to_string());
+    }
+    if target_kind == IdeTargetKind::Local {
+        let clang = Path::new(&bin_dir).join("clang");
+        let clangxx = Path::new(&bin_dir).join("clang++");
+        let gcc = Path::new(&bin_dir).join("gcc");
+        let gxx = Path::new(&bin_dir).join("g++");
+        if clang.is_file() {
+            map.insert("CC".into(), clang.to_string_lossy().into_owned());
+        } else if gcc.is_file() {
+            map.insert("CC".into(), gcc.to_string_lossy().into_owned());
+        }
+        if clangxx.is_file() {
+            map.insert("CXX".into(), clangxx.to_string_lossy().into_owned());
+        } else if gxx.is_file() {
+            map.insert("CXX".into(), gxx.to_string_lossy().into_owned());
+        }
+    }
+}
+
 /// Apply configured project SDK homes (`JAVA_HOME`, `GOROOT`, `RUSTUP_TOOLCHAIN`,
 /// `VIRTUAL_ENV`, `node_home`) onto `map` and return prepended `PATH` directories.
 pub(crate) fn apply_project_sdk_layers(
@@ -137,29 +175,7 @@ pub(crate) fn apply_project_sdk_layers(
         }
     }
     if let Some(ch) = proj.cpp_toolchain.as_deref().filter(|s| !s.is_empty()) {
-        let base = ch.trim_end_matches('/');
-        let bin_dir = if base.ends_with("/bin") {
-            base.to_string()
-        } else {
-            format!("{base}/bin")
-        };
-        push_unique(&mut proj_path_dirs, bin_dir.clone());
-        if target_kind == IdeTargetKind::Local {
-            let clang = Path::new(&bin_dir).join("clang");
-            let clangxx = Path::new(&bin_dir).join("clang++");
-            let gcc = Path::new(&bin_dir).join("gcc");
-            let gxx = Path::new(&bin_dir).join("g++");
-            if clang.is_file() {
-                map.insert("CC".into(), clang.to_string_lossy().into_owned());
-            } else if gcc.is_file() {
-                map.insert("CC".into(), gcc.to_string_lossy().into_owned());
-            }
-            if clangxx.is_file() {
-                map.insert("CXX".into(), clangxx.to_string_lossy().into_owned());
-            } else if gxx.is_file() {
-                map.insert("CXX".into(), gxx.to_string_lossy().into_owned());
-            }
-        }
+        apply_cpp_toolchain_env(ch, target_kind, map, &mut proj_path_dirs);
     }
     if let Some(kh) = proj.kotlin_home.as_deref().filter(|s| !s.is_empty()) {
         let base = kh.trim_end_matches('/');

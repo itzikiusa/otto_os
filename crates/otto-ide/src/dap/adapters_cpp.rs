@@ -221,6 +221,13 @@ pub(super) async fn resolve_cpp_adapter(
             .as_ref()
             .is_some_and(|rc| rc.runner == IdeRunnerKind::Ctest);
 
+    let is_unreal_project = raw_prog.ends_with(".uproject")
+        || ctx
+            .run_config
+            .as_ref()
+            .is_some_and(|rc| rc.runner == IdeRunnerKind::Unreal);
+    let mut unreal_uproject_arg: Option<String> = None;
+
     let is_prebuilt_binary = !raw_prog.is_empty()
         && !is_cpp_source_file(&raw_prog)
         && !raw_prog.ends_with("CMakeLists.txt")
@@ -229,6 +236,32 @@ pub(super) async fn resolve_cpp_adapter(
         && (req.target.kind == IdeTargetKind::Ssh || Path::new(&raw_prog).is_file());
     let executable = if is_attach_mode || is_prebuilt_binary {
         raw_prog
+    } else if is_unreal_project {
+        let sub = ctx
+            .run_config
+            .as_ref()
+            .and_then(|rc| rc.args.first().map(String::as_str))
+            .unwrap_or("editor");
+        if matches!(sub, "build" | "gen-cdb" | "build-plugin") {
+            return Err(Error::Invalid(format!(
+                "Unreal '{sub}' run configuration is build-only; start Debug on the Unreal Editor launch configuration instead"
+            )));
+        }
+        let ue_root =
+            crate::environments::runner_cmd::resolve_unreal_engine_root(&env).ok_or_else(|| {
+                Error::NotFound(
+                    "Unreal Engine not found: set UE_ROOT (or UNREAL_ENGINE_ROOT) in Project Environment, or install Unreal Engine under /Users/Shared/Epic Games/UE_5.*".into(),
+                )
+            })?;
+        let editor_bin = if cfg!(target_os = "macos") {
+            ue_root.join("Engine/Binaries/Mac/UnrealEditor.app/Contents/MacOS/UnrealEditor")
+        } else {
+            ue_root.join("Engine/Binaries/Linux/UnrealEditor")
+        };
+        if raw_prog.ends_with(".uproject") {
+            unreal_uproject_arg = Some(raw_prog);
+        }
+        editor_bin.to_string_lossy().into_owned()
     } else {
         compile_cpp_debug_artifact(
             data_dir,
@@ -244,6 +277,11 @@ pub(super) async fn resolve_cpp_adapter(
     };
 
     let mut prog_args = Vec::new();
+    if let Some(uproj) = unreal_uproject_arg {
+        if !req.launch.args.iter().any(|a| a == &uproj) {
+            prog_args.push(uproj);
+        }
+    }
     if let Some(tname) = req.launch.test_name.as_deref().filter(|s| !s.is_empty()) {
         // GoogleTest uses `Suite.Test` / `--gtest_filter=...`; Catch2 accepts the test name directly.
         if tname.contains('.')
@@ -292,61 +330,17 @@ pub(super) async fn resolve_cpp_adapter(
     codelldb_candidates.push("codelldb".into());
 
     if let Some(codelldb_bin) = locate_binary(&req.target, ctx, &env, &codelldb_candidates).await {
-        let (launch_command, launch_args) = if let Some(core) = core_file.as_deref() {
-            let mut cmds = init_commands.clone();
-            cmds.push(format!(
-                "target create -c '{}'",
-                core.replace('\'', "'\\''")
-            ));
-            (
-                "attach".to_string(),
-                json!({
-                    "program": executable,
-                    "cwd": cwd,
-                    "initCommands": cmds
-                }),
-            )
-        } else if let Some(pid) = attach_pid {
-            (
-                "attach".to_string(),
-                json!({
-                    "pid": pid,
-                    "program": executable,
-                    "cwd": cwd,
-                    "initCommands": init_commands
-                }),
-            )
-        } else if let Some(pname) = attach_process_name.as_deref() {
-            (
-                "attach".to_string(),
-                json!({
-                    "program": pname,
-                    "cwd": cwd,
-                    "initCommands": init_commands
-                }),
-            )
-        } else if let Some(port) = req.launch.attach_port {
-            (
-                "attach".to_string(),
-                json!({
-                    "gdbRemotePort": port,
-                    "cwd": cwd,
-                    "initCommands": init_commands
-                }),
-            )
-        } else {
-            (
-                "launch".to_string(),
-                json!({
-                    "program": executable,
-                    "args": prog_args,
-                    "cwd": cwd,
-                    "env": env,
-                    "stopOnEntry": false,
-                    "initCommands": init_commands
-                }),
-            )
-        };
+        let (launch_command, launch_args) = build_codelldb_request(
+            &executable,
+            &prog_args,
+            cwd,
+            &env,
+            &init_commands,
+            core_file.as_deref(),
+            attach_pid,
+            attach_process_name.as_deref(),
+            req.launch.attach_port,
+        );
         return Ok(ResolvedDapAdapter {
             adapter_name: "codelldb".into(),
             language: "cpp".into(),
@@ -517,6 +511,79 @@ pub(super) async fn resolve_cpp_adapter(
     Err(Error::NotFound(
         "C/C++ debugger ('codelldb', 'lldb-dap', or Xcode 'lldb') not found; install Xcode Command Line Tools or CodeLLDB via IDE → Toolchains".into(),
     ))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_codelldb_request(
+    executable: &str,
+    prog_args: &[String],
+    cwd: &str,
+    env: &BTreeMap<String, String>,
+    init_commands: &[String],
+    core_file: Option<&str>,
+    attach_pid: Option<u32>,
+    attach_process_name: Option<&str>,
+    attach_port: Option<u16>,
+) -> (String, serde_json::Value) {
+    if let Some(core) = core_file {
+        // CodeLLDB rejects `attach` without `pid`/`program` live process; core dumps
+        // use `launch` with `target create` (custom target creation, no live pid).
+        let mut cmds = init_commands.to_vec();
+        let q_core = core.replace('\'', "'\\''");
+        if executable.is_empty() {
+            cmds.push(format!("target create -c '{q_core}'"));
+        } else {
+            let q_exe = executable.replace('\'', "'\\''");
+            cmds.push(format!("target create '{q_exe}' -c '{q_core}'"));
+        }
+        (
+            "launch".to_string(),
+            json!({
+                "cwd": cwd,
+                "initCommands": cmds
+            }),
+        )
+    } else if let Some(pid) = attach_pid {
+        (
+            "attach".to_string(),
+            json!({
+                "pid": pid,
+                "program": executable,
+                "cwd": cwd,
+                "initCommands": init_commands
+            }),
+        )
+    } else if let Some(pname) = attach_process_name {
+        (
+            "attach".to_string(),
+            json!({
+                "program": pname,
+                "cwd": cwd,
+                "initCommands": init_commands
+            }),
+        )
+    } else if let Some(port) = attach_port {
+        (
+            "attach".to_string(),
+            json!({
+                "gdbRemotePort": port,
+                "cwd": cwd,
+                "initCommands": init_commands
+            }),
+        )
+    } else {
+        (
+            "launch".to_string(),
+            json!({
+                "program": executable,
+                "args": prog_args,
+                "cwd": cwd,
+                "env": env,
+                "stopOnEntry": false,
+                "initCommands": init_commands
+            }),
+        )
+    }
 }
 
 #[allow(clippy::too_many_arguments, clippy::disallowed_methods)]
@@ -1198,6 +1265,80 @@ int main(int argc, char** argv) {
             std::path::Path::new(&mod_root).canonicalize().unwrap(),
             canon_tmp,
             "CMake root should be resolved from nested src/main.cpp"
+        );
+    }
+
+    #[tokio::test]
+    async fn unreal_uproject_debug_resolves_editor_or_errors_cleanly_without_compiling_uproject() {
+        use std::collections::BTreeMap;
+        use std::path::Path;
+
+        use super::resolve_cpp_adapter;
+        use crate::dap::DapStartContext;
+        use crate::types::{IdeRunConfig, IdeStartDebugReq};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let uproj = root.join("MyGame.uproject");
+        std::fs::write(&uproj, r#"{"FileVersion": 3}"#).unwrap();
+
+        let mk_req = |prog: &Path| -> IdeStartDebugReq {
+            serde_json::from_value(serde_json::json!({
+                "target": {
+                    "kind": "local",
+                    "root": root.to_string_lossy()
+                },
+                "language": "cpp",
+                "launch": {
+                    "program": prog.to_string_lossy(),
+                    "cwd": root.to_string_lossy()
+                }
+            }))
+            .unwrap()
+        };
+
+        let empty_ctx = DapStartContext::default();
+        let err = resolve_cpp_adapter(
+            tmp.path(),
+            &mk_req(&uproj),
+            &empty_ctx,
+            &root.to_string_lossy(),
+            BTreeMap::new(),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("Unreal Engine not found") || err.contains("UE_ROOT"),
+            "unexpected error: {err}"
+        );
+
+        let ue_build_cfg: IdeRunConfig = serde_json::from_value(serde_json::json!({
+            "id": "ue-build",
+            "name": "Unreal Build",
+            "runner": "unreal",
+            "args": ["build", "MyGameEditor"],
+            "target_path": uproj.to_string_lossy(),
+            "auto_detected": true
+        }))
+        .unwrap();
+        let build_ctx = DapStartContext {
+            run_config: Some(ue_build_cfg),
+            ..DapStartContext::default()
+        };
+        let build_err = resolve_cpp_adapter(
+            tmp.path(),
+            &mk_req(&uproj),
+            &build_ctx,
+            &root.to_string_lossy(),
+            BTreeMap::new(),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(
+            build_err.contains("build-only"),
+            "unexpected build-only error: {build_err}"
         );
     }
 }
