@@ -1,7 +1,7 @@
 // The Debug All step line (rc.6): one chip per finished step with its result,
 // the "Step 2 of 4" line for the live step, the end summary, the failed tests
 // with the single-test launch their Debug starts, and the console separator a
-// chip scrolls to. Hidden for an ordinary one-step session.
+// chip scrolls to.
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
@@ -9,7 +9,6 @@ import {
   failedTestLaunch,
   failedTests,
   runSummary,
-  showSteps,
   stepChips,
   stepSeparatorPrefix,
 } from '../src/modules/ide/debug/ideDebugSteps.ts';
@@ -30,12 +29,6 @@ const run: IdeDebugStep[] = [
 ];
 
 describe('Debug All step line', () => {
-  it('shows only for a run of several steps', () => {
-    assert.equal(showSteps(undefined), false);
-    assert.equal(showSteps([step('One (net10.0)', 'running')]), false);
-    assert.equal(showSteps(run), true);
-  });
-
   it('names the live step and gives every other step a chip', () => {
     assert.equal(currentStepLine(run, 1), 'Step 2 of 4 · Api.Tests (net10.0)');
     assert.equal(currentStepLine(run, null), null);

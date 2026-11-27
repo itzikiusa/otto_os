@@ -34,11 +34,6 @@ const STATE_WORDS: Record<IdeDebugStepState, string> = {
   running: 'running',
 };
 
-/** The step line is for Debug All runs only: one step is an ordinary session. */
-export function showSteps(steps: readonly IdeDebugStep[] | null | undefined): boolean {
-  return (steps?.length ?? 0) > 1;
-}
-
 /** The current step's line: `Step 2 of 4 · Api.Tests (net10.0)`. */
 export function currentStepLine(steps: readonly IdeDebugStep[], current: number | null | undefined): string | null {
   if (current == null || !steps[current]) return null;

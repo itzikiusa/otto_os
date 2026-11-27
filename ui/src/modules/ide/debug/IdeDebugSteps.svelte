@@ -2,21 +2,37 @@
   // The Debug All step line under the debugger toolbar: the step that runs now,
   // a result chip per other step (click: its place in the console), and at the
   // end the run's summary with up to 5 failed tests, each with Debug.
-  import type { IdeDebugSessionSnapshot } from '../ideStore.svelte';
+  import { tick } from 'svelte';
+  import { ide, type IdeDebugSessionSnapshot } from '../ideStore.svelte';
   import {
     currentStepLine,
+    failedTestLaunch,
     failedTests,
     runSummary,
     stepChips,
+    stepSeparatorPrefix,
   } from './ideDebugSteps';
 
   interface Props {
     dbg: IdeDebugSessionSnapshot;
-    onjump: (index: number) => void;
-    ondebugtest: (stepIndex: number, name: string) => void;
+    /** Show the Debug console (the chip then scrolls it to its step). */
+    onshowconsole: () => void;
   }
 
-  let { dbg, onjump, ondebugtest }: Props = $props();
+  let { dbg, onshowconsole }: Props = $props();
+
+  async function onjump(index: number): Promise<void> {
+    onshowconsole();
+    await tick();
+    const prefix = stepSeparatorPrefix(index, steps.length);
+    const rows = document.querySelectorAll<HTMLElement>('[data-testid="ide-debugger-panel"] [data-testid="ide-console-line"]');
+    [...rows].find((r) => r.textContent?.trimStart().startsWith(prefix))?.scrollIntoView({ block: 'start' });
+  }
+
+  function ondebugtest(stepIndex: number, name: string): void {
+    const step = steps[stepIndex];
+    if (step) void ide.startDebug({ language: dbg.language, launch: failedTestLaunch(step, name, dbg.target_root || ide.target.root) });
+  }
 
   const steps = $derived(dbg.steps ?? []);
   const live = $derived(dbg.state !== 'terminated' && dbg.state !== 'error');
@@ -38,7 +54,7 @@
         title={chip.title}
         aria-label={chip.title}
         disabled={chip.state === 'pending'}
-        onclick={() => onjump(chip.index)}
+        onclick={() => void onjump(chip.index)}
         data-testid="ide-debug-step-chip"
       ><span class="steps-mark" aria-hidden="true">{chip.mark}</span>{chip.text}</button>
     {/each}
