@@ -288,21 +288,7 @@ impl ToolchainManager {
                 (Some(v), _) | (None, Some(v)) => Some(v.to_string()),
                 (None, None) => {
                     // Probe the selected/active Zig version on the SSH host so ZLS matches it.
-                    let probe_home = zig_home
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(|h| format!("{}/zig", h.trim_end_matches('/')));
-                    let probe_cmd = match probe_home {
-                        Some(p) => {
-                            let q = shell_words::quote(&p);
-                            format!(
-                                "for z in {q} \"$HOME/.otto/toolchains/zig/current/zig\" zig; do if [ -x \"$z\" ] || command -v \"$z\" >/dev/null 2>&1; then v=$(\"$z\" version 2>/dev/null | head -n 1); [ -n \"$v\" ] && echo \"INSTALLED_PATH:$v\" && break; fi; done"
-                            )
-                        }
-                        None => {
-                            "for z in \"$HOME/.otto/toolchains/zig/current/zig\" zig; do if [ -x \"$z\" ] || command -v \"$z\" >/dev/null 2>&1; then v=$(\"$z\" version 2>/dev/null | head -n 1); [ -n \"$v\" ] && echo \"INSTALLED_PATH:$v\" && break; fi; done".to_string()
-                        }
-                    };
+                    let probe_cmd = build_remote_zig_version_probe_cmd(zig_home);
                     run_ssh_streaming(ssh, &probe_cmd, |_| {})
                         .await
                         .ok()
@@ -341,6 +327,28 @@ impl ToolchainManager {
         );
         run_ssh_streaming(ssh, &script, |line| self.log_progress(job_id, 60, line)).await
     }
+}
+
+/// Build the remote shell probe that resolves the selected Zig SDK version across
+/// both supported layouts (`<home>/zig` and `<home>/bin/zig`) before falling back
+/// to managed `current` or `PATH` (BUG-2).
+pub(super) fn build_remote_zig_version_probe_cmd(zig_home: Option<&str>) -> String {
+    let mut candidates: Vec<String> = Vec::new();
+    if let Some(h) = zig_home
+        .map(str::trim)
+        .map(|s| s.trim_end_matches('/'))
+        .filter(|s| !s.is_empty())
+    {
+        candidates.push(shell_words::quote(&format!("{h}/zig")).into_owned());
+        candidates.push(shell_words::quote(&format!("{h}/bin/zig")).into_owned());
+    }
+    candidates.push("\"$HOME/.otto/toolchains/zig/current/zig\"".into());
+    candidates.push("\"$HOME/.otto/toolchains/zig/current/bin/zig\"".into());
+    candidates.push("zig".into());
+    format!(
+        "for z in {}; do if [ -x \"$z\" ] || command -v \"$z\" >/dev/null 2>&1; then v=$(\"$z\" version 2>/dev/null | head -n 1); [ -n \"$v\" ] && echo \"INSTALLED_PATH:$v\" && break; fi; done",
+        candidates.join(" ")
+    )
 }
 
 /// Prefer the Zig SDK path just installed in `All` mode over any stale request `zig_home` (BUG-3).

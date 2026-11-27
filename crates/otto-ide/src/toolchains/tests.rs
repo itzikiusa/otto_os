@@ -526,3 +526,65 @@ fn zig_install_all_uses_newly_installed_sdk_and_job_scoped_zls_staging() {
     assert_ne!(stage_a, stage_b);
     assert!(stage_a.starts_with(tmp) && stage_b.starts_with(tmp));
 }
+
+#[test]
+fn ssh_zig_version_probe_resolves_bin_zig_layout_before_falling_back_to_current() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // BUG-2: Selected remote Zig SDK using `<home>/bin/zig` layout must win over a
+    // different `$HOME/.otto/toolchains/zig/current/zig` compiler.
+    let tmp = tempfile::tempdir().unwrap();
+    let fake_home = tmp.path().join("home");
+    let current_zig = fake_home.join(".otto/toolchains/zig/current/zig");
+    let selected_home = tmp.path().join("custom-zig-0.13");
+    let selected_bin = selected_home.join("bin/zig");
+    std::fs::create_dir_all(current_zig.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(selected_bin.parent().unwrap()).unwrap();
+    std::fs::write(&current_zig, "#!/bin/sh\necho 0.14.0\n").unwrap();
+    std::fs::write(&selected_bin, "#!/bin/sh\necho 0.13.0\n").unwrap();
+    std::fs::set_permissions(&current_zig, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(&selected_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let cmd =
+        super::jobs::build_remote_zig_version_probe_cmd(Some(&selected_home.to_string_lossy()));
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&cmd)
+        .env("HOME", &fake_home)
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "probe failed: {:?}", out);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("INSTALLED_PATH:0.13.0"),
+        "expected bin/zig layout (0.13.0) to beat current (0.14.0), got: {stdout}"
+    );
+}
+
+#[test]
+fn ssh_probe_selects_active_zig_minor_zls_slot_over_clobbered_global_link() {
+    // BUG-4: Remote probe must surface per-minor ZLS slots and select the slot
+    // matching the active Zig SDK even after a newer minor replaced `zig/bin/zls`.
+    assert!(super::remote_probe::REMOTE_PROBE_SCRIPT.contains("LSP_SLOT:zig:"));
+    let raw = "\
+UNAME:Linux:x86_64
+SDK:zig:otto:0.13.0:/home/dev/.otto/toolchains/zig/sdks/0.13.0
+SDK:zig:otto:0.14.0:/home/dev/.otto/toolchains/zig/sdks/0.14.0
+LSP:zig:/home/dev/.otto/toolchains/zig/bin/zls
+LSP_SLOT:zig:0.13:/home/dev/.otto/toolchains/zig/zls/0.13/zls
+LSP_SLOT:zig:0.14:/home/dev/.otto/toolchains/zig/zls/0.14/zls
+";
+    let (_, mut eco_map) = super::remote_probe::parse_ssh_probe_output(raw);
+    let probed = eco_map.remove(&EcosystemKind::Zig).expect("zig eco");
+    let mut installed = probed.installed.clone();
+    for s in &mut installed {
+        s.active = s.version == "0.13.0";
+    }
+    let status = super::remote_probe::resolve_remote_zig_lsp_status(&installed, &probed);
+    assert!(status.available);
+    assert_eq!(
+        status.path.as_deref(),
+        Some("/home/dev/.otto/toolchains/zig/zls/0.13/zls")
+    );
+}

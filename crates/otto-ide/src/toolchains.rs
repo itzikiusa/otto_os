@@ -530,17 +530,22 @@ impl ToolchainManager {
                 let probed = eco_map.remove(&eco).unwrap_or_default();
                 let mut installed = custom_sdks.remove(&eco).unwrap_or_default();
                 let mut seen: BTreeSet<String> = installed.iter().map(|s| s.path.clone()).collect();
-                for disc in probed.installed {
+                for disc in &probed.installed {
                     if seen.insert(disc.path.clone()) {
-                        installed.push(disc);
+                        installed.push(disc.clone());
                     }
                 }
                 mark_active_sdk(&mut installed, eco, active_env);
+                let lsp_status = if eco == EcosystemKind::Zig {
+                    remote_probe::resolve_remote_zig_lsp_status(&installed, &probed)
+                } else {
+                    probed.lsp.unwrap_or_else(|| empty_tool(eco.lsp_name()))
+                };
                 IdeToolchainEcosystem {
                     ecosystem: eco.into(),
                     display_name: eco.display_name().to_string(),
                     installed,
-                    lsp_status: probed.lsp.unwrap_or_else(|| empty_tool(eco.lsp_name())),
+                    lsp_status,
                     dap_status: probed.dap.unwrap_or_else(|| empty_tool(eco.dap_name())),
                     downloadable: catalogs
                         .get(&eco)

@@ -161,6 +161,9 @@ for pair in "java:jdtls:$HOME/.otto/toolchains/java/lsp/bin/jdtls" "kotlin:kotli
   e="${pair%%:*}"; r="${pair#*:}"; b="${r%%:*}"; m="${r#*:}"
   if [ -x "$m" ]; then echo "LSP:$e:$m"; elif [ "$e" = "kotlin" ] && [ -x "$HOME/.otto/toolchains/kotlin/lsp/server/bin/kotlin-language-server" ]; then echo "LSP:kotlin:$HOME/.otto/toolchains/kotlin/lsp/server/bin/kotlin-language-server"; elif command -v "$b" >/dev/null 2>&1; then echo "LSP:$e:$(command -v "$b")"; fi
 done
+for zd in "$HOME"/.otto/toolchains/zig/zls/*; do
+  if [ -x "$zd/zls" ]; then echo "LSP_SLOT:zig:$(basename "$zd"):$zd/zls"; fi
+done
 [ -f "$HOME/.otto/toolchains/java/dap/com.microsoft.java.debug.plugin-0.53.1.jar" ] && echo "DAP:java:$HOME/.otto/toolchains/java/dap/com.microsoft.java.debug.plugin-0.53.1.jar" && echo "DAP:kotlin:$HOME/.otto/toolchains/java/dap/com.microsoft.java.debug.plugin-0.53.1.jar" || true
 command -v dlv >/dev/null 2>&1 && echo "DAP:go:$(command -v dlv)" || true
 if [ -x "$HOME/.otto/toolchains/rust/dap/extension/adapter/codelldb" ]; then echo "DAP:rust:$HOME/.otto/toolchains/rust/dap/extension/adapter/codelldb"; elif command -v codelldb >/dev/null 2>&1; then echo "DAP:rust:$(command -v codelldb)"; fi
@@ -177,6 +180,8 @@ if [ -x "$HOME/.otto/toolchains/json/bin/jq" ]; then echo "DAP:json:$HOME/.otto/
 pub(crate) struct ProbedRemoteEcosystem {
     pub installed: Vec<IdeInstalledSdk>,
     pub lsp: Option<IdeToolBinaryStatus>,
+    /// Per-minor managed LSP slots (e.g. `"0.13"` -> `".../zig/zls/0.13/zls"`).
+    pub lsp_slots: std::collections::BTreeMap<String, String>,
     pub dap: Option<IdeToolBinaryStatus>,
 }
 
@@ -290,6 +295,20 @@ pub(crate) fn parse_ssh_probe_output(
                     });
                 }
             }
+        } else if let Some(rest) = line.strip_prefix("LSP_SLOT:") {
+            let parts: Vec<&str> = rest.splitn(3, ':').collect();
+            if parts.len() == 3 {
+                if let Some(eco) = EcosystemKind::parse(parts[0]) {
+                    let slot = parts[1].trim();
+                    let path = parts[2].trim();
+                    if !slot.is_empty() && !path.is_empty() {
+                        map.entry(eco)
+                            .or_default()
+                            .lsp_slots
+                            .insert(slot.to_string(), path.to_string());
+                    }
+                }
+            }
         } else if let Some((eco_s, path)) =
             line.strip_prefix("LSP:").and_then(|r| r.split_once(':'))
         {
@@ -317,4 +336,36 @@ pub(crate) fn parse_ssh_probe_output(
         }
     }
     (platform, map)
+}
+
+/// Select the version-matched managed ZLS slot for the active remote Zig SDK so
+/// installing a second Zig minor's ZLS does not make the first project's SSH tool
+/// status point at the wrong global `zig/bin/zls` symlink (BUG-4).
+pub(crate) fn resolve_remote_zig_lsp_status(
+    installed: &[IdeInstalledSdk],
+    probed: &ProbedRemoteEcosystem,
+) -> IdeToolBinaryStatus {
+    if let Some((maj, min)) = installed
+        .iter()
+        .find(|s| s.active)
+        .and_then(|s| super::discovery::zig_major_minor(&s.version))
+    {
+        let slot_key = format!("{maj}.{min}");
+        if let Some(slot_path) = probed.lsp_slots.get(&slot_key) {
+            return IdeToolBinaryStatus {
+                name: EcosystemKind::Zig.lsp_name().to_string(),
+                available: true,
+                path: Some(slot_path.clone()),
+                version: None,
+                outdated: None,
+            };
+        }
+    }
+    probed.lsp.clone().unwrap_or_else(|| IdeToolBinaryStatus {
+        name: EcosystemKind::Zig.lsp_name().to_string(),
+        available: false,
+        path: None,
+        version: None,
+        outdated: None,
+    })
 }
