@@ -89,10 +89,6 @@ pub(in crate::workflow_engine) async fn execute(
         ));
     }
 
-    // Drain the run's progress pump before posting directly so earlier step
-    // updates and `▶ *step* started` always land ahead of this notification.
-    progress.flush().await;
-
     let mut sent = 0usize;
     for integ in &targets {
         let ws_id = &integ.workspace_id;
@@ -108,6 +104,10 @@ pub(in crate::workflow_engine) async fn execute(
             tracing::debug!(workspace = %ws_id, channel = integ.channel.as_str(), "channel_notify: bot token missing");
             continue;
         };
+        // Drain the run's progress pump only when posting to the same destination
+        // so earlier progress lines and uploads precede this notification without
+        // stalling notifications to unrelated channels or chats.
+        progress.flush_for(integ.channel, chat, thread).await;
         let send_result = adapter.send(chat, thread, &message).await.map(|_| ());
         match send_result {
             Ok(_) => sent += 1,

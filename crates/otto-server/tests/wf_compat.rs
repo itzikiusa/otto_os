@@ -1012,11 +1012,39 @@ async fn channel_notify_waits_for_progress_pump() {
             _ => None,
         })
         .collect();
-    assert_eq!(sends.len(), 6, "unexpected sends: {sends:#?}");
-    assert!(sends[0].0 && sends[0].1.starts_with("🚀 Started workflow"));
-    assert!(sends[1].0 && sends[1].1.starts_with("🚀 *Notify Order* started"));
-    assert_eq!(sends[2], (true, "▶ *Notify 9* started".to_string()));
-    assert_eq!(sends[3], (false, "notify body".to_string()));
-    assert!(sends[4].0 && sends[4].1.starts_with("✅ *Notify 9* done"));
-    assert!(sends[5].0 && sends[5].1.starts_with("✅ *Notify Order* — success"));
+    // Assert relative order rather than exact send count: when sibling workflow
+    // tests occupy global run slots, a queued/dequeued announcement can add an
+    // extra send before the run starts.
+    let pos = |pred: &dyn Fn(&(bool, String)) -> bool, label: &str| {
+        sends
+            .iter()
+            .position(pred)
+            .unwrap_or_else(|| panic!("missing {label} in {sends:#?}"))
+    };
+    let ack = pos(
+        &|(f, t)| *f && t.starts_with("🚀 Started workflow"),
+        "workflow ack",
+    );
+    let run_started = pos(
+        &|(f, t)| *f && t.starts_with("🚀 *Notify Order* started"),
+        "run started",
+    );
+    let step_started = pos(&|(f, t)| *f && t == "▶ *Notify 9* started", "step started");
+    let notify = pos(&|(f, t)| !*f && t == "notify body", "plain notify body");
+    let step_done = pos(
+        &|(f, t)| *f && t.starts_with("✅ *Notify 9* done"),
+        "step done",
+    );
+    let run_done = pos(
+        &|(f, t)| *f && t.starts_with("✅ *Notify Order* — success"),
+        "run done",
+    );
+    assert!(
+        ack < run_started
+            && run_started < step_started
+            && step_started < notify
+            && notify < step_done
+            && step_done < run_done,
+        "out-of-order sends: ack={ack}, run_started={run_started}, step_started={step_started}, notify={notify}, step_done={step_done}, run_done={run_done}\n{sends:#?}"
+    );
 }
