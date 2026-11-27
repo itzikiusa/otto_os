@@ -15,12 +15,18 @@ export interface NotebookCellRunHooks {
   setSessionAndVars: (sessionId: string, vars: IdeNotebookVariable[]) => void;
   commitDoc: (next: NotebookDoc, targetPath: string) => void;
   onError: (err: unknown) => void;
-  executeRequest: (origPath: string, code: string) => Promise<IdeNotebookExecuteResp>;
+  /** `runId` tags this run's streamed outputs on `/ide/notebooks/stream`. */
+  executeRequest: (origPath: string, code: string, runId: string) => Promise<IdeNotebookExecuteResp>;
+  /** The run whose streamed outputs belong to the running cell (`null` once it ends). */
+  setRunId?: (runId: string | null) => void;
 }
+
+let runSeq = 0;
 
 /** Execute one notebook cell with full concurrency/lifecycle guards (CONC-4):
  *  rejects late completions if the user switched tabs, switched to Raw Source view
- *  (disposing the notebook view), or reloaded the document while execution was in flight. */
+ *  (disposing the notebook view), or reloaded the document while execution was in flight.
+ *  Streamed outputs show while it runs; the final response then replaces them. */
 export async function executeNotebookCellGuarded(
   cellId: string,
   hooks: NotebookCellRunHooks,
@@ -33,9 +39,12 @@ export async function executeNotebookCellGuarded(
   const stillValid = (): boolean =>
     !hooks.isDisposed() && hooks.getPath() === origPath && hooks.getViewToken() === origToken;
 
+  runSeq += 1;
+  const runId = `${cellId}:${runSeq}`;
   hooks.setRunningCellId(cellId);
+  hooks.setRunId?.(runId);
   try {
-    const resp = await hooks.executeRequest(origPath, cell.source);
+    const resp = await hooks.executeRequest(origPath, cell.source, runId);
     if (!stillValid()) return false;
     hooks.setSessionAndVars(resp.session_id, resp.variables ?? []);
     const { doc: next, applied } = applyNotebookExecutionById(
@@ -52,6 +61,9 @@ export async function executeNotebookCellGuarded(
     if (stillValid()) hooks.onError(e);
     return false;
   } finally {
-    if (hooks.getRunningCellId() === cellId) hooks.setRunningCellId(null);
+    if (hooks.getRunningCellId() === cellId) {
+      hooks.setRunningCellId(null);
+      hooks.setRunId?.(null);
+    }
   }
 }

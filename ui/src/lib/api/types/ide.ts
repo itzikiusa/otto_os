@@ -503,11 +503,38 @@ export interface IdeNotebookKernelInfo {
   id: string;
   display_name: string;
   language: string;
+  /** The kernel's interpreter / command (`argv[0]` for a Jupyter kernel). */
   interpreter: string;
-  kind: 'venv' | 'uv' | 'conda' | 'poetry' | 'system' | string;
+  kind: 'jupyter' | 'builtin';
   version?: string | null;
   active: boolean;
+  /** Jupyter only: the kernelspec name written to `metadata.kernelspec.name`. */
+  spec_name?: string | null;
+  origin?: 'user' | 'system' | 'env' | 'workspace' | null;
+  /** Jupyter only: the full launch command, shell-quoted. */
+  argv_preview?: string | null;
+  /** A workspace kernelspec not accepted yet: ask before its first start. */
+  needs_trust?: boolean;
+  /** The spec declares debugger support (the running kernel's status is authoritative). */
+  debugger?: boolean;
+  /** Python envs: venv | uv | conda | poetry | system. */
+  env_kind?: string | null;
 }
+
+export interface IdeNotebookKernelStatus {
+  kernel_id: string;
+  state: 'starting' | 'idle' | 'busy' | 'dead';
+  exit_code?: number | null;
+  debugger?: boolean;
+}
+
+/** `GET /ide/notebooks/stream` events (SSE `data:` JSON). */
+export type IdeNotebookStreamEvent =
+  | ({ kind: 'status' } & (IdeNotebookKernelStatus | { state: 'none' }))
+  | { kind: 'output'; run_id: string; index: number; output: Record<string, unknown> }
+  | { kind: 'clear_output'; run_id: string }
+  | { kind: 'input_request'; run_id: string; prompt: string; password: boolean }
+  | { kind: 'input_done' };
 
 export interface IdeNotebookVariable {
   name: string;
@@ -522,13 +549,15 @@ export interface IdeNotebookKernelsResp {
   active_session_id?: string | null;
   active_interpreter?: string | null;
   execution_count?: number;
+  kernel_status?: IdeNotebookKernelStatus | null;
 }
 
 export interface IdeNotebookExecuteResp {
   session_id: string;
   interpreter: string;
   execution_count: number;
-  status: 'ok' | 'error' | string;
+  /** `dead`: the kernel stopped mid-cell. */
+  status: 'ok' | 'error' | 'aborted' | 'dead' | string;
   elapsed_ms: number;
   outputs: Record<string, unknown>[];
   variables: IdeNotebookVariable[];

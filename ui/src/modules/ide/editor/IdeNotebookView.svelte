@@ -1,38 +1,51 @@
 <script lang="ts">
   // Interactive Jupyter Notebook (.ipynb) editor for the Otto IDE.
-  // Supports opening/editing/saving nbformat v4.5 notebooks, running individual or
-  // all code cells on a persistent built-in Python kernel, rich outputs (streams,
-  // _repr_html_ tables in sandboxed iframes, matplotlib/PNG/SVG images, tracebacks),
-  // interpreter selection (venv/uv/conda/poetry/system Python), GPU/MPS badge,
-  // interrupt, restart, live Variables inspector, and isolated cell DAP debugging.
+  // Runs cells on a real Jupyter kernel (any kernelspec: ipykernel, R, Bash, …)
+  // with live streamed outputs, input(), interrupt and restart, or on the
+  // built-in Python kernel (zero-install fallback for an env without ipykernel).
+  // Rich outputs (streams, ANSI tracebacks, HTML in a script-less sandboxed
+  // iframe, PNG/SVG images), the kernel picker + status chip, the Variables
+  // pane and Debug Cell.
   import { onDestroy, untrack } from 'svelte';
   import { api } from '../../../lib/api/client';
   import type {
     IdeMlAcceleratorInfo,
     IdeNotebookExecuteResp,
     IdeNotebookKernelInfo,
+    IdeNotebookKernelStatus,
     IdeNotebookKernelsResp,
+    IdeNotebookStreamEvent,
     IdeNotebookVariable,
     IdeNotebookVariablesResp,
   } from '../../../lib/api/types';
   import Badge from '../../../lib/components/Badge.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
+  import LoadState from '../../../lib/components/LoadState.svelte';
+  import { confirmer } from '../../../lib/confirm.svelte';
+  import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
+  import { loadErrorText } from '../../../lib/loadError';
   import { toasts } from '../../../lib/toast.svelte';
   import { toastError } from '../../../lib/toastError';
   import { ide } from '../ideStore.svelte';
+  import { streamIdeSse } from '../store/ideTypes';
   import {
     addNotebookCell,
+    applyNotebookStreamOutput,
     changeNotebookCellType,
     clearNotebookOutputs,
     deleteNotebookCell,
     moveNotebookCell,
     normalizeNotebookOutputs,
     parseIpynb,
+    pickNotebookKernel,
     serializeIpynb,
     updateNotebookCellSource,
+    withKernelspecMetadata,
     type NotebookCellType,
     type NotebookDoc,
+    type NotebookOutput,
   } from './ideNotebookModel';
+  import IdeNotebookOutputs from './IdeNotebookOutputs.svelte';
   import { executeNotebookCellGuarded } from './ideNotebookRunner';
 
   interface Props {
@@ -51,20 +64,39 @@
   let lastParsedPath = '';
   let kernels = $state<IdeNotebookKernelInfo[]>([]);
   let accelerators = $state<IdeMlAcceleratorInfo[]>([]);
-  let selectedInterpreter = $state('');
+  let selectedKernelId = $state('');
   let kernelsLoading = $state(false);
+  let kernelStatus = $state<IdeNotebookKernelStatus | null>(null);
+  let kernelError = $state<string | null>(null);
   let runningCellId = $state<string | null>(null);
   let runningAll = $state(false);
+  let liveRunId = $state<string | null>(null);
+  let liveOutputs = $state<NotebookOutput[]>([]);
+  let inputReq = $state<{ prompt: string; password: boolean } | null>(null);
+  let inputValue = $state('');
   let variables = $state<IdeNotebookVariable[]>([]);
   let varsOpen = $state(false);
   let activeSessionId = $state<string | null>(null);
+  const trustedKernels = new Set<string>();
   let disposed = false;
   let viewToken = 0;
+  let streamCtl: AbortController | null = null;
+
+  const selected = $derived(kernels.find((k) => k.id === selectedKernelId));
+  const isJupyter = $derived(selected?.kind === 'jupyter');
+  const kernelDebugger = $derived(
+    isJupyter && (kernelStatus?.kernel_id === selectedKernelId ? Boolean(kernelStatus?.debugger) : Boolean(selected?.debugger)),
+  );
+  const chipState = $derived(kernelStatus && kernelStatus.kernel_id === selectedKernelId ? kernelStatus.state : null);
+  const chipTone = $derived(
+    chipState === 'dead' ? 'bad' : chipState === 'busy' ? 'warn' : chipState === 'idle' ? 'ok' : 'neutral',
+  );
 
   onDestroy(() => {
     disposed = true;
     viewToken += 1;
     runningAll = false;
+    streamCtl?.abort();
   });
 
   function switchToRawText(): void {
@@ -90,13 +122,50 @@
       viewToken += 1;
       runningCellId = null;
       runningAll = false;
+      liveRunId = null;
+      inputReq = null;
       variables = [];
       activeSessionId = null;
+      kernelStatus = null;
+      kernelError = null;
+      selectedKernelId = '';
       if (ide.hasTarget && p) {
         void refreshKernels(p);
+        subscribe(p);
       }
     });
   });
+
+  /** Live kernel events: status chip, streamed outputs, input() prompts. */
+  function subscribe(targetPath: string): void {
+    streamCtl?.abort();
+    const ctl = new AbortController();
+    streamCtl = ctl;
+    const q = new URLSearchParams({ root: ide.target.root, notebook_path: targetPath });
+    void streamIdeSse(`/ide/notebooks/stream?${q}`, {}, ctl.signal, (raw) => {
+      if (ctl.signal.aborted || path !== targetPath) return;
+      let ev: IdeNotebookStreamEvent;
+      try {
+        ev = JSON.parse(raw) as IdeNotebookStreamEvent;
+      } catch {
+        return;
+      }
+      if (ev.kind === 'status') {
+        kernelStatus = ev.state === 'none' ? null : (ev as IdeNotebookKernelStatus);
+      } else if (ev.kind === 'output' || ev.kind === 'clear_output') {
+        if (ev.run_id === liveRunId) liveOutputs = applyNotebookStreamOutput(liveOutputs, ev);
+      } else if (ev.kind === 'input_request') {
+        if (ev.run_id === liveRunId) {
+          inputReq = { prompt: ev.prompt, password: ev.password };
+          inputValue = '';
+        }
+      } else if (ev.kind === 'input_done') {
+        inputReq = null;
+      }
+    }).catch(() => {
+      /* the stream is best-effort: the final response still carries every output */
+    });
+  }
 
   function commitDoc(next: NotebookDoc, targetPath: string = path): void {
     if (disposed || targetPath !== path) return;
@@ -119,13 +188,9 @@
       kernels = resp.kernels ?? [];
       accelerators = resp.accelerators ?? [];
       activeSessionId = resp.active_session_id ?? null;
-      if (!selectedInterpreter) {
-        const active =
-          resp.active_interpreter ||
-          kernels.find((k) => k.active)?.interpreter ||
-          kernels[0]?.interpreter ||
-          '';
-        selectedInterpreter = active;
+      kernelStatus = resp.kernel_status ?? kernelStatus;
+      if (!selectedKernelId || !kernels.some((k) => k.id === selectedKernelId)) {
+        selectedKernelId = resp.kernel_status?.kernel_id ?? pickNotebookKernel(kernels, doc.metadata);
       }
     } catch {
       /* kernels optional while offline or SSH */
@@ -134,7 +199,40 @@
     }
   }
 
+  function chooseKernel(id: string): void {
+    selectedKernelId = id;
+    kernelError = null;
+    const k = kernels.find((x) => x.id === id);
+    if (k && !readOnly) commitDoc(withKernelspecMetadata(doc, k));
+  }
+
+  /** A kernelspec stored in the project could run anything: ask once before its first start. */
+  async function ensureTrusted(): Promise<boolean> {
+    const k = selected;
+    if (!k?.needs_trust || trustedKernels.has(k.id)) return true;
+    const ok = await confirmer.ask(`Start kernel '${k.display_name}' from this project? It runs: ${k.argv_preview ?? k.interpreter}`, {
+      title: 'Start project kernel?',
+      confirmLabel: 'Start kernel',
+    });
+    if (ok) trustedKernels.add(k.id);
+    return ok;
+  }
+
+  function kernelBody(origPath: string): Record<string, unknown> {
+    return {
+      target: ide.target,
+      notebook_path: origPath,
+      kernel_id: selectedKernelId || undefined,
+      trust_kernel: trustedKernels.has(selectedKernelId),
+    };
+  }
+
+  function errorLine(e: unknown): string {
+    return loadErrorText(e).replace(/^(invalid|upstream|conflict|forbidden|not found):\s*/i, '');
+  }
+
   async function runCellById(cellId: string): Promise<boolean> {
+    kernelError = null;
     return executeNotebookCellGuarded(cellId, {
       getDoc: () => doc,
       getPath: () => path,
@@ -142,30 +240,34 @@
       getViewToken: () => viewToken,
       getRunningCellId: () => runningCellId,
       setRunningCellId: (id) => { runningCellId = id; },
+      setRunId: (id) => {
+        liveRunId = id;
+        liveOutputs = [];
+        inputReq = null;
+      },
       setSessionAndVars: (sid, vars) => {
         activeSessionId = sid;
         variables = vars;
       },
       commitDoc,
-      onError: (e) => toastError('Couldn’t run cell', e),
-      executeRequest: (origPath, code) =>
+      onError: (e) => { kernelError = errorLine(e); },
+      executeRequest: (origPath, code, runId) =>
         api.post<IdeNotebookExecuteResp>('/ide/notebooks/execute', {
-          target: ide.target,
-          notebook_path: origPath,
+          ...kernelBody(origPath),
           code,
-          interpreter: selectedInterpreter || undefined,
+          run_id: runId,
         }),
     });
   }
 
   async function runCell(index: number): Promise<boolean> {
     const cell = doc.cells[index];
-    if (!cell) return false;
+    if (!cell || !(await ensureTrusted())) return false;
     return runCellById(cell.id);
   }
 
   async function runAllCells(): Promise<void> {
-    if (runningAll || runningCellId !== null) return;
+    if (runningAll || runningCellId !== null || !(await ensureTrusted())) return;
     const origPath = path;
     const codeIds = doc.cells.filter((c) => c.cell_type === 'code').map((c) => c.id);
     runningAll = true;
@@ -182,31 +284,82 @@
 
   async function interruptKernel(): Promise<void> {
     runningAll = false;
-    const origPath = path;
     try {
-      await api.post('/ide/notebooks/interrupt', { target: ide.target, notebook_path: origPath });
-      toasts.info('Interrupt sent to Python kernel');
+      const resp = await api.post<{ ok: boolean; message?: string }>('/ide/notebooks/interrupt', {
+        target: ide.target,
+        notebook_path: path,
+      });
+      if (resp.ok) toasts.info('Interrupt sent to the kernel');
+      else kernelError = resp.message ?? 'The kernel didn’t stop. Restart it to stop the cell.';
     } catch (e) {
       toastError('Couldn’t interrupt kernel', e);
     }
   }
 
-  async function restartKernel(): Promise<void> {
+  async function restartKernel(thenRunAll = false): Promise<void> {
     runningAll = false;
     const origPath = path;
+    if (!(await ensureTrusted())) return;
+    kernelError = null;
     try {
-      await api.post('/ide/notebooks/restart', {
-        target: ide.target,
-        notebook_path: origPath,
-        interpreter: selectedInterpreter || undefined,
-      });
+      await api.post('/ide/notebooks/restart', kernelBody(origPath));
       if (path !== origPath) return;
       variables = [];
-      toasts.success('Python kernel restarted');
+      toasts.success('Kernel restarted');
       await refreshKernels(origPath);
+      if (thenRunAll) await runAllCells();
     } catch (e) {
-      toastError('Couldn’t restart kernel', e);
+      kernelError = errorLine(e);
     }
+  }
+
+  async function sendInput(): Promise<void> {
+    const value = inputValue;
+    inputReq = null;
+    try {
+      await api.post('/ide/notebooks/input', { target: ide.target, notebook_path: path, value });
+    } catch (e) {
+      toastError('Couldn’t send input', e);
+    }
+  }
+
+  async function installIpykernel(): Promise<void> {
+    const k = selected;
+    if (!k || k.kind !== 'builtin') return;
+    const envDir = k.interpreter.replace(/\/bin\/python[0-9.]*$/, '');
+    const envName = envDir.split('/').pop() || envDir;
+    const ok = await confirmer.ask(`Install ipykernel into ${envName} with pip? This downloads packages from PyPI.`, {
+      title: 'Install ipykernel?',
+      confirmLabel: 'Install',
+    });
+    if (!ok) return;
+    const uv = k.env_kind === 'uv';
+    await ide.startRun({
+      adhoc: {
+        name: `Install ipykernel (${envName})`,
+        runner: 'custom',
+        command: uv ? 'uv' : k.interpreter,
+        args: uv ? ['pip', 'install', '--python', k.interpreter, 'ipykernel'] : ['-m', 'pip', 'install', 'ipykernel'],
+        cwd: ide.target.root,
+        env_overrides: {},
+      },
+    });
+  }
+
+  function openMore(e: MouseEvent): void {
+    const busy = runningCellId !== null || runningAll;
+    const items: MenuItem[] = [
+      { label: 'Restart & Run All', icon: 'refresh', disabled: readOnly || busy, action: () => void restartKernel(true) },
+    ];
+    if (selected?.kind === 'builtin') {
+      items.push({ label: 'Install ipykernel…', icon: 'download', action: () => void installIpykernel() });
+    }
+    items.push(
+      { separator: true },
+      { label: 'Clear all outputs', icon: 'trash', disabled: readOnly, action: () => commitDoc(clearNotebookOutputs(doc)) },
+      { label: 'View raw .ipynb JSON', icon: 'code', action: switchToRawText },
+    );
+    ctxMenu.showAt(e.currentTarget as HTMLElement, items, { align: 'end' });
   }
 
   async function toggleVariables(): Promise<void> {
@@ -227,7 +380,7 @@
 
   async function debugCell(index: number): Promise<void> {
     const cell = doc.cells[index];
-    if (!cell || cell.cell_type !== 'code') return;
+    if (!cell || cell.cell_type !== 'code' || isJupyter) return;
     const origPath = path;
     const saved = await ide.saveFile(origPath);
     if (!saved || path !== origPath) return;
@@ -237,9 +390,14 @@
         program: origPath,
         args: ['--cell', String(index)],
         cwd: ide.target.root,
-        sdk_path: selectedInterpreter || undefined,
+        sdk_path: selected?.interpreter || undefined,
       },
     });
+  }
+
+  function debugTitle(): string {
+    if (!isJupyter) return 'Debug cell in an isolated Python process (uses selected interpreter)';
+    return kernelDebugger ? 'Debugging Jupyter kernels isn’t available yet' : 'This kernel doesn’t support debugging';
   }
 
   function formatAccelBadge(a: IdeMlAcceleratorInfo): string {
@@ -273,7 +431,7 @@
         class="btn small ghost"
         disabled={runningCellId === null && !runningAll}
         onclick={() => void interruptKernel()}
-        title="Interrupt running cell (SIGINT)"
+        title="Interrupt the running cell"
         aria-label="Interrupt running cell"
       >
         <Icon name="stop" size={12} />
@@ -284,30 +442,23 @@
         class="btn small ghost"
         disabled={readOnly || runningCellId !== null}
         onclick={() => void restartKernel()}
-        title="Restart kernel"
+        title="Restart kernel (outputs stay)"
         aria-label="Restart kernel"
       >
         <Icon name="refresh" size={12} />
         Restart
       </button>
-      <button
-        type="button"
-        class="btn small ghost"
-        disabled={readOnly}
-        onclick={() => commitDoc(clearNotebookOutputs(doc))}
-        title="Clear all outputs"
-      >
-        Clear Outputs
-      </button>
-      <button
-        type="button"
-        class="btn small ghost"
-        class:is-on={varsOpen}
-        onclick={() => void toggleVariables()}
-        data-testid="ide-nb-vars-toggle"
-      >
-        Variables ({variables.length})
-      </button>
+      {#if !isJupyter || kernelDebugger}
+        <button
+          type="button"
+          class="btn small ghost"
+          class:is-on={varsOpen}
+          onclick={() => void toggleVariables()}
+          data-testid="ide-nb-vars-toggle"
+        >
+          Variables ({variables.length})
+        </button>
+      {/if}
     </div>
 
     <div class="nb-bar-group nb-bar-end">
@@ -316,30 +467,57 @@
       {/if}
       <select
         class="input nb-kernel-sel"
-        aria-label="Python interpreter kernel"
-        title="Built-in Python kernel (standard Python; IPython %magic not supported)"
+        aria-label="Notebook kernel"
+        title={selected?.argv_preview ?? selected?.interpreter ?? 'Notebook kernel'}
         disabled={kernelsLoading || runningCellId !== null}
-        bind:value={selectedInterpreter}
+        value={selectedKernelId}
+        onchange={(e) => chooseKernel((e.currentTarget as HTMLSelectElement).value)}
         data-testid="ide-nb-kernel-select"
       >
         {#if kernels.length === 0}
-          <option value="">Python 3 (auto)</option>
+          <option value="">{kernelsLoading ? 'Finding kernels…' : 'No kernel found'}</option>
         {:else}
-          {#each kernels as k (k.interpreter)}
-            <option value={k.interpreter}>{k.display_name}</option>
-          {/each}
+          {#if kernels.some((k) => k.kind === 'jupyter')}
+            <optgroup label="Jupyter kernels">
+              {#each kernels.filter((k) => k.kind === 'jupyter') as k (k.id)}
+                <option value={k.id}>{k.display_name}</option>
+              {/each}
+            </optgroup>
+          {/if}
+          {#if kernels.some((k) => k.kind === 'builtin')}
+            <optgroup label="Built-in">
+              {#each kernels.filter((k) => k.kind === 'builtin') as k (k.id)}
+                <option value={k.id}>{k.display_name}</option>
+              {/each}
+            </optgroup>
+          {/if}
         {/if}
       </select>
+      {#if isJupyter && chipState}
+        <Badge tone={chipTone} variant="outline" dot label={chipState} testid="ide-nb-kernel-status" title={chipState === 'dead' && kernelStatus?.exit_code != null ? `Exit code ${kernelStatus.exit_code}` : `Kernel ${chipState}`} />
+      {/if}
       <button
         type="button"
-        class="btn small ghost"
-        onclick={switchToRawText}
-        title="View raw .ipynb JSON"
+        class="icon-btn"
+        onclick={openMore}
+        aria-label="More notebook actions"
+        title="More notebook actions"
+        data-testid="ide-nb-more"
       >
-        JSON
+        <Icon name="more" size={14} />
       </button>
     </div>
   </header>
+
+  {#if kernels.length === 0 && !kernelsLoading && ide.hasTarget}
+    <p class="nb-note">No kernel found. Create a Python environment or install a Jupyter kernel.</p>
+  {:else if selected?.kind === 'builtin'}
+    <p class="nb-note">IPython magics and debugging need ipykernel. Install it from ⋯.</p>
+  {/if}
+
+  <div class="nb-kernel-err" data-testid="ide-nb-kernel-error">
+    <LoadState what="the kernel" errorTitle="The kernel couldn’t run the cell" error={kernelError} empty variant="compact" onretry={() => void restartKernel()} />
+  </div>
 
   {#if parseError}
     <div class="nb-banner-err">
@@ -352,7 +530,8 @@
     <div class="nb-cells">
       {#each doc.cells as cell, idx (cell.id)}
         {@const isRunning = runningCellId === cell.id}
-        {@const normOutputs = normalizeNotebookOutputs(cell.outputs)}
+        {@const showLive = isRunning && liveRunId !== null}
+        {@const normOutputs = normalizeNotebookOutputs(showLive ? liveOutputs : cell.outputs)}
         <section class="nb-cell" class:is-code={cell.cell_type === 'code'} data-testid={`ide-nb-cell-${idx}`}>
           <div class="nb-cell-head">
             <div class="nb-cell-meta">
@@ -372,10 +551,11 @@
                 <button
                   type="button"
                   class="icon-btn"
-                  disabled={readOnly || runningCellId !== null}
+                  disabled={readOnly || runningCellId !== null || isJupyter}
                   onclick={() => void debugCell(idx)}
-                  aria-label={`Debug cell ${idx + 1} (isolated)`}
-                  title="Debug cell in an isolated Python process (uses selected interpreter)"
+                  aria-label={`Debug cell ${idx + 1}`}
+                  title={debugTitle()}
+                  data-testid={`ide-nb-debug-${idx}`}
                 >
                   <Icon name="bug" size={12} />
                 </button>
@@ -423,23 +603,58 @@
             onkeydown={(e) => handleCellKeydown(e, idx)}
           ></textarea>
 
-          {#if normOutputs.length > 0}
-            <div class="nb-outputs" data-testid={`ide-nb-outputs-${idx}`}>
-              {#each normOutputs as out, oi (oi)}
-                {#if out.kind === 'stream'}
-                  <pre class="nb-out-pre" class:is-stderr={out.streamName === 'stderr'}>{out.text}</pre>
-                {:else if out.kind === 'error'}
-                  <pre class="nb-out-pre is-error">{out.text}</pre>
-                {:else if out.kind === 'image' || out.kind === 'svg'}
-                  <div class="nb-out-img-wrap">
-                    <img class="nb-out-img" src={out.dataUri} alt="Notebook cell figure output" />
-                  </div>
-                {:else if out.kind === 'html'}
-                  <iframe
-                    class="nb-out-html"
-                    sandbox=""
-                    title={`Cell ${idx + 1} HTML output`}
-                    srcdoc={`<!doctype html><html><head><style>body{margin:6px;font-family:-apple-system,sans-serif;line-height:1.4;color:CanvasText;background:transparent}table{border-collapse:collapse;font-size:inherit}th,td{border:1px solid color-mix(in srgb,CanvasText 20%,transparent);padding:4px 8px;text-align:start}</style></head><body>${out.text}</body></html>`}
+          {#if normOutputs.length > 0 || (isRunning && inputReq)}
+            <IdeNotebookOutputs
+              outputs={normOutputs}
+              cellIndex={idx}
+              cellId={cell.id}
+              input={isRunning ? inputReq : null}
+              bind:inputValue
+              onsubmitinput={() => void sendInput()}
+            />
+          {/if}
+        </section>
+      {/each}
+
+      <div class="nb-add-row">
+        <button type="button" class="btn small ghost" disabled={readOnly} onclick={() => commitDoc(addNotebookCell(doc, doc.cells.length - 1, 'code'))}>
+          <Icon name="plus" size={12} /> Code cell
+        </button>
+        <button type="button" class="btn small ghost" disabled={readOnly} onclick={() => commitDoc(addNotebookCell(doc, doc.cells.length - 1, 'markdown'))}>
+          <Icon name="plus" size={12} /> Markdown cell
+        </button>
+      </div>
+    </div>
+
+    {#if varsOpen}
+      <aside class="nb-vars" aria-label="Kernel variables" data-testid="ide-nb-vars-pane">
+        <div class="nb-vars-head">
+          <span class="nb-vars-title">Kernel Variables</span>
+          <button type="button" class="icon-btn" onclick={() => (varsOpen = false)} aria-label="Close variables" title="Close variables">
+            <Icon name="x" size={12} />
+          </button>
+        </div>
+        {#if variables.length === 0}
+          <p class="nb-vars-empty">Run a cell to inspect live Python variables, DataFrame shapes, and tensor sizes.</p>
+        {:else}
+          <div class="nb-vars-list">
+            {#each variables as v (v.name)}
+              <div class="nb-var-row">
+                <div class="nb-var-top">
+                  <code class="nb-var-name">{v.name}</code>
+                  <span class="nb-var-type">{v.var_type}{v.shape ? ` (${v.shape})` : ''}</span>
+                </div>
+                <code class="nb-var-prev">{v.preview}</code>
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </aside>
+    {/if}
+  </div>
+</div>
+
+<style>body{margin:6px;font-family:-apple-system,sans-serif;line-height:1.4;color:CanvasText;background:transparent}table{border-collapse:collapse;font-size:inherit}th,td{border:1px solid color-mix(in srgb,CanvasText 20%,transparent);padding:4px 8px;text-align:start}</style></head><body>${out.text}</body></html>`}
                   ></iframe>
                 {:else}
                   <pre class="nb-out-pre">{out.text}</pre>
@@ -496,7 +711,10 @@
   }
   .nb-bar-group { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
   .nb-bar-end { margin-inline-start: auto; }
-  .nb-kernel-sel { max-inline-size: 260px; font-size: var(--fs-xs); font-family: var(--font-mono); }
+  .nb-kernel-sel { max-inline-size: 280px; min-inline-size: 0; font-size: var(--fs-xs); font-family: var(--font-mono); }
+  .nb-note { margin: 0; padding: 4px 12px; font-size: var(--fs-xs); color: var(--text-dim); border-block-end: 1px solid var(--border); }
+  .nb-kernel-err:empty { display: none; }
+  .nb-kernel-err { padding-inline: 10px; }
   .nb-banner-err {
     display: flex; align-items: center; justify-content: space-between; gap: 8px;
     padding: 8px 12px; background: var(--danger-soft); color: var(--danger); font-size: var(--fs-xs);
@@ -520,19 +738,6 @@
   }
   .nb-editor.is-md { font-family: var(--font-ui); }
   .nb-editor:focus { outline: none; background: var(--surface-2); }
-  .nb-outputs {
-    display: flex; flex-direction: column; gap: 6px; padding: 8px 10px;
-    border-block-start: 1px solid var(--border); background: var(--surface-2);
-  }
-  .nb-out-pre {
-    margin: 0; font-family: var(--font-mono); font-size: var(--fs-xs); line-height: 1.45;
-    color: var(--text); white-space: pre-wrap; word-break: break-word;
-  }
-  .nb-out-pre.is-stderr { color: var(--warning); }
-  .nb-out-pre.is-error { color: var(--danger); background: var(--danger-soft); padding: 6px 8px; border-radius: var(--radius-s); }
-  .nb-out-img-wrap { padding: 4px; background: var(--surface); border-radius: var(--radius-s); border: 1px solid var(--border); }
-  .nb-out-img { max-inline-size: 100%; block-size: auto; display: block; }
-  .nb-out-html { inline-size: 100%; min-block-size: 140px; border: 1px solid var(--border); border-radius: var(--radius-s); background: var(--surface); }
   .nb-add-row { display: flex; gap: 8px; justify-content: center; padding-block: 6px; }
   .nb-vars {
     inline-size: 280px; flex-shrink: 0; border-inline-start: 1px solid var(--border);

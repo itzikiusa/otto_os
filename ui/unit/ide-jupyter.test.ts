@@ -11,8 +11,12 @@ import {
   clearNotebookOutputs,
   deleteNotebookCell,
   moveNotebookCell,
+  ansiSegments,
+  applyNotebookStreamOutput,
   normalizeNotebookOutputs,
   parseIpynb,
+  pickNotebookKernel,
+  withKernelspecMetadata,
   serializeIpynb,
   updateNotebookCellSource,
 } from '../src/modules/ide/editor/ideNotebookModel.ts';
@@ -348,4 +352,96 @@ test('BUG3-12: idePreviewMode retains large-file manual render snapshot across E
   // Evicting/closing the tab frees the cached large-file snapshot.
   store.forgetRendered([bigPath]);
   assert.equal(store.getRendered(bigPath), null);
+});
+
+test('ansiSegments maps SGR colours onto token classes and drops other escapes', () => {
+  const segs = ansiSegments('\x1b[0;31mZeroDivisionError\x1b[0m: \x1b[1;32mdivision\x1b[39m by zero\x1b[2K!');
+  assert.deepEqual(segs, [
+    { text: 'ZeroDivisionError', color: 'danger' },
+    { text: ': ' },
+    { text: 'division', color: 'success', bold: true },
+    { text: ' by zero!', bold: true },
+  ]);
+  // 256-colour codes of the base 16 map too; others stay plain.
+  assert.deepEqual(ansiSegments('\x1b[38;5;12mx\x1b[38;5;200my'), [{ text: 'x', color: 'info' }, { text: 'y' }]);
+  assert.deepEqual(ansiSegments('plain'), [{ text: 'plain' }]);
+});
+
+test('normalizeNotebookOutputs keeps ANSI tracebacks as coloured segments and notes widgets', () => {
+  const [err] = normalizeNotebookOutputs([
+    { output_type: 'error', ename: 'ValueError', evalue: 'bad', traceback: ['\x1b[31mValueError\x1b[0m: bad'] },
+  ]);
+  assert.equal(err.text, 'ValueError: bad');
+  assert.deepEqual(err.segments, [{ text: 'ValueError', color: 'danger' }, { text: ': bad' }]);
+  const [widget] = normalizeNotebookOutputs([
+    { output_type: 'display_data', data: { 'application/vnd.jupyter.widget-view+json': { model_id: 'm' }, 'text/plain': 'IntSlider(value=3)' } },
+  ]);
+  assert.equal(widget.text, 'IntSlider(value=3)');
+  assert.equal(widget.note, 'Widgets aren’t supported in Otto notebooks.');
+  const [js] = normalizeNotebookOutputs([{ output_type: 'display_data', data: { 'application/javascript': 'alert(1)' } }]);
+  assert.equal(js.text, '');
+  assert.match(js.note ?? '', /JavaScript outputs don’t run/);
+  const [htmlOverJs] = normalizeNotebookOutputs([
+    { output_type: 'display_data', data: { 'application/javascript': 'alert(1)', 'text/html': '<b>x</b>' } },
+  ]);
+  assert.equal(htmlOverJs.kind, 'html', 'the richest non-JS MIME type wins');
+});
+
+test('applyNotebookStreamOutput sets outputs by index and clears on clear_output', () => {
+  let outs = applyNotebookStreamOutput([], { kind: 'output', index: 0, output: { output_type: 'stream', name: 'stdout', text: '0\n' } });
+  outs = applyNotebookStreamOutput(outs, { kind: 'output', index: 0, output: { output_type: 'stream', name: 'stdout', text: '0\n1\n' } });
+  outs = applyNotebookStreamOutput(outs, { kind: 'output', index: 1, output: { output_type: 'display_data', data: { 'text/plain': 'x' } } });
+  assert.equal(outs.length, 2);
+  assert.equal(outs[0].text, '0\n1\n');
+  assert.deepEqual(applyNotebookStreamOutput(outs, { kind: 'clear_output' }), []);
+});
+
+test('pickNotebookKernel follows metadata.kernelspec name, then language, then the active kernel', () => {
+  const kernels = [
+    { id: 'builtin:/p', kind: 'builtin', language: 'python', active: true },
+    { id: 'jupyter:py', kind: 'jupyter', language: 'python', spec_name: 'python3', active: false },
+    { id: 'jupyter:bash', kind: 'jupyter', language: 'bash', spec_name: 'bash', active: false },
+  ];
+  assert.equal(pickNotebookKernel(kernels, { kernelspec: { name: 'bash', language: 'bash' } }), 'jupyter:bash');
+  assert.equal(pickNotebookKernel(kernels, { kernelspec: { name: 'gone', language: 'python' } }), 'jupyter:py');
+  assert.equal(pickNotebookKernel(kernels, {}), 'builtin:/p');
+  assert.equal(pickNotebookKernel([], {}), '');
+});
+
+test('withKernelspecMetadata writes the chosen Jupyter kernel and leaves built-in choices alone', () => {
+  const { doc } = parseIpynb('');
+  const next = withKernelspecMetadata(doc, { kind: 'jupyter', spec_name: 'bash', display_name: 'Bash', language: 'bash' });
+  assert.deepEqual(next.metadata.kernelspec, { display_name: 'Bash', language: 'bash', name: 'bash' });
+  assert.equal(withKernelspecMetadata(next, { kind: 'jupyter', spec_name: 'bash', display_name: 'Bash', language: 'bash' }), next);
+  assert.equal(withKernelspecMetadata(doc, { kind: 'builtin', display_name: 'Py', language: 'python' }), doc);
+});
+
+test('executeNotebookCellGuarded tags each run with a run id and clears it when the run ends', async () => {
+  const { executeNotebookCellGuarded } = await import('../src/modules/ide/editor/ideNotebookRunner.ts');
+  const { doc } = parseIpynb(JSON.stringify({
+    nbformat: 4, nbformat_minor: 5, metadata: {},
+    cells: [{ id: 'c1', cell_type: 'code', metadata: {}, execution_count: null, outputs: [], source: ['1'] }],
+  }));
+  const runIds: (string | null)[] = [];
+  let sent = '';
+  let running: string | null = null;
+  const hooks = {
+    getDoc: () => doc,
+    getPath: () => '/ws/a.ipynb',
+    isDisposed: () => false,
+    getViewToken: () => 1,
+    getRunningCellId: () => running,
+    setRunningCellId: (id: string | null) => { running = id; },
+    setRunId: (id: string | null) => { runIds.push(id); },
+    setSessionAndVars: () => {},
+    commitDoc: () => {},
+    onError: () => {},
+    executeRequest: async (_p: string, _c: string, runId: string) => {
+      sent = runId;
+      return { session_id: 's', interpreter: 'py', status: 'dead', execution_count: 0, elapsed_ms: 1, outputs: [], variables: [] };
+    },
+  };
+  assert.equal(await executeNotebookCellGuarded('c1', hooks), false, 'a dead kernel stops Run All');
+  assert.match(sent, /^c1:\d+$/);
+  assert.deepEqual(runIds, [sent, null]);
 });

@@ -485,7 +485,12 @@ class IdeStore {
     this.closedTabPaths = this.closedTabPaths.slice(1);
     await this.openFile(next, { preview: false });
   }
-  private forgetClosedTabs(paths: string[]): void { this.closedTabPaths = [...paths, ...this.closedTabPaths.filter((p) => !paths.includes(p))].slice(0, 20); this.evictClosedMetadata(paths); } // ⌘⇧T reopens newest first
+  private forgetClosedTabs(paths: string[]): void {
+    this.closedTabPaths = [...paths, ...this.closedTabPaths.filter((p) => !paths.includes(p))].slice(0, 20); // ⌘⇧T reopens newest first
+    this.evictClosedMetadata(paths);
+    // A closed notebook stops its kernel (one kernel per open notebook).
+    for (const p of paths) if (p.endsWith('.ipynb')) void api.post('/ide/notebooks/shutdown', { target: this.target, notebook_path: p }).catch(() => {});
+  }
   closeOtherTabs(keepPath: string): void { performCloseTabBatch(this, this.bufPerf, (closing) => this.forgetClosedTabs(closing), keepPath); }
   closeUnmodifiedTabs(): void { performCloseTabBatch(this, this.bufPerf, (closing) => this.forgetClosedTabs(closing)); }
 
