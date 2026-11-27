@@ -1,9 +1,9 @@
 <script lang="ts">
-  // The git graph's right pane (arch-1-09: split out of GraphView.svelte): the
-  // WIP staging panel when the working-tree row is selected, otherwise the
+  // The body of History's Detail pane (arch-1-09: split out of GraphView.svelte):
+  // the WIP staging panel when the working-tree row is selected, otherwise the
   // selected commit's header (sha, refs, subject, author, the "on <branch>"
-  // hint) over its summary-first diff. On a phone it is the accordion's last
-  // section; GraphView owns the selection (graphSelection.svelte.ts).
+  // hint) over its summary-first diff. GraphView owns the pane (DetailPane:
+  // its title, Close and width) and the selection (graphSelection.svelte.ts).
   import type { CommitInfo, RepoStatusResp } from '../../../lib/api/types';
   import { rel } from '../../../lib/stores/now.svelte';
   import { git } from '../../../lib/stores/git.svelte';
@@ -22,9 +22,8 @@
     status: RepoStatusResp;
     onstatus: (s: RepoStatusResp) => void;
     onresolve?: () => void;
-    /** Desktop: the pane takes the rest of the width when open. */
-    open: boolean;
-    isMobile: boolean;
+    /** The pane is a sheet (a phone, a narrow tablet): the WIP list opens no diff by itself. */
+    compact: boolean;
     wipSelected: boolean;
     selectedSha: string | null;
     selectedCommit: CommitInfo | null;
@@ -37,8 +36,6 @@
     diffHeld: boolean;
     onresume: () => void;
     onfiletools: (e: MouseEvent, path: string) => void;
-    fileCount?: number | null;
-    onclose: () => void;
     oncommitted: (sha: string) => void;
   }
   let {
@@ -46,8 +43,7 @@
     status,
     onstatus,
     onresolve,
-    open,
-    isMobile,
+    compact,
     wipSelected,
     selectedSha,
     selectedCommit,
@@ -58,8 +54,6 @@
     diffHeld,
     onresume,
     onfiletools,
-    fileCount = $bindable(null),
-    onclose,
     oncommitted,
   }: Props = $props();
 
@@ -82,17 +76,12 @@
   }
 </script>
 
-<div
-  class="detail-panel"
-  class:detail-visible={open && !isMobile}
-  class:mob-visible={isMobile && open}
-  class:mob-hidden={isMobile && !open}
->
+<div class="detail-panel">
   {#if wipSelected}
     <!-- Every change counts as included, the message drafts itself, the first
-         file's diff opens beside the list (desktop). -->
-    <!-- A phone closes it from the section header above (one ✕). -->
-    <WipPanel {repoId} {status} {onstatus} {oncommitted} onclose={isMobile ? undefined : onclose} {onresolve} remote={!!repo?.remote_url} selectFirst={!isMobile} autoDraft includeAll />
+         file's diff opens beside the list (an inline pane). The pane's Close
+         closes it. -->
+    <WipPanel {repoId} {status} {onstatus} {oncommitted} {onresolve} remote={!!repo?.remote_url} selectFirst={!compact} autoDraft includeAll />
   {:else if selectedSha === null}
     <div class="detail-empty">
       <span class="detail-empty-label">COMMIT</span>
@@ -104,8 +93,8 @@
     {/if}
     <div class="detail-header">
       <div class="detail-header-main">
-        <!-- One line that never wraps: sha, the refs (each ellipsizes its own
-             label, the group shrinks first), then close pinned at the end. -->
+        <!-- One line that never wraps: sha, then the refs (each ellipsizes its
+             own label, the group shrinks first). -->
         <div class="detail-title-row">
           <span class="mono detail-sha">{selectedCommit.short_sha}</span>
           <span class="detail-refs">
@@ -121,11 +110,6 @@
               />
             {/each}
           </span>
-          {#if !isMobile}
-            <button class="icon-btn detail-close" onclick={onclose} title="Close commit detail" aria-label="Close commit detail">
-              <Icon name="x" size={14} />
-            </button>
-          {/if}
         </div>
         <div class="detail-subject">{selectedCommit.subject}</div>
         <div class="detail-meta">
@@ -142,28 +126,19 @@
     </div>
 
     <!-- Diff area: summary-first, per-file lazy (see graph-commit-diff). -->
-    <GraphCommitDiff {repoId} sha={diffSha} held={diffHeld} {onresume} {onfiletools} bind:fileCount />
+    <GraphCommitDiff {repoId} sha={diffSha} held={diffHeld} {onresume} {onfiletools} />
   {/if}
 </div>
 
 <style>
   .detail-panel {
-    width: 0;
+    flex: 1;
     min-width: 0;
-    flex-shrink: 0;
+    min-height: 0;
     overflow: hidden;
     display: flex;
     flex-direction: column;
-    border-inline-start: 1px solid var(--border);
     background: var(--surface);
-  }
-  .detail-panel.detail-visible {
-    /* Fill all remaining width after refs + commit-list so the page isn't
-       half-empty when a commit is open. */
-    flex: 1 1 0;
-    width: auto;
-    min-width: 360px;
-    overflow: hidden;
   }
   .detail-empty {
     display: flex;
@@ -269,11 +244,6 @@
     white-space: nowrap;
     min-width: 0;
   }
-  /* An .icon-btn; only its placement is local. */
-  .detail-close {
-    margin-inline-start: auto;
-    flex-shrink: 0;
-  }
   .dim {
     color: var(--text-dim);
   }
@@ -281,79 +251,4 @@
     font-family: var(--font-mono);
   }
 
-  /* A narrow desktop pane (a 1100 px window with the right panel open) has no
-     room for refs + list + detail: while the detail is open the refs step
-     aside and the list and the detail share the width. */
-  :global(.graphview) {
-    container: graph / inline-size;
-    position: relative;
-  }
-  :global(.refs-peek) {
-    display: none;
-  }
-  @container graph (max-width: 900px) {
-    /* …and peek over the list from the branch button (the refs header's spot). */
-    :global(.graphview:has(> .detail-visible) > .refs-peek) {
-      display: inline-flex;
-      position: absolute;
-      inset-block-start: 2px;
-      inset-inline-start: 4px;
-      z-index: 7;
-    }
-    /* The button sits in the column heading's leading corner: the heading
-       and the peeked list's first section start after / below it. */
-    :global(.graphview:has(> .detail-visible) .graph-head .gh-branch) {
-      padding-inline-start: 32px;
-    }
-    :global(.graphview.peek:has(> .detail-visible) > .refs-panel) {
-      padding-block-start: 32px;
-      display: block;
-      position: absolute;
-      inset-block: 0;
-      inset-inline-start: 0;
-      width: min(260px, 70%);
-      z-index: 6;
-      background: var(--surface);
-      box-shadow: var(--glass-shadow);
-    }
-    :global(.graphview.peek:has(> .detail-visible) > .refs-peek) {
-      color: var(--accent-text);
-    }
-    :global(.graphview:has(> .detail-visible) > .refs-panel),
-    :global(.graphview:has(> .detail-visible) > .refs-resizer) {
-      display: none;
-    }
-    :global(.graphview:has(> .detail-visible) > .graph-panel) {
-      flex-basis: 45% !important;
-      min-width: 0;
-    }
-    .detail-panel.detail-visible {
-      min-width: 0;
-    }
-  }
-
-  /* ── Mobile + tablet (≤1024px): the accordion's diff section ── */
-  @media (max-width: 1024px) {
-    /* Diff/detail pane: the prominent section once a commit is open. */
-    .detail-panel.mob-visible,
-    .detail-panel.mob-hidden {
-      width: 100%;
-      border-inline-start: none;
-    }
-    .detail-panel.mob-visible {
-      flex: 1 1 auto;
-      min-width: 0;
-      min-height: 50vh;
-      overflow: hidden;
-      display: flex;
-    }
-    /* No commit selected → drop the empty diff pane so the list fills the view. */
-    .detail-panel.mob-hidden {
-      display: none !important;
-    }
-    .mob-visible .detail-subject { font-size: var(--fs-l); }
-    .mob-visible .detail-sha { font-size: var(--fs-s); }
-    .mob-visible .detail-author,
-    .mob-visible .detail-date { font-size: var(--fs-s); }
-  }
 </style>

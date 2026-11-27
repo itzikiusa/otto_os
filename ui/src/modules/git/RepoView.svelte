@@ -6,7 +6,6 @@
   import { git } from '../../lib/stores/git.svelte';
   import type { MenuItem } from '../../lib/contextmenu.svelte';
   import GraphView from './GraphView.svelte';
-  import GraphSearchBar from './GraphSearchBar.svelte';
   import { gitBridge } from '../../lib/diff/gitBridge.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
@@ -16,7 +15,6 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import { copyTextOrThrow } from '../../lib/clipboard';
   import { toasts } from '../../lib/toast.svelte';
-  import { focusAppContent } from '../../lib/announce.svelte';
   import { remoteHost } from './gitUiHelpers';
   import { readOverview } from '../../lib/api/gitOverview';
   import { prefetchFirstPage } from './graph/graphData.svelte';
@@ -30,9 +28,7 @@
   const LocalReviewLazy = lazyComponent(() => import('./LocalReviewPanel.svelte'));
   const MergeApprovalLazy = lazyComponent(() => import('./MergeApprovalModal.svelte'));
   const ConflictResolverLazy = lazyComponent(() => import('./ConflictResolverView.svelte'));
-  // Opened panels (blame / file history drawer, remotes, recovery tools).
-  const BlameLazy = lazyComponent(() => import('./BlamePanel.svelte'));
-  const FileHistoryLazy = lazyComponent(() => import('./FileHistoryPanel.svelte'));
+  // Opened panels (remotes, recovery tools).
   const RemotesLazy = lazyComponent(() => import('./RemotesPanel.svelte'));
   const RecoveryLazy = lazyComponent(() => import('./RecoveryTools.svelte'));
 
@@ -227,13 +223,6 @@
       },
     ];
   }
-  // History / blame open as a right-side drawer over the graph. The request
-  // comes through `gitBridge` from whichever diff header asked for it, so a
-  // stale request for ANOTHER repo never renders here.
-  const fileTool = $derived(
-    gitBridge.fileTool?.repoId === repo.id ? gitBridge.fileTool : null,
-  );
-
   /** The Git page's header draws the view switch (GitPage): what it shows. */
   export function viewState(): { tab: string; resolving: boolean; conflictFiles: number } {
     return { tab: effTab, resolving, conflictFiles: conflictSeed.files.length };
@@ -244,35 +233,9 @@
   }
 
 
-  let repoViewEl = $state<HTMLDivElement | null>(null);
-  /** Move focus into the History/Blame drawer on open and restore it to the
-   *  opener (or an in-view control) on close so focus never drops to <body>. */
-  function drawerFocus(el: HTMLElement): () => void {
-    const prev = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    el.focus({ preventScroll: true });
-    return () => {
-      const hadFocus = el.contains(document.activeElement);
-      requestAnimationFrame(() => {
-        if (!hadFocus && document.activeElement && document.activeElement !== document.body) return;
-        if (prev?.isConnected) {
-          prev.focus({ preventScroll: true });
-        } else {
-          void focusAppContent();
-        }
-      });
-    };
-  }
 </script>
 
-<!-- Escape closes the History/Blame drawer unless a dialog above owns the key. -->
-<svelte:window
-  onkeydown={(e) => {
-    if (!fileTool || e.key !== 'Escape' || e.defaultPrevented || document.querySelector('[aria-modal="true"]')) return;
-    gitBridge.closeFileTool();
-  }}
-/>
-
-<div class="repoview" bind:this={repoViewEl}>
+<div class="repoview">
   <!-- In-progress merge banner (shown when not already in the resolver). -->
   {#if merging && !resolving}
     <div class="merge-banner">
@@ -336,33 +299,17 @@
         <LazyMount lazy={LocalReviewLazy} what="the local review" variant="panel" props={{ repoId: repo.id }} />
       </div>
     {:else if status}
-      <!-- The graph (History): it lands on the WIP row or the HEAD commit. -->
-      <div class="rv-graph">
-        <GraphSearchBar repoId={repo.id} />
-        <div class="rv-graph-body">
-          <GraphView
-            repoId={repo.id}
-            repoPath={repo.path}
-            workspaceId={repo.workspace_id}
-            {status}
-            onstatus={setStatus}
-            onmergerequest={requestMerge}
-            onresolveconflicts={openResolver}
-          />
-          {#if fileTool}
-            <!-- Focus moves in on open and restores cleanly on close. -->
-            <aside class="rv-drawer" tabindex="-1" {@attach drawerFocus}>
-              {#if fileTool.kind === 'history'}
-                <LazyMount lazy={FileHistoryLazy} what="the file history" variant="panel"
-                  props={{ repoId: repo.id, path: fileTool.path, onclose: () => gitBridge.closeFileTool() }} />
-              {:else}
-                <LazyMount lazy={BlameLazy} what="the blame view" variant="panel"
-                  props={{ repoId: repo.id, path: fileTool.path, rev: fileTool.rev, onclose: () => gitBridge.closeFileTool() }} />
-              {/if}
-            </aside>
-          {/if}
-        </div>
-      </div>
+      <!-- History: Branches · the graph · the Detail pane (it lands on the
+           WIP row or the HEAD commit; a file's history / blame opens there). -->
+      <GraphView
+        repoId={repo.id}
+        repoPath={repo.path}
+        workspaceId={repo.workspace_id}
+        {status}
+        onstatus={setStatus}
+        onmergerequest={requestMerge}
+        onresolveconflicts={openResolver}
+      />
     {:else if statusError}
       <LoadState
         what={repo.name}
@@ -444,28 +391,6 @@
   .rv-prs {
     height: 100%;
     min-height: 0;
-  }
-  .rv-graph {
-    display: flex;
-    flex-direction: column;
-    height: 100%;
-    min-height: 0;
-  }
-  .rv-graph-body {
-    position: relative;
-    flex: 1;
-    min-height: 0;
-  }
-  /* History / blame slide over the graph rather than squeezing it — the graph
-     keeps its lane layout, and the drawer never exceeds the viewport width. */
-  .rv-drawer {
-    position: absolute;
-    inset-block: 0;
-    inset-inline-end: 0;
-    width: min(520px, 90vw);
-    z-index: 6;
-    background: var(--surface);
-    box-shadow: var(--glass-shadow);
   }
   .rv-tab-scroll {
     height: 100%;

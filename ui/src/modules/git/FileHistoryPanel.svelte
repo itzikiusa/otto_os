@@ -1,6 +1,7 @@
 <script lang="ts">
   import { announceShown } from '../../lib/announce.svelte';
-  // One file's history, opened from a diff header's ⋯ menu (via `gitBridge`).
+  // One file's history, opened from a diff header's ⋯ menu (via `gitBridge`)
+  // in History's Detail pane (its header carries the title and Close).
   // `follow=true` walks THROUGH renames — a history that stops at the rename is
   // the reason the flag exists. Clicking a commit selects it in the graph.
   import type { CommitInfo } from '../../lib/api/types';
@@ -14,9 +15,8 @@
   interface Props {
     repoId: string;
     path: string;
-    onclose: () => void;
   }
-  let { repoId, path, onclose }: Props = $props();
+  let { repoId, path }: Props = $props();
 
   let commits = $state.raw<CommitInfo[]>([]);
   let loading = $state(true);
@@ -88,10 +88,6 @@
   <header class="fh-head">
     <Icon name="clock" size={13} />
     <span class="fh-title mono" title={path}>{path}</span>
-    <span class="grow"></span>
-    <button class="icon-btn" onclick={onclose} aria-label="Close file history" title="Close file history">
-      <Icon name="x" size={14} />
-    </button>
   </header>
 
   <div class="fh-body">
@@ -142,10 +138,8 @@
   .fh {
     display: flex;
     flex-direction: column;
-    height: 100%;
+    flex: 1;
     min-height: 0;
-    background: var(--surface);
-    border-inline-start: 1px solid var(--border);
   }
   .fh-head {
     display: flex;
@@ -159,9 +153,6 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-  .grow {
-    flex: 1;
   }
   .fh-body {
     flex: 1;

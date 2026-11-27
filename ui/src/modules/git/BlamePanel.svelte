@@ -6,7 +6,7 @@
     repoId: string;
     path: string;
     rev?: string;
-    onclose: () => void;
+    onclose?: () => void;
     onfocuscommit?: (sha: string) => void;
   }
   let props: Props = $props();

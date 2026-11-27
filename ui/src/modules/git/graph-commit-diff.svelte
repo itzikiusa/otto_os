@@ -50,10 +50,8 @@
     held?: boolean;
     onresume?: () => void;
     onfiletools?: (e: MouseEvent, path: string) => void;
-    /** Out: number of files in the loaded summary (mobile section header). */
-    fileCount?: number | null;
   }
-  let { repoId, sha, held = false, onresume, onfiletools, fileCount = $bindable(null) }: Props = $props();
+  let { repoId, sha, held = false, onresume, onfiletools }: Props = $props();
 
   const COLLAPSE_ALL_FILES = 40;
   const COLLAPSE_ALL_LINES = 2000;
@@ -110,10 +108,6 @@
     loadCtl = ctl;
     untrack(() => void loadSummary(id, s, ctl));
     return () => ctl.abort();
-  });
-
-  $effect(() => {
-    fileCount = summary ? summary.files.length : null;
   });
 
   function reset(): void {
@@ -746,21 +740,14 @@
     font-family: var(--font-mono);
   }
 
-  /* Phone / tablet (the graph's stacked accordion, see GraphView `.mobile`). */
-  @media (max-width: 1024px) {
-    :global(.mobile) .detail-diff { -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
-    :global(.mobile) .ds-add,
-    :global(.mobile) .ds-del { font-size: var(--fs-m); }
-    :global(.mobile) .df-head { font-size: var(--fs-m); padding: 8px 12px; }
-    :global(.mobile) .df-path { font-size: var(--fs-m); }
-    :global(.mobile) .hunk-header { font-size: var(--fs-s); padding: 4px 10px; }
-    /* table-layout:fixed pins the gutter/sign columns to their declared widths
-       and hands the rest to the code column, so a long unbroken line wraps
-       INSIDE that column instead of widening the table past the viewport. */
-    :global(.mobile) .df-hunks { overflow-x: hidden; }
-    :global(.mobile) .dl-table { font-size: var(--fs-s); table-layout: fixed; width: 100%; }
-    :global(.mobile) .dl-code {
-      font-size: var(--fs-s);
+  /* A narrow pane (a phone, a sheet): table-layout:fixed pins the gutter/sign
+     columns to their declared widths and hands the rest to the code column,
+     so a long unbroken line wraps INSIDE that column instead of widening the
+     table past the pane. */
+  @container cdiff (max-width: 480px) {
+    .df-hunks { overflow-x: hidden; }
+    .dl-table { table-layout: fixed; width: 100%; }
+    .dl-code {
       width: auto;
       white-space: pre-wrap;
       word-break: break-word;
@@ -768,7 +755,18 @@
       overflow: visible;
       text-overflow: clip;
     }
-    :global(.mobile) .dl-gut { font-size: var(--fs-xs); width: 30px; min-width: 30px; }
-    :global(.mobile) .dl-sign { font-size: var(--fs-s); }
+    .dl-gut { width: 30px; min-width: 30px; }
+  }
+  /* Touch: finger-sized file heads and legible code. */
+  @media (pointer: coarse) {
+    .ds-add,
+    .ds-del { font-size: var(--fs-m); }
+    .df-head { font-size: var(--fs-m); padding: 8px 12px; }
+    .df-path { font-size: var(--fs-m); }
+    .hunk-header { font-size: var(--fs-s); padding: 4px 10px; }
+    .dl-table,
+    .dl-code,
+    .dl-sign { font-size: var(--fs-s); }
+    .dl-gut { font-size: var(--fs-xs); }
   }
 </style>

@@ -25,7 +25,6 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
-  import { viewport } from '../../lib/stores/viewport.svelte';
   import { repoDiffFileLoader } from '../../lib/diff/diff-load';
   import Icon from '../../lib/components/Icon.svelte';
   import { ListWindow } from '../../lib/listWindow.svelte';
@@ -321,7 +320,7 @@
   });
   /** Over-cap files ("Load anyway") re-fetch through the same target. */
   const loadWipFile = $derived(repoDiffFileLoader(repoId, selTarget));
-  // A file's diff (and its phone sheet) loads with the first file opened.
+  // A file's diff loads with the first file opened.
   const DiffPane = lazyComponent(() => import('./wip/WipDiffPane.svelte'));
   /** A hunk staged / unstaged / discarded from the diff. */
   function onapplied(r: StageHunkResp): void {
@@ -575,8 +574,8 @@
     const same = isSelected(section)(path);
     stagedView = section === 'staged';
     selectedPath = same ? null : path;
-    // Narrow (the card and the list above it): bring the opened diff into view.
-    if (selectedPath !== null && matchMedia('(max-width: 1024px)').matches) void tick().then(() => panelEl?.querySelector('.wp-diff')?.scrollIntoView({ block: 'start' }));
+    // Narrow (the diff stacked under the list): bring the opened diff into view.
+    if (selectedPath !== null) void tick().then(() => panelEl?.querySelector('.wp-diff')?.scrollIntoView({ block: 'nearest' }));
   }
 
   // +/− line counts per side (wip/wipLineCounts.svelte.ts).
@@ -929,7 +928,7 @@
       {@const path = selectedPath}
       <LazyMount lazy={DiffPane} what="the diff" variant="panel">{#snippet children(Pane)}
         <Pane {path} id={diffId} both={partial.has(path)} bind:stagedView {diff} loading={diffLoading} error={diffError} {repoId}
-          loadFile={loadWipFile} wip={selTarget === 'working' || virtualAll ? undefined : { target: selTarget, onapplied }} sheet={viewport.isPhone}
+          loadFile={loadWipFile} wip={selTarget === 'working' || virtualAll ? undefined : { target: selTarget, onapplied }}
           onretry={() => diffRetry++} onclose={() => (selectedPath = null)} onpickhunks={virtualAll && selTarget !== 'working' ? () => (materialized = true) : undefined} />
       {/snippet}</LazyMount>
     {/if}
@@ -1116,14 +1115,8 @@
   }
   .wp-untracked-cap code { font-size: var(--fs-xs); }
 
-  /* ≤1024px (accordion): touch-height rows, and the pane scrolls AS A WHOLE —
-     a fixed composer squeezed the list's scroller to nothing on a phone. */
-  @media (max-width: 1024px) {
+  /* Touch: finger-height conflict rows. */
+  @media (pointer: coarse) {
     .wp-crow { height: 36px; }
-    /* The panel itself is the scroller: in History's short WIP pane the composer
-       left .wp-body 23 px, under a 45 px sticky section head — no row showed. */
-    .wip-panel { overflow-y: auto; overscroll-behavior: contain; }
-    .wp-body, .wp-body.has-diff { flex: none; overflow: visible; } .wp-body.has-diff :global(.wp-diff:not(.sheet)) { height: min(70vh, 560px); } /* a tablet's inline diff (a phone's is a sheet) */
-    .wp-scroll, .wp-body.has-diff .wp-scroll { flex: none; max-height: none; overflow: visible; }
   }
 </style>

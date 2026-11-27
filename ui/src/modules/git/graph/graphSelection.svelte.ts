@@ -4,7 +4,7 @@
 // in, selects a ref's commit and scrolls it into view (sidebar rows, the
 // `gitBridge.focus` request and the `#/git/<repo>/graph/<branch>` deep link).
 
-import { untrack } from 'svelte';
+import { tick, untrack } from 'svelte';
 import type { CommitInfo, RefBranch, RefTag, RefsResp, RepoStatusResp, StashInfo } from '../../../lib/api/types';
 import { toasts } from '../../../lib/toast.svelte';
 import { git } from '../../../lib/stores/git.svelte';
@@ -17,9 +17,12 @@ import type { RefChip } from '../ref-menus';
 export interface GraphSelectionHost {
   readonly repoId: string;
   readonly status: RepoStatusResp;
-  readonly isMobile: boolean;
-  /** The phone accordion's commit-list section. */
-  commitsOpen: boolean;
+  /** The detail pane would cover the graph (a sheet: a phone, a narrow
+   *  tablet): History doesn't land on it, and a ref picked in the Branches
+   *  list only shows its commit on the graph (a tap on the row opens it). */
+  readonly compact: boolean;
+  /** Phone: push the graph on screen before a jump from the Branches list. */
+  showGraph(): Promise<void>;
   readonly refs: RefsResp | null;
   readonly commits: CommitInfo[];
   readonly commitsLoading: boolean;
@@ -52,16 +55,16 @@ export function createGraphSelection(h: GraphSelectionHost) {
   /** Selected but deliberately not loaded (a double-click checked it out). */
   let diffHeld = $state(false);
   let diffTimer: ReturnType<typeof setTimeout> | null = null;
-  /** File count of the loaded diff (mobile section header). */
-  let diffFileCount = $state<number | null>(null);
 
   // ── WIP (working tree) row selection ──────────────────────────────────────
   // GitKraken-style: a dirty working tree renders as a dashed row pinned above
   // the graph; selecting it opens the staging/commit panel in the detail pane
   // (this replaced the separate "Changes" view).
   let wipSelected = $state(false);
+  /** Selected from the Branches list on a compact screen: marked, not opened. */
+  let quiet = $state(false);
   /** The detail pane is open for EITHER a commit or the WIP row. */
-  const detailOpen = $derived(selectedSha !== null || wipSelected);
+  const detailOpen = $derived((selectedSha !== null && !quiet) || wipSelected);
 
   function selectWip(): void {
     if (wipSelected) clearSelection();
@@ -72,16 +75,12 @@ export function createGraphSelection(h: GraphSelectionHost) {
     selectedSha = null;
     selectedCommit = null;
     cancelDiff();
-    if (h.isMobile) h.commitsOpen = false;
   }
 
   // A commit (or an outside `git commit`) can leave the tree clean while the
   // WIP panel is open — close it so the pane doesn't show a stale empty WIP.
   $effect(() => {
-    if (wipSelected && h.status.changes.length === 0) {
-      wipSelected = false;
-      if (h.isMobile) h.commitsOpen = true;
-    }
+    if (wipSelected && h.status.changes.length === 0) wipSelected = false;
   });
 
   // Agent UI control: `git.requestWip` (lib/uiCommands/git.ts) opens this
@@ -110,37 +109,43 @@ export function createGraphSelection(h: GraphSelectionHost) {
     untrack(() => selectedSha !== c.sha && selectCommit(c));
   });
 
-  // Landing: History opens on the work — the WIP row with uncommitted
-  // changes, else (desktop) the checked-out commit, so the detail pane is
-  // never an empty "select a commit". A phone keeps its commit list open.
-  // Once per mount; a branch deep link or a reveal request then moves it.
+  /** Open the detail on the work: the WIP row with uncommitted changes, else
+   *  the checked-out commit (landing, and ⌥⌘B on a closed pane). */
+  function reopen(): void {
+    if (h.status.changes.length > 0) openWip();
+    else selectHead();
+  }
+
+  // Landing: History opens on the work, so the detail pane is never an empty
+  // "select a commit" — where it would be a sheet over the graph it stays
+  // shut (a phone lands on the Branches list). Once per mount; a branch deep
+  // link or a reveal request then moves it.
   let landed = false;
   $effect(() => {
     if (landed) return;
     const dirty = h.status.changes.length > 0;
     if (!dirty && (h.commitsLoading || h.commits.length === 0)) return;
     landed = true;
-    untrack(() => {
-      if (wipSelected || selectedSha) return;
-      if (dirty) openWip();
-      else if (!h.isMobile) selectHead();
-    });
+    // After a tick: the Detail pane has measured its row by then (compact).
+    untrack(() => void tick().then(() => {
+      if (!wipSelected && !selectedSha && !h.compact) reopen();
+    }));
   });
 
   /** Select a commit (opens the detail, lights its spine). `deferDiff` holds the
    *  diff load for DIFF_DEFER_MS — used by controls whose double-click checks
    *  out, so that gesture's lead click costs nothing. */
-  function selectCommit(commit: CommitInfo, opts: { deferDiff?: boolean } = {}): void {
+  function selectCommit(commit: CommitInfo, opts: { deferDiff?: boolean; quiet?: boolean } = {}): void {
     if (selectedSha === commit.sha) {
-      // clicking again deselects
-      clearSelection();
+      // clicking again deselects (a quietly marked row opens instead)
+      if (quiet && !opts.quiet) quiet = false;
+      else clearSelection();
       return;
     }
     wipSelected = false;
+    quiet = !!opts.quiet;
     selectedSha = commit.sha;
     selectedCommit = commit;
-    // On a phone, collapse the commit list so the diff section gets the room.
-    if (h.isMobile) h.commitsOpen = false;
     scheduleDiff(commit.sha, opts.deferDiff ? DIFF_DEFER_MS : 0);
   }
 
@@ -201,11 +206,10 @@ export function createGraphSelection(h: GraphSelectionHost) {
 
   function clearSelection(): void {
     wipSelected = false;
+    quiet = false;
     selectedSha = null;
     selectedCommit = null;
     cancelDiff();
-    // Re-open the commit list when the diff closes (mobile accordion).
-    if (h.isMobile) h.commitsOpen = true;
   }
 
   /** The detail pane's close (✕, the phone's diff header, WIP's close): the
@@ -264,7 +268,7 @@ export function createGraphSelection(h: GraphSelectionHost) {
    *  it (opens the detail + lights its spine) and scroll it into view. This is
    *  what a sidebar branch/tag click does — the point is to SHOW WHERE the ref
    *  sits, which a plain selection never did. */
-  async function revealSha(sha: string, label: string, opts: { deferDiff?: boolean } = {}): Promise<void> {
+  async function revealSha(sha: string, label: string, opts: { deferDiff?: boolean; quiet?: boolean } = {}): Promise<void> {
     if (!sha) return;
     revealBusy = label;
     try {
@@ -307,24 +311,31 @@ export function createGraphSelection(h: GraphSelectionHost) {
    *  first if the tip is older than what's loaded. Checkout stays on
    *  double-click. Prefers the sha the refs response carries; falls back to
    *  matching decorations for daemons that predate the field. */
-  function selectBranchRow(b: RefBranch): void {
+  async function selectBranchRow(b: RefBranch): Promise<void> {
     const sha = b.sha || h.branchTipCommit(b)?.sha;
-    if (sha) void revealSha(sha, b.name, { deferDiff: true });
+    if (!sha) return;
+    await h.showGraph();
+    void revealSha(sha, b.name, { deferDiff: true, quiet: h.compact });
   }
 
   /** Tag row SINGLE-click: same jump-to-it-on-the-graph as a branch. The tag's
    *  action menu is on right-click (and the row's ⋯ button), because a
    *  left-click that only opened a menu never showed WHERE the tag is. */
-  function selectTagRow(t: RefTag): void {
+  async function selectTagRow(t: RefTag): Promise<void> {
     const sha = t.sha || h.commits.find((c) => c.refs.some((r) => r === `tag: ${t.name}`))?.sha;
-    if (sha) void revealSha(sha, t.name);
+    if (!sha) return;
+    await h.showGraph();
+    void revealSha(sha, t.name, { quiet: h.compact });
   }
 
   /** Click a stash row → select its commit in the graph if it's present (the top
    *  stash usually is via `--all`; older reflog-only stashes won't be). */
-  function selectStash(s: StashInfo): void {
+  async function selectStash(s: StashInfo): Promise<void> {
     const c = h.bySha.get(s.sha);
-    if (c) selectCommit(c);
+    if (!c) return;
+    await h.showGraph();
+    if (selectedSha !== c.sha) selectCommit(c, { quiet: h.compact });
+    h.scrollToCommit(c.sha);
   }
 
   // A deep link `#/git/<repo>/graph/<branch>` (Run with Otto's "View branch
@@ -356,14 +367,13 @@ export function createGraphSelection(h: GraphSelectionHost) {
     get selectedCommit() { return selectedCommit; },
     get diffSha() { return diffSha; },
     get diffHeld() { return diffHeld; },
-    get diffFileCount() { return diffFileCount; },
-    set diffFileCount(v: number | null) { diffFileCount = v; },
     get wipSelected() { return wipSelected; },
     get detailOpen() { return detailOpen; },
     get highlightSpine() { return highlightSpine; },
     get selectedBranch() { return selectedBranch; },
     get revealBusy() { return revealBusy; },
     selectWip,
+    reopen,
     /** A commit just made: select it once the graph has loaded it. */
     selectWhenLoaded(sha: string) { committedSha = sha; },
     selectCommit,
