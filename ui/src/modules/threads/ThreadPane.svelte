@@ -22,7 +22,7 @@
   import { startThreadTerminal } from './runtime/threadTerminalStart';
   import { runtimeThreadMenu } from './runtime/runtimeMenu';
   import { threadsHostCommands } from './runtime/threadsHost';
-  import { asThreadSession, runtimeThreads } from './runtime/runtimeThreads.svelte';
+  import { asThreadSession, isEngineThread, runtimeThreads } from './runtime/runtimeThreads.svelte';
   import { paneSeatLabel } from './runtime/councilStore.svelte';
   import { runtimeViews } from './runtime/runtimeView.svelte';
   import { formatTokens, threadTokenTotal } from './runtime/turnUsage';
@@ -42,6 +42,7 @@
   let { paneId, focused, multiPane }: Props = $props();
 
   const runtime = $derived(runtimeThreads.get(paneId));
+  const engineClosed = $derived(!!runtime && isEngineThread(runtime.meta) && runtime.status === 'closed');
   const session = $derived(ws.getSession(paneId) ?? (runtime ? asThreadSession(runtime) : null));
   const rawStatus = $derived(ws.statusMap[paneId] ?? session?.status ?? 'idle');
   const needsYou = $derived(ws.needsYou[paneId] === true);
@@ -298,7 +299,7 @@
       </EmptyState>
     {:else if runtime}
       {#key paneId}
-        <LazyMount lazy={RuntimeThread} what="conversation" variant="panel" props={{ sessionId: paneId, focused, hostCommands: threadsHostCommands }} />
+        <LazyMount lazy={RuntimeThread} what="conversation" variant="panel" props={{ sessionId: paneId, focused, readOnly: engineClosed, hostCommands: threadsHostCommands }} />
       {/key}
     {:else if isPlainShellSession(session)}
       <div class="tp-shell-wrap otto-force-dark">

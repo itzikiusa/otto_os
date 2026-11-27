@@ -149,6 +149,16 @@ export function keepOutcome(next: RuntimeSession, prev: RuntimeSession | undefin
   return { ...next, last_turn_status: prev.last_turn_status, last_error_class: prev.last_error_class ?? null };
 }
 
+/** `meta.source` values owned by an engine (workflows / reviews): kept out of
+ *  Threads' inbox/sidebar/History lists, but openable directly by id. Matches
+ *  `ENGINE_THREAD_SOURCES` in `crates/otto-core/src/agent_runtime.rs`. */
+const ENGINE_THREAD_SOURCES: ReadonlySet<string> = new Set(['workflow', 'review', 'review_summarizer']);
+
+export function isEngineThread(meta: Record<string, unknown> | null | undefined): boolean {
+  const src = meta?.source;
+  return typeof src === 'string' && ENGINE_THREAD_SOURCES.has(src);
+}
+
 /** A Threads row backed by a runtime session (see `asThreadSession`). */
 export function isRuntimeThread(s: Session | null | undefined): boolean {
   return s?.meta?.runtime === 'structured';
@@ -211,10 +221,12 @@ class RuntimeThreads {
     return id ? (this.byId[id] ?? null) : null;
   }
 
-  /** Live (or, with `closed`, closed) sessions, newest activity first. */
+  /** Live (or, with `closed`, closed) user-facing sessions, newest activity first.
+   *  Engine threads (workflows / reviews) stay out of Threads' lists even when
+   *  loaded into `byId` for viewing. */
   live(closed = false): RuntimeSession[] {
     return Object.values(this.byId)
-      .filter((s) => (s.status === 'closed') === closed)
+      .filter((s) => !isEngineThread(s.meta) && (s.status === 'closed') === closed)
       .sort((a, b) => b.last_active_at.localeCompare(a.last_active_at));
   }
 
@@ -229,7 +241,15 @@ class RuntimeThreads {
     try {
       const rows = await api.get<RuntimeSession[]>(`/workspaces/${workspaceId}/runtime-sessions`);
       const next = { ...this.byId };
-      for (const id of Object.keys(next)) if (next[id].workspace_id === workspaceId) delete next[id];
+      const routed = router.module === 'threads' ? (router.parts[1] ?? null) : null;
+      for (const id of Object.keys(next)) {
+        const cur = next[id];
+        if (cur.workspace_id !== workspaceId) continue;
+        // Engine threads aren't returned by `/workspaces/{id}/runtime-sessions`:
+        // keep ones actively viewed (in Threads panes, routed, or embedded).
+        if (isEngineThread(cur.meta) && (this.embedded.has(id) || threads.paneIds.includes(id) || routed === id)) continue;
+        delete next[id];
+      }
       for (const r of rows) {
         next[r.id] = keepOutcome(r, this.byId[r.id]);
         noteRuntimeWaiting(r.id, r.status === 'awaiting_permission', r.title);

@@ -6,7 +6,7 @@
   // step opens as a pushed screen with its own back control. Mounted by the
   // route #/workflows/<wf>/runs/<run>[/<node>[/<child>]]: `nodeId`/`childId`
   // are the route's, `onselect` writes it. Live through RunSync.
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
@@ -17,6 +17,7 @@
   import { copyWithToast } from '../../../lib/clipboard';
   import type { MenuItem } from '../../../lib/contextmenu.svelte';
   import { loadErrorText } from '../../../lib/loadError';
+  import { loadIdeRuntimeSessionPort, type RuntimeSessionPort } from '../../../lib/runtimeThreadPort';
   import { now as clockNow } from '../../../lib/stores/now.svelte';
   import { viewport } from '../../../lib/stores/viewport.svelte';
   import type { Workflow, WorkflowGraph, WorkflowRun, WorkflowVersion } from '../../../lib/api/types';
@@ -28,7 +29,7 @@
   import StepPane from './StepPane.svelte';
   import { cancelQueued, pauseRun, rereview, resumeRun, retryStep, steerRun, stopRun } from './runActions';
   import { fallbackState, runTitle, runWord } from './runWords';
-  import { defaultSelection, entrySteps, loopChildren, orderSteps, RESULT, settledNodes, stepNumber } from './stepOrder';
+  import { defaultSelection, entrySteps, loopChildren, mergeStepChildren, orderSteps, RESULT, settledNodes, stepNumber } from './stepOrder';
   import { markRunOpened } from './seenRuns';
   import { registry } from '../../../lib/commands.svelte';
   import { workflowsUi } from '../workflowsUiState.svelte';
@@ -61,8 +62,25 @@
   let askedTab = $state<string | null>(null);
   let maximized = $state(false);
   let width = $state(1200);
-
-  onMount(() => markRunOpened(runId));
+  // Threads runtime store (through the port): keeps agent-opened sub-threads
+  // live in the step list the moment they are created (before the step settles).
+  let rtPort = $state<RuntimeSessionPort | null>(null);
+  onMount(() => {
+    markRunOpened(runId);
+    let active = true;
+    let unmountRt: (() => void) | null = null;
+    void loadIdeRuntimeSessionPort()
+      .then((port) => {
+        if (!active) return;
+        rtPort = port;
+        unmountRt = port.runtimeThreads.mount();
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+      unmountRt?.();
+    };
+  });
 
   const currentRunId = $derived(runId);
   $effect(() => {
@@ -112,8 +130,49 @@
     workflowsUi.shownRun = run;
   });
   $effect(() => () => (workflowsUi.shownRun = null));
-  // A loop step's iterations are its child rows (from the run's checkpoints).
-  const nodes = $derived(run ? settledNodes(run.nodes, live).map((n) => (!n.children?.length && run.checkpoints?.some((c) => c.loop_id === n.node_id) ? { ...n, children: loopChildren(run.checkpoints, n.node_id) } : n)) : []);
+  // Load each step's thread row and its linked group (agent-opened sub-threads
+  // and their descendants) once known, so StepList shows every live sub-session.
+  const loadedStepThreads = new Set<string>();
+  const stepThreadKey = $derived(
+    run
+      ? run.nodes
+          .flatMap((n) => [
+            ...(n.thread?.runner === 'threads' && n.thread.available !== false && n.thread.thread_id ? [n.thread.thread_id] : []),
+            ...(n.children ?? []).flatMap((c) => (c.thread_id ? [c.thread_id] : [])),
+          ])
+          .join(',')
+      : '',
+  );
+  $effect(() => {
+    const port = rtPort;
+    const key = stepThreadKey;
+    if (!port || !key) return;
+    untrack(() => {
+      for (const tid of key.split(',')) {
+        if (!tid || loadedStepThreads.has(tid)) continue;
+        loadedStepThreads.add(tid);
+        const ready = port.runtimeThreads.get(tid) ? Promise.resolve() : port.runtimeThreads.loadOne(tid).then(() => undefined, () => undefined);
+        void ready.then(() => port.runtimeThreads.loadLinked(tid).catch(() => {}));
+      }
+    });
+  });
+
+  // A loop step's iterations are its child rows (from the run's checkpoints),
+  // merged with every live/known agent-opened sub-thread in each step's group.
+  const rtSessions = $derived(rtPort ? Object.values(rtPort.runtimeThreads.byId) : []);
+  const nodes = $derived(
+    run
+      ? settledNodes(run.nodes, live).map((n) => {
+          const baseChildren =
+            !n.children?.length && run.checkpoints?.some((c) => c.loop_id === n.node_id)
+              ? loopChildren(run.checkpoints, n.node_id)
+              : (n.children ?? []);
+          const rootTid = n.thread?.runner === 'threads' ? n.thread.thread_id : null;
+          const merged = rootTid || baseChildren.some((c) => c.thread_id) ? mergeStepChildren(baseChildren, rootTid, rtSessions) : baseChildren;
+          return merged !== n.children ? { ...n, children: merged } : n;
+        })
+      : [],
+  );
   const entries = $derived(run ? orderSteps(nodes, graph, now) : []);
   const steps = $derived(entries.flatMap(entrySteps));
   const selected = $derived(nodeId ? { node: nodeId, child: childId } : defaultSelection(runState, entries, run?.overview?.failed_step?.node_id));
@@ -231,7 +290,7 @@
           {#if wide && maximized}
             <button type="button" class="btn small runback" onclick={() => (maximized = false)}><Icon name="chevronLeft" size={12} />Run</button>
           {/if}
-          <StepPane {run} {sync} {workspaceId} {runState} cardNode={pushed || (wide && maximized) || runState !== 'failed' ? null : failedNode} step={openStep} childId={selected.child} stepNo={openStep ? stepNumber(steps, openStep) : null} stepCount={steps.length} {now} tab={askedTab} {criteria} {maximized} onmaximize={wide ? () => (maximized = !maximized) : undefined} />
+          <StepPane {run} {sync} {workspaceId} {runState} cardNode={pushed || (wide && maximized) || runState !== 'failed' ? null : failedNode} step={openStep} childId={selected.child} stepNo={openStep ? stepNumber(steps, openStep) : null} stepCount={steps.length} {now} tab={askedTab} {criteria} {maximized} onmaximize={wide ? () => (maximized = !maximized) : undefined} onselectchild={openStep ? (cid) => select(openStep.id, cid) : undefined} />
         </div>
       {/if}
     {/if}

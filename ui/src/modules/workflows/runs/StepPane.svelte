@@ -16,7 +16,7 @@
   import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
   import { readRunContext, workflowNodeDetail } from '../../../lib/api/workflows';
   import { loadErrorText } from '../../../lib/loadError';
-  import type { AttachmentRef, ChildThread, Criterion, NodeRunState, RunState, StepThread, WorkflowRun } from '../../../lib/api/types';
+  import type { AttachmentRef, Criterion, NodeRunState, RunState, StepThread, WorkflowRun } from '../../../lib/api/types';
   import RunFinalOutput from '../RunFinalOutput.svelte';
   import type { RunSync } from '../runSync.svelte';
   import CriteriaTable from '../goal/CriteriaTable.svelte';
@@ -29,7 +29,7 @@
   import { reviewIds } from '../reviewAgents';
   import { runReviews } from '../runReviews.svelte';
   import { childWord, errorParts, stepDuration, stepWord } from './runWords';
-  import { childCrumb, type StepItem } from './stepOrder';
+  import { childCrumb, childTrail, type StepChild, type StepItem } from './stepOrder';
   import { paneTabs, phaseSegments, TAB_LABEL, type PaneTab } from './stepTabs';
 
   interface Props {
@@ -52,12 +52,25 @@
     /** The pane's own Maximize (the run column folds behind "Run"). */
     maximized?: boolean;
     onmaximize?: () => void;
+    /** Select a sub-thread row (or null to return to the parent step). */
+    onselectchild?: (childId: string | null) => void;
   }
-  let { run, sync, workspaceId, runState, step, childId, stepNo = null, stepCount, now, tab: asked = null, criteria = [], cardNode = null, maximized = false, onmaximize }: Props = $props();
+  let { run, sync, workspaceId, runState, step, childId, stepNo = null, stepCount, now, tab: asked = null, criteria = [], cardNode = null, maximized = false, onmaximize, onselectchild }: Props = $props();
 
   const node = $derived(step?.node ?? null);
-  const child = $derived<ChildThread | null>(node?.children?.find((c) => c.id === childId) ?? null);
+  const stepChildren = $derived((node?.children ?? []) as StepChild[]);
+  const child = $derived<StepChild | null>(stepChildren.find((c) => c.id === childId || (!!c.thread_id && c.thread_id === childId)) ?? null);
+  const trail = $derived(child ? childTrail(stepChildren, child.id) : []);
   const childKind = $derived(child ? childCrumb(step?.kind, child) : null);
+  function selectThread(threadId: string): void {
+    if (!onselectchild) return;
+    if (threadId === node?.thread?.thread_id) {
+      onselectchild(null);
+      return;
+    }
+    const match = stepChildren.find((c) => c.id === threadId || c.thread_id === threadId);
+    onselectchild(match?.id ?? threadId);
+  }
   const tabs = $derived(paneTabs({ result: !step, goal: !!run.overview?.goal, child: !!child, kind: step?.kind, node: node ?? undefined }));
   let picked = $state<PaneTab | null>(null);
   // Another step, child or asked-for tab starts over; a live update of the
@@ -180,10 +193,25 @@
   }
 </script>
 
-<section class="pane" data-testid="wf-step-pane" data-node-id={step?.id ?? '_result'} aria-label={child?.label ?? step?.name ?? 'Run result'}>
+<section class="pane" data-testid="wf-step-pane" data-node-id={step?.id ?? '_result'} data-child-id={child?.id ?? undefined} aria-label={child?.label ?? step?.name ?? 'Run result'}>
   <header class="ph">
-    <div class="crumb">
-      {#if child}{step?.name}{#if childKind}<Icon name="chevronRight" size={12} />{childKind}{/if}{:else if step}Step {stepNo ?? node?.step_no ?? '–'} of {stepCount}{:else}Run result{/if}
+    <div class="crumb" data-testid="wf-step-crumb">
+      {#if child}
+        {#if onselectchild}
+          <button type="button" class="crumb-link" data-testid="wf-crumb-parent" onclick={() => onselectchild(null)}>{step?.name}</button>
+        {:else}
+          <span>{step?.name}</span>
+        {/if}
+        {#each trail.slice(0, -1) as anc (anc.id)}
+          <Icon name="chevronRight" size={12} />
+          {#if onselectchild}
+            <button type="button" class="crumb-link" data-testid="wf-crumb-ancestor" onclick={() => onselectchild(anc.id)}>{anc.label}</button>
+          {:else}
+            <span>{anc.label}</span>
+          {/if}
+        {/each}
+        {#if childKind}<Icon name="chevronRight" size={12} />{childKind}{/if}
+      {:else if step}Step {stepNo ?? node?.step_no ?? '–'} of {stepCount}{:else}Run result{/if}
     </div>
     <div class="prow">
       <h3 class="name ellipsis" dir="auto">{child?.label ?? step?.name ?? 'final-output.md'}</h3>
@@ -220,10 +248,10 @@
   <div class="body" class:conv={showingThread} role="tabpanel" id="wf-step-panel-{tab}" aria-labelledby="wf-step-tab-{tab}">
     {#if tab === 'conversation'}
       <!-- A reviewer keeps no digest file of its own: no nodeId, so it never reads the step's. -->
-      <StepConversation {thread} sessions={child ? [] : (node?.sessions ?? [])} digest={child ? null : (body?.thread?.digest ?? null)} {workspaceId} runId={run.id} nodeId={child ? '' : (node?.node_id ?? '')} attempt={node?.attempts ?? 1} />
+      <StepConversation {thread} sessions={child ? [] : (node?.sessions ?? [])} digest={child ? null : (body?.thread?.digest ?? null)} {workspaceId} runId={run.id} nodeId={child ? '' : (node?.node_id ?? '')} attempt={node?.attempts ?? 1} onselectthread={onselectchild ? selectThread : undefined} />
     {:else if tab === 'summarizer'}
       {#if summarizer?.thread_id}
-        <StepConversation thread={{ thread_id: summarizer.thread_id, runner: 'threads', provider: summarizer.provider, turns: 0, usage: {} as StepThread['usage'] }} {workspaceId} runId={run.id} nodeId="" attempt={node?.attempts ?? 1} />
+        <StepConversation thread={{ thread_id: summarizer.thread_id, runner: 'threads', provider: summarizer.provider, turns: 0, usage: {} as StepThread['usage'] }} {workspaceId} runId={run.id} nodeId="" attempt={node?.attempts ?? 1} onselectthread={onselectchild ? selectThread : undefined} />
       {:else}
         <p class="none">The summarizer starts after the reviewers.</p>
       {/if}
@@ -319,10 +347,27 @@
   }
   .crumb {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: var(--sp-2);
     font-size: var(--fs-s);
     color: var(--text-dim);
+  }
+  .crumb-link {
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--accent-text);
+    font: inherit;
+    cursor: pointer;
+  }
+  .crumb-link:hover {
+    text-decoration: underline;
+  }
+  .crumb-link:focus-visible {
+    outline: 2px solid var(--accent-text);
+    outline-offset: 2px;
+    border-radius: var(--radius-s);
   }
   .prow {
     display: flex;

@@ -3,10 +3,10 @@
 // selection — runs/stepOrder.ts.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { childCrumb, childNoun, defaultSelection, doneFold, entrySteps, loopChildren, orderChildren, orderSteps, RESULT, settledNodes, stepNumber, timeBar, topoOrder } from '../src/modules/workflows/runs/stepOrder.ts';
+import { childCrumb, childNoun, childTrail, defaultSelection, doneFold, entrySteps, loopChildren, mergeStepChildren, orderChildren, orderChildTree, orderSteps, RESULT, runtimeChildStatus, settledNodes, stepNumber, timeBar, topoOrder } from '../src/modules/workflows/runs/stepOrder.ts';
 import { at, fanoutNodes, node, PR_GRAPH, reviewers, T0 } from './workflowRunFixtures.ts';
 import { stepWord } from '../src/modules/workflows/runs/runWords.ts';
-import type { WorkflowGraph } from '../src/lib/api/types';
+import type { RuntimeSession, WorkflowGraph } from '../src/lib/api/types';
 
 const NOW = T0 + 12 * 60_000;
 const shape = (entries: ReturnType<typeof orderSteps>) => entries.map((e) => (e.type === 'group' ? e.steps.map((s) => s.id) : e.step.id));
@@ -146,4 +146,112 @@ test('a step\'s time bar stays inside the run\'s clock (CR1-062)', () => {
     assert.ok(b.at >= 0 && b.at + b.w <= 100 + 1e-9, JSON.stringify(b));
     assert.ok(b.w > 0, 'still a visible sliver');
   }
+});
+
+const rtSession = (id: string, extra: Partial<RuntimeSession> = {}): RuntimeSession => ({
+  id,
+  workspace_id: 'ws',
+  provider: 'codex',
+  title: `Thread ${id}`,
+  cwd: '/tmp',
+  access_mode: 'approval-required',
+  capabilities: {} as RuntimeSession['capabilities'],
+  status: 'working',
+  created_by: 'u1',
+  created_at: `2026-11-26T10:00:00Z`,
+  last_active_at: `2026-11-26T10:00:00Z`,
+  last_sequence: 1,
+  ...extra,
+});
+
+test('runtimeChildStatus maps live runtime session states into step-list words', () => {
+  assert.equal(runtimeChildStatus(rtSession('a', { status: 'working' })), 'running');
+  assert.equal(runtimeChildStatus(rtSession('a', { status: 'starting' })), 'running');
+  assert.equal(runtimeChildStatus(rtSession('a', { status: 'awaiting_permission' })), 'needs_you');
+  assert.equal(runtimeChildStatus(rtSession('a', { status: 'idle', background_tasks: [{ id: 'bg', label: 'cmd', kind: 'command', started_at: at(0) }] })), 'running');
+  assert.equal(runtimeChildStatus(rtSession('a', { status: 'idle', last_turn_status: 'completed' })), 'success');
+  assert.equal(runtimeChildStatus(rtSession('a', { status: 'idle', last_turn_status: 'failed' })), 'error');
+  assert.equal(runtimeChildStatus(rtSession('a', { status: 'idle', last_turn_status: 'interrupted' })), 'skipped');
+  assert.equal(runtimeChildStatus(rtSession('a', { status: 'closed' })), 'success');
+  assert.equal(runtimeChildStatus(rtSession('a', { status: 'dormant' })), 'skipped');
+});
+
+test('mergeStepChildren merges live multi-generation sub-threads with recorded rows', () => {
+  const sessions: RuntimeSession[] = [
+    rtSession('th-root', { provider: 'claude', title: 'Step thread' }),
+    rtSession('th-kid', {
+      provider: 'codex',
+      title: 'Check tests',
+      parent_id: 'th-root',
+      status: 'idle',
+      last_turn_status: 'completed',
+      created_at: '2026-11-26T10:01:00Z',
+      meta: { child_of: { id: 'th-root', by: 'agent' } },
+    }),
+    rtSession('th-grand', {
+      provider: 'claude',
+      title: 'Inspect helper',
+      parent_id: 'th-root',
+      status: 'working',
+      created_at: '2026-11-26T10:02:00Z',
+      meta: { child_of: { id: 'th-kid', by: 'agent' }, provider_slug: 'claude-work' },
+    }),
+    rtSession('th-other', { provider: 'claude', title: 'Unrelated thread', parent_id: 'th-else' }),
+  ];
+
+  const merged = mergeStepChildren([], 'th-root', sessions);
+  assert.deepEqual(
+    merged.map((c) => [c.id, c.label, c.provider, c.status, c.depth, c.parent_child_id]),
+    [
+      ['th-kid', 'Check tests', 'codex', 'success', 0, null],
+      ['th-grand', 'Inspect helper', 'claude-work', 'running', 1, 'th-kid'],
+    ],
+  );
+
+  // Ordering keeps the done parent in `active` because its grandchild is still running.
+  const tree = orderChildTree(merged);
+  assert.deepEqual(
+    tree.active.map((e) => [e.child.id, e.depth]),
+    [['th-kid', 0], ['th-grand', 1]],
+  );
+  assert.equal(tree.done.length, 0);
+
+  // Breadcrumb trail walks parent_child_id from top child down to the open grandchild.
+  assert.deepEqual(childTrail(merged, 'th-grand').map((c) => c.id), ['th-kid', 'th-grand']);
+  assert.deepEqual(childTrail(merged, 'th-kid').map((c) => c.id), ['th-kid']);
+  assert.deepEqual(childTrail(merged, 'missing'), []);
+});
+
+test('mergeStepChildren attaches agent-opened sub-threads underneath a recorded reviewer', () => {
+  const recorded = [
+    { id: 'lens-1', label: 'Correctness · Codex', provider: 'codex', status: 'running' as const, thread_id: 'th-rev-1' },
+    { id: 'summarizer', label: 'Summarizer', provider: 'claude', status: 'queued' as const },
+  ];
+  const sessions = [
+    rtSession('th-rev-1', { provider: 'codex', title: 'Correctness' }),
+    rtSession('th-sub', {
+      provider: 'claude',
+      title: 'Verify edge case',
+      parent_id: 'th-rev-1',
+      status: 'working',
+      meta: { child_of: { id: 'th-rev-1', by: 'agent' } },
+    }),
+  ];
+  const merged = mergeStepChildren(recorded, null, sessions);
+  const tree = orderChildTree(merged);
+  assert.deepEqual(
+    tree.active.map((e) => [e.child.id, e.depth]),
+    [['lens-1', 0], ['th-sub', 1]],
+  );
+  assert.deepEqual(tree.trailing.map((e) => e.child.id), ['summarizer']);
+  assert.deepEqual(childTrail(merged, 'th-sub').map((c) => c.id), ['lens-1', 'th-sub']);
+});
+
+test('defaultSelection stays on an agent step with its own thread even while a sub-thread runs', () => {
+  const stepWithSub = node('n3', 'running', 1, null, {
+    thread: { thread_id: 'th-root', runner: 'threads', provider: 'claude', turns: 0, usage: {} as never },
+    children: [{ id: 'th-kid', label: 'Check tests', provider: 'codex', status: 'running', thread_id: 'th-kid' }],
+  });
+  const entries = orderSteps([node('n1', 'success', 0, 0), stepWithSub], PR_GRAPH, NOW);
+  assert.deepEqual(defaultSelection('running', entries), { node: 'n3', child: null });
 });
