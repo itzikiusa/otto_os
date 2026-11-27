@@ -34,11 +34,16 @@
   // pick one to see its files and patch (`git stash show -p
   // --include-untracked`), then Apply / Pop / Drop it — each addressed by the
   // stash's SHA, never a positional stash@{N}. Opened from the graph's
-  // STASHES list and the toolbar's Stashes button.
+  // STASHES list and the toolbar's Stashes button. The list is the shared
+  // row look (SideRow, use:listNav); on a phone it is one column that pushes
+  // to the picked stash, with Back to the list.
   import Modal from '../../lib/components/Modal.svelte';
-  import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import SideRow from '../../lib/components/side/SideRow.svelte';
+  import PhoneBack from '../../lib/components/side/PhoneBack.svelte';
+  import { listNav } from '../../lib/components/side/listNav';
+  import { viewport } from '../../lib/stores/viewport.svelte';
   import { api } from '../../lib/api/client';
   import { gitBridge } from '../../lib/diff/gitBridge.svelte';
   import type { RepoStatusResp, StashDetail, StashInfo } from '../../lib/api/types';
@@ -69,6 +74,10 @@
   let detailError = $state<string | null>(null);
   let busy = $state<'' | 'apply' | 'pop' | 'drop'>('');
   let openFile = $state<string | null>(null);
+  /** Phone: the picked stash is the page (opened on one when asked for one). */
+  // svelte-ignore state_referenced_locally
+  let phoneOpen = $state(!!initialSha);
+  const phone = $derived(viewport.isPhone);
 
   const current = $derived(stashes.find((s) => s.sha === selected) ?? null);
   const fileDiffs = $derived(detail ? splitPatch(detail.patch) : []);
@@ -168,32 +177,23 @@
 </script>
 
 <Modal title="Stashes" width={960} height={620} {onclose} dismissable={busy === ''}>
-  <div class="browser">
-    <div class="list" role="listbox" aria-label="Stashes">
+  <div class="browser" class:phone class:open={phoneOpen}>
+    <div class="list" aria-label="Stashes" use:listNav>
       <LoadState what="stashes" loading={listLoading && stashes.length === 0} error={listError} empty={!listLoading && !listError && stashes.length === 0} onretry={() => loadList()} variant="compact" rows={4}>
         {#snippet emptyView()}
           <EmptyState icon="stash" title="No stashes" body="Stash your working changes from the toolbar to set them aside." variant="panel" headingLevel={4} />
         {/snippet}
         {#each stashes as s (s.sha)}
-          <button
-            type="button"
-            role="option"
-            aria-selected={s.sha === selected}
-            class="sb-row"
-            class:sel={s.sha === selected}
-            onclick={() => void select(s.sha)}
-            title={s.message}
-          >
-            <span class="row-top">
-              <span class="msg">{stashTitle(s.message)}</span>
-            </span>
-            <span class="row-meta">
-              <span class="mono">{s.ref}</span>
-              {#if s.branch}<span class="mono branch"><Icon name="branch" size={12} />{s.branch}</span>{/if}
-              <span>{relativeAge(s.date)}</span>
-              {#if s.files != null}<span>{plural(s.files, 'file')}</span>{/if}
-            </span>
-          </button>
+          <SideRow
+            title={stashTitle(s.message)}
+            meta={[s.ref, s.branch, relativeAge(s.date), s.files != null ? plural(s.files, 'file') : ''].filter(Boolean).join(' · ')}
+            selected={s.sha === selected}
+            tip={s.message}
+            onclick={() => {
+              phoneOpen = true;
+              if (s.sha !== selected) void select(s.sha);
+            }}
+          />
         {/each}
       </LoadState>
     </div>
@@ -205,6 +205,7 @@
         {/if}
       {:else}
         <div class="head">
+          {#if phone}<PhoneBack label="Stashes" onclick={() => (phoneOpen = false)} />{/if}
           <div class="head-text">
             <div class="title">{stashTitle(current.message)}</div>
             <div class="sub dim">
@@ -268,57 +269,25 @@
     min-height: 0;
     height: 100%;
   }
-  @media (max-width: 640px) {
-    .browser {
-      grid-template-columns: 1fr;
-    }
+  /* A phone: one column — the list, or the picked stash. */
+  .browser.phone {
+    grid-template-columns: 1fr;
+  }
+  .browser.phone.open .list,
+  .browser.phone:not(.open) .detail {
+    display: none;
   }
   .list {
     display: flex;
     flex-direction: column;
-    gap: 2px;
     overflow-y: auto;
     max-height: 70vh;
     border-inline-end: 1px solid var(--separator);
     padding-inline-end: var(--sp-2);
   }
-  .sb-row {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    text-align: start;
-    padding: var(--sp-2);
-    border-radius: var(--radius-s);
-    background: none;
-    border: 1px solid transparent;
-    color: var(--text);
-    cursor: pointer;
-  }
-  .sb-row:hover {
-    background: var(--hover);
-  }
-  .sb-row.sel {
-    background: var(--accent-soft);
-    border-color: var(--accent-line);
-  }
-  .msg {
-    font-size: var(--fs-s);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    display: block;
-  }
-  .row-meta {
-    display: flex;
-    flex-wrap: wrap;
-    gap: var(--sp-2);
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-  }
-  .branch {
-    display: inline-flex;
-    align-items: center;
-    gap: 2px;
+  .browser.phone .list {
+    border-inline-end: 0;
+    padding-inline-end: 0;
   }
   .detail {
     display: flex;
@@ -330,7 +299,7 @@
   .head {
     display: flex;
     gap: var(--sp-3);
-    align-items: flex-start;
+    align-items: center;
     justify-content: space-between;
     flex-wrap: wrap;
   }
