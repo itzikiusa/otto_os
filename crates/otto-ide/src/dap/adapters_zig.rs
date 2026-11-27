@@ -389,10 +389,19 @@ async fn compile_zig_debug_artifact(
     let is_zig_file = raw_prog.ends_with(".zig") && !raw_prog.ends_with("/build.zig");
 
     if want_test {
-        let build_zig_src = if has_build_zig {
-            std::fs::read_to_string(Path::new(&zig_cwd).join("build.zig")).ok()
+        // SSH: the remote `build.zig` above the file decides the project graph, as locally.
+        let remote_build = if req.target.kind == IdeTargetKind::Ssh && is_zig_file {
+            find_remote_build_zig(req, ctx, raw_prog, env).await
         } else {
             None
+        };
+        let (zig_cwd, build_zig_src) = match remote_build {
+            Some((dir, src)) => (dir, Some(src)),
+            None if has_build_zig => {
+                let src = std::fs::read_to_string(Path::new(&zig_cwd).join("build.zig")).ok();
+                (zig_cwd.clone(), src)
+            }
+            None => (zig_cwd.clone(), None),
         };
         let build_graph = build_zig_src
             .as_deref()
@@ -417,7 +426,7 @@ async fn compile_zig_debug_artifact(
         // any age (BUG-5), and applies `compile.filters` when debugging a single test (BUG-35).
         let try_build_runner = (!is_zig_file
             && (has_build_zig || req.target.kind == IdeTargetKind::Ssh))
-            || (is_zig_file && has_build_zig && has_test_step);
+            || (is_zig_file && has_test_step);
         if try_build_runner {
             if let Some(runner_path) =
                 prepare_zig_build_runner_for_target(req, ctx, &zig_bin, &zig_cwd, env, data_dir)
@@ -713,6 +722,45 @@ async fn resolve_zig_binary(
                 "Zig compiler ('zig') not found; install Zig via IDE → Toolchains & SDKs".into(),
             )
         })
+}
+
+/// Shell walk from `$1`'s directory up to the bound `$2` (`""` = `/`): prints
+/// `ROOT:<dir>` and the nearest `build.zig`, or exits 1 when none is inside the bound.
+const ZIG_FIND_BUILD_SH: &str = r#"d=$(dirname "$1")
+while :; do
+  case "$d" in "$2"|"$2"/*) ;; *) exit 1 ;; esac
+  if [ -f "$d/build.zig" ]; then printf 'ROOT:%s\n' "$d"; exec cat "$d/build.zig"; fi
+  [ "$d" = / ] && exit 1
+  d=$(dirname "$d")
+done"#;
+
+/// SSH: the nearest remote `build.zig` above `file` inside the target root — its
+/// directory and source (BUG-35).
+async fn find_remote_build_zig(
+    req: &IdeStartDebugReq,
+    ctx: &DapStartContext,
+    file: &str,
+    env: &BTreeMap<String, String>,
+) -> Option<(String, String)> {
+    let bound = req.target.root.trim_end_matches('/').to_string();
+    let args = ["-c", ZIG_FIND_BUILD_SH, "sh", file, &bound].map(String::from);
+    let out = run_target_command(
+        &req.target,
+        ctx.ssh.as_ref(),
+        "sh",
+        &args,
+        &req.target.root,
+        env,
+        crate::proc_group::BUILD_STEP_TIMEOUT,
+    )
+    .await
+    .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let (first, src) = text.split_once('\n')?;
+    let dir = first.strip_prefix("ROOT:")?;
+    out.status
+        .success()
+        .then(|| (dir.to_string(), src.to_string()))
 }
 
 /// Debug executable path: Otto's data dir locally, the SSH user's private
@@ -2531,6 +2579,37 @@ pub fn build(b: *std.Build) void {
             super::select_zig_test_bin(&bins, &other.to_string_lossy(), true).unwrap();
         assert_eq!(chosen, "/cache/exe");
         assert!(notice.is_some_and(|n| n.contains("2 test suites")));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn remote_build_zig_walk_finds_the_project_inside_the_target_root() {
+        // BUG-35 (SSH): single-test Debug must find the build.zig above the file.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("ws");
+        let proj = root.join("proj");
+        std::fs::create_dir_all(proj.join("src/deep")).unwrap();
+        std::fs::write(proj.join("build.zig"), "// project build\n").unwrap();
+        std::fs::write(tmp.path().join("build.zig"), "// outside root\n").unwrap();
+        let run = |file: std::path::PathBuf, bound: std::path::PathBuf| async move {
+            tokio::process::Command::new("sh")
+                .args(["-c", super::ZIG_FIND_BUILD_SH, "sh"])
+                .arg(file)
+                .arg(bound)
+                .output()
+                .await
+                .unwrap()
+        };
+        let out = run(proj.join("src/deep/t.zig"), root.clone()).await;
+        assert!(out.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            format!("ROOT:{}\n// project build\n", proj.display())
+        );
+        // Never climbs above the target root to an unrelated build.zig.
+        let lone = root.join("lone");
+        std::fs::create_dir_all(&lone).unwrap();
+        assert!(!run(lone.join("t.zig"), root.clone()).await.status.success());
     }
 
     #[cfg(unix)]
