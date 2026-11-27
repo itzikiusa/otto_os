@@ -89,17 +89,111 @@ pub fn build_remote_lsp_script(root: &str, launch: &SpawnLaunch) -> String {
             .iter()
             .any(|a| a == "--tsProbeLocations" || a.starts_with("--tsProbeLocations="));
 
+    // SEC2-1 + BUG-32: Probe ONLY trusted managed and global-installation node_modules
+    // (resolved through the real ngserver symlink target), never the checkout's $PWD/node_modules.
     let ng_probe_setup = if is_ngserver {
         "NG_PROBES=\"\"; \
-         [ -d \"$PWD/node_modules\" ] && NG_PROBES=\"$PWD/node_modules\"; \
-         [ -d \"$HOME/.otto/toolchains/node/lsp/node_modules\" ] && NG_PROBES=\"${NG_PROBES:+$NG_PROBES,}$HOME/.otto/toolchains/node/lsp/node_modules\"; "
+         [ -d \"$HOME/.otto/toolchains/node/lsp/node_modules\" ] && NG_PROBES=\"$HOME/.otto/toolchains/node/lsp/node_modules\"; \
+         NG_BIN=$(command -v ngserver 2>/dev/null || true); \
+         if [ -n \"$NG_BIN\" ]; then \
+           NG_REAL=$(readlink -f \"$NG_BIN\" 2>/dev/null || realpath \"$NG_BIN\" 2>/dev/null || printf '%s' \"$NG_BIN\"); \
+           NG_CUR=$(dirname \"$NG_REAL\"); \
+           while [ \"$NG_CUR\" != \"/\" ] && [ -n \"$NG_CUR\" ]; do \
+             if [ \"$(basename \"$NG_CUR\")\" = \"node_modules\" ]; then \
+               case \",$NG_PROBES,\" in *\",$NG_CUR,\"*) ;; *) NG_PROBES=\"${NG_PROBES:+$NG_PROBES,}$NG_CUR\" ;; esac; \
+             fi; \
+             NG_CUR=$(dirname \"$NG_CUR\"); \
+           done; \
+         fi; "
     } else {
         ""
     };
+    let is_zls = Path::new(&launch.cmd)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n == "zls");
+
+    // BUG-4 + BUG-6 (SSH): When launching ZLS remotely, prepend the project's pinned
+    // `zig_home` onto PATH and select the per-minor managed ZLS slot
+    // (`$HOME/.otto/toolchains/zig/zls/<maj>.<min>/zls`) matching the selected Zig
+    // compiler so installing ZLS for another project's Zig minor cannot clobber this one.
+    let zls_slot_setup = if is_zls {
+        let mut zig_probes = String::new();
+        let mut zig_path_prefix = String::new();
+        if let Some(zh) = launch
+            .zig_home
+            .as_deref()
+            .map(str::trim)
+            .map(|s| s.trim_end_matches('/'))
+            .filter(|s| !s.is_empty())
+        {
+            let q_dir = posix_quote(zh);
+            let q_bin_dir = posix_quote(&format!("{zh}/bin"));
+            let q_zig = posix_quote(&format!("{zh}/zig"));
+            let q_bin_zig = posix_quote(&format!("{zh}/bin/zig"));
+            zig_path_prefix = format!(
+                "[ -d {q_bin_dir} ] && PATH={q_bin_dir}:\"$PATH\"; [ -d {q_dir} ] && PATH={q_dir}:\"$PATH\"; export PATH; "
+            );
+            zig_probes.push_str(&format!("{q_zig} {q_bin_zig} "));
+        }
+        format!(
+            "{zig_path_prefix}ZLS_BIN=\"\"; ZIG_MM=\"\"; \
+             for __zb in {zig_probes}\"$HOME/.otto/toolchains/zig/current/zig\" \"$HOME/.otto/toolchains/zig/current/bin/zig\" zig; do \
+               if [ -x \"$__zb\" ] || command -v \"$__zb\" >/dev/null 2>&1; then \
+                 ZIG_MM=$(\"$__zb\" version 2>/dev/null | head -n 1 | sed -n 's/^\\([0-9][0-9]*\\.[0-9][0-9]*\\).*/\\1/p'); \
+                 [ -n \"$ZIG_MM\" ] && break; \
+               fi; \
+             done; \
+             if [ -n \"$ZIG_MM\" ] && [ -x \"$HOME/.otto/toolchains/zig/zls/$ZIG_MM/zls\" ]; then \
+               ZLS_BIN=\"$HOME/.otto/toolchains/zig/zls/$ZIG_MM/zls\"; \
+             fi; "
+        )
+    } else {
+        String::new()
+    };
+
+    let is_csharp_ls = Path::new(&launch.cmd)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n == "csharp-ls");
+
+    // BUG-22 (SSH): Select the per-SDK-major managed csharp-ls slot (`net8`/`net9`/`net10`)
+    // matching the remote active `dotnet --version` so .NET 8 and .NET 9 projects coexist.
+    let csharp_slot_setup = if is_csharp_ls {
+        "CS_BIN=\"\"; \
+         if command -v dotnet >/dev/null 2>&1; then \
+           DN_MAJ=$(dotnet --version 2>/dev/null | head -n 1 | cut -d. -f1); \
+           case \"$DN_MAJ\" in \
+             8) CS_SLOT='net8' ;; \
+             9) CS_SLOT='net9' ;; \
+             *) CS_SLOT='net10' ;; \
+           esac; \
+           if [ -x \"$HOME/.otto/toolchains/dotnet/tools/$CS_SLOT/csharp-ls\" ]; then \
+             CS_BIN=\"$HOME/.otto/toolchains/dotnet/tools/$CS_SLOT/csharp-ls\"; \
+           fi; \
+         fi; "
+    } else {
+        ""
+    };
+
     let invoke_primary = if is_ngserver {
         format!(
             "{invoke_primary} ${{NG_PROBES:+--tsProbeLocations \"$NG_PROBES\" --ngProbeLocations \"$NG_PROBES\"}}"
         )
+    } else if is_zls {
+        let extra_args = launch
+            .args
+            .iter()
+            .map(|a| format!(" {}", posix_quote(a)))
+            .collect::<String>();
+        format!("\"${{ZLS_BIN:-zls}}\"{extra_args}")
+    } else if is_csharp_ls {
+        let extra_args = launch
+            .args
+            .iter()
+            .map(|a| format!(" {}", posix_quote(a)))
+            .collect::<String>();
+        format!("\"${{CS_BIN:-csharp-ls}}\"{extra_args}")
     } else {
         invoke_primary
     };
@@ -112,14 +206,14 @@ pub fn build_remote_lsp_script(root: &str, launch: &SpawnLaunch) -> String {
         let p_check = posix_quote(&launch.cmd);
         let fb_check = posix_quote(fb);
         format!(
-            "cd {quoted_root} && {path_setup}; {mem_exports}; {ng_probe_setup}\
-             if command -v {p_check} >/dev/null 2>&1; then exec {invoke_primary}; \
+            "cd {quoted_root} && {path_setup}; {mem_exports}; {ng_probe_setup}{zls_slot_setup}{csharp_slot_setup}\
+             if [ -n \"${{ZLS_BIN:-}}\" ] || [ -n \"${{CS_BIN:-}}\" ] || command -v {p_check} >/dev/null 2>&1; then exec {invoke_primary}; \
              elif command -v {fb_check} >/dev/null 2>&1; then exec {invoke_fb}; \
              else echo 'otto-lsp: language server not found on remote host' >&2; exit 127; fi"
         )
     } else {
         format!(
-            "cd {quoted_root} && {path_setup}; {mem_exports}; {ng_probe_setup}exec {invoke_primary}"
+            "cd {quoted_root} && {path_setup}; {mem_exports}; {ng_probe_setup}{zls_slot_setup}{csharp_slot_setup}exec {invoke_primary}"
         )
     };
     crate::target::ssh_exec::wrap_remote_stdio_with_eof_kill(&inner)
@@ -329,6 +423,7 @@ pub(crate) fn terminate_process_group(pgid: u32) {
 fn pinned_local_lsp_sdk_dirs(
     lang: &str,
     root: &str,
+    opened_project_root: Option<&str>,
     environments: Option<&EnvironmentManager>,
     owner_is_root: bool,
 ) -> Vec<PathBuf> {
@@ -341,7 +436,7 @@ fn pinned_local_lsp_sdk_dirs(
     let norm = servers::normalize_lsp_lang(lang);
     if norm == "zig" {
         let Some(zig_home) = envs
-            .cached_project_env(root)
+            .cached_project_env_for_module(root, opened_project_root)
             .and_then(|e| e.zig_home)
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
@@ -395,7 +490,7 @@ fn validate_dotnet_root_outside_workspace(
 
 fn pinned_validated_dotnet_root(root: &str, envs: &EnvironmentManager) -> Option<PathBuf> {
     let raw = envs
-        .cached_project_env(root)
+        .cached_project_env_or_ancestor(root)
         .and_then(|e| e.dotnet_root)
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())?;
@@ -428,15 +523,51 @@ pub(crate) fn resolve_local_lsp_dotnet_root(
     servers::detect_toolchain_dotnet_root(data_dir)
 }
 
+/// Select the per-SDK-major managed `csharp-ls` slot binary (`toolchains/dotnet/tools/net<major>/csharp-ls`)
+/// matching `dotnet_root`'s active SDK version when installed, so .NET 8 and .NET 9 projects
+/// coexist without overwriting each other's language server (BUG-22).
+pub(crate) fn resolve_local_csharp_ls_for_dotnet_root(
+    data_dir: &Path,
+    dotnet_root: &Path,
+    fallback_cmd: &str,
+) -> String {
+    let is_csharp_ls = Path::new(fallback_cmd)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n == "csharp-ls");
+    if !is_csharp_ls {
+        return fallback_cmd.to_string();
+    }
+    let dir_ver = crate::toolchains::discovery::dotnet_dir_version(dotnet_root);
+    let bin_ver = (dir_ver == "system")
+        .then(|| {
+            crate::toolchains::discovery::dotnet_bin_in_root(dotnet_root)
+                .and_then(|bin| crate::toolchains::discovery::read_dotnet_bin_version(&bin))
+        })
+        .flatten();
+    let ver_opt = if dir_ver != "system" {
+        Some(dir_ver.as_str())
+    } else {
+        bin_ver.as_deref()
+    };
+    let slot = crate::toolchains_catalog::dotnet_sdk_major_slot(ver_opt);
+    let cand = data_dir
+        .join("toolchains/dotnet/tools")
+        .join(slot)
+        .join("csharp-ls");
+    if crate::toolchains::discovery::is_executable_file(&cand) {
+        return cand.to_string_lossy().into_owned();
+    }
+    fallback_cmd.to_string()
+}
+
 /// Compute `--tsProbeLocations` and `--ngProbeLocations` args for Angular's `ngserver`
-/// when not already supplied by the caller (BUG-32).
+/// when not already supplied by the caller (SEC2-1, BUG-32).
 pub(crate) fn angular_ngserver_probe_args(
     data_dir: &Path,
     lang: &str,
-    root: &str,
     cmd: &str,
     existing_args: &[String],
-    owner_is_root: bool,
 ) -> Vec<String> {
     if servers::normalize_lsp_lang(lang) != "angular" {
         return Vec::new();
@@ -454,7 +585,7 @@ pub(crate) fn angular_ngserver_probe_args(
     {
         return Vec::new();
     }
-    let probes = servers::resolve_angular_probe_locations(data_dir, root, cmd, owner_is_root);
+    let probes = servers::resolve_angular_probe_locations(data_dir, cmd);
     if probes.is_empty() {
         return Vec::new();
     }
@@ -590,6 +721,7 @@ pub(crate) fn build_process_spawner(
             let pinned_sdk_dirs = pinned_local_lsp_sdk_dirs(
                 &key.lang,
                 &key.root,
+                launch.project_root.as_deref(),
                 environments.as_ref(),
                 owner_is_root,
             );
@@ -604,7 +736,35 @@ pub(crate) fn build_process_spawner(
                 canon_ws.as_deref(),
             );
 
-            let mut c = tokio::process::Command::new(&launch.cmd);
+            let resolved_dotnet_root =
+                if matches!(servers::normalize_lsp_lang(&key.lang), "csharp" | "fsharp") {
+                    let pinned_dotnet = environments
+                        .as_ref()
+                        .and_then(|e| e.cached_project_env_or_ancestor(&key.root))
+                        .and_then(|e| e.dotnet_root)
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .map(PathBuf::from);
+                    resolve_local_lsp_dotnet_root(
+                        &data_dir,
+                        &key.root,
+                        pinned_dotnet.as_deref(),
+                        owner_is_root,
+                    )
+                } else {
+                    None
+                };
+            let spawn_cmd = if servers::normalize_lsp_lang(&key.lang) == "csharp" {
+                if let Some(ref dr) = resolved_dotnet_root {
+                    resolve_local_csharp_ls_for_dotnet_root(&data_dir, dr, &launch.cmd)
+                } else {
+                    launch.cmd.clone()
+                }
+            } else {
+                launch.cmd.clone()
+            };
+
+            let mut c = tokio::process::Command::new(&spawn_cmd);
             c.env_clear();
             c.envs(collect_safe_non_root_base_env());
             c.args(&launch.args)
@@ -617,31 +777,11 @@ pub(crate) fn build_process_spawner(
                     c.env("JAVA_HOME", java_home);
                 }
             }
-            if matches!(servers::normalize_lsp_lang(&key.lang), "csharp" | "fsharp") {
-                let pinned_dotnet = environments
-                    .as_ref()
-                    .and_then(|e| e.cached_project_env(&key.root))
-                    .and_then(|e| e.dotnet_root)
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .map(PathBuf::from);
-                if let Some(dotnet_root) = resolve_local_lsp_dotnet_root(
-                    &data_dir,
-                    &key.root,
-                    pinned_dotnet.as_deref(),
-                    owner_is_root,
-                ) {
-                    c.env("DOTNET_ROOT", dotnet_root);
-                }
+            if let Some(dotnet_root) = resolved_dotnet_root {
+                c.env("DOTNET_ROOT", dotnet_root);
             }
-            let ng_probe_args = angular_ngserver_probe_args(
-                &data_dir,
-                &key.lang,
-                &key.root,
-                &launch.cmd,
-                &launch.args,
-                owner_is_root,
-            );
+            let ng_probe_args =
+                angular_ngserver_probe_args(&data_dir, &key.lang, &launch.cmd, &launch.args);
             if !ng_probe_args.is_empty() {
                 c.args(&ng_probe_args);
             }
@@ -938,6 +1078,7 @@ mod resource_metric_tests {
             args: vec![],
             fallback_cmd: None,
             fallback_args: vec![],
+            ..Default::default()
         };
         let cs_script = build_remote_lsp_script("/srv/app", &cs_launch);
         assert!(
@@ -954,23 +1095,35 @@ mod resource_metric_tests {
             args: vec!["--stdio".into()],
             fallback_cmd: Some("vscode-html-language-server".into()),
             fallback_args: vec!["--stdio".into()],
+            ..Default::default()
         };
         let ng_script = build_remote_lsp_script("/srv/ng-app", &ng_launch);
         assert!(
             ng_script.contains("--tsProbeLocations") && ng_script.contains("--ngProbeLocations"),
             "BUG-32: remote ngserver must pass probe locations: {ng_script}"
         );
+        assert!(
+            !ng_script.contains("$PWD/node_modules"),
+            "SEC2-1: remote ngserver must never auto-probe workspace $PWD/node_modules: {ng_script}"
+        );
+        assert!(
+            ng_script.contains("readlink -f") || ng_script.contains("realpath"),
+            "BUG-32: remote ngserver must resolve global symlink node_modules: {ng_script}"
+        );
     }
 
     #[test]
-    fn local_lsp_restores_validated_dotnet_root_and_rejects_workspace_local_dotnet() {
+    fn local_lsp_restores_validated_dotnet_root_for_nested_child_modules_and_rejects_workspace_local_dotnet(
+    ) {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
-        let ws = tmp.path().join("workspace");
+        let ws = tmp.path().join("umbrella");
+        let child_mod = ws.join("services/orders");
         let ws_dotnet = ws.join("evil-dotnet");
         let pinned_dotnet = tmp.path().join("sdks/dotnet-9");
         let data_dir = tmp.path().join("data");
         let managed_dotnet = data_dir.join("toolchains/dotnet/current");
+        std::fs::create_dir_all(&child_mod).unwrap();
         for dir in [&ws_dotnet, &pinned_dotnet, &managed_dotnet] {
             std::fs::create_dir_all(dir).unwrap();
             let bin = dir.join("dotnet");
@@ -978,10 +1131,26 @@ mod resource_metric_tests {
             std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         let ws_str = ws.to_string_lossy().into_owned();
+        let child_str = child_mod.to_string_lossy().into_owned();
 
-        // BUG-23: root owner gets validated pinned DOTNET_ROOT outside workspace.
-        let picked = resolve_local_lsp_dotnet_root(&data_dir, &ws_str, Some(&pinned_dotnet), true)
-            .expect("pinned dotnet root");
+        // BUG-23: A nested .NET module inherits the umbrella project's pinned DOTNET_ROOT
+        // through EnvironmentManager::cached_project_env_or_ancestor.
+        let envs = EnvironmentManager::new(data_dir.clone());
+        let mut proj_env = crate::types::IdeProjectEnvironment::default();
+        proj_env.dotnet_root = Some(pinned_dotnet.to_string_lossy().into_owned());
+        envs.seed_snapshot(&format!("local:{ws_str}"), proj_env);
+
+        let inherited_dirs =
+            pinned_local_lsp_sdk_dirs("csharp", &child_str, Some(&ws_str), Some(&envs), true);
+        assert_eq!(inherited_dirs, vec![pinned_dotnet.clone()]);
+
+        let inherited_root = envs
+            .cached_project_env_or_ancestor(&child_str)
+            .and_then(|e| e.dotnet_root)
+            .map(PathBuf::from);
+        let picked =
+            resolve_local_lsp_dotnet_root(&data_dir, &child_str, inherited_root.as_deref(), true)
+                .expect("inherited pinned dotnet root");
         assert_eq!(picked, pinned_dotnet);
 
         // Workspace-local dotnet_root is rejected and falls back to managed DOTNET_ROOT.
@@ -997,52 +1166,254 @@ mod resource_metric_tests {
     }
 
     #[test]
-    fn angular_ngserver_probe_args_passes_managed_and_workspace_node_modules() {
+    fn angular_ngserver_probe_args_excludes_workspace_and_resolves_global_symlink_node_modules() {
+        use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path().join("data");
-        let managed_nm = data_dir.join("toolchains/node/lsp/node_modules");
         let ws = tmp.path().join("ng-workspace");
         let ws_nm = ws.join("node_modules");
-        std::fs::create_dir_all(&managed_nm).unwrap();
         std::fs::create_dir_all(&ws_nm).unwrap();
-        let ng_bin = managed_nm.join(".bin/ngserver");
 
-        let root_args = angular_ngserver_probe_args(
+        // Simulate global `npm install -g @angular/language-server`:
+        // `<prefix>/bin/ngserver` -> `../lib/node_modules/@angular/language-server/bin/ngserver`
+        // with NO managed toolchain dir installed.
+        let prefix = tmp.path().join("global-npm");
+        let global_nm = prefix.join("lib/node_modules");
+        let real_bin = global_nm.join("@angular/language-server/bin/ngserver");
+        let bin_dir = prefix.join("bin");
+        std::fs::create_dir_all(real_bin.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::write(&real_bin, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&real_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let sym_bin = bin_dir.join("ngserver");
+        std::os::unix::fs::symlink(&real_bin, &sym_bin).unwrap();
+
+        let args = angular_ngserver_probe_args(
             &data_dir,
             "angular",
-            ws.to_str().unwrap(),
-            ng_bin.to_str().unwrap(),
+            sym_bin.to_str().unwrap(),
             &["--stdio".into()],
-            true,
         );
-        assert_eq!(root_args.len(), 4);
-        assert_eq!(root_args[0], "--tsProbeLocations");
-        assert_eq!(root_args[2], "--ngProbeLocations");
-        assert!(root_args[1].contains(ws_nm.to_str().unwrap()));
-        assert!(root_args[1].contains(managed_nm.to_str().unwrap()));
-
-        // Non-root must not probe workspace node_modules, only managed node_modules.
-        let non_root_args = angular_ngserver_probe_args(
-            &data_dir,
-            "angular",
-            ws.to_str().unwrap(),
-            ng_bin.to_str().unwrap(),
-            &["--stdio".into()],
-            false,
+        assert_eq!(
+            args.len(),
+            4,
+            "BUG-32: global symlink ngserver must receive probes: {args:?}"
         );
-        assert_eq!(non_root_args.len(), 4);
-        assert!(!non_root_args[1].contains(ws_nm.to_str().unwrap()));
-        assert!(non_root_args[1].contains(managed_nm.to_str().unwrap()));
+        assert_eq!(args[0], "--tsProbeLocations");
+        assert_eq!(args[2], "--ngProbeLocations");
+        let canon_global_nm = std::fs::canonicalize(&global_nm).unwrap();
+        assert!(
+            args[1].contains(canon_global_nm.to_str().unwrap()),
+            "BUG-32: probes must contain canonical global lib/node_modules: {:?}",
+            args[1]
+        );
+        // SEC2-1: workspace node_modules must NEVER be probed automatically.
+        assert!(
+            !args[1].contains(ws_nm.to_str().unwrap()),
+            "SEC2-1: workspace node_modules must never be included in ngserver probes: {:?}",
+            args[1]
+        );
 
         // Fallback html server must not receive ngserver-only flags.
         let fb_args = angular_ngserver_probe_args(
             &data_dir,
             "angular",
-            ws.to_str().unwrap(),
             "/usr/local/bin/vscode-html-language-server",
             &["--stdio".into()],
-            true,
         );
         assert!(fb_args.is_empty());
+    }
+
+    #[test]
+    fn umbrella_zig_pin_wins_over_managed_current_for_child_build_zig_module() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // BUG-6: When an umbrella project pins `zig_home` and a nested child module
+        // has its own `build.zig` with no separate environment or module_sdks entry,
+        // `pinned_local_lsp_sdk_dirs` must inherit the umbrella pin and place it ahead
+        // of Otto's managed `toolchains/zig/current`.
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        let umbrella = tmp.path().join("umbrella");
+        let child_mod = umbrella.join("packages/worker");
+        let pinned_zig = tmp.path().join("sdks/zig-0.13.0");
+        let managed_zig = data_dir.join("toolchains/zig/current");
+        std::fs::create_dir_all(&child_mod).unwrap();
+        std::fs::write(child_mod.join("build.zig"), "").unwrap();
+        for dir in [&pinned_zig, &managed_zig] {
+            std::fs::create_dir_all(dir).unwrap();
+            let bin = dir.join("zig");
+            std::fs::write(&bin, "#!/bin/sh\necho 0.13.0\n").unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let umbrella_s = umbrella.to_string_lossy().into_owned();
+        let child_s = child_mod.to_string_lossy().into_owned();
+        let envs = EnvironmentManager::new(data_dir);
+        envs.seed_snapshot(
+            &format!("local:{umbrella_s}"),
+            crate::types::IdeProjectEnvironment {
+                zig_home: Some(pinned_zig.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+        );
+
+        let pinned_dirs =
+            pinned_local_lsp_sdk_dirs("zig", &child_s, Some(&umbrella_s), Some(&envs), true);
+        assert_eq!(pinned_dirs, vec![pinned_zig.clone()]);
+
+        let aug = format!("{}:/usr/bin:/bin", managed_zig.display());
+        let merged = merge_local_lsp_path(&pinned_dirs, &aug, None, &child_mod, None);
+        let pin_pos = merged
+            .find(&pinned_zig.to_string_lossy().to_string())
+            .unwrap();
+        let mgr_pos = merged
+            .find(&managed_zig.to_string_lossy().to_string())
+            .unwrap();
+        assert!(
+            pin_pos < mgr_pos,
+            "inherited umbrella Zig pin ({pin_pos}) must precede managed zig/current ({mgr_pos}): {merged}"
+        );
+
+        // Unrelated directory outside the umbrella must NOT inherit the umbrella pin.
+        let other = tmp.path().join("other-project");
+        std::fs::create_dir_all(&other).unwrap();
+        let other_dirs = pinned_local_lsp_sdk_dirs(
+            "zig",
+            &other.to_string_lossy(),
+            Some(&umbrella_s),
+            Some(&envs),
+            true,
+        );
+        assert!(other_dirs.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_zig_lsp_script_selects_pinned_minor_zls_slot_even_after_global_link_clobbered() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // BUG-4 (SSH): After installing ZLS 0.14 overwrites `$HOME/.otto/toolchains/zig/bin/zls`,
+        // launching ZLS for an SSH project pinned to Zig 0.13 must still exec the 0.13 slot.
+        let tmp = tempfile::tempdir().unwrap();
+        let fake_home = tmp.path().join("home");
+        let proj = tmp.path().join("remote-zig-013");
+        let sdk_13 = fake_home.join(".otto/toolchains/zig/sdks/0.13.0");
+        let zls_13_dir = fake_home.join(".otto/toolchains/zig/zls/0.13");
+        let zls_14_dir = fake_home.join(".otto/toolchains/zig/zls/0.14");
+        let global_bin = fake_home.join(".otto/toolchains/zig/bin");
+        for d in [&proj, &sdk_13, &zls_13_dir, &zls_14_dir, &global_bin] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let write_exec = |p: &Path, body: &str| {
+            std::fs::write(p, body).unwrap();
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        write_exec(&sdk_13.join("zig"), "#!/bin/sh\necho 0.13.0\n");
+        write_exec(&zls_13_dir.join("zls"), "#!/bin/sh\necho ZLS_SLOT_0_13\n");
+        write_exec(&zls_14_dir.join("zls"), "#!/bin/sh\necho ZLS_SLOT_0_14\n");
+        // Global symlink points at 0.14 (clobbered by second project's install).
+        std::os::unix::fs::symlink(zls_14_dir.join("zls"), global_bin.join("zls")).unwrap();
+
+        let launch = SpawnLaunch {
+            cmd: "zls".into(),
+            args: vec![],
+            fallback_cmd: None,
+            fallback_args: vec![],
+            project_root: Some(proj.to_string_lossy().into_owned()),
+            zig_home: Some(sdk_13.to_string_lossy().into_owned()),
+        };
+        let script = build_remote_lsp_script(&proj.to_string_lossy(), &launch);
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .env("HOME", &fake_home)
+            .env("PATH", "/usr/bin:/bin")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "remote zig lsp script failed: {:?}",
+            out
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("ZLS_SLOT_0_13") && !stdout.contains("ZLS_SLOT_0_14"),
+            "BUG-4: expected SSH launcher to exec 0.13 ZLS slot, got: {stdout}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn csharp_ls_selects_per_sdk_major_slot_locally_and_remotely() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        let tools = data_dir.join("toolchains/dotnet/tools");
+        let net8_dir = tools.join("net8");
+        let net9_dir = tools.join("net9");
+        let sdk8 = tmp.path().join("sdk8");
+        let sdk9 = tmp.path().join("sdk9");
+        for d in [&net8_dir, &net9_dir, &sdk8, &sdk9] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let write_exec = |p: &Path, body: &str| {
+            std::fs::write(p, body).unwrap();
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        write_exec(&sdk8.join("dotnet"), "#!/bin/sh\necho 8.0.408\n");
+        write_exec(&sdk9.join("dotnet"), "#!/bin/sh\necho 9.0.200\n");
+        write_exec(&net8_dir.join("csharp-ls"), "#!/bin/sh\necho CSHARP_NET8\n");
+        write_exec(&net9_dir.join("csharp-ls"), "#!/bin/sh\necho CSHARP_NET9\n");
+
+        let picked8 = resolve_local_csharp_ls_for_dotnet_root(&data_dir, &sdk8, "csharp-ls");
+        let picked9 = resolve_local_csharp_ls_for_dotnet_root(&data_dir, &sdk9, "csharp-ls");
+        assert_eq!(picked8, net8_dir.join("csharp-ls").to_string_lossy());
+        assert_eq!(picked9, net9_dir.join("csharp-ls").to_string_lossy());
+
+        // Remote SSH script also picks the net8 slot when active `dotnet --version` is 8.x.
+        let fake_home = tmp.path().join("remote-home");
+        let r_net8 = fake_home.join(".otto/toolchains/dotnet/tools/net8");
+        let r_net9 = fake_home.join(".otto/toolchains/dotnet/tools/net9");
+        let proj = tmp.path().join("proj8");
+        for d in [&r_net8, &r_net9, &proj] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        write_exec(
+            &r_net8.join("csharp-ls"),
+            "#!/bin/sh\necho REMOTE_CS_NET8\n",
+        );
+        write_exec(
+            &r_net9.join("csharp-ls"),
+            "#!/bin/sh\necho REMOTE_CS_NET9\n",
+        );
+        let launch = SpawnLaunch {
+            cmd: "csharp-ls".into(),
+            args: vec![],
+            fallback_cmd: None,
+            fallback_args: vec![],
+            project_root: Some(proj.to_string_lossy().into_owned()),
+            zig_home: None,
+        };
+        let script = build_remote_lsp_script(&proj.to_string_lossy(), &launch);
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .env("HOME", &fake_home)
+            .env("PATH", format!("{}:/usr/bin:/bin", sdk8.display()))
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "remote csharp-ls script failed: {:?}",
+            out
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("REMOTE_CS_NET8") && !stdout.contains("REMOTE_CS_NET9"),
+            "BUG-22: expected SSH launcher to pick net8 csharp-ls slot, got: {stdout}"
+        );
     }
 }

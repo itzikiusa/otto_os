@@ -71,6 +71,10 @@ pub struct SpawnLaunch {
     pub args: Vec<String>,
     pub fallback_cmd: Option<String>,
     pub fallback_args: Vec<String>,
+    /// Opened umbrella/project root so child modules can inherit project-level SDK pins (BUG-6).
+    pub project_root: Option<String>,
+    /// Project-pinned Zig SDK home so remote SSH launches select the matching ZLS slot (BUG-4).
+    pub zig_home: Option<String>,
 }
 
 impl SpawnLaunch {
@@ -80,6 +84,8 @@ impl SpawnLaunch {
             args,
             fallback_cmd: None,
             fallback_args: Vec::new(),
+            project_root: None,
+            zig_home: None,
         }
     }
 }
