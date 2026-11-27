@@ -265,26 +265,176 @@ pub(super) async fn notebook_shutdown<S: IdeCtx>(
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use otto_core::auth::{BoxFuture, RoleChecker};
+    use otto_core::domain::{User, WorkspaceRole};
+    use otto_core::secrets::SecretStore;
+    use otto_core::{Error, Id, Result};
+    use otto_state::DbPool;
+    use tower::ServiceExt;
+
     use super::*;
-    use otto_core::domain::User;
+    use crate::{IdeCtx, IdeEngine, IdeSshSpec};
+
+    struct NoopSecrets;
+    impl SecretStore for NoopSecrets {
+        fn put(&self, _k: &str, _v: &str) -> Result<()> {
+            Ok(())
+        }
+        fn get(&self, _k: &str) -> Result<Option<String>> {
+            Ok(None)
+        }
+        fn delete(&self, _k: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    struct AllowRoles;
+    impl RoleChecker for AllowRoles {
+        fn check<'a>(
+            &'a self,
+            _user: &'a User,
+            _workspace_id: &'a Id,
+            _min: WorkspaceRole,
+        ) -> BoxFuture<'a, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[derive(Clone)]
+    struct TestNotebookCtx {
+        ide: Arc<IdeEngine>,
+        pool: DbPool,
+        secrets: Arc<dyn SecretStore>,
+        roles: Arc<dyn RoleChecker>,
+        data_dir: PathBuf,
+    }
+
+    impl IdeCtx for TestNotebookCtx {
+        fn ide(&self) -> &Arc<IdeEngine> {
+            &self.ide
+        }
+        fn pool(&self) -> DbPool {
+            self.pool.clone()
+        }
+        fn secrets(&self) -> &Arc<dyn SecretStore> {
+            &self.secrets
+        }
+        fn data_dir(&self) -> &Path {
+            &self.data_dir
+        }
+        fn roles(&self) -> &Arc<dyn RoleChecker> {
+            &self.roles
+        }
+        fn resolve_ssh_connection<'a>(
+            &'a self,
+            _user: &'a User,
+            _connection_id: &'a Id,
+        ) -> BoxFuture<'a, Result<IdeSshSpec>> {
+            Box::pin(async { Err(Error::Invalid("ssh unused in test".into())) })
+        }
+        fn authorize_local_target<'a>(
+            &'a self,
+            _user: &'a User,
+            _spec: &'a IdeTargetSpec,
+            _write: bool,
+        ) -> BoxFuture<'a, Result<()>> {
+            // Simulate a non-root workspace editor who HAS local workspace write access;
+            // SEC-8 requires the notebook execution gate itself to reject non-root callers.
+            Box::pin(async { Ok(()) })
+        }
+    }
 
     fn make_user(is_root: bool) -> User {
         User {
-            id: "u1".into(),
-            username: "u".into(),
-            display_name: "U".into(),
+            id: if is_root { "root-1" } else { "editor-1" }.into(),
+            username: if is_root { "root" } else { "editor" }.into(),
+            display_name: "User".into(),
             is_root,
             disabled: false,
             created_at: chrono::Utc::now(),
         }
     }
 
-    #[test]
-    fn notebook_exec_authority_rejects_non_root_and_allows_root() {
-        let non_root = make_user(false);
-        assert!(require_notebook_exec_authority(&non_root).is_err());
+    #[tokio::test]
+    async fn routed_notebook_execute_and_restart_reject_non_root_workspace_editor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("workspace");
+        std::fs::create_dir_all(&ws).unwrap();
+        let db_path = tmp.path().join("test.sqlite");
+        let pool = otto_state::open(&db_path).await.unwrap();
+        let data_dir = tmp.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let ctx = TestNotebookCtx {
+            ide: Arc::new(IdeEngine::new(data_dir.clone())),
+            pool,
+            secrets: Arc::new(NoopSecrets),
+            roles: Arc::new(AllowRoles),
+            data_dir,
+        };
+        let app = crate::http::api_router::<TestNotebookCtx>().with_state(ctx);
+        let non_root = AuthUser(make_user(false));
+        let root_str = ws.to_string_lossy().into_owned();
 
-        let root = make_user(true);
-        assert!(require_notebook_exec_authority(&root).is_ok());
+        // SEC-8: Non-root workspace editor must receive 403 Forbidden from routed
+        // POST /notebooks/execute and POST /notebooks/restart before any interpreter runs.
+        let exec_body = serde_json::json!({
+            "target": { "kind": "local", "root": root_str },
+            "notebook_path": ws.join("demo.ipynb").to_string_lossy(),
+            "code": "1 + 1",
+            "interpreter": "/nonexistent/must-never-be-resolved"
+        });
+        let exec_req = Request::builder()
+            .method("POST")
+            .uri("/ide/notebooks/execute")
+            .header("content-type", "application/json")
+            .extension(non_root.clone())
+            .body(Body::from(exec_body.to_string()))
+            .unwrap();
+        let exec_resp = app.clone().oneshot(exec_req).await.unwrap();
+        assert_eq!(
+            exec_resp.status(),
+            StatusCode::FORBIDDEN,
+            "SEC-8: routed /ide/notebooks/execute must reject non-root editor with 403"
+        );
+
+        let restart_body = serde_json::json!({
+            "target": { "kind": "local", "root": ws.to_string_lossy() },
+            "notebook_path": ws.join("demo.ipynb").to_string_lossy(),
+            "interpreter": "/nonexistent/must-never-be-resolved"
+        });
+        let restart_req = Request::builder()
+            .method("POST")
+            .uri("/ide/notebooks/restart")
+            .header("content-type", "application/json")
+            .extension(non_root.clone())
+            .body(Body::from(restart_body.to_string()))
+            .unwrap();
+        let restart_resp = app.clone().oneshot(restart_req).await.unwrap();
+        assert_eq!(
+            restart_resp.status(),
+            StatusCode::FORBIDDEN,
+            "SEC-8: routed /ide/notebooks/restart must reject non-root editor with 403"
+        );
+
+        let interrupt_req = Request::builder()
+            .method("POST")
+            .uri("/ide/notebooks/interrupt")
+            .header("content-type", "application/json")
+            .extension(non_root)
+            .body(Body::from(restart_body.to_string()))
+            .unwrap();
+        let interrupt_resp = app.oneshot(interrupt_req).await.unwrap();
+        assert_eq!(
+            interrupt_resp.status(),
+            StatusCode::FORBIDDEN,
+            "SEC-8: routed /notebooks/interrupt must reject non-root editor with 403"
+        );
+
+        assert!(require_notebook_exec_authority(&make_user(true)).is_ok());
     }
 }

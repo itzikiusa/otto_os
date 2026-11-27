@@ -1,11 +1,11 @@
 <script lang="ts">
   // Interactive Jupyter Notebook (.ipynb) editor for the Otto IDE.
   // Supports opening/editing/saving nbformat v4.5 notebooks, running individual or
-  // all code cells on a persistent Python kernel, rich outputs (streams, DataFrame
-  // HTML tables in sandboxed iframes, matplotlib/PNG/SVG images, tracebacks),
-  // kernel selection (venv/uv/conda/poetry/kernelspecs), GPU/MPS badge, interrupt,
-  // restart, live Variables inspector, and cell-level DAP debugging.
-  import { untrack } from 'svelte';
+  // all code cells on a persistent built-in Python kernel, rich outputs (streams,
+  // _repr_html_ tables in sandboxed iframes, matplotlib/PNG/SVG images, tracebacks),
+  // interpreter selection (venv/uv/conda/poetry/system Python), GPU/MPS badge,
+  // interrupt, restart, live Variables inspector, and isolated cell DAP debugging.
+  import { onDestroy, untrack } from 'svelte';
   import { api } from '../../../lib/api/client';
   import type {
     IdeMlAcceleratorInfo,
@@ -22,7 +22,6 @@
   import { ide } from '../ideStore.svelte';
   import {
     addNotebookCell,
-    applyNotebookExecutionById,
     changeNotebookCellType,
     clearNotebookOutputs,
     deleteNotebookCell,
@@ -33,8 +32,8 @@
     updateNotebookCellSource,
     type NotebookCellType,
     type NotebookDoc,
-    type NotebookOutput,
   } from './ideNotebookModel';
+  import { executeNotebookCellGuarded } from './ideNotebookRunner';
 
   interface Props {
     path: string;
@@ -59,6 +58,22 @@
   let variables = $state<IdeNotebookVariable[]>([]);
   let varsOpen = $state(false);
   let activeSessionId = $state<string | null>(null);
+  let disposed = false;
+  let viewToken = 0;
+
+  onDestroy(() => {
+    disposed = true;
+    viewToken += 1;
+    runningAll = false;
+  });
+
+  function switchToRawText(): void {
+    const origPath = path;
+    disposed = true;
+    viewToken += 1;
+    runningAll = false;
+    onswitchtext(origPath);
+  }
 
   $effect(() => {
     if (path === lastParsedPath && content === lastSerialized) return;
@@ -72,6 +87,7 @@
   $effect(() => {
     const p = path;
     untrack(() => {
+      viewToken += 1;
       runningCellId = null;
       runningAll = false;
       variables = [];
@@ -83,7 +99,7 @@
   });
 
   function commitDoc(next: NotebookDoc, targetPath: string = path): void {
-    if (targetPath !== path) return;
+    if (disposed || targetPath !== path) return;
     doc = next;
     const json = serializeIpynb(next);
     lastParsedPath = targetPath;
@@ -119,34 +135,27 @@
   }
 
   async function runCellById(cellId: string): Promise<boolean> {
-    const cell = doc.cells.find((c) => c.id === cellId);
-    if (!cell || cell.cell_type !== 'code' || runningCellId !== null) return false;
-    const origPath = path;
-    runningCellId = cellId;
-    try {
-      const resp = await api.post<IdeNotebookExecuteResp>('/ide/notebooks/execute', {
-        target: ide.target,
-        notebook_path: origPath,
-        code: cell.source,
-        interpreter: selectedInterpreter || undefined,
-      });
-      if (path !== origPath) return false;
-      activeSessionId = resp.session_id;
-      variables = resp.variables ?? [];
-      const { doc: next, applied } = applyNotebookExecutionById(
-        doc,
-        cellId,
-        resp.execution_count,
-        (resp.outputs ?? []) as unknown as NotebookOutput[],
-      );
-      if (applied) commitDoc(next, origPath);
-      return resp.status === 'ok';
-    } catch (e) {
-      if (path === origPath) toastError('Couldn’t run cell', e);
-      return false;
-    } finally {
-      if (runningCellId === cellId) runningCellId = null;
-    }
+    return executeNotebookCellGuarded(cellId, {
+      getDoc: () => doc,
+      getPath: () => path,
+      isDisposed: () => disposed,
+      getViewToken: () => viewToken,
+      getRunningCellId: () => runningCellId,
+      setRunningCellId: (id) => { runningCellId = id; },
+      setSessionAndVars: (sid, vars) => {
+        activeSessionId = sid;
+        variables = vars;
+      },
+      commitDoc,
+      onError: (e) => toastError('Couldn’t run cell', e),
+      executeRequest: (origPath, code) =>
+        api.post<IdeNotebookExecuteResp>('/ide/notebooks/execute', {
+          target: ide.target,
+          notebook_path: origPath,
+          code,
+          interpreter: selectedInterpreter || undefined,
+        }),
+    });
   }
 
   async function runCell(index: number): Promise<boolean> {
@@ -324,7 +333,7 @@
       <button
         type="button"
         class="btn small ghost"
-        onclick={() => onswitchtext(path)}
+        onclick={switchToRawText}
         title="View raw .ipynb JSON"
       >
         JSON
@@ -335,7 +344,7 @@
   {#if parseError}
     <div class="nb-banner-err">
       <span>Couldn’t parse notebook JSON: {parseError}</span>
-      <button type="button" class="btn small" onclick={() => onswitchtext(path)}>Edit raw JSON</button>
+      <button type="button" class="btn small" onclick={switchToRawText}>Edit raw JSON</button>
     </div>
   {/if}
 

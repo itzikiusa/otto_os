@@ -142,6 +142,23 @@ try:
 except Exception:
     pass
 
+# Keep stable Python stdout/stderr wrappers across cells (BUG2-12) so libraries and
+# logging.StreamHandler instances that retain a reference to sys.stdout/sys.stderr never
+# hit "ValueError: I/O operation on closed file" in later cells. Per-cell capture swaps
+# only the underlying OS fds 1 and 2 via os.dup2.
+sys.stdout = io.TextIOWrapper(
+    os.fdopen(1, "wb", buffering=0, closefd=False),
+    encoding="utf-8",
+    errors="replace",
+    line_buffering=True,
+)
+sys.stderr = io.TextIOWrapper(
+    os.fdopen(2, "wb", buffering=0, closefd=False),
+    encoding="utf-8",
+    errors="replace",
+    line_buffering=True,
+)
+
 _MAX_STREAM_BYTES = 2 * 1024 * 1024
 
 _NS = {"__name__": "__main__", "__doc__": None}
@@ -248,12 +265,16 @@ def _exec_cell(code):
     status = "ok"
     tmp_out = tempfile.TemporaryFile(mode="w+b")
     tmp_err = tempfile.TemporaryFile(mode="w+b")
-    old_py_out = sys.stdout
-    old_py_err = sys.stderr
+    try:
+        sys.stdout.flush()
+    except Exception:
+        pass
+    try:
+        sys.stderr.flush()
+    except Exception:
+        pass
     os.dup2(tmp_out.fileno(), 1)
     os.dup2(tmp_err.fileno(), 2)
-    sys.stdout = io.TextIOWrapper(os.fdopen(os.dup(1), "wb", buffering=0), encoding="utf-8", errors="replace", line_buffering=True)
-    sys.stderr = io.TextIOWrapper(os.fdopen(os.dup(2), "wb", buffering=0), encoding="utf-8", errors="replace", line_buffering=True)
     result_val = None
     has_result = False
     try:
@@ -288,16 +309,12 @@ def _exec_cell(code):
     finally:
         try:
             sys.stdout.flush()
-            sys.stdout.close()
         except Exception:
             pass
         try:
             sys.stderr.flush()
-            sys.stderr.close()
         except Exception:
             pass
-        sys.stdout = old_py_out
-        sys.stderr = old_py_err
         try:
             os.dup2(_DEVNULL_FD, 1)
             os.dup2(_DEVNULL_FD, 2)
@@ -787,11 +804,7 @@ impl NotebookManager {
     }
 
     fn remove_slot(&self, key: &KernelKey) -> Option<KernelSlot> {
-        let removed = self.sessions.lock().ok()?.remove(key);
-        if let Ok(mut pids) = kernel_pids().lock() {
-            pids.remove(key);
-        }
-        removed
+        self.sessions.lock().ok()?.remove(key)
     }
 
     fn send_sigint_by_key(&self, key: &KernelKey) -> bool {
@@ -799,9 +812,12 @@ impl NotebookManager {
         let Some(pid) = pid else {
             return false;
         };
+        // BUG2-11: Interrupt signals only the Python kernel process (SIGINT to `pid`),
+        // leaving independent background workers started by earlier cells running.
+        // Restart and shutdown continue to terminate the entire process group (`-pid`).
         #[cfg(unix)]
         {
-            send_unix_signal_group(pid, 2 /* SIGINT */)
+            send_unix_signal_pid(pid, 2 /* SIGINT */)
         }
         #[cfg(not(unix))]
         {
@@ -842,11 +858,21 @@ impl NotebookManager {
     }
 }
 
-fn clear_slot_kernel(key: &KernelKey, slot_guard: &mut Option<KernelProc>) {
+/// Remove `key` from the active PID registry only if it still points to `expected_pid`,
+/// preventing a delayed shutdown cleanup from unregistering a replacement kernel (CONC2-1).
+fn remove_pid_if_matches(key: &KernelKey, expected_pid: u32) {
     if let Ok(mut pids) = kernel_pids().lock() {
-        pids.remove(key);
+        if pids.get(key).copied() == Some(expected_pid) {
+            pids.remove(key);
+        }
     }
+}
+
+fn clear_slot_kernel(key: &KernelKey, slot_guard: &mut Option<KernelProc>) {
     if let Some(mut proc) = slot_guard.take() {
+        if let Some(expected_pid) = proc.pid {
+            remove_pid_if_matches(key, expected_pid);
+        }
         proc.terminate_tree();
     }
 }
@@ -882,6 +908,22 @@ fn kernel_pids() -> &'static StdMutex<HashMap<KernelKey, u32>> {
     static PIDS: std::sync::OnceLock<StdMutex<HashMap<KernelKey, u32>>> =
         std::sync::OnceLock::new();
     PIDS.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn send_unix_signal_pid(pid: u32, sig: std::ffi::c_int) -> bool {
+    extern "C" {
+        fn kill(pid: std::ffi::c_int, sig: std::ffi::c_int) -> std::ffi::c_int;
+    }
+    let Ok(p) = std::ffi::c_int::try_from(pid) else {
+        return false;
+    };
+    if p <= 1 {
+        return false;
+    }
+    // SAFETY: Signaling positive `p > 1` targets only the kernel process itself.
+    unsafe { kill(p, sig) == 0 }
 }
 
 #[cfg(unix)]
@@ -1292,6 +1334,156 @@ mod tests {
         assert!(conc_vars.variables.iter().any(|v| v.name == "second_var"));
         mgr.shutdown_session("u1", "local:/tmp/nb-conc", "race.ipynb")
             .await;
+
+        // BUG2-12: Libraries/loggers retaining sys.stderr across cells never hit closed-file errors.
+        let r_log_setup = mgr
+            .execute_cell(
+                "u1",
+                "local:/tmp/nb-streams",
+                "streams.ipynb",
+                &cwd,
+                &py_str,
+                &BTreeMap::new(),
+                "import logging, sys\nsaved_err = sys.stderr\nlogger = logging.getLogger('otto_nb_test')\nlogger.setLevel(logging.WARNING)\nh = logging.StreamHandler(sys.stderr)\nlogger.addHandler(h)\nprint('cell1-ok')\n",
+                Duration::from_secs(10),
+            )
+            .await
+            .expect("stream setup cell");
+        assert_eq!(r_log_setup.status, "ok");
+        let r_log_use = mgr
+            .execute_cell(
+                "u1",
+                "local:/tmp/nb-streams",
+                "streams.ipynb",
+                &cwd,
+                &py_str,
+                &BTreeMap::new(),
+                "saved_err.write('direct-retained-err\\n')\nlogger.warning('logged-warning-cell2')\n",
+                Duration::from_secs(10),
+            )
+            .await
+            .expect("stream reuse cell");
+        assert_eq!(
+            r_log_use.status, "ok",
+            "BUG2-12: retained stream must stay open: {r_log_use:?}"
+        );
+        let err_stream_text: String = r_log_use
+            .outputs
+            .iter()
+            .filter(|o| {
+                o.get("output_type").and_then(|v| v.as_str()) == Some("stream")
+                    && o.get("name").and_then(|v| v.as_str()) == Some("stderr")
+            })
+            .filter_map(|o| o.get("text"))
+            .map(|t| match t {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Array(arr) => {
+                    arr.iter().filter_map(|v| v.as_str()).collect::<String>()
+                }
+                _ => String::new(),
+            })
+            .collect();
+        assert!(
+            err_stream_text.contains("direct-retained-err")
+                && err_stream_text.contains("logged-warning-cell2"),
+            "BUG2-12: retained stderr writes must be captured in cell 2: {r_log_use:?}"
+        );
+        mgr.shutdown_session("u1", "local:/tmp/nb-streams", "streams.ipynb")
+            .await;
+
+        // BUG2-11: Interrupting a running cell sends SIGINT only to the kernel, leaving an
+        // independent background worker spawned in an earlier cell alive until shutdown.
+        #[cfg(unix)]
+        {
+            let bg_spawn = mgr
+                .execute_cell(
+                    "u1",
+                    "local:/tmp/nb-int-bg",
+                    "bg.ipynb",
+                    &cwd,
+                    &py_str,
+                    &BTreeMap::new(),
+                    "import subprocess\n_bg = subprocess.Popen(['sleep', '30'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n_bg.pid\n",
+                    Duration::from_secs(10),
+                )
+                .await
+                .expect("bg worker spawn");
+            let bg_pid: i32 = bg_spawn
+                .outputs
+                .iter()
+                .find(|o| o.get("output_type").and_then(|v| v.as_str()) == Some("execute_result"))
+                .and_then(|o| o.get("data"))
+                .and_then(|d| d.get("text/plain"))
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.trim().parse().ok())
+                .expect("bg worker pid");
+            let mgr_bg = mgr.clone();
+            let cwd_bg = cwd.clone();
+            let py_bg = py_str.clone();
+            let long_cell = tokio::spawn(async move {
+                mgr_bg
+                    .execute_cell(
+                        "u1",
+                        "local:/tmp/nb-int-bg",
+                        "bg.ipynb",
+                        &cwd_bg,
+                        &py_bg,
+                        &BTreeMap::new(),
+                        "import time\ntime.sleep(10)\n",
+                        Duration::from_secs(15),
+                    )
+                    .await
+            });
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            assert!(mgr.interrupt("u1", "local:/tmp/nb-int-bg", "bg.ipynb"));
+            let int_res = long_cell.await.unwrap().expect("interrupted cell result");
+            assert_eq!(int_res.status, "error");
+            assert!(
+                int_res
+                    .outputs
+                    .iter()
+                    .any(|o| o.get("ename").and_then(|v| v.as_str()) == Some("KeyboardInterrupt")),
+                "expected KeyboardInterrupt: {int_res:?}"
+            );
+            extern "C" {
+                fn kill(pid: std::ffi::c_int, sig: std::ffi::c_int) -> std::ffi::c_int;
+            }
+            #[allow(unsafe_code)]
+            let worker_alive = unsafe { kill(bg_pid, 0) == 0 };
+            assert!(
+                worker_alive,
+                "BUG2-11: interrupting cell 2 must NOT kill background worker {bg_pid} from cell 1"
+            );
+            mgr.shutdown_session("u1", "local:/tmp/nb-int-bg", "bg.ipynb")
+                .await;
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            #[allow(unsafe_code)]
+            let worker_alive_after_shutdown = unsafe { kill(bg_pid, 0) == 0 };
+            assert!(
+                !worker_alive_after_shutdown,
+                "shutdown_session must still kill background worker {bg_pid}"
+            );
+        }
+
+        // CONC2-1: Old kernel cleanup must NOT delete a replacement kernel's PID entry.
+        let conc_key = KernelKey {
+            owner: "u1".into(),
+            project_key: "local:/tmp/nb-conc2".into(),
+            notebook_path: "replace.ipynb".into(),
+        };
+        {
+            let mut pids = kernel_pids().lock().unwrap();
+            pids.insert(conc_key.clone(), 999_002);
+        }
+        // Old kernel had PID 999_001; cleanup must preserve replacement PID 999_002.
+        remove_pid_if_matches(&conc_key, 999_001);
+        assert_eq!(
+            kernel_pids().lock().unwrap().get(&conc_key).copied(),
+            Some(999_002),
+            "CONC2-1: old kernel cleanup must not unregister replacement PID"
+        );
+        remove_pid_if_matches(&conc_key, 999_002);
+        assert_eq!(kernel_pids().lock().unwrap().get(&conc_key).copied(), None);
     }
 
     #[test]
@@ -1303,14 +1495,32 @@ mod tests {
         let _ = accels;
 
         let tmp = tempfile::tempdir().unwrap();
+        // RED-5: Even when a Jupyter kernelspec directory exists on disk, the built-in
+        // standard Python runner must not advertise unsupported Jupyter kernelspecs.
+        let fake_kspec = tmp.path().join(".venv/share/jupyter/kernels/ir");
+        std::fs::create_dir_all(&fake_kspec).unwrap();
+        std::fs::write(
+            fake_kspec.join("kernel.json"),
+            r#"{"argv":["R","--slave"],"display_name":"R","language":"R"}"#,
+        )
+        .unwrap();
+        let data_kspec = tmp.path().join("share/jupyter/kernels/julia-1.10");
+        std::fs::create_dir_all(&data_kspec).unwrap();
+        std::fs::write(
+            data_kspec.join("kernel.json"),
+            r#"{"argv":["julia"],"display_name":"Julia","language":"julia"}"#,
+        )
+        .unwrap();
         let kernels = discover_notebook_kernels(tmp.path(), tmp.path(), None);
         assert!(
             !kernels.is_empty(),
             "expected at least system python3 kernel on host"
         );
         assert!(
-            !kernels.iter().any(|k| k.kind == "kernelspec"),
-            "built-in Python runner should not advertise Jupyter kernelspec protocol"
+            !kernels
+                .iter()
+                .any(|k| k.kind == "kernelspec" || k.id.starts_with("kernelspec:")),
+            "built-in Python runner must not advertise Jupyter kernelspec protocol: {kernels:?}"
         );
 
         // Distinct virtualenvs symlinking to the same host Python binary stay distinct (BUG-38)

@@ -152,8 +152,8 @@ export function serializeIpynb(doc: NotebookDoc): string {
       if (c.cell_type === 'code') {
         base.execution_count = c.execution_count;
         base.outputs = c.outputs ?? [];
-      }
-      if (c.attachments && Object.keys(c.attachments).length > 0) {
+      } else if (c.attachments && Object.keys(c.attachments).length > 0) {
+        // nbformat 4.5 allows `attachments` only on markdown and raw cells (DATA2-2).
         base.attachments = c.attachments;
       }
       return base;
@@ -210,16 +210,35 @@ export function changeNotebookCellType(
   cellType: NotebookCellType,
 ): NotebookDoc {
   if (index < 0 || index >= doc.cells.length) return doc;
-  const cells = doc.cells.map((c, i) =>
-    i === index
-      ? {
-          ...c,
-          cell_type: cellType,
-          execution_count: cellType === 'code' ? c.execution_count : null,
-          outputs: cellType === 'code' ? c.outputs : [],
-        }
-      : c,
-  );
+  const cells = doc.cells.map((c, i) => {
+    if (i !== index) return c;
+    const nextMeta = { ...(c.metadata ?? {}) };
+    let nextAttachments = c.attachments;
+    if (cellType === 'code') {
+      // Preserve Markdown/Raw attachments inside metadata so converting to Code
+      // never serializes an invalid nbformat 4.5 Code cell (DATA2-2).
+      if (nextAttachments && Object.keys(nextAttachments).length > 0) {
+        nextMeta.otto_preserved_attachments = nextAttachments;
+      }
+      nextAttachments = undefined;
+    } else if (
+      (!nextAttachments || Object.keys(nextAttachments).length === 0) &&
+      nextMeta.otto_preserved_attachments &&
+      typeof nextMeta.otto_preserved_attachments === 'object' &&
+      !Array.isArray(nextMeta.otto_preserved_attachments)
+    ) {
+      nextAttachments = nextMeta.otto_preserved_attachments as Record<string, Record<string, unknown>>;
+      delete nextMeta.otto_preserved_attachments;
+    }
+    return {
+      ...c,
+      cell_type: cellType,
+      metadata: nextMeta,
+      execution_count: cellType === 'code' ? c.execution_count : null,
+      outputs: cellType === 'code' ? c.outputs : [],
+      ...(nextAttachments ? { attachments: nextAttachments } : { attachments: undefined }),
+    };
+  });
   return { ...doc, cells };
 }
 

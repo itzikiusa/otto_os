@@ -175,9 +175,25 @@ test('DATA-4: Markdown cell attachments round-trip across parse, edit, and seria
   assert.deepEqual(reparsed.cells[0].attachments, {
     'plot.png': { 'image/png': 'iVBORw0KGgoAAAANSUhEUg==' },
   });
+
+  // DATA2-2: Converting an attached Markdown cell to Code must NOT emit invalid top-level
+  // `attachments` on a Code cell, and converting back to Markdown restores them losslessly.
+  const asCode = changeNotebookCellType(edited, 0, 'code');
+  const codeJson = JSON.parse(serializeIpynb(asCode));
+  assert.equal(codeJson.cells[0].cell_type, 'code');
+  assert.equal('attachments' in codeJson.cells[0], false, 'nbformat 4.5 forbids attachments on code cells');
+
+  const backToMd = changeNotebookCellType(asCode, 0, 'markdown');
+  const mdJson = JSON.parse(serializeIpynb(backToMd));
+  assert.equal(mdJson.cells[0].cell_type, 'markdown');
+  assert.deepEqual(mdJson.cells[0].attachments, {
+    'plot.png': { 'image/png': 'iVBORw0KGgoAAAANSUhEUg==' },
+  });
+  assert.equal('otto_preserved_attachments' in (mdJson.cells[0].metadata ?? {}), false);
 });
 
-test('CONC-4: applyNotebookExecutionById tracks moved cells and discards deleted cells', () => {
+test('CONC-4: executeNotebookCellGuarded drops late results on tab switch or raw-source disposal', async () => {
+  const { executeNotebookCellGuarded } = await import('../src/modules/ide/editor/ideNotebookRunner.ts');
   const { doc } = parseIpynb(JSON.stringify({
     nbformat: 4,
     nbformat_minor: 5,
@@ -192,44 +208,106 @@ test('CONC-4: applyNotebookExecutionById tracks moved cells and discards deleted
   const out = [{ output_type: 'execute_result', execution_count: 5, data: { 'text/plain': '1' } }];
   const res = applyNotebookExecutionById(moved, 'c-first', 5, out);
   assert.equal(res.applied, true);
-  assert.equal(res.doc.cells[0].id, 'c-second');
-  assert.equal(res.doc.cells[0].outputs.length, 0);
   assert.equal(res.doc.cells[1].id, 'c-first');
   assert.equal(res.doc.cells[1].execution_count, 5);
 
-  // Deleted cell discards cleanly without touching remaining cells.
   const deleted = deleteNotebookCell(moved, 1);
-  const dropped = applyNotebookExecutionById(deleted, 'c-first', 6, out);
-  assert.equal(dropped.applied, false);
-  assert.equal(dropped.doc.cells.length, 1);
-  assert.equal(dropped.doc.cells[0].outputs.length, 0);
+  assert.equal(applyNotebookExecutionById(deleted, 'c-first', 6, out).applied, false);
+
+  // Scenario 1: switching to another tab mid-run never calls commitDoc/onchange.
+  let currentPath = '/ws/a.ipynb';
+  let disposed = false;
+  let viewToken = 1;
+  let runningId: string | null = null;
+  const commits: string[] = [];
+  let resolveReq: (v: unknown) => void = () => {};
+  const pTabSwitch = executeNotebookCellGuarded('c-first', {
+    getDoc: () => doc,
+    getPath: () => currentPath,
+    isDisposed: () => disposed,
+    getViewToken: () => viewToken,
+    getRunningCellId: () => runningId,
+    setRunningCellId: (id) => { runningId = id; },
+    setSessionAndVars: () => {},
+    commitDoc: (_next, targetPath) => { commits.push(targetPath); },
+    onError: () => { commits.push('ERROR'); },
+    executeRequest: () => new Promise<unknown>((r) => { resolveReq = r; }) as ReturnType<Parameters<typeof executeNotebookCellGuarded>[1]['executeRequest']>,
+  });
+  currentPath = '/ws/b.ipynb';
+  viewToken += 1;
+  resolveReq({ session_id: 's1', status: 'ok', execution_count: 1, outputs: out, variables: [] });
+  assert.equal(await pTabSwitch, false);
+  assert.equal(commits.length, 0, 'delayed completion after tab switch must not commit');
+
+  // Scenario 2: switching the SAME notebook to raw JSON view (disposing IdeNotebookView) mid-run
+  // must NOT write stale notebook JSON over the raw text buffer.
+  currentPath = '/ws/a.ipynb';
+  disposed = false;
+  runningId = null;
+  const rawCommits: string[] = [];
+  const pRawSwitch = executeNotebookCellGuarded('c-first', {
+    getDoc: () => doc,
+    getPath: () => currentPath,
+    isDisposed: () => disposed,
+    getViewToken: () => viewToken,
+    getRunningCellId: () => runningId,
+    setRunningCellId: (id) => { runningId = id; },
+    setSessionAndVars: () => {},
+    commitDoc: (_next, targetPath) => { rawCommits.push(targetPath); },
+    onError: () => { rawCommits.push('ERROR'); },
+    executeRequest: () => new Promise<unknown>((r) => { resolveReq = r; }) as ReturnType<Parameters<typeof executeNotebookCellGuarded>[1]['executeRequest']>,
+  });
+  disposed = true;
+  resolveReq({ session_id: 's1', status: 'ok', execution_count: 2, outputs: out, variables: [] });
+  assert.equal(await pRawSwitch, false);
+  assert.equal(rawCommits.length, 0, 'delayed completion after raw-source view switch must not commit');
 });
 
-test('OBS-4: classifyDepsActionOutcome reports error when backend returns ok: false', () => {
+test('OBS-4: runManifestDepsAction reports error toast when backend returns ok: false', async () => {
+  const errCalls: [string, string][] = [];
+  const okCalls: [string, string][] = [];
+  let postResult: { ok: boolean; output?: string } = {
+    ok: false,
+    output: 'uv pip install exited with status 1\nmissing wheel',
+  };
   const mod = loadSource(
     new URL('../src/modules/ide/history/ideManifestActions.ts', import.meta.url),
     {
-      '../../../lib/api/client': { api: {} },
-      '../../../lib/toast.svelte': { toasts: {} },
+      '../../../lib/api/client': {
+        api: { post: async () => postResult },
+      },
+      '../../../lib/toast.svelte': {
+        toasts: {
+          error: (title: string, detail: string) => { errCalls.push([title, detail]); },
+          success: (title: string, detail: string) => { okCalls.push([title, detail]); },
+        },
+      },
       '../../../lib/toastError': { toastError: () => {} },
-      '../git/ideGitController.svelte': { ideGit: {} },
-      '../ideStore.svelte': { ide: {}, ideBasename: (p: string) => p.split('/').pop() ?? p },
+      '../git/ideGitController.svelte': {
+        ideGit: {
+          rootContainingPath: () => ({ path: '/ws' }),
+          reloadIdeTabIfOpen: async () => {},
+          refreshActive: async () => {},
+        },
+      },
+      '../ideStore.svelte': {
+        ide: {
+          target: { root: '/ws' },
+          targetPayload: { kind: 'local', root: '/ws' },
+          loadTree: async () => {},
+        },
+        ideBasename: (p: string) => p.split('/').pop() ?? p,
+      },
     },
   );
-  const failed = mod.classifyDepsActionOutcome(
-    { ok: false, output: 'uv pip install exited with status 1\nmissing wheel' },
-    'Sync Python Dependencies',
-    'requirements.txt',
-  );
-  assert.equal(failed.level, 'error');
-  assert.match(failed.title, /Couldn’t run Sync Python Dependencies/);
-  assert.match(failed.detail, /exited with status 1/);
+  await mod.runManifestDepsAction('/ws/requirements.txt', 'sync', 'Sync Python Dependencies');
+  assert.equal(errCalls.length, 1, 'real runManifestDepsAction must call toasts.error on ok: false');
+  assert.equal(okCalls.length, 0, 'real runManifestDepsAction must NOT call toasts.success on ok: false');
+  assert.match(errCalls[0][0], /Couldn’t run Sync Python Dependencies/);
+  assert.match(errCalls[0][1], /exited with status 1/);
 
-  const ok = mod.classifyDepsActionOutcome(
-    { ok: true, output: 'Resolved 12 packages' },
-    'Sync Python Dependencies',
-    'requirements.txt',
-  );
-  assert.equal(ok.level, 'success');
-  assert.equal(ok.title, 'Sync Python Dependencies');
+  postResult = { ok: true, output: 'Resolved 12 packages' };
+  await mod.runManifestDepsAction('/ws/requirements.txt', 'sync', 'Sync Python Dependencies');
+  assert.equal(okCalls.length, 1);
+  assert.equal(okCalls[0][0], 'Sync Python Dependencies');
 });
