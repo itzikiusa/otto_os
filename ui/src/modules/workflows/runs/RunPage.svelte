@@ -64,8 +64,9 @@
 
   onMount(() => markRunOpened(runId));
 
+  const currentRunId = $derived(runId);
   $effect(() => {
-    const id = runId;
+    const id = currentRunId;
     void reload;
     loading = true;
     error = null;
@@ -76,7 +77,7 @@
         const g = await (run.workflow_version
           ? api.get<WorkflowVersion>(`/workflows/${encodeURIComponent(run.workflow_id)}/versions/${run.workflow_version}`).catch(() => api.get<Workflow>(`/workflows/${encodeURIComponent(run.workflow_id)}`))
           : api.get<Workflow>(`/workflows/${encodeURIComponent(run.workflow_id)}`)).catch(() => null);
-        if (id !== runId) return;
+        if (id !== currentRunId) return;
         graph = g?.graph ?? { nodes: [], edges: [] };
         workflowName = g?.name ?? '';
         sync.run = run;

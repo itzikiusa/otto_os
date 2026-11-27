@@ -49,9 +49,17 @@
 
   let gone = $state<'deleted' | 'forbidden' | null>(null);
   // Another step (or attempt) in the same pane starts over: the last one's
-  // "removed" state and digest never show for it.
+  // "removed" state and digest never show for it. Derived primitives keep a
+  // re-created `thread` or parent selection object from wiping local state.
+  const threadId = $derived(thread?.thread_id ?? null);
+  const threadRunner = $derived(thread?.runner ?? null);
+  const currentRunId = $derived(runId);
+  const currentNodeId = $derived(nodeId);
+  const currentAttempt = $derived(attempt);
   $effect(() => {
-    void [thread?.thread_id, nodeId, attempt];
+    void threadId;
+    void currentNodeId;
+    void currentAttempt;
     gone = null;
     items = null;
     itemsError = null;
@@ -84,9 +92,12 @@
   let itemsRetry = $state(0);
   $effect(() => {
     void itemsRetry;
-    if (live || thread?.runner !== 'threads' || !nodeId) return;
+    const id = currentRunId;
+    const nid = currentNodeId;
+    const att = currentAttempt;
+    if (live || threadRunner !== 'threads' || !nid) return;
     const ac = new AbortController();
-    readRunContext(runId, `.threads/${nodeId}-${attempt}.json`, ac.signal).then(
+    readRunContext(id, `.threads/${nid}-${att}.json`, ac.signal).then(
       (f) => {
         try {
           const v = JSON.parse(f.content) as { items?: DigestItem[] } | DigestItem[];

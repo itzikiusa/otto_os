@@ -65,10 +65,12 @@
   // person picked. An asked tab the step does not offer yet falls back to the
   // first (`tab` below).
   const stepId = $derived(step?.id);
+  const kid = $derived(childId);
+  const want = $derived((asked ?? null) as PaneTab | null);
   $effect(() => {
     void stepId;
-    void childId;
-    picked = (asked ?? null) as PaneTab | null;
+    void kid;
+    picked = want;
   });
   const tab = $derived(picked && tabs.includes(picked) ? picked : tabs[0]);
 
@@ -77,10 +79,12 @@
   let detailError = $state<string | null>(null);
   let retry = $state(0);
   let lastFetch = 0;
+  const nodeId = $derived(node?.node_id ?? null);
+  const detailVersion = $derived(node?.detail_version);
   const needsBody = $derived(!!node && !child && (['output', 'log', 'summary', 'preview', 'conversation'].includes(tab) || (tab === 'criteria' && step?.kind === 'check')));
   $effect(() => {
-    const id = node?.node_id;
-    void node?.detail_version;
+    const id = nodeId;
+    void detailVersion;
     void retry;
     if (!id || !needsBody) return;
     // Another step's error never shows while this one's body loads.
@@ -119,7 +123,8 @@
   const reviewOut = $derived((output ?? {}) as { score_text?: string; outcome?: string; blocking?: unknown[]; advisory?: unknown[]; findings?: unknown[] });
   // A review step's records: the reviewer's own findings, "Open review".
   const reviews = $derived(step?.kind === 'review_run' && node ? reviewIds(body ?? node) : []);
-  $effect(() => runReviews.watch(child || tab === 'summary' ? reviews : []));
+  const reviewKey = $derived(child || tab === 'summary' ? reviews.join(',') : '');
+  $effect(() => runReviews.watch(reviewKey ? reviewKey.split(',') : []));
   const agent = $derived(child ? reviews.flatMap((id) => runReviews.reviews[id]?.agents ?? []).find((a) => a.name === child.id || a.name === child.label || (!!child.thread_id && a.session_id === child.thread_id)) ?? null : null);
   const findings = $derived(agent?.findings ?? []);
   /** The summary came from the deterministic fallback, not a verified summarizer. */
@@ -229,7 +234,7 @@
         <p class="none">{child?.status === 'success' ? 'This reviewer reported no findings.' : agent ? 'Findings appear when this reviewer finishes.' : 'No findings recorded for this reviewer.'}</p>
       {/if}
     {:else if tab === 'files'}
-      <StepFiles runId={run.id} contextDir={run.context_dir} stepFile={step ? (node?.step_file ?? null) : null} />
+      <StepFiles runId={run.id} contextDir={run.context_dir} stepFile={node?.step_file ?? null} />
     {:else if tab === 'result'}
       <!-- A goal run whose card is taken by a hold, a person or an error: its criteria head the Result. -->
       {#if run.overview?.goal && cardKind(run, runState) !== 'goal'}<GoalCard goal={run.overview.goal} {run} {criteria} />{/if}
