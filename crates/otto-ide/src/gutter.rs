@@ -7,6 +7,8 @@
 
 pub(crate) mod cargo_target;
 mod compiled;
+pub(crate) mod kotest;
+pub(crate) mod kotlin_lex;
 mod scripting;
 #[cfg(test)]
 mod tests;
