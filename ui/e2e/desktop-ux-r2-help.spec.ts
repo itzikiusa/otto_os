@@ -49,7 +49,7 @@ test('chapter activation reveals the player; passive chapter changes preserve re
   await expectFullyInViewport(page, video);
   await page.screenshot({ path: info.outputPath('chapter-revealed.png') });
   await chapter.scrollIntoViewIfNeeded();
-  const rail = page.locator('.help-layout .rail');
+  const rail = page.getByTestId('guides-list').locator('.side-pane-body');
   const before = await rail.evaluate((el) => el.scrollTop);
   await video.evaluate((el: HTMLVideoElement, t) => { el.pause(); el.currentTime = t; el.dispatchEvent(new Event('timeupdate')); }, everywhere.start + 1);
   await expect(page.getByRole('button', { name: everywhere.label, exact: true })).toHaveAttribute('aria-current', 'step');

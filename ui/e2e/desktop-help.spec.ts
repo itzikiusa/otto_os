@@ -57,7 +57,7 @@ test('opens on the film + Getting started; an unreachable film shows Retry, not 
   await expect(rail(page).locator('[data-guide="getting-started"]')).toHaveAttribute('aria-current', 'page');
 
   // Rail grouped like the sidebar, Basics first.
-  const labels = await rail(page).locator('.rail-group-label').allTextContents();
+  const labels = await rail(page).locator('.ssh-title').allTextContents();
   expect(labels[0]).toBe('Basics');
   for (const g of ['Work', 'Automate', 'Build']) expect(labels).toContain(g);
 

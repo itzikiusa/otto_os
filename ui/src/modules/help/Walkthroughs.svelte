@@ -14,8 +14,8 @@
   // chapter maps to it; a chapter shows "Read the guide" when its guide exists.
   // The ⌘K "Guide: …" commands are registered app-wide in App.svelte.
   //
-  // Phone: push navigation — the film + list is the page; opening a guide
-  // replaces it and the header gets a back button.
+  // Phone: push navigation (ListDetail) — the film + list is the page; a
+  // guide is pushed with "‹ Guides" in the page header.
   import { scrollBehavior } from '../../lib/motion';
   import { tick } from 'svelte';
   import { router } from '../../lib/router.svelte';
@@ -30,8 +30,9 @@
   import { DEFAULT_GUIDE_ID, FILM, GUIDE_INDEX as GUIDES, guideIndexById as guideById } from './sectionsIndex';
   import TourFilm from './TourFilm.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
-  import PaneDivider from '../../lib/components/PaneDivider.svelte';
-  import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
+  import ListDetail from '../../lib/components/side/ListDetail.svelte';
+  import ListPane from '../../lib/components/side/ListPane.svelte';
+  import SideSection from '../../lib/components/side/SideSection.svelte';
 
   const guideIds = new Set(GUIDES.map((g) => g.id));
   // The guide text is one lazy chunk (./sections.ts); the rail, titles and
@@ -51,8 +52,6 @@
     );
   }
   loadTexts();
-  /** Guides rail width — the shared list-pane default/range, remembered. */
-  let listW = $state(loadPaneWidth('walkthroughs.listW', LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
 
   // ---- selection (from the route) ----
   const param = $derived(router.module === 'walkthroughs' ? router.parts[1] : undefined);
@@ -78,9 +77,16 @@
 
   function open(id: string, replace = false): void {
     const path = `walkthroughs/${id}`;
+    phoneOpen = true;
     if (replace) router.replace(path);
     else router.go(path);
   }
+  /** Phone: a guide is pushed over the list. A routed guide (⌘K, a link) opens
+   *  pushed; Back shows the list again with that guide still marked. */
+  let phoneOpen = $state(false);
+  $effect(() => {
+    phoneOpen = !!param;
+  });
 
   // ---- rendered body (memoised per guide) ----
   const htmlCache = new Map<string, string>();
@@ -145,7 +151,7 @@
   let railEl: HTMLElement | undefined = $state();
 
   function focusRow(id: string): void {
-    railEl?.querySelector<HTMLElement>(`[data-guide="${CSS.escape(id)}"]`)?.focus();
+    railEl?.closest('.side-list')?.querySelector<HTMLElement>(`[data-guide="${CSS.escape(id)}"]`)?.focus();
   }
 
   function step(from: string | undefined, delta: number | 'first' | 'last'): string | undefined {
@@ -161,8 +167,9 @@
   function onRailKey(e: KeyboardEvent): void {
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     const inSearch = e.target === searchEl;
-    // The phone rail also contains the film. Keep its native controls and
-    // chapter buttons out of the guide list's keyboard navigation.
+    // The phone list also contains the film. Keep its native controls and
+    // chapter buttons out of the guide list's keyboard navigation. Arrows here
+    // open as they go (the list pane's own walk only moves focus).
     if (!inSearch && !(e.target instanceof HTMLElement && e.target.closest('[data-guide]'))) return;
     const moves: Record<string, number | 'first' | 'last'> = { ArrowDown: 1, ArrowUp: -1 };
     if (!inSearch) Object.assign(moves, { Home: 'first', End: 'last' });
@@ -187,58 +194,50 @@
     if (!next) return;
     // Arrow browsing replaces the history entry (Back leaves the page, not
     // every guide you arrowed past); on a phone it only moves focus.
-    if (!viewport.isPhone) open(next, true);
+    if (!viewport.navDrawer) open(next, true);
     void tick().then(() => focusRow(next));
   }
 
   const pageSubtitle = 'Guides to every part of Otto, with shortcuts and limits';
-  const showList = $derived(!viewport.isPhone || isDefault);
-  const showArticle = $derived(!viewport.isPhone || !isDefault);
+  /** The guide the list marks: on a phone the one last opened, kept on Back. */
+  const markedId = $derived(searching ? null : selectedId);
 </script>
 
 {#snippet row(g: GuideSection, match?: { kind: string; text: string })}
-  <button
-    class="rail-row"
-    class:active={!searching && g.id === selectedId && !viewport.isPhone}
-    class:hit={searching && g.id === railOrder[0]}
-    aria-current={g.id === selectedId && !viewport.isPhone ? 'page' : undefined}
-    data-guide={g.id}
-    data-testid="guide-row"
-    onclick={() => open(g.id)}
-    onkeydown={onRailKey}
-  >
-    <span class="row-title">{g.title}</span>
-    {#if searching}
-      <span class="row-meta">
-        <span class="row-group">{g.group}</span>
-        {#if match?.kind === 'shortcut'}
-          <span class="keys">{#each splitChord(match.text) as k, i (i)}<kbd>{k}</kbd>{/each}</span>
-        {:else if match?.text}
-          <span class="row-snippet">{match.text}</span>
-        {/if}
+  {@const meta = searching ? (match?.kind !== 'shortcut' && match?.text ? `${g.group} · ${match.text}` : g.group) : viewport.navDrawer ? g.summary : ''}
+  <!-- The shared row look (.side-row), drawn here to keep the guide id on the
+       row (arrow keys open as they go) and aria-current="page" (a nav). -->
+  <div class="side-row" class:two-line={!!meta} class:selected={g.id === markedId}>
+    <button
+      type="button"
+      class="side-row-main"
+      data-side-row
+      data-guide={g.id}
+      data-testid="guide-row"
+      aria-current={g.id === markedId ? 'page' : undefined}
+      onclick={() => open(g.id)}
+      onkeydown={onRailKey}
+    >
+      <span class="side-row-text">
+        <span class="side-row-title" dir="auto">{g.title}</span>
+        {#if meta}<span class="side-row-meta" dir="auto">{meta}</span>{/if}
       </span>
-    {:else if g.summary && viewport.isPhone}
-      <span class="row-snippet">{g.summary}</span>
-    {/if}
-  </button>
+      {#if searching && match?.kind === 'shortcut'}
+        <span class="side-row-trailing"><span class="keys">{#each splitChord(match.text) as k, i (i)}<kbd>{k}</kbd>{/each}</span></span>
+      {/if}
+    </button>
+  </div>
 {/snippet}
 
 <div class="help-page">
   <PageHeader title="Help" subtitle={pageSubtitle}>
-    {#snippet leading()}
-      {#if viewport.isPhone && !isDefault}
-        <button class="icon-btn help-back" onclick={() => router.go('walkthroughs')} aria-label="Back to all guides" title="Back to all guides">
-          <Icon name="chevronLeft" size={16} />
-        </button>
-      {/if}
-    {/snippet}
     {#snippet actions()}
-      {#if FILM && !showFilm && showArticle && !viewport.isPhone}
+      {#if FILM && !showFilm && !viewport.navDrawer}
         <button class="btn small ghost" onclick={watchTour} data-label="Watch the tour" data-icon="play">
           <Icon name="play" size={12} /> Watch the tour
         </button>
       {/if}
-      {#if selected?.route && showArticle}
+      {#if selected?.route}
         <button
           class="btn small primary"
           disabled={!openAllowed}
@@ -263,102 +262,97 @@
     </PageBody>
   {:else}
     <PageBody fill padded={false}>
-      <div class="help-layout" class:phone={viewport.isPhone}>
-        {#if showList}
-          <nav class="rail" aria-label="Guides" bind:this={railEl} style="--list-pane-w:{listW}px">
-            <div class="rail-search">
-              <Icon name="search" size={13} />
-              <input dir="ltr"
-                bind:this={searchEl}
-                bind:value={query}
-                type="search"
-                placeholder="Filter guides and shortcuts…"
-                aria-label="Filter guides"
-                autocomplete="off"
-                spellcheck="false"
-                onkeydown={onRailKey}
-                data-testid="guide-search"
-              />
-            </div>
-            <!-- Always mounted with the rail, so the first count after typing is
-                 spoken too (a region inserted with its text is silent); the
-                 visible count below is plain text. -->
-            <span class="sr-only" role="status" data-testid="guide-search-count">{countText}</span>
+      <ListDetail module="walkthroughs" name="Guides" open={phoneOpen} onback={() => (phoneOpen = false)} legacy={{ w: 'walkthroughs.listW' }}>
+        {#snippet list()}
+          <ListPane as="nav" count={GUIDES.length} testid="guides-list">
+            {#snippet searchRow()}
+              <div class="rail-search" bind:this={railEl}>
+                <Icon name="search" size={13} />
+                <input dir="ltr"
+                  bind:this={searchEl}
+                  bind:value={query}
+                  type="search"
+                  placeholder="Filter guides and shortcuts…"
+                  aria-label="Filter guides"
+                  autocomplete="off"
+                  spellcheck="false"
+                  onkeydown={onRailKey}
+                  data-testid="guide-search"
+                />
+              </div>
+              <!-- Always mounted with the list, so the first count after typing
+                   is spoken too (a region inserted with its text is silent);
+                   the visible count below is plain text. -->
+              <span class="sr-only" role="status" data-testid="guide-search-count">{countText}</span>
+            {/snippet}
 
-            {#if viewport.isPhone && FILM && !searching}
+            {#if viewport.navDrawer && FILM && !searching && !phoneOpen}
               <div class="rail-film"><TourFilm bind:this={film} film={FILM} {guideIds} onopenguide={(id) => open(id)} /></div>
             {/if}
 
-            <div class="rail-list">
-              {#if searching}
-                {#if hits.length === 0}
-                  <div class="rail-empty">
-                    <p>No guides match “{query.trim()}”.</p>
-                    <button class="btn small" onclick={() => { query = ''; searchEl?.focus(); }}>Clear search</button>
-                  </div>
-                {:else}
-                  <div class="rail-count">{hits.length} {hits.length === 1 ? 'guide' : 'guides'}</div>
+            {#if searching}
+              {#if hits.length === 0}
+                <div class="rail-empty">
+                  <p>No guides match “{query.trim()}”.</p>
+                  <button class="btn small" onclick={() => { query = ''; searchEl?.focus(); }}>Clear search</button>
+                </div>
+              {:else}
+                <SideSection title="{hits.length} {hits.length === 1 ? 'guide' : 'guides'}" foldable={false}>
                   {#each hits as h (h.section.id)}
                     {@render row(h.section, h.match)}
                   {/each}
-                {/if}
-              {:else}
-                {#each grouped as s (s.group)}
-                  <div class="rail-group" role="group" aria-label={s.group}>
-                    <div class="rail-group-label" aria-hidden="true">{s.group}</div>
-                    {#each s.items as g (g.id)}
-                      {@render row(g)}
-                    {/each}
-                  </div>
-                {/each}
+                </SideSection>
               {/if}
-            </div>
-          </nav>
-          {#if !viewport.isPhone}
-            <PaneDivider bind:width={listW} storageKey="walkthroughs.listW" label="Resize the guides list" />
-          {/if}
-        {/if}
+            {:else}
+              {#each grouped as s (s.group)}
+                <SideSection title={s.group} count={s.items.length} foldable={false}>
+                  {#each s.items as g (g.id)}
+                    {@render row(g)}
+                  {/each}
+                </SideSection>
+              {/each}
+            {/if}
+          </ListPane>
+        {/snippet}
 
-        {#if showArticle}
-          <main class="main" bind:this={mainEl} data-testid="guide-main">
-            <div class="column">
-              {#if showFilm}
-                <TourFilm bind:this={film} film={FILM} {guideIds} onopenguide={(id) => open(id)} />
-              {/if}
+        <main class="main" class:phone={viewport.navDrawer} bind:this={mainEl} data-testid="guide-main">
+          <div class="column">
+            {#if showFilm && !(viewport.navDrawer && !phoneOpen)}
+              <TourFilm bind:this={film} film={FILM} {guideIds} onopenguide={(id) => open(id)} />
+            {/if}
 
-              {#if selected}
-                <article class="guide" data-testid="guide-article" data-guide-id={selected.id}>
-                  <header class="guide-head">
-                    <div class="eyebrow">{selected.group}</div>
-                    <h2>{selected.title}</h2>
-                    {#if selected.summary}<p class="summary">{selected.summary}</p>{/if}
-                    {#if chapterFor}
-                      <button class="btn small" onclick={() => chapterFor && watchPart(chapterFor.start)} data-testid="guide-watch-part">
-                        <Icon name="play" size={12} /> Watch this part · {timeLabel(chapterFor.start)}
-                      </button>
-                    {/if}
-                  </header>
-                  {#if texts}
-                    <div class="md-body guide-body">{@html html}</div>
-                  {:else}
-                    <LoadState what="the guide" loading={!textsError} error={textsError} empty onretry={loadTexts} />
+            {#if selected}
+              <article class="guide" data-testid="guide-article" data-guide-id={selected.id}>
+                <header class="guide-head">
+                  <div class="eyebrow">{selected.group}</div>
+                  <h2>{selected.title}</h2>
+                  {#if selected.summary}<p class="summary">{selected.summary}</p>{/if}
+                  {#if chapterFor}
+                    <button class="btn small" onclick={() => chapterFor && watchPart(chapterFor.start)} data-testid="guide-watch-part">
+                      <Icon name="play" size={12} /> Watch this part · {timeLabel(chapterFor.start)}
+                    </button>
                   {/if}
-                </article>
-              {:else}
-                <EmptyState
-                  icon="book"
-                  title="There’s no guide called “{param}”"
-                  body={viewport.isPhone
-                    ? 'It may have been renamed. Go back to all guides, or start at the beginning.'
-                    : 'It may have been renamed. Pick one from the list, or start at the beginning.'}
-                  actionLabel="Open Getting started"
-                  onaction={() => open(DEFAULT_GUIDE_ID)}
-                />
-              {/if}
-            </div>
-          </main>
-        {/if}
-      </div>
+                </header>
+                {#if texts}
+                  <div class="md-body guide-body">{@html html}</div>
+                {:else}
+                  <LoadState what="the guide" loading={!textsError} error={textsError} empty onretry={loadTexts} />
+                {/if}
+              </article>
+            {:else}
+              <EmptyState
+                icon="book"
+                title="There’s no guide called “{param}”"
+                body={viewport.navDrawer
+                  ? 'It may have been renamed. Go back to all guides, or start at the beginning.'
+                  : 'It may have been renamed. Pick one from the list, or start at the beginning.'}
+                actionLabel="Open Getting started"
+                onaction={() => open(DEFAULT_GUIDE_ID)}
+              />
+            {/if}
+          </div>
+        </main>
+      </ListDetail>
     </PageBody>
   {/if}
 </div>
@@ -371,34 +365,11 @@
     flex-direction: column;
     background: var(--bg);
   }
-  .help-layout {
-    flex: 1;
-    min-height: 0;
-    display: flex;
-  }
-
-  /* ---- rail ---- (width is the user's; PaneDivider draws the hairline) */
-  .rail {
-    flex: none;
-    inline-size: var(--list-pane-w, 280px);
-    max-inline-size: 45%;
-    min-height: 0;
-    display: flex;
-    flex-direction: column;
-    background: var(--bg);
-  }
-  .phone .rail {
-    flex: 1;
-    inline-size: auto;
-    max-inline-size: none;
-    overflow-y: auto;
-  }
   .rail-search {
     flex-shrink: 0;
     display: flex;
     align-items: center;
     gap: 6px;
-    margin: 12px 12px 8px;
     padding: 0 8px;
     height: 28px;
     border: 1px solid var(--border);
@@ -410,11 +381,13 @@
     border-color: var(--accent-text);
     box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
-  .phone .rail-search {
-    height: 38px;
-  }
-  .phone .rail-search input {
-    height: 36px;
+  @media (pointer: coarse) {
+    .rail-search {
+      height: 38px;
+    }
+    .rail-search input {
+      height: 36px;
+    }
   }
   .rail-search input {
     flex: 1;
@@ -426,89 +399,9 @@
     font-size: var(--fs-m);
   }
   .rail-film {
-    padding: 4px 12px 16px;
-    margin-bottom: 4px;
+    padding: 4px 8px 16px;
+    margin-bottom: 8px;
     border-bottom: 1px solid var(--separator);
-  }
-  .rail-list {
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
-    padding: 0 8px 16px;
-  }
-  .phone .rail-list {
-    overflow: visible;
-  }
-  .rail-group + .rail-group {
-    margin-top: 10px;
-  }
-  .rail-group-label {
-    padding: 6px 8px 2px;
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: .06em;
-  }
-  .rail-count {
-    padding: 2px 8px 6px;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-  }
-  .rail-row {
-    display: flex;
-    flex-direction: column;
-    align-items: stretch;
-    gap: 2px;
-    width: 100%;
-    min-height: 28px;
-    padding: 4px 8px;
-    border: 0;
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text);
-    text-align: start;
-    cursor: pointer;
-  }
-  .phone .rail-row {
-    min-height: 44px;
-    padding: 8px 10px;
-  }
-  .rail-row:hover {
-    background: var(--hover);
-  }
-  .rail-row.active {
-    background: var(--accent-soft);
-  }
-  .rail-row.active .row-title {
-    color: var(--accent-text);
-    font-weight: 600;
-  }
-  .rail-row.hit {
-    box-shadow: inset 0 0 0 1px var(--border-strong);
-  }
-  .row-title {
-    font-size: var(--fs-m);
-    line-height: 1.35;
-  }
-  .row-meta {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    min-width: 0;
-  }
-  .row-group {
-    flex-shrink: 0;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-  }
-  .row-snippet {
-    min-width: 0;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
   .rail-empty {
     padding: 16px 8px;
@@ -527,7 +420,7 @@
     overflow-y: auto;
     padding: 20px 28px max(48px, var(--fb-clearance, 0px));
   }
-  .phone .main {
+  .main.phone {
     padding: 14px 16px max(40px, var(--fb-clearance, 0px));
   }
   .column {
