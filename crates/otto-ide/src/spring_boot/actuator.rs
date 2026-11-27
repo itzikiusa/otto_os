@@ -54,33 +54,16 @@ pub fn validate_loopback_actuator_url(raw_url: &str) -> Result<String> {
     Ok(parsed.as_str().trim_end_matches('/').to_string())
 }
 
-fn is_sensitive_env_key(key: &str) -> bool {
-    let lower = key.to_ascii_lowercase();
-    [
-        "password",
-        "passwd",
-        "secret",
-        "token",
-        "apikey",
-        "api_key",
-        "api-key",
-        "private",
-        "credential",
-        "auth",
-        "cookie",
-        "jwt",
-        "cert",
-        "key.store",
-        "keystore",
-        "truststore",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle))
-}
-
-async fn fetch_json_bounded(client: &reqwest::Client, url: &str) -> Option<Value> {
+async fn fetch_json_bounded(
+    client: &reqwest::Client,
+    url: &str,
+    allow_service_unavailable: bool,
+) -> Option<Value> {
     let mut resp = client.get(url).send().await.ok()?;
-    if !resp.status().is_success() {
+    let st = resp.status();
+    if !st.is_success()
+        && !(allow_service_unavailable && st == reqwest::StatusCode::SERVICE_UNAVAILABLE)
+    {
         return None;
     }
     let mut buf = Vec::new();
@@ -90,7 +73,25 @@ async fn fetch_json_bounded(client: &reqwest::Client, url: &str) -> Option<Value
         }
         buf.extend_from_slice(&chunk);
     }
-    serde_json::from_slice(&buf).ok()
+    let parsed: Value = serde_json::from_slice(&buf).ok()?;
+    if st == reqwest::StatusCode::SERVICE_UNAVAILABLE
+        && parsed.get("status").and_then(Value::as_str).is_none()
+    {
+        return None;
+    }
+    Some(parsed)
+}
+
+/// Build the dedicated loopback-only Actuator HTTP client (redirects disabled, ambient proxies bypassed).
+pub(crate) fn build_actuator_http_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(ACTUATOR_TIMEOUT)
+        .timeout(ACTUATOR_TIMEOUT)
+        .user_agent("otto-ide-spring-actuator/0.7")
+        .build()
+        .map_err(|e| Error::Internal(format!("build actuator http client: {e}")))
 }
 
 /// Query a locally running Spring Boot Actuator server (`127.0.0.1` / `localhost` / `[::1]` only)
@@ -120,25 +121,18 @@ pub async fn inspect_actuator(req: &IdeSpringActuatorReq) -> Result<IdeSpringAct
 
     let base_url = validate_loopback_actuator_url(&raw_base)?;
 
-    // Dedicated loopback-only client with redirects disabled so a local endpoint cannot redirect off-host.
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(ACTUATOR_TIMEOUT)
-        .timeout(ACTUATOR_TIMEOUT)
-        .user_agent("otto-ide-spring-actuator/0.7")
-        .build()
-        .map_err(|e| Error::Internal(format!("build actuator http client: {e}")))?;
+    let client = build_actuator_http_client()?;
 
     let health_url = format!("{base_url}/health");
     let mappings_url = format!("{base_url}/mappings");
     let beans_url = format!("{base_url}/beans");
     let env_url = format!("{base_url}/env");
     let (root_v, health_v, mappings_v, beans_v, env_v) = tokio::join!(
-        fetch_json_bounded(&client, &base_url),
-        fetch_json_bounded(&client, &health_url),
-        fetch_json_bounded(&client, &mappings_url),
-        fetch_json_bounded(&client, &beans_url),
-        fetch_json_bounded(&client, &env_url),
+        fetch_json_bounded(&client, &base_url, false),
+        fetch_json_bounded(&client, &health_url, true),
+        fetch_json_bounded(&client, &mappings_url, false),
+        fetch_json_bounded(&client, &beans_url, false),
+        fetch_json_bounded(&client, &env_url, false),
     );
 
     let reachable = root_v.is_some()
@@ -385,25 +379,17 @@ pub fn parse_actuator_env(val: &Value) -> (Vec<String>, Vec<IdeSpringEnvProp>) {
             let Some(pobj) = src.get("properties").and_then(|v| v.as_object()) else {
                 continue;
             };
-            for (k, vobj) in pobj {
+            for (k, _vobj) in pobj {
                 if props.len() >= MAX_ENV_PROPS {
                     return (active_profiles, props);
                 }
-                let redacted = is_sensitive_env_key(k);
-                let value = if redacted {
-                    "******".to_string()
-                } else {
-                    match vobj.get("value") {
-                        Some(Value::String(s)) => s.clone(),
-                        Some(other) => other.to_string(),
-                        None => String::new(),
-                    }
-                };
+                // Redact all Actuator `/env` values by default so credentials embedded in
+                // connection URIs or custom property names are never exposed over the API.
                 props.push(IdeSpringEnvProp {
                     key: k.clone(),
-                    value,
+                    value: "******".to_string(),
                     source: src_name.clone(),
-                    redacted,
+                    redacted: true,
                 });
             }
         }
@@ -411,46 +397,66 @@ pub fn parse_actuator_env(val: &Value) -> (Vec<String>, Vec<IdeSpringEnvProp>) {
     (active_profiles, props)
 }
 
-/// Touch or create the Spring Boot DevTools restart trigger file strictly inside `canon_root`.
+/// Touch (or create empty if absent) the Spring Boot DevTools restart trigger file strictly
+/// inside a compiled classpath output directory of `canon_root` (or confined `module_root`).
 pub async fn trigger_devtools_restart(
     canon_root: &Path,
     trigger_file_override: Option<&str>,
+    module_root_override: Option<&str>,
 ) -> Result<IdeSpringDevtoolsRestartResp> {
     let trigger_name = trigger_file_override
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .unwrap_or(".reloadtrigger");
 
-    // Reject path traversal or absolute paths outside the workspace root.
-    if trigger_name.contains("..") || trigger_name.starts_with('/') || trigger_name.contains('\\') {
+    // Reject path traversal, directory separators, NULs, or reserved dot names.
+    if trigger_name == "."
+        || trigger_name == ".."
+        || trigger_name.contains("..")
+        || trigger_name.contains('/')
+        || trigger_name.contains('\\')
+        || trigger_name.contains('\0')
+    {
         return Err(Error::Invalid(format!(
             "invalid DevTools trigger file name '{trigger_name}'"
         )));
     }
 
-    // Prefer compiled classpath output dirs (`target/classes`, `build/classes/java/main`,
-    // `build/classes/kotlin/main`, `build/resources/main`) when present so Spring DevTools
-    // sees the classpath change immediately; otherwise write into `src/main/resources`.
+    let effective_root = match module_root_override
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(mr) => {
+            let cand = tokio::fs::canonicalize(mr).await.map_err(|_| {
+                Error::Invalid(format!("Spring Boot module root '{mr}' does not exist"))
+            })?;
+            if !cand.is_dir() || !cand.starts_with(canon_root) {
+                return Err(Error::Forbidden(
+                    "Spring Boot module root escaped workspace root".into(),
+                ));
+            }
+            cand
+        }
+        None => canon_root.to_path_buf(),
+    };
+
+    // Only touch inside an existing compiled classpath output directory so DevTools sees the
+    // classpath change and we never pollute `src/main/resources` outside the runtime classpath.
     let target_dir = [
         "target/classes",
         "build/classes/java/main",
         "build/classes/kotlin/main",
         "build/resources/main",
-        "src/main/resources",
     ]
     .into_iter()
-    .map(|rel| canon_root.join(rel))
+    .map(|rel| effective_root.join(rel))
     .find(|d| d.is_dir())
-    .unwrap_or_else(|| canon_root.join("src/main/resources"));
-
-    if !target_dir.starts_with(canon_root) {
-        return Err(Error::Forbidden(
-            "DevTools trigger path escaped workspace root".into(),
-        ));
-    }
-    tokio::fs::create_dir_all(&target_dir)
-        .await
-        .map_err(|e| Error::Internal(format!("create DevTools trigger dir: {e}")))?;
+    .ok_or_else(|| {
+        Error::Invalid(
+            "no compiled classpath output directory found (build or run the Spring Boot app with DevTools first)"
+                .into(),
+        )
+    })?;
 
     let canon_dir = tokio::fs::canonicalize(&target_dir)
         .await
@@ -462,25 +468,51 @@ pub async fn trigger_devtools_restart(
     }
 
     let trigger_path = canon_dir.join(trigger_name);
-    if let Ok(meta) = tokio::fs::symlink_metadata(&trigger_path).await {
-        if meta.file_type().is_symlink() {
-            return Err(Error::Forbidden(
-                "DevTools trigger file must not be a symlink".into(),
-            ));
+    let trigger_path_c = trigger_path.clone();
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        match std::fs::symlink_metadata(&trigger_path_c) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() {
+                    return Err(Error::Forbidden(
+                        "DevTools trigger file must not be a symlink".into(),
+                    ));
+                }
+                if !meta.is_file() {
+                    return Err(Error::Invalid(
+                        "DevTools trigger path must be a regular file".into(),
+                    ));
+                }
+                // Touch mtime in-place without truncating or modifying existing resource bytes.
+                let file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&trigger_path_c)
+                    .map_err(|e| Error::Internal(format!("open DevTools trigger file: {e}")))?;
+                file.set_modified(std::time::SystemTime::now())
+                    .map_err(|e| Error::Internal(format!("touch DevTools trigger file: {e}")))?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .open(&trigger_path_c)
+                    .map_err(|e| Error::Internal(format!("create DevTools trigger file: {e}")))?;
+            }
+            Err(e) => {
+                return Err(Error::Internal(format!("stat DevTools trigger file: {e}")));
+            }
         }
-    }
-    let now = Utc::now().to_rfc3339();
-    let body = format!("# Otto IDE Spring Boot DevTools restart trigger\nrestarted_at={now}\n");
-    tokio::fs::write(&trigger_path, body)
-        .await
-        .map_err(|e| Error::Internal(format!("write DevTools trigger file: {e}")))?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| Error::Internal(format!("DevTools trigger task failed: {e}")))??;
 
+    let now = Utc::now().to_rfc3339();
     Ok(IdeSpringDevtoolsRestartResp {
         ok: true,
         trigger_path: trigger_path.to_string_lossy().into_owned(),
         restarted_at: now,
         message: format!(
-            "Triggered Spring Boot DevTools restart via {}",
+            "Updated DevTools trigger file {} (restart check requested)",
             trigger_path.display()
         ),
     })

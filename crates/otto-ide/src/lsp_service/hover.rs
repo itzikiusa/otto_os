@@ -72,6 +72,7 @@ pub async fn hover<S: IdeCtx>(ctx: &S, user: &User, req: IdeHoverReq) -> Result<
             .as_ref()
             .map(|r| r.local_project_roots())
             .unwrap_or_default();
+        let is_root_user = otto_core::auth::root_authority(user);
         let path_c = req.path.clone();
         let content_c = content.clone();
         if let Ok(Some(spring_hover)) = tokio::task::spawn_blocking(move || {
@@ -80,6 +81,7 @@ pub async fn hover<S: IdeCtx>(ctx: &S, user: &User, req: IdeHoverReq) -> Result<
                 &content_c,
                 line,
                 &project_roots,
+                is_root_user,
             )
         })
         .await

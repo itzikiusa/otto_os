@@ -184,6 +184,8 @@ pub struct IdeSpringBootInfo {
     pub has_devtools: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger_file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module_root: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -261,6 +263,8 @@ pub struct IdeSpringDevtoolsRestartReq {
     pub target: IdeTargetSpec,
     #[serde(default)]
     pub trigger_file: Option<String>,
+    #[serde(default)]
+    pub module_root: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

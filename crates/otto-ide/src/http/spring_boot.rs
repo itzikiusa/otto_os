@@ -50,6 +50,7 @@ pub(super) async fn spring_devtools_restart<S: IdeCtx>(
     let resp = crate::spring_boot::actuator::trigger_devtools_restart(
         &canon_root,
         req.trigger_file.as_deref(),
+        req.module_root.as_deref(),
     )
     .await?;
     Ok(Json(resp))

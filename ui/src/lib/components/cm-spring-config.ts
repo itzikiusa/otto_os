@@ -1,7 +1,10 @@
 // CodeMirror 6 autocompletion for Spring Boot `application*.{properties,yml,yaml}`
 // and `bootstrap*.{properties,yml,yaml}` configuration files.
+// Shares the single curated property catalog `docs/contracts/spring-boot-properties.json`
+// with the Rust backend (`crates/otto-ide/src/spring_boot/props.rs`).
 import { autocompletion, type Completion, type CompletionContext, type CompletionResult } from '@codemirror/autocomplete';
 import type { Extension } from '@codemirror/state';
+import rawCatalog from '../../../../docs/contracts/spring-boot-properties.json' with { type: 'json' };
 
 export interface SpringPropSpec {
   key: string;
@@ -12,46 +15,24 @@ export interface SpringPropSpec {
   deprecated?: string;
 }
 
-export const SPRING_BOOT_CONFIG_PROPS: readonly SpringPropSpec[] = [
-  { key: 'server.port', type: 'integer', defaultValue: '8080', info: 'Server HTTP port.' },
-  { key: 'server.address', type: 'string', info: 'Network address to which the server should bind.' },
-  { key: 'server.servlet.context-path', type: 'string', defaultValue: '/', info: 'Context path of the application.' },
-  { key: 'server.shutdown', type: 'enum', defaultValue: 'immediate', allowed: ['immediate', 'graceful'], info: 'Type of shutdown supported by the server.' },
-  { key: 'server.compression.enabled', type: 'boolean', defaultValue: 'false', allowed: ['true', 'false'], info: 'Whether response compression is enabled.' },
-  { key: 'spring.application.name', type: 'string', info: 'Application name used for logging, metrics, and service discovery.' },
-  { key: 'spring.profiles.active', type: 'string', info: 'Comma-separated list of active Spring profiles.' },
-  { key: 'spring.profiles.default', type: 'string', defaultValue: 'default', info: 'Name of the profile to enable if no profile is active.' },
-  { key: 'spring.main.banner-mode', type: 'enum', defaultValue: 'console', allowed: ['off', 'console', 'log'], info: 'Mode used to display the banner when the application runs.' },
-  { key: 'spring.main.web-application-type', type: 'enum', allowed: ['none', 'servlet', 'reactive'], info: 'Explicitly request a specific web application type.' },
-  { key: 'spring.threads.virtual.enabled', type: 'boolean', defaultValue: 'false', allowed: ['true', 'false'], info: 'Whether to use Java 21+ virtual threads.' },
-  { key: 'spring.datasource.url', type: 'string', info: 'JDBC URL of the database.' },
-  { key: 'spring.datasource.username', type: 'string', info: 'Login username of the database.' },
-  { key: 'spring.datasource.password', type: 'string', info: 'Login password of the database.' },
-  { key: 'spring.datasource.driver-class-name', type: 'string', info: 'Fully qualified name of the JDBC driver.' },
-  { key: 'spring.datasource.hikari.maximum-pool-size', type: 'integer', defaultValue: '10', info: 'Maximum number of connections in the HikariCP pool.' },
-  { key: 'spring.jpa.hibernate.ddl-auto', type: 'enum', defaultValue: 'none', allowed: ['none', 'validate', 'update', 'create', 'create-drop'], info: 'DDL mode for Hibernate schema management.' },
-  { key: 'spring.jpa.show-sql', type: 'boolean', defaultValue: 'false', allowed: ['true', 'false'], info: 'Enable logging of SQL statements.' },
-  { key: 'spring.jpa.open-in-view', type: 'boolean', defaultValue: 'true', allowed: ['true', 'false'], info: 'Register OpenEntityManagerInViewInterceptor.' },
-  { key: 'spring.flyway.enabled', type: 'boolean', defaultValue: 'true', allowed: ['true', 'false'], info: 'Enable Flyway database migrations.' },
-  { key: 'spring.liquibase.enabled', type: 'boolean', defaultValue: 'true', allowed: ['true', 'false'], info: 'Enable Liquibase database migrations.' },
-  { key: 'spring.data.redis.host', type: 'string', defaultValue: 'localhost', info: 'Redis server host.' },
-  { key: 'spring.data.redis.port', type: 'integer', defaultValue: '6379', info: 'Redis server port.' },
-  { key: 'spring.kafka.bootstrap-servers', type: 'string', defaultValue: 'localhost:9092', info: 'Comma-delimited Kafka bootstrap servers.' },
-  { key: 'spring.kafka.consumer.group-id', type: 'string', info: 'Kafka consumer group ID.' },
-  { key: 'spring.jackson.serialization.indent-output', type: 'boolean', defaultValue: 'false', allowed: ['true', 'false'], info: 'Pretty-print serialized JSON output.' },
-  { key: 'spring.jackson.default-property-inclusion', type: 'enum', defaultValue: 'always', allowed: ['always', 'non_null', 'non_absent', 'non_empty', 'non_default'], info: 'Controls property inclusion during JSON serialization.' },
-  { key: 'spring.devtools.restart.enabled', type: 'boolean', defaultValue: 'true', allowed: ['true', 'false'], info: 'Enable automatic DevTools restart.' },
-  { key: 'spring.devtools.restart.trigger-file', type: 'string', info: 'Specific trigger file name required for DevTools restart.' },
-  { key: 'spring.devtools.livereload.enabled', type: 'boolean', defaultValue: 'true', allowed: ['true', 'false'], info: 'Enable DevTools LiveReload server.' },
-  { key: 'management.server.port', type: 'integer', info: 'Management Actuator HTTP port (defaults to server.port).' },
-  { key: 'management.endpoints.web.base-path', type: 'string', defaultValue: '/actuator', info: 'Base path for Web Actuator endpoints.' },
-  { key: 'management.endpoints.web.exposure.include', type: 'string', defaultValue: 'health', allowed: ['*', 'health,info,metrics,beans,mappings,env', 'health,info'], info: 'Endpoint IDs exposed over HTTP.' },
-  { key: 'management.endpoints.web.exposure.exclude', type: 'string', info: 'Endpoint IDs excluded from HTTP exposure.' },
-  { key: 'management.endpoint.health.show-details', type: 'enum', defaultValue: 'never', allowed: ['never', 'when-authorized', 'always'], info: 'When to show full health component details.' },
-  { key: 'management.endpoint.health.probes.enabled', type: 'boolean', defaultValue: 'false', allowed: ['true', 'false'], info: 'Enable Kubernetes liveness and readiness probes.' },
-  { key: 'logging.level.root', type: 'enum', defaultValue: 'INFO', allowed: ['TRACE', 'DEBUG', 'INFO', 'WARN', 'ERROR', 'FATAL', 'OFF'], info: 'Root logger severity level.' },
-  { key: 'logging.file.name', type: 'string', info: 'Log file name.' },
-];
+interface RawSpringProp {
+  key: string;
+  value_type: 'string' | 'integer' | 'boolean' | 'enum';
+  default_value?: string;
+  description: string;
+  deprecated_replacement?: string;
+  allowed_values?: string[];
+}
+
+export const SPRING_BOOT_CONFIG_PROPS: readonly SpringPropSpec[] = (rawCatalog as RawSpringProp[])
+  .filter((p) => !p.deprecated_replacement)
+  .map((p) => ({
+    key: p.key,
+    type: p.value_type,
+    ...(p.default_value !== undefined ? { defaultValue: p.default_value } : {}),
+    info: p.description,
+    ...(p.allowed_values && p.allowed_values.length > 0 ? { allowed: p.allowed_values } : {}),
+  }));
 
 export function isSpringConfigPath(filePath: string): boolean {
   const base = (filePath.split(/[\\/]/).pop() ?? '').toLowerCase();
@@ -92,6 +73,14 @@ function inferYamlParentPrefix(lines: string[], targetIdx: number): string[] {
   return stack.map((s) => s.key);
 }
 
+function detectYamlIndentUnit(lines: string[]): string {
+  for (const raw of lines) {
+    const m = /^( +)\S/.exec(raw);
+    if (m && m[1].length >= 2 && m[1].length <= 4) return m[1];
+  }
+  return '  ';
+}
+
 export interface SpringCompletionMatch {
   from: number;
   options: Completion[];
@@ -103,6 +92,7 @@ export function completeSpringConfigAt(
   docText: string,
   pos: number,
   explicit: boolean,
+  indentUnit?: string,
 ): SpringCompletionMatch | null {
   if (!isSpringConfigPath(filePath)) return null;
   const lineStart = docText.lastIndexOf('\n', Math.max(0, pos - 1)) + 1;
@@ -160,6 +150,8 @@ export function completeSpringConfigAt(
 
   if (!explicit && trimmedBefore.length < 1 && parentPrefix.length === 0) return null;
   const from = pos - trimmedBefore.length;
+  const lineIndent = before.slice(0, before.length - trimmedBefore.length);
+  const unit = indentUnit ?? detectYamlIndentUnit(lines);
   const dottedPrefix = parentPrefix.length > 0 ? `${parentPrefix.join('.')}.` : '';
   const q = `${dottedPrefix}${trimmedBefore}`.toLowerCase();
 
@@ -180,7 +172,7 @@ export function completeSpringConfigAt(
       type: 'property',
       detail: isLeaf ? (p.defaultValue ? `${p.type} = ${p.defaultValue}` : p.type) : 'group',
       info: isLeaf ? p.info : `Spring Boot config group (${dottedPrefix}${nextSeg}.*)`,
-      apply: isLeaf ? `${nextSeg}: ` : `${nextSeg}:\n  `,
+      apply: isLeaf ? `${nextSeg}: ` : `${nextSeg}:\n${lineIndent}${unit}`,
     });
   }
   return options.length ? { from, options } : null;

@@ -1,6 +1,7 @@
 //! Spring Boot `application.properties` / `application.yml` configuration intelligence:
-//! curated property metadata, hover docs, `@Value("${...}")` / `@ConfigurationProperties`
-//! bidirectional navigation, and fast diagnostics with Quick Fixes.
+//! curated property metadata (shared with the UI from `docs/contracts/spring-boot-properties.json`),
+//! hover docs, `@Value("${...}")` / `@ConfigurationProperties` bidirectional navigation,
+//! and fast diagnostics (with replacement Quick Fixes in `.properties`).
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -8,391 +9,75 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use regex::Regex;
+use serde::Deserialize;
 
 use crate::types::{
     IdeDiagnostic, IdeHoverDefinedIn, IdeHoverResp, IdeQuickFix, IdeReferenceLocation, IdeTextEdit,
 };
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct SpringPropMeta {
-    pub key: &'static str,
-    pub value_type: &'static str,
-    pub default_value: Option<&'static str>,
-    pub description: &'static str,
-    pub deprecated_replacement: Option<&'static str>,
-    pub allowed_values: &'static [&'static str],
+    pub key: String,
+    pub value_type: String,
+    #[serde(default)]
+    pub default_value: Option<String>,
+    pub description: String,
+    #[serde(default)]
+    pub deprecated_replacement: Option<String>,
+    #[serde(default)]
+    pub allowed_values: Vec<String>,
 }
 
-pub static SPRING_BOOT_PROPERTIES: &[SpringPropMeta] = &[
-    SpringPropMeta {
-        key: "server.port",
-        value_type: "integer",
-        default_value: Some("8080"),
-        description: "Server HTTP port.",
-        deprecated_replacement: None,
-        allowed_values: &[],
-    },
-    SpringPropMeta {
-        key: "server.address",
-        value_type: "string",
-        default_value: None,
-        description: "Network address to which the server should bind.",
-        deprecated_replacement: None,
-        allowed_values: &[],
-    },
-    SpringPropMeta {
-        key: "server.servlet.context-path",
-        value_type: "string",
-        default_value: Some("/"),
-        description: "Context path of the application.",
-        deprecated_replacement: None,
-        allowed_values: &[],
-    },
-    SpringPropMeta {
-        key: "server.context-path",
-        value_type: "string",
-        default_value: None,
-        description: "Deprecated Spring Boot 1.x context path property.",
-        deprecated_replacement: Some("server.servlet.context-path"),
-        allowed_values: &[],
-    },
-    SpringPropMeta {
-        key: "server.shutdown",
-        value_type: "enum",
-        default_value: Some("immediate"),
-        description: "Type of shutdown that the server will support.",
-        deprecated_replacement: None,
-        allowed_values: &["immediate", "graceful"],
-    },
-    SpringPropMeta {
-        key: "server.compression.enabled",
-        value_type: "boolean",
-        default_value: Some("false"),
-        description: "Whether response compression is enabled.",
-        deprecated_replacement: None,
-        allowed_values: &["true", "false"],
-    },
-    SpringPropMeta {
-        key: "spring.application.name",
-        value_type: "string",
-        default_value: None,
-        description: "Application name (used by Actuator, tracing, and service discovery).",
-        deprecated_replacement: None,
-        allowed_values: &[],
-    },
-    SpringPropMeta {
-        key: "spring.profiles.active",
-        value_type: "string",
-        default_value: None,
-        description: "Comma-separated list of active Spring profiles.",
-        deprecated_replacement: None,
-        allowed_values: &[],
-    },
-    SpringPropMeta {
-        key: "spring.profiles.include",
-        value_type: "string",
-        default_value: None,
-        description: "Unconditionally activate the specified comma-separated list of profiles.",
-        deprecated_replacement: None,
-        allowed_values: &[],
-    },
-    SpringPropMeta {
-        key: "spring.profiles",
-        value_type: "string",
-        default_value: None,
-        description: "Deprecated in Spring Boot 2.4+. Use `spring.config.activate.on-profile`.",
-        deprecated_replacement: Some("spring.config.activate.on-profile"),
-        allowed_values: &[],
-    },
-    SpringPropMeta {
-        key: "spring.config.activate.on-profile",
-        value_type: "string",
-        default_value: None,
-        description: "Profile expression that should match for a multi-document config section to be active.",
-        deprecated_replacement: None,
-        allowed_values: &[],
-    },
-    SpringPropMeta {
-        key: "spring.config.import",
-        value_type: "string",
-        default_value: None,
-        description: "Import additional configuration data (e.g., `optional:file:.env[.properties]`).",
-        deprecated_replacement: None,
-        allowed_values: &[],
-    },
-    SpringPropMeta {
-        key: "spring.main.banner-mode",
-        value_type: "enum",
-        default_value: Some("console"),
-        description: "Mode used to display the banner when the application runs.",
-        deprecated_replacement: None,
-        allowed_values: &["console", "log", "off"],
-    },
-    SpringPropMeta {
-        key: "spring.main.web-application-type",
-        value_type: "enum",
-        default_value: None,
-        description: "Flag to explicitly request a specific type of web application.",
-        deprecated_replacement: None,
-        allowed_values: &["none", "servlet", "reactive"],
-    },
-    SpringPropMeta {
-        key: "spring.main.lazy-initialization",
-        value_type: "boolean",
-        default_value: Some("false"),
-        description: "Whether initialization should be performed lazily.",
-        deprecated_replacement: None,
-        allowed_values: &["true", "false"],
-    },
-    SpringPropMeta {
-        key: "spring.threads.virtual.enabled",
-        value_type: "boolean",
-        default_value: Some("false"),
-        description: "Whether to use Java 21+ virtual threads for web & task executors.",
-        deprecated_replacement: None,
-        allowed_values: &["true", "false"],
-    },
-    SpringPropMeta {
-        key: "spring.datasource.url",
-        value_type: "string",
-        default_value: None,
-        description: "JDBC URL of the database.",
-        deprecated_replacement: None,
-        allowed_values: &[],
-    },
-    SpringPropMeta {
-        key: "spring.datasource.username",
-        value_type: "string",
-        default_value: None,
-        description: "Login username of the database.",
-        deprecated_replacement: None,
-        allowed_values: &[],
-    },
-    SpringPropMeta {
-        key: "spring.datasource.password",
-        value_type: "string",
-        default_value: None,
-        description: "Login password of the database.",
-        deprecated_replacement: None,
-        allowed_values: &[],
-    },
-    SpringPropMeta {
-        key: "spring.datasource.driver-class-name",
-        value_type: "string",
-        default_value: None,
-        description: "Fully qualified name of the JDBC driver. Auto-detected from URL by default.",
-        deprecated_replacement: None,
-        allowed_values: &[],
-    },
-    SpringPropMeta {
-        key: "spring.datasource.hikari.maximum-pool-size",
-        value_type: "integer",
-        default_value: Some("10"),
-        description: "Maximum number of connections in the HikariCP pool.",
-        deprecated_replacement: None,
-        allowed_values: &[],
-    },
-    SpringPropMeta {
-        key: "spring.jpa.hibernate.ddl-auto",
-        value_type: "enum",
-        default_value: Some("none"),
-        description: "DDL mode (`none`, `validate`, `update`, `create`, `create-drop`).",
-        deprecated_replacement: None,
-        allowed_values: &["none", "validate", "update", "create", "create-drop"],
-    },
-    SpringPropMeta {
-        key: "spring.jpa.show-sql",
-        value_type: "boolean",
-        default_value: Some("false"),
-        description: "Whether to enable logging of SQL statements.",
-        deprecated_replacement: None,
-        allowed_values: &["true", "false"],
-    },
-    SpringPropMeta {
-        key: "spring.jpa.open-in-view",
-        value_type: "boolean",
-        default_value: Some("true"),
-        description: "Register OpenEntityManagerInViewInterceptor (recommended `false` for REST APIs).",
-        deprecated_replacement: None,
-        allowed_values: &["true", "false"],
-    },
-    SpringPropMeta {
-        key: "spring.flyway.enabled",
-        value_type: "boolean",
-        default_value: Some("true"),
-        description: "Whether to enable Flyway database migrations.",
-        deprecated_replacement: None,
-        allowed_values: &["true", "false"],
-    },
-    SpringPropMeta {
-        key: "spring.liquibase.enabled",
-        value_type: "boolean",
-        default_value: Some("true"),
-        description: "Whether to enable Liquibase database migrations.",
-        deprecated_replacement: None,
-        allowed_values: &["true", "false"],
-    },
-    SpringPropMeta {
-        key: "spring.data.redis.host",
-        value_type: "string",
-        default_value: Some("localhost"),
-        description: "Redis server host.",
-        deprecated_replacement: None,
-        allowed_values: &[],
-    },
-    SpringPropMeta {
-        key: "spring.data.redis.port",
-        value_type: "integer",
-        default_value: Some("6379"),
-        description: "Redis server port.",
-        deprecated_replacement: None,
-        allowed_values: &[],
-    },
-    SpringPropMeta {
-        key: "spring.redis.host",
-        value_type: "string",
-        default_value: Some("localhost"),
-        description: "Deprecated in Spring Boot 3.0+. Use `spring.data.redis.host`.",
-        deprecated_replacement: Some("spring.data.redis.host"),
-        allowed_values: &[],
-    },
-    SpringPropMeta {
-        key: "spring.redis.port",
-        value_type: "integer",
-        default_value: Some("6379"),
-        description: "Deprecated in Spring Boot 3.0+. Use `spring.data.redis.port`.",
-        deprecated_replacement: Some("spring.data.redis.port"),
-        allowed_values: &[],
-    },
-    SpringPropMeta {
-        key: "spring.kafka.bootstrap-servers",
-        value_type: "string",
-        default_value: Some("localhost:9092"),
-        description: "Comma-delimited list of host:port pairs for Kafka bootstrap connections.",
-        deprecated_replacement: None,
-        allowed_values: &[],
-    },
-    SpringPropMeta {
-        key: "spring.kafka.consumer.group-id",
-        value_type: "string",
-        default_value: None,
-        description: "Unique string identifying the consumer group.",
-        deprecated_replacement: None,
-        allowed_values: &[],
-    },
-    SpringPropMeta {
-        key: "spring.jackson.serialization.indent-output",
-        value_type: "boolean",
-        default_value: Some("false"),
-        description: "Pretty-print serialized JSON output.",
-        deprecated_replacement: None,
-        allowed_values: &["true", "false"],
-    },
-    SpringPropMeta {
-        key: "spring.jackson.default-property-inclusion",
-        value_type: "enum",
-        default_value: Some("always"),
-        description: "Controls inclusion of properties during JSON serialization.",
-        deprecated_replacement: None,
-        allowed_values: &["always", "non_null", "non_absent", "non_empty", "non_default"],
-    },
-    SpringPropMeta {
-        key: "spring.devtools.restart.enabled",
-        value_type: "boolean",
-        default_value: Some("true"),
-        description: "Whether to enable automatic restart via Spring Boot DevTools.",
-        deprecated_replacement: None,
-        allowed_values: &["true", "false"],
-    },
-    SpringPropMeta {
-        key: "spring.devtools.restart.trigger-file",
-        value_type: "string",
-        default_value: None,
-        description: "Name of a specific file that must be modified to trigger a DevTools restart check.",
-        deprecated_replacement: None,
-        allowed_values: &[],
-    },
-    SpringPropMeta {
-        key: "spring.devtools.livereload.enabled",
-        value_type: "boolean",
-        default_value: Some("true"),
-        description: "Whether to enable a LiveReload server.",
-        deprecated_replacement: None,
-        allowed_values: &["true", "false"],
-    },
-    SpringPropMeta {
-        key: "management.server.port",
-        value_type: "integer",
-        default_value: None,
-        description: "Management endpoint HTTP port (defaults to `server.port`).",
-        deprecated_replacement: None,
-        allowed_values: &[],
-    },
-    SpringPropMeta {
-        key: "management.endpoints.web.base-path",
-        value_type: "string",
-        default_value: Some("/actuator"),
-        description: "Base path for Web Actuator endpoints.",
-        deprecated_replacement: None,
-        allowed_values: &[],
-    },
-    SpringPropMeta {
-        key: "management.endpoints.web.exposure.include",
-        value_type: "string",
-        default_value: Some("health"),
-        description: "Endpoint IDs exposed over HTTP (`*` or comma-separated list: `health,info,metrics,beans,mappings,env`).",
-        deprecated_replacement: None,
-        allowed_values: &["*", "health,info,metrics,beans,mappings,env", "health,info"],
-    },
-    SpringPropMeta {
-        key: "management.endpoints.web.exposure.exclude",
-        value_type: "string",
-        default_value: None,
-        description: "Endpoint IDs excluded from HTTP exposure.",
-        deprecated_replacement: None,
-        allowed_values: &[],
-    },
-    SpringPropMeta {
-        key: "management.endpoint.health.show-details",
-        value_type: "enum",
-        default_value: Some("never"),
-        description: "When to show full health details.",
-        deprecated_replacement: None,
-        allowed_values: &["never", "when-authorized", "always"],
-    },
-    SpringPropMeta {
-        key: "management.endpoint.health.probes.enabled",
-        value_type: "boolean",
-        default_value: Some("false"),
-        description: "Whether to enable Kubernetes liveness and readiness probes.",
-        deprecated_replacement: None,
-        allowed_values: &["true", "false"],
-    },
-    SpringPropMeta {
-        key: "logging.level.root",
-        value_type: "enum",
-        default_value: Some("INFO"),
-        description: "Root logger severity level.",
-        deprecated_replacement: None,
-        allowed_values: &["TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL", "OFF"],
-    },
-    SpringPropMeta {
-        key: "logging.file.name",
-        value_type: "string",
-        default_value: None,
-        description: "Log file name (for instance, `myapp.log`).",
-        deprecated_replacement: None,
-        allowed_values: &[],
-    },
-    SpringPropMeta {
-        key: "logging.file",
-        value_type: "string",
-        default_value: None,
-        description: "Deprecated in Spring Boot 2.2+. Use `logging.file.name`.",
-        deprecated_replacement: Some("logging.file.name"),
-        allowed_values: &[],
-    },
-];
+const SPRING_PROPS_CATALOG_JSON: &str =
+    include_str!("../../../../docs/contracts/spring-boot-properties.json");
+
+pub fn spring_boot_properties() -> &'static [SpringPropMeta] {
+    static CATALOG: OnceLock<Vec<SpringPropMeta>> = OnceLock::new();
+    CATALOG.get_or_init(|| {
+        serde_json::from_str(SPRING_PROPS_CATALOG_JSON)
+            .expect("docs/contracts/spring-boot-properties.json must be valid JSON")
+    })
+}
+
+/// Verify that canonicalized `canon` resides strictly within `allowed_roots`,
+/// never touches denied secret paths, and respects non-root confinement.
+pub(crate) fn is_confined_spring_path(
+    canon: &Path,
+    allowed_roots: &[PathBuf],
+    is_root_user: bool,
+) -> bool {
+    let within = allowed_roots.iter().any(|r| {
+        #[allow(clippy::disallowed_methods)]
+        let cr = fs::canonicalize(r).unwrap_or_else(|_| r.clone());
+        canon.starts_with(&cr)
+    });
+    if !within {
+        return false;
+    }
+    if otto_core::secret_paths::is_denied_file(canon)
+        || otto_core::secret_paths::is_denied_dir(canon)
+    {
+        return false;
+    }
+    if !is_root_user && crate::target::enforce_non_root_path(canon).is_err() {
+        return false;
+    }
+    true
+}
+
+#[allow(clippy::disallowed_methods)]
+fn read_confined_text(
+    candidate: &Path,
+    allowed_roots: &[PathBuf],
+    is_root_user: bool,
+) -> Option<(PathBuf, String)> {
+    let canon = fs::canonicalize(candidate).ok()?;
+    if !canon.is_file() || !is_confined_spring_path(&canon, allowed_roots, is_root_user) {
+        return None;
+    }
+    let text = fs::read_to_string(&canon).ok()?;
+    Some((canon, text))
+}
 
 pub fn is_spring_config_filename(fname: &str) -> bool {
     let lower = fname.to_ascii_lowercase();
@@ -409,13 +94,12 @@ pub fn is_spring_config_path(path: &str) -> bool {
 }
 
 pub fn lookup_spring_property(key: &str) -> Option<&'static SpringPropMeta> {
-    if let Some(exact) = SPRING_BOOT_PROPERTIES.iter().find(|p| p.key == key) {
+    let catalog = spring_boot_properties();
+    if let Some(exact) = catalog.iter().find(|p| p.key == key) {
         return Some(exact);
     }
     if key.starts_with("logging.level.") {
-        return SPRING_BOOT_PROPERTIES
-            .iter()
-            .find(|p| p.key == "logging.level.root");
+        return catalog.iter().find(|p| p.key == "logging.level.root");
     }
     None
 }
@@ -533,6 +217,7 @@ pub fn hover_spring_config(
     content: &str,
     line_1based: u32,
     project_roots: &[PathBuf],
+    is_root_user: bool,
 ) -> Option<IdeHoverResp> {
     let key = if is_spring_config_path(path) {
         extract_config_key_at_line(path, content, line_1based)?
@@ -548,8 +233,8 @@ pub fn hover_spring_config(
     let meta = lookup_spring_property(&key);
     let mut doc_lines = Vec::new();
     let sig = if let Some(m) = meta {
-        doc_lines.push(m.description.to_string());
-        if let Some(def) = m.default_value {
+        doc_lines.push(m.description.clone());
+        if let Some(ref def) = m.default_value {
             doc_lines.push(format!("Default: `{def}`"));
         }
         if !m.allowed_values.is_empty() {
@@ -558,7 +243,7 @@ pub fn hover_spring_config(
                 m.allowed_values.join("`, `")
             ));
         }
-        if let Some(repl) = m.deprecated_replacement {
+        if let Some(ref repl) = m.deprecated_replacement {
             doc_lines.push(format!("Deprecated — use `{repl}` instead."));
         }
         format!("{key}: {}", m.value_type)
@@ -566,9 +251,9 @@ pub fn hover_spring_config(
         format!("{key} (Spring Boot property)")
     };
 
-    // If hovering inside Java/Kotlin code, also show configured value(s) from application config files.
+    // If hovering inside Java/Kotlin code, also show configured value(s) from confined config files.
     if !is_spring_config_path(path) {
-        let locs = find_property_in_config_files(&key, project_roots);
+        let locs = find_property_in_config_files(&key, project_roots, is_root_user);
         if locs.is_empty() && meta.is_none() {
             return None;
         }
@@ -597,14 +282,53 @@ pub fn hover_spring_config(
     })
 }
 
-/// Find definitions of a Spring Boot property key across `src/main/resources/application*.{properties,yml,yaml}`.
+#[allow(clippy::disallowed_methods)]
+fn collect_spring_search_roots(project_roots: &[PathBuf], is_root_user: bool) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for root in project_roots {
+        if !out.contains(root) {
+            out.push(root.clone());
+        }
+        let Ok(rd) = fs::read_dir(root) else {
+            continue;
+        };
+        let mut children: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+        children.sort();
+        for child in children {
+            let Ok(meta) = fs::symlink_metadata(&child) else {
+                continue;
+            };
+            if meta.file_type().is_symlink() || !meta.is_dir() {
+                continue;
+            }
+            if !child.join("pom.xml").is_file()
+                && !child.join("build.gradle").is_file()
+                && !child.join("build.gradle.kts").is_file()
+            {
+                continue;
+            }
+            if let Ok(canon) = fs::canonicalize(&child) {
+                if is_confined_spring_path(&canon, project_roots, is_root_user)
+                    && !out.contains(&canon)
+                {
+                    out.push(canon);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Find definitions of a Spring Boot property key across confined `application*.{properties,yml,yaml}` files.
 #[allow(clippy::disallowed_methods)]
 pub fn find_property_in_config_files(
     key: &str,
     project_roots: &[PathBuf],
+    is_root_user: bool,
 ) -> Vec<(String, u32, String)> {
     let mut out = Vec::new();
-    for root in project_roots {
+    let search_roots = collect_spring_search_roots(project_roots, is_root_user);
+    for root in &search_roots {
         for rel in ["src/main/resources", "config"] {
             let dir = root.join(rel);
             let Ok(rd) = fs::read_dir(&dir) else {
@@ -619,10 +343,10 @@ pub fn find_property_in_config_files(
                 if !is_spring_config_filename(fname) {
                     continue;
                 }
-                let Ok(raw) = fs::read_to_string(&f) else {
+                let Some((canon, raw)) = read_confined_text(&f, project_roots, is_root_user) else {
                     continue;
                 };
-                let f_str = f.to_string_lossy().into_owned();
+                let f_str = canon.to_string_lossy().into_owned();
                 for (k, v, ln) in extract_config_entries(&f_str, &raw) {
                     if k == key || k.starts_with(&format!("{key}.")) {
                         out.push((f_str.clone(), ln, v));
@@ -635,20 +359,21 @@ pub fn find_property_in_config_files(
     out
 }
 
-/// Navigate between Java/Kotlin `@Value` / `@ConfigurationProperties` and `application*.{properties,yml}`.
+/// Navigate between Java/Kotlin `@Value` / `@ConfigurationProperties` and confined `application*.{properties,yml}`.
 #[allow(clippy::disallowed_methods)]
 pub fn navigate_spring_config(
     path: &str,
     content: &str,
     line_1based: u32,
     project_roots: &[PathBuf],
+    is_root_user: bool,
 ) -> Option<(String, Vec<IdeReferenceLocation>)> {
     if path.ends_with(".java") || path.ends_with(".kt") {
         let raw_line = content
             .lines()
             .nth(line_1based.saturating_sub(1) as usize)?;
         let key = extract_spring_key_from_code_line(raw_line)?;
-        let hits = find_property_in_config_files(&key, project_roots);
+        let hits = find_property_in_config_files(&key, project_roots, is_root_user);
         if hits.is_empty() {
             return None;
         }
@@ -671,12 +396,21 @@ pub fn navigate_spring_config(
     if is_spring_config_path(path) {
         let key = extract_config_key_at_line(path, content, line_1based)?;
         let mut locations = Vec::new();
-        for root in project_roots {
+        let search_roots = collect_spring_search_roots(project_roots, is_root_user);
+        for root in &search_roots {
             for src_rel in ["src/main/java", "src/main/kotlin"] {
                 let dir = root.join(src_rel);
                 if dir.is_dir() {
                     let mut scanned = 0usize;
-                    search_code_for_spring_key(&dir, &key, 0, &mut scanned, &mut locations);
+                    search_code_for_spring_key(
+                        &dir,
+                        project_roots,
+                        is_root_user,
+                        &key,
+                        0,
+                        &mut scanned,
+                        &mut locations,
+                    );
                 }
             }
         }
@@ -690,6 +424,8 @@ pub fn navigate_spring_config(
 #[allow(clippy::disallowed_methods)]
 fn search_code_for_spring_key(
     dir: &Path,
+    allowed_roots: &[PathBuf],
+    is_root_user: bool,
     key: &str,
     depth: usize,
     scanned: &mut usize,
@@ -707,8 +443,22 @@ fn search_code_for_spring_key(
         if *scanned >= 120 || out.len() >= 16 {
             break;
         }
-        if entry.is_dir() {
-            search_code_for_spring_key(&entry, key, depth + 1, scanned, out);
+        let Ok(meta) = fs::symlink_metadata(&entry) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        if meta.is_dir() {
+            search_code_for_spring_key(
+                &entry,
+                allowed_roots,
+                is_root_user,
+                key,
+                depth + 1,
+                scanned,
+                out,
+            );
             continue;
         }
         let Some(ext) = entry.extension().and_then(|s| s.to_str()) else {
@@ -718,10 +468,10 @@ fn search_code_for_spring_key(
             continue;
         }
         *scanned += 1;
-        let Ok(raw) = fs::read_to_string(&entry) else {
+        let Some((canon, raw)) = read_confined_text(&entry, allowed_roots, is_root_user) else {
             continue;
         };
-        let p_str = entry.to_string_lossy().into_owned();
+        let p_str = canon.to_string_lossy().into_owned();
         for (idx, line) in raw.lines().enumerate() {
             if let Some(code_key) = extract_spring_key_from_code_line(line) {
                 if code_key == key || key.starts_with(&format!("{code_key}.")) {
@@ -738,7 +488,7 @@ fn search_code_for_spring_key(
 }
 
 /// Fast diagnostics for Spring Boot `application*.{properties,yml,yaml}`:
-/// - deprecated Spring Boot properties (with concrete Quick Fix replacement edit)
+/// - deprecated Spring Boot properties (with concrete Quick Fix replacement edit in `.properties`)
 /// - duplicate keys in `.properties`
 /// - invalid integer / boolean / enum literals on known typed keys (ignoring `${ENV_VAR}` placeholders)
 pub fn analyze_spring_config_diagnostics(path: &str, content: &str) -> Vec<IdeDiagnostic> {
@@ -775,7 +525,7 @@ pub fn analyze_spring_config_diagnostics(path: &str, content: &str) -> Vec<IdeDi
         }
 
         if let Some(meta) = lookup_spring_property(&key) {
-            if let Some(repl) = meta.deprecated_replacement {
+            if let Some(ref repl) = meta.deprecated_replacement {
                 let mut fixes = Vec::new();
                 if is_props {
                     if let Some(pos) = raw_line.find(&key) {
@@ -795,7 +545,7 @@ pub fn analyze_spring_config_diagnostics(path: &str, content: &str) -> Vec<IdeDi
                                 start_col,
                                 end_line: ln,
                                 end_col: key_end_col,
-                                new_text: repl.to_string(),
+                                new_text: repl.clone(),
                             }],
                         });
                     }
@@ -817,7 +567,7 @@ pub fn analyze_spring_config_diagnostics(path: &str, content: &str) -> Vec<IdeDi
             if val.is_empty() || val.contains("${") {
                 continue;
             }
-            match meta.value_type {
+            match meta.value_type.as_str() {
                 "integer" if val.parse::<i64>().is_err() => {
                     diags.push(IdeDiagnostic {
                         line: ln,

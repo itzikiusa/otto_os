@@ -1,0 +1,290 @@
+[
+  {
+    "key": "server.port",
+    "value_type": "integer",
+    "default_value": "8080",
+    "description": "Server HTTP port.",
+    "allowed_values": []
+  },
+  {
+    "key": "server.address",
+    "value_type": "string",
+    "description": "Network address to which the server should bind.",
+    "allowed_values": []
+  },
+  {
+    "key": "server.servlet.context-path",
+    "value_type": "string",
+    "default_value": "/",
+    "description": "Context path of the application.",
+    "allowed_values": []
+  },
+  {
+    "key": "server.shutdown",
+    "value_type": "enum",
+    "default_value": "immediate",
+    "description": "Type of shutdown supported by the server.",
+    "allowed_values": ["immediate", "graceful"]
+  },
+  {
+    "key": "server.compression.enabled",
+    "value_type": "boolean",
+    "default_value": "false",
+    "description": "Whether response compression is enabled.",
+    "allowed_values": ["true", "false"]
+  },
+  {
+    "key": "spring.application.name",
+    "value_type": "string",
+    "description": "Application name used for logging, metrics, and service discovery.",
+    "allowed_values": []
+  },
+  {
+    "key": "spring.profiles.active",
+    "value_type": "string",
+    "description": "Comma-separated list of active Spring profiles.",
+    "allowed_values": []
+  },
+  {
+    "key": "spring.profiles.default",
+    "value_type": "string",
+    "default_value": "default",
+    "description": "Name of the profile to enable if no profile is active.",
+    "allowed_values": []
+  },
+  {
+    "key": "spring.profiles.include",
+    "value_type": "string",
+    "description": "Unconditionally activate the specified comma-separated list of profiles.",
+    "allowed_values": []
+  },
+  {
+    "key": "spring.config.import",
+    "value_type": "string",
+    "description": "Import additional configuration data (e.g., `optional:file:.env[.properties]`).",
+    "allowed_values": []
+  },
+  {
+    "key": "spring.main.banner-mode",
+    "value_type": "enum",
+    "default_value": "console",
+    "description": "Mode used to display the banner when the application runs.",
+    "allowed_values": ["off", "console", "log"]
+  },
+  {
+    "key": "spring.main.web-application-type",
+    "value_type": "enum",
+    "description": "Explicitly request a specific web application type.",
+    "allowed_values": ["none", "servlet", "reactive"]
+  },
+  {
+    "key": "spring.threads.virtual.enabled",
+    "value_type": "boolean",
+    "default_value": "false",
+    "description": "Whether to use Java 21+ virtual threads.",
+    "allowed_values": ["true", "false"]
+  },
+  {
+    "key": "spring.datasource.url",
+    "value_type": "string",
+    "description": "JDBC URL of the database.",
+    "allowed_values": []
+  },
+  {
+    "key": "spring.datasource.username",
+    "value_type": "string",
+    "description": "Login username of the database.",
+    "allowed_values": []
+  },
+  {
+    "key": "spring.datasource.password",
+    "value_type": "string",
+    "description": "Login password of the database.",
+    "allowed_values": []
+  },
+  {
+    "key": "spring.datasource.driver-class-name",
+    "value_type": "string",
+    "description": "Fully qualified name of the JDBC driver.",
+    "allowed_values": []
+  },
+  {
+    "key": "spring.datasource.hikari.maximum-pool-size",
+    "value_type": "integer",
+    "default_value": "10",
+    "description": "Maximum number of connections in the HikariCP pool.",
+    "allowed_values": []
+  },
+  {
+    "key": "spring.jpa.hibernate.ddl-auto",
+    "value_type": "enum",
+    "default_value": "none",
+    "description": "DDL mode for Hibernate schema management.",
+    "allowed_values": ["none", "validate", "update", "create", "create-drop"]
+  },
+  {
+    "key": "spring.jpa.show-sql",
+    "value_type": "boolean",
+    "default_value": "false",
+    "description": "Whether to enable logging of SQL statements.",
+    "allowed_values": ["true", "false"]
+  },
+  {
+    "key": "spring.jpa.open-in-view",
+    "value_type": "boolean",
+    "default_value": "true",
+    "description": "Register OpenEntityManagerInViewInterceptor (recommended `false` for REST APIs).",
+    "allowed_values": ["true", "false"]
+  },
+  {
+    "key": "spring.flyway.enabled",
+    "value_type": "boolean",
+    "default_value": "true",
+    "description": "Whether to enable Flyway database migrations.",
+    "allowed_values": ["true", "false"]
+  },
+  {
+    "key": "spring.liquibase.enabled",
+    "value_type": "boolean",
+    "default_value": "true",
+    "description": "Whether to enable Liquibase database migrations.",
+    "allowed_values": ["true", "false"]
+  },
+  {
+    "key": "spring.data.redis.host",
+    "value_type": "string",
+    "default_value": "localhost",
+    "description": "Redis server host.",
+    "allowed_values": []
+  },
+  {
+    "key": "spring.data.redis.port",
+    "value_type": "integer",
+    "default_value": "6379",
+    "description": "Redis server port.",
+    "allowed_values": []
+  },
+  {
+    "key": "spring.redis.host",
+    "value_type": "string",
+    "default_value": "localhost",
+    "description": "Deprecated in Spring Boot 3.0+. Use `spring.data.redis.host`.",
+    "deprecated_replacement": "spring.data.redis.host",
+    "allowed_values": []
+  },
+  {
+    "key": "spring.redis.port",
+    "value_type": "integer",
+    "default_value": "6379",
+    "description": "Deprecated in Spring Boot 3.0+. Use `spring.data.redis.port`.",
+    "deprecated_replacement": "spring.data.redis.port",
+    "allowed_values": []
+  },
+  {
+    "key": "spring.kafka.bootstrap-servers",
+    "value_type": "string",
+    "default_value": "localhost:9092",
+    "description": "Comma-delimited list of host:port pairs for Kafka bootstrap connections.",
+    "allowed_values": []
+  },
+  {
+    "key": "spring.kafka.consumer.group-id",
+    "value_type": "string",
+    "description": "Unique string identifying the consumer group.",
+    "allowed_values": []
+  },
+  {
+    "key": "spring.jackson.serialization.indent-output",
+    "value_type": "boolean",
+    "default_value": "false",
+    "description": "Pretty-print serialized JSON output.",
+    "allowed_values": ["true", "false"]
+  },
+  {
+    "key": "spring.jackson.default-property-inclusion",
+    "value_type": "enum",
+    "default_value": "always",
+    "description": "Controls inclusion of properties during JSON serialization.",
+    "allowed_values": ["always", "non_null", "non_absent", "non_empty", "non_default"]
+  },
+  {
+    "key": "spring.devtools.restart.enabled",
+    "value_type": "boolean",
+    "default_value": "true",
+    "description": "Whether to enable automatic restart via Spring Boot DevTools.",
+    "allowed_values": ["true", "false"]
+  },
+  {
+    "key": "spring.devtools.restart.trigger-file",
+    "value_type": "string",
+    "description": "Name of a specific file that must be modified to trigger a DevTools restart check.",
+    "allowed_values": []
+  },
+  {
+    "key": "spring.devtools.livereload.enabled",
+    "value_type": "boolean",
+    "default_value": "true",
+    "description": "Whether to enable a LiveReload server.",
+    "allowed_values": ["true", "false"]
+  },
+  {
+    "key": "management.server.port",
+    "value_type": "integer",
+    "description": "Management endpoint HTTP port (defaults to `server.port`).",
+    "allowed_values": []
+  },
+  {
+    "key": "management.endpoints.web.base-path",
+    "value_type": "string",
+    "default_value": "/actuator",
+    "description": "Base path for Web Actuator endpoints.",
+    "allowed_values": []
+  },
+  {
+    "key": "management.endpoints.web.exposure.include",
+    "value_type": "string",
+    "default_value": "health",
+    "description": "Endpoint IDs exposed over HTTP (`*` or comma-separated list: `health,info,metrics,beans,mappings,env`).",
+    "allowed_values": ["*", "health,info,metrics,beans,mappings,env", "health,info"]
+  },
+  {
+    "key": "management.endpoints.web.exposure.exclude",
+    "value_type": "string",
+    "description": "Endpoint IDs excluded from HTTP exposure.",
+    "allowed_values": []
+  },
+  {
+    "key": "management.endpoint.health.show-details",
+    "value_type": "enum",
+    "default_value": "never",
+    "description": "When to show full health details.",
+    "allowed_values": ["never", "when-authorized", "always"]
+  },
+  {
+    "key": "management.endpoint.health.probes.enabled",
+    "value_type": "boolean",
+    "default_value": "false",
+    "description": "Whether to enable Kubernetes liveness and readiness probes.",
+    "allowed_values": ["true", "false"]
+  },
+  {
+    "key": "logging.level.root",
+    "value_type": "enum",
+    "default_value": "INFO",
+    "description": "Root logger severity level.",
+    "allowed_values": ["TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL", "OFF"]
+  },
+  {
+    "key": "logging.file.name",
+    "value_type": "string",
+    "description": "Log file name (for instance, `myapp.log`).",
+    "allowed_values": []
+  },
+  {
+    "key": "logging.file",
+    "value_type": "string",
+    "description": "Deprecated in Spring Boot 2.2+. Use `logging.file.name`.",
+    "deprecated_replacement": "logging.file.name",
+    "allowed_values": []
+  }
+]

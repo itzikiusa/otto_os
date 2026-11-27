@@ -446,6 +446,7 @@ export interface IdeSpringBootInfo {
   has_actuator: boolean;
   has_devtools: boolean;
   trigger_file?: string | null;
+  module_root?: string | null;
 }
 
 export interface IdeSpringActuatorReq {
@@ -499,6 +500,7 @@ export interface IdeSpringActuatorResp {
 export interface IdeSpringDevtoolsRestartReq {
   target: IdeTargetSpec;
   trigger_file?: string | null;
+  module_root?: string | null;
 }
 
 export interface IdeSpringDevtoolsRestartResp {

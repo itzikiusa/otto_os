@@ -4,7 +4,7 @@
   import Icon from '../../../lib/components/Icon.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
   import Tabs, { type TabItem } from '../../../lib/components/Tabs.svelte';
-  import type { IdeSpringActuatorResp, IdeSpringBootInfo } from '../../../lib/api/types';
+  import type { IdeSpringActuatorResp, IdeSpringBootInfo, IdeTargetSpec } from '../../../lib/api/types';
   import { loadErrorText } from '../../../lib/loadError';
   import { toasts } from '../../../lib/toast.svelte';
   import { ide, ideBasename } from '../ideStore.svelte';
@@ -14,11 +14,13 @@
 
   interface Props {
     info: IdeSpringBootInfo;
+    target: IdeTargetSpec;
     open: boolean;
+    disabled?: boolean;
     ontoggle: () => void;
   }
 
-  let { info, open, ontoggle }: Props = $props();
+  let { info, target, open, disabled = false, ontoggle }: Props = $props();
 
   let actuatorUrl = $state('');
   let tab = $state<SpringTab>('endpoints');
@@ -27,6 +29,7 @@
   let restarting = $state(false);
   let error = $state<string | null>(null);
   let snapshot = $state<IdeSpringActuatorResp | null>(null);
+  let pollSeq = 0;
 
   $effect(() => {
     if (!actuatorUrl && info.actuator_url) {
@@ -35,23 +38,33 @@
   });
 
   async function refreshActuator(): Promise<void> {
+    if (disabled) return;
     const url = (actuatorUrl || info.actuator_url).trim();
     if (!url) return;
+    const seq = ++pollSeq;
+    const boundTarget = target;
     loading = true;
     error = null;
     try {
-      snapshot = await inspectSpringActuator(url);
+      const res = await inspectSpringActuator(url, boundTarget);
+      if (seq !== pollSeq) return;
+      snapshot = res;
     } catch (e) {
+      if (seq !== pollSeq) return;
       error = loadErrorText(e);
     } finally {
-      loading = false;
+      if (seq === pollSeq) loading = false;
     }
   }
 
   async function handleDevtoolsRestart(): Promise<void> {
+    if (disabled || !info.has_devtools) return;
+    const boundTarget = target;
+    const boundTrigger = info.trigger_file;
+    const boundModuleRoot = info.module_root ?? null;
     restarting = true;
     try {
-      const res = await triggerSpringDevtoolsRestart(info.trigger_file);
+      const res = await triggerSpringDevtoolsRestart(boundTrigger, boundTarget, boundModuleRoot);
       toasts.success(res.message);
     } catch (e) {
       toasts.error(loadErrorText(e));
@@ -108,21 +121,23 @@
       class="sb-mini-btn"
       aria-label="Refresh Actuator"
       title="Poll local Spring Boot Actuator"
-      disabled={loading}
+      disabled={disabled || loading}
       onclick={() => void refreshActuator()}
     >
       <Icon name="refresh" size={12} />
     </button>
-    <button
-      type="button"
-      class="sb-mini-btn"
-      aria-label="DevTools Restart"
-      title="Trigger Spring Boot DevTools live restart (.reloadtrigger)"
-      disabled={restarting}
-      onclick={() => void handleDevtoolsRestart()}
-    >
-      <Icon name="play" size={12} />
-    </button>
+    {#if info.has_devtools}
+      <button
+        type="button"
+        class="sb-mini-btn"
+        aria-label="DevTools Restart"
+        title="Request Spring Boot DevTools restart check (touch classpath trigger file)"
+        disabled={disabled || restarting}
+        onclick={() => void handleDevtoolsRestart()}
+      >
+        <Icon name="play" size={12} />
+      </button>
+    {/if}
   </div>
 
   {#if open}
@@ -134,10 +149,11 @@
           dir="ltr"
           aria-label="Spring Boot Actuator loopback URL"
           placeholder="http://127.0.0.1:8080/actuator"
+          disabled={disabled}
           bind:value={actuatorUrl}
           onkeydown={(e) => { if (e.key === 'Enter') void refreshActuator(); }}
         />
-        <button type="button" class="btn small ghost" disabled={loading} onclick={() => void refreshActuator()}>
+        <button type="button" class="btn small ghost" disabled={disabled || loading} onclick={() => void refreshActuator()}>
           {loading ? '…' : 'Poll'}
         </button>
       </div>

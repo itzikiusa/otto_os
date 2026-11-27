@@ -4,7 +4,7 @@
   import { onDestroy } from 'svelte';
   import Badge from '../../../lib/components/Badge.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
-  import type { IdeMobileProject, IdeSpringBootInfo } from '../../../lib/api/types';
+  import type { IdeMobileProject, IdeSpringBootInfo, IdeTargetSpec } from '../../../lib/api/types';
   import { shortenHomePath } from '../../../lib/homePath';
   import IdeSpringBootSection from './IdeSpringBootSection.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
@@ -33,6 +33,8 @@
   let modules = $state<IdeBuildToolModule[]>([]);
   let mobileProjects = $state<IdeMobileProject[]>([]);
   let springBoot = $state<IdeSpringBootInfo | null>(null);
+  let springTargetSig = $state('');
+  let springTarget = $state<IdeTargetSpec | null>(null);
   let expanded = $state<Record<string, boolean>>({ profiles: false, springBoot: true });
 
   const labelTitle = $derived((ide.buildToolKind ?? tool) === 'gradle' ? 'Gradle' : 'Maven');
@@ -50,10 +52,18 @@
       springProfiles = [];
       modules = [];
       springBoot = null;
+      springTargetSig = '';
+      springTarget = null;
       return;
     }
     const targetSig = currentTargetSig();
+    const targetSnap = { ...ide.targetPayload };
     const isStale = (): boolean => seq !== refreshSeq || currentTargetSig() !== targetSig;
+    if (springTargetSig !== targetSig) {
+      springBoot = null;
+      springTarget = null;
+      springTargetSig = '';
+    }
     loading = true;
     error = null;
     try {
@@ -65,6 +75,8 @@
       modules = res.modules;
       mobileProjects = res.mobileProjects;
       springBoot = res.springBoot;
+      springTargetSig = targetSig;
+      springTarget = targetSnap;
       const nextExp = { ...expanded };
       if (modules.length <= 4) {
         for (const m of modules) {
@@ -401,12 +413,16 @@
         {/if}
       </div>
 
-      {#if springBoot?.detected}
-        <IdeSpringBootSection
-          info={springBoot}
-          open={Boolean(expanded.springBoot)}
-          ontoggle={() => toggleNode('springBoot')}
-        />
+      {#if springBoot?.detected && springTarget}
+        {#key springTargetSig}
+          <IdeSpringBootSection
+            info={springBoot}
+            target={springTarget}
+            disabled={loading}
+            open={Boolean(expanded.springBoot)}
+            ontoggle={() => toggleNode('springBoot')}
+          />
+        {/key}
       {/if}
 
       {#if visibleMobileProjects.length > 0}

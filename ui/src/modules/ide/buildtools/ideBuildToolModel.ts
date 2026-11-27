@@ -414,17 +414,25 @@ export async function loadBuildToolWorkspaceModel(): Promise<LoadedBuildToolWork
   };
 }
 
-export async function inspectSpringActuator(baseUrl: string): Promise<IdeSpringActuatorResp> {
+export async function inspectSpringActuator(
+  baseUrl: string,
+  target: typeof ide.targetPayload = ide.targetPayload,
+): Promise<IdeSpringActuatorResp> {
   return api.post<IdeSpringActuatorResp>('/ide/spring/actuator', {
-    target: ide.targetPayload,
+    target,
     base_url: baseUrl.trim(),
   });
 }
 
-export async function triggerSpringDevtoolsRestart(triggerFile?: string | null): Promise<IdeSpringDevtoolsRestartResp> {
+export async function triggerSpringDevtoolsRestart(
+  triggerFile?: string | null,
+  target: typeof ide.targetPayload = ide.targetPayload,
+  moduleRoot?: string | null,
+): Promise<IdeSpringDevtoolsRestartResp> {
   return api.post<IdeSpringDevtoolsRestartResp>('/ide/spring/devtools-restart', {
-    target: ide.targetPayload,
+    target,
     trigger_file: triggerFile ?? null,
+    module_root: moduleRoot ?? null,
   });
 }
 
