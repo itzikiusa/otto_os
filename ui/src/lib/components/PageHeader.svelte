@@ -52,6 +52,7 @@
   import { FitGate, StyleWriter, WidthCache, nodeSig } from './headerFit';
   import HeaderChrome from './side/HeaderChrome.svelte';
   import { pageNav } from './side/pageNav.svelte';
+  import { listPageMenu } from './side/context';
 
   interface Props {
     title: string;
@@ -139,8 +140,10 @@
   const back = $derived(phoneRow ? pageNav.back : null);
   // …and while a list IS the page (ListDetail on a phone), the row is that
   // list's header: ☰ · name count · its one primary · its ⋯ · Side panel.
+  // The page's own `more` rows follow the pane's in that ⋯, and its `tabs`
+  // (sections that hold the list: Containers | Images …) stay on the row below.
   const listPage = $derived(phoneRow ? pageNav.listPage : null);
-  const moreItems = $derived(listPage ? listPage.menu : more);
+  const moreItems = $derived(listPage ? listPageMenu(listPage.menu, more) : more);
   // Desktop / tablet: a hidden list pane's "Show <name>" (design.md §7.3).
   const showPane = $derived(pageTop && !viewport.navDrawer ? pageNav.show : null);
   // A pop-out window's traffic lights live in its own title strip (shell).
@@ -486,7 +489,7 @@
     {#if hostsPane}<PaneControls />{:else if hostsPrimaryPane}<PaneControls pane="primary" />{/if}
     {#if compactRow}<HeaderChrome part="trail" />{/if}
   </div>
-  {#if tabs && !listPage && tabsBelow}
+  {#if tabs && tabsBelow}
     <div class="ph-tabs-below">{@render tabs()}</div>
   {/if}
   {#if hostsBar}<AgentDrivingBar />{/if}
