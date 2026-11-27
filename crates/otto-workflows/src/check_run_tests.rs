@@ -221,3 +221,74 @@ async fn rule_over_review_and_command_record_structured_progress() {
     assert_eq!(cp.values.get("last_line"), Some(&json!("FAIL: TestCart")));
     assert_eq!(cp.label.as_deref(), Some("exit 1 — FAIL: TestCart"));
 }
+
+#[tokio::test]
+async fn bracketed_review_step_compound_rule_and_ceiling_rule() {
+    let dir = tempfile::tempdir().unwrap();
+    let files = RunContextFiles::create(dir.path(), "run-bug3");
+    let cwd = dir.path().to_str().unwrap().to_string();
+    let at = ScriptRun {
+        files: &files,
+        run_id: "run-bug3",
+        run_cwd: &cwd,
+        step_base: "step2-check-iter1",
+    };
+    let criteria = vec![
+        crit(
+            "named-review",
+            "expr",
+            json!({"expr": "steps[\"Review code\"].passed == true"}),
+        ),
+        crit(
+            "compound-review",
+            "expr",
+            json!({"expr": "steps.build.ok == true && steps[\"Review code\"].passed == true"}),
+        ),
+        crit(
+            "latency-cap",
+            "expr",
+            json!({"expr": "steps.bench.latency <= 200"}),
+        ),
+    ];
+    let ictx = json!({
+        "iteration": 1,
+        "steps": {
+            "build": {"ok": true},
+            "Review code": {
+                "passed": false,
+                "score": 81,
+                "threshold": 95,
+                "severity": {"bug": 2, "warn": 1},
+                "complete": true,
+                "outcome": "failed"
+            },
+            "bench": {"latency": 300}
+        }
+    });
+    let d = decide_commands_and_rules(&Host, &at, &criteria, &ictx)
+        .await
+        .unwrap();
+    assert_eq!(d.len(), 3);
+
+    // BUG-3 (a): bracketed step name resolves review output.
+    let p0 = d[0].progress.as_ref().expect("bracketed review progress");
+    assert_eq!((p0.value, p0.target), (Some(81.0), Some(95.0)));
+    assert_eq!(
+        p0.label.as_deref(),
+        Some("2 must-fix, 1 should-fix findings left")
+    );
+    assert_eq!(p0.values.get("score"), Some(&json!(81)));
+
+    // BUG-3 (b): compound rule whose first step is non-review still extracts review score.
+    let p1 = d[1].progress.as_ref().expect("compound review progress");
+    assert_eq!((p1.value, p1.target), (Some(81.0), Some(95.0)));
+    assert_eq!(p1.values.get("steps.build.ok"), Some(&json!(true)));
+    assert_eq!(p1.values.get("score"), Some(&json!(81)));
+
+    // INPUT-1: ceiling rule (latency <= 200 at 300) keeps numeric evidence without a floor ratio.
+    assert!(!d[2].met);
+    let p2 = d[2].progress.as_ref().expect("ceiling rule evidence");
+    assert_eq!((p2.value, p2.target), (None, None));
+    assert_eq!(p2.values.get("steps.bench.latency"), Some(&json!(300)));
+    assert!(p2.label.as_deref().unwrap_or("").contains("300"));
+}

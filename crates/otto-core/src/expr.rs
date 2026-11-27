@@ -92,6 +92,10 @@ pub struct ExprInspection {
     /// Numeric comparison `(value, target)` when the expression compares a
     /// numeric path against a numeric target (e.g. `steps.review.score >= 95`).
     pub numeric_target: Option<(f64, f64)>,
+    /// Whether `numeric_target` is a directional floor rule (`value >= target` or
+    /// `value > target`, including flipped `target <= value`), as opposed to a
+    /// ceiling (`<=`, `<`) or equality (`==`) comparison.
+    pub numeric_is_floor: bool,
 }
 
 /// Evaluate `src` as a boolean rule and record every path value it inspected
@@ -110,11 +114,19 @@ pub fn inspect_bool(src: &str, ctx: &Value) -> ExprInspection {
     let met = eval_ast(&ast, ctx).is_ok_and(|v| truthy(&v));
     let mut paths = Vec::new();
     let mut numeric_target = None;
-    collect_inspection(&ast, ctx, &mut paths, &mut numeric_target);
+    let mut numeric_is_floor = false;
+    collect_inspection(
+        &ast,
+        ctx,
+        &mut paths,
+        &mut numeric_target,
+        &mut numeric_is_floor,
+    );
     ExprInspection {
         met,
         paths,
         numeric_target,
+        numeric_is_floor,
     }
 }
 
@@ -123,6 +135,7 @@ fn collect_inspection(
     ctx: &Value,
     paths: &mut Vec<(String, Value)>,
     numeric_target: &mut Option<(f64, f64)>,
+    numeric_is_floor: &mut bool,
 ) {
     match ast {
         Ast::Lit(_) => {}
@@ -134,11 +147,13 @@ fn collect_inspection(
             }
             for seg in segs {
                 if let Seg::Index(e) = seg {
-                    collect_inspection(e, ctx, paths, numeric_target);
+                    collect_inspection(e, ctx, paths, numeric_target, numeric_is_floor);
                 }
             }
         }
-        Ast::Unary(_, inner) => collect_inspection(inner, ctx, paths, numeric_target),
+        Ast::Unary(_, inner) => {
+            collect_inspection(inner, ctx, paths, numeric_target, numeric_is_floor)
+        }
         Ast::Bin(op, l, r) => {
             if numeric_target.is_none()
                 && matches!(
@@ -146,20 +161,23 @@ fn collect_inspection(
                     BinOp::Ge | BinOp::Gt | BinOp::Le | BinOp::Lt | BinOp::Eq
                 )
             {
-                *numeric_target = numeric_comparison(l, r, ctx);
+                if let Some((val, target, floor)) = numeric_comparison(*op, l, r, ctx) {
+                    *numeric_target = Some((val, target));
+                    *numeric_is_floor = floor;
+                }
             }
-            collect_inspection(l, ctx, paths, numeric_target);
-            collect_inspection(r, ctx, paths, numeric_target);
+            collect_inspection(l, ctx, paths, numeric_target, numeric_is_floor);
+            collect_inspection(r, ctx, paths, numeric_target, numeric_is_floor);
         }
         Ast::Call(_, args) => {
             for a in args {
-                collect_inspection(a, ctx, paths, numeric_target);
+                collect_inspection(a, ctx, paths, numeric_target, numeric_is_floor);
             }
         }
     }
 }
 
-fn numeric_comparison(l: &Ast, r: &Ast, ctx: &Value) -> Option<(f64, f64)> {
+fn numeric_comparison(op: BinOp, l: &Ast, r: &Ast, ctx: &Value) -> Option<(f64, f64, bool)> {
     let as_lit = |a: &Ast| -> Option<f64> {
         match a {
             Ast::Lit(v) => v.as_f64().filter(|n| n.is_finite()),
@@ -181,10 +199,12 @@ fn numeric_comparison(l: &Ast, r: &Ast, ctx: &Value) -> Option<(f64, f64)> {
         }
     };
     if let (Some(val), Some(target)) = (as_path_num(l), as_lit(r)) {
-        return Some((val, target));
+        let floor = matches!(op, BinOp::Ge | BinOp::Gt);
+        return Some((val, target, floor));
     }
     if let (Some(target), Some(val)) = (as_lit(l), as_path_num(r)) {
-        return Some((val, target));
+        let floor = matches!(op, BinOp::Le | BinOp::Lt);
+        return Some((val, target, floor));
     }
     None
 }
@@ -1207,10 +1227,17 @@ mod tests {
         assert!(!r2.met);
         assert_eq!(r2.paths, vec![("steps.review.score".into(), json!(72))]);
         assert_eq!(r2.numeric_target, Some((72.0, 95.0)));
+        assert!(r2.numeric_is_floor);
 
         let r3 = inspect_bool("80 <= steps.bench.coverage", &ctx);
         assert!(!r3.met);
         assert_eq!(r3.numeric_target, Some((64.5, 80.0)));
+        assert!(r3.numeric_is_floor);
+
+        let r4 = inspect_bool("steps.bench.coverage <= 50", &ctx);
+        assert!(!r4.met);
+        assert_eq!(r4.numeric_target, Some((64.5, 50.0)));
+        assert!(!r4.numeric_is_floor);
 
         let r4 = inspect_bool(
             "steps.review.passed == false && steps.review.score >= 70",

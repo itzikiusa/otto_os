@@ -171,13 +171,16 @@ pub(crate) fn rule(c: &Criterion, ictx: &Value) -> (bool, String, Option<Criteri
         values.insert(path.clone(), compact_value(val));
     }
 
-    let referenced_step = find_referenced_step(&insp.paths, expr, ictx);
-    let mut value = insp.numeric_target.map(|(v, _)| v);
-    let mut target = insp.numeric_target.map(|(_, t)| t);
+    let referenced_steps = find_referenced_steps(&insp.paths, expr, ictx);
+    let expr_num_value = insp.numeric_target.map(|(v, _)| v);
+    let expr_num_target = insp.numeric_target.map(|(_, t)| t);
+    let mut value = insp.numeric_is_floor.then_some(expr_num_value).flatten();
+    let mut target = insp.numeric_is_floor.then_some(expr_num_target).flatten();
     let mut label: Option<String> = None;
     let mut review_evidence_note: Option<String> = None;
+    let mut review_step: Option<&Value> = None;
 
-    if let Some(step_out) = referenced_step {
+    for step_out in &referenced_steps {
         if let Some(rev) = extract_review_progress(step_out, met, value, target) {
             for (k, v) in rev.values {
                 values.insert(k, v);
@@ -186,15 +189,24 @@ pub(crate) fn rule(c: &Criterion, ictx: &Value) -> (bool, String, Option<Criteri
             target = target.or(rev.target);
             label = rev.label;
             review_evidence_note = rev.evidence_note;
+            review_step = Some(*step_out);
+            break;
         }
     }
 
     if !met && label.is_none() {
-        label = fallback_rule_label(&insp.paths, value, target);
+        label = fallback_rule_label(&insp.paths, expr_num_value, expr_num_target);
     }
 
+    let summary_step = review_step.or_else(|| {
+        referenced_steps
+            .iter()
+            .copied()
+            .find(|s| crate::step_util::brief_summary(s).is_some())
+    });
+
     let mut evidence = format!("{expr} is {met}");
-    if let Some(brief) = referenced_step.and_then(crate::step_util::brief_summary) {
+    if let Some(brief) = summary_step.and_then(crate::step_util::brief_summary) {
         evidence.push_str(" — ");
         evidence.push_str(&crate::step_util::truncate_sentences(&brief, 300));
     } else if let Some(note) = review_evidence_note {
@@ -220,34 +232,62 @@ struct ReviewExtracted {
     values: Vec<(String, Value)>,
 }
 
-fn find_referenced_step<'a>(
+fn push_unique<'a>(found: &mut Vec<&'a Value>, out: &'a Value) {
+    if !found.iter().any(|existing| std::ptr::eq(*existing, out)) {
+        found.push(out);
+    }
+}
+
+fn find_referenced_steps<'a>(
     paths: &[(String, Value)],
     expr: &str,
     ictx: &'a Value,
-) -> Option<&'a Value> {
+) -> Vec<&'a Value> {
+    let mut found: Vec<&'a Value> = Vec::new();
     if let Some(steps) = ictx.get("steps").and_then(Value::as_object) {
         for (p, _) in paths {
             if let Some(rest) = p.strip_prefix("steps.") {
                 let name = rest.split(['.', '[']).next().unwrap_or("");
                 if let Some(out) = steps.get(name) {
-                    return Some(out);
+                    push_unique(&mut found, out);
+                }
+            } else if let Some(rest) = p.strip_prefix("steps[") {
+                // Match against actual step keys (longest match first) so step
+                // names with spaces, dots or brackets resolve cleanly.
+                let matched = steps
+                    .iter()
+                    .filter(|(name, _)| {
+                        rest.strip_prefix(name.as_str()).is_some_and(|after| {
+                            after == "]" || after.starts_with("].") || after.starts_with("][")
+                        })
+                    })
+                    .max_by_key(|(name, _)| name.len())
+                    .map(|(_, out)| out);
+                if let Some(out) = matched {
+                    push_unique(&mut found, out);
                 }
             }
         }
-        if let Some((_, out)) = steps
-            .iter()
-            .find(|(name, _)| expr.contains(&format!("steps.{name}")))
-        {
-            return Some(out);
+        if found.is_empty() {
+            for (name, out) in steps {
+                if expr.contains(&format!("steps.{name}"))
+                    || expr.contains(&format!("steps[\"{name}\"]"))
+                    || expr.contains(&format!("steps['{name}']"))
+                {
+                    push_unique(&mut found, out);
+                }
+            }
         }
     }
     if paths
         .iter()
-        .any(|(p, _)| p == "last" || p.starts_with("last."))
+        .any(|(p, _)| p == "last" || p.starts_with("last.") || p.starts_with("last["))
     {
-        return ictx.get("last").filter(|v| v.is_object());
+        if let Some(out) = ictx.get("last").filter(|v| v.is_object()) {
+            push_unique(&mut found, out);
+        }
     }
-    None
+    found
 }
 
 fn extract_review_progress(

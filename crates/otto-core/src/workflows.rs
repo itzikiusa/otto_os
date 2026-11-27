@@ -644,6 +644,10 @@ pub struct GoalProgress {
     /// Criterion ids parked for a person.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub awaiting: Vec<String>,
+    /// Aggregate completion verdict from check outputs (`"achieved"`, `"continue"`,
+    /// `"blocked"`), omitted when only counts are available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict: Option<String>,
     /// Per-criterion current status and round history, keyed by `(step_id, id)`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub criteria: Vec<GoalCriterion>,
@@ -1480,6 +1484,7 @@ mod tests {
             active_ms: 5000,
             max_active_ms: None,
             awaiting: vec![],
+            verdict: Some("continue".into()),
             criteria: vec![GoalCriterion {
                 step_id: "ui.1".into(),
                 step_name: "UI".into(),

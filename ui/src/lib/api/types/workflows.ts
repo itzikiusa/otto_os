@@ -295,7 +295,10 @@ export interface GoalCriterion {
   history?: CriterionPoint[];
 }
 
-/** A goal run's progress. */
+/** A goal run's progress. On `workflow_run_updated` WS events, `criteria` is
+ *  projected to stay within the 4 KiB overview budget (at most 3 recent history
+ *  points per criterion, `progress.values` omitted, further trimmed if needed);
+ *  HTTP detail reads carry full history (up to 50 rounds) and `progress.values`. */
 export interface GoalProgress {
   iteration: number;
   max_iterations: number;
@@ -305,6 +308,8 @@ export interface GoalProgress {
   max_active_ms?: number;
   /** Criterion ids parked for a person. */
   awaiting?: string[];
+  /** Aggregate completion verdict from check outputs (`achieved` | `continue` | `blocked`). */
+  verdict?: 'achieved' | 'continue' | 'blocked' | string;
   /** Per-criterion current status and per-round history, keyed by `(step_id, id)`. */
   criteria?: GoalCriterion[];
 }

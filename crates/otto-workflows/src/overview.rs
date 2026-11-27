@@ -18,6 +18,68 @@ const MAX_ATTENTION: usize = 8;
 const MAX_DELIVERABLES: usize = 12;
 const MAX_HEADLINE: usize = 160;
 const MAX_TEXT: usize = 300;
+/// Hard serialized byte ceiling for the `overview` field carried on a
+/// `workflow_run_updated` WS event (`docs/contracts/ws.md`).
+pub const WS_OVERVIEW_MAX_BYTES: usize = 4_096;
+/// Max per-criterion history points kept on the WS event projection (the trend
+/// window shown inline; full 50-round history stays on HTTP detail reads).
+const MAX_WS_CRITERION_HISTORY: usize = 3;
+
+/// Project a `RunOverview` for the `workflow_run_updated` WebSocket event so
+/// it stays within [`WS_OVERVIEW_MAX_BYTES`] (4 KiB) even for long goal runs
+/// with many criteria and 50-round histories. Full per-criterion history and
+/// inspected `progress.values` remain on the HTTP detail / progress paths.
+pub fn ws_projection(overview: &RunOverview) -> RunOverview {
+    let mut out = overview.clone();
+    let Some(goal) = out.goal.as_mut() else {
+        return out;
+    };
+    for c in &mut goal.criteria {
+        c.text = clip(&c.text, 80);
+        if let Some(p) = c.progress.as_mut() {
+            p.values.clear();
+        }
+        if c.history.len() > MAX_WS_CRITERION_HISTORY {
+            let drop = c.history.len() - MAX_WS_CRITERION_HISTORY;
+            c.history.drain(..drop);
+        }
+    }
+    if json_len(&out) <= WS_OVERVIEW_MAX_BYTES {
+        return out;
+    }
+    if let Some(goal) = out.goal.as_mut() {
+        for c in &mut goal.criteria {
+            c.history.clear();
+        }
+    }
+    if json_len(&out) <= WS_OVERVIEW_MAX_BYTES {
+        return out;
+    }
+    if let Some(goal) = out.goal.as_mut() {
+        for c in &mut goal.criteria {
+            c.text.clear();
+            if let Some(p) = c.progress.as_mut() {
+                p.label = None;
+            }
+        }
+    }
+    if json_len(&out) <= WS_OVERVIEW_MAX_BYTES {
+        return out;
+    }
+    while json_len(&out) > WS_OVERVIEW_MAX_BYTES {
+        let Some(goal) = out.goal.as_mut() else {
+            break;
+        };
+        if goal.criteria.pop().is_none() {
+            break;
+        }
+    }
+    out
+}
+
+fn json_len(o: &RunOverview) -> usize {
+    serde_json::to_vec(o).map_or(0, |v| v.len())
+}
 
 /// The hold that counts for a run with this status (DR-105): the one rule,
 /// [`RunHold::is_effective`] (`otto_state`'s `HOLD_SQL` is its SQL twin).
@@ -318,11 +380,11 @@ fn headline(run: &WorkflowRun, graph: &WorkflowGraph, o: &RunOverview) -> String
 /// deliverable that did not land first ("Done, but the Jira comment was not
 /// posted: …").
 fn succeeded(run: &WorkflowRun, graph: &WorkflowGraph, o: &RunOverview) -> String {
-    if let Some(g) = o
-        .goal
-        .as_ref()
-        .filter(|g| g.criteria_total > 0 && g.criteria_met == g.criteria_total)
-    {
+    if let Some(g) = o.goal.as_ref().filter(|g| {
+        g.criteria_total > 0
+            && g.criteria_met == g.criteria_total
+            && g.verdict.as_deref() != Some("blocked")
+    }) {
         let parts = crate::goal_progress::numeric_parts(g);
         let s = if g.iteration == 1 { "" } else { "s" };
         if !parts.is_empty() {
