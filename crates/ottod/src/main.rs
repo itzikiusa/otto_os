@@ -518,13 +518,13 @@ async fn run(cfg: Config) -> Result<(), String> {
 
     let signal_at = *shutdown_rx.borrow();
     if tokio::time::timeout(
-        std::time::Duration::from_secs(2),
+        std::time::Duration::from_secs(4),
         agent_runtime.shutdown_for_restart(),
     )
     .await
     .is_err()
     {
-        tracing::warn!("agent runtime restart detach exceeded 2 s — continuing teardown");
+        tracing::warn!("agent runtime restart detach exceeded 4 s — continuing teardown");
     }
     if tokio::time::timeout(std::time::Duration::from_secs(3), containers.shutdown())
         .await

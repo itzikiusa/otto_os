@@ -478,6 +478,21 @@ impl CodexDriver {
 
     fn on_turn_completed(&mut self, step: &mut DriverStep, params: &Value) {
         let turn = params.get("turn").cloned().unwrap_or(Value::Null);
+        if let (Some(expected), Some(got)) = (
+            self.codex_turn.as_deref(),
+            turn.get("id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty()),
+        ) {
+            if expected != got {
+                tracing::debug!(
+                    expected,
+                    got,
+                    "ignoring codex turn/completed for non-active turn"
+                );
+                return;
+            }
+        }
         let status = match turn.get("status").and_then(Value::as_str) {
             Some("completed") => TurnTerminalStatus::Completed,
             Some("interrupted") => TurnTerminalStatus::Interrupted,
@@ -1473,6 +1488,33 @@ impl StructuredDriver for CodexDriver {
                         _ => self.on_child_notification(&mut step, child_tid, &m, &params),
                     }
                     return step;
+                }
+                // Thread-scoped notifications for an untracked/evicted foreign
+                // threadId must never terminate or corrupt the parent turn.
+                if let Some(foreign_tid) = notif_tid.filter(|t| {
+                    !t.is_empty() && self.thread_id.as_deref().is_some_and(|mine| mine != *t)
+                }) {
+                    if matches!(
+                        m.as_str(),
+                        "turn/started"
+                            | "turn/completed"
+                            | "turn/plan/updated"
+                            | "item/started"
+                            | "item/completed"
+                            | "item/agentMessage/delta"
+                            | "item/reasoning/summaryTextDelta"
+                            | "item/reasoning/textDelta"
+                            | "item/commandExecution/outputDelta"
+                            | "thread/tokenUsage/updated"
+                            | "thread/name/updated"
+                    ) {
+                        tracing::debug!(
+                            method = %m,
+                            foreign_tid,
+                            "ignoring codex notification for untracked foreign threadId"
+                        );
+                        return step;
+                    }
                 }
                 match m.as_str() {
                     "turn/started" => {
@@ -2810,5 +2852,59 @@ mod tests {
         let start = parse(p.writes.last().unwrap());
         assert_eq!(start["method"], "turn/start");
         assert!(start["params"].get("effort").is_none());
+    }
+
+    #[test]
+    fn foreign_thread_and_mismatched_turn_completed_do_not_stop_parent_turn() {
+        let mut d = CodexDriver::with_program("codex");
+        ready(&mut d, false);
+        let p = d.prompt("t1", &RuntimePromptReq::of("work")).unwrap();
+        let start = parse(&p.writes[0]);
+        feed(
+            &mut d,
+            json!({"id": start["id"], "result": {"turn": {"id": "ct-parent", "status": "inProgress"}}}),
+        );
+        feed(
+            &mut d,
+            json!({"method": "turn/started", "params": {"threadId": "th1", "turn": {"id": "ct-parent"}}}),
+        );
+        // Untracked foreign thread interrupted: must never end the parent turn.
+        let s = feed(
+            &mut d,
+            json!({"method": "turn/completed", "params": {"threadId": "th-untracked", "turn": {"id": "ct-other", "status": "interrupted"}}}),
+        );
+        assert!(
+            !s.events
+                .iter()
+                .any(|e| matches!(e, DriverEvent::Terminal { .. })),
+            "foreign threadId turn/completed must not end parent turn: {:?}",
+            s.events
+        );
+        assert_eq!(d.turn_id.as_deref(), Some("t1"));
+        // Same threadId but stale/mismatched turn id: must also be ignored.
+        let s = feed(
+            &mut d,
+            json!({"method": "turn/completed", "params": {"threadId": "th1", "turn": {"id": "ct-stale", "status": "interrupted"}}}),
+        );
+        assert!(
+            !s.events
+                .iter()
+                .any(|e| matches!(e, DriverEvent::Terminal { .. })),
+            "mismatched turn id must not end active turn: {:?}",
+            s.events
+        );
+        assert_eq!(d.turn_id.as_deref(), Some("t1"));
+        // Matching parent thread + turn id settles normally.
+        let s = feed(
+            &mut d,
+            json!({"method": "turn/completed", "params": {"threadId": "th1", "turn": {"id": "ct-parent", "status": "completed"}}}),
+        );
+        assert!(s.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::Terminal {
+                status: TurnTerminalStatus::Completed,
+                ..
+            }
+        )));
     }
 }
