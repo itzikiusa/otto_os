@@ -560,11 +560,6 @@ button.chip:focus-visible {
   padding-block: 0 8px;
   padding-inline: 8px;
 }
-/* A footer says something or is not shown (decision 13): one with no element
-   in it (a meter with no numbers yet) takes no row. */
-.side-pane-foot:not(:has(*)) {
-  display: none;
-}
 .side-pane-foot {
   flex: none;
   display: flex;
@@ -575,6 +570,11 @@ button.chip:focus-visible {
   border-block-start: 1px solid var(--separator);
   font-size: var(--fs-xs);
   color: var(--text-dim);
+}
+/* A footer says something or is not shown (decision 13): one with no element
+   in it (a meter with no numbers yet) takes no row. */
+.side-list .side-pane-foot:not(:has(*)) {
+  display: none;
 }
 .side-section + .side-section {
   margin-block-start: 8px;
