@@ -213,6 +213,7 @@ pub(crate) fn match_longest_module_sdk(
 enum SdkKindHint {
     Go,
     Java,
+    Kotlin,
     Python,
     Rust,
     Zig,
@@ -222,12 +223,31 @@ enum SdkKindHint {
     GenericPath,
 }
 
+fn is_kotlin_sdk_path(sdk: &str) -> bool {
+    if !sdk.starts_with('/') {
+        return false;
+    }
+    let sp = Path::new(sdk);
+    let s_low = sdk.to_ascii_lowercase();
+    let has_kotlinc = sp.join("bin/kotlinc").is_file() || s_low.ends_with("/bin/kotlinc");
+    let has_javac = sp.join("bin/javac").is_file() || sp.join("bin/java").is_file();
+    (has_kotlinc && !has_javac)
+        || s_low.contains("/kotlin/")
+        || s_low.contains("kotlin-compiler")
+        || s_low.ends_with("/kotlinc")
+}
+
 fn infer_sdk_kind(
     sdk: &str,
     runner: Option<IdeRunnerKind>,
     lang_or_path_hint: Option<&str>,
     mod_root: &str,
 ) -> SdkKindHint {
+    // Classify explicit Kotlin compiler homes (`kotlinc` without `javac`) before
+    // falling back to JVM runner kinds (which otherwise map to `Java` / `JAVA_HOME`).
+    if is_kotlin_sdk_path(sdk) {
+        return SdkKindHint::Kotlin;
+    }
     if let Some(r) = runner {
         match r {
             IdeRunnerKind::GoRun | IdeRunnerKind::GoBuild | IdeRunnerKind::GoTest => {
@@ -278,6 +298,12 @@ fn infer_sdk_kind(
         }
         if lower == "java" || lower.ends_with(".java") {
             return SdkKindHint::Java;
+        }
+        if matches!(lower.as_str(), "kotlin" | "kt" | "kts")
+            || lower.ends_with(".kt")
+            || lower.ends_with(".kts")
+        {
+            return SdkKindHint::Kotlin;
         }
         if lower == "python" || lower.ends_with(".py") {
             return SdkKindHint::Python;
@@ -461,6 +487,13 @@ pub(crate) fn apply_module_sdk_to_project_env(
                 .or_else(|| trimmed.strip_suffix("/bin"))
                 .unwrap_or(trimmed);
             proj.java_home = Some(root.to_string());
+        }
+        SdkKindHint::Kotlin => {
+            let root = trimmed
+                .strip_suffix("/bin/kotlinc")
+                .or_else(|| trimmed.strip_suffix("/bin"))
+                .unwrap_or(trimmed);
+            proj.kotlin_home = Some(root.to_string());
         }
         SdkKindHint::Python => {
             if trimmed.ends_with("/python")

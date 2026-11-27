@@ -8,9 +8,9 @@ use crate::types::{IdeInstalledSdk, IdeToolBinaryStatus};
 
 use super::discovery::dir_name_version;
 
-pub(super) const REMOTE_PROBE_SCRIPT: &str = r#"
+pub(crate) const REMOTE_PROBE_SCRIPT: &str = r#"
 echo "UNAME:$(uname -s) $(uname -m)"
-export PATH="$HOME/.otto/toolchains/java/current/bin:$HOME/.otto/toolchains/go/current/bin:$HOME/.otto/toolchains/zig/current:$HOME/.otto/toolchains/zig/current/bin:$HOME/.otto/toolchains/zig/bin:$HOME/.otto/toolchains/cpp/current/bin:$HOME/.otto/toolchains/cpp/bin:$HOME/.otto/toolchains/dotnet/current:$HOME/.otto/toolchains/dotnet/tools:$HOME/.otto/toolchains/dotnet/netcoredbg:$HOME/.otto/toolchains/node/current/bin:$HOME/.otto/toolchains/go/bin:$HOME/.otto/toolchains/rust/bin:$HOME/.otto/toolchains/rust/cargo/bin:$HOME/.otto/toolchains/python/bin:$HOME/.otto/toolchains/shell/bin:$HOME/.otto/toolchains/json/bin:$HOME/.cargo/bin:$HOME/go/bin:$HOME/.zvm/bin:$HOME/.dotnet:$HOME/.dotnet/tools:/usr/local/share/dotnet:/opt/homebrew/opt/llvm/bin:/opt/homebrew/bin:/usr/local/go/bin:/usr/local/bin:$PATH"
+export PATH="$HOME/.otto/toolchains/java/current/bin:$HOME/.otto/toolchains/kotlin/current/bin:$HOME/.otto/toolchains/kotlin/bin:$HOME/.otto/toolchains/go/current/bin:$HOME/.otto/toolchains/zig/current:$HOME/.otto/toolchains/zig/current/bin:$HOME/.otto/toolchains/zig/bin:$HOME/.otto/toolchains/cpp/current/bin:$HOME/.otto/toolchains/cpp/bin:$HOME/.otto/toolchains/dotnet/current:$HOME/.otto/toolchains/dotnet/tools:$HOME/.otto/toolchains/dotnet/netcoredbg:$HOME/.otto/toolchains/node/current/bin:$HOME/.otto/toolchains/go/bin:$HOME/.otto/toolchains/rust/bin:$HOME/.otto/toolchains/rust/cargo/bin:$HOME/.otto/toolchains/python/bin:$HOME/.otto/toolchains/shell/bin:$HOME/.otto/toolchains/json/bin:$HOME/.cargo/bin:$HOME/go/bin:$HOME/.zvm/bin:$HOME/.dotnet:$HOME/.dotnet/tools:/usr/local/share/dotnet:/opt/homebrew/opt/llvm/bin:/opt/homebrew/bin:/usr/local/go/bin:/usr/local/bin:$PATH"
 resolve_real() {
   readlink -f "$1" 2>/dev/null || realpath "$1" 2>/dev/null || python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$1" 2>/dev/null || echo "$1"
 }
@@ -24,6 +24,21 @@ for d in "$HOME"/.otto/toolchains/java/jdks/*; do
     jv=$(sed -n 's/^JAVA_VERSION="\?\([^"]*\)"\?.*/\1/p' "$jh/release" 2>/dev/null | head -n 1)
     [ -n "$jv" ] || jv=$(basename "$d" | sed 's/^jdk-//')
     echo "SDK:java:otto:$jv:$jh"
+  fi
+done
+for d in "$HOME"/.otto/toolchains/kotlin/sdks/* "${SDKMAN_DIR:-$HOME/.sdkman}"/candidates/kotlin/*; do
+  [ -d "$d" ] || continue
+  [ "$(basename "$d")" = "current" ] && continue
+  kh=""
+  for cand in "$d/kotlinc" "$d"; do
+    if [ -x "$cand/bin/kotlinc" ]; then kh="$cand"; break; fi
+  done
+  if [ -n "$kh" ]; then
+    kv=$("$kh/bin/kotlinc" -version 2>&1 | head -n 1 | sed -n 's/.*kotlinc-jvm \([0-9][0-9.]*\).*/\1/p')
+    [ -n "$kv" ] || kv=$(basename "$d" | sed 's/^kotlin-compiler-//')
+    src="otto"
+    case "$d" in *sdkman*) src="sdkman" ;; esac
+    echo "SDK:kotlin:$src:$kv:$kh"
   fi
 done
 for d in "$HOME"/.otto/toolchains/go/sdks/*; do
@@ -87,7 +102,7 @@ if [ -x "$HOME/.otto/toolchains/json/bin/jq" ]; then
   qv=$("$HOME/.otto/toolchains/json/bin/jq" --version 2>/dev/null | sed 's/^jq-//')
   echo "SDK:json:otto:${qv:-1.7.1}:$HOME/.otto/toolchains/json/bin/jq"
 fi
-for pair in "java:java" "go:go" "rust:rustc" "zig:zig" "cpp:clang++" "cpp:g++" "dotnet:dotnet" "node:node" "python:python3" "shell:bash" "json:jq"; do
+for pair in "java:java" "kotlin:kotlinc" "go:go" "rust:rustc" "zig:zig" "cpp:clang++" "cpp:g++" "dotnet:dotnet" "node:node" "python:python3" "shell:bash" "json:jq"; do
   e="${pair%%:*}"; b="${pair#*:}"
   bin=$(command -v "$b" 2>/dev/null || true)
   [ -n "$bin" ] || continue
@@ -98,6 +113,10 @@ for pair in "java:java" "go:go" "rust:rustc" "zig:zig" "cpp:clang++" "cpp:g++" "
     java)
       sdk_path=$(/usr/libexec/java_home 2>/dev/null || dirname "$(dirname "$real")")
       ver=$("$bin" -version 2>&1 | head -n 1 | sed -n 's/.*version "\([^"]*\)".*/\1/p')
+      ;;
+    kotlin)
+      sdk_path=$(dirname "$(dirname "$real")")
+      ver=$("$bin" -version 2>&1 | head -n 1 | sed -n 's/.*kotlinc-jvm \([0-9][0-9.]*\).*/\1/p')
       ;;
     go)
       sdk_path=$("$bin" env GOROOT 2>/dev/null || dirname "$(dirname "$real")")
@@ -138,11 +157,11 @@ for pair in "java:java" "go:go" "rust:rustc" "zig:zig" "cpp:clang++" "cpp:g++" "
   [ -n "$ver" ] || ver="system"
   echo "SDK:$e:system:$ver:$sdk_path"
 done
-for pair in "java:jdtls:$HOME/.otto/toolchains/java/lsp/bin/jdtls" "go:gopls:$HOME/.otto/toolchains/go/bin/gopls" "rust:rust-analyzer:$HOME/.otto/toolchains/rust/bin/rust-analyzer" "zig:zls:$HOME/.otto/toolchains/zig/bin/zls" "cpp:clangd:$HOME/.otto/toolchains/cpp/bin/clangd" "dotnet:csharp-ls:$HOME/.otto/toolchains/dotnet/tools/csharp-ls" "node:typescript-language-server:$HOME/.otto/toolchains/node/lsp/node_modules/.bin/typescript-language-server" "python:pyright-langserver:$HOME/.otto/toolchains/python/bin/pyright-langserver" "shell:bash-language-server:$HOME/.otto/toolchains/shell/lsp/node_modules/.bin/bash-language-server" "json:vscode-json-language-server:$HOME/.otto/toolchains/json/lsp/node_modules/.bin/vscode-json-language-server"; do
+for pair in "java:jdtls:$HOME/.otto/toolchains/java/lsp/bin/jdtls" "kotlin:kotlin-language-server:$HOME/.otto/toolchains/kotlin/bin/kotlin-language-server" "go:gopls:$HOME/.otto/toolchains/go/bin/gopls" "rust:rust-analyzer:$HOME/.otto/toolchains/rust/bin/rust-analyzer" "zig:zls:$HOME/.otto/toolchains/zig/bin/zls" "cpp:clangd:$HOME/.otto/toolchains/cpp/bin/clangd" "dotnet:csharp-ls:$HOME/.otto/toolchains/dotnet/tools/csharp-ls" "node:typescript-language-server:$HOME/.otto/toolchains/node/lsp/node_modules/.bin/typescript-language-server" "python:pyright-langserver:$HOME/.otto/toolchains/python/bin/pyright-langserver" "shell:bash-language-server:$HOME/.otto/toolchains/shell/lsp/node_modules/.bin/bash-language-server" "json:vscode-json-language-server:$HOME/.otto/toolchains/json/lsp/node_modules/.bin/vscode-json-language-server"; do
   e="${pair%%:*}"; r="${pair#*:}"; b="${r%%:*}"; m="${r#*:}"
-  if [ -x "$m" ]; then echo "LSP:$e:$m"; elif command -v "$b" >/dev/null 2>&1; then echo "LSP:$e:$(command -v "$b")"; fi
+  if [ -x "$m" ]; then echo "LSP:$e:$m"; elif [ "$e" = "kotlin" ] && [ -x "$HOME/.otto/toolchains/kotlin/lsp/server/bin/kotlin-language-server" ]; then echo "LSP:kotlin:$HOME/.otto/toolchains/kotlin/lsp/server/bin/kotlin-language-server"; elif command -v "$b" >/dev/null 2>&1; then echo "LSP:$e:$(command -v "$b")"; fi
 done
-[ -f "$HOME/.otto/toolchains/java/dap/com.microsoft.java.debug.plugin-0.53.1.jar" ] && echo "DAP:java:$HOME/.otto/toolchains/java/dap/com.microsoft.java.debug.plugin-0.53.1.jar" || true
+[ -f "$HOME/.otto/toolchains/java/dap/com.microsoft.java.debug.plugin-0.53.1.jar" ] && echo "DAP:java:$HOME/.otto/toolchains/java/dap/com.microsoft.java.debug.plugin-0.53.1.jar" && echo "DAP:kotlin:$HOME/.otto/toolchains/java/dap/com.microsoft.java.debug.plugin-0.53.1.jar" || true
 command -v dlv >/dev/null 2>&1 && echo "DAP:go:$(command -v dlv)" || true
 if [ -x "$HOME/.otto/toolchains/rust/dap/extension/adapter/codelldb" ]; then echo "DAP:rust:$HOME/.otto/toolchains/rust/dap/extension/adapter/codelldb"; elif command -v codelldb >/dev/null 2>&1; then echo "DAP:rust:$(command -v codelldb)"; fi
 if [ -x "$HOME/.otto/toolchains/rust/dap/extension/adapter/codelldb" ]; then echo "DAP:zig:$HOME/.otto/toolchains/rust/dap/extension/adapter/codelldb"; elif command -v codelldb >/dev/null 2>&1; then echo "DAP:zig:$(command -v codelldb)"; elif command -v lldb-dap >/dev/null 2>&1; then echo "DAP:zig:$(command -v lldb-dap)"; elif command -v lldb >/dev/null 2>&1; then echo "DAP:zig:$(command -v lldb)"; fi

@@ -452,6 +452,10 @@ pub fn parse_gradle_dependencies(content: &str) -> Vec<IdeDepItem> {
             let ver_m = cap.get(2);
             let name_col = (line[..mod_m.start()].chars().count() + 1) as u32;
             let name_end_col = (line[..mod_m.end()].chars().count() + 1) as u32;
+            let managed_in = ver_m.is_none().then(|| IdeDepManagedIn {
+                path: "kotlin-plugin".to_string(),
+                line: line_no,
+            });
             let ver = ver_m
                 .map(|m| m.as_str().to_string())
                 .unwrap_or_else(|| "plugin".into());
@@ -462,7 +466,7 @@ pub fn parse_gradle_dependencies(content: &str) -> Vec<IdeDepItem> {
                         (line[..m.end()].chars().count() + 1) as u32,
                     )
                 })
-                .unwrap_or((name_col, name_end_col));
+                .unwrap_or((0, 0));
             items.push(IdeDepItem {
                 name: format!("org.jetbrains.kotlin:kotlin-{}", mod_m.as_str()),
                 current_version: ver,
@@ -479,7 +483,7 @@ pub fn parse_gradle_dependencies(content: &str) -> Vec<IdeDepItem> {
                 block_start_line: line_no,
                 block_end_line: line_no,
                 property_name: None,
-                managed_in: None,
+                managed_in,
                 vulnerabilities: Vec::new(),
                 range: false,
             });
@@ -592,14 +596,17 @@ pub fn parse_gradle_version_catalog(content: &str) -> Vec<IdeDepItem> {
                     ver = Some(v);
                 }
             }
+            let managed_in = ver_span.is_none().then(|| IdeDepManagedIn {
+                path: "unversioned".to_string(),
+                line: line_no,
+            });
             let current_version = ver.unwrap_or_else(|| "*".into());
             let name_col = line
                 .find(&c)
                 .map(|i| (line[..i].chars().count() + 1) as u32)
                 .unwrap_or(1);
             let name_end_col = name_col + c.chars().count() as u32;
-            let (version_line, version_col, version_end_col) =
-                ver_span.unwrap_or((line_no, name_col, name_end_col));
+            let (version_line, version_col, version_end_col) = ver_span.unwrap_or((line_no, 0, 0));
             items.push(IdeDepItem {
                 name: c,
                 current_version,
@@ -616,7 +623,7 @@ pub fn parse_gradle_version_catalog(content: &str) -> Vec<IdeDepItem> {
                 block_start_line: line_no,
                 block_end_line: line_no,
                 property_name: prop_name,
-                managed_in: None,
+                managed_in,
                 vulnerabilities: Vec::new(),
                 range: false,
             });

@@ -122,6 +122,16 @@ pub async fn run_deps_action_scoped(
         ("vcpkg.json", "sync") => {
             exec_cmd("vcpkg", &["install"], &dir, env_map, actor_is_root).await?
         }
+        ("conanfile.txt", "sync") => {
+            exec_cmd(
+                "conan",
+                &["install", ".", "--build=missing"],
+                &dir,
+                env_map,
+                actor_is_root,
+            )
+            .await?
+        }
         (f, "sync")
             if {
                 let low = f.to_ascii_lowercase();
@@ -615,6 +625,12 @@ pub fn bump_manifest_version_in_place_scoped(
         "build.gradle" | "build.gradle.kts" => {
             let items = parse_gradle_dependencies(content);
             let hit = items.iter().find(|i| i.name == module)?;
+            if hit.version_col == 0
+                || hit.version_end_col <= hit.version_col
+                || hit.managed_in.is_some()
+            {
+                return None;
+            }
             Some(replace_line_col_span(
                 content,
                 hit.version_line,
@@ -626,6 +642,12 @@ pub fn bump_manifest_version_in_place_scoped(
         "libs.versions.toml" => {
             let items = parse_gradle_version_catalog(content);
             let hit = items.iter().find(|i| i.name == module)?;
+            if hit.version_col == 0
+                || hit.version_end_col <= hit.version_col
+                || hit.managed_in.is_some()
+            {
+                return None;
+            }
             Some(replace_line_col_span(
                 content,
                 hit.version_line,

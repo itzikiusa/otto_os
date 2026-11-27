@@ -190,6 +190,7 @@
     const env = ide.projectEnv;
     if (!env) return false;
     if (ecosystem === 'java') return env.java_home === sdk.path;
+    if (ecosystem === 'kotlin') return env.kotlin_home === sdk.path;
     if (ecosystem === 'go') return env.go_root === sdk.path;
     if (ecosystem === 'rust') return env.rust_toolchain === sdk.version || env.rust_toolchain === sdk.path;
     if (ecosystem === 'zig') return env.zig_home === sdk.path;
@@ -207,7 +208,9 @@
     const patch =
       ecosystem === 'java'
         ? { java_home: pathOrVersion }
-        : ecosystem === 'go'
+        : ecosystem === 'kotlin'
+          ? { kotlin_home: pathOrVersion }
+          : ecosystem === 'go'
           ? { go_root: pathOrVersion }
           : ecosystem === 'rust'
             ? { rust_toolchain: pathOrVersion }

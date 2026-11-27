@@ -81,7 +81,7 @@ pub(super) fn formatter_candidates(
             (
                 "ktfmt",
                 "ktfmt".into(),
-                vec!["--stdinpath".into(), path.to_string(), "-".into()],
+                vec!["--stdin-name".into(), path.to_string(), "-".into()],
             ),
             (
                 "ktlint",
@@ -306,10 +306,18 @@ pub(super) async fn run_stdin_formatter<S: IdeCtx>(
         .await
         .ok()?
         .ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8(out.stdout).ok())
-        .flatten()
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let snippet: String = stderr.trim().chars().take(240).collect();
+        tracing::warn!(
+            formatter = cmd,
+            exit_code = ?out.status.code(),
+            stderr = %snippet,
+            "IDE stdin formatter exited non-zero"
+        );
+        return None;
+    }
+    String::from_utf8(out.stdout).ok()
 }
 
 /// The project opted in to formatter configs that run code: its stored

@@ -109,14 +109,32 @@ pub(crate) fn infer_kotlin_class_stem(file_stem: &str, src: &str) -> String {
             }
         }
     }
-    let has_matching_class = src.lines().any(|l| {
-        let t = l.trim();
-        t.contains(&format!("class {file_stem}")) || t.contains(&format!("object {file_stem}"))
-    });
-    let has_top_level_main = src.lines().any(|l| {
-        !l.starts_with(' ') && !l.starts_with('\t') && l.trim_start().starts_with("fun main(")
-    });
-    if has_top_level_main && !has_matching_class {
+    // In Kotlin, any top-level `fun main(...)` (brace depth 0) ALWAYS compiles onto
+    // the file facade class `<CapFileStem>Kt` (or `@file:JvmName`), EVEN when the
+    // same file also declares `class <FileStem>` (e.g. Spring Boot `DemoApplication.kt`).
+    let mut brace_depth: i32 = 0;
+    let mut has_top_level_main = false;
+    for line in src.lines() {
+        let code = line.split_once("//").map_or(line, |(c, _)| c);
+        let trimmed = code.trim();
+        if brace_depth == 0
+            && (trimmed.starts_with("fun main(")
+                || trimmed.starts_with("suspend fun main(")
+                || trimmed.starts_with("fun main (")
+                || trimmed.starts_with("suspend fun main ("))
+        {
+            has_top_level_main = true;
+            break;
+        }
+        for ch in code.chars() {
+            match ch {
+                '{' => brace_depth += 1,
+                '}' => brace_depth = (brace_depth - 1).max(0),
+                _ => {}
+            }
+        }
+    }
+    if has_top_level_main {
         let mut chars = file_stem.chars();
         let cap = match chars.next() {
             Some(c) => format!("{}{}", c.to_ascii_uppercase(), chars.as_str()),
