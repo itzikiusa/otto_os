@@ -403,6 +403,40 @@ pub(super) async fn execute_run_task(
             }
         }
 
+        // SSH C/C++: a source inside a remote CMake / Meson project fails like Debug
+        // instead of compiling on its own (BUG-10).
+        let cpp_src = cfg
+            .target_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("main.cpp");
+        if target.kind == IdeTargetKind::Ssh
+            && cfg.runner == IdeRunnerKind::CppRun
+            && cfg.command.as_deref().is_none_or(|c| c.trim().is_empty())
+            && crate::environments::runner_cmd::is_cpp_source_path(cpp_src)
+        {
+            if let Some(err) = crate::dap::adapters_cpp::remote_cpp_project_error(
+                &target,
+                ssh.as_ref(),
+                cpp_src,
+                &cwd,
+                &env_map,
+            )
+            .await
+            {
+                end_run(
+                    &runs,
+                    &handle,
+                    IdeRunStatus::Failed,
+                    Some(1),
+                    started,
+                    Some(err),
+                );
+                return;
+            }
+        }
+
         let (program, args) = match compiled {
             None => build_runner_command(&cfg, target.kind, &cwd, &env_map),
             Some(Some(Ok(built))) => built,

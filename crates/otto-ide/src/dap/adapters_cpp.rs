@@ -669,13 +669,12 @@ async fn compile_cpp_debug_artifact(
     let project_path = Path::new(&project_dir);
 
     // 1. CMake project: configure Debug + compile_commands.json if needed, then build.
-    //    If the user launched a specific standalone `.cpp`/`.c` file that is NOT
-    //    referenced in `CMakeLists.txt` (and CMake doesn't glob sources), fall
-    //    through to standalone compiler build so clicking Debug on a scratch or
-    //    ad-hoc file inside a CMake repo still debugs that exact file.
-    //    A source file uses the same owning-target resolution as gutter Run (BUG-10).
+    //    A source file uses the same owning-target resolution as gutter Run, and one inside
+    //    a CMake / Meson project that maps to no executable fails with Run's reason instead
+    //    of compiling on its own without the project's include paths (BUG-10).
+    let is_source = is_cpp_source_file(raw_prog);
     let is_cmake = is_local && project_path.join("CMakeLists.txt").is_file();
-    let source_target = if is_cmake && is_cpp_source_file(raw_prog) {
+    let source_target = if is_cmake && is_source {
         crate::environments::runner_cmd::infer_cmake_target_for_source(
             &project_dir,
             raw_prog,
@@ -684,7 +683,14 @@ async fn compile_cpp_debug_artifact(
     } else {
         None
     };
-    let use_cmake = is_cmake && (!is_cpp_source_file(raw_prog) || source_target.is_some());
+    if is_local && is_source && source_target.is_none() {
+        if let Some(reason) =
+            crate::environments::runner_cmd::cpp_unmapped_source_error(&project_dir, raw_prog)
+        {
+            return Err(Error::Invalid(reason));
+        }
+    }
+    let use_cmake = is_cmake && (!is_source || source_target.is_some());
     if use_cmake {
         let cmake_bin = locate_binary(&req.target, ctx, env, &["cmake".into()])
             .await
@@ -722,6 +728,7 @@ async fn compile_cpp_debug_artifact(
             }
         }
         let mut build_args = vec!["--build".to_string(), build_dir.clone()];
+        let from_source = source_target.is_some();
         let target_hint =
             source_target.or_else(|| infer_cmake_target_hint(project_path, raw_prog, want_test));
         if let Some(ref th) = target_hint {
@@ -755,18 +762,27 @@ async fn compile_cpp_debug_artifact(
                 seq: 0,
             });
         }
-        if let Some(exe) = find_cmake_executable(&build_path, target_hint.as_deref(), want_test) {
+        // A source file debugs its own target, never another program of the build tree.
+        let hint = target_hint.as_deref();
+        let exe = find_cmake_executable(&build_path, hint, want_test).filter(|exe| {
+            !from_source || Path::new(exe).file_name().and_then(|n| n.to_str()) == hint
+        });
+        if let Some(exe) = exe {
             return Ok(exe);
         }
-        if !is_cpp_source_file(raw_prog) {
-            return Err(Error::Upstream(format!(
+        return Err(Error::Upstream(match hint.filter(|_| from_source) {
+            Some(t) => format!(
+                "cmake built target '{t}' in '{project_dir}' but found no executable named '{t}' under '{build_dir}': it may be a library. Debug the executable or test target that uses it instead."
+            ),
+            None => format!(
                 "cmake build succeeded in '{project_dir}' but no debug executable was found under '{build_dir}'"
-            )));
-        }
+            ),
+        }));
     }
 
-    // 2. Meson project: setup + compile, then find built executable in builddir/.
-    if is_local && project_path.join("meson.build").is_file() {
+    // 2. Meson project (not one of its sources, refused above): setup + compile, then find
+    //    built executable in builddir/.
+    if is_local && !is_source && project_path.join("meson.build").is_file() {
         if let Some(meson_bin) = locate_binary(&req.target, ctx, env, &["meson".into()]).await {
             let build_path = project_path.join("builddir");
             if !build_path.join("build.ninja").is_file() {
@@ -803,8 +819,18 @@ async fn compile_cpp_debug_artifact(
         }
     }
 
+    // SSH: a source inside a remote CMake / Meson project fails like Run (BUG-10).
+    if !is_local && is_source {
+        if let Some(reason) =
+            remote_cpp_project_error(&req.target, ctx.ssh.as_ref(), raw_prog, &project_dir, env)
+                .await
+        {
+            return Err(Error::Invalid(reason));
+        }
+    }
+
     // 3. Standalone C / C++ file compile via clang/clang++ (or configured CC/CXX).
-    let src_file = if is_cpp_source_file(raw_prog) {
+    let src_file = if is_source {
         raw_prog.to_string()
     } else {
         return Err(Error::Invalid(
@@ -871,6 +897,48 @@ async fn compile_cpp_debug_artifact(
         });
     }
     Ok(out_bin)
+}
+
+/// Shell walk from `$1`'s directory up to the bound `$2` (`""` = `/`): prints the nearest
+/// directory holding `CMakeLists.txt` or `meson.build`, or exits 1 when none is inside it.
+const CPP_FIND_PROJECT_SH: &str = r#"d=$(cd "$(dirname "$1")" 2>/dev/null && pwd) || exit 1
+while :; do
+  case "$d" in "$2"|"$2"/*) ;; *) exit 1 ;; esac
+  if [ -f "$d/CMakeLists.txt" ] || [ -f "$d/meson.build" ]; then printf '%s\n' "$d"; exit 0; fi
+  [ "$d" = / ] && exit 1
+  d=$(dirname "$d")
+done"#;
+
+/// SSH: why `source` inside a remote CMake / Meson project can neither Run nor Debug —
+/// Otto resolves no executable target over SSH, and compiled on its own the file would
+/// miss the project's include paths and libraries (BUG-10). `None` outside any project.
+pub(crate) async fn remote_cpp_project_error(
+    target: &IdeTargetSpec,
+    ssh: Option<&crate::types::IdeSshSpec>,
+    source: &str,
+    cwd: &str,
+    env: &BTreeMap<String, String>,
+) -> Option<String> {
+    let bound = target.root.trim_end_matches('/').to_string();
+    let args = ["-c", CPP_FIND_PROJECT_SH, "sh", source, &bound].map(String::from);
+    let out = run_target_command(
+        target,
+        ssh,
+        "sh",
+        &args,
+        cwd,
+        env,
+        crate::proc_group::BUILD_STEP_TIMEOUT,
+    )
+    .await
+    .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let dir = text.trim();
+    (out.status.success() && !dir.is_empty()).then(|| {
+        format!(
+            "'{source}' belongs to the CMake / Meson project in '{dir}' on the SSH host. Otto does not resolve its executable target over SSH, and compiled on its own it would miss the project's include paths and libraries. Build the project, then run or debug the built executable instead (a run configuration whose target is the executable)."
+        )
+    })
 }
 
 async fn resolve_cpp_compiler(
@@ -1520,5 +1588,150 @@ int main(int argc, char** argv) {
             bin.starts_with(&format!("{dir}/")) && bin.ends_with("main-bin"),
             "{bin}"
         );
+    }
+
+    #[cfg(unix)]
+    async fn debug_source(
+        root: &std::path::Path,
+        src: &std::path::Path,
+        env: &std::collections::BTreeMap<String, String>,
+    ) -> std::result::Result<String, String> {
+        let req: crate::types::IdeStartDebugReq = serde_json::from_value(serde_json::json!({
+            "target": { "kind": "local", "root": root.to_string_lossy() },
+            "language": "cpp",
+            "launch": { "program": src.to_string_lossy(), "cwd": root.to_string_lossy(), "args": [] }
+        }))
+        .unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let mut out = Vec::new();
+        super::compile_cpp_debug_artifact(
+            data.path(),
+            &req,
+            &crate::dap::DapStartContext::new(),
+            &root.to_string_lossy(),
+            &src.to_string_lossy(),
+            false,
+            env,
+            &mut out,
+        )
+        .await
+        .map_err(|e| e.to_string())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cpp_debug_of_unmapped_project_source_fails_like_run() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().canonicalize().unwrap();
+        let write = |p: std::path::PathBuf, body: &str| {
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        let no_env = std::collections::BTreeMap::new();
+
+        // BUG-10: a library source of a configured CMake project, a never-configured
+        // project's variable source and a Meson source fail with Run's reason instead of
+        // compiling the file on its own.
+        let lib = base.join("lib-proj");
+        write(
+            lib.join("CMakeLists.txt"),
+            "project(p)\nadd_library(core lib/core.cpp)\nadd_executable(app main.cpp)\n",
+        );
+        write(lib.join("lib/core.cpp"), "int main() { return 0; }\n");
+        write(lib.join("build/CMakeCache.txt"), "");
+        let err = debug_source(&lib, &lib.join("lib/core.cpp"), &no_env)
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("not compiled into any executable target"),
+            "{err}"
+        );
+
+        let fresh = base.join("fresh-proj");
+        write(
+            fresh.join("CMakeLists.txt"),
+            "project(f)\nset(APP_SRCS src/main.cpp)\nadd_executable(app ${APP_SRCS})\n",
+        );
+        write(fresh.join("src/main.cpp"), "int main() { return 0; }\n");
+        let err = debug_source(&fresh, &fresh.join("src/main.cpp"), &no_env)
+            .await
+            .unwrap_err();
+        assert!(err.contains("never configured"), "{err}");
+
+        let meson = base.join("meson-proj");
+        write(meson.join("meson.build"), "project('m', 'cpp')\n");
+        write(meson.join("src/main.cpp"), "int main() { return 0; }\n");
+        let err = debug_source(&meson, &meson.join("src/main.cpp"), &no_env)
+            .await
+            .unwrap_err();
+        assert!(err.contains("Meson"), "{err}");
+
+        // The compile database names a library declared through a variable: after its
+        // build, Debug must not launch some other executable of the build tree.
+        let var = base.join("var-lib");
+        write(
+            var.join("CMakeLists.txt"),
+            "project(v)\nset(LIB corelib)\nadd_library(${LIB} core/core.cpp)\nadd_executable(other_app main.cpp)\n",
+        );
+        write(var.join("core/core.cpp"), "int helper() { return 1; }\n");
+        write(var.join("build/CMakeCache.txt"), "");
+        let db = serde_json::json!([{
+            "directory": var.join("build"),
+            "file": var.join("core/core.cpp"),
+            "output": "CMakeFiles/corelib.dir/core/core.cpp.o"
+        }]);
+        write(var.join("build/compile_commands.json"), &db.to_string());
+        let bin = base.join("bin");
+        for exe in [bin.join("cmake"), var.join("build/other_app")] {
+            write(exe.clone(), "#!/bin/sh\nexit 0\n");
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let env = std::collections::BTreeMap::from([(
+            "PATH".to_string(),
+            bin.to_string_lossy().into_owned(),
+        )]);
+        let res = debug_source(&var, &var.join("core/core.cpp"), &env).await;
+        assert!(
+            res.as_ref().is_err_and(|e| e.contains("corelib")),
+            "{res:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn remote_cpp_project_walk_finds_cmake_or_meson_inside_the_target_root() {
+        // BUG-10 (SSH): Run and Debug refuse a source inside a remote build project.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap().join("ws");
+        for (dir, manifest) in [("cm", "CMakeLists.txt"), ("me", "meson.build")] {
+            std::fs::create_dir_all(root.join(dir).join("src")).unwrap();
+            std::fs::write(root.join(dir).join(manifest), "").unwrap();
+        }
+        std::fs::create_dir_all(root.join("lone")).unwrap();
+        std::fs::write(tmp.path().join("CMakeLists.txt"), "").unwrap();
+        let run = |file: std::path::PathBuf| {
+            let root = root.clone();
+            async move {
+                tokio::process::Command::new("sh")
+                    .args(["-c", super::CPP_FIND_PROJECT_SH, "sh"])
+                    .arg(file)
+                    .arg(root)
+                    .output()
+                    .await
+                    .unwrap()
+            }
+        };
+        for dir in ["cm", "me"] {
+            let out = run(root.join(dir).join("src/main.cpp")).await;
+            assert!(out.status.success(), "{dir}");
+            assert_eq!(
+                String::from_utf8_lossy(&out.stdout),
+                format!("{}\n", root.join(dir).display())
+            );
+        }
+        // Never climbs above the target root to an unrelated CMakeLists.txt.
+        assert!(!run(root.join("lone/main.cpp")).await.status.success());
     }
 }

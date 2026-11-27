@@ -2923,12 +2923,15 @@ fn cpp_round4_exact_source_paths_compile_db_and_doctest() {
     let (_, a) = run(IdeRunnerKind::CppRun, "main.cpp", None);
     assert!(a[1].contains("--target app"), "{}", a[1]);
     // A commented-out target owns nothing; no other target lists this path, so it
-    // compiles standalone instead of borrowing a same-named file's target.
+    // neither borrows a same-named file's target nor compiles on its own.
     let (_, a) = run(IdeRunnerKind::CppRun, "legacy/main.cpp", None);
     assert!(
-        !a[1].contains("--target") && a[1].contains("clang++"),
-        "{}",
-        a[1]
+        a.iter()
+            .all(|x| !x.contains("--target") && !x.contains("clang++"))
+            && a.last()
+                .unwrap()
+                .contains("not compiled into any executable target"),
+        "{a:?}"
     );
     // Sources behind a variable resolve through the configured compile database.
     let (_, a) = run(
@@ -2948,4 +2951,91 @@ fn cpp_round4_exact_source_paths_compile_db_and_doctest() {
     );
     assert!(a.iter().any(|x| x == "--test-case=adds.two"), "{a:?}");
     assert!(a.iter().all(|x| !x.starts_with("--gtest_filter=")), "{a:?}");
+}
+
+#[test]
+fn cpp_round5_unmapped_project_sources_fail_clearly_instead_of_standalone_compile() {
+    use crate::environments::runner_cmd::build_runner_command;
+    use crate::types::{IdeRunConfig, IdeRunnerKind, IdeTargetKind};
+    use std::collections::BTreeMap;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().canonicalize().unwrap();
+    let write = |p: std::path::PathBuf, body: &str| {
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    };
+    let run = |cwd: &std::path::Path, src: &str| {
+        let mut cfg: IdeRunConfig = serde_json::from_value(serde_json::json!({
+            "id": "r5",
+            "name": "cfg",
+            "target_path": src
+        }))
+        .unwrap();
+        cfg.runner = IdeRunnerKind::CppRun;
+        build_runner_command(
+            &cfg,
+            IdeTargetKind::Local,
+            &cwd.to_string_lossy(),
+            &BTreeMap::new(),
+        )
+    };
+    let no_compile = |a: &[String]| a.iter().all(|x| !x.contains("clang++"));
+
+    // A configured CMake project's library source maps to no executable: Run says so.
+    let lib = base.join("lib-proj");
+    write(
+        lib.join("CMakeLists.txt"),
+        "project(p)\nadd_library(core lib/core.cpp)\nadd_executable(app main.cpp)\ntarget_link_libraries(app core)\n",
+    );
+    write(lib.join("lib/core.cpp"), "int main() { return 0; }\n");
+    write(lib.join("main.cpp"), "int main() { return 0; }\n");
+    write(lib.join("build/CMakeCache.txt"), "");
+    let (prog, a) = run(&lib, "lib/core.cpp");
+    assert!(no_compile(&a), "{a:?}");
+    let msg = a.last().unwrap();
+    assert!(
+        msg.contains("lib/core.cpp") && msg.contains("not compiled into any executable target"),
+        "{a:?}"
+    );
+    #[cfg(unix)]
+    {
+        let out = std::process::Command::new(&prog).args(&a).output().unwrap();
+        assert_eq!(out.status.code(), Some(1));
+        assert_eq!(String::from_utf8_lossy(&out.stderr).trim(), msg.as_str());
+    }
+
+    // Never configured: sources behind a variable are unknown until the first configure.
+    let fresh = base.join("fresh-proj");
+    write(
+        fresh.join("CMakeLists.txt"),
+        "project(f)\nset(APP_SRCS src/main.cpp)\nadd_executable(app ${APP_SRCS})\n",
+    );
+    write(fresh.join("src/main.cpp"), "int main() { return 0; }\n");
+    let (_, a) = run(&fresh, "src/main.cpp");
+    assert!(no_compile(&a), "{a:?}");
+    let msg = a.last().unwrap();
+    assert!(
+        msg.contains("never configured") && msg.contains("CMake Configure"),
+        "{a:?}"
+    );
+
+    // Meson sources map to no executable either.
+    let meson = base.join("meson-proj");
+    write(
+        meson.join("meson.build"),
+        "project('m', 'cpp')\nexecutable('m', 'src/main.cpp')\n",
+    );
+    write(meson.join("src/main.cpp"), "int main() { return 0; }\n");
+    let (_, a) = run(&meson, "src/main.cpp");
+    assert!(
+        no_compile(&a) && a.last().unwrap().contains("Meson"),
+        "{a:?}"
+    );
+
+    // A file outside any build project still compiles on its own.
+    let solo = base.join("solo");
+    write(solo.join("solo.cpp"), "int main() { return 0; }\n");
+    let (_, a) = run(&solo, "solo.cpp");
+    assert!(a[1].contains("clang++"), "{a:?}");
 }

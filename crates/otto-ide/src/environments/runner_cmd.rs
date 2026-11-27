@@ -622,14 +622,22 @@ fn build_cpp_runner_cmd(
                 return (format!("./build/{target_name}"), args);
             }
             // BUG-10: Gutter Run beside `main()` inside a CMake project builds & runs the
-            // owning CMake target instead of compiling a single `.cpp` file standalone.
+            // owning CMake target instead of compiling a single `.cpp` file standalone; a
+            // project source that maps to no executable fails with the reason, as Debug does.
             let src = tp.unwrap_or("main.cpp");
-            if target_kind == IdeTargetKind::Local
-                && Path::new(cwd).join("CMakeLists.txt").is_file()
-            {
-                if let Some(cmake_target) = infer_cmake_target_for_source(cwd, src, false) {
-                    let build_dir = find_cpp_build_dir(cwd).unwrap_or_else(|| "build".into());
-                    return build_cmake_target_exec_cmd(&build_dir, &cmake_target, args);
+            if target_kind == IdeTargetKind::Local {
+                if Path::new(cwd).join("CMakeLists.txt").is_file() {
+                    if let Some(cmake_target) = infer_cmake_target_for_source(cwd, src, false) {
+                        let build_dir = find_cpp_build_dir(cwd).unwrap_or_else(|| "build".into());
+                        return build_cmake_target_exec_cmd(&build_dir, &cmake_target, args);
+                    }
+                }
+                if let Some(reason) = cpp_unmapped_source_error(cwd, src) {
+                    let script = r#"printf '%s\n' "$1" >&2; exit 1"#;
+                    return (
+                        "sh".into(),
+                        vec!["-c".into(), script.into(), "otto-cpp-run".into(), reason],
+                    );
                 }
             }
             // Compile and run a standalone C or C++ source file cleanly via a temp binary.
@@ -669,7 +677,7 @@ fn build_cpp_runner_cmd(
     }
 }
 
-fn is_cpp_source_path(p: &str) -> bool {
+pub(crate) fn is_cpp_source_path(p: &str) -> bool {
     let l = p.to_ascii_lowercase();
     l.ends_with(".c")
         || l.ends_with(".cpp")
@@ -952,6 +960,34 @@ pub(crate) fn infer_cmake_target_for_source(
             .find(|t| !t.name.to_ascii_lowercase().contains("test"))
             .or_else(|| exe_targets.first())
             .map(|t| t.name.clone())
+    } else {
+        None
+    }
+}
+
+/// Why a local C/C++ `source` inside the CMake / Meson project at `project_dir` that maps
+/// to no executable target can neither Run nor Debug: compiled on its own it would miss the
+/// project's include paths and libraries (BUG-10). `None` for a file outside any build
+/// project, which compiles standalone.
+#[allow(clippy::disallowed_methods)]
+pub(crate) fn cpp_unmapped_source_error(project_dir: &str, source: &str) -> Option<String> {
+    let root = std::fs::canonicalize(project_dir).ok()?;
+    let src = std::fs::canonicalize(root.join(source)).ok()?;
+    let shown = src.strip_prefix(&root).ok()?.display();
+    if root.join("CMakeLists.txt").is_file() {
+        Some(if find_cpp_build_dir(project_dir).is_none() {
+            format!(
+                "'{shown}' maps to no executable target yet: the CMake project in '{project_dir}' was never configured, so sources listed through variables or globs are unknown. Configure the project first ('CMake Configure Debug' in the run configurations, or 'CMake Configure' on CMakeLists.txt), then try again."
+            )
+        } else {
+            format!(
+                "'{shown}' is not compiled into any executable target of the CMake project in '{project_dir}' (it may belong to a library). Run or debug the executable or test target that uses it instead ('Run <target>' or a CTest configuration)."
+            )
+        })
+    } else if root.join("meson.build").is_file() {
+        Some(format!(
+            "'{shown}' belongs to the Meson project in '{project_dir}', and Otto does not map Meson sources to executables. Build it with 'Meson Compile', then run or debug the built executable under builddir/ instead."
+        ))
     } else {
         None
     }
