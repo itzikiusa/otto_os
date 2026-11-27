@@ -189,9 +189,12 @@ test('Working and History stay pinned above the footer while the list scrolls', 
   // Not part of the scrolling list: they sit between it and the footer.
   expect(await fold.evaluate((el) => !!el.closest('.th-scroll'))).toBe(false);
   expect(await history.evaluate((el) => !!el.closest('.th-scroll'))).toBe(false);
-  const foot = (await side.locator('.side-pane-foot').boundingBox())!;
+  // …and the pane's bottom: its footer when it has something to say, else its own edge.
+  const footEl = side.locator('.side-pane-foot');
+  const sideBox = (await side.boundingBox())!;
+  const bottom = (await footEl.isVisible()) ? (await footEl.boundingBox())!.y : sideBox.y + sideBox.height;
   const h = (await history.boundingBox())!;
-  expect(foot.y - (h.y + h.height)).toBeLessThan(60);
+  expect(bottom - (h.y + h.height)).toBeLessThan(60);
   // An open fold takes at most ~40 % of the sidebar and scrolls inside.
   const sb = (await side.boundingBox())!;
   const folds = (await side.locator('.th-folds').boundingBox())!;

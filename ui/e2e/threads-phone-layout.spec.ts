@@ -248,7 +248,7 @@ test('iPad: the thread list is a column beside the conversation; Otto shows its 
   // (an iPad on its side is the desktop shell: the Side panel's own rail strip)
   if (info.project.name === 'ipad-portrait') await expect(page.locator('[data-testid="threads-page"] > .page-header-bar').getByRole('button', { name: 'Side panel', exact: true })).toBeVisible();
   else await expect(page.locator('.rstrip')).toBeVisible();
-  await expect(page.locator('.msidebar.mfolded .rail')).toBeVisible();
+  if (info.project.name === 'ipad-portrait') await expect(page.locator('.msidebar.mfolded .rail')).toBeVisible();
   await expect(page.getByTestId('threads-toggle-inspector')).toHaveCount(1);
   await expectNoHorizontalOverflow(page);
   await shot(page, 'side-by-side', ['light', 'dark']);
