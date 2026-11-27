@@ -98,10 +98,18 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
   budget*, with **Resume** or **Extend and resume…**. Loops made before this
   release stay readable under *Older goal loops*, and an unfinished one has
   **Continue as a goal**.
+- **Project security scans.** Run or schedule local Trivy and Opengrep checks in
+  the IDE Security view with incremental caching, resource limits and macOS
+  Seatbelt confinement. Review findings in Problems and the editor gutter,
+  manage suppressions and baselines, import or export SARIF 2.1.0, and run
+  passive HTTP header audits against explicitly confirmed development run
+  targets ([Security scans](docs/features/security-scans.md)).
 - **Chat.** A run started from chat keeps one live status message in its
-  thread instead of a message per step. Each step's file is still posted, and
-  files attached to the Slack message that starts a run reach the run. The
-  Start step's *Updates in the chat thread* brings back a message per step.
+  thread instead of a message per step, and flushes pending chat progress
+  updates before `channel_notify` sends its final message so delivery order
+  stays deterministic. Each step's file is still posted, and files attached to
+  the Slack message that starts a run reach the run. The Start step's *Updates
+  in the chat thread* brings back a message per step.
 - **Limits and restarts.** A step that hits a usage limit with a known reset
   waits and continues when the limit resets. Runs cut by a restart or update
   continue from the step they were on — including held review summarizers,
@@ -315,8 +323,6 @@ rounds over the last three releases.
   configurations (DAP), language servers, refactorings, a git gutter, local
   history, dependency and vulnerability views, live shared editing and IDE
   plugins. Chat with an agent about the open project from the IDE itself.
-- **Project security scans.** Run or schedule local Trivy and Opengrep checks in
-  the IDE Security view. Review findings, exchange SARIF reports, and passively audit confirmed development URLs. [Security scans](docs/features/security-scans.md).
 - **Threads: every agent, fully.** Claude, Codex, Antigravity, Gemini, Grok,
   OpenCode, pi and Muse run as structured agents. Each one reports what it
   can do (images, files, plan mode, effort, steering) and Threads offers
