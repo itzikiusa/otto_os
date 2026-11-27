@@ -81,6 +81,13 @@ fn non_root_rust_settings() -> Value {
     })
 }
 
+/// ZLS for a non-root owner never runs `build.zig` automatically on save.
+fn non_root_zig_settings() -> Value {
+    json!({
+        "enable_build_on_save": false
+    })
+}
+
 /// The repo's venv interpreter for pyright (which EXECUTES it to read
 /// `sys.path`). A real venv (it has `pyvenv.cfg`) links `bin/python` to an
 /// installed interpreter; one that resolves inside the repo is a committed
@@ -398,6 +405,8 @@ impl Mux {
             params.insert("initializationOptions".into(), opts);
         } else if !self.owner_is_root && norm_lang == "rust" {
             params.insert("initializationOptions".into(), non_root_rust_settings());
+        } else if !self.owner_is_root && norm_lang == "zig" {
+            params.insert("initializationOptions".into(), non_root_zig_settings());
         } else if !self.owner_is_root {
             params.remove("initializationOptions");
         }
@@ -426,6 +435,11 @@ impl Mux {
                     && (section.is_empty() || section == "rust-analyzer")
                 {
                     non_root_rust_settings()
+                } else if !self.owner_is_root
+                    && norm_lang == "zig"
+                    && (section.is_empty() || section == "zls")
+                {
+                    non_root_zig_settings()
                 } else if (section == "python" || section == "python.analysis") && py_path.is_some()
                 {
                     json!({ "pythonPath": py_path })

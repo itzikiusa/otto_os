@@ -197,8 +197,6 @@ export type RuntimeThreadViewProps = {
   hideEmbedBarWhenUnlinked?: boolean;
   /** Always show the Threads header bar (status, provider, title, model, tokens). */
   showHeader?: boolean;
-  /** Show every tool call in the timeline without collapsing into "N earlier steps" / "Worked for …". */
-  expandWork?: boolean;
   /** Host-controlled thread switching (sub-thread card / linked strip / Back to parent). */
   onselectthread?: (sessionId: string) => void;
   /** No composer (a thread another feature drives, or a settled step). */

@@ -118,6 +118,7 @@ pub(super) fn match_brace_symbol(
     match lang {
         "rust" => match_rust_symbol(trimmed),
         "go" => match_go_symbol(trimmed),
+        "zig" => match_zig_symbol(trimmed),
         "java" | "kotlin" => match_jvm_symbol(trimmed),
         "javascript" | "typescript" | "svelte" | "vue" => match_ts_symbol(trimmed),
         "protobuf" => match_proto_symbol(trimmed),
@@ -233,6 +234,64 @@ fn match_go_symbol(trimmed: &str) -> Option<(String, String, Option<String>, boo
     }
     let cap = RE_C
         .get_or_init(|| Regex::new(r"^(const|var)\s+([A-Za-z_][A-Za-z0-9_]*)").unwrap())
+        .captures(trimmed)?;
+    Some((cap[2].to_string(), cap[1].to_string(), None, false))
+}
+
+fn match_zig_symbol(trimmed: &str) -> Option<(String, String, Option<String>, bool)> {
+    static RE_TYPE: OnceLock<Regex> = OnceLock::new();
+    static RE_FN: OnceLock<Regex> = OnceLock::new();
+    static RE_TEST_STR: OnceLock<Regex> = OnceLock::new();
+    static RE_TEST_IDENT: OnceLock<Regex> = OnceLock::new();
+    static RE_CONST: OnceLock<Regex> = OnceLock::new();
+
+    if let Some(cap) = RE_TYPE
+        .get_or_init(|| {
+            Regex::new(
+                r"^(?:pub\s+)?const\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:(?:packed|extern)\s+)?(struct|enum|union|opaque|error)\b",
+            )
+            .unwrap()
+        })
+        .captures(trimmed)
+    {
+        return Some((cap[1].to_string(), cap[2].to_string(), None, true));
+    }
+    if let Some(cap) = RE_FN
+        .get_or_init(|| {
+            Regex::new(
+                r#"^(?:pub\s+)?(?:export\s+|extern(?:\s+"[^"]*")?\s+|inline\s+|noinline\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)"#,
+            )
+            .unwrap()
+        })
+        .captures(trimmed)
+    {
+        let params = cap[2].trim();
+        let is_m = params.starts_with("self:") || params.starts_with("self ");
+        let kind = if is_m { "method" } else { "function" };
+        return Some((
+            cap[1].to_string(),
+            kind.into(),
+            Some(format!("({params})")),
+            false,
+        ));
+    }
+    if let Some(cap) = RE_TEST_STR
+        .get_or_init(|| Regex::new(r#"^test\s+"([^"]+)"\s*\{"#).unwrap())
+        .captures(trimmed)
+    {
+        return Some((cap[1].to_string(), "test".into(), None, false));
+    }
+    if let Some(cap) = RE_TEST_IDENT
+        .get_or_init(|| Regex::new(r"^test\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{").unwrap())
+        .captures(trimmed)
+    {
+        return Some((cap[1].to_string(), "test".into(), None, false));
+    }
+    let cap = RE_CONST
+        .get_or_init(|| {
+            Regex::new(r"^(?:pub\s+)?(?:threadlocal\s+)?(const|var)\s+([A-Za-z_][A-Za-z0-9_]*)")
+                .unwrap()
+        })
         .captures(trimmed)?;
     Some((cap[2].to_string(), cap[1].to_string(), None, false))
 }

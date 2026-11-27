@@ -375,6 +375,7 @@ pub fn scan_parent_repos(parent_path: &str, is_root_user: bool) -> Result<IdeSca
             || canon.join("build.gradle").is_file()
             || canon.join("build.gradle.kts").is_file();
         let has_cargo = canon.join("Cargo.toml").is_file();
+        let has_zig = canon.join("build.zig").is_file() || canon.join("build.zig.zon").is_file();
         let has_node = canon.join("package.json").is_file();
         let has_py =
             canon.join("pyproject.toml").is_file() || canon.join("requirements.txt").is_file();
@@ -386,6 +387,8 @@ pub fn scan_parent_repos(parent_path: &str, is_root_user: bool) -> Result<IdeSca
             "java"
         } else if has_cargo {
             "rust"
+        } else if has_zig {
+            "zig"
         } else if has_node {
             "node"
         } else if has_py {

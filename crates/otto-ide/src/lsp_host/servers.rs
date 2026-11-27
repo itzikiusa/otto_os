@@ -43,6 +43,7 @@ pub fn normalize_lsp_lang(lang: &str) -> &str {
         "gql" => "graphql",
         "containerfile" => "dockerfile",
         "kt" | "kts" => "kotlin",
+        "zon" => "zig",
         other => other,
     }
 }
@@ -148,6 +149,15 @@ pub static REGISTRY: &[ServerDef] = &[
         extensions: &[".dart"],
         install_command: Some("brew install --cask flutter"),
     },
+    ServerDef {
+        lang: "zig",
+        cmd: "zls",
+        args: &[],
+        fallback_cmd: None,
+        fallback_args: &[],
+        extensions: &[".zig", ".zon"],
+        install_command: Some("brew install zls"),
+    },
 ];
 
 /// Result of resolving one language server against toolchain dirs + PATH.
@@ -211,6 +221,7 @@ fn collect_developer_bin_dirs(
                     ".local/bin",
                     ".npm-global/bin",
                     ".volta/bin",
+                    ".zvm/bin",
                 ] {
                     dirs.push(home.join(rel));
                 }

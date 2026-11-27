@@ -43,6 +43,7 @@ export interface RawLspCompletionItem {
 export const LSP_CODE_LANGUAGES = new Set([
   'go',
   'rust',
+  'zig',
   'java',
   'typescript',
   'javascript',
@@ -124,6 +125,7 @@ export function normalizeIdeLspLanguage(langOrExt?: string | null): string | nul
   if (!raw) return null;
   if (raw === 'go' || raw === 'golang') return 'go';
   if (raw === 'rs' || raw === 'rust') return 'rust';
+  if (raw === 'zig' || raw === 'zon') return 'zig';
   if (raw === 'java') return 'java';
   if (raw === 'ts' || raw === 'tsx' || raw === 'mts' || raw === 'cts' || raw === 'typescript' || raw === 'typescriptreact') {
     return 'typescript';

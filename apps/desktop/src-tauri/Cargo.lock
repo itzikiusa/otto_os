@@ -2667,7 +2667,7 @@ dependencies = [
 
 [[package]]
 name = "otto-desktop"
-version = "0.7.0-rc.3"
+version = "0.7.0-rc.4"
 dependencies = [
  "base64 0.23.1",
  "dirs",

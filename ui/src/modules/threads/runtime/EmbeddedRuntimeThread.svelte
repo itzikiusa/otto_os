@@ -48,7 +48,6 @@
     onaccessmodechange,
     hideEmbedBarWhenUnlinked = false,
     showHeader = false,
-    expandWork = false,
     onselectthread,
     readOnly = false,
     onunavailable,
@@ -260,7 +259,6 @@
           focused={focusOnMount}
           {compact}
           {readOnly}
-          {expandWork}
           {hostCommands}
           {accessModeOverride}
           {onaccessmodechange}

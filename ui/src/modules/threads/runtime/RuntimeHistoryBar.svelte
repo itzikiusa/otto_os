@@ -21,6 +21,7 @@
     scroller: HTMLDivElement | null;
     streamEl: HTMLDivElement | null;
     onreleasebottom?: () => void;
+    onprepended?: () => void;
     rowCap?: number;
   }
 
@@ -33,6 +34,7 @@
     scroller,
     streamEl,
     onreleasebottom,
+    onprepended,
     rowCap = $bindable(INITIAL_ROW_CAP),
   }: Props = $props();
 
@@ -68,6 +70,7 @@
         if (!loaded) return;
       }
       await tick();
+      onprepended?.();
       if (el && el.isConnected) {
         if (anchor && anchor.isConnected && beforeAnchorDocY !== null) {
           const afterAnchorDocY =

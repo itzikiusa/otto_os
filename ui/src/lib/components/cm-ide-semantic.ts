@@ -149,7 +149,9 @@ export function classifySemanticTokensWithModel(
       if (ch === '/' && docText[i + 1] === '/') {
         const nl = docText.indexOf('\n', i + 2);
         const end = nl >= 0 ? Math.min(to, nl) : to;
-        if (docText[i + 2] === '/' && lang === 'rust') classifyDocComment(docText.slice(i, end), i, out);
+        if ((docText[i + 2] === '/' && (lang === 'rust' || lang === 'zig')) || (docText[i + 2] === '!' && lang === 'zig')) {
+          classifyDocComment(docText.slice(i, end), i, out);
+        }
         i = end;
         continue;
       }
@@ -165,7 +167,7 @@ export function classifySemanticTokensWithModel(
         i = nl >= 0 ? Math.min(to, nl) : to;
         continue;
       }
-      if (ch === '@' && (lang === 'java' || lang === 'ts' || lang === 'python')) {
+      if (ch === '@' && (lang === 'java' || lang === 'ts' || lang === 'python' || lang === 'zig')) {
         const m = /^@[A-Za-z_$][\w$.]*/.exec(docText.slice(i, Math.min(to, i + 64)));
         if (m) {
           out.push({ from: i, to: i + m[0].length, role: 'annotation', text: m[0] });
@@ -448,7 +450,7 @@ export interface CreateIdeSemanticOptions {
   onFindUsages?: ((ctx: { line: number; column: number; symbol?: string }) => void) | null;
 }
 
-const AUTHORITATIVE_LSP_SOURCES = new Set(['gopls', 'jdtls', 'rust-analyzer', 'pyright', 'typescript', 'tsserver']);
+const AUTHORITATIVE_LSP_SOURCES = new Set(['gopls', 'jdtls', 'rust-analyzer', 'zls', 'pyright', 'typescript', 'tsserver']);
 
 export function createIdeSemanticExtensions(opts: CreateIdeSemanticOptions): Extension {
   const lang = detectSemanticLang(opts.filePath, opts.language);
@@ -549,7 +551,7 @@ export function createIdeSemanticExtensions(opts: CreateIdeSemanticOptions): Ext
         if (goImp && !lspOwnsDiags) clientDiags.push(...goImp.diagnostics);
         const unresolved = new Set<string>(jRes ? jRes.unresolvedIdents : []);
 
-        if (!lspOwnsDiags && opts.root && (lang === 'java' || lang === 'go' || lang === 'python' || lang === 'shell' || lang === 'json')) {
+        if (!lspOwnsDiags && opts.root && (lang === 'java' || lang === 'go' || lang === 'zig' || lang === 'python' || lang === 'shell' || lang === 'json')) {
           const ctrl = new AbortController();
           this.abort = ctrl;
           try {

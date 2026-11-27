@@ -6,7 +6,6 @@
   // (the items whose `parent_item_id` is this card) plus its final answer.
   // A background subagent keeps running after its turn ended; the card says
   // so until its task finishes.
-  import { untrack } from 'svelte';
   import type { TurnItem } from '../../../lib/api/types';
   import LoadState from '../../../lib/components/LoadState.svelte';
   import { plural } from '../../../lib/plural';
@@ -26,12 +25,10 @@
     activity: TurnItem[];
     /** Live `command_output.delta` text by item id. */
     output?: Record<string, string>;
-    /** Open the subagent's activity and result immediately (workflow run view). */
-    startOpen?: boolean;
   }
-  let { sessionId = '', item, activity, output = {}, startOpen = false }: Props = $props();
+  let { sessionId = '', item, activity, output = {} }: Props = $props();
 
-  let open = $state(untrack(() => startOpen));
+  let open = $state(false);
   let attemptedForceKey = '';
   /** agy's swarm member: its work is on disk, not in the item stream. */
   const swarm = $derived(item.tool_name === 'swarm' && !!sessionId);
@@ -104,7 +101,7 @@
             {#if a.type === 'assistant_message'}
               <div class="sa-text" dir="auto"><Markdown md={a.text} /></div>
             {:else}
-              <RuntimeWorkRow {sessionId} item={a} output={output[a.id]} {startOpen} />
+              <RuntimeWorkRow {sessionId} item={a} output={output[a.id]} />
             {/if}
           {/each}
         </div>

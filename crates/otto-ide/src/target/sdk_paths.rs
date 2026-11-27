@@ -152,6 +152,8 @@ pub(crate) fn collect_base_readonly_sdk_roots(
         "VIRTUAL_ENV",
         "MAVEN_REPO_LOCAL",
         "GRADLE_USER_HOME",
+        "ZIG_LIB_DIR",
+        "ZIG_GLOBAL_CACHE_DIR",
     ] {
         if let Some(v) = env_val(key) {
             candidates.push(PathBuf::from(v));
@@ -191,6 +193,22 @@ pub(crate) fn collect_base_readonly_sdk_roots(
                     }
                 }
             }
+            let zig_bin = Path::new(seg).join("zig");
+            if zig_bin.is_file() {
+                if let Ok(canon_zig) = zig_bin.canonicalize() {
+                    if let Some(bin_dir) = canon_zig.parent() {
+                        if bin_dir.join("lib/std").is_dir() {
+                            candidates.push(bin_dir.to_path_buf());
+                        } else if let Some(zig_home) = bin_dir.parent() {
+                            if zig_home.join("lib/zig/std").is_dir()
+                                || zig_home.join("lib/std").is_dir()
+                            {
+                                candidates.push(zig_home.to_path_buf());
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -203,6 +221,10 @@ pub(crate) fn collect_base_readonly_sdk_roots(
             ".cargo/registry",
             ".cargo/git/checkouts",
             ".rustup/toolchains",
+            ".cache/zig",
+            ".zvm",
+            ".local/share/zigup",
+            "zig",
             ".m2/repository",
             ".gradle/caches",
             ".sdkman/candidates/java",

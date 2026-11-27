@@ -1,7 +1,7 @@
 import type { IdeScannedRepo } from '../../../lib/api/types/ide-intelligence';
 import type { IdeFsEntry } from '../store/ideTypes';
 
-export type RepoTech = 'go' | 'java' | 'rust' | 'node' | 'python';
+export type RepoTech = 'go' | 'java' | 'rust' | 'zig' | 'node' | 'python';
 
 function pathLeaf(p: string): string {
   const clean = p.replace(/\/+$/, '');
@@ -44,6 +44,7 @@ export function buildDedupedBulkRepos(repos: readonly IdeScannedRepo[]): {
     if (r.has_go_mod || k === 'go') detected.push('go');
     if (r.has_pom_or_gradle || k === 'java' || k === 'maven' || k === 'gradle') detected.push('java');
     if (k === 'rust') detected.push('rust');
+    if (k === 'zig') detected.push('zig');
     if (k === 'node' || k === 'ts' || k === 'javascript' || k === 'typescript') detected.push('node');
     if (k === 'python') detected.push('python');
     if (detected.length > 0) techByPath[r.path] = detected;

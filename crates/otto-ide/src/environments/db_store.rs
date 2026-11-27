@@ -38,6 +38,8 @@ pub(super) struct StoredMobileSdks {
     pub(super) flutter_root: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) xcode_developer_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) zig_home: Option<String>,
 }
 
 pub(crate) fn is_reserved_internal_env_key(key: &str) -> bool {
@@ -121,6 +123,9 @@ pub(crate) fn is_dangerous_loader_env_key(key: &str) -> bool {
                 | "RUSTC_WORKSPACE_WRAPPER"
                 | "RUSTFLAGS"
                 | "CARGO_ENCODED_RUSTFLAGS"
+                | "ZIG_LIB_DIR"
+                | "ZIG_GLOBAL_CACHE_DIR"
+                | "ZIG_LOCAL_CACHE_DIR"
                 | "NODE_OPTIONS"
                 | "NODE_PATH"
                 | "NODE_EXTRA_CA_CERTS"
@@ -249,6 +254,12 @@ pub(super) fn apply_run_config_sdk_override(
                 push_unique(path_dirs, format!("{trimmed}/bin"));
             } else {
                 map.insert("RUSTUP_TOOLCHAIN".into(), trimmed.to_string());
+            }
+        }
+        IdeRunnerKind::ZigBuild | IdeRunnerKind::ZigRun | IdeRunnerKind::ZigTest => {
+            if trimmed.starts_with('/') {
+                push_unique(path_dirs, format!("{trimmed}/bin"));
+                push_unique(path_dirs, trimmed.to_string());
             }
         }
         IdeRunnerKind::Python | IdeRunnerKind::Pytest => {
@@ -469,6 +480,7 @@ fn decode_project_env_row(
         java_home: row.try_get("java_home").ok().flatten(),
         go_root: row.try_get("go_root").ok().flatten(),
         rust_toolchain: row.try_get("rust_toolchain").ok().flatten(),
+        zig_home: mobile_sdks.zig_home,
         node_home: row.try_get("node_home").ok().flatten(),
         python_interpreter: row.try_get("python_interpreter").ok().flatten(),
         android_home: mobile_sdks.android_home,

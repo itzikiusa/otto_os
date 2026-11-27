@@ -28,6 +28,9 @@ pub(super) fn collect_managed_bin_dirs(tc_root: &Path, out: &mut Vec<PathBuf>) {
         "rust/cargo/bin",
         "rust/dap/extension/adapter",
         "rust/codelldb/adapter",
+        "zig/bin",
+        "zig/current",
+        "zig/current/bin",
         "node/current/bin",
         "node/lsp/node_modules/.bin",
         "python/bin",
@@ -43,8 +46,17 @@ pub(super) fn collect_managed_bin_dirs(tc_root: &Path, out: &mut Vec<PathBuf>) {
             out.push(c);
         }
     }
-    for sub in ["java/jdks", "go/sdks", "node/sdks", "python/interpreters"] {
+    for sub in [
+        "java/jdks",
+        "go/sdks",
+        "zig/sdks",
+        "node/sdks",
+        "python/interpreters",
+    ] {
         for p in read_subdirs(&tc_root.join(sub)) {
+            if sub == "zig/sdks" && p.join("zig").is_file() && !out.contains(&p) {
+                out.push(p.clone());
+            }
             for rel in ["bin", "Contents/Home/bin", "go/bin"] {
                 let b = p.join(rel);
                 if b.is_dir() && !out.contains(&b) {
@@ -78,7 +90,7 @@ pub(crate) fn system_search_dirs_with_shell(shell_path: Option<&str>) -> Vec<Pat
     }
     if !otto_core::e2e::isolated() {
         if let Some(home) = dirs::home_dir() {
-            for rel in [".cargo/bin", "go/bin", ".local/bin"] {
+            for rel in [".cargo/bin", "go/bin", ".local/bin", ".zvm/bin"] {
                 let p = home.join(rel);
                 if !dirs.contains(&p) {
                     dirs.push(p);
@@ -165,6 +177,14 @@ fn scan_otto_sdks(
             for dir in read_subdirs(&root.join("rust/rustup/toolchains")) {
                 if dir.join("bin/rustc").is_file() {
                     push_sdk(out, seen, "rust", &rust_toolchain_label(&dir), &dir, "otto");
+                }
+            }
+        }
+        EcosystemKind::Zig => {
+            for dir in read_subdirs(&root.join("zig/sdks")) {
+                if let Some(zh) = resolve_zig_home_dir(&dir) {
+                    let v = zig_dir_version(&dir);
+                    push_sdk(out, seen, "zig", &v, &zh, "otto");
                 }
             }
         }
@@ -271,6 +291,41 @@ fn scan_system_sdks(
                 }
             }
         }
+        EcosystemKind::Zig => {
+            for cand in [
+                "/opt/homebrew/opt/zig",
+                "/usr/local/opt/zig",
+                "/usr/local/zig",
+            ] {
+                let p = PathBuf::from(cand);
+                if let Some(zh) = resolve_zig_home_dir(&p) {
+                    let v = zig_dir_version(&zh);
+                    push_sdk(out, seen, "zig", &v, &zh, "system");
+                }
+            }
+            if let Some(h) = &home {
+                for (parent, src) in [
+                    (h.join(".zvm"), "zvm"),
+                    (h.join("zig"), "zigup"),
+                    (h.join(".local/share/zigup"), "zigup"),
+                    (h.join(".asdf/installs/zig"), "asdf"),
+                    (h.join(".local/share/mise/installs/zig"), "mise"),
+                ] {
+                    for dir in read_subdirs(&parent) {
+                        if let Some(zh) = resolve_zig_home_dir(&dir) {
+                            let v = zig_dir_version(&dir);
+                            push_sdk(out, seen, "zig", &v, &zh, src);
+                        }
+                    }
+                }
+            }
+            if let Some(zig_bin) = find_executable_in(&search, &["zig"]) {
+                if let Some(zh) = zig_home_from_bin(&zig_bin) {
+                    let v = read_zig_bin_version(&zig_bin).unwrap_or_else(|| zig_dir_version(&zh));
+                    push_sdk(out, seen, "zig", &v, &zh, "system");
+                }
+            }
+        }
         EcosystemKind::Node => {
             if let Some(h) = &home {
                 for dir in read_subdirs(&h.join(".nvm/versions/node")) {
@@ -351,6 +406,7 @@ pub(super) fn discover_local_lsp_with_shell(
         EcosystemKind::Java => &["java/lsp/bin/jdtls"],
         EcosystemKind::Go => &["go/bin/gopls"],
         EcosystemKind::Rust => &["rust/bin/rust-analyzer", "rust/cargo/bin/rust-analyzer"],
+        EcosystemKind::Zig => &["zig/bin/zls"],
         EcosystemKind::Node => &["node/lsp/node_modules/.bin/typescript-language-server"],
         EcosystemKind::Python => &["python/bin/pyright-langserver", "python/bin/pyright"],
         EcosystemKind::Shell => &["shell/lsp/node_modules/.bin/bash-language-server"],
@@ -378,6 +434,7 @@ pub(super) fn discover_local_lsp_with_shell(
         EcosystemKind::Java => &["jdtls"],
         EcosystemKind::Go => &["gopls"],
         EcosystemKind::Rust => &["rust-analyzer"],
+        EcosystemKind::Zig => &["zls"],
         EcosystemKind::Node => &["typescript-language-server"],
         EcosystemKind::Python => &["pyright-langserver", "pyright"],
         EcosystemKind::Shell => &["bash-language-server"],
@@ -386,7 +443,17 @@ pub(super) fn discover_local_lsp_with_shell(
         EcosystemKind::Android => &["kotlin-language-server"],
         EcosystemKind::Flutter => &["dart"],
     };
-    if let Some(sys) = find_executable_in(&system_search_dirs_with_shell(shell_path), sys_names) {
+    let mut search = system_search_dirs_with_shell(shell_path);
+    if matches!(
+        eco,
+        EcosystemKind::Rust | EcosystemKind::Zig | EcosystemKind::Ios
+    ) {
+        let xcode_dap_dir = PathBuf::from("/Applications/Xcode.app/Contents/Developer/usr/bin");
+        if xcode_dap_dir.is_dir() && !search.contains(&xcode_dap_dir) {
+            search.push(xcode_dap_dir);
+        }
+    }
+    if let Some(sys) = find_executable_in(&search, sys_names) {
         return IdeToolBinaryStatus {
             name,
             available: true,
@@ -413,9 +480,10 @@ pub(super) fn discover_local_dap_with_shell(
     let rels: Vec<&str> = match eco {
         EcosystemKind::Java => vec![java_rel.as_str()],
         EcosystemKind::Go => vec!["go/bin/dlv", "dlv/dlv"],
-        EcosystemKind::Rust => vec![
+        EcosystemKind::Rust | EcosystemKind::Zig => vec![
             "rust/dap/extension/adapter/codelldb",
             "rust/codelldb/adapter/codelldb",
+            "zig/dap/extension/adapter/codelldb",
         ],
         EcosystemKind::Node => vec![
             "node/dap/js-debug/src/dapDebugServer.js",
@@ -433,6 +501,7 @@ pub(super) fn discover_local_dap_with_shell(
                 EcosystemKind::Java | EcosystemKind::Node | EcosystemKind::Python => cand.is_file(),
                 EcosystemKind::Go
                 | EcosystemKind::Rust
+                | EcosystemKind::Zig
                 | EcosystemKind::Shell
                 | EcosystemKind::Json
                 | EcosystemKind::Ios
@@ -453,7 +522,7 @@ pub(super) fn discover_local_dap_with_shell(
     let sys_names: &[&str] = match eco {
         EcosystemKind::Java => &["java-debug", "java"],
         EcosystemKind::Go => &["dlv"],
-        EcosystemKind::Rust => &["codelldb", "lldb-dap", "lldb"],
+        EcosystemKind::Rust | EcosystemKind::Zig => &["codelldb", "lldb-dap", "lldb"],
         EcosystemKind::Node => &["js-debug-dap", "node"],
         EcosystemKind::Python => &["debugpy", "debugpy-adapter", "python3"],
         EcosystemKind::Shell => &["bashdb", "bash", "zsh"],
@@ -462,7 +531,17 @@ pub(super) fn discover_local_dap_with_shell(
         EcosystemKind::Android => &["adb"],
         EcosystemKind::Flutter => &["flutter"],
     };
-    if let Some(sys) = find_executable_in(&system_search_dirs_with_shell(shell_path), sys_names) {
+    let mut search = system_search_dirs_with_shell(shell_path);
+    if matches!(
+        eco,
+        EcosystemKind::Rust | EcosystemKind::Zig | EcosystemKind::Ios
+    ) {
+        let xcode_dap_dir = PathBuf::from("/Applications/Xcode.app/Contents/Developer/usr/bin");
+        if xcode_dap_dir.is_dir() && !search.contains(&xcode_dap_dir) {
+            search.push(xcode_dap_dir);
+        }
+    }
+    if let Some(sys) = find_executable_in(&search, sys_names) {
         return IdeToolBinaryStatus {
             name,
             available: true,
@@ -544,6 +623,134 @@ pub(super) fn mark_go_tool_outdated(st: &mut IdeToolBinaryStatus, goroot: Option
     }
 }
 
+/// `major.minor` of a Zig / ZLS version (`0.14.0`, `0.14.0-dev.123`) for comparison.
+pub(crate) fn zig_major_minor(v: &str) -> Option<(u32, u32)> {
+    let mut parts = v.trim().trim_start_matches('v').split(['.', '-', '+', ' ']);
+    Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
+}
+
+#[allow(clippy::disallowed_methods)]
+pub(crate) fn read_zig_bin_version(zig_bin: &Path) -> Option<String> {
+    let out = std::process::Command::new(zig_bin)
+        .arg("version")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let ver = text.lines().next()?.trim();
+    (!ver.is_empty()).then(|| ver.to_string())
+}
+
+#[allow(clippy::disallowed_methods)]
+pub(crate) fn read_zls_bin_version(zls_bin: &Path) -> Option<String> {
+    let out = std::process::Command::new(zls_bin)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let ver = text.lines().next()?.trim();
+    (!ver.is_empty()).then(|| ver.to_string())
+}
+
+/// Locate the `zig` executable inside a Zig SDK home (`<home>/zig` or `<home>/bin/zig`).
+pub(crate) fn zig_bin_in_home(zig_home: &Path) -> Option<PathBuf> {
+    for rel in ["bin/zig", "zig"] {
+        let cand = zig_home.join(rel);
+        if is_executable_file(&cand) {
+            return Some(cand);
+        }
+    }
+    None
+}
+
+/// Resolve a Zig SDK home directory from either a parent extraction directory or direct SDK dir.
+pub(crate) fn resolve_zig_home_dir(dir: &Path) -> Option<PathBuf> {
+    if zig_bin_in_home(dir).is_some() {
+        return Some(dir.to_path_buf());
+    }
+    read_subdirs(dir)
+        .into_iter()
+        .find(|sub| zig_bin_in_home(sub).is_some())
+}
+
+/// Derive a Zig SDK home directory from a `zig` executable path (resolving symlinks).
+#[allow(clippy::disallowed_methods)]
+pub(crate) fn zig_home_from_bin(bin: &Path) -> Option<PathBuf> {
+    let real = std::fs::canonicalize(bin).unwrap_or_else(|_| bin.to_path_buf());
+    let parent = real.parent()?;
+    if parent.file_name().and_then(|n| n.to_str()) == Some("bin") {
+        parent.parent().map(Path::to_path_buf)
+    } else {
+        Some(parent.to_path_buf())
+    }
+}
+
+/// Extract a Zig version string from a directory name like `zig-macos-aarch64-0.14.0`, `0.14.0_2`, `0.14.0`.
+pub(crate) fn zig_dir_version(dir: &Path) -> String {
+    let raw = dir.file_name().and_then(|s| s.to_str()).unwrap_or("system");
+    let stripped = raw
+        .trim_start_matches("zig-macos-aarch64-")
+        .trim_start_matches("zig-macos-x86_64-")
+        .trim_start_matches("zig-linux-aarch64-")
+        .trim_start_matches("zig-linux-x86_64-")
+        .trim_start_matches("zig-aarch64-macos-")
+        .trim_start_matches("zig-x86_64-macos-")
+        .trim_start_matches("zig-aarch64-linux-")
+        .trim_start_matches("zig-x86_64-linux-")
+        .trim_start_matches("zig-")
+        .trim_start_matches('v');
+    let clean = stripped.split('_').next().unwrap_or(stripped);
+    if clean.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        clean.to_string()
+    } else if let Some(bin) = zig_bin_in_home(dir) {
+        read_zig_bin_version(&bin).unwrap_or_else(|| "system".into())
+    } else {
+        "system".into()
+    }
+}
+
+/// ZLS must match the active Zig compiler's `major.minor` version (e.g. Zig 0.14.x <-> ZLS 0.14.x).
+/// Record `zls --version` and flag `outdated` when `major.minor` diverges from the active Zig SDK.
+pub(super) fn mark_zig_tool_outdated(
+    st: &mut IdeToolBinaryStatus,
+    active_zig_home: Option<&Path>,
+    active_zig_version: Option<&str>,
+) {
+    let Some(zls_path) = st.path.as_deref() else {
+        return;
+    };
+    let Some(zls_ver) = read_zls_bin_version(Path::new(zls_path)) else {
+        return;
+    };
+    st.version = Some(zls_ver.clone());
+    let zig_ver = active_zig_version
+        .map(str::to_string)
+        .filter(|v| zig_major_minor(v).is_some())
+        .or_else(|| {
+            active_zig_home
+                .and_then(zig_bin_in_home)
+                .and_then(|b| read_zig_bin_version(&b))
+        });
+    if let (Some(zb), Some(zv)) = (
+        zig_major_minor(&zls_ver),
+        zig_ver.as_deref().and_then(zig_major_minor),
+    ) {
+        if zb != zv {
+            st.outdated = Some(format!(
+                "zls {zls_ver} does not match Zig {}.{} — reinstall ZLS for Zig {}.{}",
+                zv.0, zv.1, zv.0, zv.1
+            ));
+        }
+    }
+}
+
 #[allow(clippy::disallowed_methods)] // called from the toolchain listing's blocking task
 fn python_has_debugpy(python: &str) -> bool {
     std::process::Command::new(python)
@@ -564,6 +771,7 @@ pub(super) fn mark_active_sdk(
         EcosystemKind::Java => env.java_home.as_deref(),
         EcosystemKind::Go => env.go_root.as_deref(),
         EcosystemKind::Rust => env.rust_toolchain.as_deref(),
+        EcosystemKind::Zig => env.zig_home.as_deref(),
         EcosystemKind::Node => env.node_home.as_deref(),
         EcosystemKind::Python => env.python_interpreter.as_deref(),
         EcosystemKind::Ios => env.xcode_developer_dir.as_deref(),

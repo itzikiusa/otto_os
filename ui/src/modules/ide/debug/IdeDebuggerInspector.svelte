@@ -248,7 +248,7 @@
                 <div class="dbg-var-empty dim">No variables in {scope.name}</div>
               {:else}
                 <div role="list" aria-label={`${scope.name} variables`}>
-                  <IdeVarRows vars={vars} root={scope.name} {openPaths} onsetopen={setOpen} changed={isChanged} />
+                  <IdeVarRows vars={vars} root={scope.name} parentRef={scope.variables_reference} {openPaths} onsetopen={setOpen} changed={isChanged} />
                 </div>
               {/if}
             {/if}

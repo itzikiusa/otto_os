@@ -529,3 +529,110 @@ fn infer_rust_file_modules(path: &str) -> Vec<String> {
         .map(str::to_string)
         .collect()
 }
+
+// ---------------------------------------------------------------------------
+// 4. Zig (`pub fn main`, `test "name"`, `test decl`, `test {`)
+// ---------------------------------------------------------------------------
+
+pub(super) fn detect_zig(path: &str, dir: &str, content: &str, out: &mut Vec<IdeGutterItem>) {
+    static RE_MAIN: OnceLock<Regex> = OnceLock::new();
+    static RE_TEST_STR: OnceLock<Regex> = OnceLock::new();
+    static RE_TEST_DECL: OnceLock<Regex> = OnceLock::new();
+
+    let re_main = RE_MAIN.get_or_init(|| Regex::new(r"^\s*pub\s+fn\s+main\s*\(").unwrap());
+    let re_test_str =
+        RE_TEST_STR.get_or_init(|| Regex::new(r#"^\s*test\s+"((?:\\.|[^"\\])+)"\s*\{"#).unwrap());
+    let re_test_decl = RE_TEST_DECL
+        .get_or_init(|| Regex::new(r"^\s*test\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{").unwrap());
+
+    let effective_cwd = find_zig_project_root(dir).unwrap_or_else(|| dir.to_string());
+
+    for (idx, line) in content.lines().enumerate() {
+        let line_no = (idx + 1) as u32;
+        let trimmed = line.trim();
+        if trimmed.starts_with("//") {
+            continue;
+        }
+
+        if re_main.is_match(line) {
+            out.push(IdeGutterItem {
+                line: line_no,
+                kind: IdeGutterKind::Main,
+                label: "main".into(),
+                language: "zig".into(),
+                run_spec: IdeQuickRunSpec {
+                    runner: IdeRunnerKind::ZigRun,
+                    command: Some("zig".into()),
+                    args: vec!["run".into(), path.to_string()],
+                    cwd: Some(effective_cwd.clone()),
+                    target_path: Some(path.to_string()),
+                    test_filter: None,
+                    debug_program: Some(path.to_string()),
+                    debug_test_name: None,
+                },
+            });
+        } else if let Some(cap) = re_test_str.captures(line) {
+            let test_name = cap[1].replace("\\\"", "\"");
+            out.push(IdeGutterItem {
+                line: line_no,
+                kind: IdeGutterKind::Test,
+                label: test_name.clone(),
+                language: "zig".into(),
+                run_spec: IdeQuickRunSpec {
+                    runner: IdeRunnerKind::ZigTest,
+                    command: Some("zig".into()),
+                    args: vec![
+                        "test".into(),
+                        "--test-filter".into(),
+                        test_name.clone(),
+                        path.to_string(),
+                    ],
+                    cwd: Some(effective_cwd.clone()),
+                    target_path: Some(path.to_string()),
+                    test_filter: Some(test_name.clone()),
+                    debug_program: Some(path.to_string()),
+                    debug_test_name: Some(test_name),
+                },
+            });
+        } else if let Some(cap) = re_test_decl.captures(line) {
+            let decl_name = cap[1].to_string();
+            out.push(IdeGutterItem {
+                line: line_no,
+                kind: IdeGutterKind::Test,
+                label: decl_name.clone(),
+                language: "zig".into(),
+                run_spec: IdeQuickRunSpec {
+                    runner: IdeRunnerKind::ZigTest,
+                    command: Some("zig".into()),
+                    args: vec![
+                        "test".into(),
+                        "--test-filter".into(),
+                        decl_name.clone(),
+                        path.to_string(),
+                    ],
+                    cwd: Some(effective_cwd.clone()),
+                    target_path: Some(path.to_string()),
+                    test_filter: Some(decl_name.clone()),
+                    debug_program: Some(path.to_string()),
+                    debug_test_name: Some(decl_name),
+                },
+            });
+        }
+    }
+}
+
+fn find_zig_project_root(dir: &str) -> Option<String> {
+    let mut cur = Some(std::path::Path::new(dir));
+    let mut hops = 0usize;
+    while let Some(d) = cur {
+        if d.join("build.zig").is_file() {
+            return Some(d.to_string_lossy().into_owned());
+        }
+        hops += 1;
+        if hops >= 8 {
+            break;
+        }
+        cur = d.parent();
+    }
+    None
+}

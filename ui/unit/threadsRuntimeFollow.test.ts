@@ -2,7 +2,7 @@
 // that must never overwrite what the person is typing.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { followAfterScroll, followPillText, unreadSince } from '../src/modules/threads/runtime/follow.ts';
+import { followAfterScroll, followPillText, renderWindow, timelineRowKey, unreadSince } from '../src/modules/threads/runtime/follow.ts';
 import { loadSource } from './sourceHarness.ts';
 
 test('unread counts messages after the last one seen at the bottom', () => {
@@ -47,4 +47,20 @@ test('Edit on a queued message keeps the unsent draft and adds the message below
   assert.equal(mergeQueuedEdit('  \n', 'queued one'), 'queued one');
   assert.equal(mergeQueuedEdit('half a thought', 'queued one'), 'half a thought\nqueued one');
   assert.equal(mergeQueuedEdit('draft\n\n', 'queued one'), 'draft\nqueued one');
+});
+
+test('renderWindow keeps newly prepended older rows anchored when holdFrom advances after loadMore', () => {
+  const mk = (n: number) => ({ kind: 'message', item: { id: `m-${n}` } });
+  const initial = Array.from({ length: 300 }, (_, i) => mk(i));
+  // Initially capped to newest 200 (100..299); scrolled up locks holdFrom = m-100.
+  const win1 = renderWindow(initial, 200, 'm-100', timelineRowKey);
+  assert.equal(timelineRowKey(win1[0]), 'm-100');
+  // User reaches top -> rowCap grows to 400 revealing m-0..m-299, and holdFrom advances to m-0.
+  const win2 = renderWindow(initial, 400, 'm-0', timelineRowKey);
+  assert.equal(timelineRowKey(win2[0]), 'm-0');
+  // 150 more live rows arrive at the bottom (total 450 > cap 400): m-0 stays pinned at the top (0 rows dropped).
+  const grown = [...initial, ...Array.from({ length: 150 }, (_, i) => mk(300 + i))];
+  const win3 = renderWindow(grown, 400, 'm-0', timelineRowKey);
+  assert.equal(timelineRowKey(win3[0]), 'm-0');
+  assert.equal(win3.length, 450);
 });

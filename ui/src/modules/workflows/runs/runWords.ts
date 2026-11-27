@@ -356,8 +356,12 @@ export function stepLine2(n: NodeRunState): string {
   return '';
 }
 
-/** A reviewer's (child thread's) word. */
-export function childWord(c: ChildThread, now: number): Word {
+/** A reviewer's (child thread's) word. An earlier failed attempt followed by a
+ *  retry reads muted ("Attempt 1 failed · retried") instead of bare danger "Failed". */
+export function childWord(c: ChildThread & { retried_attempt?: number | null }, now: number): Word {
+  if (c.status === 'error' && c.retried_attempt != null) {
+    return calm(`Attempt ${c.retried_attempt} failed · retried`);
+  }
   switch (c.status) {
     case 'running': return calm(c.started_at ? `Working ${elapsed(now - t(c.started_at))}` : 'Working');
     case 'success': return { word: c.note ? `Done · ${c.note}` : 'Done', tone: '' };

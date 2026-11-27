@@ -23,8 +23,16 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
   and each agent step's conversation beside the list. **Pause**, **Resume**,
   *Skip this step* and *Add a note for the next step…* work while it runs. The
   same pages work on the phone, with touch.
+- **Zig in the IDE.** Zig projects (`build.zig`) get what the other languages
+  have: highlighting, toolchain detection and Otto's own installer, `zls`
+  for completion and navigation, run configurations and gutter Run / Debug on
+  `main` and on tests, and debugging with breakpoints, stepping, watch, set
+  variable and stops on `@panic`, with slices, optionals and error unions
+  shown as values.
 - **A step's conversation is the Threads view.** On the run page a step's
-  Conversation is the same conversation Threads shows, with nothing folded,
+  Conversation is the same conversation Threads shows, folded and scrolled
+  the same way (it opens on the newest line and follows it only while you are
+  at the bottom),
   and every sub-session the step creates (reviewers, loop rounds, threads an
   agent opens) is listed under it while it is still working and opens in the
   same pane. The run's ring says what its time is ("Running for 2m").
@@ -462,10 +470,11 @@ including behaviour changes to know before upgrading.
   hand over and reclaim terminal control at any moment, and generate a local
   structured recap (decisions, actions, open questions) once participants consent.
 - **IDE (Beta)** — a multi-language IDE (`#/ide`) on your local or SSH
-  projects: language servers (hover, diagnostics, rename), a git gutter, run
-  configurations with live output and test trees, a DAP debugger with
-  breakpoints, and an agent dock that proposes diffs you apply or undo. See
-  `docs/features/ide.md`.
+  projects (Go, Java, Rust, Zig, TypeScript/JS, Python, Shell): language servers
+  (`gopls`, `jdtls`, `rust-analyzer`, `zls`, `pyright`, `tsserver`), a git gutter,
+  run configurations with live output and test trees, a DAP debugger with
+  breakpoints, watches, variable editing, and an agent dock that proposes diffs
+  you apply or undo. See `docs/features/ide.md`.
 - **Git & Pull Requests** — a GitKraken-style **commit graph** with a WIP row +
   staging panel, per-file diffs, folder-level stage/discard, an interactive
   **conflict resolver** (A/B line picking with live output) that covers merge,

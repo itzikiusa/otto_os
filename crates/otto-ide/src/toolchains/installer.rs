@@ -380,6 +380,37 @@ pub(super) async fn install_local_sdk(
             .await?;
             Ok(ch.to_string_lossy().into_owned())
         }
+        EcosystemKind::Zig => {
+            let archive = tmp.join(format!("zig-{}.tar.xz", entry.version));
+            download_https_to_file(mgr, job_id, &entry.url, &archive, exp_sha, 15).await?;
+            let dest = root.join("zig/sdks").join(&entry.version);
+            let _ = tokio::fs::remove_dir_all(&dest).await;
+            tokio::fs::create_dir_all(&dest)
+                .await
+                .map_err(|e| e.to_string())?;
+            run_local_cmd(
+                mgr,
+                job_id,
+                50,
+                Path::new("tar"),
+                &[
+                    "-xJf",
+                    &archive.to_string_lossy(),
+                    "--strip-components=1",
+                    "-C",
+                    &dest.to_string_lossy(),
+                ],
+                &[],
+            )
+            .await?;
+            let _ = tokio::fs::remove_file(&archive).await;
+            let zig_bin = super::discovery::zig_bin_in_home(&dest)
+                .ok_or("Zig archive missing zig executable")?;
+            make_executable(&zig_bin)?;
+            relink_current(&root.join("zig/current"), &dest);
+            run_local_cmd(mgr, job_id, 58, &zig_bin, &["version"], &[]).await?;
+            Ok(dest.to_string_lossy().into_owned())
+        }
         EcosystemKind::Node => {
             let archive = tmp.join(format!("node-{}.tar.gz", entry.version));
             download_https_to_file(mgr, job_id, &entry.url, &archive, exp_sha, 15).await?;

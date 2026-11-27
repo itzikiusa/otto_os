@@ -187,6 +187,24 @@ pub(super) async fn sync_all_breakpoints(
             )
             .await;
     }
+    if snap_before.language == "zig" {
+        let fn_bps = if break_exc {
+            json!([
+                { "name": "debug.defaultPanic" },
+                { "name": "builtin.default_panic" },
+                { "name": "debug.panicImpl" }
+            ])
+        } else {
+            json!([])
+        };
+        let _ = conn
+            .wire
+            .request(
+                "setFunctionBreakpoints",
+                Some(json!({ "breakpoints": fn_bps })),
+            )
+            .await;
+    }
     Ok(())
 }
 
