@@ -93,7 +93,7 @@
             aria-selected={false}
             aria-level={1}
             class:current={isHere}
-            disabled={w.prunable || openWtBusy !== ''}
+            disabled={openWtBusy !== ''}
             title={w.prunable
               ? `${w.path} · stale (folder gone)`
               : isHere

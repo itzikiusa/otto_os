@@ -44,12 +44,16 @@ async function openRepo(page: Page, tab = 'graph') {
   // A tight header turns the views into one menu button (R2-001).
   await expect(page.locator('.rv-tabs, .git-views-menu').first()).toBeVisible();
 }
-/** Show the HEAD commit (secondSha): a desktop History lands on it, a
- *  narrower one (the stacked accordion) keeps its list and needs the tap. */
+/** Show the HEAD commit (secondSha): a desktop History lands on it; a
+ *  tablet (its Detail pane a sheet) needs the tap, and a phone first pushes
+ *  the graph from its Branches list. */
 async function showHead(page: Page) {
   const row = page.locator(`.graph-row[data-sha="${secondSha}"]`);
-  if (page.viewportSize()!.width > 1024) await expect(row).toHaveClass(/graph-row-selected/);
-  else await row.click();
+  if (page.viewportSize()!.width > 1024) return expect(row).toHaveClass(/graph-row-selected/);
+  const current = page.locator('.refs-panel .ref-row.current');
+  await expect(row.or(current).first()).toBeVisible();
+  if (await row.isHidden()) await current.click();
+  await row.locator('.graph-select').click();
 }
 function diff(path: string) {
   return { files: [{ path, old_path: null, is_binary: false, hunks: [{ header: '@@ -0,0 +1 @@', lines: [{ origin: 'add', content: path, old_line: null, new_line: 1 }] }] }] };
@@ -137,15 +141,22 @@ test('graph diff stays LTR inside an RTL UI', async ({ page }) => {
 
 test('branch actions work with keyboard and phone tap', async ({ page }) => {
   await openRepo(page);
-  const menu = page.getByRole('button', { name: 'Actions for branch feature/a-long-branch-for-keyboard-actions', exact: true });
-  await expect(menu).toBeVisible();
-  await menu.focus();
-  await page.keyboard.press('Enter');
+  const name = 'feature/a-long-branch-for-keyboard-actions';
+  const row = page.locator('.refs-panel .ref-row', { hasText: 'keyboard-actions' });
+  const menu = page.getByRole('button', { name: `Actions for branch ${name}`, exact: true });
+  // The row's own keys: ↑ / ↓ walk the tree, ⇧F10 opens its menu.
+  await row.focus();
+  await page.keyboard.press('ArrowUp');
+  await expect(row).not.toBeFocused();
+  await page.keyboard.press('ArrowDown');
+  await expect(row).toBeFocused();
+  await page.keyboard.press('Shift+F10');
   await expect(page.locator('.ctx-menu')).toBeVisible();
   await expectFullyInViewport(page, page.locator('.ctx-menu'));
   await page.keyboard.press('Escape');
+  // On a phone the Branches list is the page; the row's ⋯ is still a click away.
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.locator('.mob-sec-head').filter({ hasText: 'Branches' }).click();
+  await row.hover();
   await menu.click();
   await expectFullyInViewport(page, page.locator('.ctx-menu'));
   await expectNoHorizontalOverflow(page);

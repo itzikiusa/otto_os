@@ -141,19 +141,19 @@ test('stash, stale worktree and submodule actions are accessible by keyboard and
   await page.route('**/api/v1/repos/*/worktrees', r => r.fulfill({ json: [{ path: '/tmp/stale-audit-tree', sha: firstSha, branch: 'stale-audit', is_main: false, locked: false, prunable: true, dirty: false, dirty_known: true }] }));
   await page.route('**/api/v1/repos/*/submodules', r => r.fulfill({ json: [{ path: 'vendor/audit-submodule', sha: firstSha, url: 'https://example.test/submodule', state: 'uninitialized' }] }));
   await openRepo(page);
-  for (const section of ['STASHES', 'WORKTREES', 'SUBMODULES']) await page.locator('.ref-header').filter({ hasText: section }).click();
-  for (const name of ['Actions for stash stash@{0}', 'Actions for worktree /tmp/stale-audit-tree', 'Actions for submodule vendor/audit-submodule']) {
-    const button = page.getByRole('button', { name, exact: true });
-    await expect(button).toBeVisible();
-    await button.focus();
-    await page.keyboard.press('Enter');
+  const head = (section: string) => page.locator('.refs-panel .side-section-head').filter({ hasText: section }).getByRole('button').first();
+  for (const section of ['Stashes', 'Worktrees', 'Submodules']) await head(section).click();
+  // Each row's menu: ⇧F10 on the focused row (the submodule row IS its menu button).
+  for (const row of [page.locator('.stash-row').first(), page.locator('.stash-row', { hasText: 'stale-audit' }), page.getByRole('treeitem', { name: 'Actions for submodule vendor/audit-submodule' })]) {
+    await row.focus();
+    await page.keyboard.press('Shift+F10');
     await expectFullyInViewport(page, page.locator('.ctx-menu'));
     await page.keyboard.press('Escape');
   }
+  // On a phone the Branches list is the page; the stash row's ⋯ is a click away.
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.locator('.mob-sec-head').filter({ hasText: 'Branches' }).click();
-  const stashSection = page.locator('.ref-header').filter({ hasText: 'STASHES' });
-  if (await stashSection.getAttribute('aria-expanded') === 'false') await stashSection.click();
+  if (await head('Stashes').getAttribute('aria-expanded') === 'false') await head('Stashes').click();
+  await page.locator('.stash-row').first().hover();
   await page.getByRole('button', { name: 'Actions for stash stash@{0}', exact: true }).click();
   await expectFullyInViewport(page, page.locator('.ctx-menu'));
 });
