@@ -258,6 +258,91 @@ async fn a_reviewer_held_through_a_restart_names_its_review_for_recovery() {
     rt2.shutdown().await;
 }
 
+/// TEST-1: a real-holder restart test for a held review summarizer — detaches
+/// while the live summarizer turn is running, lets the detached holder write
+/// its `result.json` handoff across the restart, adopts on a fresh runtime,
+/// and settles cleanly in a single turn with the detached handoff intact.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_summarizer_held_through_a_restart_writes_handoff_while_detached_and_adopts() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let db = root.join("state.db");
+    let sum_dir = root.join("otto-summary-test");
+    std::fs::create_dir_all(&sum_dir).unwrap();
+    let result_path = sum_dir.join("result.json");
+    let payload = r#"[{"source_ids":["0:0"],"path":"src/lib.rs","line":1,"severity":"bug","body":"add subtracts","category":"correctness","disposition":"verified","evidence":"src/lib.rs:1"}]"#;
+    let prompt = format!(
+        "OTTO_FAKE: sleep 1200\nOTTO_FAKE: write otto-summary-test/result.json {payload}\nOTTO_FAKE: reply summarized"
+    );
+    let rt1 = held_runtime(&open_db(&db).await, &root);
+    let mut t = turn(&root, &prompt);
+    t.title = "Review summarizer".into();
+    t.handoff = Some(result_path.clone());
+    t.meta = serde_json::json!({
+        "source": "review_summarizer",
+        "review_id": "rv-sum",
+        "result_path": result_path.to_string_lossy(),
+    });
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let runner = ThreadStepRunner::new(rt1.clone(), Arc::new(NoStepHost));
+    let t1 = t.clone();
+    let task = tokio::spawn(async move { runner.run(t1, tx, CancelSignal::new()).await });
+    let mut id = None;
+    let mut start = 0;
+    while let Some(e) = tokio::time::timeout(Duration::from_secs(15), rx.recv())
+        .await
+        .unwrap()
+    {
+        if let StepEvent::Started {
+            thread_id,
+            start_ordinal,
+        } = &e
+        {
+            id = Some(thread_id.clone());
+            start = *start_ordinal;
+        }
+        if e == StepEvent::Working {
+            break;
+        }
+    }
+    let id = id.expect("summarizer thread started");
+    // Detach BEFORE result.json exists; the holder writes it while detached.
+    assert!(
+        !result_path.exists(),
+        "handoff must not exist before detach"
+    );
+    rt1.shutdown_for_restart().await;
+    task.abort();
+    drop(rt1);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let rt2 = held_runtime(&open_db(&db).await, &root);
+    let adopted = rt2.recover_and_adopt().await.unwrap();
+    assert!(
+        adopted.handled_ids.contains(&id),
+        "summarizer thread adopted"
+    );
+    assert_eq!(
+        rt2.held_reviews(&adopted).await,
+        [Id::from("rv-sum")].into(),
+        "held summarizer keeps rv-sum in recovery set"
+    );
+    let runner2 = ThreadStepRunner::new(rt2.clone(), Arc::new(NoStepHost));
+    let (tx2, _rx2) = tokio::sync::mpsc::unbounded_channel();
+    let out = runner2
+        .resume(&id, start, &t, tx2, CancelSignal::new())
+        .await
+        .unwrap();
+    assert_eq!(out.error, None, "{:?}", out.error);
+    assert_eq!(out.turns, 1, "awaited held turn — no second turn started");
+    assert_eq!(
+        std::fs::read_to_string(&result_path).unwrap().trim(),
+        payload,
+        "handoff written while detached must survive adoption"
+    );
+    rt2.shutdown().await;
+}
+
 /// The daemon's step host as a resumed step meets it: one MCP approval card
 /// waiting, a plan usage limit that resets at `.0`.
 struct AfterRestart(chrono::DateTime<Utc>);
