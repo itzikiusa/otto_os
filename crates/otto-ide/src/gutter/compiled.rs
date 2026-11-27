@@ -636,3 +636,140 @@ fn find_zig_project_root(dir: &str) -> Option<String> {
     }
     None
 }
+
+// ---------------------------------------------------------------------------
+// 5. C / C++ (`int main`, GoogleTest `TEST*`, Catch2 `TEST_CASE` / `SCENARIO`)
+// ---------------------------------------------------------------------------
+
+pub(super) fn detect_c_cpp(
+    path: &str,
+    dir: &str,
+    lang: &str,
+    content: &str,
+    out: &mut Vec<IdeGutterItem>,
+) {
+    static RE_MAIN: OnceLock<Regex> = OnceLock::new();
+    static RE_GTEST: OnceLock<Regex> = OnceLock::new();
+    static RE_CATCH: OnceLock<Regex> = OnceLock::new();
+
+    let re_main = RE_MAIN
+        .get_or_init(|| Regex::new(r"^\s*(?:(?:int|auto|signed)\s+)main\s*\([^;]*$").unwrap());
+    let re_gtest = RE_GTEST.get_or_init(|| {
+        Regex::new(
+            r"^\s*(?:TEST|TEST_F|TEST_P|TYPED_TEST|TYPED_TEST_P)\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*,\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)",
+        )
+        .unwrap()
+    });
+    let re_catch = RE_CATCH.get_or_init(|| {
+        Regex::new(r#"^\s*(?:TEST_CASE|SCENARIO|TEMPLATE_TEST_CASE)\s*\(\s*"((?:\\.|[^"\\])+)""#)
+            .unwrap()
+    });
+
+    let effective_cwd = find_cpp_project_root(dir).unwrap_or_else(|| dir.to_string());
+    let mut emitted_suites = std::collections::HashSet::<String>::new();
+
+    for (idx, line) in content.lines().enumerate() {
+        let line_no = (idx + 1) as u32;
+        let trimmed = line.trim();
+        if trimmed.starts_with("//") || trimmed.starts_with('*') || trimmed.starts_with("/*") {
+            continue;
+        }
+
+        if re_main.is_match(line) && !trimmed.ends_with(';') {
+            out.push(IdeGutterItem {
+                line: line_no,
+                kind: IdeGutterKind::Main,
+                label: "main".into(),
+                language: lang.to_string(),
+                run_spec: IdeQuickRunSpec {
+                    runner: IdeRunnerKind::CppRun,
+                    command: None,
+                    args: Vec::new(),
+                    cwd: Some(effective_cwd.clone()),
+                    target_path: Some(path.to_string()),
+                    test_filter: None,
+                    debug_program: Some(path.to_string()),
+                    debug_test_name: None,
+                },
+            });
+        } else if let Some(cap) = re_gtest.captures(line) {
+            let suite = cap[1].to_string();
+            let name = cap[2].to_string();
+            let full = format!("{suite}.{name}");
+            if emitted_suites.insert(suite.clone()) {
+                let suite_filter = format!("{suite}.*");
+                out.push(IdeGutterItem {
+                    line: line_no,
+                    kind: IdeGutterKind::Suite,
+                    label: suite.clone(),
+                    language: lang.to_string(),
+                    run_spec: IdeQuickRunSpec {
+                        runner: IdeRunnerKind::Ctest,
+                        command: None,
+                        args: Vec::new(),
+                        cwd: Some(effective_cwd.clone()),
+                        target_path: Some(path.to_string()),
+                        test_filter: Some(suite_filter.clone()),
+                        debug_program: Some(path.to_string()),
+                        debug_test_name: Some(suite_filter),
+                    },
+                });
+            }
+            out.push(IdeGutterItem {
+                line: line_no,
+                kind: IdeGutterKind::Test,
+                label: full.clone(),
+                language: lang.to_string(),
+                run_spec: IdeQuickRunSpec {
+                    runner: IdeRunnerKind::Ctest,
+                    command: None,
+                    args: Vec::new(),
+                    cwd: Some(effective_cwd.clone()),
+                    target_path: Some(path.to_string()),
+                    test_filter: Some(full.clone()),
+                    debug_program: Some(path.to_string()),
+                    debug_test_name: Some(full),
+                },
+            });
+        } else if let Some(cap) = re_catch.captures(line) {
+            let test_name = cap[1].replace("\\\"", "\"");
+            out.push(IdeGutterItem {
+                line: line_no,
+                kind: IdeGutterKind::Test,
+                label: test_name.clone(),
+                language: lang.to_string(),
+                run_spec: IdeQuickRunSpec {
+                    runner: IdeRunnerKind::Ctest,
+                    command: None,
+                    args: Vec::new(),
+                    cwd: Some(effective_cwd.clone()),
+                    target_path: Some(path.to_string()),
+                    test_filter: Some(test_name.clone()),
+                    debug_program: Some(path.to_string()),
+                    debug_test_name: Some(test_name),
+                },
+            });
+        }
+    }
+}
+
+fn find_cpp_project_root(dir: &str) -> Option<String> {
+    let mut cur = Some(std::path::Path::new(dir));
+    let mut hops = 0usize;
+    let mut best = None;
+    while let Some(d) = cur {
+        if d.join("CMakePresets.json").is_file()
+            || d.join("CMakeLists.txt").is_file()
+            || d.join("meson.build").is_file()
+            || d.join("compile_commands.json").is_file()
+        {
+            best = Some(d.to_string_lossy().into_owned());
+        }
+        hops += 1;
+        if hops >= 8 {
+            break;
+        }
+        cur = d.parent();
+    }
+    best
+}

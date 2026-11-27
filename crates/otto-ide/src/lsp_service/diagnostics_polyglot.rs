@@ -302,6 +302,94 @@ pub(crate) fn parse_zig_ast_check_stderr(stderr: &str) -> Vec<IdeDiagnostic> {
     diags
 }
 
+pub(super) async fn analyze_cpp_diagnostics(
+    path: &str,
+    lang: &str,
+    content: &str,
+    env_map: &BTreeMap<String, String>,
+) -> Vec<IdeDiagnostic> {
+    let lower = path.to_ascii_lowercase();
+    let is_c = lang == "c" && !lower.ends_with(".hpp") && !lower.ends_with(".hxx");
+    let compiler = if is_c { "clang" } else { "clang++" };
+    let mut cmd = Command::new(compiler);
+    cmd.args([
+        "-fsyntax-only",
+        "-fno-color-diagnostics",
+        "-x",
+        if is_c { "c" } else { "c++" },
+    ]);
+    if !is_c {
+        cmd.arg("-std=c++20");
+    }
+    if let Some(parent) = Path::new(path).parent().filter(|p| p.is_dir()) {
+        cmd.arg("-I").arg(parent);
+        if let Some(grand) = parent.parent().filter(|p| p.is_dir()) {
+            let inc = grand.join("include");
+            if inc.is_dir() {
+                cmd.arg("-I").arg(inc);
+            }
+        }
+    }
+    cmd.arg("-")
+        .env_clear()
+        .envs(crate::environments::shell_env::collect_safe_non_root_base_env());
+    for (k, v) in env_map {
+        if !crate::environments::is_dangerous_loader_env_key(k) {
+            cmd.env(k, v);
+        }
+    }
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let Some((ok, stderr)) =
+        run_stdin_diag_cmd(cmd, content.as_bytes(), true, DIAG_CMD_TIMEOUT).await
+    else {
+        return Vec::new();
+    };
+    if ok {
+        return Vec::new();
+    }
+    parse_clang_stderr(&stderr)
+}
+
+pub(crate) fn parse_clang_stderr(stderr: &str) -> Vec<IdeDiagnostic> {
+    static RE_CLANG: OnceLock<Regex> = OnceLock::new();
+    let re = RE_CLANG.get_or_init(|| {
+        Regex::new(r"^.+?:(\d+):(\d+):\s*(fatal error|error|warning|note):\s*(.+)$").unwrap()
+    });
+    let mut diags = Vec::new();
+    let has_stdin = stderr.lines().any(|l| l.starts_with("<stdin>:"));
+    for line in stderr.lines() {
+        let trimmed = line.trim_end_matches('\r');
+        // Ignore diagnostics from included system headers when stdin (`<stdin>`) fails.
+        if has_stdin && !trimmed.starts_with("<stdin>:") {
+            continue;
+        }
+        if let Some(cap) = re.captures(trimmed) {
+            let ln: u32 = cap[1].parse().unwrap_or(1);
+            let col: u32 = cap[2].parse().unwrap_or(1);
+            let sev = match &cap[3] {
+                "warning" => "warning",
+                "note" => "info",
+                _ => "error",
+            };
+            diags.push(IdeDiagnostic {
+                line: ln,
+                col,
+                end_line: ln,
+                end_col: col + 1,
+                severity: sev.into(),
+                code: "clang_syntax".into(),
+                source: "clang".into(),
+                message: cap[4].trim().to_string(),
+                quick_fixes: Vec::new(),
+            });
+        }
+    }
+    diags
+}
+
 fn find_simple_unused_imports(path: &str, lang: &str, content: &str) -> Vec<IdeDiagnostic> {
     let lines: Vec<&str> = content.lines().collect();
     let mut imports: Vec<(u32, String)> = Vec::new();

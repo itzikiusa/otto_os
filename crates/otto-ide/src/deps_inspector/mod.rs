@@ -28,8 +28,9 @@ use self::enrich::{
 use self::go_mod::enrich_go_mod_updates;
 pub use self::go_mod::parse_go_mod;
 pub use self::parsers::{
-    apply_cargo_lock_versions, parse_build_zig_zon, parse_cargo_toml, parse_package_json,
-    parse_python_deps,
+    apply_cargo_lock_versions, parse_build_zig_zon, parse_cargo_toml, parse_cmake_deps,
+    parse_conanfile_txt, parse_package_json, parse_python_deps, parse_unreal_plugins,
+    parse_vcpkg_json,
 };
 
 /// Inspect a manifest file (`go.mod`, `pom.xml`, `build.gradle*`, `package.json`,
@@ -141,6 +142,18 @@ pub async fn inspect_dependencies_scoped(
     } else if fname == "build.zig.zon" {
         let list = parse_build_zig_zon(&content);
         ("zig", "", list)
+    } else if fname == "vcpkg.json" {
+        let list = parse_vcpkg_json(&content);
+        ("vcpkg", "", list)
+    } else if fname == "conanfile.txt" {
+        let list = parse_conanfile_txt(&content);
+        ("conan", "", list)
+    } else if fname == "CMakeLists.txt" {
+        let list = parse_cmake_deps(&content);
+        ("cmake", "", list)
+    } else if fname.ends_with(".uproject") || fname.ends_with(".uplugin") {
+        let list = parse_unreal_plugins(&content);
+        ("unreal", "", list)
     } else {
         return IdeDepsInspectResp {
             ecosystem: "unknown".into(),

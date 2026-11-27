@@ -204,6 +204,21 @@ pub(super) async fn sync_all_breakpoints(
                 Some(json!({ "breakpoints": fn_bps })),
             )
             .await;
+    } else if matches!(snap_before.language.as_str(), "c" | "cpp")
+        && !conn.exception_filters.iter().any(|f| f == "cpp_throw")
+    {
+        let fn_bps = if break_exc {
+            json!([{ "name": "__cxa_throw" }])
+        } else {
+            json!([])
+        };
+        let _ = conn
+            .wire
+            .request(
+                "setFunctionBreakpoints",
+                Some(json!({ "breakpoints": fn_bps })),
+            )
+            .await;
     }
     Ok(())
 }

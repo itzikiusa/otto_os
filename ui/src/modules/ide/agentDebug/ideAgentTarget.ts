@@ -110,6 +110,9 @@ export function launchPreview(l: {
   } else if (l.language === 'zig') {
     if (l.test_name) parts.push('zig test', flags, `--test-filter "${l.test_name}"`, prog, args);
     else parts.push('zig build', flags, prog, args);
+  } else if (l.language === 'cpp' || l.language === 'c') {
+    if (l.test_name) parts.push('ctest', flags, `-R "${l.test_name}"`, prog, args);
+    else parts.push('cmake --build', flags, prog, args);
   } else if (l.language === 'python') {
     parts.push(l.test_name ? `pytest ${l.test_name.includes('::') ? l.test_name : `${prog}::${l.test_name}`}` : `python ${prog}`, args);
   } else {

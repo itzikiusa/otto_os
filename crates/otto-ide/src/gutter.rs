@@ -92,6 +92,7 @@ fn detect_gutter_items_inner(
             "java" => compiled::detect_java(normalized_path, &dir, content, &mut items),
             "rust" => compiled::detect_rust(normalized_path, &dir, content, &mut items),
             "zig" => compiled::detect_zig(normalized_path, &dir, content, &mut items),
+            "c" | "cpp" => compiled::detect_c_cpp(normalized_path, &dir, lang, content, &mut items),
             "python" => scripting::detect_python(normalized_path, &dir, content, &mut items),
             "javascript" | "typescript" => {
                 scripting::detect_js_ts(normalized_path, &dir, lang, content, &mut items);

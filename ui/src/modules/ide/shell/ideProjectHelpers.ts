@@ -545,6 +545,29 @@ export function detectFastRunConfigs(rootPath: string, entries: IdeFsEntry[]): I
       },
     );
   }
+  if (names.has('CMakeLists.txt')) {
+    out.push(
+      {
+        id: 'auto:cmake_build', name: 'CMake: Build', runner: 'cmake',
+        args: ['--build', 'build'], cwd: rootPath, env_overrides: {}, inherit_shell_env: true, auto_detected: true,
+      },
+      {
+        id: 'auto:ctest', name: 'CTest: Run All', runner: 'ctest',
+        args: ['--test-dir', 'build', '--output-on-failure'], cwd: rootPath, env_overrides: {}, inherit_shell_env: true, auto_detected: true,
+      },
+    );
+  } else if (names.has('meson.build')) {
+    out.push(
+      {
+        id: 'auto:meson_compile', name: 'Meson: Compile', runner: 'meson',
+        args: ['compile', '-C', 'builddir'], cwd: rootPath, env_overrides: {}, inherit_shell_env: true, auto_detected: true,
+      },
+      {
+        id: 'auto:meson_test', name: 'Meson: Test', runner: 'meson',
+        args: ['test', '-C', 'builddir'], cwd: rootPath, env_overrides: {}, inherit_shell_env: true, auto_detected: true,
+      },
+    );
+  }
   if (names.has('package.json')) {
     out.push({
       id: 'auto:npm_test', name: 'npm test', runner: 'npm',

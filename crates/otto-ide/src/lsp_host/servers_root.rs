@@ -49,6 +49,15 @@ fn manifest_names_for_lang(norm_lang: &str) -> &'static [&'static str] {
         ],
         "rust" => &["Cargo.toml"],
         "zig" => &["build.zig", "build.zig.zon"],
+        "cpp" | "c" => &[
+            "compile_commands.json",
+            "CMakePresets.json",
+            "CMakeLists.txt",
+            "meson.build",
+            ".clangd",
+            "Makefile",
+            "GNUmakefile",
+        ],
         "typescript" | "javascript" => &["tsconfig.json", "jsconfig.json", "package.json"],
         "python" => &[
             "pyproject.toml",
@@ -74,10 +83,23 @@ fn manifest_names_for_lang(norm_lang: &str) -> &'static [&'static str] {
     }
 }
 
+fn dir_has_unreal_descriptor(dir: &Path) -> bool {
+    #[allow(clippy::disallowed_methods)]
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    rd.flatten().take(64).any(|e| {
+        e.file_name()
+            .to_str()
+            .is_some_and(|n| n.ends_with(".uproject") || n.ends_with(".uplugin"))
+    })
+}
+
 fn dir_has_any_manifest(dir: &Path, names: &[&str], extra_markers: &[String]) -> bool {
     names
         .iter()
         .any(|m| dir.join(m).is_file() || dir.join(m).is_dir())
+        || (names.contains(&"CMakeLists.txt") && dir_has_unreal_descriptor(dir))
         || extra_markers
             .iter()
             .map(|s| s.trim())
@@ -96,11 +118,14 @@ fn dir_looks_like_child_repo(dir: &Path) -> bool {
         "build.gradle.kts",
         "Cargo.toml",
         "build.zig",
+        "CMakeLists.txt",
+        "meson.build",
         "package.json",
         "pyproject.toml",
     ]
     .iter()
     .any(|m| dir.join(m).is_file())
+        || dir_has_unreal_descriptor(dir)
 }
 
 /// Detect whether `dir` is a multi-repository parent umbrella folder (no own
@@ -139,6 +164,12 @@ fn is_dependency_dir(dir: &Path) -> bool {
         || parts.windows(2).any(|w| w == [".cache", "zig"])
         || parts.windows(3).any(|w| w == ["lib", "zig", "std"])
         || parts.windows(2).any(|w| w == ["lib", "std"])
+        // C/C++ system SDK headers (macOS CLT/Xcode, Homebrew, Linux /usr/include) and Conan/vcpkg caches.
+        || parts.windows(2).any(|w| w == ["CommandLineTools", "SDKs"])
+        || parts.windows(2).any(|w| w == ["Xcode.app", "Contents"])
+        || parts.windows(2).any(|w| w == ["usr", "include"])
+        || parts.windows(2).any(|w| w == ["homebrew", "include"])
+        || parts.iter().any(|c| matches!(*c, ".conan2" | "vcpkg_installed"))
 }
 
 #[allow(clippy::disallowed_methods)]
@@ -206,6 +237,16 @@ pub(crate) fn climb_to_build_root(
             // Cargo binds a member to its nearest `[workspace]` ancestor.
             "rust" if is_cargo_workspace(&parent) => return parent,
             "rust" => true,
+            // CMake sub-directories (`src/CMakeLists.txt`) and Unreal modules (`Source/MyGame`)
+            // belong to the top-most ancestor holding `CMakeLists.txt`, `CMakePresets.json`,
+            // `compile_commands.json`, `meson.build`, or `*.uproject`.
+            "cpp" | "c" => {
+                parent.join("CMakeLists.txt").is_file()
+                    || parent.join("CMakePresets.json").is_file()
+                    || parent.join("compile_commands.json").is_file()
+                    || parent.join("meson.build").is_file()
+                    || dir_has_unreal_descriptor(&parent)
+            }
             _ => false,
         };
         if !climb {

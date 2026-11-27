@@ -31,6 +31,9 @@ pub(super) fn collect_managed_bin_dirs(tc_root: &Path, out: &mut Vec<PathBuf>) {
         "zig/bin",
         "zig/current",
         "zig/current/bin",
+        "cpp/bin",
+        "cpp/current/bin",
+        "cpp/dap/extension/adapter",
         "node/current/bin",
         "node/lsp/node_modules/.bin",
         "python/bin",
@@ -50,6 +53,7 @@ pub(super) fn collect_managed_bin_dirs(tc_root: &Path, out: &mut Vec<PathBuf>) {
         "java/jdks",
         "go/sdks",
         "zig/sdks",
+        "cpp/sdks",
         "node/sdks",
         "python/interpreters",
     ] {
@@ -185,6 +189,14 @@ fn scan_otto_sdks(
                 if let Some(zh) = resolve_zig_home_dir(&dir) {
                     let v = zig_dir_version(&dir);
                     push_sdk(out, seen, "zig", &v, &zh, "otto");
+                }
+            }
+        }
+        EcosystemKind::Cpp => {
+            for dir in read_subdirs(&root.join("cpp/sdks")) {
+                if dir.join("bin/clang++").is_file() || dir.join("bin/clang").is_file() {
+                    let v = dir_name_version(&dir);
+                    push_sdk(out, seen, "cpp", &v, &dir, "otto");
                 }
             }
         }
@@ -326,6 +338,37 @@ fn scan_system_sdks(
                 }
             }
         }
+        EcosystemKind::Cpp => {
+            for (cand, label_src) in [
+                (
+                    "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr",
+                    "xcode",
+                ),
+                ("/Library/Developer/CommandLineTools/usr", "xcode-clt"),
+                ("/opt/homebrew/opt/llvm", "homebrew"),
+                ("/usr/local/opt/llvm", "homebrew"),
+            ] {
+                let p = PathBuf::from(cand);
+                let bin = p.join("bin/clang++");
+                if is_executable_file(&bin) {
+                    let v = read_cpp_compiler_version(&bin)
+                        .unwrap_or_else(|| dir_name_version(&p));
+                    push_sdk(out, seen, "cpp", &v, &p, label_src);
+                }
+            }
+            if let Some(cxx_bin) = find_executable_in(&search, &["clang++", "g++", "clang", "gcc"])
+            {
+                let prefix = bin_prefix(&cxx_bin).unwrap_or_else(|| {
+                    cxx_bin
+                        .parent()
+                        .and_then(|p| p.parent())
+                        .map(Path::to_path_buf)
+                        .unwrap_or_else(|| PathBuf::from("/usr"))
+                });
+                let v = read_cpp_compiler_version(&cxx_bin).unwrap_or_else(|| "system".into());
+                push_sdk(out, seen, "cpp", &v, &prefix, "system");
+            }
+        }
         EcosystemKind::Node => {
             if let Some(h) = &home {
                 for dir in read_subdirs(&h.join(".nvm/versions/node")) {
@@ -407,6 +450,7 @@ pub(super) fn discover_local_lsp_with_shell(
         EcosystemKind::Go => &["go/bin/gopls"],
         EcosystemKind::Rust => &["rust/bin/rust-analyzer", "rust/cargo/bin/rust-analyzer"],
         EcosystemKind::Zig => &["zig/bin/zls"],
+        EcosystemKind::Cpp => &["cpp/bin/clangd", "cpp/current/bin/clangd"],
         EcosystemKind::Node => &["node/lsp/node_modules/.bin/typescript-language-server"],
         EcosystemKind::Python => &["python/bin/pyright-langserver", "python/bin/pyright"],
         EcosystemKind::Shell => &["shell/lsp/node_modules/.bin/bash-language-server"],
@@ -435,6 +479,7 @@ pub(super) fn discover_local_lsp_with_shell(
         EcosystemKind::Go => &["gopls"],
         EcosystemKind::Rust => &["rust-analyzer"],
         EcosystemKind::Zig => &["zls"],
+        EcosystemKind::Cpp => &["clangd"],
         EcosystemKind::Node => &["typescript-language-server"],
         EcosystemKind::Python => &["pyright-langserver", "pyright"],
         EcosystemKind::Shell => &["bash-language-server"],
@@ -446,11 +491,18 @@ pub(super) fn discover_local_lsp_with_shell(
     let mut search = system_search_dirs_with_shell(shell_path);
     if matches!(
         eco,
-        EcosystemKind::Rust | EcosystemKind::Zig | EcosystemKind::Ios
+        EcosystemKind::Rust | EcosystemKind::Zig | EcosystemKind::Cpp | EcosystemKind::Ios
     ) {
-        let xcode_dap_dir = PathBuf::from("/Applications/Xcode.app/Contents/Developer/usr/bin");
-        if xcode_dap_dir.is_dir() && !search.contains(&xcode_dap_dir) {
-            search.push(xcode_dap_dir);
+        for extra_dir in [
+            "/opt/homebrew/opt/llvm/bin",
+            "/usr/local/opt/llvm/bin",
+            "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin",
+            "/Applications/Xcode.app/Contents/Developer/usr/bin",
+        ] {
+            let p = PathBuf::from(extra_dir);
+            if p.is_dir() && !search.contains(&p) {
+                search.push(p);
+            }
         }
     }
     if let Some(sys) = find_executable_in(&search, sys_names) {
@@ -480,7 +532,8 @@ pub(super) fn discover_local_dap_with_shell(
     let rels: Vec<&str> = match eco {
         EcosystemKind::Java => vec![java_rel.as_str()],
         EcosystemKind::Go => vec!["go/bin/dlv", "dlv/dlv"],
-        EcosystemKind::Rust | EcosystemKind::Zig => vec![
+        EcosystemKind::Rust | EcosystemKind::Zig | EcosystemKind::Cpp => vec![
+            "cpp/dap/extension/adapter/codelldb",
             "rust/dap/extension/adapter/codelldb",
             "rust/codelldb/adapter/codelldb",
             "zig/dap/extension/adapter/codelldb",
@@ -502,6 +555,7 @@ pub(super) fn discover_local_dap_with_shell(
                 EcosystemKind::Go
                 | EcosystemKind::Rust
                 | EcosystemKind::Zig
+                | EcosystemKind::Cpp
                 | EcosystemKind::Shell
                 | EcosystemKind::Json
                 | EcosystemKind::Ios
@@ -522,7 +576,9 @@ pub(super) fn discover_local_dap_with_shell(
     let sys_names: &[&str] = match eco {
         EcosystemKind::Java => &["java-debug", "java"],
         EcosystemKind::Go => &["dlv"],
-        EcosystemKind::Rust | EcosystemKind::Zig => &["codelldb", "lldb-dap", "lldb"],
+        EcosystemKind::Rust | EcosystemKind::Zig | EcosystemKind::Cpp => {
+            &["codelldb", "lldb-dap", "lldb"]
+        }
         EcosystemKind::Node => &["js-debug-dap", "node"],
         EcosystemKind::Python => &["debugpy", "debugpy-adapter", "python3"],
         EcosystemKind::Shell => &["bashdb", "bash", "zsh"],
@@ -534,11 +590,18 @@ pub(super) fn discover_local_dap_with_shell(
     let mut search = system_search_dirs_with_shell(shell_path);
     if matches!(
         eco,
-        EcosystemKind::Rust | EcosystemKind::Zig | EcosystemKind::Ios
+        EcosystemKind::Rust | EcosystemKind::Zig | EcosystemKind::Cpp | EcosystemKind::Ios
     ) {
-        let xcode_dap_dir = PathBuf::from("/Applications/Xcode.app/Contents/Developer/usr/bin");
-        if xcode_dap_dir.is_dir() && !search.contains(&xcode_dap_dir) {
-            search.push(xcode_dap_dir);
+        for extra_dir in [
+            "/opt/homebrew/opt/llvm/bin",
+            "/usr/local/opt/llvm/bin",
+            "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin",
+            "/Applications/Xcode.app/Contents/Developer/usr/bin",
+        ] {
+            let p = PathBuf::from(extra_dir);
+            if p.is_dir() && !search.contains(&p) {
+                search.push(p);
+            }
         }
     }
     if let Some(sys) = find_executable_in(&search, sys_names) {
@@ -762,6 +825,27 @@ fn python_has_debugpy(python: &str) -> bool {
         .is_ok_and(|s| s.success())
 }
 
+#[allow(clippy::disallowed_methods)]
+pub(crate) fn read_cpp_compiler_version(bin: &Path) -> Option<String> {
+    let out = std::process::Command::new(bin)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let first = text.lines().next()?.trim();
+    for tok in first.split_whitespace() {
+        let clean = tok.trim_matches(|c: char| matches!(c, '(' | ')' | ','));
+        if clean.chars().next().is_some_and(|c| c.is_ascii_digit()) && clean.contains('.') {
+            return Some(clean.to_string());
+        }
+    }
+    (!first.is_empty()).then(|| first.chars().take(32).collect())
+}
+
 pub(super) fn mark_active_sdk(
     installed: &mut [IdeInstalledSdk],
     eco: EcosystemKind,
@@ -772,6 +856,7 @@ pub(super) fn mark_active_sdk(
         EcosystemKind::Go => env.go_root.as_deref(),
         EcosystemKind::Rust => env.rust_toolchain.as_deref(),
         EcosystemKind::Zig => env.zig_home.as_deref(),
+        EcosystemKind::Cpp => env.cpp_toolchain.as_deref(),
         EcosystemKind::Node => env.node_home.as_deref(),
         EcosystemKind::Python => env.python_interpreter.as_deref(),
         EcosystemKind::Ios => env.xcode_developer_dir.as_deref(),

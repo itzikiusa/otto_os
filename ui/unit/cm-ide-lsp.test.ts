@@ -56,6 +56,7 @@ test('LSP pool limits and shouldAttachIdeLsp gate code buffers strictly and skip
     'go',
     'rust',
     'zig',
+    'cpp',
     'java',
     'typescript',
     'javascript',
@@ -69,6 +70,9 @@ test('LSP pool limits and shouldAttachIdeLsp gate code buffers strictly and skip
   assert.equal(shouldAttachIdeLsp('/ws/crates/lib.rs', 'rust', '/ws'), true);
   assert.equal(shouldAttachIdeLsp('/ws/src/main.zig', 'zig', '/ws'), true);
   assert.equal(shouldAttachIdeLsp('/ws/build.zig.zon', undefined, '/ws'), true);
+  assert.equal(shouldAttachIdeLsp('/ws/src/main.cpp', 'cpp', '/ws'), true);
+  assert.equal(shouldAttachIdeLsp('/ws/include/math.hpp', undefined, '/ws'), true);
+  assert.equal(shouldAttachIdeLsp('/ws/src/util.c', 'c', '/ws'), true);
   assert.equal(shouldAttachIdeLsp('/ws/src/App.java', 'java', '/ws'), true);
   assert.equal(shouldAttachIdeLsp('/ws/ui/index.ts', 'typescript', '/ws'), true);
   assert.equal(shouldAttachIdeLsp('/ws/ui/view.tsx', undefined, '/ws'), true);

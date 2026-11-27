@@ -5,6 +5,7 @@
 import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
 import { ide, type IdeOpenTab } from '../ideStore.svelte';
 import { flushAutoLocalHistorySnapshot, toggleFormatOnSave } from './ideEditorStoreBridge.svelte';
+import { isCppHeaderOrSourcePath } from './ideHeaderSwitch';
 import { ideEditorActionsFor } from './ideStatusModel';
 
 export interface IdeEditorMoreCtx {
@@ -76,6 +77,7 @@ export function ideEditorMoreRows(c: IdeEditorMoreCtx, appearance: MenuItem[]): 
   if (acts.quickFix) rows.push({ label: 'Context actions…', icon: 'bulb', hint: k('⌥⏎'), action: c.onquickfix });
   if (acts.reformat) rows.push({ label: 'Reformat code', icon: 'format', hint: k('⌘⌥L'), disabled: ro, action: () => void ide.formatActiveFile() });
   if (acts.optimizeImports) rows.push({ label: 'Optimize imports', icon: 'sparkle', hint: k('⌃⌥O'), disabled: ro, action: () => void ide.organizeImportsActiveFile() });
+  if (isCppHeaderOrSourcePath(c.tab.path)) rows.push({ label: 'Switch header / source', icon: 'swap', hint: k('⌥O'), action: () => void ide.switchHeaderSource(c.tab.path) });
   if (c.isGo) rows.push({ label: 'Go build tags…', icon: 'tag', action: c.onsetgotags });
   rows.push(
     { separator: true },

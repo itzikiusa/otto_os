@@ -152,7 +152,7 @@ export const ZIG_MAIN_SOURCE = [
 ].join('\n');
 
 export function seedPolyglotFiles(dir: string): void {
-  for (const sub of ['app', 'decimal', 'pyapp', 'zigapp/src', 'web', 'scripts', 'notes', 'src/main/java/com/otto']) {
+  for (const sub of ['app', 'decimal', 'pyapp', 'zigapp/src', 'cppapp/include', 'cppapp/src', 'web', 'scripts', 'notes', 'src/main/java/com/otto']) {
     mkdirSync(join(dir, sub), { recursive: true });
   }
 
@@ -261,6 +261,34 @@ export function seedPolyglotFiles(dir: string): void {
     ].join('\n'),
   );
   writeFileSync(join(dir, 'zigapp', 'src', 'main.zig'), ZIG_MAIN_SOURCE);
+
+  writeFileSync(
+    join(dir, 'cppapp', 'CMakeLists.txt'),
+    [
+      'cmake_minimum_required(VERSION 3.16)',
+      'project(cppapp LANGUAGES CXX)',
+      'set(CMAKE_CXX_STANDARD 20)',
+      'set(CMAKE_EXPORT_COMPILE_COMMANDS ON)',
+      'add_executable(cppapp src/main.cpp src/calc.cpp)',
+      'target_include_directories(cppapp PRIVATE include)',
+      'target_compile_options(cppapp PRIVATE -g -O0)',
+      'enable_testing()',
+      'add_test(NAME cppapp_smoke COMMAND cppapp)',
+      '',
+    ].join('\n'),
+  );
+  writeFileSync(
+    join(dir, 'cppapp', 'include', 'calc.hpp'),
+    '#pragma once\nnamespace calc {\nint add(int a, int b);\n}\n',
+  );
+  writeFileSync(
+    join(dir, 'cppapp', 'src', 'calc.cpp'),
+    '#include "calc.hpp"\nnamespace calc {\nint add(int a, int b) { return a + b; }\n}\n',
+  );
+  writeFileSync(
+    join(dir, 'cppapp', 'src', 'main.cpp'),
+    '#include <iostream>\n#include "calc.hpp"\nint main() {\n    int left = 30;\n    int total = calc::add(left, 12);\n    std::cout << "CPP_SETTLEMENT_DONE:" << total << "\\n";\n    return 0;\n}\n',
+  );
 
   writeFileSync(
     join(dir, 'package.json'),

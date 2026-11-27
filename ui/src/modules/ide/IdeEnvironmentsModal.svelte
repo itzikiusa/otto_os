@@ -56,6 +56,7 @@
   let goBuildTagsText = $state('');
   let rustToolchain = $state('');
   let zigHome = $state('');
+  let cppToolchain = $state('');
   let nodeHome = $state('');
   let pythonInterpreter = $state('');
   let dotenvPath = $state('');
@@ -82,6 +83,7 @@
       goBuildTagsText: goBuildTagsText.trim(),
       rustToolchain: rustToolchain.trim(),
       zigHome: zigHome.trim(),
+      cppToolchain: cppToolchain.trim(),
       nodeHome: nodeHome.trim(),
       pythonInterpreter: pythonInterpreter.trim(),
       dotenvPath: dotenvPath.trim(),
@@ -213,6 +215,7 @@
       goBuildTagsText = (e.go_build_tags ?? []).join(', ');
       rustToolchain = e.rust_toolchain ?? '';
       zigHome = e.zig_home ?? '';
+      cppToolchain = e.cpp_toolchain ?? '';
       nodeHome = e.node_home ?? '';
       pythonInterpreter = e.python_interpreter ?? '';
       dotenvPath = e.dotenv_path ?? '';
@@ -344,6 +347,7 @@
         go_build_tags: parsedGoTags,
         rust_toolchain: rustToolchain.trim() || null,
         zig_home: zigHome.trim() || null,
+        cpp_toolchain: cppToolchain.trim() || null,
         node_home: nodeHome.trim() || null,
         python_interpreter: pythonInterpreter.trim() || null,
         dotenv_path: dotenvPath.trim() || null,
@@ -533,6 +537,14 @@
                   <input id="env-zig-home" class="input" type="text" dir="ltr" list="env-zig-datalist" placeholder="System default zig" bind:value={zigHome} />
                   <datalist id="env-zig-datalist">
                     {#each sdkOptionsFor('zig') as opt (opt.value)}<option value={opt.value}>{opt.label}</option>{/each}
+                  </datalist>
+                </div>
+
+                <div class="field">
+                  <label for="env-cpp-tc">C / C++ toolchain</label>
+                  <input id="env-cpp-tc" class="input" type="text" dir="ltr" list="env-cpp-datalist" placeholder="System default clang / gcc" bind:value={cppToolchain} />
+                  <datalist id="env-cpp-datalist">
+                    {#each sdkOptionsFor('cpp') as opt (opt.value)}<option value={opt.value}>{opt.label}</option>{/each}
                   </datalist>
                 </div>
 

@@ -18,7 +18,7 @@
   let { section, onnavigate }: Props = $props();
 
   const ALL_ECOS: readonly { id: string; label: string }[] = [
-    { id: 'go', label: 'Go' }, { id: 'java', label: 'Java' }, { id: 'rust', label: 'Rust' }, { id: 'zig', label: 'Zig' }, { id: 'node', label: 'Node / TS' },
+    { id: 'go', label: 'Go' }, { id: 'java', label: 'Java' }, { id: 'rust', label: 'Rust' }, { id: 'zig', label: 'Zig' }, { id: 'cpp', label: 'C / C++' }, { id: 'node', label: 'Node / TS' },
     { id: 'python', label: 'Python' }, { id: 'ios', label: 'iOS / Xcode' }, { id: 'android', label: 'Android' },
     { id: 'flutter', label: 'Flutter' }, { id: 'shell', label: 'Shell' }, { id: 'json', label: 'JSON' }, { id: 'csv', label: 'CSV' },
   ];
@@ -48,7 +48,7 @@
     ide.toolchains.flatMap((eco) => eco.installed.map((sdk) => ({ eco: eco.ecosystem, ecoName: eco.display_name || eco.ecosystem, sdk }))),
   );
   const activePrimarySdkPath = $derived(
-    ideSettings.envDraft.go_root || ideSettings.envDraft.java_home || ideSettings.envDraft.python_interpreter || ideSettings.envDraft.node_home || ideSettings.envDraft.rust_toolchain || ideSettings.envDraft.zig_home || '',
+    ideSettings.envDraft.go_root || ideSettings.envDraft.java_home || ideSettings.envDraft.python_interpreter || ideSettings.envDraft.node_home || ideSettings.envDraft.rust_toolchain || ideSettings.envDraft.zig_home || ideSettings.envDraft.cpp_toolchain || '',
   );
   const activePrimarySdkLabel = $derived.by(() => {
     if (!activePrimarySdkPath) return '';
@@ -81,6 +81,7 @@
     else if (ecosystem === 'node') ideSettings.patchEnv({ node_home: pathOrVer });
     else if (ecosystem === 'rust') ideSettings.patchEnv({ rust_toolchain: pathOrVer });
     else if (ecosystem === 'zig') ideSettings.patchEnv({ zig_home: pathOrVer });
+    else if (ecosystem === 'cpp') ideSettings.patchEnv({ cpp_toolchain: pathOrVer });
     else if (ecosystem === 'ios') ideSettings.patchEnv({ xcode_developer_dir: pathOrVer });
     else if (ecosystem === 'android') ideSettings.patchEnv({ android_home: pathOrVer });
     else if (ecosystem === 'flutter') ideSettings.patchEnv({ flutter_root: pathOrVer });
@@ -100,7 +101,7 @@
       {
         label: 'No SDK',
         checked: !activePrimarySdkPath,
-        action: () => ideSettings.patchEnv({ go_root: '', java_home: '', python_interpreter: '', node_home: '', rust_toolchain: '', zig_home: '' }),
+        action: () => ideSettings.patchEnv({ go_root: '', java_home: '', python_interpreter: '', node_home: '', rust_toolchain: '', zig_home: '', cpp_toolchain: '' }),
       },
     ];
     if (allInstalledSdks.length > 0) {
@@ -147,6 +148,7 @@
     if (names.has('pom.xml') || names.has('build.gradle') || names.has('build.gradle.kts')) return 'Java';
     if (names.has('Cargo.toml')) return 'Rust';
     if (names.has('build.zig') || names.has('build.zig.zon')) return 'Zig';
+    if (names.has('CMakeLists.txt') || names.has('meson.build') || names.has('compile_commands.json') || [...names].some((n) => n.endsWith('.uproject'))) return 'C / C++';
     if (names.has('package.json')) return 'TS / Node';
     if (names.has('pyproject.toml') || names.has('requirements.txt')) return 'Python';
     return 'Polyglot';

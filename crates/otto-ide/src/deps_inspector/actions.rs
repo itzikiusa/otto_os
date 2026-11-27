@@ -102,6 +102,26 @@ pub async fn run_deps_action_scoped(
         ("build.zig.zon", "sync") => {
             exec_cmd("zig", &["build", "--fetch"], &dir, env_map, actor_is_root).await?
         }
+        ("CMakeLists.txt", "sync") => {
+            exec_cmd(
+                "cmake",
+                &[
+                    "-S",
+                    ".",
+                    "-B",
+                    "build",
+                    "-DCMAKE_BUILD_TYPE=Debug",
+                    "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+                ],
+                &dir,
+                env_map,
+                actor_is_root,
+            )
+            .await?
+        }
+        ("vcpkg.json", "sync") => {
+            exec_cmd("vcpkg", &["install"], &dir, env_map, actor_is_root).await?
+        }
         ("go.mod", "why") => {
             let m = validate_dep_spec("module", req.module.as_deref().unwrap_or(""))?;
             exec_cmd(

@@ -6,7 +6,7 @@
 import type { Text } from '@codemirror/state';
 
 export type SemanticLangKind =
-  | 'go' | 'java' | 'ts' | 'rust' | 'zig' | 'python' | 'shell' | 'json' | 'csv' | 'other';
+  | 'go' | 'java' | 'ts' | 'rust' | 'zig' | 'cpp' | 'python' | 'shell' | 'json' | 'csv' | 'other';
 
 export type SemanticRole =
   | 'fg' | 'keyword' | 'control' | 'func-decl' | 'func-call' | 'field'
@@ -96,6 +96,12 @@ export function detectSemanticLang(filePath: string, language?: string): Semanti
   }
   if (ext === 'rs' || language === 'rust') return 'rust';
   if (ext === 'zig' || ext === 'zon' || language === 'zig') return 'zig';
+  if (
+    ['c', 'h', 'cc', 'cpp', 'cxx', 'c++', 'hh', 'hpp', 'hxx', 'h++', 'inl', 'ipp', 'tpp', 'ixx', 'cppm', 'm', 'mm'].includes(ext) ||
+    language === 'cpp' || language === 'c'
+  ) {
+    return 'cpp';
+  }
   if (ext === 'py' || ext === 'pyi' || language === 'python') return 'python';
   if (['sh', 'bash', 'zsh', 'bats'].includes(ext) || language === 'shell' || language === 'shellscript') return 'shell';
   if (['json', 'jsonc', 'jsonl', 'ndjson'].includes(ext) || language === 'json' || language === 'jsonl') return 'json';

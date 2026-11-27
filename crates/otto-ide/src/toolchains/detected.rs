@@ -114,6 +114,20 @@ pub(super) fn scan_detected_sdks(
                 );
             }
         }
+        for dir in read_subdirs(&root.join("cpp/sdks")) {
+            if dir.join("bin/clang++").is_file() || dir.join("bin/clang").is_file() {
+                let v = dir_name_version(&dir);
+                push_det(
+                    &mut out,
+                    &mut seen,
+                    "cpp",
+                    format!("LLVM / Clang {v}"),
+                    &v,
+                    &dir,
+                    "otto",
+                );
+            }
+        }
         // Otto-managed Android SDK installed by `otto-simulators` at `<data_dir>/android-sdk`.
         if let Some(parent) = root.parent() {
             push_android_sdk_if_valid(&parent.join("android-sdk"), "otto", &mut out, &mut seen);
@@ -537,6 +551,31 @@ fn scan_python_and_rust_sdks(
         if let Some(zh) = zig_home_from_bin(&zig_bin) {
             let v = zig_dir_version(&zh);
             push_det(out, seen, "zig", format!("Zig {v}"), &v, &zh, "path");
+        }
+    }
+
+    // 6b. C / C++ toolchains (Xcode CLT, Homebrew LLVM/GCC, /usr/bin)
+    for (cand, label, src) in [
+        (
+            "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr",
+            "Xcode Clang Toolchain",
+            "xcode",
+        ),
+        (
+            "/Library/Developer/CommandLineTools/usr",
+            "Command Line Tools Clang",
+            "xcode-clt",
+        ),
+        (
+            "/opt/homebrew/opt/llvm",
+            "Homebrew LLVM / Clang",
+            "homebrew",
+        ),
+        ("/usr/local/opt/llvm", "Homebrew LLVM / Clang", "homebrew"),
+    ] {
+        let p = PathBuf::from(cand);
+        if p.join("bin/clang++").is_file() || p.join("bin/clang").is_file() {
+            push_det(out, seen, "cpp", label.to_string(), "system", &p, src);
         }
     }
 

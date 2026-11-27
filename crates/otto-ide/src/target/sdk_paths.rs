@@ -154,6 +154,8 @@ pub(crate) fn collect_base_readonly_sdk_roots(
         "GRADLE_USER_HOME",
         "ZIG_LIB_DIR",
         "ZIG_GLOBAL_CACHE_DIR",
+        "UE_ROOT",
+        "UNREAL_ENGINE_ROOT",
     ] {
         if let Some(v) = env_val(key) {
             candidates.push(PathBuf::from(v));
@@ -225,6 +227,8 @@ pub(crate) fn collect_base_readonly_sdk_roots(
             ".zvm",
             ".local/share/zigup",
             "zig",
+            ".conan2",
+            ".vcpkg",
             ".m2/repository",
             ".gradle/caches",
             ".sdkman/candidates/java",
@@ -256,6 +260,13 @@ pub(crate) fn collect_base_readonly_sdk_roots(
         "/Library/Frameworks/Python.framework",
         "/usr/lib/python3",
         "/Library/Developer/CommandLineTools/SDKs",
+        "/Applications/Xcode.app/Contents/Developer/Platforms",
+        "/Applications/Xcode.app/Contents/Developer/Toolchains",
+        "/opt/homebrew/include",
+        "/opt/homebrew/opt/llvm/include",
+        "/usr/local/include",
+        "/usr/include",
+        "/Users/Shared/Epic Games",
     ] {
         candidates.push(PathBuf::from(sys));
     }

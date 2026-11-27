@@ -199,6 +199,7 @@ pub enum EcosystemKind {
     Go,
     Rust,
     Zig,
+    Cpp,
     Node,
     Python,
     Shell,
@@ -209,11 +210,12 @@ pub enum EcosystemKind {
 }
 
 impl EcosystemKind {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Java,
         Self::Go,
         Self::Rust,
         Self::Zig,
+        Self::Cpp,
         Self::Node,
         Self::Python,
         Self::Shell,
@@ -229,6 +231,7 @@ impl EcosystemKind {
             "go" | "golang" => Some(Self::Go),
             "rust" | "cargo" => Some(Self::Rust),
             "zig" | "zls" => Some(Self::Zig),
+            "cpp" | "c" | "c++" | "cxx" | "clang" | "clangd" | "gcc" | "llvm" => Some(Self::Cpp),
             "node" | "nodejs" | "javascript" | "typescript" | "js" | "ts" => Some(Self::Node),
             "python" | "py" | "uv" => Some(Self::Python),
             "shell" | "bash" | "sh" | "zsh" => Some(Self::Shell),
@@ -246,6 +249,7 @@ impl EcosystemKind {
             Self::Go => "go",
             Self::Rust => "rust",
             Self::Zig => "zig",
+            Self::Cpp => "cpp",
             Self::Node => "node",
             Self::Python => "python",
             Self::Shell => "shell",
@@ -262,6 +266,7 @@ impl EcosystemKind {
             Self::Go => "Go",
             Self::Rust => "Rust",
             Self::Zig => "Zig",
+            Self::Cpp => "C / C++ (Clang / GCC)",
             Self::Node => "Node.js (JS / TS)",
             Self::Python => "Python (uv)",
             Self::Shell => "Shell (Bash / Zsh)",
@@ -278,6 +283,7 @@ impl EcosystemKind {
             Self::Go => "gopls",
             Self::Rust => "rust-analyzer",
             Self::Zig => "zls",
+            Self::Cpp => "clangd",
             Self::Node => "typescript-language-server",
             Self::Python => "pyright",
             Self::Shell => "bash-language-server",
@@ -294,6 +300,7 @@ impl EcosystemKind {
             Self::Go => "dlv",
             Self::Rust => "codelldb",
             Self::Zig => "codelldb",
+            Self::Cpp => "codelldb",
             Self::Node => "js-debug",
             Self::Python => "debugpy",
             Self::Shell => "bashdb",
@@ -310,6 +317,7 @@ impl EcosystemKind {
             Self::Go => "1.24.2",
             Self::Rust => "stable",
             Self::Zig => "0.14.0",
+            Self::Cpp => "19.1.7",
             Self::Node => "22.14.0",
             Self::Python => "3.13",
             Self::Shell => "3.10.0",
@@ -343,6 +351,7 @@ impl From<crate::types::IdeEcosystemKind> for EcosystemKind {
             crate::types::IdeEcosystemKind::Go => Self::Go,
             crate::types::IdeEcosystemKind::Rust => Self::Rust,
             crate::types::IdeEcosystemKind::Zig => Self::Zig,
+            crate::types::IdeEcosystemKind::Cpp => Self::Cpp,
             crate::types::IdeEcosystemKind::Node => Self::Node,
             crate::types::IdeEcosystemKind::Python => Self::Python,
             crate::types::IdeEcosystemKind::Shell => Self::Shell,
@@ -361,6 +370,7 @@ impl From<EcosystemKind> for crate::types::IdeEcosystemKind {
             EcosystemKind::Go => Self::Go,
             EcosystemKind::Rust => Self::Rust,
             EcosystemKind::Zig => Self::Zig,
+            EcosystemKind::Cpp => Self::Cpp,
             EcosystemKind::Node => Self::Node,
             EcosystemKind::Python => Self::Python,
             EcosystemKind::Shell => Self::Shell,
@@ -453,6 +463,28 @@ pub fn zls_tarball_url(version: &str, platform: TargetPlatform) -> String {
         platform.arch.as_str(),
         platform.os.as_str()
     )
+}
+
+pub fn llvm_tarball_url(version: &str, platform: TargetPlatform) -> String {
+    let clean = version.trim().trim_start_matches("llvmorg-");
+    let slug = match (platform.os, platform.arch) {
+        (TargetOs::Macos, TargetArch::Aarch64) => "macOS-ARM64",
+        (TargetOs::Macos, TargetArch::X86_64) => "macOS-X64",
+        (TargetOs::Linux, TargetArch::Aarch64) => "Linux-ARM64",
+        (TargetOs::Linux, TargetArch::X86_64) => "Linux-X64",
+    };
+    format!(
+        "https://github.com/llvm/llvm-project/releases/download/llvmorg-{clean}/LLVM-{clean}-{slug}.tar.xz"
+    )
+}
+
+pub fn clangd_zip_url(version: &str, platform: TargetPlatform) -> String {
+    let clean = version.trim().trim_start_matches('v');
+    let slug = match platform.os {
+        TargetOs::Macos => "mac",
+        TargetOs::Linux => "linux",
+    };
+    format!("https://github.com/clangd/clangd/releases/download/{clean}/clangd-{slug}-{clean}.zip")
 }
 
 pub fn node_tarball_url(version: &str, platform: TargetPlatform) -> String {
@@ -583,6 +615,19 @@ pub fn curated_catalog(ecosystem: EcosystemKind, platform: TargetPlatform) -> Ve
             sha256: None,
         })
         .collect(),
+        EcosystemKind::Cpp => [("19.1.7", true, "340 MB"), ("18.1.8", false, "320 MB")]
+            .into_iter()
+            .map(|(ver, lts, sz)| CatalogSdkEntry {
+                version: ver.to_string(),
+                label: format!("LLVM / Clang {ver}"),
+                lts,
+                os: os.clone(),
+                arch: arch.clone(),
+                url: llvm_tarball_url(ver, platform),
+                size_hint: Some(sz.to_string()),
+                sha256: None,
+            })
+            .collect(),
         EcosystemKind::Node => [
             ("24.0.0", "Node.js 24.0.0 (Current)", false, "44 MB"),
             ("22.14.0", "Node.js 22.14.0 LTS (Jod)", true, "42 MB"),
@@ -726,6 +771,19 @@ pub fn resolve_sdk_download(
                 os,
                 arch,
                 url: zig_tarball_url(&clean, platform),
+                size_hint: None,
+                sha256: None,
+            })
+        }
+        EcosystemKind::Cpp => {
+            let clean = ver.trim_start_matches("llvmorg-").to_string();
+            Ok(CatalogSdkEntry {
+                version: clean.clone(),
+                label: format!("LLVM / Clang {clean}"),
+                lts: true,
+                os,
+                arch,
+                url: llvm_tarball_url(&clean, platform),
                 size_hint: None,
                 sha256: None,
             })

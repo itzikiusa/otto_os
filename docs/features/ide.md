@@ -244,6 +244,7 @@ global system directories:
 | **Python** | `uv`, standalone CPython (3.11 / 3.12 / 3.13), `pyright`, `ruff`, `debugpy` |
 | **Rust** | `rustup` (`rustc` + `cargo`), `rust-analyzer`, `CodeLLDB` (`codelldb`) |
 | **Zig** | Official Zig SDK tarball (`ziglang.org/download/index.json`, SHA-256 verified), local SDK registration, `zls` (Zig-version-matched), `CodeLLDB` (`codelldb`) / `lldb-dap` / built-in `otto-lldb-dap` with Zig LLDB type formatters |
+| **C / C++ & Unreal Engine** | Clang / GCC / LLVM toolchain discovery & local registration, `clangd` (auto `--compile-commands-dir` including CMake/Meson/Unreal `Intermediate/ProjectFiles` + `textDocument/switchSourceHeader` `⌥O`), `clang-format`, CMake (Presets & CTest), Meson, Make, `vcpkg.json` / `conanfile.txt` / `.uproject` deps, `CodeLLDB` / `lldb-dap` / built-in `otto-lldb-dap` with C++ STL & Unreal pretty-printers, PID/process-name attach, and core-dump debugging |
 | **Go** | Official Go SDK tarball, local SDK registration (`POST /ide/toolchains/local`), `gopls`, Delve (`dlv`), `gofumpt` |
 | **Node / TypeScript** | Node LTS (22), `pnpm`, `typescript-language-server`, `vscode-langservers-extracted`, `prettier`, `js-debug` |
 | **Shell (Bash / Zsh)** | `bash-language-server`, `shellcheck`, `shfmt`, built-in `otto-sh-dap` (`DEBUG` trap DAP debugger) |
@@ -274,7 +275,7 @@ never spawned per request) and merges:
 `daemon base env → cached login shell env → selected SDK env → project .env file → Run/Debug config overrides`
 
 into **all** Run executions, DAP Debug sessions, IDE Terminals, and local LSP
-servers (`gopls`, `jdtls`, `rust-analyzer`, `zls`, `pyright`, `tsserver`).
+servers (`gopls`, `jdtls`, `rust-analyzer`, `zls`, `clangd`, `pyright`, `tsserver`).
 When that PATH has no `mvn` / `gradle` (a slow capture falls back to `-lc`, which
 skips `~/.zshrc` and so sdkman's init), a local run looks in
 `~/.sdkman/candidates/{maven,gradle}/current/bin`, then `/opt/homebrew/bin` and
@@ -286,7 +287,7 @@ secret environment variable values stored in the macOS Keychain via
 `otto-keychain` (`ide-env:<project_hash>:<key>`):
 
 - Select SDK/toolchain overrides per project (`java_home`, `go_root`,
-  `rust_toolchain`, `zig_home`, `node_home`, `python_interpreter`, `dotenv_path`,
+  `rust_toolchain`, `zig_home`, `cpp_toolchain`, `node_home`, `python_interpreter`, `dotenv_path`,
   `extra_path`, `inherit_shell_env`, `additional_roots`).
 - Create project-local Python virtual environments (`POST /ide/environments/python-venv`
   via `uv venv` or `python3 -m venv`), discover `.env*` files, and configure
@@ -294,14 +295,14 @@ secret environment variable values stored in the macOS Keychain via
 - Instant (`< 25ms`, pure file-stat/manifest scan with zero subprocess spawns)
   runner discovery across primary and attached folders plus reusable **Run
   Configurations** (`go_test`, `go_run`, `java_junit`, `java_main`, `maven`,
-  `gradle`, `cargo_test`, `cargo_run`, `zig_build`, `zig_run`, `zig_test`, `node`, `npm`, `vitest`, `pytest`,
+  `gradle`, `cargo_test`, `cargo_run`, `zig_build`, `zig_run`, `zig_test`, `cmake`, `ctest`, `cpp_run`, `make`, `meson`, `unreal`, `node`, `npm`, `vitest`, `pytest`,
   `python`, `shell`, `compound`, `custom`), launched in the **Run** bottom dock
   (`POST /ide/runs`) with live output and structured test-result trees, or
   stopped via `POST /ide/runs/{run_id}/stop`.
 - Maven / Gradle runs read the JUnit XML reports the run wrote (`TEST-*.xml`
   under `**/target/surefire-reports` and `**/build/test-results/**`) for one row
   per test with its time and failure message, instead of the console's one row
-  per class. A test run with a filter (`go_test`, `cargo_test`, `zig_test`, `pytest`,
+  per class. A test run with a filter (`go_test`, `cargo_test`, `zig_test`, `ctest`, `cpp_run`, `meson`, `pytest`,
   `vitest`, `java_junit`, `maven`, `gradle`) that exits 0 with no tests fails
   with `No tests matched '<filter>'` instead of showing green.
 - A config's `before_launch` hook runs before the program, in its own process
@@ -323,6 +324,7 @@ items directly into the editor gutter:
 
 - **Rust:** `fn main()`, `#[test]`, `#[tokio::test]`, `mod tests`
 - **Zig:** `pub fn main()`, `test "name" { ... }`, `test Decl { ... }`
+- **C / C++:** `int main(...)`, GoogleTest `TEST(...)` / `TEST_F(...)` / `TEST_P(...)` / `TYPED_TEST(...)` (plus suite gutter), Catch2 `TEST_CASE("...")` / `SCENARIO("...")`
 - **Go:** `func main()`, `func TestXxx(t *testing.T)`, `func BenchmarkXxx(b *testing.B)`
 - **Python:** `if __name__ == "__main__":`, `def test_*`, `class Test*`
 - **Java:** `public static void main`, `@Test`, `@ParameterizedTest`
@@ -384,7 +386,7 @@ plus zero-install built-in bridges across every major ecosystem: `dlv dap` (Go),
 `java-debug-adapter` or built-in `otto-jdi-jdwp` (`jdb`/JDWP for Java),
 `debugpy.adapter` or built-in `otto-py-bdb` (Python stdlib `bdb`), `js-debug`
 or built-in `otto-node-cdp` (`node --inspect-brk=0` CDP), `codelldb` /
-`lldb-dap` or built-in `otto-lldb-dap` (`/usr/bin/lldb` for Rust & Zig, with Zig LLDB pretty-printers for slices, strings, optionals, and error unions, plus `POST /ide/debug/sessions/{id}/set-variable` and Zig panic function breakpoints), and
+`lldb-dap` or built-in `otto-lldb-dap` (`/usr/bin/lldb` for Rust, Zig, and C/C++ / Unreal, with Zig, C++ STL, and Unreal LLDB pretty-printers, PID/process-name attach, post-mortem core-dump loading, `POST /ide/debug/sessions/{id}/set-variable`, and Zig panic / C++ `__cxa_throw` exception breakpoints), and
 `otto-sh-dap` (`DEBUG` trap for Bash/Zsh), plus a deterministic mock adapter.
 
 A Java Debug (or `java_main` Run) of a file in a Maven module takes the classpath
@@ -860,8 +862,8 @@ Full schemas and route tables live in [`docs/contracts/api.md`](../contracts/api
 
 - **"Language server unavailable" banner:** Click **Toolchains** in the IDE
   toolbar and install the matching language server (for example `rust-analyzer`,
-  `zls`, `gopls`, `pyright`, `jdtls`, or `typescript-language-server`, or install/enable
-  a runtime IDE plugin for additional languages such as Kotlin or C/C++). The
+  `zls`, `clangd`, `gopls`, `pyright`, `jdtls`, or `typescript-language-server`, or install/enable
+  a runtime IDE plugin for additional languages such as Kotlin). The
   editor reconnects automatically once the install job finishes. A rustup
   `rust-analyzer` proxy only counts as installed once `rust-analyzer --version`
   succeeds (`rustup component add rust-analyzer`).

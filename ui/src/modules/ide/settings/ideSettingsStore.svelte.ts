@@ -62,7 +62,7 @@ export const SETTINGS_TREE: readonly SettingsTreeNode[] = [
     children: [
       { id: 'project.project', label: 'Project', desc: 'Project name and primary SDK.', keywords: ['project', 'name', 'sdk'] },
       { id: 'project.modules', label: 'Modules', desc: 'Multi-folder repository roots attached to this project, bulk attach, and per-module SDKs.', keywords: ['modules', 'folders', 'multi-repo', 'roots', 'attach'] },
-      { id: 'project.sdks', label: 'SDKs', desc: 'Language ecosystems: installed toolchains, detected host SDKs, LSP servers, and DAP debuggers.', keywords: ['sdks', 'toolchains', 'download', 'detected', 'goroot', 'jdk', 'node', 'python', 'rust', 'zig'] },
+      { id: 'project.sdks', label: 'SDKs', desc: 'Language ecosystems: installed toolchains, detected host SDKs, LSP servers, and DAP debuggers.', keywords: ['sdks', 'toolchains', 'download', 'detected', 'goroot', 'jdk', 'node', 'python', 'rust', 'zig', 'cpp', 'clang', 'cmake'] },
     ],
   },
   {
@@ -127,14 +127,15 @@ export const SETTINGS_TREE: readonly SettingsTreeNode[] = [
       { id: 'lang.python', label: 'Python', desc: 'Python interpreter, .venv / uv / pyenv environments, pyright, and debugpy.', keywords: ['python', 'venv', 'virtualenv', 'uv', 'pyenv', 'pyright', 'debugpy'] },
       { id: 'lang.rust', label: 'Rust', desc: 'rustup toolchain, rust-analyzer, and codelldb / lldb-dap debugger.', keywords: ['rust', 'cargo', 'rustup', 'rust-analyzer', 'codelldb', 'lldb'] },
       { id: 'lang.zig', label: 'Zig', desc: 'Zig SDK, ZLS language server, and codelldb / lldb-dap debugger.', keywords: ['zig', 'zls', 'build.zig', 'build.zig.zon', 'codelldb', 'lldb'] },
+      { id: 'lang.cpp', label: 'C / C++ & Unreal', desc: 'Clang / GCC / LLVM toolchain, clangd, CMake / Meson / Make, Unreal .uproject, and LLDB debugger.', keywords: ['c', 'cpp', 'c++', 'clang', 'clangd', 'gcc', 'cmake', 'ctest', 'meson', 'make', 'gtest', 'catch2', 'unreal', 'uproject', 'lldb', 'codelldb'] },
       { id: 'lang.csv', label: 'CSV Formats', desc: 'CSV / TSV delimiter detection, header row, and rainbow column alignment.', keywords: ['csv', 'tsv', 'delimiter', 'table'] },
     ],
   },
   {
     id: 'plugins',
     label: 'Plugins & Language Servers',
-    desc: 'Live health of LSP servers (gopls, jdtls, tsserver, pyright, rust-analyzer, zls, bash-ls) and runtime IDE plugins.',
-    keywords: ['plugins', 'extensions', 'lsp', 'language server', 'gopls', 'jdtls', 'pyright', 'rust-analyzer', 'zls', 'zig', 'catalog'],
+    desc: 'Live health of LSP servers (gopls, jdtls, tsserver, pyright, rust-analyzer, zls, clangd, bash-ls) and runtime IDE plugins.',
+    keywords: ['plugins', 'extensions', 'lsp', 'language server', 'gopls', 'jdtls', 'pyright', 'rust-analyzer', 'zls', 'zig', 'clangd', 'cpp', 'catalog'],
   },
 ];
 
@@ -150,6 +151,9 @@ const SECTION_ALIASES: Record<string, string> = {
   python: 'lang.python',
   rust: 'lang.rust',
   zig: 'lang.zig',
+  cpp: 'lang.cpp',
+  c: 'lang.cpp',
+  unreal: 'lang.cpp',
   node: 'lang.node',
   'lang.shell': 'plugins',
   'lang.json': 'editor.font',
@@ -214,6 +218,7 @@ export interface EnvDraftState {
   go_root: string;
   rust_toolchain: string;
   zig_home: string;
+  cpp_toolchain: string;
   node_home: string;
   python_interpreter: string;
   android_home: string;
@@ -231,6 +236,7 @@ function emptyEnvDraft(env: IdeProjectEnvironment | null): EnvDraftState {
     go_root: env?.go_root ?? '',
     rust_toolchain: env?.rust_toolchain ?? '',
     zig_home: env?.zig_home ?? '',
+    cpp_toolchain: env?.cpp_toolchain ?? '',
     node_home: env?.node_home ?? '',
     python_interpreter: env?.python_interpreter ?? '',
     android_home: env?.android_home ?? '',
@@ -318,6 +324,7 @@ class IdeSettingsController {
         go_root: this.envDraft.go_root || null,
         rust_toolchain: this.envDraft.rust_toolchain || null,
         zig_home: this.envDraft.zig_home || null,
+        cpp_toolchain: this.envDraft.cpp_toolchain || null,
         node_home: this.envDraft.node_home || null,
         python_interpreter: this.envDraft.python_interpreter || null,
         android_home: this.envDraft.android_home || null,

@@ -127,7 +127,7 @@ export type RepoTestExecutionPlan =
       };
     };
 
-type RepoTestEcosystem = 'go' | 'rust' | 'zig' | 'maven' | 'gradle' | 'vitest' | 'npm' | 'pytest';
+type RepoTestEcosystem = 'go' | 'rust' | 'zig' | 'cpp_cmake' | 'cpp_meson' | 'maven' | 'gradle' | 'vitest' | 'npm' | 'pytest';
 
 export function detectRepoTestEcosystem(opts: {
   repoRoot: string;
@@ -141,6 +141,8 @@ export function detectRepoTestEcosystem(opts: {
   if (entryNames.has('go.mod') || entryNames.has('go.work')) return 'go';
   if (entryNames.has('cargo.toml')) return 'rust';
   if (entryNames.has('build.zig') || entryNames.has('build.zig.zon')) return 'zig';
+  if (entryNames.has('cmakelists.txt')) return 'cpp_cmake';
+  if (entryNames.has('meson.build')) return 'cpp_meson';
   if (entryNames.has('pom.xml')) return 'maven';
   if (entryNames.has('build.gradle') || entryNames.has('build.gradle.kts')) return 'gradle';
   if (
@@ -174,6 +176,8 @@ export function detectRepoTestEcosystem(opts: {
     if (r.startsWith('go_')) return 'go';
     if (r.startsWith('cargo_')) return 'rust';
     if (r.startsWith('zig_')) return 'zig';
+    if (r === 'cmake' || r === 'ctest' || r === 'cpp_run' || r === 'unreal') return 'cpp_cmake';
+    if (r === 'meson') return 'cpp_meson';
     if (r === 'maven' || r === 'java_junit') return 'maven';
     if (r === 'gradle') return 'gradle';
     if (r === 'vitest') return 'vitest';
@@ -189,6 +193,7 @@ export function detectRepoTestEcosystem(opts: {
     if (lang === 'go' || tp.endsWith('.go')) return 'go';
     if (lang === 'rust' || tp.endsWith('.rs')) return 'rust';
     if (lang === 'zig' || tp.endsWith('.zig')) return 'zig';
+    if (lang === 'cpp' || lang === 'c' || /\.(?:cpp|cc|cxx|hpp|h|c)$/.test(tp)) return 'cpp_cmake';
     if (lang === 'java' || tp.endsWith('.java')) return 'maven';
     if (lang === 'python' || tp.endsWith('.py')) return 'pytest';
     if (
@@ -248,6 +253,15 @@ export function resolveRepoTestPlan(opts: {
         repoRoot,
         repoName,
         language: 'zig',
+        launch: { program: repoRoot, args: [], build_flags: [], cwd: repoRoot },
+      };
+    }
+    if (eco === 'cpp_cmake' || eco === 'cpp_meson') {
+      return {
+        kind: 'debug',
+        repoRoot,
+        repoName,
+        language: 'cpp',
         launch: { program: repoRoot, args: [], build_flags: [], cwd: repoRoot },
       };
     }
@@ -322,6 +336,20 @@ export function resolveRepoTestPlan(opts: {
         repoRoot,
         repoName,
         adhoc: { ...common, runner: 'zig_test', args: [] },
+      };
+    case 'cpp_cmake':
+      return {
+        kind: 'run',
+        repoRoot,
+        repoName,
+        adhoc: { ...common, runner: 'ctest', args: ['--test-dir', 'build', '--output-on-failure'] },
+      };
+    case 'cpp_meson':
+      return {
+        kind: 'run',
+        repoRoot,
+        repoName,
+        adhoc: { ...common, runner: 'meson', args: ['test', '-C', 'builddir'] },
       };
     case 'maven':
       return {

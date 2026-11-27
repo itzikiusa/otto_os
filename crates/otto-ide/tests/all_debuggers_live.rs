@@ -1191,3 +1191,668 @@ test "addition works" {
     );
     send_cmd(&app, &sid_p, "stop").await;
 }
+
+#[tokio::test]
+async fn live_cpp_cmake_lldb_stl_watch_set_variable_attach_and_exceptions() {
+    if !ensure_bins_or_skip(&["cmake", "clang++", "lldb"]) {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("cpp-sample");
+    std::fs::create_dir_all(ws.join("include")).unwrap();
+    std::fs::create_dir_all(ws.join("src")).unwrap();
+
+    std::fs::write(
+        ws.join("CMakeLists.txt"),
+        r#"cmake_minimum_required(VERSION 3.16)
+project(cpp_sample LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+add_executable(cpp_sample src/main.cpp src/math.cpp)
+target_include_directories(cpp_sample PRIVATE include)
+target_compile_options(cpp_sample PRIVATE -g -O0)
+
+enable_testing()
+add_test(NAME sample_runs COMMAND cpp_sample)
+"#,
+    )
+    .unwrap();
+
+    let math_hpp = ws.join("include/math.hpp");
+    std::fs::write(
+        &math_hpp,
+        "#pragma once\nnamespace demo {\nint add(int a, int b);\n}\n",
+    )
+    .unwrap();
+
+    let math_cpp = ws.join("src/math.cpp");
+    std::fs::write(
+        &math_cpp,
+        "#include \"math.hpp\"\nnamespace demo {\nint add(int a, int b) {\n    int total = a + b;\n    return total;\n}\n}\n",
+    )
+    .unwrap();
+
+    let main_cpp = ws.join("src/main.cpp");
+    std::fs::write(
+        &main_cpp,
+        r#"#include <iostream>
+#include <map>
+#include <optional>
+#include <string>
+#include <vector>
+#include "math.hpp"
+
+int main() {
+    int counter = 4;
+    counter += 1;
+    std::string greeting = "hello cpp";
+    std::vector<int> nums = {10, 20, 30};
+    std::map<std::string, int> scores = {{"alpha", 7}, {"beta", 9}};
+    std::optional<int> opt_some = counter + 37;
+    std::optional<int> opt_none = std::nullopt;
+    int sum = demo::add(counter, 3);
+    std::cout << "CPP_DONE:" << counter << ":" << greeting << ":" << sum
+              << ":" << nums.size() << ":" << scores.size()
+              << ":" << opt_some.value_or(-1) << ":" << opt_none.value_or(-1) << "\n";
+    return 0;
+}
+"#,
+    )
+    .unwrap();
+
+    let (_ctx, app) = build_test_app(tmp.path().join("data"), &tmp.path().join("db.sqlite")).await;
+    let ws_str = ws.to_string_lossy().into_owned();
+    let main_str = main_cpp.to_string_lossy().into_owned();
+
+    // 0. Run CMake configure+build via `/ide/runs` (verifying CMake runner & compile_commands.json)
+    let (st_cfg, run_cfg) = send_json(
+        &app,
+        Method::POST,
+        "/ide/runs",
+        Some(json!({
+            "target": { "kind": "local", "root": ws_str },
+            "adhoc": {
+                "id": "cmake-cfg-build",
+                "name": "CMake Configure & Build",
+                "runner": "cmake",
+                "args": ["-S", ".", "-B", "build", "-DCMAKE_BUILD_TYPE=Debug", "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"],
+                "cwd": ws_str,
+            }
+        })),
+    )
+    .await;
+    assert_eq!(
+        st_cfg,
+        StatusCode::OK,
+        "CMake configure run failed: {run_cfg}"
+    );
+    let cfg_id = run_cfg["run"]["id"].as_str().unwrap().to_string();
+    let cfg_deadline = Instant::now() + Duration::from_secs(30);
+    let mut cfg_state = run_cfg["run"].clone();
+    while Instant::now() < cfg_deadline && cfg_state["status"] == "running" {
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        let (_, r) = send_json(&app, Method::GET, &format!("/ide/runs/{cfg_id}"), None).await;
+        cfg_state = r["run"].clone();
+    }
+    assert_eq!(
+        cfg_state["status"], "passed",
+        "CMake configure failed: {cfg_state}"
+    );
+    assert!(
+        ws.join("build/compile_commands.json").exists(),
+        "expected CMake to generate build/compile_commands.json"
+    );
+
+    // Build via CMake runner
+    let (st_bld, run_bld) = send_json(
+        &app,
+        Method::POST,
+        "/ide/runs",
+        Some(json!({
+            "target": { "kind": "local", "root": ws_str },
+            "adhoc": {
+                "id": "cmake-build",
+                "name": "CMake Build",
+                "runner": "cmake",
+                "args": ["--build", "build"],
+                "cwd": ws_str,
+            }
+        })),
+    )
+    .await;
+    assert_eq!(st_bld, StatusCode::OK, "CMake build run failed: {run_bld}");
+    let bld_id = run_bld["run"]["id"].as_str().unwrap().to_string();
+    let bld_deadline = Instant::now() + Duration::from_secs(30);
+    let mut bld_state = run_bld["run"].clone();
+    while Instant::now() < bld_deadline && bld_state["status"] == "running" {
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        let (_, r) = send_json(&app, Method::GET, &format!("/ide/runs/{bld_id}"), None).await;
+        bld_state = r["run"].clone();
+    }
+    assert_eq!(
+        bld_state["status"], "passed",
+        "CMake build failed: {bld_state}"
+    );
+
+    // Run CTest via `/ide/runs` and verify structured test result parsing
+    let (st_ct, run_ct) = send_json(
+        &app,
+        Method::POST,
+        "/ide/runs",
+        Some(json!({
+            "target": { "kind": "local", "root": ws_str },
+            "adhoc": {
+                "id": "ctest-all",
+                "name": "CTest",
+                "runner": "ctest",
+                "args": ["--test-dir", "build", "--output-on-failure"],
+                "cwd": ws_str,
+            }
+        })),
+    )
+    .await;
+    assert_eq!(st_ct, StatusCode::OK, "CTest run failed: {run_ct}");
+    let ct_id = run_ct["run"]["id"].as_str().unwrap().to_string();
+    let ct_deadline = Instant::now() + Duration::from_secs(20);
+    let mut ct_state = run_ct["run"].clone();
+    while Instant::now() < ct_deadline && ct_state["status"] == "running" {
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        let (_, r) = send_json(&app, Method::GET, &format!("/ide/runs/{ct_id}"), None).await;
+        ct_state = r["run"].clone();
+    }
+    assert_eq!(ct_state["status"], "passed", "CTest failed: {ct_state}");
+    assert!(
+        ct_state["tests"].as_array().is_some_and(|arr| arr
+            .iter()
+            .any(|t| t["name"] == "sample_runs" && t["status"] == "passed")),
+        "expected parsed CTest sample_runs result: {ct_state}"
+    );
+
+    // 1. Debug built CMake binary: breakpoint at line 16, verify STL locals, watch, set-variable, step into math.cpp
+    let bin_str = ws.join("build/cpp_sample").to_string_lossy().into_owned();
+    let (st, start) = send_json(
+        &app,
+        Method::POST,
+        "/ide/debug/sessions",
+        Some(json!({
+            "target": { "kind": "local", "root": ws_str },
+            "language": "cpp",
+            "launch": { "program": bin_str, "cwd": ws_str },
+            "breakpoints": [{ "path": main_str, "line": 16 }],
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "C++ start_debug failed: {start}");
+    let sid = start["session"]["id"].as_str().unwrap().to_string();
+
+    let snap1 = wait_until_paused(&app, &sid, FIRST_PAUSE).await;
+    assert_eq!(
+        snap1["paused_line"],
+        16,
+        "C++ paused_line mismatch: {}",
+        brief(&snap1)
+    );
+    let vars1 = all_vars(&snap1);
+    let var_val = |name: &str| -> String {
+        vars1
+            .iter()
+            .find(|v| v["name"] == name)
+            .and_then(|v| v["value"].as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    assert!(
+        var_val("counter").contains("5"),
+        "expected counter=5, got '{}', names={:?}",
+        var_val("counter"),
+        var_names(&vars1)
+    );
+    assert!(
+        var_val("greeting").contains("hello cpp"),
+        "expected STL std::string value for greeting, got '{}'",
+        var_val("greeting")
+    );
+    let nums_v = var_val("nums");
+    assert!(
+        nums_v.contains("size=3") || (nums_v.contains("10") && nums_v.contains("30")),
+        "expected STL std::vector summary for nums, got '{nums_v}'"
+    );
+    let scores_v = var_val("scores");
+    assert!(
+        scores_v.contains("size=2") || scores_v.contains("alpha"),
+        "expected STL std::map summary for scores, got '{scores_v}'"
+    );
+    let opt_some_v = var_val("opt_some");
+    assert!(
+        opt_some_v.contains("42") || opt_some_v.contains("Has Value=true"),
+        "expected STL std::optional value for opt_some, got '{opt_some_v}'"
+    );
+
+    // Watch / evaluate expression
+    let (st_ev, ev_body) = send_json(
+        &app,
+        Method::POST,
+        &format!("/ide/debug/sessions/{sid}/evaluate"),
+        Some(json!({ "expression": "counter + 10" })),
+    )
+    .await;
+    assert_eq!(st_ev, StatusCode::OK, "C++ evaluate failed: {ev_body}");
+    assert!(
+        ev_body["result"].as_str().unwrap_or("").contains("15"),
+        "expected 15 from counter + 10, got {ev_body}"
+    );
+
+    // Set variable via `POST /ide/debug/sessions/{id}/set-variable`
+    let locals_ref = snap1["scopes"][0]["variables_reference"]
+        .as_i64()
+        .unwrap_or(0);
+    assert!(
+        locals_ref > 0,
+        "expected Locals scope variables_reference > 0"
+    );
+    let (st_sv, sv_body) = send_json(
+        &app,
+        Method::POST,
+        &format!("/ide/debug/sessions/{sid}/set-variable"),
+        Some(json!({
+            "variables_reference": locals_ref,
+            "name": "counter",
+            "value": "99",
+        })),
+    )
+    .await;
+    assert_eq!(st_sv, StatusCode::OK, "C++ set-variable failed: {sv_body}");
+    assert!(
+        sv_body["value"].as_str().unwrap_or("").contains("99"),
+        "expected 99 after set-variable, got {sv_body}"
+    );
+
+    // Step into `demo::add(counter, 3)` in `src/math.cpp`
+    send_cmd(&app, &sid, "step_into").await;
+    let snap2 = wait_until_paused(&app, &sid, Duration::from_secs(10)).await;
+    let paused2 = snap2["paused_line"].as_u64().unwrap_or(0);
+    let paused2_file = snap2["paused_file"].as_str().unwrap_or("");
+    assert!(
+        paused2_file.ends_with("math.cpp") && (3..=5).contains(&paused2),
+        "expected step_into inside src/math.cpp lines 3..=5, got {paused2_file}:{paused2}: {}",
+        brief(&snap2)
+    );
+
+    // Continue to exit and verify mutated output
+    send_cmd(&app, &sid, "continue").await;
+    let end = wait_until_terminated(&app, &sid, Duration::from_secs(15)).await;
+    assert_eq!(
+        end["state"], "terminated",
+        "C++ session ended in error: {end}"
+    );
+    let out = joined_output(&end);
+    assert!(
+        out.contains("CPP_DONE:99:hello cpp:102:3:2:42:-1"),
+        "expected mutated counter=99 and sum=102 in C++ output, got: {out}"
+    );
+
+    // 2. C++ exception breakpoint (`break_on_exceptions: true` catches `throw std::runtime_error`)
+    let throw_cpp = ws.join("src/throw_demo.cpp");
+    std::fs::write(
+        &throw_cpp,
+        "#include <stdexcept>\nint main() {\n    throw std::runtime_error(\"deliberate cpp boom\");\n}\n",
+    )
+    .unwrap();
+    let throw_str = throw_cpp.to_string_lossy().into_owned();
+    let (st_ex, start_ex) = send_json(
+        &app,
+        Method::POST,
+        "/ide/debug/sessions",
+        Some(json!({
+            "target": { "kind": "local", "root": ws_str },
+            "language": "cpp",
+            "launch": { "program": throw_str, "cwd": ws_str },
+            "breakpoints": [],
+            "break_on_exceptions": true,
+        })),
+    )
+    .await;
+    assert_eq!(
+        st_ex,
+        StatusCode::OK,
+        "C++ exception start_debug failed: {start_ex}"
+    );
+    let sid_ex = start_ex["session"]["id"].as_str().unwrap().to_string();
+    let snap_ex = wait_until_paused(&app, &sid_ex, FIRST_PAUSE).await;
+    assert_eq!(
+        snap_ex["state"],
+        "paused",
+        "expected C++ exception session to pause on throw: {}",
+        brief(&snap_ex)
+    );
+    send_cmd(&app, &sid_ex, "stop").await;
+
+    // 3. Live attach by PID (`attach_pid`)
+    let attach_src = ws.join("src/attach_demo.cpp");
+    let attach_bin = ws.join("build/attach_demo");
+    std::fs::write(
+        &attach_src,
+        "#include <chrono>\n#include <thread>\nint main() {\n    volatile int spin = 1;\n    while (spin) {\n        std::this_thread::sleep_for(std::chrono::milliseconds(20));\n    }\n    return 0;\n}\n",
+    )
+    .unwrap();
+    let attach_src_canon = attach_src.canonicalize().unwrap();
+    let compile_attach = tokio::process::Command::new("clang++")
+        .args(["-std=c++20", "-g", "-O0"])
+        .arg(&attach_src_canon)
+        .arg("-o")
+        .arg(&attach_bin)
+        .status()
+        .await
+        .expect("compile attach_demo");
+    assert!(
+        compile_attach.success(),
+        "clang++ attach_demo compile failed"
+    );
+
+    let mut child = std::process::Command::new(&attach_bin)
+        .spawn()
+        .expect("spawn attach_demo");
+    let child_pid = child.id();
+    tokio::time::sleep(Duration::from_millis(120)).await;
+
+    let attach_src_str = attach_src_canon.to_string_lossy().into_owned();
+    let (st_att, start_att) = send_json(
+        &app,
+        Method::POST,
+        "/ide/debug/sessions",
+        Some(json!({
+            "target": { "kind": "local", "root": ws_str },
+            "language": "cpp",
+            "launch": {
+                "program": attach_bin.to_string_lossy().into_owned(),
+                "cwd": ws_str,
+                "attach_pid": child_pid,
+            },
+            "breakpoints": [{ "path": attach_src_str, "line": 6 }],
+        })),
+    )
+    .await;
+    assert_eq!(
+        st_att,
+        StatusCode::OK,
+        "C++ attach_pid start_debug failed: {start_att}"
+    );
+    let sid_att = start_att["session"]["id"].as_str().unwrap().to_string();
+    let snap_att = wait_until_paused(&app, &sid_att, FIRST_PAUSE).await;
+    assert_eq!(
+        snap_att["state"],
+        "paused",
+        "expected LLDB attach_pid to pause running process: {}",
+        brief(&snap_att)
+    );
+    assert_eq!(
+        snap_att["paused_line"],
+        6,
+        "expected attach_pid breakpoint hit at attach_demo.cpp:6: {}",
+        brief(&snap_att)
+    );
+    send_cmd(&app, &sid_att, "stop").await;
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[tokio::test]
+async fn live_cpp_clangd_lsp_completion_hover_definition_and_header_switch() {
+    if !ensure_bins_or_skip(&["cmake", "clangd"]) {
+        return;
+    }
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    use tokio::process::Command;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("clangd-sample");
+    std::fs::create_dir_all(ws.join("include")).unwrap();
+    std::fs::create_dir_all(ws.join("src")).unwrap();
+
+    std::fs::write(
+        ws.join("CMakeLists.txt"),
+        r#"cmake_minimum_required(VERSION 3.16)
+project(clangd_sample LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+add_executable(clangd_sample src/main.cpp src/math.cpp)
+target_include_directories(clangd_sample PRIVATE include)
+"#,
+    )
+    .unwrap();
+    let math_hpp = ws.join("include/math.hpp");
+    std::fs::write(
+        &math_hpp,
+        "#pragma once\nnamespace demo {\n/// Adds two integers.\nint add_numbers(int a, int b);\n}\n",
+    )
+    .unwrap();
+    let math_cpp = ws.join("src/math.cpp");
+    std::fs::write(
+        &math_cpp,
+        "#include \"math.hpp\"\nnamespace demo {\nint add_numbers(int a, int b) { return a + b; }\n}\n",
+    )
+    .unwrap();
+    let main_cpp = ws.join("src/main.cpp");
+    let main_src = "#include \"math.hpp\"\nint main() {\n    int v = demo::add_numbers(2, 3);\n    return v;\n}\n";
+    std::fs::write(&main_cpp, main_src).unwrap();
+
+    let st = Command::new("cmake")
+        .args([
+            "-S",
+            ".",
+            "-B",
+            "build",
+            "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+        ])
+        .current_dir(&ws)
+        .status()
+        .await
+        .expect("run cmake");
+    assert!(st.success(), "cmake configure for clangd fixture failed");
+    assert!(ws.join("build/compile_commands.json").exists());
+
+    // Verify Otto's built-in LSP registry resolves `cpp` -> `clangd`
+    let canon_ws = ws.canonicalize().unwrap();
+    let resolved = otto_ide::lsp_host::servers::resolve_lang("cpp")
+        .expect("expected built-in cpp/clangd entry in LSP registry");
+    assert!(resolved.available, "expected clangd to be available");
+    assert!(
+        resolved.command.ends_with("clangd"),
+        "expected clangd command, got {}",
+        resolved.command
+    );
+    let clangd_bin = std::path::PathBuf::from(&resolved.command);
+
+    let mut clangd_args = resolved.args.clone();
+    clangd_args.push(format!(
+        "--compile-commands-dir={}",
+        canon_ws.join("build").to_string_lossy()
+    ));
+
+    let mut child = Command::new(&clangd_bin)
+        .args(&clangd_args)
+        .current_dir(&canon_ws)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn clangd");
+
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    async fn send_lsp(stdin: &mut tokio::process::ChildStdin, body: &Value) {
+        let s = body.to_string();
+        let frame = format!("Content-Length: {}\r\n\r\n{}", s.len(), s);
+        stdin.write_all(frame.as_bytes()).await.unwrap();
+        stdin.flush().await.unwrap();
+    }
+
+    async fn read_lsp_response(
+        stdout: &mut BufReader<tokio::process::ChildStdout>,
+        want_id: i64,
+    ) -> Value {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
+            let mut content_len: usize = 0;
+            loop {
+                let mut line = String::new();
+                let n = tokio::time::timeout(Duration::from_secs(10), stdout.read_line(&mut line))
+                    .await
+                    .expect("clangd read header timeout")
+                    .unwrap();
+                assert!(n > 0, "clangd exited unexpectedly");
+                if line == "\r\n" || line == "\n" {
+                    break;
+                }
+                if let Some(rest) = line.strip_prefix("Content-Length:") {
+                    content_len = rest.trim().parse().unwrap();
+                }
+            }
+            let mut buf = vec![0u8; content_len];
+            stdout.read_exact(&mut buf).await.unwrap();
+            let v: Value = serde_json::from_slice(&buf).unwrap();
+            if v.get("id").and_then(|x| x.as_i64()) == Some(want_id) {
+                return v;
+            }
+        }
+        panic!("timed out waiting for clangd response id={want_id}");
+    }
+
+    let root_uri = format!("file://{}", canon_ws.to_string_lossy());
+    let main_uri = format!("file://{}", canon_ws.join("src/main.cpp").to_string_lossy());
+    let math_cpp_uri = format!("file://{}", canon_ws.join("src/math.cpp").to_string_lossy());
+    let math_src = std::fs::read_to_string(&math_cpp).unwrap();
+
+    send_lsp(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "processId": std::process::id(),
+                "rootUri": root_uri,
+                "capabilities": {}
+            }
+        }),
+    )
+    .await;
+    let init = read_lsp_response(&mut stdout, 1).await;
+    assert!(
+        init["result"]["capabilities"].is_object(),
+        "clangd initialize failed: {init}"
+    );
+
+    send_lsp(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
+    )
+    .await;
+    send_lsp(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": main_src }
+            }
+        }),
+    )
+    .await;
+    send_lsp(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": { "uri": math_cpp_uri, "languageId": "cpp", "version": 1, "text": math_src }
+            }
+        }),
+    )
+    .await;
+
+    // Hover on `add_numbers` at line 2, char 20
+    send_lsp(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/hover",
+            "params": {
+                "textDocument": { "uri": main_uri },
+                "position": { "line": 2, "character": 20 }
+            }
+        }),
+    )
+    .await;
+    let hover = read_lsp_response(&mut stdout, 2).await;
+    let hover_str = hover.to_string();
+    assert!(
+        hover_str.contains("add_numbers") && hover_str.contains("int"),
+        "expected clangd hover to mention add_numbers signature: {hover_str}"
+    );
+
+    // Definition of `add_numbers` -> include/math.hpp or src/math.cpp
+    send_lsp(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "textDocument/definition",
+            "params": {
+                "textDocument": { "uri": main_uri },
+                "position": { "line": 2, "character": 20 }
+            }
+        }),
+    )
+    .await;
+    let def = read_lsp_response(&mut stdout, 3).await;
+    assert!(
+        def.to_string().contains("math.hpp") || def.to_string().contains("math.cpp"),
+        "expected clangd definition to jump to math.hpp/math.cpp: {def}"
+    );
+
+    // Completion after `demo::` (line 2, char 18)
+    send_lsp(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": { "uri": main_uri },
+                "position": { "line": 2, "character": 18 }
+            }
+        }),
+    )
+    .await;
+    let comp = read_lsp_response(&mut stdout, 4).await;
+    assert!(
+        comp.to_string().contains("add_numbers"),
+        "expected clangd completion after demo:: to include add_numbers: {comp}"
+    );
+
+    // Header/Source switch (`textDocument/switchSourceHeader`) on src/math.cpp -> include/math.hpp
+    send_lsp(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "textDocument/switchSourceHeader",
+            "params": { "uri": math_cpp_uri }
+        }),
+    )
+    .await;
+    let sw = read_lsp_response(&mut stdout, 5).await;
+    assert!(
+        sw["result"]
+            .as_str()
+            .is_some_and(|u| u.ends_with("include/math.hpp")),
+        "expected clangd switchSourceHeader to return include/math.hpp, got: {sw}"
+    );
+
+    let _ = child.kill().await;
+}

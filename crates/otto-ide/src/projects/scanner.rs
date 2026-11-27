@@ -376,6 +376,17 @@ pub fn scan_parent_repos(parent_path: &str, is_root_user: bool) -> Result<IdeSca
             || canon.join("build.gradle.kts").is_file();
         let has_cargo = canon.join("Cargo.toml").is_file();
         let has_zig = canon.join("build.zig").is_file() || canon.join("build.zig.zon").is_file();
+        let has_unreal = fs::read_dir(&canon).ok().is_some_and(|rd| {
+            rd.flatten().take(64).any(|e| {
+                e.file_name()
+                    .to_str()
+                    .is_some_and(|n| n.ends_with(".uproject") || n.ends_with(".uplugin"))
+            })
+        });
+        let has_cpp = canon.join("CMakeLists.txt").is_file()
+            || canon.join("CMakePresets.json").is_file()
+            || canon.join("meson.build").is_file()
+            || canon.join("compile_commands.json").is_file();
         let has_node = canon.join("package.json").is_file();
         let has_py =
             canon.join("pyproject.toml").is_file() || canon.join("requirements.txt").is_file();
@@ -389,6 +400,10 @@ pub fn scan_parent_repos(parent_path: &str, is_root_user: bool) -> Result<IdeSca
             "rust"
         } else if has_zig {
             "zig"
+        } else if has_unreal {
+            "unreal"
+        } else if has_cpp {
+            "cpp"
         } else if has_node {
             "node"
         } else if has_py {

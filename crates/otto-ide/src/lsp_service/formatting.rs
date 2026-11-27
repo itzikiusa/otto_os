@@ -44,6 +44,11 @@ pub(super) fn formatter_candidates(
             "zig".into(),
             vec!["fmt".into(), "--stdin".into()],
         )],
+        "c" | "cpp" => vec![(
+            "clang-format",
+            "clang-format".into(),
+            vec![format!("--assume-filename={path}")],
+        )],
         "python" => vec![
             (
                 "ruff",

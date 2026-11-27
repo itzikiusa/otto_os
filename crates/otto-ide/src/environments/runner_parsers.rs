@@ -56,6 +56,19 @@ impl IncrementalTestTracker {
                     }
                 }
             }
+            IdeRunnerKind::Ctest | IdeRunnerKind::Meson => {
+                if let Some(tc) = parse_cpp_test_line(line) {
+                    self.push_capped(tc);
+                } else if let Some((file, ln, msg)) = parse_cpp_diag_line(line.trim()) {
+                    if let Some(last) = self.results.last_mut() {
+                        last.file.get_or_insert(file);
+                        last.line.get_or_insert(ln);
+                        if last.message.is_none() {
+                            last.message = Some(msg);
+                        }
+                    }
+                }
+            }
             IdeRunnerKind::Pytest => {
                 if let Some(tc) = parse_python_test_line(line) {
                     self.push_capped(tc);
@@ -319,6 +332,142 @@ fn parse_zig_diag_line(trimmed: &str) -> Option<(String, u32, String)> {
         .map(|(_, m)| m.trim())
         .unwrap_or_else(|| tail.trim());
     Some((format!("{file_part}.zig"), line_no, msg.to_string()))
+}
+
+pub(crate) fn parse_cpp_test_line(line: &str) -> Option<IdeTestCaseResult> {
+    let t = line.trim();
+    // GoogleTest:
+    //   `[       OK ] MathTest.Adds (2 ms)`
+    //   `[  FAILED  ] MathTest.Divides (0 ms)`
+    //   `[  SKIPPED ] MathTest.Pending (0 ms)`
+    if let Some((status, rest)) = t
+        .strip_prefix("[       OK ]")
+        .map(|r| (IdeTestCaseStatus::Passed, r))
+        .or_else(|| {
+            t.strip_prefix("[  FAILED  ]")
+                .map(|r| (IdeTestCaseStatus::Failed, r))
+        })
+        .or_else(|| {
+            t.strip_prefix("[  SKIPPED ]")
+                .map(|r| (IdeTestCaseStatus::Skipped, r))
+        })
+    {
+        let rest = rest.trim();
+        // Skip summary lines like `[  FAILED  ] 1 test, listed below:`
+        if rest.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        let dur_ms = parse_ms_suffix(rest);
+        let full_name = rest
+            .split_once(" (")
+            .map(|(n, _)| n.trim())
+            .unwrap_or(rest)
+            .trim_end_matches(',');
+        if full_name.is_empty() {
+            return None;
+        }
+        let (suite, name) = match full_name.split_once('.') {
+            Some((s, n)) => (Some(s.to_string()), n),
+            None => (None, full_name),
+        };
+        let mut tc = simple_test_case(name, status, dur_ms);
+        tc.suite = suite;
+        return Some(tc);
+    }
+
+    // CTest:
+    //   `1/3 Test #1: MathTest .......................   Passed    0.01 sec`
+    //   `2/3 Test #2: FailTest .......................***Failed    0.02 sec`
+    //   `3/3 Test #3: SkipTest .......................***Skipped   0.00 sec`
+    if let Some((_, after_test)) = t.split_once("Test #") {
+        let (_, after_colon) = after_test.split_once(':')?;
+        let after_colon = after_colon.trim();
+        let (name_raw, tail) = after_colon
+            .split_once("..")
+            .or_else(|| after_colon.split_once("***"))?;
+        let name = name_raw.trim();
+        if name.is_empty() {
+            return None;
+        }
+        let tail_clean = tail.trim_start_matches(['.', '*', ' ']);
+        let mut parts = tail_clean.split_whitespace();
+        let outcome = parts.next()?;
+        let status = match outcome {
+            "Passed" => IdeTestCaseStatus::Passed,
+            "Failed" | "Timeout" | "Subprocess" => IdeTestCaseStatus::Failed,
+            "Skipped" | "Not" => IdeTestCaseStatus::Skipped,
+            _ => return None,
+        };
+        let dur_ms = parts
+            .find_map(|tok| tok.parse::<f64>().ok())
+            .map(|sec| (sec * 1000.0).round() as u64);
+        return Some(simple_test_case(name, status, dur_ms));
+    }
+
+    // Meson test:
+    //   `1/2 math_test        OK              0.01s`
+    //   `2/2 broken_test      FAIL            0.02s   exit status 1`
+    if let Some((prefix, rest)) = t.split_once(' ') {
+        if let Some((cur, total)) = prefix.split_once('/') {
+            if !cur.is_empty()
+                && cur.chars().all(|c| c.is_ascii_digit())
+                && !total.is_empty()
+                && total.chars().all(|c| c.is_ascii_digit())
+                && !rest.contains("...")
+            {
+                let tokens: Vec<&str> = rest.split_whitespace().collect();
+                if tokens.len() >= 2 {
+                    let status_pos = tokens.iter().position(|tok| {
+                        matches!(*tok, "OK" | "FAIL" | "SKIP" | "TIMEOUT" | "EXPECTEDFAIL")
+                    });
+                    if let Some(pos) = status_pos {
+                        if pos > 0 {
+                            let name = tokens[..pos].join(" ");
+                            let status = match tokens[pos] {
+                                "OK" | "EXPECTEDFAIL" => IdeTestCaseStatus::Passed,
+                                "SKIP" => IdeTestCaseStatus::Skipped,
+                                _ => IdeTestCaseStatus::Failed,
+                            };
+                            let dur_ms = tokens.get(pos + 1).and_then(|s| {
+                                s.strip_suffix('s')
+                                    .and_then(|n| n.parse::<f64>().ok())
+                                    .map(|sec| (sec * 1000.0).round() as u64)
+                            });
+                            return Some(simple_test_case(&name, status, dur_ms));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Catch2 verbose / reporter: `test case: "adds numbers" - passed` / `FAILED:`
+    if let Some(rest) = t.strip_prefix("FAILED:") {
+        let msg = rest.trim();
+        if !msg.is_empty() {
+            return Some(simple_test_case(msg, IdeTestCaseStatus::Failed, None));
+        }
+    }
+    None
+}
+
+fn parse_cpp_diag_line(trimmed: &str) -> Option<(String, u32, String)> {
+    for ext in [".cpp:", ".cc:", ".cxx:", ".c:", ".hpp:", ".h:"] {
+        if let Some((file_part, rest)) = trimmed.split_once(ext) {
+            if file_part.contains(' ') {
+                continue;
+            }
+            let (line_s, msg) = rest.split_once(':')?;
+            let line_no = line_s.trim().parse::<u32>().ok()?;
+            let clean_ext = ext.trim_end_matches(':');
+            return Some((
+                format!("{file_part}{clean_ext}"),
+                line_no,
+                msg.trim().to_string(),
+            ));
+        }
+    }
+    None
 }
 
 fn parse_python_test_line(line: &str) -> Option<IdeTestCaseResult> {

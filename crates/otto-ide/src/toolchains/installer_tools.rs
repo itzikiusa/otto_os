@@ -3,9 +3,9 @@
 use std::path::{Path, PathBuf};
 
 use crate::toolchains_catalog::{
-    codelldb_vsix_url, jq_binary_url, rust_analyzer_gz_url, uv_tarball_url, zls_tarball_url,
-    EcosystemKind, TargetPlatform, BASH_LSP_NPM_PACKAGES, DEBUGPY_PKG, DLV_PKG, GOPLS_PKG,
-    JAVA_DEBUG_JAR_NAME, JAVA_DEBUG_JAR_URL, JDTLS_TARBALL_URL, JSON_LSP_NPM_PACKAGES,
+    clangd_zip_url, codelldb_vsix_url, jq_binary_url, rust_analyzer_gz_url, uv_tarball_url,
+    zls_tarball_url, EcosystemKind, TargetPlatform, BASH_LSP_NPM_PACKAGES, DEBUGPY_PKG, DLV_PKG,
+    GOPLS_PKG, JAVA_DEBUG_JAR_NAME, JAVA_DEBUG_JAR_URL, JDTLS_TARBALL_URL, JSON_LSP_NPM_PACKAGES,
     JS_DEBUG_TARBALL_URL, PYRIGHT_PKG, TS_LSP_NPM_PACKAGES,
 };
 
@@ -173,6 +173,51 @@ pub(super) async fn install_local_lsp(
             make_executable(&dest)?;
             Ok(dest.to_string_lossy().into_owned())
         }
+        EcosystemKind::Cpp => {
+            let ver = EcosystemKind::Cpp.default_sdk_version();
+            let zip = tmp.join(format!("clangd-{ver}.zip"));
+            download_https_to_file(mgr, job_id, &clangd_zip_url(ver, platform), &zip, None, 65)
+                .await?;
+            let extract_dir = tmp.join("clangd-extract");
+            let _ = tokio::fs::remove_dir_all(&extract_dir).await;
+            tokio::fs::create_dir_all(&extract_dir)
+                .await
+                .map_err(|e| e.to_string())?;
+            run_local_cmd(
+                mgr,
+                job_id,
+                75,
+                Path::new("unzip"),
+                &[
+                    "-q",
+                    "-o",
+                    &zip.to_string_lossy(),
+                    "-d",
+                    &extract_dir.to_string_lossy(),
+                ],
+                &[],
+            )
+            .await?;
+            let _ = tokio::fs::remove_file(&zip).await;
+            let bin_dir = root.join("cpp/bin");
+            tokio::fs::create_dir_all(&bin_dir)
+                .await
+                .map_err(|e| e.to_string())?;
+            let src_bin = super::read_subdirs(&extract_dir)
+                .into_iter()
+                .map(|d| d.join("bin/clangd"))
+                .chain(std::iter::once(extract_dir.join("bin/clangd")))
+                .find(|p| p.is_file())
+                .ok_or("clangd archive missing bin/clangd")?;
+            let dest = bin_dir.join("clangd");
+            let _ = tokio::fs::remove_file(&dest).await;
+            tokio::fs::rename(&src_bin, &dest)
+                .await
+                .map_err(|e| e.to_string())?;
+            let _ = tokio::fs::remove_dir_all(&extract_dir).await;
+            make_executable(&dest)?;
+            Ok(dest.to_string_lossy().into_owned())
+        }
         EcosystemKind::Node => {
             let npm = resolve_best_sdk_bin(mgr, root, EcosystemKind::Node, "npm")
                 .ok_or("Node.js/npm required first")?;
@@ -289,7 +334,7 @@ pub(super) async fn install_local_dap(
             .await?;
             Ok(gobin.join("dlv").to_string_lossy().into_owned())
         }
-        EcosystemKind::Rust | EcosystemKind::Zig => {
+        EcosystemKind::Rust | EcosystemKind::Zig | EcosystemKind::Cpp => {
             let vsix = tmp.join("codelldb.vsix");
             download_https_to_file(mgr, job_id, &codelldb_vsix_url(platform), &vsix, None, 85)
                 .await?;

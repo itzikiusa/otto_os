@@ -19,8 +19,8 @@ use crate::IdeCtx;
 
 pub(crate) use super::diagnostics_go::analyze_go_diagnostics;
 use super::diagnostics_polyglot::{
-    analyze_js_ts_diagnostics, analyze_python_diagnostics, analyze_rust_diagnostics,
-    analyze_shell_diagnostics, analyze_zig_diagnostics,
+    analyze_cpp_diagnostics, analyze_js_ts_diagnostics, analyze_python_diagnostics,
+    analyze_rust_diagnostics, analyze_shell_diagnostics, analyze_zig_diagnostics,
 };
 use super::java_diag::analyze_java_diagnostics;
 use super::{build_formatter_env, resolve_language};
@@ -156,6 +156,15 @@ pub async fn diagnostics<S: IdeCtx>(
             };
             analyze_zig_diagnostics(&req.path, &content, &env_map).await
         }
+        "c" | "cpp" => {
+            let env_map = match resolved_opt {
+                Some((ref resolved, ref spec)) => {
+                    build_formatter_env(ctx, user, resolved, spec).await
+                }
+                None => BTreeMap::new(),
+            };
+            analyze_cpp_diagnostics(&req.path, &lang, &content, &env_map).await
+        }
         _ => Vec::new(),
     };
 
@@ -188,6 +197,9 @@ fn resolve_effective_target_spec(req: &IdeDiagnosticsReq) -> Option<IdeTargetSpe
                 || d.join("go.mod").is_file()
                 || d.join("Cargo.toml").is_file()
                 || d.join("build.zig").is_file()
+                || d.join("CMakeLists.txt").is_file()
+                || d.join("meson.build").is_file()
+                || d.join("compile_commands.json").is_file()
                 || d.join("package.json").is_file()
             {
                 root_dir = Some(d.to_path_buf());

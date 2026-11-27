@@ -44,6 +44,7 @@ export const LSP_CODE_LANGUAGES = new Set([
   'go',
   'rust',
   'zig',
+  'cpp',
   'java',
   'typescript',
   'javascript',
@@ -126,6 +127,14 @@ export function normalizeIdeLspLanguage(langOrExt?: string | null): string | nul
   if (raw === 'go' || raw === 'golang') return 'go';
   if (raw === 'rs' || raw === 'rust') return 'rust';
   if (raw === 'zig' || raw === 'zon') return 'zig';
+  if (
+    raw === 'c' || raw === 'cpp' || raw === 'c++' || raw === 'cxx' || raw === 'cc' ||
+    raw === 'h' || raw === 'hh' || raw === 'hpp' || raw === 'hxx' || raw === 'h++' ||
+    raw === 'inl' || raw === 'ipp' || raw === 'tpp' || raw === 'ixx' || raw === 'cppm' ||
+    raw === 'm' || raw === 'mm' || raw === 'objc' || raw === 'objcpp'
+  ) {
+    return 'cpp';
+  }
   if (raw === 'java') return 'java';
   if (raw === 'ts' || raw === 'tsx' || raw === 'mts' || raw === 'cts' || raw === 'typescript' || raw === 'typescriptreact') {
     return 'typescript';
@@ -413,8 +422,11 @@ export function detectLspCompletionTrigger(
     return { from: p, context: { triggerKind: 2, triggerCharacter: '.' } };
   }
   const lang = normalizeIdeLspLanguage(languageId) ?? languageId ?? '';
-  if (before.endsWith('::') && (lang === 'rust' || !lang)) {
+  if (before.endsWith('::') && (lang === 'rust' || lang === 'cpp' || !lang)) {
     return { from: p, context: { triggerKind: 2, triggerCharacter: ':' } };
+  }
+  if (before.endsWith('->') && (lang === 'cpp' || !lang)) {
+    return { from: p, context: { triggerKind: 2, triggerCharacter: '>' } };
   }
   if (before.endsWith('@') && (lang === 'java' || lang === 'typescript' || lang === 'javascript' || lang === 'python')) {
     return { from: p, context: { triggerKind: 2, triggerCharacter: '@' } };
@@ -604,6 +616,8 @@ export function createIdeLspCompletionExtension(opts: {
         if (ch === '.') {
           shouldOpen = true;
         } else if (ch === ':' && tb >= 2 && u.state.sliceDoc(tb - 2, tb) === '::') {
+          shouldOpen = true;
+        } else if (ch === '>' && tb >= 2 && u.state.sliceDoc(tb - 2, tb) === '->') {
           shouldOpen = true;
         } else if (ch === '@') {
           shouldOpen = true;

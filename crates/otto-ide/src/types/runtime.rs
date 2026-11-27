@@ -72,6 +72,12 @@ pub struct IdeDebugLaunchSpec {
     pub test_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attach_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attach_pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attach_process_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub core_file: Option<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

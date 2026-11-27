@@ -302,6 +302,8 @@ const DENIED_ENV: &[&str] = &[
     // Flutter toolchain roots, the cache owner and the shell's directory.
     "DEVELOPER_DIR",
     "FLUTTER_ROOT",
+    "UE_ROOT",
+    "UNREAL_ENGINE_ROOT",
     "USER",
     "LOGNAME",
     "PWD",
