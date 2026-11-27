@@ -672,6 +672,10 @@
     color: var(--text);
     border-color: var(--accent-text);
   }
+  /* One clear button: ours, not WebKit's as well. */
+  .th-search input::-webkit-search-cancel-button {
+    display: none;
+  }
   .th-search input {
     flex: 1;
     min-width: 0;
