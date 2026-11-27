@@ -660,6 +660,8 @@ export interface IdeDebugLaunch {
   build_flags?: string[];
   cwd?: string | null;
   test_name?: string | null;
+  /** The line of the test's `test(` call (Playwright selects `file:line`). */
+  test_line?: number | null;
   is_test?: boolean;
   attach_port?: number | null;
   attach_pid?: number | null;
@@ -735,12 +737,8 @@ export interface IdeInlineValue {
   value: string;
 }
 
-export interface IdeDebugOutput {
-  category: 'stdout' | 'stderr' | 'console' | string;
-  text: string;
-  /** Monotonic per-session position (1-based, never reused); absent on older daemons. */
-  seq?: number;
-}
+export type { IdeDebugOutput, IdeDebugTarget } from './ide-debug';
+import type { IdeDebugOutput, IdeDebugTarget } from './ide-debug';
 
 export interface IdeDebugSessionSnapshot {
   id: string;
@@ -780,6 +778,8 @@ export interface IdeDebugSessionSnapshot {
   steps?: IdeDebugStep[];
   /** Index into `steps` of the step that runs now. */
   current_step?: number | null;
+  /** js-debug sessions (Playwright, Karma): one entry per debugged process. */
+  targets?: IdeDebugTarget[];
 }
 
 

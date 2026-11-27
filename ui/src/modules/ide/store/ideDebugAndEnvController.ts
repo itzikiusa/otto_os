@@ -131,7 +131,7 @@ export function languageFromRunner(runner: string | undefined, fallback: string)
   if (runner.startsWith('dotnet_')) return 'csharp';
   if (runner.startsWith('java_') || runner === 'maven' || runner === 'gradle') return 'java';
   if (runner === 'pytest' || runner === 'python') return 'python';
-  if (runner === 'node' || runner === 'npm' || runner === 'vitest') return 'javascript';
+  if (runner === 'node' || runner === 'npm' || runner === 'vitest' || runner === 'playwright' || runner === 'karma') return 'javascript';
   if (runner === 'shell') return 'shell';
   return fallback;
 }
@@ -580,7 +580,7 @@ export function launchGutterAction(
   item: IdeGutterItem,
   mode: 'run' | 'debug' | 'run_keep_tc',
   onRun: (adhoc: Partial<IdeRunConfig>, keepTestcontainers?: boolean) => void,
-  onDebug: (opts: { language: string; launch: { program: string; args: string[]; build_flags?: string[]; cwd: string; test_name?: string } }) => void,
+  onDebug: (opts: { language: string; launch: { program: string; args: string[]; build_flags?: string[]; cwd: string; test_name?: string; test_line?: number } }) => void,
 ): void {
   const spec = item.run_spec ?? {};
   const filePath = spec.target_path || spec.program || host.activePath || '';
@@ -604,6 +604,8 @@ export function launchGutterAction(
         ...(goFlags.length > 0 ? { build_flags: goFlags } : {}),
         cwd: spec.cwd || repoInfo.path || host.target.root,
         test_name: spec.debug_test_name || spec.test_name || spec.test_filter || (item.kind === 'test' ? item.label : undefined),
+        // Playwright selects a test or a describe by the line of its call.
+        ...(spec.runner === 'playwright' ? { test_line: item.line } : {}),
       },
     });
     return;
@@ -629,7 +631,7 @@ export async function launchDebugSession(
     configId?: string;
     language?: string;
     confirmProdTargets?: boolean;
-    launch?: { program: string; args?: string[]; build_flags?: string[]; cwd?: string; test_name?: string; attach_port?: number; env?: Record<string, string>; env_file?: string | null; inherit_shell_env?: boolean; sdk_path?: string | null };
+    launch?: { program: string; args?: string[]; build_flags?: string[]; cwd?: string; test_name?: string; test_line?: number; attach_port?: number; env?: Record<string, string>; env_file?: string | null; inherit_shell_env?: boolean; sdk_path?: string | null };
   },
   prevCtl: AbortController | null,
   onSnapshot: (snap: IdeDebugSessionSnapshot) => void,
@@ -653,7 +655,7 @@ export async function launchDebugSession(
   // Build-only and run-only (BUG-30, the daemon's own text) configurations, whatever tab is focused.
   const refusal = unrealSub === 'build' || unrealSub === 'gen-cdb' || unrealSub === 'build-plugin'
     ? `Unreal '${unrealSub}' run configuration is build-only; start Debug on the Unreal Editor launch configuration instead`
-    : runOnlyDebugRefusal(cfg?.runner);
+    : runOnlyDebugRefusal(cfg);
   if (refusal) {
     host.openBottomTab('debug');
     ideDebugLaunch.startError = { message: refusal, kind: null, ecosystem: null };
