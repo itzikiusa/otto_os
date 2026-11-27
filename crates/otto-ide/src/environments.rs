@@ -119,12 +119,21 @@ fn record_snapshot_into(
     guard.retain(|s| s.owner_key.as_deref() != Some(project_key));
     upsert_snapshot_entry(&mut guard, project_key.to_string(), None, base_env.clone());
     if let Some(primary_root) = project_key.strip_prefix("local:") {
+        let strip_execution_trust = |env: &mut IdeProjectEnvironment| {
+            env.env_vars.retain(|v| {
+                !v.key.starts_with("OTTO_IDE_TRUST_")
+                    && v.key != crate::lsp_host::ws_bridge::TRUST_KOTLIN_LSP_ENV
+                    && v.key != crate::lsp_host::ws_bridge::TRUST_ZIG_LSP_ENV
+                    && v.key != crate::lsp_host::ws_bridge::TRUST_PROJECT_EXECUTION_ENV
+            });
+        };
         for (mod_root, sdk_val) in &base_env.module_sdks {
             let mod_key = format!("local:{}", mod_root.trim_end_matches('/'));
             if mod_key == project_key {
                 continue;
             }
             let mut mod_env = base_env.clone();
+            strip_execution_trust(&mut mod_env);
             apply_module_sdk_to_project_env(&mut mod_env, mod_root, sdk_val, None, None);
             mod_env.go_build_tags = effective_go_build_tags_for_paths_in_project(
                 Some(primary_root),
@@ -143,6 +152,7 @@ fn record_snapshot_into(
                 continue;
             }
             let mut mod_env = base_env.clone();
+            strip_execution_trust(&mut mod_env);
             mod_env.go_build_tags = effective_go_build_tags_for_paths_in_project(
                 Some(primary_root),
                 &base_env,
@@ -477,6 +487,31 @@ impl EnvironmentManager {
 
     pub fn cached_project_env(&self, project_key_or_root: &str) -> Option<IdeProjectEnvironment> {
         lookup_snapshot_in(&self.snapshots, project_key_or_root)
+    }
+
+    /// Look up cached project environment strictly from explicit primary project
+    /// snapshots (`owner_key.is_none()`), ignoring synthetic module-override clones
+    /// and `module_sdks` fallback matches (SEC-2/SEC-3).
+    pub fn cached_explicit_project_env(
+        &self,
+        project_key_or_root: &str,
+    ) -> Option<IdeProjectEnvironment> {
+        let trimmed = project_key_or_root.trim().trim_end_matches('/');
+        if trimmed.is_empty() {
+            return None;
+        }
+        let local_key = format!("local:{trimmed}");
+        let guard = self.snapshots.read().unwrap_or_else(|e| e.into_inner());
+        guard
+            .iter()
+            .rev()
+            .find(|s| {
+                s.owner_key.is_none() && {
+                    let sk = s.key.trim_end_matches('/');
+                    sk == trimmed || sk == local_key
+                }
+            })
+            .map(|s| s.env.clone())
     }
 
     /// Look up cached project environment for `module_root`, falling back to

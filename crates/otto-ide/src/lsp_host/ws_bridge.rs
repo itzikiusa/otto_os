@@ -234,7 +234,7 @@ fn lsp_execution_trusted_for_key(
             None => cur_s.into_owned(),
         };
         if envs
-            .cached_project_env(&lookup_key)
+            .cached_explicit_project_env(&lookup_key)
             .is_some_and(|env| has_opt_in(&env))
         {
             return true;
@@ -997,10 +997,12 @@ mod root_tests {
         assert_eq!(err.status, StatusCode::FORBIDDEN);
         assert_eq!(err.code, "kotlin_lsp_requires_trust");
 
-        // 2. Trusting `canon_parent` allows opening `canon_parent` (including its own `sub-mod`),
-        //    but MUST NOT trust an independent checkout opened at `canon_child` underneath it.
+        // 2. Trusting `canon_parent` — EVEN WHEN `canon_parent` configures `module_sdks`
+        //    and `module_go_build_tags` targeting `canon_child` (which synthesizes a child
+        //    snapshot in `EnvironmentManager`) — allows opening `canon_parent` (including its
+        //    own `sub-mod`), but MUST NOT trust an independent checkout opened at `canon_child`.
         ide.environments.seed_snapshot(
-            &canon_parent.to_string_lossy(),
+            &format!("local:{}", canon_parent.to_string_lossy()),
             crate::types::IdeProjectEnvironment {
                 env_vars: vec![crate::types::IdeEnvVarEntry {
                     key: TRUST_KOTLIN_LSP_ENV.into(),
@@ -1008,6 +1010,14 @@ mod root_tests {
                     secret: false,
                     has_secret: false,
                 }],
+                module_sdks: std::collections::BTreeMap::from([(
+                    canon_child.to_string_lossy().into_owned(),
+                    "/opt/jdk-21".into(),
+                )]),
+                module_go_build_tags: std::collections::BTreeMap::from([(
+                    canon_child.to_string_lossy().into_owned(),
+                    vec!["e2e".into()],
+                )]),
                 ..Default::default()
             },
         );
