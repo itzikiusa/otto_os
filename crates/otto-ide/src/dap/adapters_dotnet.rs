@@ -552,7 +552,7 @@ async fn resolve_dotnet_test_debug(
     mut initial_output: Vec<IdeDebugOutputEntry>,
 ) -> Result<ResolvedDapAdapter> {
     let proj_path = match req.target.kind {
-        IdeTargetKind::Local => select_local_dotnet_test_project(norm_program, cwd, test_name)?
+        IdeTargetKind::Local => select_local_dotnet_test_project(norm_program, cwd)?
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|| cwd.to_string()),
         IdeTargetKind::Ssh => select_ssh_dotnet_build_target(norm_program, cwd)
@@ -606,7 +606,11 @@ async fn resolve_dotnet_test_debug(
         test_args.push(f.clone());
     }
     test_args.push(proj_path.clone());
-    let label = test_name.unwrap_or("all tests");
+    let label = test_name.map(str::to_string).unwrap_or_else(|| {
+        let proj = Path::new(&proj_path);
+        let name = proj.file_name().unwrap_or(proj.as_os_str()).to_string_lossy();
+        format!("all tests in {name}")
+    });
 
     if req.target.kind == IdeTargetKind::Local {
         // Use official VSTest debug handshake (`VSTEST_HOST_DEBUG=1`): `dotnet test`
@@ -755,14 +759,6 @@ pub(crate) fn compute_dotnet_launch_cwd(built_proj_path: Option<&Path>, cwd: &st
     cwd.to_string()
 }
 
-fn is_explicit_dotnet_project_or_solution(p: &Path) -> bool {
-    p.is_file()
-        && p.extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.to_ascii_lowercase())
-            .is_some_and(|e| matches!(e.as_str(), "csproj" | "fsproj" | "sln" | "slnx"))
-}
-
 fn is_dotnet_test_project_with_props(proj: &Path, stop_root: &Path) -> bool {
     let xml = std::fs::read_to_string(proj).unwrap_or_default();
     if xml.contains("<IsTestProject>false</IsTestProject>") {
@@ -797,23 +793,53 @@ fn is_dotnet_test_project_with_props(proj: &Path, stop_root: &Path) -> bool {
     false
 }
 
+/// Test projects a `.sln` (`"path\\App.Tests.csproj"`) or `.slnx` (`Path="..."`) references.
+#[allow(clippy::disallowed_methods)] // one small solution file read at debug session start
+fn dotnet_solution_test_projects(sln: &Path) -> Vec<PathBuf> {
+    let dir = sln.parent().unwrap_or(Path::new(""));
+    std::fs::read_to_string(sln)
+        .unwrap_or_default()
+        .split('"')
+        .filter(|t| {
+            let low = t.to_ascii_lowercase();
+            low.ends_with(".csproj") || low.ends_with(".fsproj")
+        })
+        .map(|t| dir.join(t.replace('\\', "/")))
+        .filter(|p| is_dotnet_test_project_with_props(p, dir))
+        .collect()
+}
+
 /// Select the local `.csproj`/`.fsproj` (or `.sln`) target for `.NET` test debugging:
-/// - Always honors an explicitly requested `.csproj`/`.fsproj`/`.sln`/`.slnx` file as-is
-///   even when `IsTestProject`/`Microsoft.NET.Test.Sdk` lives in `Directory.Build.props` (BUG3-8).
-/// - When invoked on a directory/repo root, scans bounded subdirectories (depth <= 3). If
-///   multiple test projects exist for an unfiltered "Debug All Tests" launch, returns a clear
-///   error instead of silently dropping projects 2..N (BUG-25).
+/// - An explicitly requested `.csproj`/`.fsproj` is used as-is, even when its
+///   `IsTestProject`/`Microsoft.NET.Test.Sdk` comes from `Directory.Build.props` (BUG3-8).
+/// - A directory/repo root is scanned (depth <= 3) for test projects.
+/// - One VSTest debug session attaches to ONE test host, so a solution or directory holding
+///   several test projects is refused with their names instead of silently debugging only
+///   the first one (BUG-25).
 #[allow(clippy::disallowed_methods)] // bounded depth-3 scan at debug session start
 pub(crate) fn select_local_dotnet_test_project(
     norm_program: &str,
     cwd: &str,
-    test_name: Option<&str>,
 ) -> Result<Option<PathBuf>> {
     let prog_path = Path::new(norm_program);
-    if !norm_program.is_empty() && is_explicit_dotnet_project_or_solution(prog_path) {
+    let ext = prog_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    let is_file = !norm_program.is_empty() && prog_path.is_file();
+    if is_file && matches!(ext.as_str(), "csproj" | "fsproj") {
         return Ok(Some(prog_path.to_path_buf()));
     }
-    if !norm_program.is_empty() && prog_path.is_file() {
+    if is_file && matches!(ext.as_str(), "sln" | "slnx") {
+        let tests = dotnet_solution_test_projects(prog_path);
+        let dir = prog_path.parent().unwrap_or(Path::new(""));
+        return match tests.len() {
+            0 | 1 => Ok(Some(prog_path.to_path_buf())),
+            _ => Err(multiple_dotnet_test_projects_err(&tests, dir)),
+        };
+    }
+    if is_file {
         if let Some(direct) = find_local_dotnet_project(norm_program, cwd) {
             return Ok(Some(direct));
         }
@@ -859,27 +885,23 @@ pub(crate) fn select_local_dotnet_test_project(
         }
     }
     test_projects.sort();
-    if test_projects.len() == 1 {
-        return Ok(Some(test_projects.remove(0)));
+    match test_projects.len() {
+        0 => Ok(sln_fallback.or_else(|| find_local_dotnet_project(norm_program, cwd))),
+        1 => Ok(test_projects.pop()),
+        _ => Err(multiple_dotnet_test_projects_err(&test_projects, &root)),
     }
-    if test_projects.len() > 1 {
-        if test_name.is_some_and(|s| !s.is_empty()) {
-            if let Some(sln) = sln_fallback {
-                return Ok(Some(sln));
-            }
-        }
-        let names = test_projects
-            .iter()
-            .filter_map(|p| p.strip_prefix(&root).ok().or(Some(p.as_path())))
-            .map(|p| p.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
-        return Err(Error::Invalid(format!(
-            "Found {} .NET test projects ({names}). Single-session VSTest debugging attaches to one test host at a time — select a specific test project (.csproj/.fsproj) or debug an individual test from the gutter.",
-            test_projects.len()
-        )));
-    }
-    Ok(sln_fallback.or_else(|| find_local_dotnet_project(norm_program, cwd)))
+}
+
+fn multiple_dotnet_test_projects_err(tests: &[PathBuf], root: &Path) -> Error {
+    let names = tests
+        .iter()
+        .map(|p| p.strip_prefix(root).unwrap_or(p).display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Error::Invalid(format!(
+        "Found {} .NET test projects ({names}). A debug session attaches to one test host — pick one project's \".NET Test\" run configuration, or debug a single test from the gutter.",
+        tests.len()
+    ))
 }
 
 /// Extract an explicit `.NET` attach PID from `launch.attach_pid` or `DOTNET_ATTACH_PID`
@@ -1322,7 +1344,6 @@ public class MathTests
             select_local_dotnet_test_project(
                 &sln_root.to_string_lossy(),
                 &sln_root.to_string_lossy(),
-                None
             )
             .unwrap(),
             Some(test_csproj.clone())
@@ -1348,7 +1369,6 @@ public class MathTests
             select_local_dotnet_test_project(
                 &props_csproj.to_string_lossy(),
                 &sln_root.to_string_lossy(),
-                None
             )
             .unwrap(),
             Some(props_csproj.clone()),
@@ -1360,7 +1380,6 @@ public class MathTests
         let multi_err = select_local_dotnet_test_project(
             &sln_root.to_string_lossy(),
             &sln_root.to_string_lossy(),
-            None,
         )
         .expect_err("BUG-25: multiple test projects for unfiltered Debug All Tests must error");
         let multi_msg = multi_err.to_string();
@@ -1368,6 +1387,38 @@ public class MathTests
             multi_msg.contains("App.Tests.csproj") && multi_msg.contains("PropsXunit.Tests.csproj"),
             "BUG-25: error should name all discovered test projects: {multi_msg}"
         );
+
+        // BUG-25: an explicit solution referencing both test projects is refused the same way
+        // (VSTest pauses one test host per project); one referencing a single test project
+        // is used as-is.
+        let both_sln = sln_root.join("All.sln");
+        std::fs::write(
+            &both_sln,
+            "Project(\"{FAE04EC0}\") = \"App.Tests\", \"tests\\App.Tests\\App.Tests.csproj\", \"{1}\"\nProject(\"{FAE04EC0}\") = \"PropsXunit.Tests\", \"tests\\PropsXunit.Tests\\PropsXunit.Tests.csproj\", \"{2}\"\n",
+        )
+        .unwrap();
+        let sln_err = select_local_dotnet_test_project(
+            &both_sln.to_string_lossy(),
+            &sln_root.to_string_lossy(),
+        )
+        .expect_err("BUG-25: a solution with two test projects must be refused");
+        assert!(sln_err.to_string().contains("PropsXunit.Tests.csproj"), "{sln_err}");
+        let one_slnx = sln_root.join("One.slnx");
+        std::fs::write(
+            &one_slnx,
+            r#"<Solution><Project Path="src/App/App.csproj" /><Project Path="tests/App.Tests/App.Tests.csproj" /></Solution>"#,
+        )
+        .unwrap();
+        assert_eq!(
+            select_local_dotnet_test_project(
+                &one_slnx.to_string_lossy(),
+                &sln_root.to_string_lossy(),
+            )
+            .unwrap(),
+            Some(one_slnx.clone())
+        );
+        std::fs::remove_file(&both_sln).unwrap();
+        std::fs::remove_file(&one_slnx).unwrap();
 
         repo_test_req.launch.is_test = false;
         repo_test_req.launch.program = test_csproj.to_string_lossy().into_owned();
