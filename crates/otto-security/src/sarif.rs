@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use otto_core::redact::redact_text;
 use otto_core::{Error, Result};
 use otto_state::DbPool;
 use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC};
@@ -121,10 +122,22 @@ fn import_finding(item: &Value, roots: &[PathBuf]) -> Option<Finding> {
     };
     let root = root.to_string_lossy().into_owned();
     let rule = text(item["ruleId"].as_str().unwrap_or("sarif"), 180);
+    let rule_id = rule.to_ascii_lowercase().replace('_', "-");
     let secret = read_check == Some(Check::Secret)
-        || ["secret", "credential", "token", "password"]
-            .iter()
-            .any(|word| rule.to_lowercase().contains(word));
+        || [
+            "secret",
+            "credential",
+            "token",
+            "password",
+            "access-key",
+            "api-key",
+            "private-key",
+        ]
+        .iter()
+        .any(|word| rule_id.contains(word))
+        || rule_id
+            .split(|ch: char| !ch.is_ascii_alphanumeric())
+            .any(|part| part == "pat");
     let check = if secret {
         Check::Secret
     } else {
@@ -148,15 +161,21 @@ fn import_finding(item: &Value, roots: &[PathBuf]) -> Option<Finding> {
     } else {
         (
             text(
-                item["message"]["text"]
-                    .as_str()
-                    .unwrap_or("Review the reported location."),
+                &redact_text(
+                    item["message"]["text"]
+                        .as_str()
+                        .unwrap_or("Review the reported location."),
+                )
+                .value,
                 900,
             ),
             text(
-                item["properties"]["fix"]
-                    .as_str()
-                    .unwrap_or("Review the rule guidance."),
+                &redact_text(
+                    item["properties"]["fix"]
+                        .as_str()
+                        .unwrap_or("Review the rule guidance."),
+                )
+                .value,
                 600,
             ),
         )
@@ -192,5 +211,37 @@ mod tests {
         assert_eq!(findings[0].path, "src config.env");
         assert_eq!(findings[0].line, Some(8));
         assert!(!encode(&findings).unwrap().contains("raw credential"));
+    }
+
+    #[test]
+    fn import_masks_external_secret_rules_and_recognized_keys_in_other_text() {
+        let roots = [PathBuf::from("/project")];
+        let location = json!([{"physicalLocation":{"artifactLocation":{"uri":"src/config"}}}]);
+        for rule in [
+            "aws-access-key-id",
+            "github-pat",
+            "private-key",
+            "generic-api-key",
+        ] {
+            let finding = import_finding(
+                &json!({"ruleId":rule, "message":{"text":"opaque-value"},
+                    "properties":{"fix":"remove opaque-value"}, "locations":location}),
+                &roots,
+            )
+            .unwrap();
+            assert_eq!(finding.check, Check::Secret, "{rule}");
+            assert!(!encode(&finding).unwrap().contains("opaque-value"));
+        }
+
+        let key = "ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let finding = import_finding(
+            &json!({"ruleId":"pattern", "message":{"text":format!("Observed {key}")},
+                "properties":{"fix":format!("Remove {key}")}, "locations":location}),
+            &roots,
+        )
+        .unwrap();
+        assert_eq!(finding.check, Check::Sast);
+        assert_eq!(finding.description, "Observed [redacted]");
+        assert_eq!(finding.fix, "Remove [redacted]");
     }
 }
