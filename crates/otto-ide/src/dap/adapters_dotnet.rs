@@ -57,6 +57,7 @@ pub(crate) fn parse_dotnet_project_meta(proj_path: &Path, xml: &str) -> (Option<
 }
 
 /// Compute the Unity Editor Mono Soft Debugger port from the editor's PID.
+#[cfg(test)]
 pub(crate) const fn unity_editor_debug_port(pid: u32) -> u16 {
     56000 + (pid % 1000) as u16
 }

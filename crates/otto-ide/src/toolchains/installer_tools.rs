@@ -3,9 +3,10 @@
 use std::path::{Path, PathBuf};
 
 use crate::toolchains_catalog::{
-    clangd_download_url, codelldb_vsix_url, jq_binary_url, kotlin_lsp_zip_url,
-    netcoredbg_tarball_url, rust_analyzer_gz_url, uv_tarball_url, EcosystemKind, TargetPlatform,
-    BASH_LSP_NPM_PACKAGES, CSHARP_LS_TOOL, DEBUGPY_PKG, DLV_PKG, GOPLS_PKG, JAVA_DEBUG_JAR_NAME,
+    clangd_download_url, codelldb_vsix_url, csharp_ls_version_for_dotnet_sdk, jq_binary_url,
+    kotlin_lsp_zip_url, netcoredbg_download_asset, rust_analyzer_gz_url, uv_tarball_url,
+    EcosystemKind, TargetPlatform, BASH_LSP_NPM_PACKAGES, CSHARP_LS_TOOL, DEBUGPY_PKG, DLV_PKG,
+    FSAUTOCOMPLETE_TOOL, FSAUTOCOMPLETE_VERSION, GOPLS_PKG, JAVA_DEBUG_JAR_NAME,
     JAVA_DEBUG_JAR_URL, JDTLS_TARBALL_URL, JSON_LSP_NPM_PACKAGES, JS_DEBUG_TARBALL_URL,
     PYRIGHT_PKG, TS_LSP_NPM_PACKAGES,
 };
@@ -328,28 +329,54 @@ pub(super) async fn install_local_lsp(
             if let Some(ref dr) = resolved_root {
                 env_pairs.push(("DOTNET_ROOT", dr.as_path()));
             }
-            let tool_dest = tools_dir.join(CSHARP_LS_TOOL);
-            let subcmd = if tool_dest.is_file() {
-                "update"
-            } else {
-                "install"
-            };
-            run_local_cmd(
-                mgr,
-                job_id,
-                75,
-                &dotnet_bin,
-                &[
-                    "tool",
-                    subcmd,
-                    "--tool-path",
-                    &tools_dir.to_string_lossy(),
-                    CSHARP_LS_TOOL,
-                ],
-                &env_pairs,
-            )
-            .await?;
-            Ok(tool_dest.to_string_lossy().into_owned())
+            let sdk_ver = super::discovery::read_dotnet_bin_version(&dotnet_bin).or_else(|| {
+                resolved_root
+                    .as_deref()
+                    .map(super::discovery::dotnet_dir_version)
+            });
+            let csharp_ver = csharp_ls_version_for_dotnet_sdk(sdk_ver.as_deref());
+            let tools_dir_str = tools_dir.to_string_lossy().into_owned();
+            // Pin csharp-ls to the active SDK's TFM so installing on .NET 8/9 never pulls
+            // a newer release requiring a higher runtime (BUG-22), and also install
+            // fsautocomplete so F# gets a working LSP out of the box (RED-3).
+            for (tool, version, progress) in [
+                (CSHARP_LS_TOOL, csharp_ver, 70u8),
+                (FSAUTOCOMPLETE_TOOL, FSAUTOCOMPLETE_VERSION, 78u8),
+            ] {
+                let dest = tools_dir.join(tool);
+                if dest.is_file() {
+                    let _ = run_local_cmd(
+                        mgr,
+                        job_id,
+                        progress.saturating_sub(2),
+                        &dotnet_bin,
+                        &["tool", "uninstall", "--tool-path", &tools_dir_str, tool],
+                        &env_pairs,
+                    )
+                    .await;
+                }
+                run_local_cmd(
+                    mgr,
+                    job_id,
+                    progress,
+                    &dotnet_bin,
+                    &[
+                        "tool",
+                        "install",
+                        "--tool-path",
+                        &tools_dir_str,
+                        "--version",
+                        version,
+                        tool,
+                    ],
+                    &env_pairs,
+                )
+                .await?;
+            }
+            Ok(tools_dir
+                .join(CSHARP_LS_TOOL)
+                .to_string_lossy()
+                .into_owned())
         }
         EcosystemKind::Node => {
             let npm = resolve_best_sdk_bin(mgr, root, EcosystemKind::Node, "npm")
@@ -522,35 +549,50 @@ pub(super) async fn install_local_dap(
             staged_res
         }
         EcosystemKind::Dotnet => {
-            let archive = tmp.join("netcoredbg.tar.gz");
-            download_https_to_file(
-                mgr,
-                job_id,
-                &netcoredbg_tarball_url(platform),
-                &archive,
-                None,
-                85,
-            )
-            .await?;
+            let asset = netcoredbg_download_asset(platform)?;
+            let archive = tmp.join(if asset.is_zip {
+                "netcoredbg.zip"
+            } else {
+                "netcoredbg.tar.gz"
+            });
+            download_https_to_file(mgr, job_id, &asset.url, &archive, None, 85).await?;
             let dest = root.join("dotnet/dap");
             let _ = tokio::fs::remove_dir_all(&dest).await;
             tokio::fs::create_dir_all(&dest)
                 .await
                 .map_err(|e| e.to_string())?;
-            run_local_cmd(
-                mgr,
-                job_id,
-                94,
-                Path::new("tar"),
-                &[
-                    "-xzf",
-                    &archive.to_string_lossy(),
-                    "-C",
-                    &dest.to_string_lossy(),
-                ],
-                &[],
-            )
-            .await?;
+            if asset.is_zip {
+                run_local_cmd(
+                    mgr,
+                    job_id,
+                    94,
+                    Path::new("unzip"),
+                    &[
+                        "-q",
+                        "-o",
+                        &archive.to_string_lossy(),
+                        "-d",
+                        &dest.to_string_lossy(),
+                    ],
+                    &[],
+                )
+                .await?;
+            } else {
+                run_local_cmd(
+                    mgr,
+                    job_id,
+                    94,
+                    Path::new("tar"),
+                    &[
+                        "-xzf",
+                        &archive.to_string_lossy(),
+                        "-C",
+                        &dest.to_string_lossy(),
+                    ],
+                    &[],
+                )
+                .await?;
+            }
             let _ = tokio::fs::remove_file(&archive).await;
             let adapter = [dest.join("netcoredbg/netcoredbg"), dest.join("netcoredbg")]
                 .into_iter()
@@ -666,5 +708,79 @@ pub(super) async fn install_local_dap(
         EcosystemKind::Ios => Err("lldb-dap ships with Xcode / Command Line Tools.".into()),
         EcosystemKind::Android => Err("adb ships with Android SDK platform-tools.".into()),
         EcosystemKind::Flutter => Err("Flutter debugging ships inside the Flutter SDK.".into()),
+    }
+}
+
+#[cfg(test)]
+mod dotnet_installer_tests {
+    use super::*;
+    use crate::toolchains_catalog::{TargetArch, TargetOs};
+
+    #[tokio::test]
+    async fn local_dotnet_lsp_pins_csharp_ls_for_sdk8_and_installs_fsautocomplete_and_dap_rejects_mac_x64(
+    ) {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        let tc_root = data_dir.join("toolchains");
+        let fake_sdk = tmp.path().join("dotnet-sdk-8");
+        let log_file = tmp.path().join("dotnet-invocations.log");
+        std::fs::create_dir_all(&fake_sdk).unwrap();
+        let fake_dotnet = fake_sdk.join("dotnet");
+        std::fs::write(
+            &fake_dotnet,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 8.0.408; exit 0; fi\necho \"$*\" >> '{}'\nexit 0\n",
+                log_file.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake_dotnet, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mgr = ToolchainManager::new(data_dir);
+        let platform = TargetPlatform {
+            os: TargetOs::Macos,
+            arch: TargetArch::Aarch64,
+        };
+        let installed = install_local_lsp(
+            &mgr,
+            "job_dotnet_lsp",
+            &tc_root,
+            EcosystemKind::Dotnet,
+            platform,
+            None,
+            None,
+            Some(&fake_sdk),
+        )
+        .await
+        .expect("local dotnet lsp install");
+        assert!(installed.ends_with("dotnet/tools/csharp-ls"));
+        let log = std::fs::read_to_string(&log_file).unwrap();
+        assert!(
+            log.contains("--version 0.16.0 csharp-ls"),
+            "BUG-22: expected csharp-ls 0.16.0 for .NET 8 SDK, got:\n{log}"
+        );
+        assert!(
+            log.contains("--version 0.85.4 fsautocomplete"),
+            "RED-3: expected fsautocomplete 0.85.4 installed alongside csharp-ls, got:\n{log}"
+        );
+
+        let err_x64 = install_local_dap(
+            &mgr,
+            "job_dotnet_dap",
+            &tc_root,
+            EcosystemKind::Dotnet,
+            TargetPlatform {
+                os: TargetOs::Macos,
+                arch: TargetArch::X86_64,
+            },
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err_x64.contains("macOS x86_64"),
+            "BUG-20: expected clear error on macOS x86_64 netcoredbg install, got: {err_x64}"
+        );
     }
 }

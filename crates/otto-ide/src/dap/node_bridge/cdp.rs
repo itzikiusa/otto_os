@@ -232,6 +232,7 @@ pub(super) async fn discover_attach_ws_path(
     discover_attach_ws_path_for(port, requested_url, CDP_HANDSHAKE_TIMEOUT).await
 }
 
+#[cfg(test)]
 pub(super) async fn discover_attach_ws_path_with_timeout(
     port: u16,
     timeout: Duration,

@@ -41,6 +41,8 @@ pub const PYRIGHT_PKG: &str = "pyright";
 pub const DEBUGPY_PKG: &str = "debugpy";
 pub const CSHARP_LS_TOOL: &str = "csharp-ls";
 pub const FSAUTOCOMPLETE_TOOL: &str = "fsautocomplete";
+pub const FSAUTOCOMPLETE_VERSION: &str = "0.85.4";
+pub const NETCOREDBG_RELEASE_VERSION: &str = "3.2.0-1092";
 
 /// Normalized target operating system (`macos` or `linux`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -207,12 +209,12 @@ impl TargetPlatform {
         }
     }
 
-    pub const fn netcoredbg_slug(self) -> &'static str {
+    pub const fn netcoredbg_slug(self) -> Option<&'static str> {
         match (self.os, self.arch) {
-            (TargetOs::Macos, TargetArch::Aarch64) => "osx-amd64",
-            (TargetOs::Macos, TargetArch::X86_64) => "osx-amd64",
-            (TargetOs::Linux, TargetArch::Aarch64) => "linux-arm64",
-            (TargetOs::Linux, TargetArch::X86_64) => "linux-amd64",
+            (TargetOs::Macos, TargetArch::Aarch64) => Some("osx-arm64"),
+            (TargetOs::Macos, TargetArch::X86_64) => None,
+            (TargetOs::Linux, TargetArch::Aarch64) => Some("linux-arm64"),
+            (TargetOs::Linux, TargetArch::X86_64) => Some("linux-amd64"),
         }
     }
 }
@@ -565,11 +567,54 @@ pub fn dotnet_sdk_tarball_url(version: &str, platform: TargetPlatform) -> String
     )
 }
 
-pub fn netcoredbg_tarball_url(platform: TargetPlatform) -> String {
-    format!(
-        "https://github.com/Samsung/netcoredbg/releases/latest/download/netcoredbg-{}.tar.gz",
-        platform.netcoredbg_slug()
-    )
+/// Verified upstream `Samsung/netcoredbg` release archive descriptor (BUG-20).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetcoredbgReleaseAsset {
+    pub url: String,
+    pub is_zip: bool,
+}
+
+/// Resolve the official `Samsung/netcoredbg` release archive for `platform` (BUG-20).
+/// Upstream `3.2.0-1092` publishes `netcoredbg-osx-arm64.zip`,
+/// `netcoredbg-linux-amd64.tar.gz`, and `netcoredbg-linux-arm64.tar.gz` (no macOS x86_64).
+pub fn netcoredbg_download_asset(
+    platform: TargetPlatform,
+) -> Result<NetcoredbgReleaseAsset, String> {
+    let Some(slug) = platform.netcoredbg_slug() else {
+        return Err(format!(
+            "Prebuilt Samsung/netcoredbg {NETCOREDBG_RELEASE_VERSION} archives are not published for macOS x86_64; build netcoredbg from source or install via Homebrew."
+        ));
+    };
+    let is_zip = platform.os == TargetOs::Macos;
+    let ext = if is_zip { "zip" } else { "tar.gz" };
+    Ok(NetcoredbgReleaseAsset {
+        url: format!(
+            "https://github.com/Samsung/netcoredbg/releases/download/{NETCOREDBG_RELEASE_VERSION}/netcoredbg-{slug}.{ext}"
+        ),
+        is_zip,
+    })
+}
+
+/// Pick the latest `csharp-ls` NuGet version compatible with the active `.NET` SDK major
+/// version so `dotnet tool install` never pulls a tool requiring a newer runtime (BUG-22).
+///
+/// Verified NuGet target frameworks:
+/// - `0.16.0` -> `net8.0`
+/// - `0.20.0` -> `net9.0`
+/// - `0.26.0` -> `net10.0`
+/// - `0.29.0` -> `net11.0`
+pub fn csharp_ls_version_for_dotnet_sdk(sdk_version: Option<&str>) -> &'static str {
+    let major = sdk_version
+        .map(str::trim)
+        .and_then(|s| s.trim_start_matches('v').split(['.', '-', '+']).next())
+        .and_then(|m| m.parse::<u32>().ok());
+    match major {
+        Some(0..=8) => "0.16.0",
+        Some(9) => "0.20.0",
+        Some(10) => "0.26.0",
+        Some(11..) => "0.29.0",
+        None => "0.20.0",
+    }
 }
 
 pub fn node_tarball_url(version: &str, platform: TargetPlatform) -> String {
@@ -1853,5 +1898,48 @@ mod tests {
             parse_zls_select_version_json(r#"{"code":1,"message":"incompatible"}"#, mac_arm)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn netcoredbg_download_asset_matches_verified_upstream_release_files() {
+        let mac_arm = ALL_PLATFORMS[0];
+        let mac_x64 = ALL_PLATFORMS[1];
+        let lin_arm = ALL_PLATFORMS[2];
+        let lin_x64 = ALL_PLATFORMS[3];
+
+        let mac = netcoredbg_download_asset(mac_arm).expect("macOS arm64 asset");
+        assert!(mac.is_zip);
+        assert!(
+            mac.url.ends_with("/3.2.0-1092/netcoredbg-osx-arm64.zip"),
+            "BUG-20: unexpected macOS arm64 asset URL: {}",
+            mac.url
+        );
+
+        let err_x64 = netcoredbg_download_asset(mac_x64).unwrap_err();
+        assert!(
+            err_x64.contains("macOS x86_64"),
+            "BUG-20: macOS x86_64 must fail clearly: {err_x64}"
+        );
+
+        let la = netcoredbg_download_asset(lin_arm).expect("linux arm64 asset");
+        assert!(!la.is_zip);
+        assert!(la
+            .url
+            .ends_with("/3.2.0-1092/netcoredbg-linux-arm64.tar.gz"));
+
+        let lx = netcoredbg_download_asset(lin_x64).expect("linux amd64 asset");
+        assert!(!lx.is_zip);
+        assert!(lx
+            .url
+            .ends_with("/3.2.0-1092/netcoredbg-linux-amd64.tar.gz"));
+    }
+
+    #[test]
+    fn csharp_ls_version_matches_selected_dotnet_sdk_major() {
+        assert_eq!(csharp_ls_version_for_dotnet_sdk(Some("8.0.408")), "0.16.0");
+        assert_eq!(csharp_ls_version_for_dotnet_sdk(Some("9.0.203")), "0.20.0");
+        assert_eq!(csharp_ls_version_for_dotnet_sdk(Some("10.0.100")), "0.26.0");
+        assert_eq!(csharp_ls_version_for_dotnet_sdk(Some("11.0.100")), "0.29.0");
+        assert_eq!(csharp_ls_version_for_dotnet_sdk(None), "0.20.0");
     }
 }
