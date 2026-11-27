@@ -70,6 +70,8 @@
     assistantFooter?: Snippet<[Extract<TurnItem, { type: 'assistant_message' }>]>;
     /** Open the thread's Changes surface on a file (the turn changes card). */
     onopendiff?: (path: string) => void;
+    /** Keep every work step expanded (no "N earlier steps" or "Worked for …" folds). */
+    expandWork?: boolean;
   }
 
   let {
@@ -87,6 +89,7 @@
     formatAssistantText,
     assistantFooter,
     onopendiff,
+    expandWork = false,
   }: Props = $props();
 
   /** Edit as new message: only on the person's latest message (less chrome). */
@@ -352,8 +355,8 @@
     </div>
   {:else if row.kind === 'work'}
     {@const flat = workRowEntries(row)}
-    {@const fold = shouldFold(flat, turns, pendingIds, turnById)}
-    {@const earlier = fold ? 0 : earlierSteps(row.parts, pendingIds, !stretchDone(flat, turns, turnById), keptOpen)}
+    {@const fold = expandWork ? false : shouldFold(flat, turns, pendingIds, turnById)}
+    {@const earlier = expandWork || fold ? 0 : earlierSteps(row.parts, pendingIds, !stretchDone(flat, turns, turnById), keptOpen)}
     <div class="rt-work">
       <RuntimeWorkFold id={row.id} entries={flat} {fold} keepOpen={row.parts.some(keptOpen)} tokens={tokensByRow.get(row.id) ?? ''}>
         {#if earlier}

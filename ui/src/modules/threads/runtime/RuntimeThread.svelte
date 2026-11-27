@@ -45,7 +45,7 @@
   import { threadPrefs } from './threadPrefs.svelte';
   import { recallPrompt, sentPrompts, type HistoryState } from './promptHistory';
   import { dropAttachments, fileDrop } from './composerDrop';
-  import { READ_ONLY_CTX } from './childNav';
+  import { OPEN_CHILD_CTX, openChildThread, READ_ONLY_CTX } from './childNav';
   import RuntimeModelControl from './RuntimeModelControl.svelte';
   import { switchPromptFields } from './providerSwitch';
   import RuntimeNextLine from './RuntimeNextLine.svelte';
@@ -96,6 +96,10 @@
     compact?: boolean;
     /** No composer: another feature drives this thread (its cards stay answerable). */
     readOnly?: boolean;
+    /** Keep every work step unfolded (no "N earlier steps" / "Worked for …" collapse). */
+    expandWork?: boolean;
+    /** Allow "Open in Threads" from linked-thread rows even while read-only. */
+    allowOpenInThreads?: boolean;
     accessModeOverride?: RuntimeAccessMode | null;
     onaccessmodechange?: (mode: RuntimeAccessMode) => void;
     fallbackCwd?: string | null;
@@ -113,7 +117,7 @@
   }
 
   let {
-    sessionId, focused, onswitch, agentChat, hostCommands, compact = false, readOnly = false, accessModeOverride = null,
+    sessionId, focused, onswitch, agentChat, hostCommands, compact = false, readOnly = false, expandWork = false, allowOpenInThreads = false, accessModeOverride = null,
     onaccessmodechange, fallbackCwd = null, hasExternalContext = false, transformOutgoingText,
     transformRestoredQueuedText, onExternalContextConsumed, onopenpath, formatAssistantText,
     assistantFooter, composerTopSlot, composerFootLeadSlot, testIds,
@@ -131,8 +135,13 @@
   const session = $derived(runtimeThreads.get(sessionId));
   const effectiveCwd = $derived(session?.cwd ?? fallbackCwd ?? null);
   setContext(PATH_LINK_CTX, () => ({ sessionId, cwd: effectiveCwd, workspaceId: session?.workspace_id }));
-  // Another feature drives a read-only thread: its sub-thread cards neither open nor stop.
+  // Another feature drives a read-only thread: its sub-thread cards don't stop or hand over,
+  // but when `onswitch` is provided a click still opens the sub-thread in the same pane.
   setContext(READ_ONLY_CTX, () => readOnly);
+  setContext(OPEN_CHILD_CTX, (id: string, modifier: boolean) => {
+    if (onswitch && !modifier) onswitch(id);
+    else openChildThread(id, modifier);
+  });
 
   const p = $derived(runtimeViews.projections[sessionId] ?? null);
   const loadError = $derived(runtimeViews.loadError[sessionId] ?? null);
@@ -450,7 +459,7 @@
 
 <svelte:window onkeydown={onWindowKey} />
 <section class="rt" class:compact aria-label="Conversation" data-testid="runtime-thread-{sessionId}" use:fileDrop={{ box: () => composerBoxEl, onfiles: (f) => { if (!readOnly) dropAttachments(ownerId, draft, f, caps, agentName); } }}>
-  {#if onswitch}<RuntimeLinkedThreads {sessionId} {onswitch} />{/if}
+  {#if onswitch}<RuntimeLinkedThreads {sessionId} {onswitch} {allowOpenInThreads} />{/if}
   <div class="rt-scroll" class:isolated={!ui.overlayOpen} bind:this={scroller}>
     <div class="rt-stream" bind:this={streamEl} data-runtime-stream>
       <div class="rt-col">
@@ -488,6 +497,7 @@
               onopendiff={hostCommands?.openDiff ? (path) => hostCommands.openDiff!(sessionId, path) : undefined}
               {formatAssistantText}
               {assistantFooter}
+              {expandWork}
             />
           {/if}
           <RuntimeTurnStatus

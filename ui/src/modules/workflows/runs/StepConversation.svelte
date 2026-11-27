@@ -30,10 +30,6 @@
   import { retentionNote } from './runWords';
   import { keptSessions } from './stepTabs';
 
-  /** The embed's read-only props (agreed-names.md §9b; added to
-   *  RuntimeThreadViewProps by the editor package — typed here until then). */
-  type ReadOnlyEmbedProps = RuntimeThreadViewProps & { readOnly?: boolean; onunavailable?: (reason: 'deleted' | 'forbidden') => void };
-
   interface Props {
     thread?: StepThread | null;
     /** PTY session ids (an older run). */
@@ -44,8 +40,10 @@
     runId: string;
     nodeId: string;
     attempt: number;
+    /** Switch to another thread (a sub-thread card or Back to parent) in the same pane. */
+    onselectthread?: (threadId: string) => void;
   }
-  let { thread = null, sessions = [], digest = null, workspaceId, runId, nodeId, attempt }: Props = $props();
+  let { thread = null, sessions = [], digest = null, workspaceId, runId, nodeId, attempt, onselectthread }: Props = $props();
 
   let gone = $state<'deleted' | 'forbidden' | null>(null);
   // Another step (or attempt) in the same pane starts over: the last one's
@@ -76,13 +74,13 @@
   });
   const pty = $derived(keptSessions(ptyIds, kept));
 
-  let View = $state<Component<ReadOnlyEmbedProps> | null>(null);
+  let View = $state<Component<RuntimeThreadViewProps> | null>(null);
   let viewError = $state<string | null>(null);
   let viewRetry = $state(0);
   $effect(() => {
     void viewRetry;
     if (!live || View) return;
-    loadRuntimeThreadView().then((m) => (View = m.default as Component<ReadOnlyEmbedProps>), (e) => (viewError = loadErrorText(e)));
+    loadRuntimeThreadView().then((m) => (View = m.default), (e) => (viewError = loadErrorText(e)));
   });
 
   // The digest's timeline, kept beside the run's files.
@@ -116,7 +114,16 @@
 
 {#if live && View}
   <div class="embed" data-testid="wf-step-conversation">
-    <View sessionId={thread!.thread_id} {workspaceId} readOnly hideEmbedBarWhenUnlinked onunavailable={(reason) => (gone = reason)} />
+    <View
+      sessionId={thread!.thread_id}
+      {workspaceId}
+      readOnly
+      showHeader
+      showOpenInThreads
+      expandWork
+      {onselectthread}
+      onunavailable={(reason) => (gone = reason)}
+    />
   </div>
   <p class="note"><Icon name="lock" size={12} />{note}</p>
 {:else if live}
@@ -161,8 +168,12 @@
   .embed {
     display: flex;
     flex-direction: column;
-    min-block-size: 360px;
+    flex: 1;
+    min-block-size: 420px;
     block-size: 100%;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
+    overflow: hidden;
   }
   .note {
     display: flex;

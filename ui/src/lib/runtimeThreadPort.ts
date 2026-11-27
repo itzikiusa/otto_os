@@ -195,7 +195,15 @@ export type RuntimeThreadViewProps = {
   /** Notifies the host when the user picks an access mode inside the embed chip. */
   onaccessmodechange?: (mode: RuntimeAccessMode) => void;
   hideEmbedBarWhenUnlinked?: boolean;
-  /** No composer and no "Open in Threads" (a thread another feature drives). */
+  /** Always show the Threads header bar (status, provider, title, model, tokens, Open in Threads). */
+  showHeader?: boolean;
+  /** Offer "Open in Threads" even when `readOnly` is true (e.g. settled workflow steps). */
+  showOpenInThreads?: boolean;
+  /** Show every tool call in the timeline without collapsing into "N earlier steps" / "Worked for …". */
+  expandWork?: boolean;
+  /** Host-controlled thread switching (sub-thread card / linked strip / Back to parent). */
+  onselectthread?: (sessionId: string) => void;
+  /** No composer (a thread another feature drives, or a settled step). */
   readOnly?: boolean;
   onunavailable?: (reason: RuntimeEmbedUnavailable) => void;
   fallbackCwd?: string | null;

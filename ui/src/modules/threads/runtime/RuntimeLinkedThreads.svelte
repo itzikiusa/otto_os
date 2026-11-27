@@ -18,7 +18,7 @@
   import { READ_ONLY_CTX } from './childNav';
   import { runtimeThreads } from './runtimeThreads.svelte';
 
-  let { sessionId, onswitch }: { sessionId: string; onswitch?: (id: string) => void } = $props();
+  let { sessionId, onswitch, allowOpenInThreads = false }: { sessionId: string; onswitch?: (id: string) => void; allowOpenInThreads?: boolean } = $props();
   const linked = $derived(runtimeThreads.group(sessionId));
   const readOnly = getContext<(() => boolean) | undefined>(READ_ONLY_CTX);
   let open = $state(false);
@@ -68,7 +68,7 @@
             <span class="rt-title ellipsis" dir="auto">{t.title}</span>
             <span class="rt-meta">{current ? 'Shown' : st.text}</span>
           </button>
-          {#if !readOnly?.()}
+          {#if allowOpenInThreads || !readOnly?.()}
             <button type="button" class="icon-btn" aria-label="Open {t.title} in Threads" title="Open in Threads" onclick={() => pick(t.id, true)}>
               <Icon name="external" size={12} />
             </button>

@@ -119,6 +119,11 @@
   const segs = $derived(!child && node?.phases?.length ? phaseSegments(node.phases, node.status === 'running' ? now : Date.parse(node.started_at ?? '') + (node.duration_ms ?? 0)) : []);
   const segTotal = $derived(Math.max(1, segs.reduce((s, x) => s + x.ms, 0)));
   const summarizer = $derived(node?.children?.find((c) => /^summar/i.test(c.label) || c.id === 'summarizer') ?? null);
+  /** The conversation tab mounts Threads' own header (provider · model · tokens), so don't repeat the model chip above it. */
+  const showingThread = $derived(
+    (tab === 'conversation' && thread?.runner === 'threads' && thread.available !== false) ||
+    (tab === 'summarizer' && !!summarizer?.thread_id),
+  );
   const output = $derived(body?.output);
   const reviewOut = $derived((output ?? {}) as { score_text?: string; outcome?: string; blocking?: unknown[]; advisory?: unknown[]; findings?: unknown[] });
   // A review step's records: the reviewer's own findings, "Open review".
@@ -184,7 +189,7 @@
       <h3 class="name ellipsis" dir="auto">{child?.label ?? step?.name ?? 'final-output.md'}</h3>
       {#if word?.word}<span class="word {word.tone}">{word.word}</span>{/if}
       <span class="grow"></span>
-      {#if modelChip}<span class="chip" title="What ran">{modelChip}</span>{/if}
+      {#if modelChip && !showingThread}<span class="chip" title="What ran">{modelChip}</span>{/if}
       {#if onmaximize}
         <button type="button" class="icon-btn" aria-label={maximized ? 'Show the run' : 'Maximize conversation'} title={maximized ? 'Show the run' : 'Maximize conversation'} onclick={onmaximize}><Icon name={maximized ? 'minimize' : 'maximize'} size={13} /></button>
       {/if}
@@ -212,7 +217,7 @@
     <Tabs label="Step details" tabs={tabs.map((id) => ({ id, label: TAB_LABEL[id], testid: `wf-step-tab-${id}`, count: id === 'findings' && findings.length ? findings.length : undefined }))} value={tab} onchange={(id) => (picked = id)} idBase="wf-step" />
   {/if}
 
-  <div class="body" role="tabpanel" id="wf-step-panel-{tab}" aria-labelledby="wf-step-tab-{tab}">
+  <div class="body" class:conv={showingThread} role="tabpanel" id="wf-step-panel-{tab}" aria-labelledby="wf-step-tab-{tab}">
     {#if tab === 'conversation'}
       <!-- A reviewer keeps no digest file of its own: no nodeId, so it never reads the step's. -->
       <StepConversation {thread} sessions={child ? [] : (node?.sessions ?? [])} digest={child ? null : (body?.thread?.digest ?? null)} {workspaceId} runId={run.id} nodeId={child ? '' : (node?.node_id ?? '')} attempt={node?.attempts ?? 1} />
@@ -307,6 +312,7 @@
   .pane {
     display: flex;
     flex-direction: column;
+    flex: 1;
     gap: var(--sp-4);
     min-inline-size: 0;
     min-block-size: 0;
@@ -397,6 +403,11 @@
   .body {
     min-block-size: 0;
     min-inline-size: 0;
+  }
+  .body.conv {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
   }
   .none,
   .dim {
