@@ -27,7 +27,10 @@ pub const JAVA_DEBUG_JAR_NAME: &str = "com.microsoft.java.debug.plugin-0.53.1.ja
 pub const GOPLS_PKG: &str = "golang.org/x/tools/gopls@latest";
 pub const DLV_PKG: &str = "github.com/go-delve/delve/cmd/dlv@latest";
 pub const JS_DEBUG_TARBALL_URL: &str =
-    "https://github.com/microsoft/vscode-js-debug/releases/download/v1.97.1/js-debug-dap-v1.97.1.tar.gz";
+    "https://github.com/microsoft/vscode-js-debug/releases/download/v1.140.1/js-debug-dap-v1.140.1.tar.gz";
+/// SHA-256 of [`JS_DEBUG_TARBALL_URL`] (the release asset's published digest).
+pub const JS_DEBUG_SHA256: &str =
+    "c72fab31bcbfdce6ad1f42adfd28eff8d4681dd3b03b5e2e6f9e72e6f9927faf";
 pub const TS_LSP_NPM_PACKAGES: &[&str] = &[
     "typescript",
     "typescript-language-server",

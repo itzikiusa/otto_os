@@ -14,7 +14,8 @@ use crate::toolchains_catalog::{
     dotnet_sdk_major_slot, jq_binary_url, kotlin_lsp_zip_url, netcoredbg_download_asset,
     rust_analyzer_gz_url, shfmt_binary_url, CatalogSdkEntry, EcosystemKind, TargetPlatform,
     CSHARP_LS_TOOL, DEBUGPY_PKG, DLV_PKG, FSAUTOCOMPLETE_TOOL, FSAUTOCOMPLETE_VERSION, GOPLS_PKG,
-    JAVA_DEBUG_JAR_NAME, JAVA_DEBUG_JAR_URL, JDTLS_TARBALL_URL, JS_DEBUG_TARBALL_URL, PYRIGHT_PKG,
+    JAVA_DEBUG_JAR_NAME, JAVA_DEBUG_JAR_URL, JDTLS_TARBALL_URL, JS_DEBUG_SHA256,
+    JS_DEBUG_TARBALL_URL, PYRIGHT_PKG,
 };
 use crate::types::{IdeInstallComponent, IdeSshSpec};
 
@@ -355,7 +356,7 @@ pub(super) fn build_remote_install_script_with_zls(
                     asset.url
                 ));
             }
-            EcosystemKind::Node => s.push_str(&format!("rm -rf \"$TC/node/dap\" && mkdir -p \"$TC/node/dap\"\nARCH=\"$TC/.downloads/js-debug.tar.gz\"\ndownload_and_verify '{JS_DEBUG_TARBALL_URL}' \"$ARCH\"\ntar -xzf \"$ARCH\" -C \"$TC/node/dap\" && rm -f \"$ARCH\"\nln -sfn \"$TC/node/dap/js-debug\" \"$TC/node/js-debug\"\necho \"INSTALLED_PATH:$TC/node/dap/js-debug/src/dapDebugServer.js\"\n")),
+            EcosystemKind::Node => s.push_str(&format!("rm -rf \"$TC/node/dap\" && mkdir -p \"$TC/node/dap\"\nARCH=\"$TC/.downloads/js-debug.tar.gz\"\ndownload_and_verify '{JS_DEBUG_TARBALL_URL}' \"$ARCH\" '{JS_DEBUG_SHA256}'\ntar -xzf \"$ARCH\" -C \"$TC/node/dap\" && rm -f \"$ARCH\"\nln -sfn \"$TC/node/dap/js-debug\" \"$TC/node/js-debug\"\necho \"INSTALLED_PATH:$TC/node/dap/js-debug/src/dapDebugServer.js\"\n")),
             EcosystemKind::Python => s.push_str(&format!("\"$TC/python/bin/uv\" venv --clear \"$TC/python/dap\" && \"$TC/python/bin/uv\" pip install --python \"$TC/python/dap/bin/python\" '{DEBUGPY_PKG}'\necho \"INSTALLED_PATH:$TC/python/dap/bin/python\"\n")),
             EcosystemKind::Shell => s.push_str("mkdir -p \"$TC/shell/bin\"\nprintf '#!/usr/bin/env bash\\nexec bash -x \"$@\"\\n' > \"$TC/shell/bin/bashdb\" && chmod +x \"$TC/shell/bin/bashdb\"\necho \"INSTALLED_PATH:$TC/shell/bin/bashdb\"\n"),
             EcosystemKind::Json => s.push_str(&format!("mkdir -p \"$TC/json/bin\"\nJQ_TMP=\"$TC/.downloads/jq\"\ndownload_and_verify '{}' \"$JQ_TMP\"\nmv \"$JQ_TMP\" \"$TC/json/bin/jq\" && chmod +x \"$TC/json/bin/jq\"\necho \"INSTALLED_PATH:$TC/json/bin/jq\"\n", jq_binary_url("1.7.1", platform))),
@@ -434,6 +435,20 @@ mod tests {
         )
         .unwrap();
         assert!(shell_lsp.contains("$TC/node/current/bin"));
+    }
+
+    #[test]
+    fn remote_js_debug_install_verifies_the_pinned_sha256() {
+        let script = build_remote_install_script(
+            EcosystemKind::Node,
+            IdeInstallComponent::Dap,
+            TargetPlatform::host(),
+            None,
+        )
+        .unwrap();
+        assert!(script.contains(&format!(
+            "download_and_verify '{JS_DEBUG_TARBALL_URL}' \"$ARCH\" '{JS_DEBUG_SHA256}'"
+        )));
     }
 
     #[test]
