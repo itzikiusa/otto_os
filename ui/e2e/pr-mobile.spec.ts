@@ -33,8 +33,11 @@ test('PR header: every action is on screen and reachable', async ({ page }) => {
     expect((await b.boundingBox())!.height).toBeGreaterThanOrEqual(44);
   }
   await expect(actions.locator('.btn')).toHaveCount(3);
-  // Check out is a visible button on the details card's branch row.
-  await expect(page.getByTestId('pr-checkout')).toBeAttached();
+  // Check out is a visible button on the details card's branch row (ⓘ: the Detail pane, a sheet here).
+  await page.getByTestId('pr-details-toggle').tap();
+  await expect(page.getByTestId('pr-checkout')).toBeVisible();
+  await page.getByRole('button', { name: 'Close Pull request details' }).tap();
+  await expect(page.getByTestId('pr-checkout')).toHaveCount(0);
   await expectNoHorizontalOverflow(page);
   // A phone: everything else on the PR screen takes a finger too (design review 2, H8) —
   // ‹ back, the agent, a tab's ✕, Conversation · Files, Edit, ⋯ and Post comment.

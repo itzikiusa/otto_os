@@ -126,7 +126,7 @@
       const n = Number(router.parts[3]);
       untrack(() => {
         git.openRepoTab(r.repo!, 'prs');
-        if (Number.isInteger(n) && n > 0) prWorkspace.open(r.repo!, n);
+        if (Number.isInteger(n) && n > 0) prWorkspace.reveal(r.repo!, n);
         router.replace('git');
       });
       return;

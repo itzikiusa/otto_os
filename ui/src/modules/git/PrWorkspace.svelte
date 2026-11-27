@@ -56,8 +56,15 @@
   let prView = $state('summary');
   /** The tab strip earns its row with two or more open PRs. */
   const strip = $derived(tabs.open.length >= 2);
-  /** Phone: an opened PR is the page (pushed from the list); Back returns. */
+  /** Phone: an opened PR is the page (pushed from the list; a deep link lands on it); Back returns. */
   let phoneOpen = $state(false);
+  $effect(() => {
+    if (prWorkspace.revealed !== repoId) return;
+    untrack(() => {
+      phoneOpen = true;
+      prWorkspace.revealed = null;
+    });
+  });
   /** The repository has no pull request at all: no list pane, the EmptyState owns the page. */
   let listEmpty = $state(false);
   let createOpen = $state(false);

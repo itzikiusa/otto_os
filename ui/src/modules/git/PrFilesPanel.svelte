@@ -216,7 +216,7 @@
   .pfp-filter-input { width: 100%; height: 26px; font-size: var(--fs-s); }
   .pfp-list { flex: 1; min-height: 0; overflow-y: auto; padding-block-end: 6px; }
   .pfp-note { margin: 0; padding: 8px 12px; font-size: var(--fs-s); color: var(--text-dim); }
-  @media (max-width: 1024px) {
+  @media (pointer: coarse) {
     .pfp-icon { width: 32px; height: 32px; }
   }
 </style>

@@ -86,8 +86,6 @@ test.beforeEach(async ({ page }) => {
     localStorage.setItem('otto_workspace', id);
     localStorage.setItem('otto_rail_expanded', '0');
     localStorage.setItem('otto_git_auto_fetch', JSON.stringify({ enabled: false }));
-    // The PR Code tab's file tree is opt-in; these checks drive it.
-    localStorage.setItem('otto_pr_tree', '1');
     // Long-task log (Chromium): every main-thread block over 50 ms.
     const w = window as unknown as { __lt: number[] };
     w.__lt = [];
@@ -241,12 +239,13 @@ for (const mode of ['summary', 'legacy'] as const) {
     expect(await maxLongTask(page)).toBeLessThan(200);
     await page.getByRole('button', { name: 'Unified' }).click();
 
-    // The navigator is windowed too (GIT2-12): 1k files never mount 1k nav rows.
-    expect(await page.locator('.diff-nav .nav-file').count(), 'nav rows mounted').toBeLessThan(120);
-    // Jump to a file near the end from the navigator (filter to reach it — its
-    // row is outside the nav window): its comment renders.
-    await page.locator('.nav-search').fill(`file_${FILES - 3}.ts`);
-    await page.locator('.diff-nav .nav-file', { hasText: `file_${FILES - 3}.ts` }).click();
+    // The Files panel's tree is windowed too (GIT2-12): 1k files never mount 1k rows.
+    const files = page.locator('.pfp');
+    expect(await files.locator('.nav-file').count(), 'tree rows mounted').toBeLessThan(120);
+    // Jump to a file near the end from the tree (filter to reach it — its
+    // row is outside the window): its comment renders.
+    await files.getByRole('searchbox', { name: 'Filter files' }).fill(`file_${FILES - 3}.ts`);
+    await files.locator('.nav-file', { hasText: `file_${FILES - 3}.ts` }).click();
     await expect(page.getByText('Deep comment far down the diff')).toBeVisible({ timeout: 15_000 });
     expect(await domRows(page)).toBeLessThan(ROW_BUDGET);
     expect(resizeLoops, 'no "ResizeObserver loop" errors').toBe(0);

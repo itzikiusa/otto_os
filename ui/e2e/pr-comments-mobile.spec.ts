@@ -42,6 +42,7 @@ test('one statement of the checks; merge rules and the open task are in the deta
   await expect(page.locator('.prd-title')).toBeVisible({ timeout: 15_000 });
   await expect(page.getByTestId('pr-status')).toHaveText('1 of 2 checks failing');
   await expect(page.locator('.prd-head')).not.toContainText('task open');
+  await page.getByTestId('pr-details-toggle').tap(); // the details card: the Detail pane's sheet
   const rules = page.getByRole('region', { name: 'Merge rules' });
   await expect(rules).toContainText('1 of 3 met');
   await expect(rules.getByTestId('pr-open-tasks')).toHaveText('1 task open');

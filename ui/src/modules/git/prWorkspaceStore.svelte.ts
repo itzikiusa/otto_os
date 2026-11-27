@@ -28,6 +28,8 @@ function load(): Record<string, PrTabs> {
 
 class PrWorkspaceStore {
   byRepo: Record<string, PrTabs> = $state(load());
+  /** A deep link asked for this PR: on a phone the workspace pushes it (once). */
+  revealed = $state<string | null>(null);
 
   tabs(repoId: string): PrTabs {
     return this.byRepo[repoId] ?? { open: [], active: null };
@@ -45,6 +47,12 @@ class PrWorkspaceStore {
   /** Open PR `n` (a background open keeps the current tab in front). */
   open(repoId: string, n: number, background = false): void {
     this.#set(repoId, prTabsAfterOpen(this.tabs(repoId), [n], background, MAX_PR_TABS));
+  }
+
+  /** A deep link: open PR `n` and show it, not the list, on a phone. */
+  reveal(repoId: string, n: number): void {
+    this.open(repoId, n);
+    this.revealed = repoId;
   }
 
   /** Open several at once; the first one comes to the front. */
