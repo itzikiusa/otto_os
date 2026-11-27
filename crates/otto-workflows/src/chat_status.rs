@@ -284,45 +284,128 @@ pub fn render_final(
             }
         }
     }
-    let mut tail = vec![];
+    let outcome = lines.pop().unwrap_or_default();
+    let outcome = if outcome.chars().count() > CHAT_MAX_CHARS.saturating_sub(200) {
+        clip(&outcome, CHAT_MAX_CHARS.saturating_sub(200))
+    } else {
+        outcome
+    };
+    let mut deliv_lines = vec![];
     for d in &overview.deliverables {
         let detail = d.detail.as_deref().filter(|s| !s.trim().is_empty());
         let words = match d.state {
-            DeliverableState::Done => detail.unwrap_or("posted").to_string(),
-            DeliverableState::Partial => detail.unwrap_or("partly posted").to_string(),
+            DeliverableState::Done => detail
+                .map(|s| clip(s, 180))
+                .unwrap_or_else(|| "posted".into()),
+            DeliverableState::Partial => detail
+                .map(|s| clip(s, 180))
+                .unwrap_or_else(|| "partly posted".into()),
             DeliverableState::Failed => match detail {
-                Some(why) => format!("not posted ({why})"),
+                Some(why) => format!("not posted ({})", clip(why, 180)),
                 None => "not posted".into(),
             },
             DeliverableState::PendingApproval => "pending approval".into(),
             DeliverableState::Unknown => "not confirmed".into(),
         };
-        tail.push(match &d.url {
-            Some(url) => format!("• [{}]({url}): {words}", d.label),
-            None => format!("• {}: {words}", d.label),
+        deliv_lines.push(match &d.url {
+            Some(url) => format!("• [{}]({url}): {words}", clip(&d.label, 80)),
+            None => format!("• {}: {words}", clip(&d.label, 80)),
         });
     }
     let posted = overview
         .deliverables
         .iter()
         .any(|d| matches!(d.state, DeliverableState::Done | DeliverableState::Partial));
+    let mut fixed_tail = vec![];
     if overview.state == RunState::Failed && !posted && overview.hold.is_none() {
         if let Some(pr) = overview.subject.as_ref().and_then(|s| s.pr.as_ref()) {
-            tail.push(format!("Nothing was posted on PR #{}.", pr.number));
+            fixed_tail.push(format!("Nothing was posted on PR #{}.", pr.number));
         }
     }
     if let Some(url) = link {
-        tail.push(format!("[Open in Otto]({url})"));
+        fixed_tail.push(format!("[Open in Otto]({url})"));
     }
+
+    let fixed_chars = outcome.chars().count()
+        + if fixed_tail.is_empty() {
+            0
+        } else {
+            1 + joined_chars(&fixed_tail)
+        };
+    let middle_budget = CHAT_MAX_CHARS.saturating_sub(fixed_chars);
+
+    let mut goal_lines = vec![];
+    let mut kept_delivs = vec![];
     if let Some(goal) = overview.goal.as_ref() {
         let allow_reached = overview.hold.is_none() && overview.state != RunState::Blocked;
-        let reserved =
-            joined_chars(&lines) + joined_chars(&tail) + if tail.is_empty() { 1 } else { 2 };
-        let goal_budget = CHAT_MAX_CHARS.saturating_sub(reserved);
-        lines.extend(budget_goal_block(goal, allow_reached, goal_budget));
+        let goal_reserve = if middle_budget >= 160 { 120 } else { 0 };
+        let deliv_budget = if deliv_lines.is_empty() {
+            0
+        } else {
+            // Reserve separator newline for goal + deliverables.
+            middle_budget.saturating_sub(goal_reserve + 2)
+        };
+        kept_delivs = budget_deliverable_lines(&deliv_lines, deliv_budget);
+        let deliv_used = if kept_delivs.is_empty() {
+            0
+        } else {
+            1 + joined_chars(&kept_delivs)
+        };
+        let goal_budget = middle_budget.saturating_sub(deliv_used + 1);
+        goal_lines = budget_goal_block(goal, allow_reached, goal_budget);
+    } else if !deliv_lines.is_empty() {
+        kept_delivs = budget_deliverable_lines(&deliv_lines, middle_budget.saturating_sub(1));
     }
-    lines.extend(tail);
-    lines.join("\n")
+
+    let mut out = vec![outcome];
+    out.extend(goal_lines);
+    out.extend(kept_delivs);
+    out.extend(fixed_tail);
+    out.join("\n")
+}
+
+/// Fit deliverable lines within `max_chars`, capping overlong lines and folding
+/// trailing deliverables into `"• … N more deliverables"` so the final brief
+/// never exceeds Telegram's limit.
+fn budget_deliverable_lines(deliv_lines: &[String], max_chars: usize) -> Vec<String> {
+    if deliv_lines.is_empty() || max_chars == 0 {
+        return Vec::new();
+    }
+    if joined_chars(deliv_lines) <= max_chars {
+        return deliv_lines.to_vec();
+    }
+    let mut kept: Vec<String> = Vec::new();
+    let mut used: usize = 0;
+    for (idx, line) in deliv_lines.iter().enumerate() {
+        let sep = usize::from(!kept.is_empty());
+        let remaining_after = deliv_lines.len() - 1 - idx;
+        let fold_reserve = if remaining_after > 0 { 28 } else { 0 };
+        let avail = max_chars.saturating_sub(used + sep + fold_reserve);
+        if avail < 16 {
+            break;
+        }
+        let fit = if line.chars().count() <= avail {
+            line.clone()
+        } else {
+            clip(line, avail)
+        };
+        used += sep + fit.chars().count();
+        kept.push(fit);
+    }
+    let omitted = deliv_lines.len().saturating_sub(kept.len());
+    if omitted > 0 {
+        let sep = usize::from(!kept.is_empty());
+        let word = if omitted == 1 {
+            "deliverable"
+        } else {
+            "deliverables"
+        };
+        let fold = format!("• … {omitted} more {word}");
+        if used + sep + fold.chars().count() <= max_chars {
+            kept.push(fold);
+        }
+    }
+    kept
 }
 
 fn joined_chars(lines: &[String]) -> usize {

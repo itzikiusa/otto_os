@@ -23,8 +23,8 @@ const MAX_TEXT: usize = 300;
 pub use otto_core::workflows::WS_OVERVIEW_MAX_BYTES;
 
 /// Project a `RunOverview` for the `workflow_run_updated` WebSocket event so
-/// it stays within [`WS_OVERVIEW_MAX_BYTES`] (4 KiB).
-pub fn ws_projection(overview: &RunOverview) -> RunOverview {
+/// it stays within [`WS_OVERVIEW_MAX_BYTES`] (4 KiB), or `None` when omitted.
+pub fn ws_projection(overview: &RunOverview) -> Option<RunOverview> {
     overview.ws_projected()
 }
 

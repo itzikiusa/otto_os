@@ -425,7 +425,11 @@ pub fn compute(
         } else {
             prev.map_or(0, |p| p.active_ms)
         },
-        max_active_ms: max_active_ms.or_else(|| prev.and_then(|p| p.max_active_ms)),
+        max_active_ms: if held_loop.is_some() {
+            max_active_ms
+        } else {
+            max_active_ms.or_else(|| prev.and_then(|p| p.max_active_ms))
+        },
         awaiting,
         verdict,
         criteria: criteria_out,

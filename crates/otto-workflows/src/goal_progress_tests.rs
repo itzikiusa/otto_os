@@ -648,7 +648,7 @@ fn api1_ws_projection_stays_within_four_kib_budget() {
         raw_bytes > crate::overview::WS_OVERVIEW_MAX_BYTES,
         "fixture must exceed 4 KiB raw (got {raw_bytes})"
     );
-    let projected = crate::overview::ws_projection(&full);
+    let projected = crate::overview::ws_projection(&full).expect("fits after projection");
     let proj_bytes = serde_json::to_vec(&projected).unwrap().len();
     assert!(
         proj_bytes <= crate::overview::WS_OVERVIEW_MAX_BYTES,
@@ -660,4 +660,116 @@ fn api1_ws_projection_stays_within_four_kib_budget() {
     assert!(pg.criteria[0].progress.as_ref().unwrap().values.is_empty());
     // Full HTTP overview remains untouched.
     assert_eq!(full.goal.as_ref().unwrap().criteria[0].history.len(), 30);
+}
+
+#[test]
+fn bug1_uncapped_held_loop_does_not_inherit_time_cap_from_prev_sibling_aggregate() {
+    let g: WorkflowGraph = serde_json::from_value(json!({
+        "nodes": [
+            {"id": "loop_a", "kind": "loop", "name": "Loop A", "params": {
+                "max_iterations": 4,
+                "steps": [
+                    {"kind": "check", "name": "check", "params": {
+                        "criteria": [{"id": "a1", "text": "A passes", "verify": "expr", "expr": "true"}]
+                    }}
+                ]
+            }},
+            {"id": "loop_b", "kind": "loop", "name": "Loop B", "params": {
+                "max_iterations": 50,
+                "max_active_s": 7200,
+                "steps": [
+                    {"kind": "check", "name": "check", "params": {
+                        "criteria": [{"id": "b1", "text": "B passes", "verify": "expr", "expr": "true"}]
+                    }}
+                ]
+            }}
+        ],
+        "edges": []
+    }))
+    .unwrap();
+    let mut run: WorkflowRun = serde_json::from_value(json!({
+        "id": "r-held-uncapped", "workflow_id": "wf", "workspace_id": "ws", "status": "error",
+        "input": {}, "started_at": t(0), "finished_at": t(600), "rev": 6,
+        "hold": {
+            "kind": "exhausted",
+            "reason": "Used all 4 iterations",
+            "since": t(600),
+            "node_ids": ["loop_a"],
+            "iteration": 4
+        },
+        "nodes": [
+            {"node_id": "loop_a", "status": "pending", "started_at": t(0)},
+            {"node_id": "loop_b", "status": "success", "started_at": t(0), "output": {
+                "iterations": 50, "max_iterations": 50, "active_ms": 5_000_000, "max_active_s": 7200
+            }}
+        ]
+    }))
+    .unwrap();
+    run.overview = Some(otto_core::workflows::RunOverview {
+        rev: 5,
+        state: otto_core::workflows::RunState::Running,
+        goal: Some(GoalProgress {
+            iteration: 50,
+            max_iterations: 50,
+            criteria_met: 1,
+            criteria_total: 2,
+            active_ms: 5_000_000,
+            max_active_ms: Some(7_200_000),
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    let ov = run_overview(&run, &g, None, None, t(600));
+    let goal = ov.goal.as_ref().expect("goal");
+    assert_eq!((goal.iteration, goal.max_iterations), (4, 4));
+    assert_eq!(
+        goal.max_active_ms, None,
+        "uncapped held loop must not borrow completed sibling's previous max_active_ms"
+    );
+}
+
+#[test]
+fn bug4_twelve_failed_deliverables_with_long_provider_errors_stay_under_telegram_limit() {
+    let g = two_loop_graph();
+    let long_err = format!(
+        "422 Unprocessable Entity: {}",
+        "validation detail ".repeat(40)
+    );
+    let deliverables: Vec<_> = (0..12)
+        .map(|i| otto_core::workflows::Deliverable {
+            label: format!("PR #{i} inline review comments"),
+            state: otto_core::workflows::DeliverableState::Failed,
+            url: Some(format!("https://github.com/org/repo/pull/{i}")),
+            detail: Some(long_err.clone()),
+        })
+        .collect();
+    let ov = otto_core::workflows::RunOverview {
+        state: otto_core::workflows::RunState::Succeeded,
+        goal: Some(GoalProgress {
+            iteration: 4,
+            max_iterations: 5,
+            criteria_met: 2,
+            criteria_total: 2,
+            verdict: Some("achieved".into()),
+            ..Default::default()
+        }),
+        deliverables,
+        ..Default::default()
+    };
+    let view = ChatView {
+        workflow: "Review & Fix",
+        now: t(500),
+        tz: FixedOffset::east_opt(0).unwrap(),
+    };
+    let fin = render_final(&view, &ov, &[], &g, Some("https://otto.local/runs/r-deliv"));
+    assert!(
+        fin.chars().count() <= crate::chat_status::CHAT_MAX_CHARS,
+        "final post with 12 verbose deliverables exceeded budget: {} chars",
+        fin.chars().count()
+    );
+    assert!(fin.starts_with("⚠️ *Review & Fix* done"), "{fin}");
+    assert!(
+        fin.contains("[Open in Otto](https://otto.local/runs/r-deliv)"),
+        "link must be preserved even when deliverables overflow: {fin}"
+    );
 }
