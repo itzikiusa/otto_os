@@ -42,7 +42,7 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
   and Kotest spec-level gutter runs, Gradle `libs.versions.toml` inspection, JVM JDWP debugging,
   `application.properties`/`application.yml` completion, hover, and navigation
   (plus `.properties` deprecation quick fixes), a loopback-only Actuator
-  inspector with secret redaction, and DevTools `.reloadtrigger` restart check. .NET (C# / F# / Unity / Unreal C#) gets
+  inspector (every `/env` value redacted), and DevTools `.reloadtrigger` restart check. .NET (C# / F# / Unity / Unreal C#) gets
   highlighting, toolchain discovery/installer, `csharp-ls` / OmniSharp /
   `fsautocomplete`, xUnit/NUnit/MSTest gutter runs, NuGet inspection, and
   `netcoredbg` debugging (launch, VSTest test debugging of one test project
