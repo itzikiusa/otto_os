@@ -18,10 +18,9 @@
   import { ideGit } from '../git/ideGitController.svelte';
   import { ide } from '../ideStore.svelte';
   import { openGoToLine } from '../search/ideQuickOpen.svelte';
-  import { ideProjectTrusted } from './ideLspTrust';
   import {
     applyIdeLspLink, ideEolLabel, ideLanguageLabel, ideLanguageSettingsSection, ideLspItem, ideLspLangFor,
-    ideLspRecordFor, ideProblemCounts, type IdeLspRecord,
+    ideLspRecordFor, ideProblemCounts, ideProjectTrusted, type IdeLspRecord,
   } from './ideStatusModel';
 
   let lspRecords = $state<IdeLspRecord[]>(recentLspLinks().reduce(applyIdeLspLink, [] as IdeLspRecord[]));

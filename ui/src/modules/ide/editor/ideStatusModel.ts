@@ -5,6 +5,7 @@
 import { langKeyFor } from '../../../lib/components/langForPath.ts';
 import { isMakefilePath } from '../../../lib/components/makefilePath.ts';
 import type { IdeLspLinkDetail } from '../../../lib/components/cm-ide-lsp-reconnect';
+import type { IdeEnvVar } from '../store/ideTypes';
 
 export type IdeFileKind = 'code' | 'markup' | 'data' | 'text';
 
@@ -162,6 +163,21 @@ export function ideLspRecordFor(records: readonly IdeLspRecord[], lang: string, 
     if (!best || r.rootPath.length > best.rootPath.length) best = r;
   }
   return best;
+}
+
+/** The saved-environment opt-ins the /ws/lsp trust gate reads (lsp_host/ws_bridge.rs). */
+export const IDE_TRUST_PROJECT_ENV = 'OTTO_IDE_TRUST_PROJECT_EXECUTION';
+const TRUST_LANG_ENV: Record<string, string> = {
+  zig: 'OTTO_IDE_TRUST_ZIG_BUILD', kotlin: 'OTTO_IDE_TRUST_KOTLIN_LSP', vue: 'OTTO_IDE_TRUST_VUE_LSP',
+  csharp: 'OTTO_IDE_TRUST_DOTNET_LSP', fsharp: 'OTTO_IDE_TRUST_DOTNET_LSP',
+};
+
+/** Whether the saved environment lets `lang`'s server run project code (a non-secret "1" for the
+ *  project-wide or the language key); null while it isn't loaded. */
+export function ideProjectTrusted(vars: readonly IdeEnvVar[] | null | undefined, lang: string): boolean | null {
+  if (!vars) return null;
+  const keys = [IDE_TRUST_PROJECT_ENV, TRUST_LANG_ENV[lang]];
+  return vars.some((v) => !v.secret && keys.includes(v.key) && (v.value ?? '').trim() === '1');
 }
 
 export interface IdeLspItem { label: string; tone: 'ok' | 'busy' | 'bad'; title: string; action: 'settings' | 'retry' | 'trust' }

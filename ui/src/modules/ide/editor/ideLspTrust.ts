@@ -8,31 +8,22 @@
 // Pure (no store, no runes) so node unit tests run it directly.
 import { loadErrorText } from '../../../lib/loadError.ts';
 import type { IdeEnvVar } from '../store/ideTypes';
-import { ideLspServerName, type IdeLspRecord } from './ideStatusModel.ts';
+import { IDE_TRUST_PROJECT_ENV, ideLspServerName, type IdeLspRecord } from './ideStatusModel.ts';
 
-export const IDE_TRUST_PROJECT_ENV = 'OTTO_IDE_TRUST_PROJECT_EXECUTION';
+export { IDE_TRUST_PROJECT_ENV, ideProjectTrusted } from './ideStatusModel.ts';
 
-const DOTNET = { key: 'OTTO_IDE_TRUST_DOTNET_LSP', needs: 'load this project’s MSBuild project, which runs its build targets', runs: 'its MSBuild targets' };
-const TRUST_LANGS: Record<string, { name: string; key: string; needs: string; runs: string }> = {
-  zig: { name: 'Zig', key: 'OTTO_IDE_TRUST_ZIG_BUILD', needs: 'run this project’s build.zig', runs: 'its build.zig' },
-  kotlin: { name: 'Kotlin', key: 'OTTO_IDE_TRUST_KOTLIN_LSP', needs: 'import this project’s Gradle or Maven build', runs: 'its Gradle or Maven build scripts' },
-  vue: { name: 'Vue', key: 'OTTO_IDE_TRUST_VUE_LSP', needs: 'load the plugins this project’s tsconfig.json names', runs: 'the plugins its tsconfig.json names' },
+const DOTNET = { needs: 'load this project’s MSBuild project, which runs its build targets', runs: 'its MSBuild targets' };
+const TRUST_LANGS: Record<string, { name: string; needs: string; runs: string }> = {
+  zig: { name: 'Zig', needs: 'run this project’s build.zig', runs: 'its build.zig' },
+  kotlin: { name: 'Kotlin', needs: 'import this project’s Gradle or Maven build', runs: 'its Gradle or Maven build scripts' },
+  vue: { name: 'Vue', needs: 'load the plugins this project’s tsconfig.json names', runs: 'the plugins its tsconfig.json names' },
   csharp: { name: 'C#', ...DOTNET },
   fsharp: { name: 'F#', ...DOTNET },
 };
 
-const on = (v: IdeEnvVar, key: string): boolean => !v.secret && v.key === key && (v.value ?? '').trim() === '1';
-
-/** Whether the saved environment lets `lang`'s server run project code; null while it isn't loaded. */
-export function ideProjectTrusted(vars: readonly IdeEnvVar[] | null | undefined, lang: string): boolean | null {
-  if (!vars) return null;
-  const key = TRUST_LANGS[lang]?.key;
-  return vars.some((v) => on(v, IDE_TRUST_PROJECT_ENV) || (key !== undefined && on(v, key)));
-}
-
 /** The Project environment switch: the project-wide key only (per-language keys stay rows). */
 export function ideProjectTrustOn(vars: readonly IdeEnvVar[]): boolean {
-  return vars.some((v) => on(v, IDE_TRUST_PROJECT_ENV));
+  return vars.some((v) => !v.secret && v.key === IDE_TRUST_PROJECT_ENV && (v.value ?? '').trim() === '1');
 }
 
 /** `vars` with the project-wide trust variable set to "1" (in place, or appended) or removed;
