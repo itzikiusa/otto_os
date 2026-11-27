@@ -25,16 +25,49 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
   same pages work on the phone, with touch.
 - **Zig in the IDE.** Zig projects (`build.zig`) get what the other languages
   have: highlighting, toolchain detection and Otto's own installer, `zls`
-  for completion and navigation, run configurations and gutter Run / Debug on
-  `main` and on tests, and debugging with breakpoints, stepping, watch, set
-  variable and stops on `@panic`, with slices, optionals and error unions
-  shown as values.
+  (SHA-256 verified via zigtools' release selector) for completion and
+  navigation, run configurations and gutter Run / Debug on `main` and on tests,
+  and debugging with breakpoints, stepping, watch, set variable and stops on
+  `@panic`, with slices, optionals and error unions shown as values.
+- **C / C++, Unreal Engine, Kotlin, Spring Boot, .NET and web frameworks in the
+  IDE.** C / C++ & Unreal Engine get highlighting, `clangd` with auto
+  `--compile-commands-dir` and `⌥O` header/source switch, CMake / Presets /
+  CTest / Meson / Make / Unreal run configs, GoogleTest & Catch2 gutter runs,
+  `vcpkg`/`conan`/CMake/`.uproject` inspection, and LLDB debugging (STL &
+  Unreal formatters, exception breakpoints, PID/process-name attach and core
+  dumps). Kotlin & Spring Boot get Kotlin highlighting,
+  `kotlin-language-server`, mixed Java/Kotlin modules, JUnit 5 & Kotest gutter
+  runs, Gradle `libs.versions.toml` inspection, JVM JDWP debugging,
+  `application.properties`/`application.yml` completion/hover/navigation/deprecation
+  quick fixes, a loopback-only Actuator inspector with secret redaction, and
+  DevTools `.reloadtrigger` restart. .NET (C# / F# / Unity / Unreal C#) gets
+  highlighting, toolchain discovery/installer, `csharp-ls` / OmniSharp /
+  `fsautocomplete`, xUnit/NUnit/MSTest gutter runs, NuGet inspection, and
+  `netcoredbg` / Unity attach. JS/TS web frameworks (Angular, React, Next.js,
+  Svelte/SvelteKit, Vue/Nuxt, Vite) get framework detection, `svelteserver` /
+  `vue-language-server` / `ngserver`, Vitest/Jest/Playwright/Karma runners, and
+  Node + Browser CDP debugging.
 - **Jupyter notebooks & ML workflow in the IDE.** Open, edit, run and save
   `.ipynb` notebooks directly in Otto with a persistent Python kernel, inline
   matplotlib plots and HTML DataFrame tables, kernel selection across `.venv` /
   `conda` / `uv` / Poetry / Jupyter kernelspecs, interrupt/restart, live
   Variables view, cell DAP debugging, Apple Silicon MPS / GPU detection, and
   auto-discovered training and TensorBoard run configurations.
+- **Goal progress, loop rounds and waiting threads.** Goal criteria show numeric
+  progress (`value / target`), a progress meter, last-3-rounds trends and
+  blocker counts across multiple loops on the run page and in chat status
+  updates. Loop steps group children by round (current round open, earlier
+  rounds folded to one line), describe the loop's current position in words,
+  and list named clickable links to the threads a step or pending summarizer is
+  waiting on.
+- **Session inbox grouped by workspace & faster multi-terminal workspaces.**
+  In Agents, *All workspaces* groups sessions by workspace by default (current
+  workspace first, then by latest activity; *Needs you*, *Working*, *Idle*,
+  *Done* inside each), with collapsible headers and Workspace / Status / None
+  grouping saved per user. Tiled and Splits layouts mount the focused terminal
+  first and pace background panes progressively, skip exited/inactive tiles in
+  the auto-live budget, and keep the most-recently-focused terminal parked
+  across page switches.
 - **A step's conversation is the Threads view.** On the run page a step's
   Conversation is the same conversation Threads shows, folded and scrolled
   the same way (it opens on the newest line and follows it only while you are
@@ -70,8 +103,11 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
   files attached to the Slack message that starts a run reach the run. The
   Start step's *Updates in the chat thread* brings back a message per step.
 - **Limits and restarts.** A step that hits a usage limit with a known reset
-  waits and continues when the limit resets, and a run cut by a restart or an
-  update continues from the step it was on.
+  waits and continues when the limit resets. Runs cut by a restart or update
+  continue from the step they were on — including held review summarizers,
+  queued reviews with persisted prompts, `check` completion reviews and
+  personal-agent delegations — and resumed workflow reviews stay on their
+  configured provider without falling back to Claude.
 - **For agents (MCP).** `otto.thread_close` can remove a sub-thread the agent
   no longer needs. `otto.control_workflow_run` is new, off by default and
   asks before it acts.
