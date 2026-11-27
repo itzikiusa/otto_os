@@ -114,6 +114,7 @@ impl ToolchainManager {
                         sdk_entry,
                         req.go_root.as_deref(),
                         req.zig_home.as_deref(),
+                        req.dotnet_root.as_deref(),
                     )
                     .await
                 }
@@ -190,10 +191,12 @@ impl ToolchainManager {
         sdk_entry: Option<CatalogSdkEntry>,
         go_root: Option<&str>,
         zig_home: Option<&str>,
+        dotnet_root: Option<&str>,
     ) -> std::result::Result<String, String> {
         let root = self.toolchains_dir();
         let go_root = go_root.map(Path::new);
         let zig_home = zig_home.map(Path::new);
+        let dotnet_root = dotnet_root.map(Path::new);
         tokio::fs::create_dir_all(&root)
             .await
             .map_err(|e| format!("create toolchains dir: {e}"))?;
@@ -215,8 +218,17 @@ impl ToolchainManager {
                 65,
                 format!("Installing LSP ({})...", eco.lsp_name()),
             );
-            let p =
-                install_local_lsp(self, job_id, &root, eco, platform, go_root, zig_home).await?;
+            let p = install_local_lsp(
+                self,
+                job_id,
+                &root,
+                eco,
+                platform,
+                go_root,
+                zig_home,
+                dotnet_root,
+            )
+            .await?;
             if component == IdeInstallComponent::Lsp {
                 final_path = p;
             }

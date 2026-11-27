@@ -380,10 +380,17 @@ pub enum IdeRunnerKind {
     Meson,
     #[serde(alias = "ue", alias = "ubt")]
     Unreal,
+    DotnetBuild,
+    DotnetTest,
+    #[serde(alias = "dotnet")]
+    DotnetRun,
     Node,
     #[serde(alias = "npm_script")]
     Npm,
     Vitest,
+    Jest,
+    Playwright,
+    Karma,
     Pytest,
     Python,
     #[serde(alias = "sh", alias = "bash")]

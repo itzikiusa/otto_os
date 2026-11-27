@@ -157,6 +157,8 @@ pub(crate) fn collect_base_readonly_sdk_roots(
         "ZIG_GLOBAL_CACHE_DIR",
         "UE_ROOT",
         "UNREAL_ENGINE_ROOT",
+        "DOTNET_ROOT",
+        "NUGET_PACKAGES",
     ] {
         if let Some(v) = env_val(key) {
             candidates.push(PathBuf::from(v));
@@ -230,6 +232,8 @@ pub(crate) fn collect_base_readonly_sdk_roots(
             "zig",
             ".conan2",
             ".vcpkg",
+            ".dotnet",
+            ".nuget/packages",
             ".m2/repository",
             ".gradle/caches",
             ".sdkman/candidates/java",
@@ -269,6 +273,9 @@ pub(crate) fn collect_base_readonly_sdk_roots(
         "/usr/local/include",
         "/usr/include",
         "/Users/Shared/Epic Games",
+        "/usr/local/share/dotnet",
+        "/usr/share/dotnet",
+        "/opt/homebrew/opt/dotnet",
     ] {
         candidates.push(PathBuf::from(sys));
     }

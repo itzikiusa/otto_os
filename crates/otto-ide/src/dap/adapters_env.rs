@@ -158,6 +158,10 @@ pub(crate) fn validate_non_root_debug_request(
             .is_some_and(|s| !s.trim().is_empty())
         || env.contains_key("DLV_ATTACH_PID")
         || req.launch.env.contains_key("DLV_ATTACH_PID")
+        || env.contains_key("DOTNET_ATTACH_PID")
+        || req.launch.env.contains_key("DOTNET_ATTACH_PID")
+        || env.contains_key("UNITY_ATTACH_PID")
+        || req.launch.env.contains_key("UNITY_ATTACH_PID")
         || env.contains_key("OTTO_JAVA_DEBUG_DAP_PORT")
         || req.launch.env.contains_key("OTTO_JAVA_DEBUG_DAP_PORT")
     {
@@ -470,6 +474,10 @@ pub(crate) fn build_effective_env_with_manager(
             "zig/bin",
             "cpp/current/bin",
             "cpp/bin",
+            "dotnet/current",
+            "dotnet/tools",
+            "dotnet/netcoredbg",
+            "dotnet/dap/netcoredbg",
             "node/current/bin",
             "python/current/bin",
             "python/bin",
@@ -485,7 +493,14 @@ pub(crate) fn build_effective_env_with_manager(
         }
         if !otto_core::e2e::isolated() && ctx.caller_is_root {
             if let Some(home) = dirs::home_dir() {
-                for rel in ["go/bin", ".cargo/bin", ".zvm/bin", ".local/bin"] {
+                for rel in [
+                    "go/bin",
+                    ".cargo/bin",
+                    ".zvm/bin",
+                    ".dotnet",
+                    ".dotnet/tools",
+                    ".local/bin",
+                ] {
                     let p = home.join(rel);
                     if p.is_dir() {
                         crate::environments::push_unique(
@@ -496,7 +511,13 @@ pub(crate) fn build_effective_env_with_manager(
                 }
             }
         }
-        for sys_bin in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/local/go/bin"] {
+        for sys_bin in [
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/usr/local/go/bin",
+            "/usr/local/share/dotnet",
+            "/opt/homebrew/opt/dotnet/libexec",
+        ] {
             if Path::new(sys_bin).is_dir() {
                 crate::environments::push_unique(&mut path_entries, sys_bin.to_string());
             }

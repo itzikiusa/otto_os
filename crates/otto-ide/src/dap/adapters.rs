@@ -17,6 +17,7 @@ use otto_core::{Error, Result};
 use serde_json::{json, Value};
 
 use super::adapters_cpp::resolve_cpp_adapter;
+use super::adapters_dotnet::resolve_dotnet_adapter;
 pub(crate) use super::adapters_env::build_effective_env_with_manager;
 pub use super::adapters_env::{build_effective_env, display_target_path, normalize_target_path};
 pub(super) use super::adapters_env::{resolve_debug_sdk_override, validate_non_root_debug_request};
@@ -285,8 +286,11 @@ fn resolve_debug_launch_spec<'a>(
         "rust" | "rs" => "rust",
         "zig" | "zon" => "zig",
         "c" | "cpp" | "c++" | "cxx" | "cc" | "h" | "hpp" | "hxx" | "hh" => "cpp",
-        "javascript" | "js" => "javascript",
-        "typescript" | "ts" | "node" => "typescript",
+        "csharp" | "cs" | "csx" | "c#" | "dotnet" => "csharp",
+        "fsharp" | "fs" | "fsx" | "f#" => "fsharp",
+        "javascript" | "js" | "jsx" => "javascript",
+        "typescript" | "ts" | "tsx" | "node" | "svelte" | "vue" | "angular" | "browser"
+        | "chrome" => "typescript",
         "java" => "java",
         "kotlin" | "kt" | "kts" => "kotlin",
         "shell" | "bash" | "sh" | "zsh" => "shell",
@@ -310,6 +314,8 @@ fn resolve_debug_launch_spec<'a>(
             "rust" => ("rust".to_string(), "lldb".to_string(), None),
             "zig" => ("zig".to_string(), "lldb".to_string(), None),
             "cpp" => ("cpp".to_string(), "lldb".to_string(), None),
+            "csharp" => ("csharp".to_string(), "netcoredbg".to_string(), None),
+            "fsharp" => ("fsharp".to_string(), "netcoredbg".to_string(), None),
             "javascript" => ("javascript".to_string(), "node-inspector".to_string(), None),
             "typescript" => ("typescript".to_string(), "node-inspector".to_string(), None),
             "java" => ("java".to_string(), "java-jdwp".to_string(), None),
@@ -317,7 +323,7 @@ fn resolve_debug_launch_spec<'a>(
             "shell" => ("shell".to_string(), "shell-debug".to_string(), None),
             other => {
                 return Err(Error::Invalid(format!(
-                    "unsupported debug language '{other}'; install a DAP plugin or choose go, python, rust, zig, c, cpp, javascript, typescript, java, kotlin, or shell"
+                    "unsupported debug language '{other}'; install a DAP plugin or choose go, python, rust, zig, c, cpp, csharp, fsharp, javascript, typescript, java, kotlin, or shell"
                 )));
             }
         }
@@ -371,6 +377,17 @@ pub(crate) async fn resolve_dap_adapter_with_manager(
         "rust" => resolve_rust_adapter(data_dir, req, ctx, &spec.cwd, spec.env).await,
         "zig" => resolve_zig_adapter(data_dir, req, ctx, &spec.cwd, spec.env).await,
         "cpp" => resolve_cpp_adapter(data_dir, req, ctx, &spec.cwd, spec.env).await,
+        "csharp" | "fsharp" => {
+            resolve_dotnet_adapter(
+                data_dir,
+                &spec.canonical_lang,
+                req,
+                ctx,
+                &spec.cwd,
+                spec.env,
+            )
+            .await
+        }
         "javascript" | "typescript" => {
             resolve_js_ts_adapter(data_dir, &spec.raw_lang, req, ctx, &spec.cwd, spec.env).await
         }

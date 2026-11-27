@@ -7,10 +7,11 @@ use std::path::{Path, PathBuf};
 use crate::types::{IdeDetectedSdk, IdeEcosystemKind};
 
 use super::discovery::{
-    bin_prefix, dir_name_version, find_executable_in, is_executable_file, is_goroot,
-    node_prefix_version, python_dir_version, read_go_root_version, read_java_release_version,
-    read_subdirs, resolve_java_home_dir, resolve_zig_home_dir, rust_toolchain_label,
-    system_search_dirs, zig_dir_version, zig_home_from_bin,
+    bin_prefix, dir_name_version, dotnet_dir_version, dotnet_root_from_bin, find_executable_in,
+    is_executable_file, is_goroot, node_prefix_version, python_dir_version, read_go_root_version,
+    read_java_release_version, read_subdirs, resolve_dotnet_root_dir, resolve_java_home_dir,
+    resolve_zig_home_dir, rust_toolchain_label, system_search_dirs, zig_dir_version,
+    zig_home_from_bin,
 };
 
 pub(super) fn scan_detected_sdks(
@@ -143,6 +144,20 @@ pub(super) fn scan_detected_sdks(
                     format!("Kotlin {v}"),
                     &v,
                     &kh,
+                    "otto",
+                );
+            }
+        }
+        for dir in read_subdirs(&root.join("dotnet/sdks")) {
+            if let Some(dr) = resolve_dotnet_root_dir(&dir) {
+                let v = dotnet_dir_version(&dr);
+                push_det(
+                    &mut out,
+                    &mut seen,
+                    "dotnet",
+                    format!(".NET SDK {v}"),
+                    &v,
+                    &dr,
                     "otto",
                 );
             }
@@ -632,6 +647,85 @@ fn scan_python_and_rust_sdks(
                 &v,
                 &p,
                 "homebrew",
+            );
+        }
+    }
+
+    // 6d. .NET SDK: DOTNET_ROOT, /usr/local/share/dotnet, Homebrew, ~/.dotnet, asdf/mise, PATH
+    for (cand, src, label_prefix) in [
+        ("/usr/local/share/dotnet", "system", ".NET SDK"),
+        (
+            "/opt/homebrew/opt/dotnet/libexec",
+            "homebrew",
+            "Homebrew .NET SDK",
+        ),
+        (
+            "/usr/local/opt/dotnet/libexec",
+            "homebrew",
+            "Homebrew .NET SDK",
+        ),
+        ("/usr/share/dotnet", "system", ".NET SDK"),
+    ] {
+        let p = PathBuf::from(cand);
+        if let Some(dr) = resolve_dotnet_root_dir(&p) {
+            let v = dotnet_dir_version(&dr);
+            push_det(
+                out,
+                seen,
+                "dotnet",
+                format!("{label_prefix} {v}"),
+                &v,
+                &dr,
+                src,
+            );
+        }
+    }
+    if let Some(h) = home {
+        let dot_dotnet = h.join(".dotnet");
+        if let Some(dr) = resolve_dotnet_root_dir(&dot_dotnet) {
+            let v = dotnet_dir_version(&dr);
+            push_det(
+                out,
+                seen,
+                "dotnet",
+                format!(".NET SDK {v} (~/.dotnet)"),
+                &v,
+                &dr,
+                "dotnet",
+            );
+        }
+        for (parent, src, tag) in [
+            (h.join(".asdf/installs/dotnet-core"), "asdf", "asdf"),
+            (h.join(".asdf/installs/dotnet"), "asdf", "asdf"),
+            (h.join(".local/share/mise/installs/dotnet"), "mise", "mise"),
+        ] {
+            for dir in read_subdirs(&parent) {
+                if let Some(dr) = resolve_dotnet_root_dir(&dir) {
+                    let v = dotnet_dir_version(&dr);
+                    push_det(
+                        out,
+                        seen,
+                        "dotnet",
+                        format!(".NET SDK {v} ({tag})"),
+                        &v,
+                        &dr,
+                        src,
+                    );
+                }
+            }
+        }
+    }
+    if let Some(bin) = find_executable_in(&system_search_dirs(), &["dotnet"]) {
+        if let Some(dr) = dotnet_root_from_bin(&bin) {
+            let v = dotnet_dir_version(&dr);
+            push_det(
+                out,
+                seen,
+                "dotnet",
+                format!(".NET SDK {v}"),
+                &v,
+                &dr,
+                "path",
             );
         }
     }

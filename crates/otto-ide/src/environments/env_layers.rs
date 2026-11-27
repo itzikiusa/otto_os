@@ -166,6 +166,19 @@ pub(crate) fn apply_project_sdk_layers(
         map.insert("KOTLIN_HOME".into(), base.to_string());
         push_unique(&mut proj_path_dirs, format!("{base}/bin"));
     }
+    if let Some(dr) = proj.dotnet_root.as_deref().filter(|s| !s.is_empty()) {
+        let base = dr.trim_end_matches('/');
+        map.insert("DOTNET_ROOT".into(), base.to_string());
+        push_unique(&mut proj_path_dirs, base.to_string());
+        if target_kind == IdeTargetKind::Local {
+            let bin_sub = format!("{base}/bin");
+            if Path::new(&bin_sub).join("dotnet").is_file() {
+                push_unique(&mut proj_path_dirs, bin_sub);
+            }
+        } else {
+            push_unique(&mut proj_path_dirs, format!("{base}/bin"));
+        }
+    }
     if let Some(nh) = proj.node_home.as_deref().filter(|s| !s.is_empty()) {
         push_unique(
             &mut proj_path_dirs,

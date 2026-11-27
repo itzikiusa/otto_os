@@ -69,7 +69,9 @@ export async function promptCreateTreeEntry(
                 ? 'New C++ file'
                 : extHint === '.hpp'
                   ? 'New C++ header'
-                  : 'New file',
+                  : extHint === '.cs'
+                    ? 'New C# file'
+                    : 'New file',
       confirmLabel: 'Create',
       placeholder: isDir
         ? 'pkg/handlers'
@@ -83,7 +85,9 @@ export async function promptCreateTreeEntry(
                 ? 'engine.cpp'
                 : extHint === '.hpp'
                   ? 'engine.hpp'
-                  : 'handler.go',
+                  : extHint === '.cs'
+                    ? 'Service.cs'
+                    : 'handler.go',
       validate: (v) => (v.includes('..') ? 'Relative parent segments (..) aren’t allowed.' : null),
     },
   );
@@ -243,6 +247,9 @@ export function showTreeNodeContextMenu(
       /\.(?:cpp|cc|cxx|hpp|h|c)$/i.test(e.name),
     ),
   );
+  const isDotnet = Object.values(ide.childrenByDir).some((es) =>
+    es.some((e) => e.name.endsWith('.csproj') || e.name.endsWith('.fsproj') || e.name.endsWith('.sln') || e.name.endsWith('.slnx') || e.name.endsWith('.cs') || e.name.endsWith('.fs')),
+  );
   items.push({ label: 'New file…', icon: 'plus', action: () => void promptCreateTreeEntry(baseDir, 'create_file') });
   if (isGo) items.push({ label: 'New Go file…', icon: 'file', action: () => void promptCreateTreeEntry(baseDir, 'create_file', '.go') });
   if (isKotlin) items.push({ label: 'New Kotlin file…', icon: 'file', action: () => void promptCreateTreeEntry(baseDir, 'create_file', '.kt') });
@@ -253,6 +260,7 @@ export function showTreeNodeContextMenu(
       { label: 'New C++ header…', icon: 'file', action: () => void promptCreateTreeEntry(baseDir, 'create_file', '.hpp') },
     );
   }
+  if (isDotnet) items.push({ label: 'New C# file…', icon: 'file', action: () => void promptCreateTreeEntry(baseDir, 'create_file', '.cs') });
   items.push({ label: 'New folder…', icon: 'folder', action: () => void promptCreateTreeEntry(baseDir, 'mkdir') });
   if (ide.target.kind === 'local') {
     items.push(

@@ -10,6 +10,8 @@ const MANIFEST_NAMES = new Set([
   'cmakelists.txt',
   'vcpkg.json',
   'conanfile.txt',
+  'directory.packages.props',
+  'packages.config',
   'requirements.txt',
   'pyproject.toml',
   'build.gradle',
@@ -23,6 +25,9 @@ export function isIdeManifestPath(filePath: string): boolean {
     MANIFEST_NAMES.has(base) ||
     base.endsWith('.uproject') ||
     base.endsWith('.uplugin') ||
+    base.endsWith('.csproj') ||
+    base.endsWith('.fsproj') ||
+    base.endsWith('.vbproj') ||
     /^requirements(?:[-_.][\w-]+)?\.txt$/.test(base)
   );
 }

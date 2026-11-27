@@ -3,8 +3,9 @@
 use std::path::{Path, PathBuf};
 
 use crate::toolchains_catalog::{
-    clangd_zip_url, codelldb_vsix_url, jq_binary_url, kotlin_lsp_zip_url, rust_analyzer_gz_url,
-    uv_tarball_url, zls_tarball_url, EcosystemKind, TargetPlatform, BASH_LSP_NPM_PACKAGES,
+    clangd_zip_url, codelldb_vsix_url, jq_binary_url, kotlin_lsp_zip_url, netcoredbg_tarball_url,
+    rust_analyzer_gz_url, uv_tarball_url, zls_tarball_url, EcosystemKind, TargetPlatform,
+    BASH_LSP_NPM_PACKAGES, CSHARP_LS_TOOL,
     DEBUGPY_PKG, DLV_PKG, GOPLS_PKG, JAVA_DEBUG_JAR_NAME, JAVA_DEBUG_JAR_URL, JDTLS_TARBALL_URL,
     JSON_LSP_NPM_PACKAGES, JS_DEBUG_TARBALL_URL, PYRIGHT_PKG, TS_LSP_NPM_PACKAGES,
 };
@@ -24,6 +25,7 @@ fn project_go_bin(go_root: Option<&Path>) -> Option<PathBuf> {
         .filter(|b| super::discovery::is_executable_file(b))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn install_local_lsp(
     mgr: &ToolchainManager,
     job_id: &str,
@@ -32,6 +34,7 @@ pub(super) async fn install_local_lsp(
     platform: TargetPlatform,
     go_root: Option<&Path>,
     zig_home: Option<&Path>,
+    dotnet_root: Option<&Path>,
 ) -> std::result::Result<String, String> {
     let tmp = root.join(".downloads");
     tokio::fs::create_dir_all(&tmp)
@@ -257,6 +260,43 @@ pub(super) async fn install_local_lsp(
             relink_current(&bin_dir.join("kotlin-language-server"), &bin);
             Ok(bin.to_string_lossy().into_owned())
         }
+        EcosystemKind::Dotnet => {
+            let dotnet_bin = dotnet_root
+                .and_then(super::discovery::dotnet_bin_in_root)
+                .or_else(|| resolve_best_sdk_bin(mgr, root, EcosystemKind::Dotnet, "dotnet"))
+                .ok_or(".NET SDK required first")?;
+            let tools_dir = root.join("dotnet/tools");
+            tokio::fs::create_dir_all(&tools_dir)
+                .await
+                .map_err(|e| e.to_string())?;
+            let mut env_pairs: Vec<(&str, &Path)> = Vec::new();
+            let resolved_root = super::discovery::dotnet_root_from_bin(&dotnet_bin);
+            if let Some(ref dr) = resolved_root {
+                env_pairs.push(("DOTNET_ROOT", dr.as_path()));
+            }
+            let tool_dest = tools_dir.join(CSHARP_LS_TOOL);
+            let subcmd = if tool_dest.is_file() {
+                "update"
+            } else {
+                "install"
+            };
+            run_local_cmd(
+                mgr,
+                job_id,
+                75,
+                &dotnet_bin,
+                &[
+                    "tool",
+                    subcmd,
+                    "--tool-path",
+                    &tools_dir.to_string_lossy(),
+                    CSHARP_LS_TOOL,
+                ],
+                &env_pairs,
+            )
+            .await?;
+            Ok(tool_dest.to_string_lossy().into_owned())
+        }
         EcosystemKind::Node => {
             let npm = resolve_best_sdk_bin(mgr, root, EcosystemKind::Node, "npm")
                 .ok_or("Node.js/npm required first")?;
@@ -401,6 +441,47 @@ pub(super) async fn install_local_dap(
             let adapter = dest.join("extension/adapter/codelldb");
             make_executable(&adapter)?;
             relink_current(&root.join("rust/codelldb"), &dest.join("extension"));
+            Ok(adapter.to_string_lossy().into_owned())
+        }
+        EcosystemKind::Dotnet => {
+            let archive = tmp.join("netcoredbg.tar.gz");
+            download_https_to_file(
+                mgr,
+                job_id,
+                &netcoredbg_tarball_url(platform),
+                &archive,
+                None,
+                85,
+            )
+            .await?;
+            let dest = root.join("dotnet/dap");
+            let _ = tokio::fs::remove_dir_all(&dest).await;
+            tokio::fs::create_dir_all(&dest)
+                .await
+                .map_err(|e| e.to_string())?;
+            run_local_cmd(
+                mgr,
+                job_id,
+                94,
+                Path::new("tar"),
+                &[
+                    "-xzf",
+                    &archive.to_string_lossy(),
+                    "-C",
+                    &dest.to_string_lossy(),
+                ],
+                &[],
+            )
+            .await?;
+            let _ = tokio::fs::remove_file(&archive).await;
+            let adapter = [dest.join("netcoredbg/netcoredbg"), dest.join("netcoredbg")]
+                .into_iter()
+                .find(|p| p.is_file())
+                .ok_or("netcoredbg archive missing netcoredbg binary")?;
+            make_executable(&adapter)?;
+            if let Some(parent) = adapter.parent() {
+                relink_current(&root.join("dotnet/netcoredbg"), parent);
+            }
             Ok(adapter.to_string_lossy().into_owned())
         }
         EcosystemKind::Node => {

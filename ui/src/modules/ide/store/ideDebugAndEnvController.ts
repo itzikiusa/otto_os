@@ -44,7 +44,7 @@ import {
   collabGuestPost, defaultRunnerForLanguage, GUTTER_TARGET_ID, IdeCollabHttpError, ideTargetKey, streamIdeSse, type IdeBottomTab,
   type IdeBreakpoint, type IdeCollabRoom, type IdeDebugSessionSnapshot, type IdeDetectedSdk,
   type IdeEnvVar, type IdeGutterItem, type IdeInstalledSdk, type IdeInstallJob,
-  type IdeOpenTab, type IdeProjectEnvironment, type IdeProjectRoot, type IdePythonVenv,
+  type IdeMlAcceleratorInfo, type IdeOpenTab, type IdeProjectEnvironment, type IdeProjectRoot, type IdePythonVenv,
   type IdeReplEntry, type IdeRunConfig, type IdeRunState, type IdeShellEnvResp,
   type IdeTargetSpec, type IdeToolchainEcosystem, type IdeVariable, type IdeWatch,
 } from './ideTypes';
@@ -70,6 +70,7 @@ export interface DebugAndEnvHost {
   shellEnvError?: string | null;
   keepTestcontainersAlive?: boolean;
   pythonVenvs: IdePythonVenv[];
+  accelerators: IdeMlAcceleratorInfo[];
   dotenvFiles: string[];
   runConfigs: IdeRunConfig[];
   detectedConfigs: IdeRunConfig[];
@@ -126,6 +127,7 @@ export function languageFromRunner(runner: string | undefined, fallback: string)
   if (runner.startsWith('cargo_')) return 'rust';
   if (runner.startsWith('zig_')) return 'zig';
   if (runner === 'cmake' || runner === 'ctest' || runner === 'cpp_run' || runner === 'make' || runner === 'meson' || runner === 'unreal') return 'cpp';
+  if (runner.startsWith('dotnet_')) return 'csharp';
   if (runner.startsWith('java_') || runner === 'maven' || runner === 'gradle') return 'java';
   if (runner === 'pytest' || runner === 'python') return 'python';
   if (runner === 'node' || runner === 'npm' || runner === 'vitest') return 'javascript';
@@ -310,6 +312,7 @@ export async function fetchEnvironments(host: DebugAndEnvHost): Promise<void> {
       configs: IdeRunConfig[];
       detected_configs?: IdeRunConfig[];
       effective_env?: Record<string, string>;
+      accelerators?: IdeMlAcceleratorInfo[];
     }>(`/ide/environments?${host.targetQuery()}`);
     // The project switched while this was in flight: its run configs belong to the old one.
     if (stale()) return;
@@ -319,6 +322,7 @@ export async function fetchEnvironments(host: DebugAndEnvHost): Promise<void> {
       host.syncAdditionalRootsFromEnv?.(resp.env.additional_roots);
     }
     host.pythonVenvs = resp.python_venvs ?? [];
+    host.accelerators = resp.accelerators ?? [];
     host.dotenvFiles = resp.dotenv_files ?? [];
     const backendDetected = resp.detected_configs ?? [];
     host.detectedConfigs = backendDetected.length > 0 ? backendDetected : host.detectedConfigs;
@@ -552,7 +556,7 @@ function selectedGutterTarget(host: DebugAndEnvHost): IdeGutterItem | null {
 }
 
 const TOOL_ARGV_RUNNERS = new Set([
-  'go_run', 'go_test', 'go_build', 'cargo_run', 'cargo_test', 'zig_build', 'zig_run', 'zig_test', 'cmake', 'ctest', 'cpp_run', 'make', 'meson', 'unreal', 'pytest', 'npm', 'vitest', 'maven', 'java_junit', 'gradle',
+  'go_run', 'go_test', 'go_build', 'cargo_run', 'cargo_test', 'zig_build', 'zig_run', 'zig_test', 'cmake', 'ctest', 'cpp_run', 'make', 'meson', 'unreal', 'dotnet_build', 'dotnet_run', 'dotnet_test', 'pytest', 'npm', 'vitest', 'maven', 'java_junit', 'gradle',
 ]);
 
 /** The toolbar/shortcut target when the caller named none (`null` = the caller did). */

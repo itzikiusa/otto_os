@@ -44,6 +44,8 @@ pub(super) struct StoredMobileSdks {
     pub(super) cpp_toolchain: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) kotlin_home: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) dotnet_root: Option<String>,
 }
 
 pub(crate) fn is_reserved_internal_env_key(key: &str) -> bool {
@@ -71,6 +73,9 @@ pub(crate) fn is_dangerous_loader_env_key(key: &str) -> bool {
         || upper.starts_with("XDG_")
         || upper.starts_with("PKG_CONFIG_")
         || upper.starts_with("CGO_")
+        || upper.starts_with("DOTNET_")
+        || upper.starts_with("CORECLR_")
+        || upper.starts_with("COMPLUS_")
         || (upper.starts_with("CARGO_TARGET_")
             && (upper.ends_with("_LINKER") || upper.ends_with("_RUNNER")))
         || matches!(
@@ -277,6 +282,13 @@ pub(super) fn apply_run_config_sdk_override(
                 push_unique(path_dirs, trimmed.to_string());
             }
         }
+        IdeRunnerKind::DotnetBuild | IdeRunnerKind::DotnetRun | IdeRunnerKind::DotnetTest => {
+            if trimmed.starts_with('/') {
+                map.insert("DOTNET_ROOT".into(), trimmed.to_string());
+                push_unique(path_dirs, trimmed.to_string());
+                push_unique(path_dirs, format!("{trimmed}/bin"));
+            }
+        }
         IdeRunnerKind::Python | IdeRunnerKind::Pytest => {
             let p = Path::new(trimmed);
             if p.is_file() {
@@ -298,6 +310,9 @@ pub(super) fn apply_run_config_sdk_override(
         IdeRunnerKind::Node
         | IdeRunnerKind::Npm
         | IdeRunnerKind::Vitest
+        | IdeRunnerKind::Jest
+        | IdeRunnerKind::Playwright
+        | IdeRunnerKind::Karma
         | IdeRunnerKind::ReactNative => {
             push_unique(path_dirs, format!("{trimmed}/bin"));
         }
@@ -498,6 +513,7 @@ fn decode_project_env_row(
         zig_home: mobile_sdks.zig_home,
         cpp_toolchain: mobile_sdks.cpp_toolchain,
         kotlin_home: mobile_sdks.kotlin_home,
+        dotnet_root: mobile_sdks.dotnet_root,
         node_home: row.try_get("node_home").ok().flatten(),
         python_interpreter: row.try_get("python_interpreter").ok().flatten(),
         android_home: mobile_sdks.android_home,
@@ -631,8 +647,27 @@ pub(super) fn discover_local_dotenv_files(root: &Path) -> Vec<String> {
         .collect()
 }
 
-pub(super) fn discover_local_python_venvs(root: &Path, data_dir: &Path) -> Vec<IdePythonVenvInfo> {
+#[allow(clippy::disallowed_methods)] // bounded local env scan executed inside spawn_blocking
+pub(crate) fn discover_local_python_venvs(root: &Path, data_dir: &Path) -> Vec<IdePythonVenvInfo> {
     let mut out = Vec::new();
+    let mut seen: Vec<PathBuf> = Vec::new();
+    let mut push_venv = |p: PathBuf, kind: &str, ver: Option<String>| {
+        let canon = std::fs::canonicalize(&p).unwrap_or_else(|_| p.clone());
+        if seen.contains(&canon) {
+            return;
+        }
+        seen.push(canon);
+        let version = ver
+            .or_else(|| read_pyvenv_version(&p))
+            .or_else(|| read_conda_python_version(&p))
+            .unwrap_or_else(|| "3".into());
+        out.push(IdePythonVenvInfo {
+            version,
+            path: p.to_string_lossy().into_owned(),
+            kind: kind.into(),
+        });
+    };
+
     for dir_name in [".venv", "venv", "env", ".env"] {
         let p = root.join(dir_name);
         if p.join("bin/python").is_file() {
@@ -645,11 +680,7 @@ pub(super) fn discover_local_python_venvs(root: &Path, data_dir: &Path) -> Vec<I
             } else {
                 "venv"
             };
-            out.push(IdePythonVenvInfo {
-                version: read_pyvenv_version(&p).unwrap_or_else(|| "3".into()),
-                path: p.to_string_lossy().into_owned(),
-                kind: kind.into(),
-            });
+            push_venv(p, kind, None);
         }
     }
     for py_dir in read_subdirs(&data_dir.join("toolchains/python/interpreters"))
@@ -657,38 +688,78 @@ pub(super) fn discover_local_python_venvs(root: &Path, data_dir: &Path) -> Vec<I
         .take(16)
     {
         if py_dir.join("bin/python3").is_file() {
-            out.push(IdePythonVenvInfo {
-                version: py_dir
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("3")
-                    .to_string(),
-                path: py_dir.to_string_lossy().into_owned(),
-                kind: "uv".into(),
-            });
+            let ver = py_dir
+                .file_name()
+                .and_then(|s| s.to_str())
+                .map(str::to_string);
+            push_venv(py_dir, "uv", ver);
         }
     }
     if !otto_core::e2e::isolated() {
         if let Some(home) = dirs::home_dir() {
+            // 1. Conda's own registry (`~/.conda/environments.txt`) lists every created conda env.
+            if let Ok(env_list) = std::fs::read_to_string(home.join(".conda/environments.txt")) {
+                for line in env_list.lines().take(24) {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() || trimmed.starts_with('#') {
+                        continue;
+                    }
+                    let p = PathBuf::from(trimmed);
+                    if p.join("bin/python").is_file() {
+                        push_venv(p, "conda", None);
+                    }
+                }
+            }
+            // 2. Base conda installations
+            for base in [
+                home.join("miniconda3"),
+                home.join("anaconda3"),
+                home.join("miniforge3"),
+                home.join("mambaforge"),
+                PathBuf::from("/opt/homebrew/Caskroom/miniconda/base"),
+                PathBuf::from("/opt/homebrew/Caskroom/miniforge/base"),
+                PathBuf::from("/opt/anaconda3"),
+            ] {
+                if base.join("bin/python").is_file() && base.join("conda-meta").is_dir() {
+                    push_venv(base.clone(), "conda", None);
+                }
+                for d in read_subdirs(&base.join("envs")).into_iter().take(12) {
+                    if d.join("bin/python").is_file() {
+                        push_venv(d, "conda", None);
+                    }
+                }
+            }
+            // 3. Additional ~/.conda/envs and Poetry virtualenvs
             for (kind, parent) in [
                 ("conda", home.join(".conda/envs")),
-                ("conda", home.join("miniconda3/envs")),
                 ("poetry", home.join("Library/Caches/pypoetry/virtualenvs")),
                 ("poetry", home.join(".cache/pypoetry/virtualenvs")),
             ] {
                 for d in read_subdirs(&parent).into_iter().take(12) {
                     if d.join("bin/python").is_file() {
-                        out.push(IdePythonVenvInfo {
-                            version: read_pyvenv_version(&d).unwrap_or_else(|| "3".into()),
-                            path: d.to_string_lossy().into_owned(),
-                            kind: kind.into(),
-                        });
+                        push_venv(d, kind, None);
                     }
                 }
             }
         }
     }
     out
+}
+
+#[allow(clippy::disallowed_methods)]
+fn read_conda_python_version(env_dir: &Path) -> Option<String> {
+    let rd = std::fs::read_dir(env_dir.join("conda-meta")).ok()?;
+    for entry in rd.flatten().take(256) {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if let Some(rest) = name.strip_prefix("python-") {
+            if let Some(ver) = rest.split('-').next() {
+                if ver.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                    return Some(ver.to_string());
+                }
+            }
+        }
+    }
+    None
 }
 
 pub(super) fn read_pyvenv_version(venv: &Path) -> Option<String> {

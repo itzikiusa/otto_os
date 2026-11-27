@@ -15,6 +15,7 @@ import {
   availablePreviewModes,
   effectivePreviewMode,
   filePreviewKind,
+  isNotebookPreviewKind,
   isTablePreviewKind,
   parsePreviewModes,
   type FilePreviewKind,
@@ -26,8 +27,8 @@ import { ideLayout } from '../shell/ideLayout.svelte';
 export const IDE_PREVIEW_MODE_KEY = 'otto.ide.previewMode.v1';
 
 /** What the editor pane shows: the editor alone, editor + preview, the
- *  preview in place of the editor, or the editable table in its place. */
-export type IdePreviewLayout = 'none' | 'split' | 'only' | 'table';
+ *  preview in place of the editor, the editable table, or the interactive notebook. */
+export type IdePreviewLayout = 'none' | 'split' | 'only' | 'table' | 'notebook';
 
 function readModes(): Partial<Record<FilePreviewKind, FilePreviewMode>> {
   try {
@@ -61,6 +62,7 @@ class IdePreviewModeStore {
     const m = this.modeFor(path);
     if (!k || m === 'source') return 'none';
     if (m === 'split') return 'split';
+    if (isNotebookPreviewKind(k)) return 'notebook';
     return isTablePreviewKind(k) ? 'table' : 'only';
   }
 

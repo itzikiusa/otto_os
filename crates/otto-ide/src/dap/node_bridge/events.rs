@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use tokio::io::AsyncWrite;
 
 use super::cdp::InspectorWs;
-use super::{file_url_to_path, NodeBridgeState};
+use super::{file_url_to_path_in_cwd, NodeBridgeState};
 use crate::dap::wire::DapWriter;
 
 pub(super) fn format_remote_object(
@@ -105,16 +105,17 @@ pub(super) async fn handle_node_cdp_msg<W: AsyncWrite + Unpin>(
                     .and_then(Value::as_u64)
                     .unwrap_or(0) as u32
                     + 1;
-                let has_bp_at_entry = file_url_to_path(&resolved_url).is_some_and(|top_path| {
-                    let top_canon = std::fs::canonicalize(&top_path).ok();
-                    st.user_bp_lines.iter().any(|(bp_file, lines)| {
-                        let same_file = bp_file == &top_path
-                            || top_canon.as_ref().is_some_and(|tc| {
-                                std::fs::canonicalize(bp_file).ok().as_ref() == Some(tc)
-                            });
-                        same_file && lines.contains(&top_line)
-                    })
-                });
+                let has_bp_at_entry = file_url_to_path_in_cwd(&resolved_url, &st.workspace_cwd)
+                    .is_some_and(|top_path| {
+                        let top_canon = std::fs::canonicalize(&top_path).ok();
+                        st.user_bp_lines.iter().any(|(bp_file, lines)| {
+                            let same_file = bp_file == &top_path
+                                || top_canon.as_ref().is_some_and(|tc| {
+                                    std::fs::canonicalize(bp_file).ok().as_ref() == Some(tc)
+                                });
+                            same_file && lines.contains(&top_line)
+                        })
+                    });
                 if !has_bp_at_entry {
                     let cid = st.alloc_cdp();
                     ws.send_json(&json!({ "id": cid, "method": "Debugger.resume" }))

@@ -127,7 +127,7 @@ export type RepoTestExecutionPlan =
       };
     };
 
-type RepoTestEcosystem = 'go' | 'rust' | 'zig' | 'cpp_cmake' | 'cpp_meson' | 'maven' | 'gradle' | 'vitest' | 'npm' | 'pytest';
+type RepoTestEcosystem = 'go' | 'rust' | 'zig' | 'cpp_cmake' | 'cpp_meson' | 'dotnet' | 'maven' | 'gradle' | 'vitest' | 'npm' | 'pytest';
 
 export function detectRepoTestEcosystem(opts: {
   repoRoot: string;
@@ -143,6 +143,7 @@ export function detectRepoTestEcosystem(opts: {
   if (entryNames.has('build.zig') || entryNames.has('build.zig.zon')) return 'zig';
   if (entryNames.has('cmakelists.txt')) return 'cpp_cmake';
   if (entryNames.has('meson.build')) return 'cpp_meson';
+  if (entryNames.has('global.json') || [...entryNames].some((n) => /\.(?:sln|slnx|csproj|fsproj)$/.test(n))) return 'dotnet';
   if (entryNames.has('pom.xml')) return 'maven';
   if (entryNames.has('build.gradle') || entryNames.has('build.gradle.kts')) return 'gradle';
   if (
@@ -178,6 +179,7 @@ export function detectRepoTestEcosystem(opts: {
     if (r.startsWith('zig_')) return 'zig';
     if (r === 'cmake' || r === 'ctest' || r === 'cpp_run' || r === 'unreal') return 'cpp_cmake';
     if (r === 'meson') return 'cpp_meson';
+    if (r.startsWith('dotnet_')) return 'dotnet';
     if (r === 'maven' || r === 'java_junit') return 'maven';
     if (r === 'gradle') return 'gradle';
     if (r === 'vitest') return 'vitest';
@@ -194,6 +196,7 @@ export function detectRepoTestEcosystem(opts: {
     if (lang === 'rust' || tp.endsWith('.rs')) return 'rust';
     if (lang === 'zig' || tp.endsWith('.zig')) return 'zig';
     if (lang === 'cpp' || lang === 'c' || /\.(?:cpp|cc|cxx|hpp|h|c)$/.test(tp)) return 'cpp_cmake';
+    if (lang === 'csharp' || lang === 'fsharp' || tp.endsWith('.cs') || tp.endsWith('.fs')) return 'dotnet';
     if (lang === 'java' || tp.endsWith('.java')) return 'maven';
     if (lang === 'python' || tp.endsWith('.py')) return 'pytest';
     if (
@@ -262,6 +265,15 @@ export function resolveRepoTestPlan(opts: {
         repoRoot,
         repoName,
         language: 'cpp',
+        launch: { program: repoRoot, args: [], build_flags: [], cwd: repoRoot },
+      };
+    }
+    if (eco === 'dotnet') {
+      return {
+        kind: 'debug',
+        repoRoot,
+        repoName,
+        language: 'csharp',
         launch: { program: repoRoot, args: [], build_flags: [], cwd: repoRoot },
       };
     }
@@ -350,6 +362,13 @@ export function resolveRepoTestPlan(opts: {
         repoRoot,
         repoName,
         adhoc: { ...common, runner: 'meson', args: ['test', '-C', 'builddir'] },
+      };
+    case 'dotnet':
+      return {
+        kind: 'run',
+        repoRoot,
+        repoName,
+        adhoc: { ...common, runner: 'dotnet_test', args: [] },
       };
     case 'maven':
       return {

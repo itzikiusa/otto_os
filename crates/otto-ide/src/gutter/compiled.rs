@@ -1082,3 +1082,324 @@ fn find_cpp_project_root(dir: &str) -> Option<String> {
     }
     best
 }
+
+// ---------------------------------------------------------------------------
+// 6. C# (`Main`, top-level `Program.cs`, xUnit / NUnit / MSTest)
+// ---------------------------------------------------------------------------
+
+pub(super) fn detect_csharp(path: &str, dir: &str, content: &str, out: &mut Vec<IdeGutterItem>) {
+    static RE_NS: OnceLock<Regex> = OnceLock::new();
+    static RE_CLASS: OnceLock<Regex> = OnceLock::new();
+    static RE_MAIN: OnceLock<Regex> = OnceLock::new();
+    static RE_TEST_ATTR: OnceLock<Regex> = OnceLock::new();
+    static RE_METHOD: OnceLock<Regex> = OnceLock::new();
+
+    let re_ns = RE_NS.get_or_init(|| {
+        Regex::new(r"^\s*namespace\s+([A-Za-z_][A-Za-z0-9_.]*)\s*(?:;|\{)?").unwrap()
+    });
+    let re_class = RE_CLASS.get_or_init(|| {
+        Regex::new(
+            r"^\s*(?:(?:public|internal|private|protected|static|abstract|sealed|partial|file)\s+)*(?:class|record|struct)\s+([A-Za-z_][A-Za-z0-9_]*)",
+        )
+        .unwrap()
+    });
+    let re_main = RE_MAIN.get_or_init(|| {
+        Regex::new(
+            r"^\s*(?:(?:public|private|internal|protected|async|unsafe)\s+)*static\s+(?:async\s+)?(?:void|int|Task|Task<int>|System\.Threading\.Tasks\.Task(?:<int>)?)\s+Main\s*\(",
+        )
+        .unwrap()
+    });
+    let re_test_attr = RE_TEST_ATTR.get_or_init(|| {
+        Regex::new(
+            r"\[\s*(?:(?:Xunit|NUnit\.Framework|Microsoft\.VisualStudio\.TestTools\.UnitTesting)\.)?(?:Fact|Theory|Test|TestCase|TestCaseSource|TestMethod|DataTestMethod)\b",
+        )
+        .unwrap()
+    });
+    let re_method = RE_METHOD.get_or_init(|| {
+        Regex::new(
+            r"^\s*(?:(?:public|private|internal|protected|static|async|virtual|override|sealed|new|unsafe)\s+)*(?:[A-Za-z0-9_<>,\[\]\.?\s]+?\s+)([A-Za-z_][A-Za-z0-9_]*)\s*(?:<[^>]+>)?\s*\(",
+        )
+        .unwrap()
+    });
+
+    let proj_root = find_dotnet_project_root(dir).unwrap_or_else(|| dir.to_string());
+    let mut namespace_name = String::new();
+    let mut current_class: Option<(String, u32)> = None;
+    let mut emitted_suite_line: Option<u32> = None;
+    let mut pending_test_attr = false;
+    let mut has_explicit_main = false;
+    let mut has_any_type = false;
+    let mut first_stmt_line: Option<u32> = None;
+
+    for (idx, line) in content.lines().enumerate() {
+        let line_no = (idx + 1) as u32;
+        let trimmed = line.trim();
+        if trimmed.is_empty()
+            || trimmed.starts_with("//")
+            || trimmed.starts_with('*')
+            || trimmed.starts_with("/*")
+            || trimmed.starts_with('#')
+        {
+            continue;
+        }
+        if let Some(cap) = re_ns.captures(line) {
+            namespace_name = cap[1].to_string();
+            continue;
+        }
+        if let Some(cap) = re_class.captures(line) {
+            has_any_type = true;
+            current_class = Some((cap[1].to_string(), line_no));
+            emitted_suite_line = None;
+            pending_test_attr = false;
+            continue;
+        }
+        if re_test_attr.is_match(line) {
+            pending_test_attr = true;
+            continue;
+        }
+        if trimmed.starts_with('[') {
+            continue;
+        }
+        if !trimmed.starts_with("using ")
+            && !trimmed.starts_with("global using ")
+            && first_stmt_line.is_none()
+        {
+            first_stmt_line = Some(line_no);
+        }
+        if re_main.is_match(line) {
+            has_explicit_main = true;
+            let cls = current_class
+                .as_ref()
+                .map(|(c, _)| c.as_str())
+                .unwrap_or("Program");
+            out.push(IdeGutterItem {
+                line: line_no,
+                kind: IdeGutterKind::Main,
+                label: format!("{cls}.Main()"),
+                language: "csharp".into(),
+                run_spec: IdeQuickRunSpec {
+                    runner: IdeRunnerKind::DotnetRun,
+                    command: Some("dotnet".into()),
+                    args: vec!["run".into()],
+                    cwd: Some(proj_root.clone()),
+                    target_path: Some(path.to_string()),
+                    test_filter: None,
+                    debug_program: Some(path.to_string()),
+                    debug_test_name: None,
+                },
+            });
+            pending_test_attr = false;
+            continue;
+        }
+        if pending_test_attr {
+            if let Some(cap) = re_method.captures(line) {
+                let method = cap[1].to_string();
+                let fqn_prefix = match (&namespace_name.is_empty(), &current_class) {
+                    (false, Some((c, _))) => format!("{namespace_name}.{c}"),
+                    (true, Some((c, _))) => c.clone(),
+                    (false, None) => namespace_name.clone(),
+                    (true, None) => String::new(),
+                };
+                if let Some((ref cls, cls_line)) = current_class {
+                    if emitted_suite_line != Some(cls_line) {
+                        emitted_suite_line = Some(cls_line);
+                        out.push(IdeGutterItem {
+                            line: cls_line,
+                            kind: IdeGutterKind::Suite,
+                            label: format!("{cls} (all tests)"),
+                            language: "csharp".into(),
+                            run_spec: IdeQuickRunSpec {
+                                runner: IdeRunnerKind::DotnetTest,
+                                command: Some("dotnet".into()),
+                                args: vec![
+                                    "test".into(),
+                                    "--verbosity".into(),
+                                    "normal".into(),
+                                    "--filter".into(),
+                                    format!("FullyQualifiedName~{fqn_prefix}"),
+                                ],
+                                cwd: Some(proj_root.clone()),
+                                target_path: Some(path.to_string()),
+                                test_filter: Some(fqn_prefix.clone()),
+                                debug_program: Some(path.to_string()),
+                                debug_test_name: Some(fqn_prefix.clone()),
+                            },
+                        });
+                    }
+                }
+                let full_test = if fqn_prefix.is_empty() {
+                    method.clone()
+                } else {
+                    format!("{fqn_prefix}.{method}")
+                };
+                out.push(IdeGutterItem {
+                    line: line_no,
+                    kind: IdeGutterKind::Test,
+                    label: method,
+                    language: "csharp".into(),
+                    run_spec: IdeQuickRunSpec {
+                        runner: IdeRunnerKind::DotnetTest,
+                        command: Some("dotnet".into()),
+                        args: vec![
+                            "test".into(),
+                            "--verbosity".into(),
+                            "normal".into(),
+                            "--filter".into(),
+                            format!("FullyQualifiedName~{full_test}"),
+                        ],
+                        cwd: Some(proj_root.clone()),
+                        target_path: Some(path.to_string()),
+                        test_filter: Some(full_test.clone()),
+                        debug_program: Some(path.to_string()),
+                        debug_test_name: Some(full_test),
+                    },
+                });
+                pending_test_attr = false;
+            }
+        }
+    }
+
+    // C# 9+ top-level statements (`Program.cs` with executable statements and no explicit `Main`).
+    let is_program_cs = path
+        .rsplit('/')
+        .next()
+        .is_some_and(|n| n.eq_ignore_ascii_case("Program.cs"));
+    if is_program_cs && !has_explicit_main && !has_any_type {
+        if let Some(stmt_ln) = first_stmt_line {
+            out.push(IdeGutterItem {
+                line: stmt_ln,
+                kind: IdeGutterKind::Main,
+                label: "Program (top-level)".into(),
+                language: "csharp".into(),
+                run_spec: IdeQuickRunSpec {
+                    runner: IdeRunnerKind::DotnetRun,
+                    command: Some("dotnet".into()),
+                    args: vec!["run".into()],
+                    cwd: Some(proj_root),
+                    target_path: Some(path.to_string()),
+                    test_filter: None,
+                    debug_program: Some(path.to_string()),
+                    debug_test_name: None,
+                },
+            });
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 7. F# (`[<EntryPoint>]`, `[<Fact>]`, `[<Test>]`, `[<TestMethod>]`)
+// ---------------------------------------------------------------------------
+
+pub(super) fn detect_fsharp(path: &str, dir: &str, content: &str, out: &mut Vec<IdeGutterItem>) {
+    static RE_LET: OnceLock<Regex> = OnceLock::new();
+    let re_let = RE_LET.get_or_init(|| {
+        Regex::new(r"^\s*let\s+(?:``([^`]+)``|([A-Za-z_][A-Za-z0-9_']*)\b)").unwrap()
+    });
+    let proj_root = find_dotnet_project_root(dir).unwrap_or_else(|| dir.to_string());
+    let mut pending_entry = false;
+    let mut pending_test = false;
+
+    for (idx, line) in content.lines().enumerate() {
+        let line_no = (idx + 1) as u32;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            continue;
+        }
+        if trimmed.contains("[<EntryPoint>]") {
+            pending_entry = true;
+            continue;
+        }
+        if trimmed.contains("[<Fact")
+            || trimmed.contains("[<Theory")
+            || trimmed.contains("[<Test")
+            || trimmed.contains("[<TestMethod")
+        {
+            pending_test = true;
+            continue;
+        }
+        if trimmed.starts_with("[<") {
+            continue;
+        }
+        if pending_entry {
+            if let Some(cap) = re_let.captures(line) {
+                let name = cap.get(1).or_else(|| cap.get(2)).unwrap().as_str();
+                out.push(IdeGutterItem {
+                    line: line_no,
+                    kind: IdeGutterKind::Main,
+                    label: format!("{name} (EntryPoint)"),
+                    language: "fsharp".into(),
+                    run_spec: IdeQuickRunSpec {
+                        runner: IdeRunnerKind::DotnetRun,
+                        command: Some("dotnet".into()),
+                        args: vec!["run".into()],
+                        cwd: Some(proj_root.clone()),
+                        target_path: Some(path.to_string()),
+                        test_filter: None,
+                        debug_program: Some(path.to_string()),
+                        debug_test_name: None,
+                    },
+                });
+                pending_entry = false;
+            }
+        } else if pending_test {
+            if let Some(cap) = re_let.captures(line) {
+                let name = cap
+                    .get(1)
+                    .or_else(|| cap.get(2))
+                    .unwrap()
+                    .as_str()
+                    .to_string();
+                out.push(IdeGutterItem {
+                    line: line_no,
+                    kind: IdeGutterKind::Test,
+                    label: name.clone(),
+                    language: "fsharp".into(),
+                    run_spec: IdeQuickRunSpec {
+                        runner: IdeRunnerKind::DotnetTest,
+                        command: Some("dotnet".into()),
+                        args: vec![
+                            "test".into(),
+                            "--verbosity".into(),
+                            "normal".into(),
+                            "--filter".into(),
+                            format!("FullyQualifiedName~{name}"),
+                        ],
+                        cwd: Some(proj_root.clone()),
+                        target_path: Some(path.to_string()),
+                        test_filter: Some(name.clone()),
+                        debug_program: Some(path.to_string()),
+                        debug_test_name: Some(name),
+                    },
+                });
+                pending_test = false;
+            }
+        }
+    }
+}
+
+#[allow(clippy::disallowed_methods)] // bounded <=8-hop ancestor check executed inside spawn_blocking
+fn find_dotnet_project_root(dir: &str) -> Option<String> {
+    let mut cur = Some(std::path::Path::new(dir));
+    let mut hops = 0usize;
+    while let Some(d) = cur {
+        let has_proj = std::fs::read_dir(d).ok().is_some_and(|rd| {
+            rd.flatten().any(|e| {
+                e.file_name().to_str().is_some_and(|n| {
+                    n.ends_with(".csproj")
+                        || n.ends_with(".fsproj")
+                        || n.ends_with(".sln")
+                        || n.ends_with(".slnx")
+                })
+            })
+        });
+        if has_proj {
+            return Some(d.to_string_lossy().into_owned());
+        }
+        hops += 1;
+        if hops >= 8 {
+            break;
+        }
+        cur = d.parent();
+    }
+    None
+}

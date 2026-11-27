@@ -215,3 +215,97 @@ pub(in crate::deps_inspector) async fn enrich_maven_updates(
         }
     }
 }
+
+pub(in crate::deps_inspector) async fn enrich_nuget_updates(items: &mut [IdeDepItem]) {
+    if items.is_empty() {
+        return;
+    }
+    let now = Instant::now();
+    let mut remote_needed: Vec<String> = Vec::new();
+    let mut seen = HashSet::new();
+
+    for item in items.iter_mut() {
+        let key = item.name.to_ascii_lowercase();
+        if key.is_empty()
+            || !key
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+        {
+            continue;
+        }
+        if let Some(meta) = cache_get("nuget", &key, now) {
+            apply_cached_meta(item, &meta);
+        } else if !otto_core::e2e::isolated()
+            && remote_needed.len() < MAX_REMOTE_LOOKUPS
+            && seen.insert(key.clone())
+        {
+            remote_needed.push(key);
+        }
+    }
+
+    if !remote_needed.is_empty() {
+        let _ = tokio::time::timeout(
+            ENRICH_BATCH_DEADLINE,
+            stream::iter(remote_needed)
+                .map(|pkg| async move {
+                    let url = format!("https://api.nuget.org/v3-flatcontainer/{pkg}/index.json");
+                    let Some((status, body)) =
+                        guarded_get_status_and_text(&url, Duration::from_millis(2000)).await
+                    else {
+                        return;
+                    };
+                    let fetched_now = Instant::now();
+                    if status == StatusCode::NOT_FOUND {
+                        cache_put(
+                            "nuget",
+                            &pkg,
+                            CachedRegistryMeta {
+                                versions: Vec::new(),
+                                deprecated: None,
+                                single_latest_only: false,
+                                inserted_at: fetched_now,
+                                expires_at: fetched_now + REGISTRY_NOT_FOUND_TTL,
+                            },
+                            fetched_now,
+                        );
+                        return;
+                    }
+                    if !status.is_success() {
+                        return;
+                    }
+                    let versions: Vec<String> = serde_json::from_str::<serde_json::Value>(&body)
+                        .ok()
+                        .and_then(|v| v.get("versions").and_then(|a| a.as_array()).cloned())
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect();
+                    cache_put(
+                        "nuget",
+                        &pkg,
+                        CachedRegistryMeta {
+                            versions,
+                            deprecated: None,
+                            single_latest_only: false,
+                            inserted_at: fetched_now,
+                            expires_at: fetched_now + REGISTRY_CACHE_TTL,
+                        },
+                        fetched_now,
+                    );
+                })
+                .buffer_unordered(REGISTRY_CONCURRENCY)
+                .collect::<Vec<()>>(),
+        )
+        .await;
+
+        let post_now = Instant::now();
+        for item in items.iter_mut() {
+            if item.latest_version.is_none() {
+                let key = item.name.to_ascii_lowercase();
+                if let Some(meta) = cache_get("nuget", &key, post_now) {
+                    apply_cached_meta(item, &meta);
+                }
+            }
+        }
+    }
+}

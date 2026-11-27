@@ -27,7 +27,7 @@ zero-rebuild **runtime IDE plugins**.
     (`GET/PUT /ide/environments`) and minting a collab share room
     (`POST /ide/collab/rooms`) carry `RouteClass::Secret` (human credentials only);
     and subprocess-spawning workspace mutations (`python-venv`, `deps/action`,
-    `POST /ide/runs`, `POST /ide/debug/sessions`) carry `RouteClass::Admin`
+    `POST /ide/runs`, `POST /ide/debug/sessions`, `POST /ide/notebooks/{execute,interrupt,restart,shutdown}`) carry `RouteClass::Admin`
     (human credentials only).
   - Public guest routes (`/api/v1/ide/collab/guest/*`) sit outside the bearer
     chokepoint and authenticate each request with the room's capability share
@@ -92,7 +92,7 @@ zero-rebuild **runtime IDE plugins**.
 - Code:
   - Engine & routers: `crates/otto-ide/` (`target.rs`, `target/fs_ops.rs`,
     `toolchains_catalog.rs`, `toolchains.rs`, `environments.rs`,
-    `environments/runner.rs`, `gutter.rs`, `dap/`, `lsp_service.rs`,
+    `environments/runner.rs`, `notebooks.rs`, `http/notebooks.rs`, `gutter.rs`, `dap/`, `lsp_service.rs`,
     `lsp_host/`, `collab.rs`, `plugins.rs`, `http.rs`).
   - Host wiring & `/ws/lsp` bridge: `crates/otto-server/src/lsp/mod.rs`,
     `crates/otto-server/src/modules/ctx_impls.rs`, `crates/otto-server/src/policy.rs`.
@@ -247,8 +247,9 @@ global system directories:
 | **Rust** | `rustup` (`rustc` + `cargo`), `rust-analyzer`, `CodeLLDB` (`codelldb`) |
 | **Zig** | Official Zig SDK tarball (`ziglang.org/download/index.json`, SHA-256 verified), local SDK registration, `zls` (Zig-version-matched), `CodeLLDB` (`codelldb`) / `lldb-dap` / built-in `otto-lldb-dap` with Zig LLDB type formatters |
 | **C / C++ & Unreal Engine** | Clang / GCC / LLVM toolchain discovery & local registration, `clangd` (auto `--compile-commands-dir` including CMake/Meson/Unreal `Intermediate/ProjectFiles` + `textDocument/switchSourceHeader` `⌥O`), `clang-format`, CMake (Presets & CTest), Meson, Make, `vcpkg.json` / `conanfile.txt` / `.uproject` deps, `CodeLLDB` / `lldb-dap` / built-in `otto-lldb-dap` with C++ STL & Unreal pretty-printers, PID/process-name attach, and core-dump debugging |
+| **.NET (C# / F# / Unity / Unreal)** | Official .NET SDK tarball (`dotnetcli.azureedge.net` / `builds.dotnet.microsoft.com`, LTS 8.0 / 9.0), local SDK registration (`DOTNET_ROOT`), `csharp-ls` (with OmniSharp / Roslyn / `fsautocomplete` fallback), NuGet inspector & OSV vulnerabilities, `netcoredbg` (and `vsdbg` fallback) with `VSTEST_HOST_DEBUG` test debugging & Unity attach |
 | **Go** | Official Go SDK tarball, local SDK registration (`POST /ide/toolchains/local`), `gopls`, Delve (`dlv`), `gofumpt` |
-| **Node / TypeScript** | Node LTS (22), `pnpm`, `typescript-language-server`, `vscode-langservers-extracted`, `prettier`, `js-debug` |
+| **Node / TypeScript & Web Frameworks** | Node LTS (22), `pnpm`, `typescript-language-server`, `svelteserver` (Svelte/SvelteKit), `vue-language-server` (Vue/Nuxt), `ngserver` (Angular), `vscode-langservers-extracted`, `prettier`, `js-debug` & built-in `otto-node-cdp` (Node + Browser CDP attach with Vite/webpack URL mapping) |
 | **Shell (Bash / Zsh)** | `bash-language-server`, `shellcheck`, `shfmt`, built-in `otto-sh-dap` (`DEBUG` trap DAP debugger) |
 | **JSON & CSV / TSV** | `vscode-json-language-server`, live JSONPath breadcrumb (JSONC files — `.jsonc`, `tsconfig*.json`, `jsconfig*.json`, `.vscode/*.json`, `devcontainer.json`, `.eslintrc.json` — allow comments and trailing commas in the built-in syntax check), Pretty / Minify / Sort Keys, `$ref` navigation, virtualized `IdeCsvView` (`Table ↔ Text` toggle, rainbow columns, sort/filter, inline cell edit + undo, column stats) |
 
@@ -277,7 +278,7 @@ never spawned per request) and merges:
 `daemon base env → cached login shell env → selected SDK env → project .env file → Run/Debug config overrides`
 
 into **all** Run executions, DAP Debug sessions, IDE Terminals, and local LSP
-servers (`gopls`, `jdtls`, `kotlin-language-server`, `rust-analyzer`, `zls`, `clangd`, `pyright`, `tsserver`).
+servers (`gopls`, `jdtls`, `kotlin-language-server`, `rust-analyzer`, `zls`, `clangd`, `csharp-ls`, `pyright`, `tsserver`).
 When that PATH has no `mvn` / `gradle` (a slow capture falls back to `-lc`, which
 skips `~/.zshrc` and so sdkman's init), a local run looks in
 `~/.sdkman/candidates/{maven,gradle}/current/bin`, then `/opt/homebrew/bin` and
@@ -289,7 +290,7 @@ secret environment variable values stored in the macOS Keychain via
 `otto-keychain` (`ide-env:<project_hash>:<key>`):
 
 - Select SDK/toolchain overrides per project (`java_home`, `kotlin_home`, `go_root`,
-  `rust_toolchain`, `zig_home`, `cpp_toolchain`, `node_home`, `python_interpreter`, `dotenv_path`,
+  `rust_toolchain`, `zig_home`, `cpp_toolchain`, `dotnet_root`, `node_home`, `python_interpreter`, `dotenv_path`,
   `extra_path`, `inherit_shell_env`, `additional_roots`).
 - Create project-local Python virtual environments (`POST /ide/environments/python-venv`
   via `uv venv` or `python3 -m venv`), discover `.env*` files, and configure
@@ -297,15 +298,15 @@ secret environment variable values stored in the macOS Keychain via
 - Instant (`< 25ms`, pure file-stat/manifest scan with zero subprocess spawns)
   runner discovery across primary and attached folders plus reusable **Run
   Configurations** (`go_test`, `go_run`, `java_junit`, `java_main`, `maven`,
-  `gradle`, `cargo_test`, `cargo_run`, `zig_build`, `zig_run`, `zig_test`, `cmake`, `ctest`, `cpp_run`, `make`, `meson`, `unreal`, `node`, `npm`, `vitest`, `pytest`,
+  `gradle`, `cargo_test`, `cargo_run`, `zig_build`, `zig_run`, `zig_test`, `cmake`, `ctest`, `cpp_run`, `make`, `meson`, `unreal`, `dotnet_build`, `dotnet_run`, `dotnet_test`, `node`, `npm`, `vitest`, `jest`, `playwright`, `karma`, `pytest`,
   `python`, `shell`, `compound`, `custom`), launched in the **Run** bottom dock
   (`POST /ide/runs`) with live output and structured test-result trees, or
   stopped via `POST /ide/runs/{run_id}/stop`.
 - Maven / Gradle runs read the JUnit XML reports the run wrote (`TEST-*.xml`
   under `**/target/surefire-reports` and `**/build/test-results/**`) for one row
   per test with its time and failure message, instead of the console's one row
-  per class. A test run with a filter (`go_test`, `cargo_test`, `zig_test`, `ctest`, `cpp_run`, `meson`, `pytest`,
-  `vitest`, `java_junit`, `maven`, `gradle`) that exits 0 with no tests fails
+  per class. A test run with a filter (`go_test`, `cargo_test`, `zig_test`, `ctest`, `cpp_run`, `meson`, `dotnet_test`, `pytest`,
+  `vitest`, `jest`, `playwright`, `karma`, `java_junit`, `maven`, `gradle`) that exits 0 with no tests fails
   with `No tests matched '<filter>'` instead of showing green.
 - A config's `before_launch` hook runs before the program, in its own process
   group, with its stdout/stderr streamed into the Run console. A non-zero exit
@@ -865,8 +866,8 @@ Full schemas and route tables live in [`docs/contracts/api.md`](../contracts/api
 
 - **"Language server unavailable" banner:** Click **Toolchains** in the IDE
   toolbar and install the matching language server (for example `rust-analyzer`,
-  `zls`, `clangd`, `gopls`, `pyright`, `jdtls`, or `typescript-language-server`, or install/enable
-  a runtime IDE plugin for additional languages such as Kotlin). The
+  `zls`, `clangd`, `csharp-ls`, `kotlin-language-server`, `gopls`, `pyright`, `jdtls`, or `typescript-language-server`, or install/enable
+  a runtime IDE plugin for additional languages). The
   editor reconnects automatically once the install job finishes. A rustup
   `rust-analyzer` proxy only counts as installed once `rust-analyzer --version`
   succeeds (`rustup component add rust-analyzer`).

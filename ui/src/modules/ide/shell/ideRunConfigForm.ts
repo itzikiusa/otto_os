@@ -2,14 +2,14 @@
 // those are everyday (shown) and which fold into "Advanced", plus the draft a
 // new configuration starts from (the active tab's language and file).
 
-import { defaultRunnerForLanguage, type IdeOpenTab } from '../store/ideTypes';
+import { defaultRunnerForLanguage, type IdeOpenTab } from '../store/ideTypes.ts';
 
 export type RunConfigField =
   | 'target' | 'command' | 'test_filter' | 'args' | 'cwd'
   | 'build_flags' | 'sdk' | 'env_file' | 'before_launch' | 'inherit_shell_env';
 
-const TEST_RUNNERS = new Set(['go_test', 'java_junit', 'cargo_test', 'zig_test', 'ctest', 'cpp_run', 'meson', 'pytest', 'vitest', 'maven', 'gradle']);
-const BUILD_FLAG_RUNNERS = new Set(['go_test', 'go_run', 'go_build', 'cargo_test', 'cargo_run', 'zig_build', 'zig_run', 'zig_test', 'cmake', 'ctest', 'cpp_run', 'make', 'meson', 'unreal', 'maven', 'gradle', 'java_main', 'java_junit']);
+const TEST_RUNNERS = new Set(['go_test', 'java_junit', 'cargo_test', 'zig_test', 'ctest', 'cpp_run', 'meson', 'dotnet_test', 'pytest', 'vitest', 'jest', 'playwright', 'karma', 'maven', 'gradle']);
+const BUILD_FLAG_RUNNERS = new Set(['go_test', 'go_run', 'go_build', 'cargo_test', 'cargo_run', 'zig_build', 'zig_run', 'zig_test', 'cmake', 'ctest', 'cpp_run', 'make', 'meson', 'unreal', 'dotnet_build', 'dotnet_run', 'dotnet_test', 'maven', 'gradle', 'java_main', 'java_junit']);
 const NO_SDK_RUNNERS = new Set(['shell', 'custom']);
 
 /** Fields the runner uses at all: everyday ones first, the rest under "Advanced". */
@@ -76,6 +76,9 @@ const TARGET_COPY: Record<string, { label: string; placeholder: string }> = {
   make: { label: 'Make target', placeholder: 'all or test' },
   meson: { label: 'Meson build dir or command', placeholder: 'builddir' },
   unreal: { label: '.uproject path', placeholder: 'MyGame.uproject' },
+  dotnet_build: { label: 'Solution or project', placeholder: 'App.sln or src/App/App.csproj' },
+  dotnet_run: { label: 'Project or file', placeholder: 'src/App/App.csproj' },
+  dotnet_test: { label: 'Test project or solution', placeholder: 'tests/App.Tests/App.Tests.csproj' },
   java_main: { label: 'Main class or file', placeholder: 'com.acme.App' },
   java_junit: { label: 'Test class or file', placeholder: 'com.acme.AppTest' },
   maven: { label: 'Module', placeholder: 'service-core' },
@@ -83,6 +86,9 @@ const TARGET_COPY: Record<string, { label: string; placeholder: string }> = {
   node: { label: 'Script', placeholder: 'src/index.js' },
   npm: { label: 'npm script', placeholder: 'dev' },
   vitest: { label: 'Test file or folder', placeholder: 'src/lib' },
+  jest: { label: 'Test file or folder', placeholder: 'src/__tests__' },
+  playwright: { label: 'Spec file or folder', placeholder: 'e2e/' },
+  karma: { label: 'Spec file (optional)', placeholder: 'src/app/app.component.spec.ts' },
   pytest: { label: 'Test file or folder', placeholder: 'tests/' },
   python: { label: 'Script', placeholder: 'main.py' },
   shell: { label: 'Script', placeholder: 'scripts/deploy.sh' },

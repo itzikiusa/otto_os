@@ -63,7 +63,7 @@ function detectOutlineCsvDelim(sampleText: string, filePath: string): OutlineCsv
 export type IdeOutlineNode = IdeSymbolNode & { column?: number };
 
 export type IdeDocKind =
-  | 'go' | 'ts' | 'java' | 'kotlin' | 'rust' | 'zig' | 'cpp' | 'python' | 'shell' | 'json' | 'jsonl' | 'csv' | 'other';
+  | 'go' | 'ts' | 'java' | 'kotlin' | 'rust' | 'zig' | 'cpp' | 'csharp' | 'fsharp' | 'python' | 'shell' | 'json' | 'jsonl' | 'csv' | 'other';
 
 export function detectIdeDocKind(filePath: string, language?: string): IdeDocKind {
   if (filePath.startsWith('jdt://')) return 'java';
@@ -83,6 +83,8 @@ export function detectIdeDocKind(filePath: string, language?: string): IdeDocKin
     ['c', 'h', 'cc', 'cpp', 'cxx', 'c++', 'hh', 'hpp', 'hxx', 'h++', 'inl', 'ipp', 'tpp', 'ixx', 'cppm', 'm', 'mm'].includes(ext) ||
     language === 'cpp' || language === 'c'
   ) return 'cpp';
+  if (ext === 'cs' || ext === 'csx' || ext === 'razor' || language === 'csharp') return 'csharp';
+  if (ext === 'fs' || ext === 'fsx' || ext === 'fsi' || language === 'fsharp') return 'fsharp';
   if (ext === 'py' || ext === 'pyi' || language === 'python') return 'python';
   if (
     ext === 'sh' || ext === 'bash' || ext === 'zsh' || ext === 'bats' ||
@@ -266,6 +268,37 @@ export function extractInstantSymbols(filePath: string, language: string | undef
       const mFn = /^(?:(?:template\s*<[^>]*>\s*)?(?:static|inline|virtual|explicit|constexpr|consteval|extern|friend|const|unsigned|signed)\s+)*[A-Za-z_][\w:<>*,&\s]*?\s+([A-Za-z_~][\w:~]*)\s*\([^;]*\)\s*(?:const\s*)?(?:noexcept(?:\([^)]*\))?\s*)?(?:override\s*)?(?:final\s*)?(?:\{|->|;)/.exec(trimmed);
       if (mFn && !['if', 'for', 'while', 'switch', 'catch', 'return', 'else'].includes(mFn[1])) {
         out.push({ name: `${mFn[1]}()`, kind: mFn[1].includes('::') ? 'method' : 'function', line: ln, column: 1, end_line: ln, children: [] });
+      }
+    } else if (kind === 'csharp') {
+      const mNs = /^namespace\s+([A-Za-z_][\w.]*)/.exec(trimmed);
+      if (mNs) {
+        out.push({ name: mNs[1], kind: 'namespace', line: ln, column: 1, end_line: ln, children: [] });
+        continue;
+      }
+      const mType = /^(?:(?:public|private|protected|internal|static|abstract|sealed|partial|readonly|ref|file)\s+)*(class|struct|interface|enum|record(?:\s+struct|\s+class)?)\s+([A-Za-z_]\w*)/.exec(trimmed);
+      if (mType) {
+        const k = mType[1].startsWith('record') ? 'class' : mType[1];
+        out.push({ name: mType[2], kind: k, line: ln, column: 1, end_line: ln, children: [] });
+        continue;
+      }
+      const mMethod = /^(?:(?:public|private|protected|internal|static|async|virtual|override|sealed|abstract|new|partial)\s+)+(?:[A-Za-z0-9_<>,.\[\]?\s]+?\s+)?([A-Za-z_]\w*)\s*(?:<[^>]+>)?\s*\(/.exec(trimmed);
+      if (mMethod && !/^(?:if|for|foreach|while|switch|catch|using|lock)$/.test(mMethod[1])) {
+        out.push({ name: mMethod[1], kind: 'method', line: ln, column: 1, end_line: ln, children: [] });
+      }
+    } else if (kind === 'fsharp') {
+      const mMod = /^(namespace|module)\s+(?:rec\s+)?([A-Za-z_][\w.]*)/.exec(trimmed);
+      if (mMod) {
+        out.push({ name: mMod[2], kind: mMod[1], line: ln, column: 1, end_line: ln, children: [] });
+        continue;
+      }
+      const mType = /^type\s+(?:private\s+|internal\s+|public\s+)?([A-Za-z_][\w']*)/.exec(trimmed);
+      if (mType) {
+        out.push({ name: mType[1], kind: 'class', line: ln, column: 1, end_line: ln, children: [] });
+        continue;
+      }
+      const mLet = /^(?:let|member|static\s+member|override)\s+(?:rec\s+)?(?:inline\s+)?(?:private\s+|internal\s+)?(?:[A-Za-z_]\w*\.)?(?:``([^`]+)``|([A-Za-z_][\w']*))/.exec(trimmed);
+      if (mLet) {
+        out.push({ name: mLet[1] || mLet[2], kind: 'function', line: ln, column: 1, end_line: ln, children: [] });
       }
     } else if (kind === 'shell') {
       const mFn = /^(?:function\s+([\w.:-]+)(?:\s*\(\s*\))?|([\w.:-]+)\s*\(\s*\))\s*\{?/.exec(trimmed);

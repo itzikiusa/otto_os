@@ -58,7 +58,31 @@ fn manifest_names_for_lang(norm_lang: &str) -> &'static [&'static str] {
             "Makefile",
             "GNUmakefile",
         ],
-        "typescript" | "javascript" => &["tsconfig.json", "jsconfig.json", "package.json"],
+        "csharp" | "fsharp" => &[
+            "*.sln",
+            "*.slnx",
+            "*.csproj",
+            "*.fsproj",
+            "global.json",
+            "Directory.Build.props",
+            "Directory.Packages.props",
+        ],
+        "typescript" | "javascript" | "svelte" | "vue" | "angular" => &[
+            "angular.json",
+            "svelte.config.js",
+            "svelte.config.ts",
+            "svelte.config.mjs",
+            "next.config.ts",
+            "next.config.mjs",
+            "next.config.js",
+            "nuxt.config.ts",
+            "nuxt.config.js",
+            "vite.config.ts",
+            "vite.config.js",
+            "tsconfig.json",
+            "jsconfig.json",
+            "package.json",
+        ],
         "python" => &[
             "pyproject.toml",
             "setup.py",
@@ -95,11 +119,22 @@ fn dir_has_unreal_descriptor(dir: &Path) -> bool {
     })
 }
 
+#[allow(clippy::disallowed_methods)] // shallow 1-level dir check executed during LSP root resolution
+fn dir_has_suffix(dir: &Path, suffix: &str) -> bool {
+    std::fs::read_dir(dir).ok().is_some_and(|rd| {
+        rd.flatten()
+            .any(|e| e.file_name().to_str().is_some_and(|n| n.ends_with(suffix)))
+    })
+}
+
 fn dir_has_any_manifest(dir: &Path, names: &[&str], extra_markers: &[String]) -> bool {
-    names
-        .iter()
-        .any(|m| dir.join(m).is_file() || dir.join(m).is_dir())
-        || (names.contains(&"CMakeLists.txt") && dir_has_unreal_descriptor(dir))
+    names.iter().any(|m| {
+        if let Some(suffix) = m.strip_prefix('*') {
+            dir_has_suffix(dir, suffix)
+        } else {
+            dir.join(m).is_file() || dir.join(m).is_dir()
+        }
+    }) || (names.contains(&"CMakeLists.txt") && dir_has_unreal_descriptor(dir))
         || extra_markers
             .iter()
             .map(|s| s.trim())
@@ -170,6 +205,9 @@ fn is_dependency_dir(dir: &Path) -> bool {
         || parts.windows(2).any(|w| w == ["usr", "include"])
         || parts.windows(2).any(|w| w == ["homebrew", "include"])
         || parts.iter().any(|c| matches!(*c, ".conan2" | "vcpkg_installed"))
+        // NuGet package cache (`~/.nuget/packages/...`) and .NET shared reference packs.
+        || parts.windows(2).any(|w| w == [".nuget", "packages"])
+        || parts.windows(2).any(|w| w == ["dotnet", "packs"])
 }
 
 #[allow(clippy::disallowed_methods)]
@@ -246,6 +284,15 @@ pub(crate) fn climb_to_build_root(
                     || parent.join("compile_commands.json").is_file()
                     || parent.join("meson.build").is_file()
                     || dir_has_unreal_descriptor(&parent)
+            }
+            // .NET binds a `.csproj`/`.fsproj` member to its nearest `.sln`/`.slnx` ancestor.
+            "csharp" | "fsharp"
+                if dir_has_suffix(&parent, ".sln") || dir_has_suffix(&parent, ".slnx") =>
+            {
+                return parent;
+            }
+            "csharp" | "fsharp" => {
+                !dir_has_suffix(module, ".sln") && !dir_has_suffix(module, ".slnx")
             }
             _ => false,
         };

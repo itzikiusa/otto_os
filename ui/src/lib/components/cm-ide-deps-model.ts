@@ -4,7 +4,7 @@
 
 import { parseGradleManifestDependencies } from './cm-ide-deps-gradle.ts';
 
-export type ManifestEcosystem = 'go' | 'maven' | 'gradle' | 'npm' | 'cargo' | 'zig' | 'cpp' | 'pypi';
+export type ManifestEcosystem = 'go' | 'maven' | 'gradle' | 'npm' | 'cargo' | 'zig' | 'cpp' | 'nuget' | 'pypi';
 
 export interface IdeDepVuln {
   id: string;
@@ -67,6 +67,15 @@ export function detectManifestEcosystem(filePath: string): ManifestEcosystem | n
     base.endsWith('.uplugin')
   ) {
     return 'cpp';
+  }
+  if (
+    base.endsWith('.csproj') ||
+    base.endsWith('.fsproj') ||
+    base.endsWith('.vbproj') ||
+    base === 'directory.packages.props' ||
+    base === 'packages.config'
+  ) {
+    return 'nuget';
   }
   if (
     base === 'requirements.txt' ||
@@ -457,6 +466,47 @@ export function parseManifestDependencies(filePath: string, content: string): Id
           });
           curName = '';
         }
+      }
+    }
+  } else if (eco === 'nuget') {
+    for (let i = 0; i < lines.length; i++) {
+      const raw = lines[i];
+      const ln = i + 1;
+      const mRef = /<(?:PackageReference|PackageVersion)\b([^>]*?)\/?>/i.exec(raw);
+      if (mRef) {
+        const attrs = mRef[1];
+        const mInc = /\b(?:Include|Update)=["']([^"']+)["']/i.exec(attrs);
+        if (!mInc) continue;
+        let ver = /\b(?:Version|VersionOverride)=["']([^"']+)["']/i.exec(attrs)?.[1] ?? '';
+        let endLn = ln;
+        if (!ver && !raw.includes('/>')) {
+          for (let j = i + 1; j < Math.min(lines.length, i + 8); j++) {
+            const mv = /<Version>\s*([^<\s]+)\s*<\/Version>/i.exec(lines[j]);
+            if (mv) ver = mv[1];
+            if (/<\/Package(?:Reference|Version)>/i.test(lines[j])) {
+              endLn = j + 1;
+              break;
+            }
+          }
+        }
+        items.push({
+          name: mInc[1],
+          current_version: ver || 'central',
+          line: ln,
+          end_line: endLn,
+          vulnerabilities: [],
+        });
+        continue;
+      }
+      const mPkg = /<package\b[^>]*\bid=["']([^"']+)["'][^>]*\bversion=["']([^"']+)["']/i.exec(raw);
+      if (mPkg) {
+        items.push({
+          name: mPkg[1],
+          current_version: mPkg[2],
+          line: ln,
+          end_line: ln,
+          vulnerabilities: [],
+        });
       }
     }
   } else if (eco === 'gradle') {

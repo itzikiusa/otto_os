@@ -156,6 +156,8 @@
           if (names.has('Cargo.toml')) detected.push('rust');
           if (names.has('build.zig') || names.has('build.zig.zon')) detected.push('zig');
           if (names.has('CMakeLists.txt') || names.has('meson.build') || names.has('compile_commands.json') || [...names].some((n) => n.endsWith('.uproject'))) detected.push('cpp');
+          if (names.has('Assets') && names.has('ProjectSettings')) detected.push('unity');
+          else if (names.has('global.json') || [...names].some((n) => /\.(?:sln|slnx|csproj|fsproj)$/i.test(n))) detected.push('dotnet');
           if (names.has('package.json')) detected.push('node');
           if (names.has('pyproject.toml') || names.has('requirements.txt')) detected.push('python');
           if (detected.length > 0) {
@@ -383,6 +385,8 @@
                 {#if techs.includes('rust')}<Badge tone="neutral" variant="outline" label="Rust" />{/if}
                 {#if techs.includes('zig')}<Badge tone="neutral" variant="outline" label="Zig" />{/if}
                 {#if techs.includes('cpp')}<Badge tone="neutral" variant="outline" label="C/C++" />{/if}
+                {#if techs.includes('unity')}<Badge tone="neutral" variant="outline" label="Unity" />{/if}
+                {#if techs.includes('dotnet')}<Badge tone="neutral" variant="outline" label=".NET" />{/if}
                 {#if techs.includes('node')}<Badge tone="neutral" variant="outline" label="Node/TS" />{/if}
                 {#if techs.includes('python')}<Badge tone="neutral" variant="outline" label="Python" />{/if}
                 {#if mode === 'create' && checked}

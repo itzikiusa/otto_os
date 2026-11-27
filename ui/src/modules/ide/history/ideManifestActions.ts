@@ -152,5 +152,33 @@ export function buildManifestMenuItems(
       },
     ];
   }
+  if (lower.endsWith('.csproj') || lower.endsWith('.fsproj') || lower.endsWith('.vbproj') || lower === 'directory.packages.props') {
+    return [
+      { separator: true },
+      {
+        label: 'Restore NuGet Packages',
+        icon: 'refresh',
+        action: () =>
+          void runManifestDepsAction(filePath, 'sync', 'Restore NuGet Packages', onTreeOutput, false),
+      },
+      {
+        label: 'List Outdated NuGet Packages',
+        icon: 'layers',
+        action: () =>
+          void runManifestDepsAction(filePath, 'outdated', 'Outdated NuGet Packages', onTreeOutput, true),
+      },
+    ];
+  }
+  if (lower === 'requirements.txt' || lower === 'pyproject.toml') {
+    return [
+      { separator: true },
+      {
+        label: 'Sync Python Dependencies (uv / pip)',
+        icon: 'refresh',
+        action: () =>
+          void runManifestDepsAction(filePath, 'sync', 'Sync Python Dependencies', onTreeOutput, false),
+      },
+    ];
+  }
   return [];
 }

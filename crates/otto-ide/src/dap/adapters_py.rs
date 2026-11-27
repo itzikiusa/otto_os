@@ -29,7 +29,51 @@ pub(super) async fn resolve_python_adapter(
     cwd: &str,
     env: BTreeMap<String, String>,
 ) -> Result<ResolvedDapAdapter> {
-    let program = normalize_target_path(&req.target, &req.launch.program);
+    let raw_program = normalize_target_path(&req.target, &req.launch.program);
+    let (program, launch_user_args) = if req.target.kind == IdeTargetKind::Local
+        && raw_program.to_ascii_lowercase().ends_with(".ipynb")
+    {
+        let mut cell_idx: Option<usize> = None;
+        let mut rest_args: Vec<String> = Vec::with_capacity(req.launch.args.len());
+        let mut i = 0;
+        while i < req.launch.args.len() {
+            if req.launch.args[i] == "--cell" {
+                if let Some(next) = req.launch.args.get(i + 1) {
+                    cell_idx = next.parse::<usize>().ok();
+                    i += 2;
+                    continue;
+                }
+            }
+            rest_args.push(req.launch.args[i].clone());
+            i += 1;
+        }
+        let raw_nb = std::fs::read_to_string(&raw_program)
+            .map_err(|e| Error::Invalid(format!("could not read notebook {raw_program}: {e}")))?;
+        let extracted = crate::notebooks::extract_ipynb_cell_python(&raw_nb, cell_idx)?;
+        let nb_dir = crate::go_build_cache::ide_build_cache_root().join("notebooks");
+        std::fs::create_dir_all(&nb_dir)
+            .map_err(|e| Error::Internal(format!("could not create notebook debug dir: {e}")))?;
+        let mut h: u64 = 0xcbf29ce484222325;
+        for b in raw_program
+            .as_bytes()
+            .iter()
+            .chain(b":")
+            .chain(extracted.as_bytes())
+        {
+            h ^= u64::from(*b);
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        let cell_suffix = cell_idx
+            .map(|c| format!("cell{c}"))
+            .unwrap_or_else(|| "all".into());
+        let py_path = nb_dir.join(format!("nb_{cell_suffix}_{h:016x}.py"));
+        std::fs::write(&py_path, &extracted).map_err(|e| {
+            Error::Internal(format!("could not write extracted notebook script: {e}"))
+        })?;
+        (py_path.to_string_lossy().into_owned(), rest_args)
+    } else {
+        (raw_program, req.launch.args.clone())
+    };
     // A test debugs from pytest's rootdir, like its Run: the project imports and the root
     // `conftest.py` resolve the same way.
     let test_cwd;
@@ -165,7 +209,7 @@ pub(super) async fn resolve_python_adapter(
         (
             "launch".to_string(),
             json!({
-                "program": program, "args": req.launch.args, "cwd": cwd,
+                "program": program, "args": launch_user_args, "cwd": cwd,
                 "console": "internalConsole", "justMyCode": false, "python": [py_bin],
             }),
         )

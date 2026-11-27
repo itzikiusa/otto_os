@@ -8,6 +8,7 @@ import type {
   IdeDebugLaunch,
   IdeEnvironmentResp,
   IdeHostMapping,
+  IdeMlAcceleratorInfo,
   IdeNetBridgeStatusResp,
   IdeNetBridgeTestReq,
   IdeNetworkBridgeConfig,
@@ -31,6 +32,7 @@ export type {
   IdeBridgedServiceSummary,
   IdeEnvironmentResp,
   IdeHostMapping,
+  IdeMlAcceleratorInfo,
   IdeNetBridgeStatusResp,
   IdeNetBridgeTestReq,
   IdeNetworkBridgeConfig,
@@ -279,7 +281,7 @@ export interface IdeEnvVar { key: string; value?: string; secret: boolean; has_s
 
 export interface IdeProjectEnvironment {
   java_home?: string | null; kotlin_home?: string | null; go_root?: string | null; rust_toolchain?: string | null; zig_home?: string | null;
-  cpp_toolchain?: string | null; node_home?: string | null; python_interpreter?: string | null;
+  cpp_toolchain?: string | null; dotnet_root?: string | null; node_home?: string | null; python_interpreter?: string | null;
   android_home?: string | null; flutter_root?: string | null; xcode_developer_dir?: string | null;
   dotenv_path?: string | null; extra_path?: string | null;
   inherit_shell_env?: boolean; additional_roots?: string[];
@@ -439,6 +441,7 @@ export function isReadOnlySdkOrCachePath(p: string): boolean {
     p.includes('/.conan2/') ||
     p.includes('/vcpkg_installed/')
   ) return true;
+  if (p.includes('/.nuget/packages/') || p.includes('/.dotnet/') || p.startsWith('/usr/local/share/dotnet/') || p.startsWith('/usr/share/dotnet/')) return true;
   if (p.includes('/node_modules/') || p.includes('/site-packages/') || p.includes('/dist-packages/')) return true;
   if (p.includes('/.otto/toolchains/')) return true;
   return false;
@@ -466,6 +469,7 @@ export function detectIdeLanguage(p: string): string {
     c: 'c', m: 'c', cpp: 'cpp', cc: 'cpp', cxx: 'cpp', 'c++': 'cpp', h: 'cpp', hh: 'cpp', hpp: 'cpp', hxx: 'cpp',
     'h++': 'cpp', inl: 'cpp', ipp: 'cpp', tpp: 'cpp', ixx: 'cpp', cppm: 'cpp', mm: 'cpp',
     cmake: 'cmake', meson: 'meson', uproject: 'json', uplugin: 'json',
+    cs: 'csharp', csx: 'csharp', razor: 'csharp', cshtml: 'csharp', fs: 'fsharp', fsx: 'fsharp', fsi: 'fsharp',
     ts: 'typescript', mts: 'typescript', cts: 'typescript', tsx: 'tsx',
     js: 'javascript', mjs: 'javascript', cjs: 'javascript', jsx: 'jsx',
     json: 'json', jsonc: 'json', jsonl: 'jsonl', csv: 'csv', tsv: 'tsv',
@@ -491,7 +495,7 @@ export const GUTTER_TARGET_ID = 'gutter';
 export function defaultRunnerForLanguage(lang: string): string {
   const map: Record<string, string> = {
     go: 'go_run', rust: 'cargo_run', zig: 'zig_run', c: 'cpp_run', cpp: 'cpp_run',
-    cmake: 'cmake', meson: 'meson', java: 'java_main', kotlin: 'java_main', python: 'python',
+    cmake: 'cmake', meson: 'meson', csharp: 'dotnet_run', fsharp: 'dotnet_run', java: 'java_main', kotlin: 'java_main', python: 'python',
     javascript: 'node', typescript: 'node', tsx: 'npm', jsx: 'node', shell: 'shell',
   };
   return map[lang] ?? 'custom';
@@ -553,6 +557,28 @@ export function buildNewFileTemplate(fullPath: string, rootPath: string, sibling
     }
     return '';
   }
+  if (lower.endsWith('.cs')) {
+    const stem = name.slice(0, -3).replace(/[^A-Za-z0-9_]/g, '') || 'Class1';
+    const ns = ideBasename(parentDir).replace(/[^A-Za-z0-9_]/g, '') || 'App';
+    if (lower === 'program.cs') {
+      return `Console.WriteLine("Hello from ${ns}");\n`;
+    }
+    if (lower.endsWith('.build.cs')) {
+      const mod = name.slice(0, -9).replace(/[^A-Za-z0-9_]/g, '') || 'Game';
+      return `using UnrealBuildTool;\n\npublic class ${mod} : ModuleRules\n{\n    public ${mod}(ReadOnlyTargetRules Target) : base(Target)\n    {\n        PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;\n    }\n}\n`;
+    }
+    if (parentDir.includes('/Assets/') || parentDir.endsWith('/Assets')) {
+      return `using UnityEngine;\n\npublic class ${stem} : MonoBehaviour\n{\n    private void Start()\n    {\n    }\n\n    private void Update()\n    {\n    }\n}\n`;
+    }
+    return `namespace ${ns};\n\npublic class ${stem}\n{\n}\n`;
+  }
+  if (lower.endsWith('.fs')) {
+    const stem = name.slice(0, -3).replace(/[^A-Za-z0-9_]/g, '') || 'Program';
+    if (lower === 'program.fs') {
+      return `[<EntryPoint>]\nlet main argv =\n    printfn "Hello from F#"\n    0\n`;
+    }
+    return `module ${stem}\n\n`;
+  }
   if (lower.endsWith('.sh') || lower.endsWith('.bash')) return '#!/usr/bin/env bash\nset -euo pipefail\n\n';
   if (lower.endsWith('.zsh')) return '#!/usr/bin/env zsh\nset -euo pipefail\n\n';
   if (lower.endsWith('.json')) return '{\n  \n}\n';
@@ -612,7 +638,7 @@ export async function collabGuestPost<T>(path: string, guestToken: string | null
   return (await resp.json()) as T;
 }
 
-const ENTRY_FILE_NAMES = ['readme.md', 'main.go', 'main.rs', 'main.kt', 'main.zig', 'main.cpp', 'main.c', 'main.py', 'index.ts', 'app.svelte', 'go.mod', 'cargo.toml', 'build.gradle.kts', 'build.zig', 'cmakelists.txt', 'meson.build', 'package.json'];
+const ENTRY_FILE_NAMES = ['readme.md', 'main.go', 'main.rs', 'main.kt', 'main.zig', 'main.cpp', 'main.c', 'program.cs', 'program.fs', 'main.py', 'index.ts', 'app.svelte', 'go.mod', 'cargo.toml', 'build.gradle.kts', 'build.zig', 'cmakelists.txt', 'meson.build', 'package.json'];
 
 export function pickInitialEntryFile(entries: IdeFsEntry[]): IdeFsEntry | null {
   const files = entries.filter((e) => e.kind === 'file' && !e.name.startsWith('.'));

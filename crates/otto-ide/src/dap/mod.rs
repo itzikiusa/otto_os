@@ -13,6 +13,7 @@
 
 pub mod adapters;
 pub(crate) mod adapters_cpp;
+pub(crate) mod adapters_dotnet;
 pub(crate) mod adapters_env;
 pub(crate) mod adapters_go_py;
 pub(crate) mod adapters_jvm_js;

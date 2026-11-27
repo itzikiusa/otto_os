@@ -57,10 +57,15 @@ test('LSP pool limits and shouldAttachIdeLsp gate code buffers strictly and skip
     'rust',
     'zig',
     'cpp',
+    'csharp',
+    'fsharp',
     'java',
     'kotlin',
     'typescript',
     'javascript',
+    'svelte',
+    'vue',
+    'angular',
     'python',
     'shell',
     'css',
@@ -74,6 +79,8 @@ test('LSP pool limits and shouldAttachIdeLsp gate code buffers strictly and skip
   assert.equal(shouldAttachIdeLsp('/ws/src/main.cpp', 'cpp', '/ws'), true);
   assert.equal(shouldAttachIdeLsp('/ws/include/math.hpp', undefined, '/ws'), true);
   assert.equal(shouldAttachIdeLsp('/ws/src/util.c', 'c', '/ws'), true);
+  assert.equal(shouldAttachIdeLsp('/ws/src/Program.cs', 'csharp', '/ws'), true);
+  assert.equal(shouldAttachIdeLsp('/ws/src/Lib.fs', 'fsharp', '/ws'), true);
   assert.equal(shouldAttachIdeLsp('/ws/src/App.java', 'java', '/ws'), true);
   assert.equal(shouldAttachIdeLsp('/ws/src/main/kotlin/App.kt', 'kotlin', '/ws'), true);
   assert.equal(shouldAttachIdeLsp('/ws/build.gradle.kts', undefined, '/ws'), true);

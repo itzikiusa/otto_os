@@ -29,6 +29,12 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
   `main` and on tests, and debugging with breakpoints, stepping, watch, set
   variable and stops on `@panic`, with slices, optionals and error unions
   shown as values.
+- **Jupyter notebooks & ML workflow in the IDE.** Open, edit, run and save
+  `.ipynb` notebooks directly in Otto with a persistent Python kernel, inline
+  matplotlib plots and HTML DataFrame tables, kernel selection across `.venv` /
+  `conda` / `uv` / Poetry / Jupyter kernelspecs, interrupt/restart, live
+  Variables view, cell DAP debugging, Apple Silicon MPS / GPU detection, and
+  auto-discovered training and TensorBoard run configurations.
 - **A step's conversation is the Threads view.** On the run page a step's
   Conversation is the same conversation Threads shows, folded and scrolled
   the same way (it opens on the newest line and follows it only while you are
@@ -470,9 +476,9 @@ including behaviour changes to know before upgrading.
   hand over and reclaim terminal control at any moment, and generate a local
   structured recap (decisions, actions, open questions) once participants consent.
 - **IDE (Beta)** — a multi-language IDE (`#/ide`) on your local or SSH
-  projects (Go, Java & Spring Boot, Kotlin, Rust, Zig, C/C++ & Unreal Engine, TypeScript/JS, Python, Shell): language servers
-  (`gopls`, `jdtls`, `kotlin-language-server`, `rust-analyzer`, `zls`, `clangd`, `pyright`, `tsserver`), header/source switch (`⌥O`), a git gutter,
-  run configurations (CMake/CTest, Meson, Make, Unreal, Go, Cargo, Zig, Maven/Gradle, pytest, npm) with live output and test trees, a DAP debugger with
+  projects (Go, Java & Spring Boot, Kotlin, Rust, Zig, C/C++ & Unreal Engine, .NET C#/F#, TypeScript/JS & web frameworks, Python & Jupyter notebooks, Shell): language servers
+  (`gopls`, `jdtls`, `kotlin-language-server`, `rust-analyzer`, `zls`, `clangd`, `csharp-ls`, `svelteserver`, `vue-language-server`, `ngserver`, `pyright`, `tsserver`), header/source switch (`⌥O`), a git gutter,
+  run configurations (CMake/CTest, Meson, Make, Unreal, Go, Cargo, Zig, .NET, Maven/Gradle, pytest, npm/Vitest/Jest/Playwright/Karma) with live output and test trees, a DAP debugger with
   breakpoints, watches, variable editing, PID/core attach, and an agent dock that proposes diffs
   you apply or undo. See `docs/features/ide.md`.
 - **Git & Pull Requests** — a GitKraken-style **commit graph** with a WIP row +

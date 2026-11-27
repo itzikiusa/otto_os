@@ -49,6 +49,16 @@ pub(super) fn formatter_candidates(
             "clang-format".into(),
             vec![format!("--assume-filename={path}")],
         )],
+        "csharp" => vec![(
+            "csharpier",
+            "csharpier".into(),
+            vec!["format".into(), "--write-stdout".into()],
+        )],
+        "fsharp" => vec![(
+            "fantomas",
+            "fantomas".into(),
+            vec!["--stdin".into(), "--stdout".into()],
+        )],
         "python" => vec![
             (
                 "ruff",

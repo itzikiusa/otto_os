@@ -1,7 +1,7 @@
 import type { IdeScannedRepo } from '../../../lib/api/types/ide-intelligence';
 import type { IdeFsEntry } from '../store/ideTypes';
 
-export type RepoTech = 'go' | 'java' | 'kotlin' | 'rust' | 'zig' | 'cpp' | 'node' | 'python';
+export type RepoTech = 'go' | 'java' | 'kotlin' | 'rust' | 'zig' | 'cpp' | 'dotnet' | 'unity' | 'angular' | 'nextjs' | 'svelte' | 'nuxt' | 'vue' | 'react' | 'vite' | 'node' | 'python';
 
 function pathLeaf(p: string): string {
   const clean = p.replace(/\/+$/, '');
@@ -47,6 +47,9 @@ export function buildDedupedBulkRepos(repos: readonly IdeScannedRepo[]): {
     if (k === 'rust') detected.push('rust');
     if (k === 'zig') detected.push('zig');
     if (k === 'cpp' || k === 'c' || k === 'unreal') detected.push('cpp');
+    if (k === 'unity') detected.push('unity');
+    if (k === 'dotnet' || k === 'csharp' || k === 'fsharp') detected.push('dotnet');
+    if (k === 'angular' || k === 'nextjs' || k === 'svelte' || k === 'nuxt' || k === 'vue' || k === 'react' || k === 'vite') detected.push(k);
     if (k === 'node' || k === 'ts' || k === 'javascript' || k === 'typescript') detected.push('node');
     if (k === 'python') detected.push('python');
     if (detected.length > 0) techByPath[r.path] = detected;

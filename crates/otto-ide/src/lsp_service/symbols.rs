@@ -121,6 +121,8 @@ pub(super) fn match_brace_symbol(
         "zig" => match_zig_symbol(trimmed),
         "c" | "cpp" => match_cpp_symbol(trimmed),
         "java" | "kotlin" => match_jvm_symbol(trimmed),
+        "csharp" => match_csharp_symbol(trimmed),
+        "fsharp" => match_fsharp_symbol(trimmed),
         "javascript" | "typescript" | "svelte" | "vue" => match_ts_symbol(trimmed),
         "protobuf" => match_proto_symbol(trimmed),
         "graphql" => match_graphql_symbol(trimmed),
@@ -457,6 +459,106 @@ fn match_jvm_symbol(trimmed: &str) -> Option<(String, String, Option<String>, bo
         Some(format!("({})", cap[2].trim())),
         false,
     ))
+}
+
+fn match_csharp_symbol(trimmed: &str) -> Option<(String, String, Option<String>, bool)> {
+    static RE_NS: OnceLock<Regex> = OnceLock::new();
+    static RE_TYPE: OnceLock<Regex> = OnceLock::new();
+    static RE_METHOD: OnceLock<Regex> = OnceLock::new();
+    static RE_PROP: OnceLock<Regex> = OnceLock::new();
+
+    if let Some(cap) = RE_NS
+        .get_or_init(|| Regex::new(r"^namespace\s+([A-Za-z_][A-Za-z0-9_.]*)").unwrap())
+        .captures(trimmed)
+    {
+        return Some((cap[1].to_string(), "namespace".into(), None, true));
+    }
+    if let Some(cap) = RE_TYPE
+        .get_or_init(|| {
+            Regex::new(
+                r"^(?:(?:public|private|protected|internal|static|abstract|sealed|partial|readonly|ref|file|new)\s+)*(class|struct|interface|enum|record(?:\s+struct|\s+class)?)\s+([A-Za-z_][A-Za-z0-9_]*)",
+            )
+            .unwrap()
+        })
+        .captures(trimmed)
+    {
+        let raw_kind = cap[1].split_whitespace().next().unwrap_or("class");
+        let kind = if raw_kind == "record" {
+            "class"
+        } else {
+            raw_kind
+        };
+        return Some((cap[2].to_string(), kind.into(), None, true));
+    }
+    if [
+        "if ", "if(", "for ", "for(", "foreach ", "foreach(", "while ", "while(", "switch ",
+        "switch(", "catch ", "catch(", "using ", "using(", "lock ", "lock(", "return ", "new ",
+        "throw ",
+    ]
+    .iter()
+    .any(|p| trimmed.starts_with(p))
+    {
+        return None;
+    }
+    if let Some(cap) = RE_METHOD
+        .get_or_init(|| {
+            Regex::new(
+                r"^(?:(?:public|private|protected|internal|static|async|virtual|override|sealed|abstract|extern|unsafe|new|partial)\s+)+(?:[A-Za-z0-9_<>,.\[\]?\s]+?\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*(?:<[^>]+>)?\s*\(([^)]*)\)",
+            )
+            .unwrap()
+        })
+        .captures(trimmed)
+    {
+        return Some((
+            cap[1].to_string(),
+            "method".into(),
+            Some(format!("({})", cap[2].trim())),
+            false,
+        ));
+    }
+    let cap = RE_PROP
+        .get_or_init(|| {
+            Regex::new(
+                r"^(?:(?:public|private|protected|internal|static|virtual|override|sealed|abstract|required|new)\s+)+[A-Za-z0-9_<>,.\[\]?]+\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:\{\s*(?:get|set|init)|=>)",
+            )
+            .unwrap()
+        })
+        .captures(trimmed)?;
+    Some((cap[1].to_string(), "property".into(), None, false))
+}
+
+fn match_fsharp_symbol(trimmed: &str) -> Option<(String, String, Option<String>, bool)> {
+    static RE_MOD: OnceLock<Regex> = OnceLock::new();
+    static RE_TYPE: OnceLock<Regex> = OnceLock::new();
+    static RE_LET: OnceLock<Regex> = OnceLock::new();
+
+    if let Some(cap) = RE_MOD
+        .get_or_init(|| {
+            Regex::new(r"^(namespace|module)\s+(?:rec\s+)?([A-Za-z_][A-Za-z0-9_.]*)").unwrap()
+        })
+        .captures(trimmed)
+    {
+        return Some((cap[2].to_string(), cap[1].to_string(), None, true));
+    }
+    if let Some(cap) = RE_TYPE
+        .get_or_init(|| {
+            Regex::new(r"^type\s+(?:private\s+|internal\s+|public\s+)?([A-Za-z_][A-Za-z0-9_']*)")
+                .unwrap()
+        })
+        .captures(trimmed)
+    {
+        return Some((cap[1].to_string(), "class".into(), None, true));
+    }
+    let cap = RE_LET
+        .get_or_init(|| {
+            Regex::new(
+                r"^(?:let|member|static\s+member|override)\s+(?:rec\s+)?(?:inline\s+)?(?:private\s+|internal\s+)?(?:[A-Za-z_][A-Za-z0-9_]*\.)?(?:``([^`]+)``|([A-Za-z_][A-Za-z0-9_']*))\b",
+            )
+            .unwrap()
+        })
+        .captures(trimmed)?;
+    let name = cap.get(1).or_else(|| cap.get(2)).unwrap().as_str();
+    Some((name.to_string(), "function".into(), None, false))
 }
 
 fn match_ts_symbol(trimmed: &str) -> Option<(String, String, Option<String>, bool)> {

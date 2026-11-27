@@ -22,15 +22,15 @@ use crate::types::{IdeDepItem, IdeDepManagedIn, IdeDepsInspectResp};
 
 pub use self::actions::{run_deps_action, run_deps_action_as, run_deps_action_scoped};
 use self::enrich::{
-    enrich_crates_updates, enrich_maven_updates, enrich_npm_updates, enrich_osv_vulnerabilities,
-    enrich_pypi_updates,
+    enrich_crates_updates, enrich_maven_updates, enrich_npm_updates, enrich_nuget_updates,
+    enrich_osv_vulnerabilities, enrich_pypi_updates,
 };
 use self::go_mod::enrich_go_mod_updates;
 pub use self::go_mod::parse_go_mod;
 pub use self::parsers::{
     apply_cargo_lock_versions, parse_build_zig_zon, parse_cargo_toml, parse_cmake_deps,
-    parse_conanfile_txt, parse_package_json, parse_python_deps, parse_unreal_plugins,
-    parse_vcpkg_json,
+    parse_conanfile_txt, parse_dotnet_deps, parse_package_json, parse_python_deps,
+    parse_unreal_plugins, parse_vcpkg_json,
 };
 
 /// Inspect a manifest file (`go.mod`, `pom.xml`, `build.gradle*`, `package.json`,
@@ -92,6 +92,12 @@ pub async fn inspect_dependencies_scoped(
         .and_then(|s| s.to_str())
         .unwrap_or("");
 
+    let fname_low = fname.to_ascii_lowercase();
+    let is_dotnet_manifest = fname_low.ends_with(".csproj")
+        || fname_low.ends_with(".fsproj")
+        || fname_low.ends_with(".vbproj")
+        || fname_low == "directory.packages.props"
+        || fname_low == "packages.config";
     let (ecosystem, osv_eco, mut items) = if fname == "go.mod" {
         let mut list = parse_go_mod(&content);
         enrich_go_mod_updates(manifest_path, &mut list, env_map).await;
@@ -158,6 +164,10 @@ pub async fn inspect_dependencies_scoped(
     } else if fname.ends_with(".uproject") || fname.ends_with(".uplugin") {
         let list = parse_unreal_plugins(&content);
         ("unreal", "", list)
+    } else if is_dotnet_manifest {
+        let mut list = parse_dotnet_deps(&content);
+        enrich_nuget_updates(&mut list).await;
+        ("nuget", "NuGet", list)
     } else {
         return IdeDepsInspectResp {
             ecosystem: "unknown".into(),

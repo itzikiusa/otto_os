@@ -5,7 +5,7 @@
 
 mod crud;
 mod crud_folders;
-mod db_store;
+pub(crate) mod db_store;
 pub mod discovery;
 pub(crate) mod discovery_cpp;
 mod discovery_jvm_py;
@@ -17,7 +17,7 @@ mod run_configs;
 mod runner;
 pub(crate) mod runner_cmd;
 pub(crate) use self::runner_cmd::{find_build_wrapper, pytest_rootdir};
-mod runner_parsers;
+pub(crate) mod runner_parsers;
 mod runner_proc;
 mod runner_steps;
 pub mod shell_env;

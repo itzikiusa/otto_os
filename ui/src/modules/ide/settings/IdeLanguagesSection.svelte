@@ -27,9 +27,11 @@
   const rustEco = $derived(ide.toolchains.find((e) => e.ecosystem === 'rust') ?? null);
   const zigEco = $derived(ide.toolchains.find((e) => e.ecosystem === 'zig') ?? null);
   const cppEco = $derived(ide.toolchains.find((e) => e.ecosystem === 'cpp') ?? null);
+  const dotnetEco = $derived(ide.toolchains.find((e) => e.ecosystem === 'dotnet') ?? null);
   const goDetected = $derived(ide.detectedSdks.filter((d) => d.ecosystem === 'go'));
   const zigDetected = $derived(ide.detectedSdks.filter((d) => d.ecosystem === 'zig'));
   const cppDetected = $derived(ide.detectedSdks.filter((d) => d.ecosystem === 'cpp'));
+  const dotnetDetected = $derived(ide.detectedSdks.filter((d) => d.ecosystem === 'dotnet'));
   const javaDetected = $derived(ide.detectedSdks.filter((d) => d.ecosystem === 'java'));
   const kotlinDetected = $derived(ide.detectedSdks.filter((d) => d.ecosystem === 'kotlin'));
   const gopathVal = $derived(ide.shellEnv?.vars?.GOPATH || ide.effectiveEnv?.GOPATH || '~/go');
@@ -65,6 +67,13 @@
     ]);
   }
 
+  function openDotnetPlusMenu(e: MouseEvent): void {
+    ctxMenu.show(e, [
+      { label: 'Local…', icon: 'folder', action: () => (pickerEco = 'dotnet') },
+      { label: 'Download…', icon: 'download', action: () => onnavigate('project.sdks') },
+    ]);
+  }
+
   async function selectDetected(det: IdeDetectedSdk): Promise<void> {
     const p = det.home_path || det.path || '';
     if (!p) return;
@@ -75,6 +84,7 @@
     else if (det.ecosystem === 'go') ideSettings.patchEnv({ go_root: chosen });
     else if (det.ecosystem === 'zig') ideSettings.patchEnv({ zig_home: chosen });
     else if (det.ecosystem === 'cpp') ideSettings.patchEnv({ cpp_toolchain: chosen });
+    else if (det.ecosystem === 'dotnet') ideSettings.patchEnv({ dotnet_root: chosen });
     toasts.success(`Registered ${det.label || `${det.ecosystem.toUpperCase()} ${det.version}`}`);
   }
 
@@ -135,6 +145,7 @@
     else if (eco === 'node') ideSettings.patchEnv({ node_home: val });
     else if (eco === 'zig') ideSettings.patchEnv({ zig_home: val });
     else if (eco === 'cpp') ideSettings.patchEnv({ cpp_toolchain: val });
+    else if (eco === 'dotnet') ideSettings.patchEnv({ dotnet_root: val });
     else if (eco === 'python') ideSettings.patchEnv({ python_interpreter: val });
   }
 
@@ -289,16 +300,24 @@
 {:else if section === 'lang.python'}
   <div class="lg-sec" data-testid="ide-settings-lang-python">
     <div class="lg-card">
-      <span class="lg-title">Python Interpreter (.venv / uv / pyenv)</span>
+      <div class="lg-head-row">
+        <span class="lg-title">Python Interpreter (.venv / conda / uv / pyenv)</span>
+        {#each ide.accelerators as acc (`${acc.kind}:${acc.name}`)}
+          <Badge tone={acc.available ? 'ok' : 'neutral'} variant="outline" label={acc.memory_mb ? `${acc.name} (${Math.round(acc.memory_mb / 1024)} GB)` : acc.name} />
+        {/each}
+      </div>
       <div class="goroot-bar">
         <select class="input goroot-sel" aria-label="Python interpreter" value={ideSettings.envDraft.python_interpreter} onchange={(e) => ideSettings.patchEnv({ python_interpreter: (e.currentTarget as HTMLSelectElement).value })}>
-          <option value="">&lt;Auto-detect .venv or python3&gt;</option>
+          <option value="">&lt;Auto-detect .venv, conda, uv or python3&gt;</option>
           {#each ide.pythonVenvs as v (v.interpreter_path || v.path)}<option value={v.interpreter_path || v.path}>{v.name || `${v.kind} Python ${v.version}`} ({v.interpreter_path || v.path})</option>{/each}
           {#each pyEco?.installed ?? [] as sdk (sdk.path)}<option value={sdk.path}>Python {sdk.version} ({sdk.path})</option>{/each}
         </select>
         <button type="button" class="btn small ghost" onclick={() => (pickerEco = 'python')}>Browse…</button>
         <button type="button" class="btn small" disabled={creatingVenv || !ide.hasTarget} onclick={() => void handleCreateVenv()}>{creatingVenv ? 'Creating…' : 'Create .venv'}</button>
       </div>
+      <p class="lg-sub">
+        Jupyter notebooks (<code>.ipynb</code>) run directly on your selected venv, conda, uv, Poetry or system Python interpreter with persistent kernel state, inline plots/tables, Variables view and cell debugging. Training scripts (<code>train.py</code>, <code>finetune.py</code>) and TensorBoard run configurations are discovered automatically.
+      </p>
     </div>
   </div>
 
@@ -407,6 +426,48 @@
       </div>
       <p class="lg-sub">
         Supports <code>compile_commands.json</code>, CMake (Presets &amp; CTest), Make, Meson, GoogleTest/Catch2 gutter runs, Unreal <code>.uproject</code>/<code>.uplugin</code>, header/source switch (<code>⌥O</code>), and LLDB debugging with STL &amp; Unreal pretty-printers, PID attach, and core dumps.
+      </p>
+    </div>
+  </div>
+
+{:else if section === 'lang.dotnet'}
+  <div class="lg-sec" data-testid="ide-settings-lang-dotnet">
+    <div class="lg-card">
+      <div class="lg-head-row">
+        <span class="lg-title">.NET SDK (dotnet / csharp-ls / netcoredbg)</span>
+        {#if dotnetEco?.lsp_status || dotnetEco?.lsp}
+          {@const lsp = dotnetEco.lsp_status ?? dotnetEco.lsp!}
+          {@const ok = Boolean(lsp.available ?? lsp.installed)}
+          <Badge tone={ok ? 'ok' : 'neutral'} variant="outline" label={ok ? `${lsp.name} ✓` : 'csharp-ls missing'} />
+        {/if}
+        {#if dotnetEco?.dap_status || dotnetEco?.dap}
+          {@const dap = dotnetEco.dap_status ?? dotnetEco.dap!}
+          {@const ok = Boolean(dap.available ?? dap.installed)}
+          <Badge tone={ok ? 'ok' : 'neutral'} variant="outline" label={ok ? `${dap.name} ✓` : 'netcoredbg missing'} />
+        {/if}
+      </div>
+      <div class="goroot-bar">
+        <select
+          class="input goroot-sel"
+          aria-label=".NET SDK"
+          value={ideSettings.envDraft.dotnet_root}
+          onchange={(e) => ideSettings.patchEnv({ dotnet_root: (e.currentTarget as HTMLSelectElement).value })}
+          data-testid="ide-dotnetroot-select"
+        >
+          <option value="">&lt;Auto-detect from PATH&gt;</option>
+          {#each dotnetEco?.installed ?? [] as sdk (sdk.path)}
+            <option value={sdk.path}>.NET {sdk.version} ({sdk.path}){isBroken(sdk) ? ' [Invalid]' : ''}</option>
+          {/each}
+          {#each dotnetDetected as det (`det:${det.home_path || det.path}`)}
+            <option value={det.home_path || det.path}>{det.label || `Detected .NET ${det.version}`} ({det.home_path || det.path})</option>
+          {/each}
+        </select>
+        <button type="button" class="icon-btn goroot-plus" aria-label="Add or download .NET SDK" title="Add local .NET SDK or download official .NET release" onclick={openDotnetPlusMenu} data-testid="ide-dotnetroot-add-btn">
+          <Icon name="plus" size={14} />
+        </button>
+      </div>
+      <p class="lg-sub">
+        Supports <code>.sln</code> / <code>.slnx</code> / <code>.csproj</code> / <code>.fsproj</code>, NuGet <code>PackageReference</code> + <code>Directory.Packages.props</code>, xUnit / NUnit / MSTest gutter run &amp; debug, Unity &amp; Unreal C# projects, <code>csharp-ls</code> / OmniSharp / <code>fsautocomplete</code>, and <code>netcoredbg</code>.
       </p>
     </div>
   </div>

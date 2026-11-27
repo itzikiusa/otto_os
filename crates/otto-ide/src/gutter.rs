@@ -11,7 +11,7 @@ mod scripting;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use scripting::js_test_package;
+pub(crate) use scripting::{js_test_package, JsTestRunnerKind};
 
 use crate::plugins::IdePluginRegistry;
 use crate::types::{detect_language, IdeGutterItem, IdeRunnerKind, PluginGutterDetector};
@@ -94,6 +94,8 @@ fn detect_gutter_items_inner(
             "rust" => compiled::detect_rust(normalized_path, &dir, content, &mut items),
             "zig" => compiled::detect_zig(normalized_path, &dir, content, &mut items),
             "c" | "cpp" => compiled::detect_c_cpp(normalized_path, &dir, lang, content, &mut items),
+            "csharp" => compiled::detect_csharp(normalized_path, &dir, content, &mut items),
+            "fsharp" => compiled::detect_fsharp(normalized_path, &dir, content, &mut items),
             "python" => scripting::detect_python(normalized_path, &dir, content, &mut items),
             "javascript" | "typescript" => {
                 scripting::detect_js_ts(normalized_path, &dir, lang, content, &mut items);

@@ -28,11 +28,19 @@ pub const GOPLS_PKG: &str = "golang.org/x/tools/gopls@latest";
 pub const DLV_PKG: &str = "github.com/go-delve/delve/cmd/dlv@latest";
 pub const JS_DEBUG_TARBALL_URL: &str =
     "https://github.com/microsoft/vscode-js-debug/releases/download/v1.97.1/js-debug-dap-v1.97.1.tar.gz";
-pub const TS_LSP_NPM_PACKAGES: &[&str] = &["typescript", "typescript-language-server"];
+pub const TS_LSP_NPM_PACKAGES: &[&str] = &[
+    "typescript",
+    "typescript-language-server",
+    "svelte-language-server",
+    "@vue/language-server",
+    "@angular/language-server",
+];
 pub const BASH_LSP_NPM_PACKAGES: &[&str] = &["bash-language-server"];
 pub const JSON_LSP_NPM_PACKAGES: &[&str] = &["vscode-langservers-extracted"];
 pub const PYRIGHT_PKG: &str = "pyright";
 pub const DEBUGPY_PKG: &str = "debugpy";
+pub const CSHARP_LS_TOOL: &str = "csharp-ls";
+pub const FSAUTOCOMPLETE_TOOL: &str = "fsautocomplete";
 
 /// Normalized target operating system (`macos` or `linux`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -189,6 +197,24 @@ impl TargetPlatform {
             (TargetOs::Linux, TargetArch::X86_64) => "x86_64-linux",
         }
     }
+
+    pub const fn dotnet_rid(self) -> &'static str {
+        match (self.os, self.arch) {
+            (TargetOs::Macos, TargetArch::Aarch64) => "osx-arm64",
+            (TargetOs::Macos, TargetArch::X86_64) => "osx-x64",
+            (TargetOs::Linux, TargetArch::Aarch64) => "linux-arm64",
+            (TargetOs::Linux, TargetArch::X86_64) => "linux-x64",
+        }
+    }
+
+    pub const fn netcoredbg_slug(self) -> &'static str {
+        match (self.os, self.arch) {
+            (TargetOs::Macos, TargetArch::Aarch64) => "osx-amd64",
+            (TargetOs::Macos, TargetArch::X86_64) => "osx-amd64",
+            (TargetOs::Linux, TargetArch::Aarch64) => "linux-arm64",
+            (TargetOs::Linux, TargetArch::X86_64) => "linux-amd64",
+        }
+    }
 }
 
 /// First-class supported language toolchain ecosystems.
@@ -201,6 +227,7 @@ pub enum EcosystemKind {
     Rust,
     Zig,
     Cpp,
+    Dotnet,
     Node,
     Python,
     Shell,
@@ -211,13 +238,14 @@ pub enum EcosystemKind {
 }
 
 impl EcosystemKind {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::Java,
         Self::Kotlin,
         Self::Go,
         Self::Rust,
         Self::Zig,
         Self::Cpp,
+        Self::Dotnet,
         Self::Node,
         Self::Python,
         Self::Shell,
@@ -235,6 +263,7 @@ impl EcosystemKind {
             "rust" | "cargo" => Some(Self::Rust),
             "zig" | "zls" => Some(Self::Zig),
             "cpp" | "c" | "c++" | "cxx" | "clang" | "clangd" | "gcc" | "llvm" => Some(Self::Cpp),
+            "dotnet" | "csharp" | "fsharp" | "cs" | "fs" | "c#" | "f#" => Some(Self::Dotnet),
             "node" | "nodejs" | "javascript" | "typescript" | "js" | "ts" => Some(Self::Node),
             "python" | "py" | "uv" => Some(Self::Python),
             "shell" | "bash" | "sh" | "zsh" => Some(Self::Shell),
@@ -254,6 +283,7 @@ impl EcosystemKind {
             Self::Rust => "rust",
             Self::Zig => "zig",
             Self::Cpp => "cpp",
+            Self::Dotnet => "dotnet",
             Self::Node => "node",
             Self::Python => "python",
             Self::Shell => "shell",
@@ -272,6 +302,7 @@ impl EcosystemKind {
             Self::Rust => "Rust",
             Self::Zig => "Zig",
             Self::Cpp => "C / C++ (Clang / GCC)",
+            Self::Dotnet => ".NET SDK (C# / F#)",
             Self::Node => "Node.js (JS / TS)",
             Self::Python => "Python (uv)",
             Self::Shell => "Shell (Bash / Zsh)",
@@ -290,6 +321,7 @@ impl EcosystemKind {
             Self::Rust => "rust-analyzer",
             Self::Zig => "zls",
             Self::Cpp => "clangd",
+            Self::Dotnet => "csharp-ls",
             Self::Node => "typescript-language-server",
             Self::Python => "pyright",
             Self::Shell => "bash-language-server",
@@ -308,6 +340,7 @@ impl EcosystemKind {
             Self::Rust => "codelldb",
             Self::Zig => "codelldb",
             Self::Cpp => "codelldb",
+            Self::Dotnet => "netcoredbg",
             Self::Node => "js-debug",
             Self::Python => "debugpy",
             Self::Shell => "bashdb",
@@ -326,6 +359,7 @@ impl EcosystemKind {
             Self::Rust => "stable",
             Self::Zig => "0.14.0",
             Self::Cpp => "19.1.7",
+            Self::Dotnet => "9.0.203",
             Self::Node => "22.14.0",
             Self::Python => "3.13",
             Self::Shell => "3.10.0",
@@ -361,6 +395,7 @@ impl From<crate::types::IdeEcosystemKind> for EcosystemKind {
             crate::types::IdeEcosystemKind::Rust => Self::Rust,
             crate::types::IdeEcosystemKind::Zig => Self::Zig,
             crate::types::IdeEcosystemKind::Cpp => Self::Cpp,
+            crate::types::IdeEcosystemKind::Dotnet => Self::Dotnet,
             crate::types::IdeEcosystemKind::Node => Self::Node,
             crate::types::IdeEcosystemKind::Python => Self::Python,
             crate::types::IdeEcosystemKind::Shell => Self::Shell,
@@ -381,6 +416,7 @@ impl From<EcosystemKind> for crate::types::IdeEcosystemKind {
             EcosystemKind::Rust => Self::Rust,
             EcosystemKind::Zig => Self::Zig,
             EcosystemKind::Cpp => Self::Cpp,
+            EcosystemKind::Dotnet => Self::Dotnet,
             EcosystemKind::Node => Self::Node,
             EcosystemKind::Python => Self::Python,
             EcosystemKind::Shell => Self::Shell,
@@ -504,6 +540,21 @@ pub fn kotlin_compiler_zip_url(version: &str) -> String {
 
 pub fn kotlin_lsp_zip_url() -> String {
     "https://github.com/fwcd/kotlin-language-server/releases/latest/download/server.zip".to_string()
+}
+
+pub fn dotnet_sdk_tarball_url(version: &str, platform: TargetPlatform) -> String {
+    let clean = version.trim().trim_start_matches('v');
+    format!(
+        "https://builds.dotnet.microsoft.com/dotnet/Sdk/{clean}/dotnet-sdk-{clean}-{}.tar.gz",
+        platform.dotnet_rid()
+    )
+}
+
+pub fn netcoredbg_tarball_url(platform: TargetPlatform) -> String {
+    format!(
+        "https://github.com/Samsung/netcoredbg/releases/latest/download/netcoredbg-{}.tar.gz",
+        platform.netcoredbg_slug()
+    )
 }
 
 pub fn node_tarball_url(version: &str, platform: TargetPlatform) -> String {
@@ -660,6 +711,22 @@ pub fn curated_catalog(ecosystem: EcosystemKind, platform: TargetPlatform) -> Ve
                 sha256: None,
             })
             .collect(),
+        EcosystemKind::Dotnet => [
+            ("9.0.203", ".NET SDK 9.0.203 (STS)", false, "215 MB"),
+            ("8.0.408", ".NET SDK 8.0.408 (LTS)", true, "205 MB"),
+        ]
+        .into_iter()
+        .map(|(ver, label, lts, sz)| CatalogSdkEntry {
+            version: ver.to_string(),
+            label: label.to_string(),
+            lts,
+            os: os.clone(),
+            arch: arch.clone(),
+            url: dotnet_sdk_tarball_url(ver, platform),
+            size_hint: Some(sz.to_string()),
+            sha256: None,
+        })
+        .collect(),
         EcosystemKind::Node => [
             ("24.0.0", "Node.js 24.0.0 (Current)", false, "44 MB"),
             ("22.14.0", "Node.js 22.14.0 LTS (Jod)", true, "42 MB"),
@@ -830,6 +897,19 @@ pub fn resolve_sdk_download(
                 arch,
                 url: kotlin_compiler_zip_url(&clean),
                 size_hint: None,
+                sha256: None,
+            })
+        }
+        EcosystemKind::Dotnet => {
+            let clean = ver.trim_start_matches('v').to_string();
+            Ok(CatalogSdkEntry {
+                version: clean.clone(),
+                label: format!(".NET SDK {clean}"),
+                lts: clean.starts_with("8.") || clean.starts_with("10."),
+                os,
+                arch,
+                url: dotnet_sdk_tarball_url(&clean, platform),
+                size_hint: Some("210 MB".to_string()),
                 sha256: None,
             })
         }
@@ -1182,6 +1262,55 @@ pub fn parse_zig_index_json(raw: &str, platform: TargetPlatform) -> Vec<CatalogS
     out
 }
 
+pub fn parse_dotnet_releases_index_json(
+    raw: &str,
+    platform: TargetPlatform,
+) -> Vec<CatalogSdkEntry> {
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return Vec::new();
+    };
+    let Some(channels) = val.get("releases-index").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for ch in channels {
+        let phase = ch
+            .get("support-phase")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if !matches!(phase, "active" | "maintenance") {
+            continue;
+        }
+        let Some(sdk_ver) = ch
+            .get("latest-sdk")
+            .and_then(|v| v.as_str())
+            .filter(|s| is_safe_version_token(s))
+        else {
+            continue;
+        };
+        let release_type = ch
+            .get("release-type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("sts");
+        let is_lts = release_type.eq_ignore_ascii_case("lts");
+        let tag = if is_lts { "LTS" } else { "STS" };
+        out.push(CatalogSdkEntry {
+            version: sdk_ver.to_string(),
+            label: format!(".NET SDK {sdk_ver} ({tag})"),
+            lts: is_lts,
+            os: platform.os.as_str().to_string(),
+            arch: platform.arch.as_str().to_string(),
+            url: dotnet_sdk_tarball_url(sdk_ver, platform),
+            size_hint: Some("210 MB".to_string()),
+            sha256: None,
+        });
+        if out.len() >= 6 {
+            break;
+        }
+    }
+    out
+}
+
 // ── Live + Cached Catalog Client ─────────────────────────────────────────────
 
 struct CachedPlatformCatalog {
@@ -1288,15 +1417,16 @@ impl CatalogClient {
             }
         }
 
-        let (java, go, rust, zig, node, python) = tokio::join!(
+        let (java, go, rust, zig, dotnet, node, python) = tokio::join!(
             self.fetch_java(platform),
             self.fetch_go(platform),
             self.fetch_rust(platform),
             self.fetch_zig(platform),
+            self.fetch_dotnet(platform),
             self.fetch_node(platform),
             self.fetch_python(platform),
         );
-        let mut map = HashMap::with_capacity(13);
+        let mut map = HashMap::with_capacity(14);
         map.insert(EcosystemKind::Java, java);
         map.insert(
             EcosystemKind::Kotlin,
@@ -1309,6 +1439,7 @@ impl CatalogClient {
             EcosystemKind::Cpp,
             curated_catalog(EcosystemKind::Cpp, platform),
         );
+        map.insert(EcosystemKind::Dotnet, dotnet);
         map.insert(EcosystemKind::Node, node);
         map.insert(EcosystemKind::Python, python);
         map.insert(
@@ -1419,6 +1550,21 @@ impl CatalogClient {
             }
         }
         curated_catalog(EcosystemKind::Zig, platform)
+    }
+
+    async fn fetch_dotnet(&self, platform: TargetPlatform) -> Vec<CatalogSdkEntry> {
+        if let Some(raw) = self
+            .get_text(
+                "https://dotnetcli.blob.core.windows.net/dotnet/release-metadata/releases-index.json",
+            )
+            .await
+        {
+            let parsed = parse_dotnet_releases_index_json(&raw, platform);
+            if !parsed.is_empty() {
+                return parsed;
+            }
+        }
+        curated_catalog(EcosystemKind::Dotnet, platform)
     }
 
     async fn fetch_node(&self, platform: TargetPlatform) -> Vec<CatalogSdkEntry> {

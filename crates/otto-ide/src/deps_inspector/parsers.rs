@@ -771,6 +771,167 @@ pub fn parse_unreal_plugins(content: &str) -> Vec<IdeDepItem> {
     items
 }
 
+/// Parse .NET NuGet dependencies from `*.csproj`, `*.fsproj`, `*.vbproj`,
+/// `Directory.Packages.props`, or legacy `packages.config`.
+pub fn parse_dotnet_deps(content: &str) -> Vec<IdeDepItem> {
+    static RE_PKG_REF: OnceLock<Regex> = OnceLock::new();
+    static RE_VER_ELEM: OnceLock<Regex> = OnceLock::new();
+    static RE_PKG_CFG: OnceLock<Regex> = OnceLock::new();
+    let pkg_ref_re = RE_PKG_REF.get_or_init(|| {
+        Regex::new(r#"(?i)<(?:PackageReference|PackageVersion)\b([^>]*?)(/?)>"#).unwrap()
+    });
+    let ver_elem_re =
+        RE_VER_ELEM.get_or_init(|| Regex::new(r"(?i)<Version>\s*([^<\s]+)\s*</Version>").unwrap());
+    let pkg_cfg_re = RE_PKG_CFG.get_or_init(|| Regex::new(r#"(?i)<package\b([^>]*?)/?>"#).unwrap());
+
+    fn extract_attr(attrs: &str, name: &str) -> Option<(String, usize, usize)> {
+        let lower_attrs = attrs.to_ascii_lowercase();
+        let key = format!("{}=", name.to_ascii_lowercase());
+        let mut search_from = 0usize;
+        while let Some(rel) = lower_attrs[search_from..].find(&key) {
+            let pos = search_from + rel;
+            let prev_ok = pos == 0
+                || attrs.as_bytes()[pos - 1].is_ascii_whitespace()
+                || attrs.as_bytes()[pos - 1] == b'<';
+            let val_start = pos + key.len();
+            if prev_ok {
+                let rest = &attrs[val_start..];
+                let ws_len = rest.len() - rest.trim_start().len();
+                let trimmed = &rest[ws_len..];
+                if let Some(q) = trimmed.chars().next().filter(|c| *c == '"' || *c == '\'') {
+                    let after_q = &trimmed[q.len_utf8()..];
+                    if let Some(end) = after_q.find(q) {
+                        let v = after_q[..end].trim();
+                        if !v.is_empty() {
+                            let s = val_start + ws_len + q.len_utf8();
+                            return Some((v.to_string(), s, s + end));
+                        }
+                    }
+                }
+            }
+            search_from = val_start;
+        }
+        None
+    }
+
+    let lines: Vec<&str> = content.lines().collect();
+    let mut items = Vec::new();
+    let mut i = 0usize;
+    while i < lines.len() {
+        let line = lines[i];
+        let ln = (i + 1) as u32;
+        let trimmed = line.trim();
+        if trimmed.starts_with("<!--") {
+            i += 1;
+            continue;
+        }
+        if let Some(cap) = pkg_ref_re.captures(line) {
+            let attrs_m = cap.get(1);
+            let attrs = attrs_m.map(|m| m.as_str()).unwrap_or("");
+            let attrs_off = attrs_m.map(|m| m.start()).unwrap_or(0);
+            let self_closing = cap.get(2).map(|m| m.as_str()) == Some("/");
+            if let Some((name, ns, ne)) =
+                extract_attr(attrs, "Include").or_else(|| extract_attr(attrs, "Update"))
+            {
+                let mut version = String::new();
+                let mut version_line = ln;
+                let mut ver_col = 0u32;
+                let mut ver_end_col = 0u32;
+                if let Some((v, vs, ve)) = extract_attr(attrs, "Version")
+                    .or_else(|| extract_attr(attrs, "VersionOverride"))
+                {
+                    version = v;
+                    ver_col = (attrs_off + vs + 1) as u32;
+                    ver_end_col = (attrs_off + ve + 1) as u32;
+                }
+                let mut end_ln = ln;
+                if version.is_empty()
+                    && !self_closing
+                    && !line.to_ascii_lowercase().contains("</package")
+                {
+                    let mut j = i + 1;
+                    while j < lines.len() && j <= i + 10 {
+                        if let Some(vc) = ver_elem_re.captures(lines[j]) {
+                            let vm = vc.get(1).unwrap();
+                            version = vm.as_str().trim().to_string();
+                            version_line = (j + 1) as u32;
+                            ver_col = (vm.start() + 1) as u32;
+                            ver_end_col = (vm.end() + 1) as u32;
+                        }
+                        if lines[j].to_ascii_lowercase().contains("</package") {
+                            end_ln = (j + 1) as u32;
+                            break;
+                        }
+                        j += 1;
+                    }
+                }
+                let is_range =
+                    version.contains('*') || version.starts_with('[') || version.starts_with('(');
+                items.push(IdeDepItem {
+                    name,
+                    current_version: if version.is_empty() {
+                        "central".into()
+                    } else {
+                        version
+                    },
+                    latest_version: None,
+                    latest_patch: None,
+                    indirect: false,
+                    deprecated: None,
+                    line: ln,
+                    name_col: (attrs_off + ns + 1) as u32,
+                    name_end_col: (attrs_off + ne + 1) as u32,
+                    version_line,
+                    version_col: ver_col,
+                    version_end_col: ver_end_col,
+                    block_start_line: ln,
+                    block_end_line: end_ln,
+                    property_name: None,
+                    managed_in: None,
+                    vulnerabilities: Vec::new(),
+                    range: is_range,
+                });
+            }
+            i += 1;
+            continue;
+        }
+        if let Some(cap) = pkg_cfg_re.captures(line) {
+            let attrs_m = cap.get(1);
+            let attrs = attrs_m.map(|m| m.as_str()).unwrap_or("");
+            let attrs_off = attrs_m.map(|m| m.start()).unwrap_or(0);
+            if let Some((name, ns, ne)) = extract_attr(attrs, "id") {
+                let (version, vc, vec) = extract_attr(attrs, "version")
+                    .map(|(v, vs, ve)| {
+                        (v, (attrs_off + vs + 1) as u32, (attrs_off + ve + 1) as u32)
+                    })
+                    .unwrap_or_else(|| (String::new(), 0, 0));
+                items.push(IdeDepItem {
+                    name,
+                    current_version: version,
+                    latest_version: None,
+                    latest_patch: None,
+                    indirect: false,
+                    deprecated: None,
+                    line: ln,
+                    name_col: (attrs_off + ns + 1) as u32,
+                    name_end_col: (attrs_off + ne + 1) as u32,
+                    version_line: ln,
+                    version_col: vc,
+                    version_end_col: vec,
+                    block_start_line: ln,
+                    block_end_line: ln,
+                    property_name: None,
+                    managed_in: None,
+                    vulnerabilities: Vec::new(),
+                    range: false,
+                });
+            }
+        }
+        i += 1;
+    }
+    items
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

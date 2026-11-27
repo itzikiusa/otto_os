@@ -65,7 +65,7 @@ pub fn build_remote_lsp_script(root: &str, launch: &SpawnLaunch) -> String {
         "\"$HOME\"/.otto/toolchains/*/*/Contents/Home/bin ",
         "\"$HOME\"/.otto/toolchains/*/*/node_modules/.bin ",
         "\"$HOME\"/.otto/toolchains/*/*/lib/node_modules/.bin ",
-        "\"$HOME/go/bin\" \"$HOME/.cargo/bin\" \"$HOME/.zvm/bin\" \"$HOME/.local/bin\"; ",
+        "\"$HOME/go/bin\" \"$HOME/.cargo/bin\" \"$HOME/.zvm/bin\" \"$HOME/.dotnet\" \"$HOME/.dotnet/tools\" \"$HOME/.local/bin\"; ",
         "do [ -d \"$d\" ] && PATH=\"$d:$PATH\"; done; export PATH"
     );
 
@@ -144,6 +144,14 @@ pub(crate) fn apply_language_memory_caps(
                 command.env("GOMEMLIMIT", "512MiB");
             }
         }
+        "csharp" | "fsharp" => {
+            if !inherited.contains_key("DOTNET_CLI_TELEMETRY_OPTOUT") {
+                command.env("DOTNET_CLI_TELEMETRY_OPTOUT", "1");
+            }
+            if !inherited.contains_key("DOTNET_NOLOGO") {
+                command.env("DOTNET_NOLOGO", "1");
+            }
+        }
         "java" => {
             for flag in JDTLS_JVM_FLAGS {
                 command.arg(format!("--jvm-arg={flag}"));
@@ -160,7 +168,7 @@ pub(crate) fn apply_language_memory_caps(
                 command.arg("-data").arg(data_dir);
             }
         }
-        "typescript" | "javascript" | "shell" | "css" | "html" => {
+        "typescript" | "javascript" | "svelte" | "vue" | "angular" | "shell" | "css" | "html" => {
             set_node_heap_cap(command, inherited);
         }
         "python" if cmd_name.contains("pyright") => {

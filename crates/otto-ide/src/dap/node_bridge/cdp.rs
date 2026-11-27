@@ -266,15 +266,47 @@ pub(super) async fn discover_attach_ws_path_with_timeout(
         .unwrap_or(text.as_ref());
     let arr: Value = serde_json::from_str(body.trim())
         .map_err(|e| Error::Upstream(format!("parse /json/list: {e}")))?;
-    let ws_url = arr
-        .as_array()
-        .and_then(|a| a.first())
-        .and_then(|item| item.get("webSocketDebuggerUrl"))
-        .and_then(Value::as_str)
-        .ok_or_else(|| Error::Upstream("Node inspector returned no debuggable target".into()))?;
-    extract_ws_port_and_path(ws_url)
+    let ws_url = select_cdp_target_ws_url(&arr).ok_or_else(|| {
+        Error::Upstream("Node/Browser inspector returned no debuggable target".into())
+    })?;
+    extract_ws_port_and_path(&ws_url)
         .map(|(_, path)| path)
         .ok_or_else(|| Error::Upstream(format!("invalid webSocketDebuggerUrl '{ws_url}'")))
+}
+
+/// Pick the best debuggable WebSocket URL from a CDP `/json/list` payload:
+/// prefer a `"node"` target, else a web `"page"` target (skipping `devtools://`
+/// and `chrome-extension://`), else the first entry carrying `webSocketDebuggerUrl`.
+pub(crate) fn select_cdp_target_ws_url(arr: &Value) -> Option<String> {
+    let items = arr.as_array()?;
+    let ws_of = |item: &Value| -> Option<String> {
+        item.get("webSocketDebuggerUrl")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+    };
+    if let Some(ws) = items
+        .iter()
+        .find(|i| i.get("type").and_then(Value::as_str) == Some("node"))
+        .and_then(ws_of)
+    {
+        return Some(ws);
+    }
+    if let Some(ws) = items
+        .iter()
+        .find(|i| {
+            i.get("type").and_then(Value::as_str) == Some("page")
+                && i.get("url").and_then(Value::as_str).is_some_and(|u| {
+                    (u.starts_with("http://") || u.starts_with("https://"))
+                        && !u.starts_with("devtools://")
+                        && !u.starts_with("chrome-extension://")
+                })
+        })
+        .and_then(ws_of)
+    {
+        return Some(ws);
+    }
+    items.iter().find_map(ws_of)
 }
 
 pub(super) fn extract_ws_port_and_path(line: &str) -> Option<(u16, String)> {

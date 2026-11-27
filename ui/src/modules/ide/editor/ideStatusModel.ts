@@ -11,7 +11,7 @@ export type IdeFileKind = 'code' | 'markup' | 'data' | 'text';
 const CODE_EXT = new Set([
   'go', 'rs', 'zig', 'zon', 'java', 'kt', 'kts', 'scala', 'groovy', 'ts', 'tsx', 'mts', 'cts', 'js', 'jsx', 'mjs', 'cjs',
   'py', 'pyi', 'rb', 'php', 'c', 'h', 'cc', 'cpp', 'cxx', 'c++', 'hh', 'hpp', 'hxx', 'h++', 'inl', 'ipp', 'tpp', 'ixx', 'cppm', 'm', 'mm',
-  'cmake', 'meson', 'cs', 'swift', 'dart', 'lua', 'sh', 'bash',
+  'cmake', 'meson', 'cs', 'csx', 'fs', 'fsx', 'fsi', 'razor', 'swift', 'dart', 'lua', 'sh', 'bash',
   'zsh', 'svelte', 'vue', 'css', 'scss', 'less', 'sql', 'proto',
 ]);
 /** Code without functions to step through. */
@@ -19,7 +19,7 @@ const FUNCTIONLESS_EXT = new Set(['css', 'scss', 'less', 'sql', 'proto']);
 const MARKUP_EXT = new Set(['md', 'markdown', 'mdx', 'rst', 'adoc', 'txt', 'html', 'htm', 'svg']);
 const DATA_EXT = new Set(['csv', 'tsv', 'json', 'jsonc', 'jsonl', 'ndjson', 'yaml', 'yml', 'toml', 'xml', 'ini', 'env', 'lock', 'properties']);
 const FORMATTABLE_DATA_EXT = new Set(['json', 'jsonc', 'yaml', 'yml', 'html', 'htm']);
-const CODE_LANGS = new Set(['go', 'rust', 'zig', 'java', 'kotlin', 'typescript', 'javascript', 'python', 'ruby', 'php', 'c', 'cpp', 'csharp', 'swift', 'shell', 'bash']);
+const CODE_LANGS = new Set(['go', 'rust', 'zig', 'java', 'kotlin', 'typescript', 'javascript', 'python', 'ruby', 'php', 'c', 'cpp', 'csharp', 'fsharp', 'swift', 'shell', 'bash']);
 
 function extOf(path: string): string {
   const base = path.split('?')[0].split('/').pop() ?? '';
@@ -60,15 +60,15 @@ export function ideEditorActionsFor(path: string, language: string | null | unde
 
 const LANG_LABELS: Record<string, string> = {
   go: 'Go', rust: 'Rust', zig: 'Zig', zon: 'Zig Object Notation', java: 'Java', kotlin: 'Kotlin', typescript: 'TypeScript', javascript: 'JavaScript',
-  python: 'Python', markdown: 'Markdown', json: 'JSON', jsonl: 'JSON Lines', csv: 'CSV', tsv: 'TSV', yaml: 'YAML',
+  python: 'Python', notebook: 'Jupyter Notebook', markdown: 'Markdown', json: 'JSON', jsonl: 'JSON Lines', csv: 'CSV', tsv: 'TSV', yaml: 'YAML',
   toml: 'TOML', xml: 'XML', html: 'HTML', css: 'CSS', scss: 'SCSS', sql: 'SQL', shell: 'Shell', bash: 'Shell',
-  dockerfile: 'Dockerfile', makefile: 'Makefile', cmake: 'CMake', meson: 'Meson', svelte: 'Svelte', vue: 'Vue', c: 'C', cpp: 'C++', csharp: 'C#', ruby: 'Ruby', php: 'PHP',
+  dockerfile: 'Dockerfile', makefile: 'Makefile', cmake: 'CMake', meson: 'Meson', svelte: 'Svelte', vue: 'Vue', c: 'C', cpp: 'C++', csharp: 'C#', fsharp: 'F#', ruby: 'Ruby', php: 'PHP',
   properties: 'Properties', conf: 'Config', ini: 'INI', dotenv: '.env', ignore: 'Ignore file', requirements: 'pip requirements',
   nginx: 'nginx', proto: 'Protocol Buffers', protobuf: 'Protocol Buffers', hcl: 'HCL', diff: 'Diff', powershell: 'PowerShell',
   batch: 'Batch', vtt: 'WebVTT', groovy: 'Groovy', mod: 'Go module', sum: 'Go checksums', work: 'Go workspace',
 };
 const EXT_LANG: Record<string, string> = {
-  rs: 'rust', zon: 'zig', ts: 'typescript', tsx: 'typescript', js: 'javascript', jsx: 'javascript', mjs: 'javascript',
+  rs: 'rust', zon: 'zig', cs: 'csharp', csx: 'csharp', razor: 'csharp', fs: 'fsharp', fsx: 'fsharp', fsi: 'fsharp', ts: 'typescript', tsx: 'typescript', js: 'javascript', jsx: 'javascript', mjs: 'javascript',
   cjs: 'javascript', py: 'python', md: 'markdown', yml: 'yaml', sh: 'shell', kt: 'kotlin', kts: 'kotlin', rb: 'ruby',
   h: 'cpp', hh: 'cpp', hpp: 'cpp', hxx: 'cpp', cc: 'cpp', cxx: 'cpp', inl: 'cpp', ipp: 'cpp', tpp: 'cpp', ixx: 'cpp', cppm: 'cpp', mm: 'cpp', m: 'c',
 };
@@ -88,11 +88,12 @@ export function ideLanguageSettingsSection(path: string, language?: string | nul
   if (lang === 'go') return 'lang.go';
   if (lang === 'java') return 'lang.java';
   if (lang === 'kotlin') return 'lang.kotlin';
-  if (lang === 'typescript' || lang === 'javascript') return 'lang.node';
-  if (lang === 'python') return 'lang.python';
+  if (lang === 'typescript' || lang === 'javascript' || lang === 'svelte' || lang === 'vue' || lang === 'angular') return 'lang.node';
+  if (lang === 'python' || lang === 'notebook') return 'lang.python';
   if (lang === 'rust') return 'lang.rust';
   if (lang === 'zig') return 'lang.zig';
   if (lang === 'c' || lang === 'cpp' || lang === 'cmake' || lang === 'meson') return 'lang.cpp';
+  if (lang === 'csharp' || lang === 'fsharp' || lang === 'dotnet') return 'lang.dotnet';
   if (lang === 'csv' || lang === 'tsv') return 'lang.csv';
   return null;
 }
@@ -117,11 +118,12 @@ export function ideProblemCounts(problems: readonly { severity: string }[]): { e
 // ── Language server ─────────────────────────────────────────────────────────
 
 const SERVER_NAMES: Record<string, string> = {
-  go: 'gopls', rust: 'rust-analyzer', zig: 'zls', cpp: 'clangd', c: 'clangd', java: 'jdtls', kotlin: 'kotlin-language-server', typescript: 'tsserver', javascript: 'tsserver', python: 'pyright',
+  go: 'gopls', rust: 'rust-analyzer', zig: 'zls', cpp: 'clangd', c: 'clangd', csharp: 'csharp-ls', fsharp: 'fsautocomplete', java: 'jdtls', kotlin: 'kotlin-language-server', typescript: 'tsserver', javascript: 'tsserver', svelte: 'svelteserver', vue: 'vue-language-server', angular: 'ngserver', python: 'pyright',
 };
 
 /** The language-server id (`go`, `typescript`, …) for a file, or null when Otto runs none for it. */
 export function ideLspLangFor(path: string, language?: string | null): string | null {
+  if (path.toLowerCase().endsWith('.component.html')) return 'angular';
   const raw = (language || EXT_LANG[extOf(path)] || extOf(path)).toLowerCase();
   const id = raw === 'golang' ? 'go' : raw;
   return SERVER_NAMES[id] ? id : null;

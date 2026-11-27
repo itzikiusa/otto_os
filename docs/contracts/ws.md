@@ -452,13 +452,14 @@ credentials are refused with 403 (`RootRoute::Lsp`).
   supplied inside an authorized directory, the bridge walks up from `file` to
   the nearest module manifest (`go.mod`, `Cargo.toml`, `build.zig`, `build.zig.zon`,
   `compile_commands.json`, `CMakeLists.txt`, `CMakePresets.json`, `meson.build`, `*.uproject`,
-  `pom.xml`, `build.gradle*`, `package.json`, `pyproject.toml`) so multi-repo workspaces always bind to the
+  `*.sln`, `*.slnx`, `*.csproj`, `*.fsproj`, `pom.xml`, `build.gradle*`, `package.json`, `pyproject.toml`) so multi-repo workspaces always bind to the
   active file's module root. Binary discovery checks
   `<data_dir>/toolchains/**/bin` first (prepend to `PATH`, plus managed JDK
   `JAVA_HOME`), then standard developer bin directories (`~/.cargo/bin`,
-  `~/go/bin`, `~/.zvm/bin`, `~/.local/bin`, Homebrew, …), and includes both the built-in
-  language servers (`gopls`, `typescript-language-server`, `jdtls`,
-  `kotlin-language-server`, `rust-analyzer`, `zls`, `clangd`, `pyright-langserver`, `bash-language-server`,
+  `~/go/bin`, `~/.zvm/bin`, `~/.dotnet/tools`, `~/.local/bin`, Homebrew, …), and includes both the built-in
+  language servers (`gopls`, `typescript-language-server`, `svelteserver`,
+  `vue-language-server`, `ngserver`, `jdtls`, `kotlin-language-server`,
+  `rust-analyzer`, `zls`, `clangd`, `csharp-ls` / `OmniSharp` / `fsautocomplete`, `pyright-langserver`, `bash-language-server`,
   `vscode-json-language-server`, `vscode-css-language-server`,
   `vscode-html-language-server`, `marksman`) and any enabled runtime IDE plugin
   language servers (`IdePluginRegistry`). Local spawns inherit the cached user

@@ -151,8 +151,27 @@ export const ZIG_MAIN_SOURCE = [
   '',
 ].join('\n');
 
+export const DOTNET_PROGRAM_SOURCE = [
+  'using System;',
+  '',
+  'namespace OttoDotnet;',
+  '',
+  'public static class Settlement',
+  '{',
+  '    /// <summary>Computes settlement bonus.</summary>',
+  '    public static int ComputeBonus(int amount, int rate) => amount + rate * 2;',
+  '',
+  '    public static void Main(string[] args)',
+  '    {',
+  '        var total = ComputeBonus(40, 5);',
+  '        Console.WriteLine($"DOTNET_SETTLEMENT_DONE:{total}");',
+  '    }',
+  '}',
+  '',
+].join('\n');
+
 export function seedPolyglotFiles(dir: string): void {
-  for (const sub of ['app', 'decimal', 'pyapp', 'zigapp/src', 'cppapp/include', 'cppapp/src', 'web', 'scripts', 'notes', 'src/main/java/com/otto']) {
+  for (const sub of ['app', 'decimal', 'pyapp', 'zigapp/src', 'cppapp/include', 'cppapp/src', 'dotnetapp', 'web', 'scripts', 'notes', 'src/main/java/com/otto']) {
     mkdirSync(join(dir, sub), { recursive: true });
   }
 
@@ -313,6 +332,22 @@ export function seedPolyglotFiles(dir: string): void {
     join(dir, 'kotlinapp', 'src', 'test', 'kotlin', 'com', 'otto', 'AppSpec.kt'),
     'package com.otto\n\nimport io.kotest.core.spec.style.StringSpec\n\nclass AppSpec : StringSpec({\n    "computes settlement" {\n        assert(Settlement(42).amount == 42)\n    }\n})\n',
   );
+
+  writeFileSync(
+    join(dir, 'dotnetapp', 'DotnetApp.csproj'),
+    [
+      '<Project Sdk="Microsoft.NET.Sdk">',
+      '  <PropertyGroup>',
+      '    <OutputType>Exe</OutputType>',
+      '    <TargetFramework>net8.0</TargetFramework>',
+      '    <ImplicitUsings>enable</ImplicitUsings>',
+      '    <Nullable>enable</Nullable>',
+      '  </PropertyGroup>',
+      '</Project>',
+      '',
+    ].join('\n'),
+  );
+  writeFileSync(join(dir, 'dotnetapp', 'Program.cs'), DOTNET_PROGRAM_SOURCE);
 
   writeFileSync(
     join(dir, 'package.json'),

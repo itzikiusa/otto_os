@@ -44,6 +44,9 @@ export async function installToolchainJob(
     const zigHome = ecosystem === 'zig' && component !== 'sdk'
       ? host.toolchains.find((e) => e.ecosystem === 'zig')?.installed.find((s) => s.active)?.path ?? null
       : null;
+    const dotnetRoot = ecosystem === 'dotnet' && component !== 'sdk'
+      ? host.toolchains.find((e) => e.ecosystem === 'dotnet')?.installed.find((s) => s.active)?.path ?? null
+      : null;
     const resp = await api.post<{ job: IdeInstallJob }>('/ide/toolchains/install', {
       target: host.targetPayload,
       ecosystem,
@@ -51,6 +54,7 @@ export async function installToolchainJob(
       version,
       ...(goRoot ? { go_root: goRoot } : {}),
       ...(zigHome ? { zig_home: zigHome } : {}),
+      ...(dotnetRoot ? { dotnet_root: dotnetRoot } : {}),
     });
     host.installJobs = [resp.job, ...host.installJobs.filter((j) => j.id !== resp.job.id)].slice(0, 12);
     ensurePoller();

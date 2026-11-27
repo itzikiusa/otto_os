@@ -98,6 +98,11 @@ pub(crate) fn local_env_mutation_requires_root(
             prev.kotlin_home.as_deref(),
         ),
         (
+            "dotnet_root",
+            trimmed_opt(&req.dotnet_root),
+            prev.dotnet_root.as_deref(),
+        ),
+        (
             "node_home",
             trimmed_opt(&req.node_home),
             prev.node_home.as_deref(),
@@ -295,7 +300,7 @@ impl EnvironmentManager {
 
         let saved_configs = self.list_run_configs(pool, target).await?;
 
-        let (dotenv_files, python_venvs, detected_configs) = match target.kind {
+        let (dotenv_files, python_venvs, detected_configs, accelerators) = match target.kind {
             IdeTargetKind::Local => {
                 let target_clone = target.clone();
                 let extra_roots = env.additional_roots.clone();
@@ -312,7 +317,8 @@ impl EnvironmentManager {
                         }
                     }
                     let detected = discover_run_configs(&target_clone, &extra_roots);
-                    (dotenvs, venvs, detected)
+                    let accels = crate::notebooks::detect_local_accelerators();
+                    (dotenvs, venvs, detected, accels)
                 })
                 .await
                 .map_err(|e| Error::Internal(format!("local environment discovery: {e}")))?
@@ -326,7 +332,7 @@ impl EnvironmentManager {
                     .discover_python_venvs(targets, target, ssh)
                     .await
                     .unwrap_or_default();
-                (dotenvs, venvs, Vec::new())
+                (dotenvs, venvs, Vec::new(), Vec::new())
             }
         };
 
@@ -362,6 +368,7 @@ impl EnvironmentManager {
             configs,
             detected_configs,
             effective_env,
+            accelerators,
         })
     }
 
@@ -547,6 +554,7 @@ impl EnvironmentManager {
                 zig_home: clean_opt(&req.zig_home),
                 cpp_toolchain: clean_opt(&req.cpp_toolchain),
                 kotlin_home: clean_opt(&req.kotlin_home),
+                dotnet_root: clean_opt(&req.dotnet_root),
             }
         } else {
             StoredMobileSdks {
@@ -556,6 +564,7 @@ impl EnvironmentManager {
                 zig_home: prev_proj.zig_home.clone(),
                 cpp_toolchain: prev_proj.cpp_toolchain.clone(),
                 kotlin_home: prev_proj.kotlin_home.clone(),
+                dotnet_root: prev_proj.dotnet_root.clone(),
             }
         };
         if next_mobile_sdks.android_home.is_some()
@@ -564,6 +573,7 @@ impl EnvironmentManager {
             || next_mobile_sdks.zig_home.is_some()
             || next_mobile_sdks.cpp_toolchain.is_some()
             || next_mobile_sdks.kotlin_home.is_some()
+            || next_mobile_sdks.dotnet_root.is_some()
         {
             let encoded = serde_json::to_string(&next_mobile_sdks)
                 .map_err(|e| Error::Internal(format!("serialize mobile_sdks: {e}")))?;

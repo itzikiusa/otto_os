@@ -6,7 +6,7 @@
 import type { Text } from '@codemirror/state';
 
 export type SemanticLangKind =
-  | 'go' | 'java' | 'kotlin' | 'ts' | 'rust' | 'zig' | 'cpp' | 'python' | 'shell' | 'json' | 'csv' | 'other';
+  | 'go' | 'java' | 'kotlin' | 'ts' | 'rust' | 'zig' | 'cpp' | 'csharp' | 'fsharp' | 'python' | 'shell' | 'json' | 'csv' | 'other';
 
 export type SemanticRole =
   | 'fg' | 'keyword' | 'control' | 'func-decl' | 'func-call' | 'field'
@@ -103,6 +103,8 @@ export function detectSemanticLang(filePath: string, language?: string): Semanti
   ) {
     return 'cpp';
   }
+  if (ext === 'cs' || ext === 'csx' || ext === 'razor' || language === 'csharp') return 'csharp';
+  if (ext === 'fs' || ext === 'fsx' || ext === 'fsi' || language === 'fsharp') return 'fsharp';
   if (ext === 'py' || ext === 'pyi' || language === 'python') return 'python';
   if (['sh', 'bash', 'zsh', 'bats'].includes(ext) || language === 'shell' || language === 'shellscript') return 'shell';
   if (['json', 'jsonc', 'jsonl', 'ndjson'].includes(ext) || language === 'json' || language === 'jsonl') return 'json';

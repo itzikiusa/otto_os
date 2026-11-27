@@ -11,6 +11,8 @@ mod collab_sse;
 mod db_watch;
 #[path = "http/intelligence.rs"]
 mod intelligence;
+#[path = "http/notebooks.rs"]
+mod notebooks;
 #[path = "http/projects_deps.rs"]
 mod projects_deps;
 #[path = "http/runtime_debug.rs"]
@@ -47,6 +49,10 @@ use self::intelligence::{
     fs_complete, history_entry, history_list, history_restore, history_snapshot, lsp_code_actions,
     lsp_definition, lsp_diagnostics, lsp_format, lsp_hover, lsp_implementation, lsp_references,
     lsp_rename, lsp_status, lsp_symbols,
+};
+use self::notebooks::{
+    notebook_execute, notebook_interrupt, notebook_kernels, notebook_restart, notebook_shutdown,
+    notebook_variables,
 };
 use self::projects_deps::{
     add_project_folders_bulk, build_tools_model, delete_project, deps_action, deps_inspect,
@@ -220,6 +226,13 @@ pub fn api_router<S: IdeCtx>() -> Router<S> {
             .route("/ide/runs/{run_id}", get(get_run::<S>))
             .route("/ide/runs/{run_id}/events", get(stream_run_events::<S>))
             .route("/ide/runs/{run_id}/stop", post(stop_run::<S>))
+            // C2. Jupyter / Python Notebooks
+            .route("/ide/notebooks/kernels", post(notebook_kernels::<S>))
+            .route("/ide/notebooks/execute", post(notebook_execute::<S>))
+            .route("/ide/notebooks/interrupt", post(notebook_interrupt::<S>))
+            .route("/ide/notebooks/restart", post(notebook_restart::<S>))
+            .route("/ide/notebooks/variables", post(notebook_variables::<S>))
+            .route("/ide/notebooks/shutdown", post(notebook_shutdown::<S>))
             // D. Full DAP Debugger Engine
             .route(
                 "/ide/debug/sessions",
