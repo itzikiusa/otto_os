@@ -159,30 +159,32 @@ pub(super) fn discover_java(
         ));
     }
 
-    let java_src = root.join("src/main/java");
-    if java_src.is_dir() {
-        let mut scanned = 0usize;
-        let mut mains = Vec::new();
-        scan_java_mains(&java_src, root, 0, &mut scanned, &mut mains);
-        for (fqcn, rel_path) in mains.into_iter().take(4) {
-            let short = fqcn.rsplit('.').next().unwrap_or(&fqcn);
-            let mut cfg = make_auto_config(
-                root_badge,
-                IdeRunnerKind::JavaMain,
-                &format!("main-{fqcn}"),
-                format!("Run {short}.main()"),
-                None,
-                Vec::new(),
-                cwd.clone(),
-                Some(rel_path),
-            );
-            cfg.test_filter = Some(fqcn);
-            out.push(cfg);
+    for src_sub in ["src/main/java", "src/main/kotlin"] {
+        let src_dir = root.join(src_sub);
+        if src_dir.is_dir() {
+            let mut scanned = 0usize;
+            let mut mains = Vec::new();
+            scan_jvm_mains(&src_dir, root, 0, &mut scanned, &mut mains);
+            for (fqcn, rel_path) in mains.into_iter().take(4) {
+                let short = fqcn.rsplit('.').next().unwrap_or(&fqcn);
+                let mut cfg = make_auto_config(
+                    root_badge,
+                    IdeRunnerKind::JavaMain,
+                    &format!("main-{fqcn}"),
+                    format!("Run {short}.main()"),
+                    None,
+                    Vec::new(),
+                    cwd.clone(),
+                    Some(rel_path),
+                );
+                cfg.test_filter = Some(fqcn);
+                out.push(cfg);
+            }
         }
     }
 }
 
-fn scan_java_mains(
+fn scan_jvm_mains(
     dir: &Path,
     workspace_root: &Path,
     depth: usize,
@@ -197,28 +199,34 @@ fn scan_java_mains(
             break;
         }
         if entry_path.is_dir() {
-            scan_java_mains(&entry_path, workspace_root, depth + 1, scanned, out);
-        } else if entry_path
-            .extension()
-            .and_then(|s| s.to_str())
-            .is_some_and(|e| e == "java")
-        {
+            scan_jvm_mains(&entry_path, workspace_root, depth + 1, scanned, out);
+        } else if let Some(ext) = entry_path.extension().and_then(|s| s.to_str()) {
+            if ext != "java" && ext != "kt" {
+                continue;
+            }
             *scanned += 1;
             if let Some(head) = read_head(&entry_path) {
-                if head.contains("static void main(") {
-                    let cls = entry_path
+                let is_java_main = ext == "java" && head.contains("static void main(");
+                let is_kt_main =
+                    ext == "kt" && (head.contains("fun main(") || head.contains("fun main ()"));
+                if is_java_main || is_kt_main {
+                    let stem = entry_path
                         .file_stem()
                         .and_then(|s| s.to_str())
                         .unwrap_or("Main");
+                    let cls = if ext == "kt" {
+                        crate::dap::java_bridge::infer_kotlin_class_stem(stem, &head)
+                    } else {
+                        stem.to_string()
+                    };
                     let pkg = head.lines().find_map(|l| {
                         let t = l.trim();
                         t.strip_prefix("package ")
-                            .and_then(|r| r.strip_suffix(';'))
-                            .map(|p| p.trim().to_string())
+                            .map(|r| r.trim_end_matches(';').trim().to_string())
                     });
                     let fqcn = match pkg {
                         Some(p) if !p.is_empty() => format!("{p}.{cls}"),
-                        _ => cls.to_string(),
+                        _ => cls,
                     };
                     let rel = entry_path
                         .strip_prefix(workspace_root)

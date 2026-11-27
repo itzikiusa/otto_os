@@ -6,7 +6,7 @@
 import type { Text } from '@codemirror/state';
 
 export type SemanticLangKind =
-  | 'go' | 'java' | 'ts' | 'rust' | 'zig' | 'cpp' | 'python' | 'shell' | 'json' | 'csv' | 'other';
+  | 'go' | 'java' | 'kotlin' | 'ts' | 'rust' | 'zig' | 'cpp' | 'python' | 'shell' | 'json' | 'csv' | 'other';
 
 export type SemanticRole =
   | 'fg' | 'keyword' | 'control' | 'func-decl' | 'func-call' | 'field'
@@ -91,6 +91,7 @@ export function detectSemanticLang(filePath: string, language?: string): Semanti
   const ext = clean.slice(Math.max(0, clean.lastIndexOf('/'))).split('.').pop() ?? '';
   if (ext === 'go' || language === 'go') return 'go';
   if (ext === 'java' || ext === 'class' || language === 'java') return 'java';
+  if (ext === 'kt' || ext === 'kts' || language === 'kotlin') return 'kotlin';
   if (['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'mts', 'cts'].includes(ext) || language === 'typescript' || language === 'javascript') {
     return 'ts';
   }

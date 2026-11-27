@@ -10,7 +10,7 @@ export const LANG_KEYS: ReadonlySet<string> = new Set([
   'sql', 'redis', 'js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs', 'mts', 'cts', 'py', 'pyi', 'go', 'rs', 'zig',
   'c', 'cpp', 'cmake', 'meson',
   'json', 'jsonc', 'jsonl', 'ndjson', 'html', 'htm', 'xml', 'svelte', 'vue', 'css', 'scss', 'less',
-  'md', 'mdx', 'markdown', 'java', 'class', 'gradle', 'kts', 'groovy', 'sh', 'bash', 'zsh', 'bats',
+  'md', 'mdx', 'markdown', 'java', 'class', 'gradle', 'kt', 'kts', 'groovy', 'sh', 'bash', 'zsh', 'bats',
   'shell', 'shellscript', 'mod', 'sum', 'work', 'toml', 'makefile', 'properties', 'yaml', 'conf',
   'dotenv', 'ignore', 'requirements', 'dockerfile', 'nginx', 'proto', 'hcl', 'diff', 'powershell', 'batch', 'vtt',
 ]);
@@ -70,7 +70,7 @@ const DIRS: [RegExp, string][] = [
 /** What a language the IDE read off a file (server ids, sniffed keys) is called here. */
 const HINT_ALIAS: Record<string, string> = {
   protobuf: 'proto', ini: 'conf', shell: 'sh', markdown: 'md', javascript: 'js', typescript: 'ts', python: 'py',
-  rust: 'rs', golang: 'go', zon: 'zig', 'c++': 'cpp', cxx: 'cpp', objc: 'c', objcpp: 'cpp',
+  rust: 'rs', golang: 'go', zon: 'zig', 'c++': 'cpp', cxx: 'cpp', objc: 'c', objcpp: 'cpp', kotlin: 'kt',
 };
 
 function extOf(base: string): string {

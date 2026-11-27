@@ -14,6 +14,7 @@ const MANIFEST_NAMES = new Set([
   'pyproject.toml',
   'build.gradle',
   'build.gradle.kts',
+  'libs.versions.toml',
 ]);
 
 export function isIdeManifestPath(filePath: string): boolean {

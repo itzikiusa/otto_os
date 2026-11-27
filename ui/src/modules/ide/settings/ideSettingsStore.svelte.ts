@@ -123,6 +123,7 @@ export const SETTINGS_TREE: readonly SettingsTreeNode[] = [
     children: [
       { id: 'lang.go', label: 'Go', desc: 'GOROOT, GOPATH, GOPRIVATE, gopls, and Delve debugger configuration.', keywords: ['go', 'golang', 'goroot', 'gopath', 'goprivate', 'gomod', 'gopls', 'dlv', 'delve'] },
       { id: 'lang.java', label: 'Java', desc: 'JDK & Classpath picker with auto-detected Homebrew / SDKMAN / GraalVM JDKs and broken-SDK warnings.', keywords: ['java', 'jdk', 'java_home', 'classpath', 'maven', 'gradle', 'jdtls', 'graalvm', 'openjdk', 'lombok'] },
+      { id: 'lang.kotlin', label: 'Kotlin', desc: 'Kotlin compiler (KOTLIN_HOME), kotlin-language-server, Gradle Kotlin DSL / libs.versions.toml, Kotest, and JVM JDWP.', keywords: ['kotlin', 'kt', 'kts', 'kotlinc', 'kotlin_home', 'kotlin-language-server', 'kotest', 'gradle', 'maven', 'coroutines', 'ksp', 'kapt'] },
       { id: 'lang.node', label: 'JavaScript & TypeScript', desc: 'Node.js runtime and typescript-language-server configuration.', keywords: ['javascript', 'typescript', 'node', 'tsserver', 'npm'] },
       { id: 'lang.python', label: 'Python', desc: 'Python interpreter, .venv / uv / pyenv environments, pyright, and debugpy.', keywords: ['python', 'venv', 'virtualenv', 'uv', 'pyenv', 'pyright', 'debugpy'] },
       { id: 'lang.rust', label: 'Rust', desc: 'rustup toolchain, rust-analyzer, and codelldb / lldb-dap debugger.', keywords: ['rust', 'cargo', 'rustup', 'rust-analyzer', 'codelldb', 'lldb'] },
@@ -148,6 +149,9 @@ const SECTION_ALIASES: Record<string, string> = {
   go: 'lang.go',
   java: 'lang.java',
   jdk: 'lang.java',
+  kotlin: 'lang.kotlin',
+  kt: 'lang.kotlin',
+  kts: 'lang.kotlin',
   python: 'lang.python',
   rust: 'lang.rust',
   zig: 'lang.zig',
@@ -215,6 +219,7 @@ export function filterSettingsTree(query: string): SettingsTreeNode[] {
 
 export interface EnvDraftState {
   java_home: string;
+  kotlin_home: string;
   go_root: string;
   rust_toolchain: string;
   zig_home: string;
@@ -233,6 +238,7 @@ export interface EnvDraftState {
 function emptyEnvDraft(env: IdeProjectEnvironment | null): EnvDraftState {
   return {
     java_home: env?.java_home ?? '',
+    kotlin_home: env?.kotlin_home ?? '',
     go_root: env?.go_root ?? '',
     rust_toolchain: env?.rust_toolchain ?? '',
     zig_home: env?.zig_home ?? '',
@@ -321,6 +327,7 @@ class IdeSettingsController {
     if ((this.envDirty || Object.keys(snap.moduleSdkMap).length > 0) && ide.hasTarget) {
       const envOk = await ide.saveEnvironment({
         java_home: this.envDraft.java_home || null,
+        kotlin_home: this.envDraft.kotlin_home || null,
         go_root: this.envDraft.go_root || null,
         rust_toolchain: this.envDraft.rust_toolchain || null,
         zig_home: this.envDraft.zig_home || null,

@@ -52,6 +52,7 @@
   let activeTab = $state<EnvTab>('env');
   let inheritShellEnv = $state(true);
   let javaHome = $state('');
+  let kotlinHome = $state('');
   let goRoot = $state('');
   let goBuildTagsText = $state('');
   let rustToolchain = $state('');
@@ -79,6 +80,7 @@
     return JSON.stringify({
       inheritShellEnv,
       javaHome: javaHome.trim(),
+      kotlinHome: kotlinHome.trim(),
       goRoot: goRoot.trim(),
       goBuildTagsText: goBuildTagsText.trim(),
       rustToolchain: rustToolchain.trim(),
@@ -211,6 +213,7 @@
     untrack(() => {
       inheritShellEnv = e.inherit_shell_env !== false;
       javaHome = e.java_home ?? '';
+      kotlinHome = e.kotlin_home ?? '';
       goRoot = e.go_root ?? '';
       goBuildTagsText = (e.go_build_tags ?? []).join(', ');
       rustToolchain = e.rust_toolchain ?? '';
@@ -343,6 +346,7 @@
       const ok = await ide.saveEnvironment({
         inherit_shell_env: inheritShellEnv,
         java_home: javaHome.trim() || null,
+        kotlin_home: kotlinHome.trim() || null,
         go_root: goRoot.trim() || null,
         go_build_tags: parsedGoTags,
         rust_toolchain: rustToolchain.trim() || null,
@@ -519,6 +523,14 @@
                   <input id="env-java-home" class="input" type="text" dir="ltr" list="env-java-datalist" placeholder="System default JDK" bind:value={javaHome} />
                   <datalist id="env-java-datalist">
                     {#each sdkOptionsFor('java') as opt (opt.value)}<option value={opt.value}>{opt.label}</option>{/each}
+                  </datalist>
+                </div>
+
+                <div class="field">
+                  <label for="env-kotlin-home">Kotlin SDK (KOTLIN_HOME)</label>
+                  <input id="env-kotlin-home" class="input" type="text" dir="ltr" list="env-kotlin-datalist" placeholder="System default kotlinc" bind:value={kotlinHome} />
+                  <datalist id="env-kotlin-datalist">
+                    {#each sdkOptionsFor('kotlin') as opt (opt.value)}<option value={opt.value}>{opt.label}</option>{/each}
                   </datalist>
                 </div>
 

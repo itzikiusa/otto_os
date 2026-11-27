@@ -278,7 +278,7 @@ export interface IdeInstallJob {
 export interface IdeEnvVar { key: string; value?: string; secret: boolean; has_secret?: boolean }
 
 export interface IdeProjectEnvironment {
-  java_home?: string | null; go_root?: string | null; rust_toolchain?: string | null; zig_home?: string | null;
+  java_home?: string | null; kotlin_home?: string | null; go_root?: string | null; rust_toolchain?: string | null; zig_home?: string | null;
   cpp_toolchain?: string | null; node_home?: string | null; python_interpreter?: string | null;
   android_home?: string | null; flutter_root?: string | null; xcode_developer_dir?: string | null;
   dotenv_path?: string | null; extra_path?: string | null;
@@ -462,7 +462,7 @@ export function detectIdeLanguage(p: string): string {
   if (lower === 'meson.build' || lower === 'meson_options.txt' || lower === 'meson.options') return 'meson';
   const ext = lower.includes('.') ? (lower.split('.').pop() ?? '') : '';
   const map: Record<string, string> = {
-    go: 'go', java: 'java', class: 'java', rs: 'rust', zig: 'zig', zon: 'zig', py: 'python', pyi: 'python',
+    go: 'go', java: 'java', class: 'java', kt: 'kotlin', kts: 'kotlin', rs: 'rust', zig: 'zig', zon: 'zig', py: 'python', pyi: 'python',
     c: 'c', m: 'c', cpp: 'cpp', cc: 'cpp', cxx: 'cpp', 'c++': 'cpp', h: 'cpp', hh: 'cpp', hpp: 'cpp', hxx: 'cpp',
     'h++': 'cpp', inl: 'cpp', ipp: 'cpp', tpp: 'cpp', ixx: 'cpp', cppm: 'cpp', mm: 'cpp',
     cmake: 'cmake', meson: 'meson', uproject: 'json', uplugin: 'json',
@@ -491,7 +491,7 @@ export const GUTTER_TARGET_ID = 'gutter';
 export function defaultRunnerForLanguage(lang: string): string {
   const map: Record<string, string> = {
     go: 'go_run', rust: 'cargo_run', zig: 'zig_run', c: 'cpp_run', cpp: 'cpp_run',
-    cmake: 'cmake', meson: 'meson', java: 'java_main', python: 'python',
+    cmake: 'cmake', meson: 'meson', java: 'java_main', kotlin: 'java_main', python: 'python',
     javascript: 'node', typescript: 'node', tsx: 'npm', jsx: 'node', shell: 'shell',
   };
   return map[lang] ?? 'custom';
@@ -518,6 +518,13 @@ export function buildNewFileTemplate(fullPath: string, rootPath: string, sibling
     const m = parentDir.match(/\/src\/(?:main|test)\/java\/(.+)$/);
     const pkgLine = m?.[1] ? `package ${m[1].replace(/\//g, '.')};\n\n` : '';
     return `${pkgLine}public class ${stem} {\n}\n`;
+  }
+  if (lower.endsWith('.kt')) {
+    const stem = name.slice(0, -3).replace(/[^A-Za-z0-9_]/g, '') || 'Main';
+    const m = parentDir.match(/\/src\/(?:main|test)\/(?:kotlin|java)\/(.+)$/);
+    const pkgLine = m?.[1] ? `package ${m[1].replace(/\//g, '.')}\n\n` : '';
+    if (lower === 'main.kt') return `${pkgLine}fun main() {\n}\n`;
+    return `${pkgLine}class ${stem} {\n}\n`;
   }
   if (lower.endsWith('.zig')) {
     if (lower === 'main.zig') {
@@ -605,7 +612,7 @@ export async function collabGuestPost<T>(path: string, guestToken: string | null
   return (await resp.json()) as T;
 }
 
-const ENTRY_FILE_NAMES = ['readme.md', 'main.go', 'main.rs', 'main.zig', 'main.cpp', 'main.c', 'main.py', 'index.ts', 'app.svelte', 'go.mod', 'cargo.toml', 'build.zig', 'cmakelists.txt', 'meson.build', 'package.json'];
+const ENTRY_FILE_NAMES = ['readme.md', 'main.go', 'main.rs', 'main.kt', 'main.zig', 'main.cpp', 'main.c', 'main.py', 'index.ts', 'app.svelte', 'go.mod', 'cargo.toml', 'build.gradle.kts', 'build.zig', 'cmakelists.txt', 'meson.build', 'package.json'];
 
 export function pickInitialEntryFile(entries: IdeFsEntry[]): IdeFsEntry | null {
   const files = entries.filter((e) => e.kind === 'file' && !e.name.startsWith('.'));

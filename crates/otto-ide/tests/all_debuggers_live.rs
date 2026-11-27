@@ -1856,3 +1856,156 @@ target_include_directories(clangd_sample PRIVATE include)
 
     let _ = child.kill().await;
 }
+
+#[tokio::test]
+async fn live_kotlin_jvm_jdwp_debug_and_mixed_java_kotlin_sources() {
+    // Kotlin compiles to JVM bytecode and reuses Otto's Java JDWP bridge (`language: "kotlin"`).
+    // Even when `kotlinc` is not installed on the host, we verify the REAL live JVM JDWP debug path
+    // end-to-end with the installed JDK (`javac -g` + `java`) using a `*Kt` class + sibling Java helper
+    // in a mixed `src/main/kotlin` + `src/main/java` module layout.
+    if !ensure_bins_or_skip(&["java", "javac"]) {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("kt-jvm-app");
+    let kt_pkg = ws.join("src/main/kotlin/com/acme");
+    let java_pkg = ws.join("src/main/java/com/acme");
+    let classes_dir = ws.join("build/classes/kotlin/main");
+    std::fs::create_dir_all(&kt_pkg).unwrap();
+    std::fs::create_dir_all(&java_pkg).unwrap();
+    std::fs::create_dir_all(&classes_dir).unwrap();
+
+    // Mixed Java helper called from the Kotlin-style `*Kt` entry class
+    let helper_java = java_pkg.join("JavaHelper.java");
+    std::fs::write(
+        &helper_java,
+        r#"package com.acme;
+
+public class JavaHelper {
+    public static int boost(int n) {
+        int out = n * 2;
+        return out;
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    // Kotlin-convention `*Kt` class (compiled with javac -g so the test runs on hosts without kotlinc)
+    let app_kt_java = java_pkg.join("AppKt.java");
+    std::fs::write(
+        &app_kt_java,
+        r#"package com.acme;
+
+public final class AppKt {
+    public static void main(String[] args) {
+        int base = 21;
+        int boosted = JavaHelper.boost(base);
+        System.out.println("KT_JDWP_DONE:" + boosted);
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    // Mirror `.kt` file in `src/main/kotlin` to confirm mixed source-root inclusion in the adapter
+    std::fs::write(
+        kt_pkg.join("Placeholder.kt"),
+        "package com.acme\n\nfun helper(): Int = 42\n",
+    )
+    .unwrap();
+
+    let compile_status = tokio::process::Command::new("javac")
+        .args([
+            "-g",
+            "-d",
+            &classes_dir.to_string_lossy(),
+            &helper_java.to_string_lossy(),
+            &app_kt_java.to_string_lossy(),
+        ])
+        .status()
+        .await
+        .expect("run javac");
+    assert!(
+        compile_status.success(),
+        "javac failed for Kotlin JDWP test"
+    );
+
+    let (_ctx, app) = build_test_app(tmp.path().join("data"), &tmp.path().join("db.sqlite")).await;
+    let ws_str = ws.to_string_lossy().into_owned();
+    let app_kt_java_str = app_kt_java.to_string_lossy().into_owned();
+
+    // Launch with `language: "kotlin"` pointing to `com.acme.AppKt` + compiled classpath
+    let (st, start) = send_json(
+        &app,
+        Method::POST,
+        "/ide/debug/sessions",
+        Some(json!({
+            "target": { "kind": "local", "root": ws_str },
+            "language": "kotlin",
+            "launch": {
+                "program": "com.acme.AppKt",
+                "cwd": ws_str,
+                "classpath": [classes_dir.to_string_lossy()],
+            },
+            "breakpoints": [{ "path": app_kt_java_str, "line": 6 }],
+        })),
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::OK,
+        "Kotlin JDWP start_debug failed: {start}"
+    );
+    let sid = start["session"]["id"].as_str().unwrap().to_string();
+
+    let snap1 = wait_until_paused(&app, &sid, FIRST_PAUSE).await;
+    assert_eq!(
+        snap1["paused_line"],
+        6,
+        "Kotlin JDWP paused_line mismatch: {}",
+        brief(&snap1)
+    );
+    let vars1 = all_vars(&snap1);
+    assert!(
+        vars1
+            .iter()
+            .any(|v| v["name"] == "base" && v["value"] == "21"),
+        "expected base=21 in Kotlin JDWP locals: {:?}",
+        var_names(&vars1)
+    );
+
+    // Evaluate `base + 9`
+    let (st_ev, ev_body) = send_json(
+        &app,
+        Method::POST,
+        &format!("/ide/debug/sessions/{sid}/evaluate"),
+        Some(json!({ "expression": "base + 9" })),
+    )
+    .await;
+    assert_eq!(st_ev, StatusCode::OK);
+    assert_eq!(ev_body["result"], "30");
+
+    // Step into JavaHelper.boost (mixed Kotlin/Java stepping)
+    send_cmd(&app, &sid, "step_into").await;
+    let snap2 = wait_until_paused(&app, &sid, Duration::from_secs(10)).await;
+    assert!(
+        snap2["paused_file"]
+            .as_str()
+            .unwrap_or("")
+            .ends_with("JavaHelper.java"),
+        "expected step_into JavaHelper.java, got {snap2}"
+    );
+
+    send_cmd(&app, &sid, "continue").await;
+    let end = wait_until_terminated(&app, &sid, Duration::from_secs(15)).await;
+    assert_eq!(
+        end["state"], "terminated",
+        "Kotlin JDWP session ended in error: {end}"
+    );
+    let out = joined_output(&end);
+    assert!(
+        out.contains("KT_JDWP_DONE:42"),
+        "expected KT_JDWP_DONE:42 in output, got: {out}"
+    );
+}

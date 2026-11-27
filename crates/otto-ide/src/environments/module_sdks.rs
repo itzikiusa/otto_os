@@ -549,6 +549,9 @@ pub(super) async fn layer_child_and_module_sdk_for_run(
                 if mod_proj.cpp_toolchain.is_some() {
                     proj.cpp_toolchain = mod_proj.cpp_toolchain;
                 }
+                if mod_proj.kotlin_home.is_some() {
+                    proj.kotlin_home = mod_proj.kotlin_home;
+                }
                 if mod_proj.node_home.is_some() {
                     proj.node_home = mod_proj.node_home;
                 }

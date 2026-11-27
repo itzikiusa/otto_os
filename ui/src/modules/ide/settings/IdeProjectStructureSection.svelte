@@ -18,7 +18,7 @@
   let { section, onnavigate }: Props = $props();
 
   const ALL_ECOS: readonly { id: string; label: string }[] = [
-    { id: 'go', label: 'Go' }, { id: 'java', label: 'Java' }, { id: 'rust', label: 'Rust' }, { id: 'zig', label: 'Zig' }, { id: 'cpp', label: 'C / C++' }, { id: 'node', label: 'Node / TS' },
+    { id: 'go', label: 'Go' }, { id: 'java', label: 'Java' }, { id: 'kotlin', label: 'Kotlin' }, { id: 'rust', label: 'Rust' }, { id: 'zig', label: 'Zig' }, { id: 'cpp', label: 'C / C++' }, { id: 'node', label: 'Node / TS' },
     { id: 'python', label: 'Python' }, { id: 'ios', label: 'iOS / Xcode' }, { id: 'android', label: 'Android' },
     { id: 'flutter', label: 'Flutter' }, { id: 'shell', label: 'Shell' }, { id: 'json', label: 'JSON' }, { id: 'csv', label: 'CSV' },
   ];
@@ -48,7 +48,7 @@
     ide.toolchains.flatMap((eco) => eco.installed.map((sdk) => ({ eco: eco.ecosystem, ecoName: eco.display_name || eco.ecosystem, sdk }))),
   );
   const activePrimarySdkPath = $derived(
-    ideSettings.envDraft.go_root || ideSettings.envDraft.java_home || ideSettings.envDraft.python_interpreter || ideSettings.envDraft.node_home || ideSettings.envDraft.rust_toolchain || ideSettings.envDraft.zig_home || ideSettings.envDraft.cpp_toolchain || '',
+    ideSettings.envDraft.go_root || ideSettings.envDraft.java_home || ideSettings.envDraft.kotlin_home || ideSettings.envDraft.python_interpreter || ideSettings.envDraft.node_home || ideSettings.envDraft.rust_toolchain || ideSettings.envDraft.zig_home || ideSettings.envDraft.cpp_toolchain || '',
   );
   const activePrimarySdkLabel = $derived.by(() => {
     if (!activePrimarySdkPath) return '';
@@ -76,6 +76,7 @@
 
   function assignSdkToDraft(ecosystem: string, pathOrVer: string): void {
     if (ecosystem === 'java') ideSettings.patchEnv({ java_home: pathOrVer });
+    else if (ecosystem === 'kotlin') ideSettings.patchEnv({ kotlin_home: pathOrVer });
     else if (ecosystem === 'go') ideSettings.patchEnv({ go_root: pathOrVer });
     else if (ecosystem === 'python') ideSettings.patchEnv({ python_interpreter: pathOrVer });
     else if (ecosystem === 'node') ideSettings.patchEnv({ node_home: pathOrVer });
@@ -101,7 +102,7 @@
       {
         label: 'No SDK',
         checked: !activePrimarySdkPath,
-        action: () => ideSettings.patchEnv({ go_root: '', java_home: '', python_interpreter: '', node_home: '', rust_toolchain: '', zig_home: '', cpp_toolchain: '' }),
+        action: () => ideSettings.patchEnv({ go_root: '', java_home: '', kotlin_home: '', python_interpreter: '', node_home: '', rust_toolchain: '', zig_home: '', cpp_toolchain: '' }),
       },
     ];
     if (allInstalledSdks.length > 0) {

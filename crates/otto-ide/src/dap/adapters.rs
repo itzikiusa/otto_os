@@ -288,6 +288,7 @@ fn resolve_debug_launch_spec<'a>(
         "javascript" | "js" => "javascript",
         "typescript" | "ts" | "node" => "typescript",
         "java" => "java",
+        "kotlin" | "kt" | "kts" => "kotlin",
         "shell" | "bash" | "sh" | "zsh" => "shell",
         other => other,
     };
@@ -312,10 +313,11 @@ fn resolve_debug_launch_spec<'a>(
             "javascript" => ("javascript".to_string(), "node-inspector".to_string(), None),
             "typescript" => ("typescript".to_string(), "node-inspector".to_string(), None),
             "java" => ("java".to_string(), "java-jdwp".to_string(), None),
+            "kotlin" => ("kotlin".to_string(), "java-jdwp".to_string(), None),
             "shell" => ("shell".to_string(), "shell-debug".to_string(), None),
             other => {
                 return Err(Error::Invalid(format!(
-                    "unsupported debug language '{other}'; install a DAP plugin or choose go, python, rust, zig, c, cpp, javascript, typescript, java, or shell"
+                    "unsupported debug language '{other}'; install a DAP plugin or choose go, python, rust, zig, c, cpp, javascript, typescript, java, kotlin, or shell"
                 )));
             }
         }
@@ -372,10 +374,10 @@ pub(crate) async fn resolve_dap_adapter_with_manager(
         "javascript" | "typescript" => {
             resolve_js_ts_adapter(data_dir, &spec.raw_lang, req, ctx, &spec.cwd, spec.env).await
         }
-        "java" => resolve_java_adapter(data_dir, req, ctx, &spec.cwd, spec.env).await,
+        "java" | "kotlin" => resolve_java_adapter(data_dir, req, ctx, &spec.cwd, spec.env).await,
         "shell" => resolve_shell_adapter(req, ctx, &spec.cwd, spec.env).await,
         other => Err(Error::Invalid(format!(
-            "unsupported debug language '{other}'; install a DAP plugin or choose go, python, rust, zig, c, cpp, javascript, typescript, java, or shell"
+            "unsupported debug language '{other}'; install a DAP plugin or choose go, python, rust, zig, c, cpp, javascript, typescript, java, kotlin, or shell"
         ))),
     }
 }

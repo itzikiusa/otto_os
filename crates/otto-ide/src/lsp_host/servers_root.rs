@@ -494,26 +494,26 @@ mod tests {
     #[test]
     fn includes_custom_lsp_from_enabled_ide_plugin() {
         let tmp = tempfile::tempdir().unwrap();
-        let plugin_dir = tmp.path().join("ide-plugins/kotlin-ide");
+        let plugin_dir = tmp.path().join("ide-plugins/elixir-ide");
         std::fs::create_dir_all(&plugin_dir).unwrap();
-        let fake_bin_dir = tmp.path().join("toolchains/kotlin/bin");
+        let fake_bin_dir = tmp.path().join("toolchains/elixir/bin");
         std::fs::create_dir_all(&fake_bin_dir).unwrap();
-        let fake_kls = fake_bin_dir.join("kotlin-language-server");
-        std::fs::write(&fake_kls, "#!/bin/sh\nexit 0\n").unwrap();
+        let fake_els = fake_bin_dir.join("elixir-ls");
+        std::fs::write(&fake_els, "#!/bin/sh\nexit 0\n").unwrap();
 
         std::fs::write(
             plugin_dir.join("otto-ide-plugin.json"),
             r#"{
-                "slug": "kotlin-ide",
-                "name": "Kotlin IDE",
+                "slug": "elixir-ide",
+                "name": "Elixir IDE",
                 "version": "1.0.0",
                 "contributions": {
                     "lsp_servers": [{
-                        "language": "kotlin",
-                        "command": "kotlin-language-server",
+                        "language": "elixir",
+                        "command": "elixir-ls",
                         "args": [],
-                        "extensions": [".kt", ".kts"],
-                        "install_hint": "brew install kotlin-language-server"
+                        "extensions": [".ex", ".exs"],
+                        "install_hint": "brew install elixir-ls"
                     }]
                 }
             }"#,
@@ -522,13 +522,13 @@ mod tests {
 
         let reg = IdePluginRegistry::with_dirs(tmp.path().to_path_buf(), None);
         assert!(
-            resolve_lang_with_ide("kotlin", tmp.path(), &reg).is_none(),
+            resolve_lang_with_ide("elixir", tmp.path(), &reg).is_none(),
             "unrecorded on-disk plugin directory must remain disabled until explicitly toggled"
         );
-        reg.toggle("kotlin-ide", true).unwrap();
-        let resolved = resolve_lang_with_ide("kotlin", tmp.path(), &reg).unwrap();
+        reg.toggle("elixir-ide", true).unwrap();
+        let resolved = resolve_lang_with_ide("elixir", tmp.path(), &reg).unwrap();
         assert!(resolved.available);
-        assert_eq!(resolved.command, fake_kls.to_string_lossy());
+        assert_eq!(resolved.command, fake_els.to_string_lossy());
     }
 
     #[test]

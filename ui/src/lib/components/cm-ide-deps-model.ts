@@ -2,6 +2,8 @@
 // and backend `/ide/deps/*` client helpers (`go.mod`, `pom.xml`, `build.gradle*`,
 // `package.json`, `Cargo.toml`, `requirements.txt`, `pyproject.toml`).
 
+import { parseGradleManifestDependencies } from './cm-ide-deps-gradle.ts';
+
 export type ManifestEcosystem = 'go' | 'maven' | 'gradle' | 'npm' | 'cargo' | 'zig' | 'cpp' | 'pypi';
 
 export interface IdeDepVuln {
@@ -53,7 +55,7 @@ export function detectManifestEcosystem(filePath: string): ManifestEcosystem | n
   const base = filePath.split('?')[0].split('/').pop()?.toLowerCase() ?? '';
   if (base === 'go.mod') return 'go';
   if (base === 'pom.xml') return 'maven';
-  if (base === 'build.gradle' || base === 'build.gradle.kts') return 'gradle';
+  if (base === 'build.gradle' || base === 'build.gradle.kts' || base === 'libs.versions.toml') return 'gradle';
   if (base === 'package.json') return 'npm';
   if (base === 'cargo.toml') return 'cargo';
   if (base === 'build.zig.zon') return 'zig';
@@ -458,20 +460,7 @@ export function parseManifestDependencies(filePath: string, content: string): Id
       }
     }
   } else if (eco === 'gradle') {
-    for (let i = 0; i < lines.length; i++) {
-      const m = /^\s*(?:implementation|api|compileOnly|runtimeOnly|testImplementation)\s*\(?\s*['"]([^:'"]+):([^:'"]+):([^'"]+)['"]/.exec(
-        lines[i],
-      );
-      if (m) {
-        items.push({
-          name: `${m[1]}:${m[2]}`,
-          current_version: m[3],
-          line: i + 1,
-          end_line: i + 1,
-          vulnerabilities: [],
-        });
-      }
-    }
+    items.push(...parseGradleManifestDependencies(filePath, lines));
   } else if (eco === 'pypi') {
     const isPyProject = filePath.toLowerCase().endsWith('pyproject.toml');
     let inPoetry = false;

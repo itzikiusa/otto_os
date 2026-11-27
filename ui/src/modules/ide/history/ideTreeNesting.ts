@@ -11,6 +11,8 @@ const PARENT_BY_NAME: Readonly<Record<string, string>> = {
   'pnpm-lock.yaml': 'package.json',
   'npm-shrinkwrap.json': 'package.json',
   'Cargo.lock': 'Cargo.toml',
+  'gradle.properties': 'build.gradle.kts',
+  'gradlew.bat': 'gradlew',
   'build.zig.zon': 'build.zig',
   'CMakePresets.json': 'CMakeLists.txt',
   'CMakeUserPresets.json': 'CMakeLists.txt',

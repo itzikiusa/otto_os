@@ -269,6 +269,7 @@ const DENIED_ENV: &[&str] = &[
     "MAVEN_OPTS",
     "GRADLE_OPTS",
     "JAVA_HOME",
+    "KOTLIN_HOME",
     "CLASSPATH",
     // C1-019: files / endpoints a tool the program runs reads as code,
     // credentials or a server to trust (credential_process, exec plugins,

@@ -371,6 +371,8 @@ pub fn scan_parent_repos(parent_path: &str, is_root_user: bool) -> Result<IdeSca
         }
 
         let has_go_mod = canon.join("go.mod").is_file() || canon.join("go.work").is_file();
+        let has_kotlin =
+            canon.join("src/main/kotlin").is_dir() || canon.join("build.gradle.kts").is_file();
         let has_pom_or_gradle = canon.join("pom.xml").is_file()
             || canon.join("build.gradle").is_file()
             || canon.join("build.gradle.kts").is_file();
@@ -394,6 +396,8 @@ pub fn scan_parent_repos(parent_path: &str, is_root_user: bool) -> Result<IdeSca
 
         let kind = if has_go_mod {
             "go"
+        } else if has_kotlin && !canon.join("src/main/java").is_dir() {
+            "kotlin"
         } else if has_pom_or_gradle {
             "java"
         } else if has_cargo {

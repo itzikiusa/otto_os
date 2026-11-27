@@ -46,6 +46,7 @@ export const LSP_CODE_LANGUAGES = new Set([
   'zig',
   'cpp',
   'java',
+  'kotlin',
   'typescript',
   'javascript',
   'python',
@@ -136,6 +137,7 @@ export function normalizeIdeLspLanguage(langOrExt?: string | null): string | nul
     return 'cpp';
   }
   if (raw === 'java') return 'java';
+  if (raw === 'kt' || raw === 'kts' || raw === 'kotlin') return 'kotlin';
   if (raw === 'ts' || raw === 'tsx' || raw === 'mts' || raw === 'cts' || raw === 'typescript' || raw === 'typescriptreact') {
     return 'typescript';
   }
@@ -422,13 +424,13 @@ export function detectLspCompletionTrigger(
     return { from: p, context: { triggerKind: 2, triggerCharacter: '.' } };
   }
   const lang = normalizeIdeLspLanguage(languageId) ?? languageId ?? '';
-  if (before.endsWith('::') && (lang === 'rust' || lang === 'cpp' || !lang)) {
+  if (before.endsWith('::') && (lang === 'rust' || lang === 'cpp' || lang === 'kotlin' || !lang)) {
     return { from: p, context: { triggerKind: 2, triggerCharacter: ':' } };
   }
   if (before.endsWith('->') && (lang === 'cpp' || !lang)) {
     return { from: p, context: { triggerKind: 2, triggerCharacter: '>' } };
   }
-  if (before.endsWith('@') && (lang === 'java' || lang === 'typescript' || lang === 'javascript' || lang === 'python')) {
+  if (before.endsWith('@') && (lang === 'java' || lang === 'kotlin' || lang === 'typescript' || lang === 'javascript' || lang === 'python')) {
     return { from: p, context: { triggerKind: 2, triggerCharacter: '@' } };
   }
   // ⌃Space on an empty spot; never after `(`, `,`, `;`… (an explicit session started by

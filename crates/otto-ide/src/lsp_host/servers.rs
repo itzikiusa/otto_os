@@ -98,6 +98,15 @@ pub static REGISTRY: &[ServerDef] = &[
         install_command: Some("brew install jdtls"),
     },
     ServerDef {
+        lang: "kotlin",
+        cmd: "kotlin-language-server",
+        args: &[],
+        fallback_cmd: None,
+        fallback_args: &[],
+        extensions: &[".kt", ".kts"],
+        install_command: Some("brew install kotlin-language-server"),
+    },
+    ServerDef {
         lang: "rust",
         cmd: "rust-analyzer",
         args: &[],

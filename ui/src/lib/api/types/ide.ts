@@ -222,6 +222,7 @@ export interface IdeGutterResp {
 
 export type IdeEcosystem =
   | 'java'
+  | 'kotlin'
   | 'go'
   | 'rust'
   | 'zig'
@@ -407,6 +408,7 @@ export interface IdeNetBridgeStatusResp {
 
 export interface IdeProjectEnvironment {
   java_home?: string | null;
+  kotlin_home?: string | null;
   go_root?: string | null;
   rust_toolchain?: string | null;
   zig_home?: string | null;
@@ -553,7 +555,7 @@ export interface IdeRunResp {
 
 // ── DAP Debugger Engine ──────────────────────────────────────────────────────
 
-export type IdeDebugLanguage = 'go' | 'java' | 'rust' | 'zig' | 'cpp' | 'c' | 'javascript' | 'typescript' | 'python' | 'shell' | string;
+export type IdeDebugLanguage = 'go' | 'java' | 'kotlin' | 'rust' | 'zig' | 'cpp' | 'c' | 'javascript' | 'typescript' | 'python' | 'shell' | string;
 
 export interface IdeBreakpoint {
   path: string;

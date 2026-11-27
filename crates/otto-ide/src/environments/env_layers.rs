@@ -161,6 +161,11 @@ pub(crate) fn apply_project_sdk_layers(
             }
         }
     }
+    if let Some(kh) = proj.kotlin_home.as_deref().filter(|s| !s.is_empty()) {
+        let base = kh.trim_end_matches('/');
+        map.insert("KOTLIN_HOME".into(), base.to_string());
+        push_unique(&mut proj_path_dirs, format!("{base}/bin"));
+    }
     if let Some(nh) = proj.node_home.as_deref().filter(|s| !s.is_empty()) {
         push_unique(
             &mut proj_path_dirs,

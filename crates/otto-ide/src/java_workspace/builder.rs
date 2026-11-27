@@ -702,10 +702,15 @@ pub fn infer_java_fqcn_from_file(java_file: &Path) -> Option<String> {
     if simple.is_empty() {
         return None;
     }
-    let pkg = fs::read_to_string(java_file)
-        .ok()
-        .and_then(|src| {
-            src.lines().find_map(|line| {
+    let is_kt = java_file
+        .extension()
+        .and_then(|s| s.to_str())
+        .is_some_and(|e| e == "kt" || e == "kts");
+    let src = fs::read_to_string(java_file).ok();
+    let pkg = src
+        .as_deref()
+        .and_then(|s| {
+            s.lines().find_map(|line| {
                 let t = line.trim();
                 t.strip_prefix("package ")
                     .and_then(|rest| rest.split(';').next())
@@ -713,15 +718,24 @@ pub fn infer_java_fqcn_from_file(java_file: &Path) -> Option<String> {
             })
         })
         .filter(|p| !p.is_empty());
+    let cls = if is_kt {
+        src.as_deref()
+            .map(|s| crate::dap::java_bridge::infer_kotlin_class_stem(simple, s))
+            .unwrap_or_else(|| simple.to_string())
+    } else {
+        simple.to_string()
+    };
     Some(match pkg {
-        Some(p) => format!("{p}.{simple}"),
-        None => simple.to_string(),
+        Some(p) => format!("{p}.{cls}"),
+        None => cls,
     })
 }
 
 fn main_method_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"\bpublic\s+static\s+void\s+main\s*\(").unwrap())
+    RE.get_or_init(|| {
+        Regex::new(r"(?:\bpublic\s+static\s+void\s+main\s*\(|\bfun\s+main\s*\()").unwrap()
+    })
 }
 
 fn resolve_main_class(
@@ -729,14 +743,16 @@ fn resolve_main_class(
     target_file_or_dir: &Path,
     srcs: &[PathBuf],
 ) -> Result<String> {
-    if let Some(exp) = explicit
-        .map(str::trim)
-        .filter(|s| !s.is_empty() && !s.ends_with(".java") && !s.contains('/'))
-    {
+    if let Some(exp) = explicit.map(str::trim).filter(|s| {
+        !s.is_empty() && !s.ends_with(".java") && !s.ends_with(".kt") && !s.contains('/')
+    }) {
         return Ok(exp.to_string());
     }
     if target_file_or_dir.is_file()
-        && target_file_or_dir.extension().and_then(|s| s.to_str()) == Some("java")
+        && matches!(
+            target_file_or_dir.extension().and_then(|s| s.to_str()),
+            Some("java" | "kt" | "kts")
+        )
     {
         if let Some(fqcn) = infer_java_fqcn_from_file(target_file_or_dir) {
             return Ok(fqcn);

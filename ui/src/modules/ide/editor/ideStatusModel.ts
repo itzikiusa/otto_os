@@ -69,7 +69,7 @@ const LANG_LABELS: Record<string, string> = {
 };
 const EXT_LANG: Record<string, string> = {
   rs: 'rust', zon: 'zig', ts: 'typescript', tsx: 'typescript', js: 'javascript', jsx: 'javascript', mjs: 'javascript',
-  cjs: 'javascript', py: 'python', md: 'markdown', yml: 'yaml', sh: 'shell', kt: 'kotlin', rb: 'ruby',
+  cjs: 'javascript', py: 'python', md: 'markdown', yml: 'yaml', sh: 'shell', kt: 'kotlin', kts: 'kotlin', rb: 'ruby',
   h: 'cpp', hh: 'cpp', hpp: 'cpp', hxx: 'cpp', cc: 'cpp', cxx: 'cpp', inl: 'cpp', ipp: 'cpp', tpp: 'cpp', ixx: 'cpp', cppm: 'cpp', mm: 'cpp', m: 'c',
 };
 
@@ -87,6 +87,7 @@ export function ideLanguageSettingsSection(path: string, language?: string | nul
   const lang = (language ?? EXT_LANG[extOf(path)] ?? extOf(path)).toLowerCase();
   if (lang === 'go') return 'lang.go';
   if (lang === 'java') return 'lang.java';
+  if (lang === 'kotlin') return 'lang.kotlin';
   if (lang === 'typescript' || lang === 'javascript') return 'lang.node';
   if (lang === 'python') return 'lang.python';
   if (lang === 'rust') return 'lang.rust';
@@ -116,7 +117,7 @@ export function ideProblemCounts(problems: readonly { severity: string }[]): { e
 // ── Language server ─────────────────────────────────────────────────────────
 
 const SERVER_NAMES: Record<string, string> = {
-  go: 'gopls', rust: 'rust-analyzer', zig: 'zls', cpp: 'clangd', c: 'clangd', java: 'jdtls', typescript: 'tsserver', javascript: 'tsserver', python: 'pyright',
+  go: 'gopls', rust: 'rust-analyzer', zig: 'zls', cpp: 'clangd', c: 'clangd', java: 'jdtls', kotlin: 'kotlin-language-server', typescript: 'tsserver', javascript: 'tsserver', python: 'pyright',
 };
 
 /** The language-server id (`go`, `typescript`, …) for a file, or null when Otto runs none for it. */

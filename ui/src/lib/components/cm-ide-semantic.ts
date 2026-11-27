@@ -450,7 +450,7 @@ export interface CreateIdeSemanticOptions {
   onFindUsages?: ((ctx: { line: number; column: number; symbol?: string }) => void) | null;
 }
 
-const AUTHORITATIVE_LSP_SOURCES = new Set(['gopls', 'jdtls', 'rust-analyzer', 'zls', 'clangd', 'pyright', 'typescript', 'tsserver']);
+const AUTHORITATIVE_LSP_SOURCES = new Set(['gopls', 'jdtls', 'kotlin-language-server', 'rust-analyzer', 'zls', 'clangd', 'pyright', 'typescript', 'tsserver']);
 
 export function createIdeSemanticExtensions(opts: CreateIdeSemanticOptions): Extension {
   const lang = detectSemanticLang(opts.filePath, opts.language);
@@ -551,7 +551,7 @@ export function createIdeSemanticExtensions(opts: CreateIdeSemanticOptions): Ext
         if (goImp && !lspOwnsDiags) clientDiags.push(...goImp.diagnostics);
         const unresolved = new Set<string>(jRes ? jRes.unresolvedIdents : []);
 
-        if (!lspOwnsDiags && opts.root && (lang === 'java' || lang === 'go' || lang === 'zig' || lang === 'cpp' || lang === 'python' || lang === 'shell' || lang === 'json')) {
+        if (!lspOwnsDiags && opts.root && (lang === 'java' || lang === 'kotlin' || lang === 'go' || lang === 'zig' || lang === 'cpp' || lang === 'python' || lang === 'shell' || lang === 'json')) {
           const ctrl = new AbortController();
           this.abort = ctrl;
           try {

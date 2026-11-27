@@ -61,25 +61,29 @@ export async function promptCreateTreeEntry(
         ? 'New folder'
         : extHint === '.go'
           ? 'New Go file'
-          : extHint === '.zig'
-            ? 'New Zig file'
-            : extHint === '.cpp'
-              ? 'New C++ file'
-              : extHint === '.hpp'
-                ? 'New C++ header'
-                : 'New file',
+          : extHint === '.kt'
+            ? 'New Kotlin file'
+            : extHint === '.zig'
+              ? 'New Zig file'
+              : extHint === '.cpp'
+                ? 'New C++ file'
+                : extHint === '.hpp'
+                  ? 'New C++ header'
+                  : 'New file',
       confirmLabel: 'Create',
       placeholder: isDir
         ? 'pkg/handlers'
         : extHint === '.go'
           ? 'service.go'
-          : extHint === '.zig'
-            ? 'module.zig'
-            : extHint === '.cpp'
-              ? 'engine.cpp'
-              : extHint === '.hpp'
-                ? 'engine.hpp'
-                : 'handler.go',
+          : extHint === '.kt'
+            ? 'Service.kt'
+            : extHint === '.zig'
+              ? 'module.zig'
+              : extHint === '.cpp'
+                ? 'engine.cpp'
+                : extHint === '.hpp'
+                  ? 'engine.hpp'
+                  : 'handler.go',
       validate: (v) => (v.includes('..') ? 'Relative parent segments (..) aren’t allowed.' : null),
     },
   );
@@ -228,6 +232,7 @@ export function showTreeNodeContextMenu(
   }
   // "New Go file…" only where Go is in play: a go.mod / go.work or .go file among the loaded folders.
   const isGo = Object.values(ide.childrenByDir).some((es) => es.some((e) => e.name === 'go.mod' || e.name === 'go.work' || e.name.endsWith('.go')));
+  const isKotlin = Object.values(ide.childrenByDir).some((es) => es.some((e) => e.name === 'build.gradle.kts' || e.name === 'settings.gradle.kts' || e.name.endsWith('.kt')));
   const isZig = Object.values(ide.childrenByDir).some((es) => es.some((e) => e.name === 'build.zig' || e.name === 'build.zig.zon' || e.name.endsWith('.zig')));
   const isCpp = Object.values(ide.childrenByDir).some((es) =>
     es.some((e) =>
@@ -240,6 +245,7 @@ export function showTreeNodeContextMenu(
   );
   items.push({ label: 'New file…', icon: 'plus', action: () => void promptCreateTreeEntry(baseDir, 'create_file') });
   if (isGo) items.push({ label: 'New Go file…', icon: 'file', action: () => void promptCreateTreeEntry(baseDir, 'create_file', '.go') });
+  if (isKotlin) items.push({ label: 'New Kotlin file…', icon: 'file', action: () => void promptCreateTreeEntry(baseDir, 'create_file', '.kt') });
   if (isZig) items.push({ label: 'New Zig file…', icon: 'file', action: () => void promptCreateTreeEntry(baseDir, 'create_file', '.zig') });
   if (isCpp) {
     items.push(

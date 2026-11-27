@@ -19,8 +19,9 @@ use crate::IdeCtx;
 
 pub(crate) use super::diagnostics_go::analyze_go_diagnostics;
 use super::diagnostics_polyglot::{
-    analyze_cpp_diagnostics, analyze_js_ts_diagnostics, analyze_python_diagnostics,
-    analyze_rust_diagnostics, analyze_shell_diagnostics, analyze_zig_diagnostics,
+    analyze_cpp_diagnostics, analyze_js_ts_diagnostics, analyze_kotlin_diagnostics,
+    analyze_python_diagnostics, analyze_rust_diagnostics, analyze_shell_diagnostics,
+    analyze_zig_diagnostics,
 };
 use super::java_diag::analyze_java_diagnostics;
 use super::{build_formatter_env, resolve_language};
@@ -164,6 +165,15 @@ pub async fn diagnostics<S: IdeCtx>(
                 None => BTreeMap::new(),
             };
             analyze_cpp_diagnostics(&req.path, &lang, &content, &env_map).await
+        }
+        "kotlin" => {
+            let env_map = match resolved_opt {
+                Some((ref resolved, ref spec)) => {
+                    build_formatter_env(ctx, user, resolved, spec).await
+                }
+                None => BTreeMap::new(),
+            };
+            analyze_kotlin_diagnostics(&req.path, &content, &env_map).await
         }
         _ => Vec::new(),
     };

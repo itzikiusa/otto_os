@@ -214,6 +214,28 @@ pub(super) fn normalize_and_validate_local_sdk(
                 read_cpp_compiler_version(&compiler).unwrap_or_else(|| dir_name_version(&root));
             Ok((root.to_string_lossy().into_owned(), ver))
         }
+        EcosystemKind::Kotlin => {
+            let root = if canon.is_file() && is_executable_file(&canon) {
+                canon
+                    .parent()
+                    .and_then(|b| b.parent())
+                    .map(Path::to_path_buf)
+                    .unwrap_or(canon)
+            } else if canon.join("kotlinc/bin/kotlinc").is_file() {
+                canon.join("kotlinc")
+            } else {
+                canon
+            };
+            let kotlinc = root.join("bin/kotlinc");
+            if !is_executable_file(&kotlinc) {
+                return Err(Error::Invalid(format!(
+                    "'{}' does not contain bin/kotlinc",
+                    root.display()
+                )));
+            }
+            let ver = dir_name_version(&root);
+            Ok((root.to_string_lossy().into_owned(), ver))
+        }
         EcosystemKind::Node => {
             let root = if canon.is_file() && is_executable_file(&canon) {
                 canon

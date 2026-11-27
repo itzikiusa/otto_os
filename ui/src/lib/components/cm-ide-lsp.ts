@@ -118,7 +118,7 @@ interface PooledClientEntry {
   disposed: boolean;
 }
 
-const MODULE_SCOPED_LSP_LANGS = new Set(['go', 'rust', 'zig', 'cpp', 'java', 'python']);
+const MODULE_SCOPED_LSP_LANGS = new Set(['go', 'rust', 'zig', 'cpp', 'java', 'kotlin', 'python']);
 
 let marimoPromise: Promise<MarimoMod> | null = null;
 let marimoCache: MarimoMod | null = null;

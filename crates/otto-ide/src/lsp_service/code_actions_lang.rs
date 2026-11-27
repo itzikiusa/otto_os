@@ -118,6 +118,25 @@ pub(super) fn add_language_specific_actions(
             ));
         }
     }
+    if lang == "kotlin"
+        && (trimmed.starts_with("fun ")
+            || trimmed.starts_with("public fun ")
+            || trimmed.starts_with("protected fun ")
+            || trimmed.starts_with("suspend fun "))
+        && !trimmed.starts_with("override ")
+    {
+        let mut updated: Vec<String> = lines.iter().map(|s| (*s).to_string()).collect();
+        updated[idx] = format!("{indent}override {trimmed}");
+        out.push(make_action(
+            path,
+            content,
+            "refactor.kotlin.add_override",
+            "Add 'override' modifier",
+            "refactor.rewrite",
+            format!("override {trimmed}"),
+            join_preserving_nl(&updated, content),
+        ));
+    }
     if lang == "java"
         && (trimmed.starts_with("public ") || trimmed.starts_with("protected "))
         && trimmed.contains('(')

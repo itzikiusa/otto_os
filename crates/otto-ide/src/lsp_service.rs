@@ -54,6 +54,7 @@ mod text_scan;
 
 pub use code_actions::{code_actions, generate_code_actions};
 pub use diagnostics::diagnostics;
+pub use diagnostics_polyglot::parse_kotlinc_stderr;
 #[cfg(test)]
 pub(crate) use diagnostics_polyglot::{parse_clang_stderr, parse_zig_ast_check_stderr};
 pub use formatting::{format_builtin_fallback, format_builtin_fallback_opts};

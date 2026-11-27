@@ -44,29 +44,49 @@ pub struct JavaJdwpBridgeSpec {
     pub source_map: HashMap<String, String>,
 }
 
-/// Infer the fully qualified Java class name for `path`.
+/// Infer the fully qualified Java or Kotlin JVM class name for `path`.
+///
+/// For Kotlin `.kt` files:
+/// - Respects `@file:JvmName("Custom")` when present.
+/// - Top-level `fun main` (without a class matching the file stem) resolves to `<pkg>.<Stem>Kt`.
+/// - Package statements in Kotlin do not require a trailing `;`.
 pub(crate) async fn infer_java_fqcn(target: &IdeTargetSpec, path: &str) -> String {
     let stem = Path::new(path)
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("Main");
+    let is_kt = path.ends_with(".kt") || path.ends_with(".kts");
     if target.kind == IdeTargetKind::Local {
         if let Ok(txt) = tokio::fs::read_to_string(path).await {
             let pkg = txt.lines().find_map(|l| {
                 l.trim()
                     .strip_prefix("package ")
-                    .and_then(|r| r.strip_suffix(';'))
-                    .map(|p| p.trim().to_string())
+                    .map(|r| r.trim_end_matches(';').trim().to_string())
             });
+            let cls = if is_kt {
+                infer_kotlin_class_stem(stem, &txt)
+            } else {
+                stem.to_string()
+            };
             if let Some(p) = pkg.filter(|p| !p.is_empty()) {
-                return format!("{p}.{stem}");
+                return format!("{p}.{cls}");
             }
-            return stem.to_string();
+            return cls;
         }
     }
-    for marker in ["/src/main/java/", "/src/test/java/", "/src/"] {
+    for marker in [
+        "/src/main/java/",
+        "/src/test/java/",
+        "/src/main/kotlin/",
+        "/src/test/kotlin/",
+        "/src/",
+    ] {
         if let Some((_, rel)) = path.split_once(marker) {
-            let without_ext = rel.strip_suffix(".java").unwrap_or(rel);
+            let without_ext = rel
+                .strip_suffix(".java")
+                .or_else(|| rel.strip_suffix(".kt"))
+                .or_else(|| rel.strip_suffix(".kts"))
+                .unwrap_or(rel);
             let dotted = without_ext.replace('/', ".");
             if !dotted.is_empty() {
                 return dotted;
@@ -74,6 +94,38 @@ pub(crate) async fn infer_java_fqcn(target: &IdeTargetSpec, path: &str) -> Strin
         }
     }
     stem.to_string()
+}
+
+pub(crate) fn infer_kotlin_class_stem(file_stem: &str, src: &str) -> String {
+    // Check `@file:JvmName("CustomMain")`
+    for line in src.lines().take(24) {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("@file:JvmName(") {
+            if let Some(inner) = rest.strip_suffix(')') {
+                let unquoted = inner.trim().trim_matches('"');
+                if !unquoted.is_empty() {
+                    return unquoted.to_string();
+                }
+            }
+        }
+    }
+    let has_matching_class = src.lines().any(|l| {
+        let t = l.trim();
+        t.contains(&format!("class {file_stem}")) || t.contains(&format!("object {file_stem}"))
+    });
+    let has_top_level_main = src.lines().any(|l| {
+        !l.starts_with(' ') && !l.starts_with('\t') && l.trim_start().starts_with("fun main(")
+    });
+    if has_top_level_main && !has_matching_class {
+        let mut chars = file_stem.chars();
+        let cap = match chars.next() {
+            Some(c) => format!("{}{}", c.to_ascii_uppercase(), chars.as_str()),
+            None => "Main".into(),
+        };
+        format!("{cap}Kt")
+    } else {
+        file_stem.to_string()
+    }
 }
 
 pub(crate) async fn spawn_java_jdwp_bridge(

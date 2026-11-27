@@ -325,11 +325,13 @@ pub(super) async fn resolve_java_adapter(
             }
         }
         let prog_path = PathBuf::from(&program);
-        let (target_path, explicit_main) = if program.ends_with(".java") || prog_path.exists() {
-            (prog_path, None)
-        } else {
-            (PathBuf::from(cwd), Some(program.clone()))
-        };
+        let is_kotlin_file = program.ends_with(".kt") || program.ends_with(".kts");
+        let (target_path, explicit_main) =
+            if program.ends_with(".java") || is_kotlin_file || prog_path.exists() {
+                (prog_path, None)
+            } else {
+                (PathBuf::from(cwd), Some(program.clone()))
+            };
         let include_tests = req
             .launch
             .test_name
@@ -338,8 +340,10 @@ pub(super) async fn resolve_java_adapter(
         // A test selector (`com.acme.CalcTest#adds`) runs through a JUnit launcher,
         // unless the class is an app with its own `main` (the gutter's main item also
         // names its class as the filter).
-        let has_main =
-            std::fs::read_to_string(&program).is_ok_and(|src| src.contains("static void main("));
+        let has_main = std::fs::read_to_string(&program).is_ok_and(|src| {
+            src.contains("static void main(")
+                || (is_kotlin_file && (src.contains("fun main(") || src.contains("fun main ()")))
+        });
         let test_selector = req
             .launch
             .test_name
@@ -388,13 +392,29 @@ pub(super) async fn resolve_java_adapter(
                 source_roots.push(s);
             }
         }
-        if program.ends_with(".java") {
+        if program.ends_with(".java") || program.ends_with(".kt") || program.ends_with(".kts") {
             if let Some(fname) = Path::new(&program).file_name().and_then(|n| n.to_str()) {
                 source_map.insert(fname.to_string(), program.clone());
             }
             let sroot = infer_java_source_root(&program, cwd);
             if !source_roots.contains(&sroot) {
                 source_roots.push(sroot);
+            }
+        }
+        // Mixed Java/Kotlin modules: register sibling kotlin/java source roots so JDWP
+        // breakpoints and stepping work seamlessly across Java <-> Kotlin calls.
+        for extra_sub in [
+            "src/main/kotlin",
+            "src/test/kotlin",
+            "src/main/java",
+            "src/test/java",
+        ] {
+            let cand = Path::new(cwd).join(extra_sub);
+            if cand.is_dir() {
+                let s = cand.to_string_lossy().into_owned();
+                if !source_roots.contains(&s) {
+                    source_roots.push(s);
+                }
             }
         }
         initial_output.push(IdeDebugOutputEntry {
@@ -505,24 +525,51 @@ pub(super) async fn resolve_java_adapter(
 
 fn resolve_java_source_or_fqcn(target: &IdeTargetSpec, raw_prog: &str, cwd: &str) -> String {
     let norm = normalize_target_path(target, raw_prog);
-    if norm.ends_with(".java") || target.kind != IdeTargetKind::Local {
+    if norm.ends_with(".java")
+        || norm.ends_with(".kt")
+        || norm.ends_with(".kts")
+        || target.kind != IdeTargetKind::Local
+    {
         return norm;
     }
     let simple = raw_prog.rsplit('.').next().unwrap_or(raw_prog);
-    let in_cwd = Path::new(cwd).join(format!("{simple}.java"));
-    if in_cwd.is_file() {
-        return normalize_target_path(target, &in_cwd.to_string_lossy());
+    let simple_kt = simple.strip_suffix("Kt").unwrap_or(simple);
+    for cand_name in [
+        format!("{simple}.java"),
+        format!("{simple}.kt"),
+        format!("{simple_kt}.kt"),
+    ] {
+        let in_cwd = Path::new(cwd).join(&cand_name);
+        if in_cwd.is_file() {
+            return normalize_target_path(target, &in_cwd.to_string_lossy());
+        }
     }
     let rel_java = format!("{}.java", raw_prog.replace('.', "/"));
-    // `cwd` is the Maven module a test runs from: its own sources come first.
+    let rel_kt = format!("{}.kt", raw_prog.replace('.', "/"));
+    let rel_kt_trimmed = raw_prog
+        .strip_suffix("Kt")
+        .map(|base| format!("{}.kt", base.replace('.', "/")));
+    // `cwd` is the Maven/Gradle module a test runs from: its own sources come first.
     for root in [cwd, target.root.as_str()]
         .into_iter()
         .chain(target.additional_roots.iter().map(String::as_str))
     {
-        for root_sub in ["src/main/java", "src/test/java", "src", "."] {
-            let cand = Path::new(root).join(root_sub).join(&rel_java);
-            if cand.is_file() {
-                return normalize_target_path(target, &cand.to_string_lossy());
+        for root_sub in [
+            "src/main/java",
+            "src/test/java",
+            "src/main/kotlin",
+            "src/test/kotlin",
+            "src",
+            ".",
+        ] {
+            for rel in std::iter::once(rel_java.as_str())
+                .chain(std::iter::once(rel_kt.as_str()))
+                .chain(rel_kt_trimmed.as_deref())
+            {
+                let cand = Path::new(root).join(root_sub).join(rel);
+                if cand.is_file() {
+                    return normalize_target_path(target, &cand.to_string_lossy());
+                }
             }
         }
     }
@@ -535,7 +582,13 @@ fn resolve_java_source_or_fqcn(target: &IdeTargetSpec, raw_prog: &str, cwd: &str
 }
 
 pub(crate) fn infer_java_source_root(java_file: &str, fallback: &str) -> String {
-    for marker in ["/src/main/java/", "/src/test/java/", "/src/"] {
+    for marker in [
+        "/src/main/java/",
+        "/src/test/java/",
+        "/src/main/kotlin/",
+        "/src/test/kotlin/",
+        "/src/",
+    ] {
         if let Some((prefix, _)) = java_file.split_once(marker) {
             let trimmed = marker.trim_end_matches('/');
             return format!("{prefix}{trimmed}");

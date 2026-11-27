@@ -152,6 +152,7 @@ fn normalize_remote_sdk_path(eco: EcosystemKind, raw_path: &str) -> String {
     let trimmed = raw_path.trim();
     match eco {
         EcosystemKind::Java
+        | EcosystemKind::Kotlin
         | EcosystemKind::Go
         | EcosystemKind::Rust
         | EcosystemKind::Zig

@@ -111,6 +111,10 @@ pub async fn inspect_dependencies_scoped(
         let mut list = parse_gradle_dependencies(&content);
         enrich_maven_updates(&mut list, env_map).await;
         ("gradle", "Maven", list)
+    } else if fname == "libs.versions.toml" {
+        let mut list = parse_gradle_version_catalog(&content);
+        enrich_maven_updates(&mut list, env_map).await;
+        ("gradle", "Maven", list)
     } else if fname == "package.json" {
         let mut list = parse_package_json(&content);
         enrich_npm_updates(&mut list).await;
@@ -389,19 +393,26 @@ fn extract_line_tag_span(line: &str, tag: &str) -> Option<(String, u32, u32)> {
 
 pub fn parse_gradle_dependencies(content: &str) -> Vec<IdeDepItem> {
     static RE_GRADLE_DEP: OnceLock<Regex> = OnceLock::new();
+    static RE_KOTLIN_DSL: OnceLock<Regex> = OnceLock::new();
     let re = RE_GRADLE_DEP.get_or_init(|| {
         Regex::new(
-            r#"(?:implementation|api|compileOnly|runtimeOnly|testImplementation)\s*\(?\s*['"]([^:'"]+):([^:'"]+):([^'"]+)['"]"#,
+            r#"(?:implementation|api|compileOnly|runtimeOnly|testImplementation|testRuntimeOnly|kapt|ksp)\s*\(?\s*['"]([^:'"]+):([^:'"]+):([^'"]+)['"]"#,
+        )
+        .unwrap()
+    });
+    let re_kt = RE_KOTLIN_DSL.get_or_init(|| {
+        Regex::new(
+            r#"(?:implementation|api|compileOnly|runtimeOnly|testImplementation|testRuntimeOnly)\s*\(\s*kotlin\s*\(\s*"([^"]+)"(?:\s*,\s*"([^"]+)")?\s*\)\s*\)"#,
         )
         .unwrap()
     });
     let mut items = Vec::new();
     for (idx, line) in content.lines().enumerate() {
+        let line_no = (idx + 1) as u32;
         if let Some(cap) = re.captures(line) {
             let g = cap.get(1).unwrap();
             let a = cap.get(2).unwrap();
             let v = cap.get(3).unwrap();
-            let line_no = (idx + 1) as u32;
             let name_col = (line[..g.start()].chars().count() + 1) as u32;
             let name_end_col = (line[..a.end()].chars().count() + 1) as u32;
             let ver_col = (line[..v.start()].chars().count() + 1) as u32;
@@ -422,6 +433,179 @@ pub fn parse_gradle_dependencies(content: &str) -> Vec<IdeDepItem> {
                 block_start_line: line_no,
                 block_end_line: line_no,
                 property_name: None,
+                managed_in: None,
+                vulnerabilities: Vec::new(),
+                range: false,
+            });
+        } else if let Some(cap) = re_kt.captures(line) {
+            let mod_m = cap.get(1).unwrap();
+            let ver_m = cap.get(2);
+            let name_col = (line[..mod_m.start()].chars().count() + 1) as u32;
+            let name_end_col = (line[..mod_m.end()].chars().count() + 1) as u32;
+            let ver = ver_m
+                .map(|m| m.as_str().to_string())
+                .unwrap_or_else(|| "plugin".into());
+            let (ver_col, ver_end_col) = ver_m
+                .map(|m| {
+                    (
+                        (line[..m.start()].chars().count() + 1) as u32,
+                        (line[..m.end()].chars().count() + 1) as u32,
+                    )
+                })
+                .unwrap_or((name_col, name_end_col));
+            items.push(IdeDepItem {
+                name: format!("org.jetbrains.kotlin:kotlin-{}", mod_m.as_str()),
+                current_version: ver,
+                latest_version: None,
+                latest_patch: None,
+                indirect: line.trim_start().starts_with("test"),
+                deprecated: None,
+                line: line_no,
+                name_col,
+                name_end_col,
+                version_line: line_no,
+                version_col: ver_col,
+                version_end_col: ver_end_col,
+                block_start_line: line_no,
+                block_end_line: line_no,
+                property_name: None,
+                managed_in: None,
+                vulnerabilities: Vec::new(),
+                range: false,
+            });
+        }
+    }
+    items
+}
+
+/// Parse Gradle Version Catalog (`gradle/libs.versions.toml`) `[versions]` + `[libraries]`.
+pub fn parse_gradle_version_catalog(content: &str) -> Vec<IdeDepItem> {
+    static RE_KV: OnceLock<Regex> = OnceLock::new();
+    static RE_MOD_VER: OnceLock<Regex> = OnceLock::new();
+    static RE_GROUP_NAME: OnceLock<Regex> = OnceLock::new();
+    static RE_VER_REF: OnceLock<Regex> = OnceLock::new();
+    static RE_VER_INLINE: OnceLock<Regex> = OnceLock::new();
+
+    let re_kv = RE_KV.get_or_init(|| Regex::new(r#"^([A-Za-z0-9_.-]+)\s*=\s*"([^"]+)""#).unwrap());
+    let re_mod_ver = RE_MOD_VER
+        .get_or_init(|| Regex::new(r#"module\s*=\s*"([^":]+:[^":]+)(?::([^"]+))?""#).unwrap());
+    let re_group_name = RE_GROUP_NAME
+        .get_or_init(|| Regex::new(r#"group\s*=\s*"([^"]+)".*?name\s*=\s*"([^"]+)""#).unwrap());
+    let re_ver_ref =
+        RE_VER_REF.get_or_init(|| Regex::new(r#"version\.ref\s*=\s*"([^"]+)""#).unwrap());
+    let re_ver_inline =
+        RE_VER_INLINE.get_or_init(|| Regex::new(r#"version\s*=\s*"([^"]+)""#).unwrap());
+
+    let mut versions = HashMap::<String, (String, u32, u32, u32)>::new();
+    let mut section = String::new();
+    for (idx, line) in content.lines().enumerate() {
+        let t = line.trim();
+        let line_no = (idx + 1) as u32;
+        if t.starts_with('[') && t.ends_with(']') {
+            section = t[1..t.len() - 1].trim().to_ascii_lowercase();
+            continue;
+        }
+        if section == "versions" {
+            if let Some(cap) = re_kv.captures(t) {
+                let val = cap[2].to_string();
+                let (vc, vec) = line
+                    .find(&format!("\"{val}\""))
+                    .map(|pos| {
+                        let start = (line[..pos + 1].chars().count() + 1) as u32;
+                        (start, start + val.chars().count() as u32)
+                    })
+                    .unwrap_or((1, 1));
+                versions.insert(cap[1].to_string(), (val, line_no, vc, vec));
+            }
+        }
+    }
+
+    let mut items = Vec::new();
+    section.clear();
+    for (idx, line) in content.lines().enumerate() {
+        let t = line.trim();
+        let line_no = (idx + 1) as u32;
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        if t.starts_with('[') && t.ends_with(']') {
+            section = t[1..t.len() - 1].trim().to_ascii_lowercase();
+            continue;
+        }
+        if section != "libraries" {
+            continue;
+        }
+        let mut coord: Option<String> = None;
+        let mut ver: Option<String> = None;
+        let mut prop_name: Option<String> = None;
+        let mut ver_span: Option<(u32, u32, u32)> = None;
+        if let Some(cap) = re_kv.captures(t) {
+            let parts: Vec<&str> = cap[2].split(':').collect();
+            if parts.len() >= 2 {
+                coord = Some(format!("{}:{}", parts[0], parts[1]));
+                if let Some(v) = parts.get(2) {
+                    ver = Some((*v).to_string());
+                    if let Some(pos) = line.rfind(&format!(":{v}\"")) {
+                        let start = (line[..pos + 1].chars().count() + 1) as u32;
+                        ver_span = Some((line_no, start, start + v.chars().count() as u32));
+                    }
+                }
+            }
+        } else if let Some(cap) = re_mod_ver.captures(t) {
+            coord = Some(cap[1].to_string());
+            if let Some(m) = cap.get(2) {
+                let v = m.as_str();
+                ver = Some(v.to_string());
+                if let Some(pos) = line.find(&format!(":{v}\"")) {
+                    let start = (line[..pos + 1].chars().count() + 1) as u32;
+                    ver_span = Some((line_no, start, start + v.chars().count() as u32));
+                }
+            }
+        } else if let Some(cap) = re_group_name.captures(t) {
+            coord = Some(format!("{}:{}", &cap[1], &cap[2]));
+        }
+        if let Some(c) = coord {
+            if ver.is_none() {
+                if let Some(vref) = re_ver_ref.captures(t) {
+                    let key = vref[1].to_string();
+                    if let Some((v, vl, vc, vec)) = versions.get(&key) {
+                        ver = Some(v.clone());
+                        ver_span = Some((*vl, *vc, *vec));
+                    }
+                    prop_name = Some(key);
+                } else if let Some(vin) = re_ver_inline.captures(t) {
+                    let v = vin[1].to_string();
+                    if let Some(pos) = line.find(&format!("\"{v}\"")) {
+                        let start = (line[..pos + 1].chars().count() + 1) as u32;
+                        ver_span = Some((line_no, start, start + v.chars().count() as u32));
+                    }
+                    ver = Some(v);
+                }
+            }
+            let current_version = ver.unwrap_or_else(|| "*".into());
+            let name_col = line
+                .find(&c)
+                .map(|i| (line[..i].chars().count() + 1) as u32)
+                .unwrap_or(1);
+            let name_end_col = name_col + c.chars().count() as u32;
+            let (version_line, version_col, version_end_col) =
+                ver_span.unwrap_or((line_no, name_col, name_end_col));
+            items.push(IdeDepItem {
+                name: c,
+                current_version,
+                latest_version: None,
+                latest_patch: None,
+                indirect: false,
+                deprecated: None,
+                line: line_no,
+                name_col,
+                name_end_col,
+                version_line,
+                version_col,
+                version_end_col,
+                block_start_line: line_no,
+                block_end_line: line_no,
+                property_name: prop_name,
                 managed_in: None,
                 vulnerabilities: Vec::new(),
                 range: false,

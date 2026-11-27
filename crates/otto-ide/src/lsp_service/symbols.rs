@@ -391,13 +391,26 @@ fn match_cpp_symbol(trimmed: &str) -> Option<(String, String, Option<String>, bo
 
 fn match_jvm_symbol(trimmed: &str) -> Option<(String, String, Option<String>, bool)> {
     static RE_CLS: OnceLock<Regex> = OnceLock::new();
+    static RE_COMPANION: OnceLock<Regex> = OnceLock::new();
     static RE_KT: OnceLock<Regex> = OnceLock::new();
     static RE_M: OnceLock<Regex> = OnceLock::new();
 
+    if let Some(cap) = RE_COMPANION
+        .get_or_init(|| {
+            Regex::new(r"^companion\s+object(?:\s+([A-Za-z_][A-Za-z0-9_]*))?\b").unwrap()
+        })
+        .captures(trimmed)
+    {
+        let name = cap
+            .get(1)
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_else(|| "Companion".into());
+        return Some((name, "object".into(), None, true));
+    }
     if let Some(cap) = RE_CLS
         .get_or_init(|| {
             Regex::new(
-                r"^(?:(?:public|private|protected|abstract|final|static|sealed|non-sealed|open|data|internal)\s+)*(class|interface|enum|record|object)\s+([A-Za-z_][A-Za-z0-9_]*)",
+                r"^(?:(?:public|private|protected|abstract|final|static|sealed|non-sealed|open|data|internal|annotation|value|inline|inner|enum|expect|actual)\s+)*(class|interface|enum|record|object)\s+([A-Za-z_][A-Za-z0-9_]*)",
             )
             .unwrap()
         })
@@ -408,7 +421,7 @@ fn match_jvm_symbol(trimmed: &str) -> Option<(String, String, Option<String>, bo
     if let Some(cap) = RE_KT
         .get_or_init(|| {
             Regex::new(
-                r"^(?:(?:public|private|protected|internal|override|suspend|inline)\s+)*fun\s+`?([A-Za-z0-9_ ]+?)`?\s*\(([^)]*)\)",
+                r"^(?:(?:public|private|protected|internal|override|open|final|abstract|suspend|inline|tailrec|operator|infix|external|expect|actual)\s+)*fun\s+(?:<[^>]*>\s+)?(?:[A-Za-z_][A-Za-z0-9_<>,.?* ]*\.)?`?([A-Za-z0-9_ ]+?)`?\s*\(([^)]*)\)",
             )
             .unwrap()
         })

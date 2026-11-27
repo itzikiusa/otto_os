@@ -218,3 +218,211 @@ fn jsonc_files_allow_comments_and_trailing_commas() {
     assert_eq!(diags.len(), 1);
     assert_eq!(diags[0].line, 4);
 }
+
+#[test]
+fn kotlin_lsp_gutter_kotest_deps_symbols_and_mixed_jvm_workspace_work() {
+    use crate::deps_inspector::actions::bump_manifest_version_in_place_scoped;
+    use crate::deps_inspector::{parse_gradle_dependencies, parse_gradle_version_catalog};
+    use crate::gutter::detect_gutter_items;
+    use crate::java_workspace::{infer_java_fqcn_from_file, scan_java_workspace};
+    use crate::lsp_host::servers::{resolve_lsp_module_root, REGISTRY};
+    use crate::toolchains_catalog::{
+        curated_catalog, kotlin_compiler_zip_url, kotlin_lsp_zip_url, resolve_sdk_download,
+        EcosystemKind, TargetPlatform,
+    };
+    use crate::types::{IdeEcosystemKind, IdeGutterKind, IdeSymbolNode};
+
+    // 1. Ecosystem + catalog + LSP server
+    let eco_from_alias: IdeEcosystemKind = serde_json::from_str("\"kt\"").unwrap();
+    assert_eq!(eco_from_alias, IdeEcosystemKind::Kotlin);
+    assert_eq!(EcosystemKind::parse("kts"), Some(EcosystemKind::Kotlin));
+    let plat = TargetPlatform::host();
+    let cat = curated_catalog(EcosystemKind::Kotlin, plat);
+    assert!(!cat.is_empty());
+    let resolved = resolve_sdk_download(EcosystemKind::Kotlin, Some("2.1.20"), plat, &cat).unwrap();
+    assert_eq!(resolved.url, kotlin_compiler_zip_url("2.1.20"));
+    assert!(kotlin_lsp_zip_url().contains("kotlin-language-server"));
+
+    let srv = REGISTRY
+        .iter()
+        .find(|s| s.lang == "kotlin")
+        .expect("built-in kotlin-language-server");
+    assert_eq!(srv.cmd, "kotlin-language-server");
+
+    // 2. Mixed Java + Kotlin Gradle workspace discovery + module root resolution
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("kt-mixed");
+    std::fs::create_dir_all(ws.join("src/main/kotlin/com/acme")).unwrap();
+    std::fs::create_dir_all(ws.join("src/main/java/com/acme")).unwrap();
+    std::fs::create_dir_all(ws.join("src/test/kotlin/com/acme")).unwrap();
+    std::fs::write(
+        ws.join("settings.gradle.kts"),
+        "rootProject.name = \"kt-mixed\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        ws.join("build.gradle.kts"),
+        "plugins { kotlin(\"jvm\") version \"2.1.20\" }\n",
+    )
+    .unwrap();
+    let app_kt = ws.join("src/main/kotlin/com/acme/App.kt");
+    std::fs::write(
+        &app_kt,
+        "package com.acme\n\nfun main() {\n    println(\"hi\")\n}\n",
+    )
+    .unwrap();
+    let canon_ws = ws.canonicalize().unwrap();
+    let canon_app = app_kt.canonicalize().unwrap();
+
+    let mod_root = resolve_lsp_module_root(
+        "kotlin",
+        &canon_ws.to_string_lossy(),
+        Some(&canon_app.to_string_lossy()),
+        std::slice::from_ref(&canon_ws),
+    )
+    .unwrap();
+    assert_eq!(mod_root, canon_ws.to_string_lossy());
+
+    let jws = scan_java_workspace(std::slice::from_ref(&canon_ws));
+    assert_eq!(jws.modules.len(), 1);
+    assert!(jws.modules[0]
+        .main_src_dirs
+        .iter()
+        .any(|d| d.ends_with("src/main/kotlin")));
+    assert!(jws.modules[0]
+        .test_src_dirs
+        .iter()
+        .any(|d| d.ends_with("src/test/kotlin")));
+    assert_eq!(
+        infer_java_fqcn_from_file(&canon_app).as_deref(),
+        Some("com.acme.AppKt")
+    );
+
+    // 3. Gutter targets: top-level main, @file:JvmName, JUnit backtick tests, Kotest specs
+    let kt_main = "@file:JvmName(\"Launcher\")\npackage com.acme\n\nfun main(args: Array<String>) {\n    println(args.size)\n}\n";
+    let main_targets = detect_gutter_items("src/main/kotlin/com/acme/App.kt", kt_main, &[]);
+    assert!(
+        main_targets.iter().any(|t| {
+            t.kind == IdeGutterKind::Main
+                && t.run_spec.debug_program.as_deref() == Some("com.acme.Launcher")
+                && t.line == 4
+        }),
+        "expected @file:JvmName main gutter target, got: {main_targets:?}"
+    );
+
+    let kt_junit = "package com.acme\nimport org.junit.jupiter.api.Test\nclass MathTest {\n    @Test\n    fun `adds positive numbers`() {\n        assert(1 + 1 == 2)\n    }\n}\n";
+    let junit_targets = detect_gutter_items("src/test/kotlin/com/acme/MathTest.kt", kt_junit, &[]);
+    assert!(
+        junit_targets
+            .iter()
+            .any(|t| t.kind == IdeGutterKind::Test && t.label.contains("adds positive numbers")),
+        "expected JUnit backtick test gutter target, got: {junit_targets:?}"
+    );
+
+    let kt_kotest = "package com.acme\nimport io.kotest.core.spec.style.StringSpec\nclass CalcSpec : StringSpec({\n    \"multiplies two ints\" {\n        assert(2 * 3 == 6)\n    }\n})\n";
+    let kotest_targets =
+        detect_gutter_items("src/test/kotlin/com/acme/CalcSpec.kt", kt_kotest, &[]);
+    assert!(
+        kotest_targets
+            .iter()
+            .any(|t| t.kind == IdeGutterKind::Suite && t.label.contains("CalcSpec")),
+        "expected Kotest suite gutter target, got: {kotest_targets:?}"
+    );
+    assert!(
+        kotest_targets
+            .iter()
+            .any(|t| t.kind == IdeGutterKind::Test && t.label.contains("multiplies two ints")),
+        "expected Kotest test gutter target, got: {kotest_targets:?}"
+    );
+
+    // 4. Gradle Kotlin DSL + Version Catalog (`gradle/libs.versions.toml`) parsing + in-place bump
+    let gradle_kts = r#"dependencies {
+    implementation(kotlin("stdlib"))
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
+    ksp("com.google.dagger:hilt-compiler:2.52")
+    testImplementation("io.kotest:kotest-runner-junit5:5.9.1")
+}
+"#;
+    let gdeps = parse_gradle_dependencies(gradle_kts);
+    assert!(gdeps
+        .iter()
+        .any(|d| d.name == "org.jetbrains.kotlin:kotlin-stdlib"));
+    assert!(gdeps.iter().any(
+        |d| d.name == "org.jetbrains.kotlinx:kotlinx-coroutines-core"
+            && d.current_version == "1.9.0"
+    ));
+    assert!(gdeps
+        .iter()
+        .any(|d| d.name == "com.google.dagger:hilt-compiler"));
+    assert!(gdeps
+        .iter()
+        .any(|d| d.name == "io.kotest:kotest-runner-junit5" && d.indirect));
+
+    let catalog_toml = r#"[versions]
+coroutines = "1.9.0"
+kotest = "5.9.1"
+
+[libraries]
+kotlinx-coroutines = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "coroutines" }
+kotest-runner = { group = "io.kotest", name = "kotest-runner-junit5", version.ref = "kotest" }
+junit-jupiter = "org.junit.jupiter:junit-jupiter:5.11.0"
+"#;
+    let cdeps = parse_gradle_version_catalog(catalog_toml);
+    assert_eq!(cdeps.len(), 3, "catalog deps={cdeps:?}");
+    assert!(cdeps.iter().any(
+        |d| d.name == "org.jetbrains.kotlinx:kotlinx-coroutines-core"
+            && d.current_version == "1.9.0"
+            && d.property_name.as_deref() == Some("coroutines")
+    ));
+    let bumped = bump_manifest_version_in_place_scoped(
+        &canon_ws.join("gradle/libs.versions.toml"),
+        "libs.versions.toml",
+        catalog_toml,
+        "org.jetbrains.kotlinx:kotlinx-coroutines-core",
+        "1.10.1",
+        std::slice::from_ref(&canon_ws),
+        false,
+    )
+    .expect("bump version.ref in libs.versions.toml");
+    assert!(
+        bumped.contains("coroutines = \"1.10.1\""),
+        "expected [versions] bump, got:\n{bumped}"
+    );
+
+    // 5. Document symbols + kotlinc stderr parser + unused import diagnostics
+    let kt_sym_src = r#"package com.acme
+import java.util.UUID
+import java.time.Instant
+
+data class Order(val id: UUID)
+sealed interface ResultState
+object Registry {
+    companion object {
+        fun String.shout(): String = uppercase()
+    }
+}
+"#;
+    let syms = parse_document_symbols("Order.kt", "kotlin", kt_sym_src);
+    fn collect_names(nodes: &[IdeSymbolNode], out: &mut Vec<String>) {
+        for s in nodes {
+            out.push(s.name.clone());
+            collect_names(&s.children, out);
+        }
+    }
+    let mut names = Vec::new();
+    collect_names(&syms, &mut names);
+    for expected in ["Order", "ResultState", "Registry", "shout"] {
+        assert!(
+            names.iter().any(|n| n.contains(expected)),
+            "missing Kotlin symbol {expected} in {names:?}"
+        );
+    }
+
+    let kt_diags = parse_kotlinc_stderr(
+        "src/main/kotlin/App.kt:12:5: error: unresolved reference: foo\nsrc/main/kotlin/App.kt:14:9: warning: parameter 'x' is never used\n",
+    );
+    assert_eq!(kt_diags.len(), 2);
+    assert_eq!(kt_diags[0].severity, "error");
+    assert_eq!(kt_diags[0].line, 12);
+    assert_eq!(kt_diags[1].severity, "warning");
+}

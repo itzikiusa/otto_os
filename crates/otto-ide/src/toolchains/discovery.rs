@@ -23,6 +23,9 @@ pub(super) fn collect_managed_bin_dirs(tc_root: &Path, out: &mut Vec<PathBuf>) {
     for rel in [
         "java/lsp/bin",
         "java/current/bin",
+        "kotlin/bin",
+        "kotlin/current/bin",
+        "kotlin/lsp/server/bin",
         "go/bin",
         "rust/bin",
         "rust/cargo/bin",
@@ -51,6 +54,7 @@ pub(super) fn collect_managed_bin_dirs(tc_root: &Path, out: &mut Vec<PathBuf>) {
     }
     for sub in [
         "java/jdks",
+        "kotlin/sdks",
         "go/sdks",
         "zig/sdks",
         "cpp/sdks",
@@ -61,7 +65,7 @@ pub(super) fn collect_managed_bin_dirs(tc_root: &Path, out: &mut Vec<PathBuf>) {
             if sub == "zig/sdks" && p.join("zig").is_file() && !out.contains(&p) {
                 out.push(p.clone());
             }
-            for rel in ["bin", "Contents/Home/bin", "go/bin"] {
+            for rel in ["bin", "Contents/Home/bin", "go/bin", "kotlinc/bin"] {
                 let b = p.join(rel);
                 if b.is_dir() && !out.contains(&b) {
                     out.push(b);
@@ -197,6 +201,19 @@ fn scan_otto_sdks(
                 if dir.join("bin/clang++").is_file() || dir.join("bin/clang").is_file() {
                     let v = dir_name_version(&dir);
                     push_sdk(out, seen, "cpp", &v, &dir, "otto");
+                }
+            }
+        }
+        EcosystemKind::Kotlin => {
+            for dir in read_subdirs(&root.join("kotlin/sdks")) {
+                let kh = if dir.join("kotlinc/bin/kotlinc").is_file() {
+                    dir.join("kotlinc")
+                } else {
+                    dir.clone()
+                };
+                if kh.join("bin/kotlinc").is_file() {
+                    let v = dir_name_version(&dir);
+                    push_sdk(out, seen, "kotlin", &v, &kh, "otto");
                 }
             }
         }
@@ -369,6 +386,34 @@ fn scan_system_sdks(
                 push_sdk(out, seen, "cpp", &v, &prefix, "system");
             }
         }
+        EcosystemKind::Kotlin => {
+            if let Some(h) = &home {
+                for dir in read_subdirs(&h.join(".sdkman/candidates/kotlin")) {
+                    if dir.join("bin/kotlinc").is_file() {
+                        let v = dir_name_version(&dir);
+                        push_sdk(out, seen, "kotlin", &v, &dir, "sdkman");
+                    }
+                }
+            }
+            for cand in [
+                "/opt/homebrew/opt/kotlin/libexec",
+                "/usr/local/opt/kotlin/libexec",
+                "/opt/homebrew/opt/kotlin",
+                "/usr/local/opt/kotlin",
+            ] {
+                let p = PathBuf::from(cand);
+                if p.join("bin/kotlinc").is_file() {
+                    let v = dir_name_version(&p);
+                    push_sdk(out, seen, "kotlin", &v, &p, "homebrew");
+                }
+            }
+            if let Some(kc) = find_executable_in(&search, &["kotlinc"]) {
+                if let Some(kh) = bin_prefix(&kc) {
+                    let v = dir_name_version(&kh);
+                    push_sdk(out, seen, "kotlin", &v, &kh, "system");
+                }
+            }
+        }
         EcosystemKind::Node => {
             if let Some(h) = &home {
                 for dir in read_subdirs(&h.join(".nvm/versions/node")) {
@@ -447,6 +492,10 @@ pub(super) fn discover_local_lsp_with_shell(
     let name = eco.lsp_name().to_string();
     let rels: &[&str] = match eco {
         EcosystemKind::Java => &["java/lsp/bin/jdtls"],
+        EcosystemKind::Kotlin => &[
+            "kotlin/bin/kotlin-language-server",
+            "kotlin/lsp/server/bin/kotlin-language-server",
+        ],
         EcosystemKind::Go => &["go/bin/gopls"],
         EcosystemKind::Rust => &["rust/bin/rust-analyzer", "rust/cargo/bin/rust-analyzer"],
         EcosystemKind::Zig => &["zig/bin/zls"],
@@ -476,6 +525,7 @@ pub(super) fn discover_local_lsp_with_shell(
     }
     let sys_names: &[&str] = match eco {
         EcosystemKind::Java => &["jdtls"],
+        EcosystemKind::Kotlin => &["kotlin-language-server"],
         EcosystemKind::Go => &["gopls"],
         EcosystemKind::Rust => &["rust-analyzer"],
         EcosystemKind::Zig => &["zls"],
@@ -530,7 +580,7 @@ pub(super) fn discover_local_dap_with_shell(
     let name = eco.dap_name().to_string();
     let java_rel = format!("java/dap/{JAVA_DEBUG_JAR_NAME}");
     let rels: Vec<&str> = match eco {
-        EcosystemKind::Java => vec![java_rel.as_str()],
+        EcosystemKind::Java | EcosystemKind::Kotlin => vec![java_rel.as_str()],
         EcosystemKind::Go => vec!["go/bin/dlv", "dlv/dlv"],
         EcosystemKind::Rust | EcosystemKind::Zig | EcosystemKind::Cpp => vec![
             "cpp/dap/extension/adapter/codelldb",
@@ -551,7 +601,10 @@ pub(super) fn discover_local_dap_with_shell(
         for rel in &rels {
             let cand = root.join(rel);
             let ok = match eco {
-                EcosystemKind::Java | EcosystemKind::Node | EcosystemKind::Python => cand.is_file(),
+                EcosystemKind::Java
+                | EcosystemKind::Kotlin
+                | EcosystemKind::Node
+                | EcosystemKind::Python => cand.is_file(),
                 EcosystemKind::Go
                 | EcosystemKind::Rust
                 | EcosystemKind::Zig
@@ -574,7 +627,7 @@ pub(super) fn discover_local_dap_with_shell(
         }
     }
     let sys_names: &[&str] = match eco {
-        EcosystemKind::Java => &["java-debug", "java"],
+        EcosystemKind::Java | EcosystemKind::Kotlin => &["java-debug", "java"],
         EcosystemKind::Go => &["dlv"],
         EcosystemKind::Rust | EcosystemKind::Zig | EcosystemKind::Cpp => {
             &["codelldb", "lldb-dap", "lldb"]
@@ -853,6 +906,7 @@ pub(super) fn mark_active_sdk(
 ) {
     let chosen = active_env.and_then(|env| match eco {
         EcosystemKind::Java => env.java_home.as_deref(),
+        EcosystemKind::Kotlin => env.kotlin_home.as_deref(),
         EcosystemKind::Go => env.go_root.as_deref(),
         EcosystemKind::Rust => env.rust_toolchain.as_deref(),
         EcosystemKind::Zig => env.zig_home.as_deref(),

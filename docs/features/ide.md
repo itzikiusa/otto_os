@@ -241,6 +241,7 @@ global system directories:
 | Ecosystem | Components |
 |-----------|------------|
 | **Java / JVM** | Adoptium Temurin JDK (17, 21 LTS), Maven, Gradle, Eclipse `jdtls`, `java-debug-adapter` |
+| **Kotlin** | Kotlin Compiler (`kotlinc` / `KOTLIN_HOME`, SDKMAN / Homebrew / official archive), `kotlin-language-server`, `ktfmt` / `ktlint`, Gradle Kotlin DSL (`build.gradle.kts`) & Version Catalog (`gradle/libs.versions.toml`), mixed Java/Kotlin Maven & Gradle modules, JUnit 5 (incl. backtick names) & Kotest gutter runs, JVM JDWP debugging via `java-debug` |
 | **Python** | `uv`, standalone CPython (3.11 / 3.12 / 3.13), `pyright`, `ruff`, `debugpy` |
 | **Rust** | `rustup` (`rustc` + `cargo`), `rust-analyzer`, `CodeLLDB` (`codelldb`) |
 | **Zig** | Official Zig SDK tarball (`ziglang.org/download/index.json`, SHA-256 verified), local SDK registration, `zls` (Zig-version-matched), `CodeLLDB` (`codelldb`) / `lldb-dap` / built-in `otto-lldb-dap` with Zig LLDB type formatters |
@@ -275,7 +276,7 @@ never spawned per request) and merges:
 `daemon base env → cached login shell env → selected SDK env → project .env file → Run/Debug config overrides`
 
 into **all** Run executions, DAP Debug sessions, IDE Terminals, and local LSP
-servers (`gopls`, `jdtls`, `rust-analyzer`, `zls`, `clangd`, `pyright`, `tsserver`).
+servers (`gopls`, `jdtls`, `kotlin-language-server`, `rust-analyzer`, `zls`, `clangd`, `pyright`, `tsserver`).
 When that PATH has no `mvn` / `gradle` (a slow capture falls back to `-lc`, which
 skips `~/.zshrc` and so sdkman's init), a local run looks in
 `~/.sdkman/candidates/{maven,gradle}/current/bin`, then `/opt/homebrew/bin` and
@@ -286,7 +287,7 @@ Per-project configuration is persisted in SQLite (`0214_ide_configs.sql`), with
 secret environment variable values stored in the macOS Keychain via
 `otto-keychain` (`ide-env:<project_hash>:<key>`):
 
-- Select SDK/toolchain overrides per project (`java_home`, `go_root`,
+- Select SDK/toolchain overrides per project (`java_home`, `kotlin_home`, `go_root`,
   `rust_toolchain`, `zig_home`, `cpp_toolchain`, `node_home`, `python_interpreter`, `dotenv_path`,
   `extra_path`, `inherit_shell_env`, `additional_roots`).
 - Create project-local Python virtual environments (`POST /ide/environments/python-venv`

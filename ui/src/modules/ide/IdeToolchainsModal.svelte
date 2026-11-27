@@ -37,6 +37,7 @@
   const BASE_ECOS: readonly { id: string; label: string }[] = [
     { id: 'go', label: 'Go' },
     { id: 'java', label: 'Java' },
+    { id: 'kotlin', label: 'Kotlin' },
     { id: 'rust', label: 'Rust' },
     { id: 'zig', label: 'Zig' },
     { id: 'cpp', label: 'C / C++' },
@@ -64,7 +65,7 @@
   function defaultEcoFromWorkspace(): string {
     const lang = ide.activeTab?.language;
     if (lang === 'swift' || lang === 'objc') return 'ios';
-    if (lang === 'kotlin') return 'android';
+    if (lang === 'kotlin') return 'kotlin';
     if (lang === 'dart') return 'flutter';
     if (lang === 'java') return 'java';
     if (lang === 'rust') return 'rust';

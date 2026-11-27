@@ -13,8 +13,8 @@ use crate::local_history::LocalHistoryStore;
 use crate::types::{IdeDepsActionReq, IdeDepsActionResp};
 
 use super::{
-    parse_cargo_toml, parse_go_mod, parse_gradle_dependencies, parse_package_json,
-    parse_pom_dependencies_scoped, parse_python_deps,
+    parse_cargo_toml, parse_go_mod, parse_gradle_dependencies, parse_gradle_version_catalog,
+    parse_package_json, parse_pom_dependencies_scoped, parse_python_deps,
 };
 
 pub async fn run_deps_action(
@@ -217,8 +217,18 @@ pub async fn run_deps_action_scoped(
         ("pom.xml", "maven_tree") => {
             exec_cmd("mvn", &["dependency:tree"], &dir, env_map, actor_is_root).await?
         }
-        ("build.gradle" | "build.gradle.kts", "gradle_sync" | "maven_sync" | "sync") => {
-            let bin = if dir.join("gradlew").is_file() {
+        (
+            "build.gradle" | "build.gradle.kts" | "libs.versions.toml",
+            "gradle_sync" | "maven_sync" | "sync",
+        ) => {
+            let work_dir = if fname == "libs.versions.toml"
+                && dir.file_name().and_then(|s| s.to_str()) == Some("gradle")
+            {
+                dir.parent().unwrap_or(&dir).to_path_buf()
+            } else {
+                dir.clone()
+            };
+            let bin = if work_dir.join("gradlew").is_file() {
                 "./gradlew"
             } else {
                 "gradle"
@@ -226,7 +236,7 @@ pub async fn run_deps_action_scoped(
             exec_cmd(
                 bin,
                 &["dependencies", "--configuration", "compileClasspath"],
-                &dir,
+                &work_dir,
                 env_map,
                 actor_is_root,
             )
@@ -523,6 +533,17 @@ pub fn bump_manifest_version_in_place_scoped(
         }
         "build.gradle" | "build.gradle.kts" => {
             let items = parse_gradle_dependencies(content);
+            let hit = items.iter().find(|i| i.name == module)?;
+            Some(replace_line_col_span(
+                content,
+                hit.version_line,
+                hit.version_col,
+                hit.version_end_col,
+                new_ver,
+            ))
+        }
+        "libs.versions.toml" => {
+            let items = parse_gradle_version_catalog(content);
             let hit = items.iter().find(|i| i.name == module)?;
             Some(replace_line_col_span(
                 content,

@@ -390,6 +390,47 @@ pub(crate) fn parse_clang_stderr(stderr: &str) -> Vec<IdeDiagnostic> {
     diags
 }
 
+pub(super) async fn analyze_kotlin_diagnostics(
+    path: &str,
+    content: &str,
+    _env_map: &BTreeMap<String, String>,
+) -> Vec<IdeDiagnostic> {
+    // Fast stateless fallback when kotlin-language-server is unavailable:
+    // flag unused imports (non-wildcard, non-operator/extension-like).
+    find_simple_unused_imports(path, "kotlin", content)
+}
+
+pub fn parse_kotlinc_stderr(stderr: &str) -> Vec<IdeDiagnostic> {
+    static RE_KT: OnceLock<Regex> = OnceLock::new();
+    let re = RE_KT
+        .get_or_init(|| Regex::new(r"^.+?:(\d+):(\d+):\s*(error|warning|info):\s*(.+)$").unwrap());
+    let mut diags = Vec::new();
+    for line in stderr.lines() {
+        let trimmed = line.trim_end_matches('\r');
+        if let Some(cap) = re.captures(trimmed) {
+            let ln: u32 = cap[1].parse().unwrap_or(1);
+            let col: u32 = cap[2].parse().unwrap_or(1);
+            let sev = match &cap[3] {
+                "warning" => "warning",
+                "info" => "info",
+                _ => "error",
+            };
+            diags.push(IdeDiagnostic {
+                line: ln,
+                col,
+                end_line: ln,
+                end_col: col + 1,
+                severity: sev.into(),
+                code: "kotlinc".into(),
+                source: "kotlinc".into(),
+                message: cap[4].trim().to_string(),
+                quick_fixes: Vec::new(),
+            });
+        }
+    }
+    diags
+}
+
 fn find_simple_unused_imports(path: &str, lang: &str, content: &str) -> Vec<IdeDiagnostic> {
     let lines: Vec<&str> = content.lines().collect();
     let mut imports: Vec<(u32, String)> = Vec::new();
@@ -471,6 +512,29 @@ fn find_simple_unused_imports(path: &str, lang: &str, content: &str) -> Vec<IdeD
                             {
                                 imports.push((ln, sym.to_string()));
                             }
+                        }
+                    }
+                }
+            }
+            "kotlin" => {
+                let code = t
+                    .split("//")
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .trim_end_matches(';');
+                if let Some(rest) = code.strip_prefix("import ") {
+                    if !rest.contains('*') {
+                        let sym = rest
+                            .split(" as ")
+                            .last()
+                            .and_then(|s| s.rsplit('.').next())
+                            .unwrap_or("")
+                            .trim();
+                        if !sym.is_empty()
+                            && sym.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                        {
+                            imports.push((ln, sym.to_string()));
                         }
                     }
                 }

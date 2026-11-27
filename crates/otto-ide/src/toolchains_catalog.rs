@@ -196,6 +196,7 @@ impl TargetPlatform {
 #[serde(rename_all = "lowercase")]
 pub enum EcosystemKind {
     Java,
+    Kotlin,
     Go,
     Rust,
     Zig,
@@ -210,8 +211,9 @@ pub enum EcosystemKind {
 }
 
 impl EcosystemKind {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Java,
+        Self::Kotlin,
         Self::Go,
         Self::Rust,
         Self::Zig,
@@ -228,6 +230,7 @@ impl EcosystemKind {
     pub fn parse(raw: &str) -> Option<Self> {
         match raw.trim().to_ascii_lowercase().as_str() {
             "java" | "jdk" => Some(Self::Java),
+            "kotlin" | "kt" | "kts" | "kotlinc" => Some(Self::Kotlin),
             "go" | "golang" => Some(Self::Go),
             "rust" | "cargo" => Some(Self::Rust),
             "zig" | "zls" => Some(Self::Zig),
@@ -246,6 +249,7 @@ impl EcosystemKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Java => "java",
+            Self::Kotlin => "kotlin",
             Self::Go => "go",
             Self::Rust => "rust",
             Self::Zig => "zig",
@@ -263,6 +267,7 @@ impl EcosystemKind {
     pub const fn display_name(self) -> &'static str {
         match self {
             Self::Java => "Java (Temurin JDK)",
+            Self::Kotlin => "Kotlin (kotlinc / JVM)",
             Self::Go => "Go",
             Self::Rust => "Rust",
             Self::Zig => "Zig",
@@ -280,6 +285,7 @@ impl EcosystemKind {
     pub const fn lsp_name(self) -> &'static str {
         match self {
             Self::Java => "jdtls",
+            Self::Kotlin => "kotlin-language-server",
             Self::Go => "gopls",
             Self::Rust => "rust-analyzer",
             Self::Zig => "zls",
@@ -297,6 +303,7 @@ impl EcosystemKind {
     pub const fn dap_name(self) -> &'static str {
         match self {
             Self::Java => "java-debug",
+            Self::Kotlin => "java-debug",
             Self::Go => "dlv",
             Self::Rust => "codelldb",
             Self::Zig => "codelldb",
@@ -314,6 +321,7 @@ impl EcosystemKind {
     pub const fn default_sdk_version(self) -> &'static str {
         match self {
             Self::Java => "21",
+            Self::Kotlin => "2.1.20",
             Self::Go => "1.24.2",
             Self::Rust => "stable",
             Self::Zig => "0.14.0",
@@ -348,6 +356,7 @@ impl From<crate::types::IdeEcosystemKind> for EcosystemKind {
     fn from(k: crate::types::IdeEcosystemKind) -> Self {
         match k {
             crate::types::IdeEcosystemKind::Java => Self::Java,
+            crate::types::IdeEcosystemKind::Kotlin => Self::Kotlin,
             crate::types::IdeEcosystemKind::Go => Self::Go,
             crate::types::IdeEcosystemKind::Rust => Self::Rust,
             crate::types::IdeEcosystemKind::Zig => Self::Zig,
@@ -367,6 +376,7 @@ impl From<EcosystemKind> for crate::types::IdeEcosystemKind {
     fn from(k: EcosystemKind) -> Self {
         match k {
             EcosystemKind::Java => Self::Java,
+            EcosystemKind::Kotlin => Self::Kotlin,
             EcosystemKind::Go => Self::Go,
             EcosystemKind::Rust => Self::Rust,
             EcosystemKind::Zig => Self::Zig,
@@ -485,6 +495,15 @@ pub fn clangd_zip_url(version: &str, platform: TargetPlatform) -> String {
         TargetOs::Linux => "linux",
     };
     format!("https://github.com/clangd/clangd/releases/download/{clean}/clangd-{slug}-{clean}.zip")
+}
+
+pub fn kotlin_compiler_zip_url(version: &str) -> String {
+    let clean = version.trim().trim_start_matches('v');
+    format!("https://github.com/JetBrains/kotlin/releases/download/v{clean}/kotlin-compiler-{clean}.zip")
+}
+
+pub fn kotlin_lsp_zip_url() -> String {
+    "https://github.com/fwcd/kotlin-language-server/releases/latest/download/server.zip".to_string()
 }
 
 pub fn node_tarball_url(version: &str, platform: TargetPlatform) -> String {
@@ -624,6 +643,19 @@ pub fn curated_catalog(ecosystem: EcosystemKind, platform: TargetPlatform) -> Ve
                 os: os.clone(),
                 arch: arch.clone(),
                 url: llvm_tarball_url(ver, platform),
+                size_hint: Some(sz.to_string()),
+                sha256: None,
+            })
+            .collect(),
+        EcosystemKind::Kotlin => [("2.1.20", true, "76 MB"), ("2.0.21", false, "74 MB")]
+            .into_iter()
+            .map(|(ver, lts, sz)| CatalogSdkEntry {
+                version: ver.to_string(),
+                label: format!("Kotlin Compiler {ver}"),
+                lts,
+                os: os.clone(),
+                arch: arch.clone(),
+                url: kotlin_compiler_zip_url(ver),
                 size_hint: Some(sz.to_string()),
                 sha256: None,
             })
@@ -784,6 +816,19 @@ pub fn resolve_sdk_download(
                 os,
                 arch,
                 url: llvm_tarball_url(&clean, platform),
+                size_hint: None,
+                sha256: None,
+            })
+        }
+        EcosystemKind::Kotlin => {
+            let clean = ver.trim_start_matches('v').to_string();
+            Ok(CatalogSdkEntry {
+                version: clean.clone(),
+                label: format!("Kotlin Compiler {clean}"),
+                lts: true,
+                os,
+                arch,
+                url: kotlin_compiler_zip_url(&clean),
                 size_hint: None,
                 sha256: None,
             })
@@ -1251,11 +1296,19 @@ impl CatalogClient {
             self.fetch_node(platform),
             self.fetch_python(platform),
         );
-        let mut map = HashMap::with_capacity(11);
+        let mut map = HashMap::with_capacity(13);
         map.insert(EcosystemKind::Java, java);
+        map.insert(
+            EcosystemKind::Kotlin,
+            curated_catalog(EcosystemKind::Kotlin, platform),
+        );
         map.insert(EcosystemKind::Go, go);
         map.insert(EcosystemKind::Rust, rust);
         map.insert(EcosystemKind::Zig, zig);
+        map.insert(
+            EcosystemKind::Cpp,
+            curated_catalog(EcosystemKind::Cpp, platform),
+        );
         map.insert(EcosystemKind::Node, node);
         map.insert(EcosystemKind::Python, python);
         map.insert(

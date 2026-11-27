@@ -3,10 +3,10 @@
 use std::path::{Path, PathBuf};
 
 use crate::toolchains_catalog::{
-    clangd_zip_url, codelldb_vsix_url, jq_binary_url, rust_analyzer_gz_url, uv_tarball_url,
-    zls_tarball_url, EcosystemKind, TargetPlatform, BASH_LSP_NPM_PACKAGES, DEBUGPY_PKG, DLV_PKG,
-    GOPLS_PKG, JAVA_DEBUG_JAR_NAME, JAVA_DEBUG_JAR_URL, JDTLS_TARBALL_URL, JSON_LSP_NPM_PACKAGES,
-    JS_DEBUG_TARBALL_URL, PYRIGHT_PKG, TS_LSP_NPM_PACKAGES,
+    clangd_zip_url, codelldb_vsix_url, jq_binary_url, kotlin_lsp_zip_url, rust_analyzer_gz_url,
+    uv_tarball_url, zls_tarball_url, EcosystemKind, TargetPlatform, BASH_LSP_NPM_PACKAGES,
+    DEBUGPY_PKG, DLV_PKG, GOPLS_PKG, JAVA_DEBUG_JAR_NAME, JAVA_DEBUG_JAR_URL, JDTLS_TARBALL_URL,
+    JSON_LSP_NPM_PACKAGES, JS_DEBUG_TARBALL_URL, PYRIGHT_PKG, TS_LSP_NPM_PACKAGES,
 };
 
 use super::installer::{
@@ -218,6 +218,45 @@ pub(super) async fn install_local_lsp(
             make_executable(&dest)?;
             Ok(dest.to_string_lossy().into_owned())
         }
+        EcosystemKind::Kotlin => {
+            let zip = tmp.join("kotlin-language-server.zip");
+            download_https_to_file(mgr, job_id, &kotlin_lsp_zip_url(), &zip, None, 65).await?;
+            let dest = root.join("kotlin/lsp");
+            let _ = tokio::fs::remove_dir_all(&dest).await;
+            tokio::fs::create_dir_all(&dest)
+                .await
+                .map_err(|e| e.to_string())?;
+            run_local_cmd(
+                mgr,
+                job_id,
+                75,
+                Path::new("unzip"),
+                &[
+                    "-q",
+                    "-o",
+                    &zip.to_string_lossy(),
+                    "-d",
+                    &dest.to_string_lossy(),
+                ],
+                &[],
+            )
+            .await?;
+            let _ = tokio::fs::remove_file(&zip).await;
+            let bin = [
+                dest.join("server/bin/kotlin-language-server"),
+                dest.join("bin/kotlin-language-server"),
+            ]
+            .into_iter()
+            .find(|p| p.is_file())
+            .ok_or("kotlin-language-server archive missing bin/kotlin-language-server")?;
+            make_executable(&bin)?;
+            let bin_dir = root.join("kotlin/bin");
+            tokio::fs::create_dir_all(&bin_dir)
+                .await
+                .map_err(|e| e.to_string())?;
+            relink_current(&bin_dir.join("kotlin-language-server"), &bin);
+            Ok(bin.to_string_lossy().into_owned())
+        }
         EcosystemKind::Node => {
             let npm = resolve_best_sdk_bin(mgr, root, EcosystemKind::Node, "npm")
                 .ok_or("Node.js/npm required first")?;
@@ -310,7 +349,7 @@ pub(super) async fn install_local_dap(
         .await
         .map_err(|e| e.to_string())?;
     match eco {
-        EcosystemKind::Java => {
+        EcosystemKind::Java | EcosystemKind::Kotlin => {
             let jar = root.join("java/dap").join(JAVA_DEBUG_JAR_NAME);
             download_https_to_file(mgr, job_id, JAVA_DEBUG_JAR_URL, &jar, None, 85).await?;
             Ok(jar.to_string_lossy().into_owned())
