@@ -160,7 +160,7 @@ pub(super) async fn start<S: IdeCtx>(
                 let ctx = ctx.clone();
                 async move { ctx.security_scan_busy().await }
             },
-            move |_, cancel| async move {
+            move |_, cancel, _| async move {
                 let roots = project_roots(&job_ctx, &user, &project).await?;
                 let (target, root) = eligible(&job_ctx, &user, &project, &roots, false)
                     .await?
@@ -198,11 +198,13 @@ pub(super) async fn enqueue_scheduled<S: IdeCtx>(
                 let ctx = load_ctx.clone();
                 async move { ctx.security_scan_busy().await }
             },
-            move |settings, cancel| async move {
+            move |settings, cancel, busy| async move {
                 let roots = project_roots(&job_ctx, &user, &project).await?;
-                let (mut runs, mut findings) =
-                    worker.scan_sources(&roots, &settings, &cancel).await?;
+                let (mut runs, mut findings) = worker
+                    .scan_sources(&roots, &settings, &cancel, &busy)
+                    .await?;
                 if let Some((expected, _)) = expected {
+                    otto_security::wait_for_idle(&busy, &cancel).await?;
                     if let Some((target, root)) = eligible(&job_ctx, &user, &project, &roots, true)
                         .await?
                         .filter(|(target, _)| {

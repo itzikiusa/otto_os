@@ -14,5 +14,5 @@ mod service;
 mod store;
 mod types;
 
-pub use service::SecurityScans;
+pub use service::{wait_for_idle, SecurityScans};
 pub use types::*;

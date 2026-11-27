@@ -13,6 +13,9 @@ Enter a five-field cron and an IANA timezone to schedule scans. Select
 **Preview next runs** to see the next five occurrences. Clear the cron field
 and save to disable it. Otto's scheduled-task supervisor serves the latest
 missed occurrence when it wakes after sleep.
+For legacy projects without an owner, scheduled scans run as the person who
+saved the schedule. Re-save any older schedule on an ownerless project to
+activate it under your account.
 
 Choose a completed scan to review findings by severity and location. Open
 a finding's file, suppress it with a reason, or restore it from **Show
@@ -39,6 +42,8 @@ query string, or a body. The audit stays at the confirmed URL and checks the
 response's browser security headers and cookie attributes. The audit stores
 rule descriptions and fix hints without saving cookie values. It uses a
 ten-second deadline and the project scan queue.
+Choose a URL that accepts unauthenticated HEAD requests and returns a success
+status. If the URL redirects, confirm the final URL instead.
 
 Enable **Include in scheduled scans** when confirming the URL to allow future
 scheduled audits while the same configuration is running. A changed URL,
@@ -78,8 +83,8 @@ writes within the scan cache and output directories. It discards matched
 secret text and snippets before saving findings.
 
 Across projects Otto runs one scan at a time and waits for machine load and
-memory pressure to fall before starting. By default the engine runs at
-background priority with one worker, a sampled 1 GiB RSS limit and a
+memory pressure to fall before starting and between scan steps. By default
+the engine runs at background priority with one worker, a sampled 1 GiB RSS limit and a
 180-second timeout per folder. Change the worker count, memory limit or timeout
 in project settings. Cancelling a scan stops the scanner's process group.
 

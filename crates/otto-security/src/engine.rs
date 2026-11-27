@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -68,17 +69,22 @@ impl Engine {
         read_json(&self.dir.join("engine.json")).await
     }
 
-    pub(crate) async fn execute(
+    pub(crate) async fn execute<Fut>(
         &self,
         roots: &[PathBuf],
         settings: &ScanSettings,
         cancel: &CancellationToken,
-    ) -> Result<(crate::EngineRun, Vec<Finding>)> {
+        busy: &(impl Fn() -> Fut + Sync),
+    ) -> Result<(crate::EngineRun, Vec<Finding>)>
+    where
+        Fut: Future<Output = bool> + Send,
+    {
         if !cfg!(target_os = "macos") {
             return Err(Error::Invalid(
                 "Security scans require macOS Seatbelt.".into(),
             ));
         }
+        crate::wait_for_idle(busy, cancel).await?;
         tokio::fs::create_dir_all(&self.dir)
             .await
             .map_err(io_error)?;
@@ -140,12 +146,14 @@ impl Engine {
         let cache_context = crate::incremental::CacheContext::new(&self.dir, &key, settings);
         let mut findings = Vec::new();
         for root in roots {
+            crate::wait_for_idle(busy, cancel).await?;
             let plan = cache_context.plan(root, self.kind, cancel).await?;
             let (run, results) = match &plan.selection {
                 crate::incremental::Selection::Files(files) if files.is_empty() => {
                     (ScanMetrics::default(), Vec::new())
                 }
                 selection => {
+                    crate::wait_for_idle(busy, cancel).await?;
                     self.scan_root(
                         &program,
                         &cache,
@@ -749,7 +757,10 @@ mod tests {
             timeout_secs: 300,
             ..Default::default()
         };
-        let (run, findings) = engine.execute(&[root], &settings, &cancel).await.unwrap();
+        let (run, findings) = engine
+            .execute(&[root], &settings, &cancel, &|| async { false })
+            .await
+            .unwrap();
         let (version, metrics) = (run.version, run.metrics);
         println!(
             "Trivy {} full scan of Otto: {} findings, wall={} ms, sampled peak CPU={:.1}%, peak RSS={} MiB",
@@ -797,7 +808,9 @@ mod tests {
             };
             let start = Instant::now();
             let (full, _) = engine
-                .execute(std::slice::from_ref(&root), &settings, &cancel)
+                .execute(std::slice::from_ref(&root), &settings, &cancel, &|| async {
+                    false
+                })
                 .await
                 .unwrap();
             assert_eq!(full.mode, crate::ScanMode::Full);
@@ -811,7 +824,9 @@ mod tests {
                 .unwrap();
                 let start = Instant::now();
                 let (incremental, findings) = engine
-                    .execute(std::slice::from_ref(&root), &settings, &cancel)
+                    .execute(std::slice::from_ref(&root), &settings, &cancel, &|| async {
+                        false
+                    })
                     .await
                     .unwrap();
                 assert_eq!(incremental.mode, crate::ScanMode::Incremental);
@@ -821,7 +836,9 @@ mod tests {
             }
             let start = Instant::now();
             let (cached, _) = engine
-                .execute(std::slice::from_ref(&root), &settings, &cancel)
+                .execute(std::slice::from_ref(&root), &settings, &cancel, &|| async {
+                    false
+                })
                 .await
                 .unwrap();
             assert_eq!(cached.mode, crate::ScanMode::Cached);

@@ -85,23 +85,34 @@ impl SecurityScans {
         Roots: Future<Output = Result<Vec<PathBuf>>> + Send,
     {
         let service = self.clone();
-        self.enqueue_job(pool, project, busy, move |settings, cancel| async move {
-            let roots = tokio::select! {
-                biased;
-                _ = cancel.cancelled() => return Err(cancelled()),
-                result = resolve_roots() => result?,
-            };
-            service.scan_sources(&roots, &settings, &cancel).await
-        })
+        self.enqueue_job(
+            pool,
+            project,
+            busy,
+            move |settings, cancel, busy| async move {
+                let roots = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => return Err(cancelled()),
+                    result = resolve_roots() => result?,
+                };
+                service
+                    .scan_sources(&roots, &settings, &cancel, &busy)
+                    .await
+            },
+        )
         .await
     }
 
-    pub async fn scan_sources(
+    pub async fn scan_sources<Fut>(
         &self,
         roots: &[PathBuf],
         settings: &ScanSettings,
         cancel: &CancellationToken,
-    ) -> Result<(Vec<EngineRun>, Vec<Finding>)> {
+        busy: &(impl Fn() -> Fut + Sync),
+    ) -> Result<(Vec<EngineRun>, Vec<Finding>)>
+    where
+        Fut: Future<Output = bool> + Send,
+    {
         let mut runs = Vec::new();
         let mut findings = Vec::new();
         for (engine, only_sast) in [(&self.engine, false), (&self.sast, true)] {
@@ -110,7 +121,7 @@ impl SecurityScans {
                 .checks
                 .retain(|check| (*check == crate::Check::Sast) == only_sast);
             if !config.checks.is_empty() {
-                let (run, mut result) = engine.execute(roots, &config, cancel).await?;
+                let (run, mut result) = engine.execute(roots, &config, cancel, busy).await?;
                 runs.push(run);
                 findings.append(&mut result);
             }
@@ -128,7 +139,7 @@ impl SecurityScans {
     where
         F: Fn() -> Fut + Send + Sync + 'static,
         Fut: Future<Output = bool> + Send,
-        J: FnOnce(ScanSettings, CancellationToken) -> JobFuture + Send + 'static,
+        J: FnOnce(ScanSettings, CancellationToken, F) -> JobFuture + Send + 'static,
         JobFuture: Future<Output = Result<(Vec<EngineRun>, Vec<Finding>)>> + Send,
     {
         self.recover(&pool).await?;
@@ -157,20 +168,11 @@ impl SecurityScans {
                     _ = cancel.cancelled() => return Err(cancelled()),
                     permit = service.queue.acquire() => permit.expect("scan queue never closes"),
                 };
-                let wait_for_idle = async {
-                    while busy().await {
-                        tokio::time::sleep(Duration::from_secs(5)).await;
-                    }
-                };
-                tokio::select! {
-                    biased;
-                    _ = cancel.cancelled() => return Err(cancelled()),
-                    () = wait_for_idle => {}
-                }
+                wait_for_idle(&busy, &cancel).await?;
                 if cancel.is_cancelled() || !store::start(&pool, &id).await? {
                     return Err(cancelled());
                 }
-                let (runs, mut findings) = job(settings, cancel.clone()).await?;
+                let (runs, mut findings) = job(settings, cancel.clone(), busy).await?;
                 findings.sort_unstable_by(|a, b| {
                     a.severity
                         .cmp(&b.severity)
@@ -218,6 +220,22 @@ impl SecurityScans {
     }
 }
 
+pub async fn wait_for_idle<Fut>(busy: &impl Fn() -> Fut, cancel: &CancellationToken) -> Result<()>
+where
+    Fut: Future<Output = bool>,
+{
+    let idle = async {
+        while busy().await {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    };
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err(cancelled()),
+        () = idle => Ok(()),
+    }
+}
+
 fn validate(settings: &mut ScanSettings) -> Result<()> {
     if settings.checks.is_empty()
         || settings.checks.contains(&crate::Check::Dast)
@@ -249,4 +267,153 @@ fn validate(settings: &mut ScanSettings) -> Result<()> {
     settings.checks.sort_unstable();
     settings.checks.dedup();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Check;
+
+    #[test]
+    fn settings_reject_invalid_scopes_and_resource_limits_and_deduplicate_checks() {
+        for settings in [
+            ScanSettings {
+                checks: vec![],
+                ..Default::default()
+            },
+            ScanSettings {
+                checks: vec![Check::Dast],
+                ..Default::default()
+            },
+            ScanSettings {
+                parallelism: 3,
+                ..Default::default()
+            },
+            ScanSettings {
+                memory_mib: 255,
+                ..Default::default()
+            },
+            ScanSettings {
+                timeout_secs: 901,
+                ..Default::default()
+            },
+            ScanSettings {
+                excludes: vec!["../other".into()],
+                ..Default::default()
+            },
+            ScanSettings {
+                excludes: vec!["invalid[".into()],
+                ..Default::default()
+            },
+        ] {
+            assert!(
+                matches!(validate(&mut settings.clone()), Err(Error::Invalid(_))),
+                "{settings:?}"
+            );
+        }
+        let mut settings = ScanSettings {
+            checks: vec![Check::Sast, Check::Sast],
+            excludes: vec!["generated/**".into()],
+            ..Default::default()
+        };
+        validate(&mut settings).unwrap();
+        assert_eq!(settings.checks, [Check::Sast]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn queued_scan_yields_and_can_cancel_between_folder_launches() {
+        use std::os::unix::fs::PermissionsExt;
+        use tokio::sync::Notify;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let service = Arc::new(SecurityScans::new(&root.join("tools")));
+        let tools = root.join("tools/security-trivy");
+        let binary = tools.join("releases/1.2.3/trivy");
+        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        std::fs::write(
+            &binary,
+            r#"#!/bin/sh
+while [ "$1" != --output ]; do shift; done
+printf '%s' '{"Results":[]}' > "$2"
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        crate::engine::write_json(
+            &tools.join("engine.json"),
+            &crate::EngineVersion {
+                version: "1.2.3".into(),
+                checked_at: store::now(),
+                updated_at: store::now(),
+            },
+        )
+        .await
+        .unwrap();
+        crate::engine::write_json(&tools.join("release-attempt.json"), &store::now())
+            .await
+            .unwrap();
+        let roots = [root.join("first"), root.join("second")];
+        for folder in &roots {
+            std::fs::create_dir(folder).unwrap();
+            std::fs::write(folder.join("test.txt"), "fixture").unwrap();
+        }
+
+        let pool = otto_state::db::test_pool().await;
+        sqlx::query("INSERT INTO ide_named_projects (id) VALUES ('project')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        service
+            .configure(
+                &pool,
+                "project",
+                ScanSettings {
+                    checks: vec![Check::Secret],
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let yielded = Arc::new(Notify::new());
+        let cache = tools.join("result-cache");
+        let scan = service
+            .enqueue(
+                pool.clone(),
+                "project".into(),
+                move || async move { Ok(Vec::from(roots)) },
+                {
+                    let cache = cache.clone();
+                    let yielded = yielded.clone();
+                    move || {
+                        let cache = cache.clone();
+                        let yielded = yielded.clone();
+                        async move {
+                            let busy = cache.exists();
+                            if busy {
+                                yielded.notify_one();
+                            }
+                            busy
+                        }
+                    }
+                },
+            )
+            .await
+            .unwrap();
+        let observed = tokio::time::timeout(Duration::from_secs(5), yielded.notified()).await;
+        let files = std::fs::read_dir(cache)
+            .expect("first folder did not complete")
+            .count();
+        assert!(
+            observed.is_ok(),
+            "checked no load after first folder; {files} folders completed"
+        );
+        assert_eq!(files, 1);
+        let cancelled = service.cancel(&pool, "project", &scan.id).await.unwrap();
+        assert_eq!(cancelled.status, crate::ScanStatus::Cancelled);
+        tokio::time::timeout(Duration::from_secs(1), service.shutdown())
+            .await
+            .unwrap();
+    }
 }
