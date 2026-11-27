@@ -2417,6 +2417,82 @@ async fn kotlin_round3_fixes_template_braces_ssh_kotest_configless_jdk_and_regis
     );
 }
 
+/// BUG2-6 on the Debug path: the gutter's main item sends its class as `test_name`, so a
+/// gutter Debug of a main in `src/main` must still launch on main sources only.
+#[tokio::test]
+async fn gutter_debug_of_a_java_main_runs_on_main_sources_only() {
+    use crate::dap::{resolve_dap_adapter, DapAdapterTransport, DapStartContext};
+    use crate::types::IdeStartDebugReq;
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let module = root.join("svc");
+    let src = module.join("src/main/java/com/acme");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::create_dir_all(module.join("src/test/java/com/acme")).unwrap();
+    std::fs::write(
+        module.join("pom.xml"),
+        "<project><groupId>com.acme</groupId><artifactId>svc</artifactId><version>1</version></project>",
+    )
+    .unwrap();
+    std::fs::write(
+        src.join("App.java"),
+        "package com.acme;\npublic class App {\n    public static void main(String[] a) {}\n}\n",
+    )
+    .unwrap();
+    let exe = |p: std::path::PathBuf, body: &str| {
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    let jdk = root.join("jdk");
+    exe(jdk.join("bin/java"), "exit 0");
+    exe(jdk.join("bin/javac"), "exit 0");
+    let seen = root.join("mvn-call");
+    exe(
+        root.join("bin/mvn"),
+        &format!(
+            r#"echo "$*" > {}; for a in "$@"; do case "$a" in -Dmdep.outputFile=*) printf '/m2/a.jar' > "${{a#-Dmdep.outputFile=}}";; esac; done"#,
+            seen.display()
+        ),
+    );
+    let module_s = module.to_string_lossy().into_owned();
+    let req: IdeStartDebugReq = serde_json::from_value(serde_json::json!({
+        "target": { "kind": "local", "root": module_s },
+        "language": "java",
+        "launch": {
+            "program": "com.acme.App",
+            "cwd": module_s,
+            "test_name": "com.acme.App",
+            "inherit_shell_env": false,
+            "env": {
+                "JAVA_HOME": jdk.to_string_lossy(),
+                "PATH": format!("{}:/usr/bin:/bin", root.join("bin").display()),
+            }
+        }
+    }))
+    .unwrap();
+    let ctx = DapStartContext::new().with_caller_is_root(true);
+    let resolved = resolve_dap_adapter(&root.join("data"), &req, &ctx)
+        .await
+        .expect("Java debug plan");
+    let DapAdapterTransport::JavaJdwpBridge(spec) = resolved.transport else {
+        panic!("expected the JDWP bridge");
+    };
+    assert_eq!(spec.main_class, "com.acme.App");
+    assert!(
+        !spec.classpath.contains("test-classes"),
+        "a main in src/main must not run on test classes: {}",
+        spec.classpath
+    );
+    let call = std::fs::read_to_string(&seen).unwrap();
+    assert!(
+        call.contains(" compile dependency:build-classpath -Dmdep.includeScope=runtime"),
+        "{call}"
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn cpp_review_fixes_clangd_llvm_codelldb_core_unreal_cc_override_cmake_and_conan() {
@@ -3077,6 +3153,7 @@ fn cpp_round5_unmapped_project_sources_fail_clearly_instead_of_standalone_compil
     );
     #[cfg(unix)]
     {
+        #[allow(clippy::disallowed_methods)] // runs the refusal script itself
         let out = std::process::Command::new(&prog).args(&a).output().unwrap();
         assert_eq!(out.status.code(), Some(1));
         assert_eq!(String::from_utf8_lossy(&out.stderr).trim(), msg.as_str());
