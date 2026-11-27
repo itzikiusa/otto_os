@@ -117,9 +117,11 @@ export function createGraphSelection(h: GraphSelectionHost) {
   }
 
   // Landing: History opens on the work, so the detail pane is never an empty
-  // "select a commit" — where it would be a sheet over the graph it stays
-  // shut (a phone lands on the Branches list). Once per mount; a branch deep
-  // link or a reveal request then moves it.
+  // "select a commit": the WIP row with uncommitted changes (on a phone, a
+  // sheet over the Branches list — the commit card first), else the
+  // checked-out commit, but only where the pane sits beside the graph (a
+  // phone lands on the Branches list). Once per mount; a branch deep link or
+  // a reveal request then moves it.
   let landed = false;
   $effect(() => {
     if (landed) return;
@@ -128,7 +130,9 @@ export function createGraphSelection(h: GraphSelectionHost) {
     landed = true;
     // After a tick: the Detail pane has measured its row by then (compact).
     untrack(() => void tick().then(() => {
-      if (!wipSelected && !selectedSha && !h.compact) reopen();
+      if (wipSelected || selectedSha) return;
+      if (dirty) openWip();
+      else if (!h.compact) selectHead();
     }));
   });
 

@@ -740,11 +740,11 @@
     font-family: var(--font-mono);
   }
 
-  /* A narrow pane (a phone, a sheet): table-layout:fixed pins the gutter/sign
-     columns to their declared widths and hands the rest to the code column,
-     so a long unbroken line wraps INSIDE that column instead of widening the
-     table past the pane. */
-  @container cdiff (max-width: 480px) {
+  /* A narrow pane (a phone, a sheet, a tablet's or a default desktop pane):
+     table-layout:fixed pins the gutter/sign columns to their declared widths
+     and hands the rest to the code column, so a long unbroken line wraps
+     INSIDE that column instead of widening the table past the pane. */
+  @container cdiff (max-width: 640px) {
     .df-hunks { overflow-x: hidden; }
     .dl-table { table-layout: fixed; width: 100%; }
     .dl-code {
