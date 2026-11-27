@@ -125,7 +125,7 @@ test('a failed step under another card says its failure in the pane (CR1-047)', 
   await expect(stepPane(page).getByTestId('wf-step-error')).toContainText('API Error: 500');
 });
 
-test('a step thread offers neither an agent restart nor Open in Threads (CR2-009)', async ({ page }) => {
+test('a live step thread offers no agent restart, shows the Threads composer + notice, and opens in Threads (CR2-009)', async ({ page }) => {
   const wf = await createWorkflow(api, 'E2E Live step thread', chain(agentStep('slow', 'Slow step', ['sleep 60000'])));
   const run = await startRun(api, wf);
   const live = await waitRun(api, run, (r) => !!r.nodes.find((n) => n.node_id === 'slow')?.thread?.thread_id);
@@ -136,12 +136,52 @@ test('a step thread offers neither an agent restart nor Open in Threads (CR2-009
   await api.post(`/runtime-sessions/${thread}/children`, { prompt: 'hi', targets: [{ provider: 'claude' }], title: 'Step subagent' });
   await openRun(page, wf, run, 'slow');
   const conv = page.getByTestId('wf-step-conversation');
+  await expect(conv.getByTestId('embedded-thread-header')).toBeVisible({ timeout: 20_000 });
+  await expect(conv.getByTestId('wf-step-live-note')).toContainText('This conversation belongs to the run. What you send is added to this step.');
+  await expect(conv.getByTestId('runtime-composer')).toBeVisible();
   await conv.getByTestId('runtime-linked').click({ timeout: 20_000 });
   const list = page.getByRole('list', { name: 'Subagents' });
   await expect(list).toContainText('Step subagent');
-  await expect(list.getByRole('button', { name: /in Threads$/ })).toHaveCount(0);
   await page.keyboard.press('Escape');
   await expect(conv.getByTestId('runtime-mcp-changed')).toHaveCount(0);
+  // Open in Threads routes directly to the workflow thread even though it is not in Threads' lists.
+  await conv.getByTestId('embedded-thread-open').click();
+  await expect(page).toHaveURL(new RegExp(`#/threads/${thread}$`), { timeout: 15_000 });
+  await expect(page.getByTestId(`runtime-thread-${thread}`)).toBeVisible({ timeout: 20_000 });
+});
+
+test('full timeline without a fold, live agent-opened sub-thread row, and opening its card in the pane', async ({ page }) => {
+  const wf = await createWorkflow(api, 'E2E Live sub-thread', chain(agentStep('work', 'Work step', ['child codex sleep 60000', 'sleep 60000'])));
+  const run = await startRun(api, wf);
+  await waitRun(api, run, (r) => r.nodes.some((n) => n.node_id === 'work' && n.status === 'running' && !!n.thread?.thread_id));
+  await openRun(page, wf, run, 'work');
+
+  const conv = page.getByTestId('wf-step-conversation');
+  await expect(conv).toBeVisible({ timeout: 20_000 });
+  // The sub-thread appears as a live row under the step while both are still running.
+  const childRow = page.getByTestId('wf-step-child').first();
+  await expect(childRow).toBeVisible({ timeout: 25_000 });
+  await expect(childRow).toHaveAttribute('data-status', 'running');
+  await expect(page.getByTestId('wf-run-page')).toHaveAttribute('data-state', 'running');
+
+  // Full timeline stays unfolded (no "N earlier steps" or "Worked for …" folds).
+  await expect(conv.getByTestId('runtime-earlier-steps')).toHaveCount(0);
+  await expect(conv.locator('[data-testid^="runtime-fold-"]')).toHaveCount(0);
+
+  // Clicking the sub-thread card inside the conversation opens it in the same pane and selects its row.
+  const childCardOpen = conv.locator('[data-testid^="runtime-child-"] [data-testid="runtime-item-open"]').first();
+  await expect(childCardOpen).toBeVisible({ timeout: 20_000 });
+  const childThreadId = await childRow.getAttribute('data-child-id');
+  expect(childThreadId).toBeTruthy();
+  await childCardOpen.click();
+  await expect(stepPane(page)).toHaveAttribute('data-child-id', childThreadId!, { timeout: 15_000 });
+  await expect(page.locator(`[data-testid="wf-step-child"][data-child-id="${childThreadId}"]`)).toHaveAttribute('aria-current', 'true');
+  await expect(page.getByTestId('wf-crumb-parent')).toBeVisible();
+
+  // Back crumb returns to the parent step.
+  await page.getByTestId('wf-crumb-parent').click();
+  await expect(stepPane(page)).not.toHaveAttribute('data-child-id', /.+/);
+  await expect(stepRow(page, 'work')).toHaveAttribute('aria-current', 'true');
 });
 
 test('Stop run… asks first; Stop is never beside a primary', async ({ page }) => {
@@ -207,8 +247,11 @@ test('a settled step\'s conversation is read-only: no Revive, Stop or limit card
   await waitRun(api, run, settled);
   await openRun(page, wf, run, 'one');
   await expect(page.getByTestId('wf-step-conversation')).toBeVisible({ timeout: 20_000 });
-  // The step persona's answer (fake_script.rs): the real thread, read-only.
+  // The step persona's answer (fake_script.rs): the real thread, read-only once settled, unfolded.
   await expect(page.getByTestId('wf-step-conversation').getByText('step done').first()).toBeVisible();
+  await expect(page.getByTestId('wf-step-conversation').getByTestId('runtime-composer')).toHaveCount(0);
+  await expect(page.getByTestId('wf-step-conversation').getByTestId('runtime-earlier-steps')).toHaveCount(0);
+  await expect(page.getByTestId('wf-step-conversation').locator('[data-testid^="runtime-fold-"]')).toHaveCount(0);
   for (const id of ['runtime-closed', 'runtime-reopen', 'runtime-background', 'runtime-background-stop-all']) await expect(page.getByTestId(id)).toHaveCount(0);
 });
 
