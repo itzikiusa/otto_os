@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 use crate::toolchains_catalog::{
     clangd_zip_url, codelldb_vsix_url, jq_binary_url, kotlin_lsp_zip_url, netcoredbg_tarball_url,
     rust_analyzer_gz_url, uv_tarball_url, zls_tarball_url, EcosystemKind, TargetPlatform,
-    BASH_LSP_NPM_PACKAGES, CSHARP_LS_TOOL,
-    DEBUGPY_PKG, DLV_PKG, GOPLS_PKG, JAVA_DEBUG_JAR_NAME, JAVA_DEBUG_JAR_URL, JDTLS_TARBALL_URL,
-    JSON_LSP_NPM_PACKAGES, JS_DEBUG_TARBALL_URL, PYRIGHT_PKG, TS_LSP_NPM_PACKAGES,
+    BASH_LSP_NPM_PACKAGES, CSHARP_LS_TOOL, DEBUGPY_PKG, DLV_PKG, GOPLS_PKG, JAVA_DEBUG_JAR_NAME,
+    JAVA_DEBUG_JAR_URL, JDTLS_TARBALL_URL, JSON_LSP_NPM_PACKAGES, JS_DEBUG_TARBALL_URL,
+    PYRIGHT_PKG, TS_LSP_NPM_PACKAGES,
 };
 
 use super::installer::{
