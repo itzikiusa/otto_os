@@ -2,7 +2,7 @@
 // core modules — Threads, Workflows, Connections, Git, API and Usage — for the occasions a
 // thinner app on a phone or tablet helps. The full app stays the default
 // everywhere; the person turns light on from the bottom nav's More sheet,
-// Navigator / ShortNavDrawer, Settings ▸ Appearance, or ⌘K, and back the same ways.
+// Navigator / the phone drawer (PhoneNavDrawer), Settings ▸ Appearance, or ⌘K, and back the same ways.
 //
 // While it is on (and on any phone/tablet or coarse-pointer touch device):
 // - every navigation surface offers only the six (lib/sidebar.ts

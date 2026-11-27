@@ -118,9 +118,9 @@
   // (phones) keeps the dropdown.
   const projectTabsOn = $derived(!stack && !ide.collabIsGuest && idePreferences.current.projectTabs);
   const pane = $derived(ideLayout.pane);
-  // One owner for the page's chrome: a tablet folds Otto's navigator to its icon rail (an iPad
-  // portrait then has room for the workbench, I4-24); the workbench's status strip replaces the shell's.
-  $effect(() => pageChrome.set({ foldNav: true, hideStatusBar: !stack }));
+  // One owner for the page's chrome: the workbench's status strip replaces the shell's (a tablet
+  // shows Otto's Rail by default, so an iPad portrait has room for the workbench, I4-24).
+  $effect(() => pageChrome.set({ hideStatusBar: !stack }));
   // Opening the agent / build-tool window hides the explorer rail when the editor would
   // drop under ~720 px, and brings it back when that window closes (ideExplorerRoom.ts).
   // A live-session guest works only in the host's open files (no tree, run, agent or

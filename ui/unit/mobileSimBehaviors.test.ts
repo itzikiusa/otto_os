@@ -127,7 +127,9 @@ test('decodeBinaryFrame: decodes valid frames and rejects malformed headers/vers
 
 // ── 3. Viewport tablet rail toggle (FE-8) ─────────────────────────────────
 
-test('viewport.toggleTabletRail folds/unfolds deterministically on tablets', () => {
+test('a tablet shows the Rail by default; the Navigator / Rail choice is persisted', () => {
+  const store = new Map<string, string>();
+  const localStorage = { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => void store.set(k, v) };
   const mql = (matches: boolean) => ({
     matches,
     addEventListener: () => {},
@@ -137,6 +139,7 @@ test('viewport.toggleTabletRail folds/unfolds deterministically on tablets', () 
     new URL('../src/lib/stores/viewport.svelte.ts', import.meta.url),
     {},
     {
+      localStorage,
       window: {
         matchMedia: (q: string) => {
           if (q.includes('max-width: 640px')) return mql(false);
@@ -149,16 +152,21 @@ test('viewport.toggleTabletRail folds/unfolds deterministically on tablets', () 
   const vp = mod.viewport;
   assert.equal(vp.isTablet, true);
   assert.equal(vp.navDrawer, false);
-  assert.equal(vp.tabletNavFolded, null);
+  assert.equal(vp.tabletNavFolded, true, 'the Rail by default (design.md §2)');
 
   vp.toggleTabletRail();
-  assert.equal(vp.tabletNavFolded, true, 'first toggle folds from null');
+  assert.equal(vp.tabletNavFolded, false, 'first toggle expands the Navigator');
+  assert.equal(store.get(mod.TABLET_NAV_KEY), 'navigator', 'the choice is persisted');
   vp.toggleTabletRail();
-  assert.equal(vp.tabletNavFolded, false, 'second toggle unfolds');
-  vp.toggleTabletRail(false);
-  assert.equal(vp.tabletNavFolded, true, 'explicit expanded=false folds');
+  assert.equal(vp.tabletNavFolded, true, 'second toggle folds');
   vp.toggleTabletRail(true);
   assert.equal(vp.tabletNavFolded, false, 'explicit expanded=true unfolds');
+  vp.toggleTabletRail(false);
+  assert.equal(vp.tabletNavFolded, true, 'explicit expanded=false folds');
+  assert.equal(store.get(mod.TABLET_NAV_KEY), 'rail');
+
+  const again = loadSource(new URL('../src/lib/stores/viewport.svelte.ts', import.meta.url), {}, { localStorage: { ...localStorage, getItem: () => 'navigator' }, window: { matchMedia: () => mql(false) } });
+  assert.equal(again.viewport.tabletNavFolded, false, 'a saved Navigator choice is read back');
 });
 
 // ── 4. Browser bookmarks store ────────────────────────────────────────────

@@ -36,6 +36,16 @@ function computeMode(): ViewportMode {
   return 'desktop';
 }
 
+/** The tablet's Navigator / Rail choice (design.md §2: Rail by default). */
+export const TABLET_NAV_KEY = 'otto.nav.tablet';
+function loadTabletFolded(): boolean {
+  try {
+    return localStorage.getItem(TABLET_NAV_KEY) !== 'navigator';
+  } catch {
+    return true;
+  }
+}
+
 function computeShort(): boolean {
   if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return false;
   return window.matchMedia(SHORT_QUERY).matches;
@@ -47,12 +57,17 @@ class ViewportStore {
   /** Short touch screen (phone landscape). Only the shell chrome follows it
    *  (`navDrawer`); module layouts keep their width-based `mode`. */
   short: boolean = $state(computeShort());
-  /** Tablet-only (641-1024px): user's explicit fold/unfold choice between the
-   *  220px Navigator and 44px Rail. null = follow the page default. */
-  tabletNavFolded: boolean | null = $state(null);
+  /** Tablet-only (641-1024px): the Rail (true, the default — design.md §2)
+   *  or the 220 px Navigator; the person's choice, persisted on this device. */
+  tabletNavFolded: boolean = $state(loadTabletFolded());
 
   toggleTabletRail(expanded?: boolean): void {
-    this.tabletNavFolded = expanded !== undefined ? !expanded : !(this.tabletNavFolded ?? false);
+    this.tabletNavFolded = expanded !== undefined ? !expanded : !this.tabletNavFolded;
+    try {
+      localStorage.setItem(TABLET_NAV_KEY, this.tabletNavFolded ? 'rail' : 'navigator');
+    } catch {
+      /* storage unavailable: the choice lasts this session */
+    }
   }
 
   // Hold references so the listeners can be (re)attached idempotently. Two

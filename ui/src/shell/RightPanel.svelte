@@ -66,7 +66,6 @@
 </script>
 
 <script lang="ts">
-  import { pageChrome } from '../lib/stores/pageChrome.svelte';
   // The Side panel (⌘J), on every page. One component in both states: the
   // vertical icon rail is always there (VS Code activity bar); clicking an
   // icon opens that tab's content beside the rail, clicking the shown tab
@@ -378,8 +377,6 @@
   />
 {/if}
 
-<!-- A page may hide the rail (Threads) until the person opens the panel. -->
-{#if !pageChrome.hideSideRail || open || forceOpen}
 <div class="rside" class:embedded={forceOpen}>
   {#if open || browserKept}
     <aside
@@ -532,7 +529,6 @@
     {/each}
   </div>
 </div>
-{/if}
 
 <style>
   .rpanel-card {

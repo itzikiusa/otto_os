@@ -50,6 +50,9 @@
   import { uiControl } from '../stores/uiControl.svelte';
   import { ctxMenu, type MenuItem } from '../contextmenu.svelte';
   import { FitGate, StyleWriter, WidthCache, nodeSig } from './headerFit';
+  import PhoneBack from './side/PhoneBack.svelte';
+  import { pageNav } from './side/pageNav.svelte';
+  import { SIDE_PANEL } from '../rightTabs';
 
   interface Props {
     title: string;
@@ -119,6 +122,22 @@
   // strip under its row (lib/components/AgentDrivingBar.svelte).
   $effect(() => (rootEl ? uiControl.claimBar(rootEl) : undefined));
   const hostsBar = $derived(!!rootEl && uiControl.barOwner === rootEl);
+  // The page's own top header (not one inside a panel or the side pane).
+  const pageTop = $derived(hostsBar && !isEmbedded && !isPopout);
+  // Phone: this header IS the one top row (design.md §7.1, §7.11) — ☰ on a
+  // list / top-level page or the list's ‹ Back on a page pushed from it
+  // (pageNav, from ListDetail), the page's title and actions, ⋯, and the
+  // Side panel last. No history arrows and no bell (the bell is at the top of
+  // the drawer). A narrow Mac window keeps the shell bar for its traffic lights.
+  let inCenter = $state(false);
+  $effect(() => {
+    void viewport.mode;
+    inCenter = !!rootEl?.closest('.mcenter');
+  });
+  const phoneRow = $derived(pageTop && inCenter && viewport.navDrawer && !isTauri);
+  const back = $derived(phoneRow ? pageNav.back : null);
+  // Desktop / tablet: a hidden list pane's "Show <name>" (design.md §7.3).
+  const showPane = $derived(pageTop && !viewport.isPhone ? pageNav.show : null);
   // A pop-out window's traffic lights live in its own title strip (shell).
   // In a side-by-side split they sit over whichever pane leads: the main
   // pane's header when the side pane trails, the side pane's when it leads.
@@ -223,6 +242,7 @@
       const lead = row?.querySelector<HTMLElement>(':scope > .ph-leading');
       const inlineTabs = row?.querySelector<HTMLElement>(':scope > .ph-tabs-inline');
       const pane = row?.querySelector<HTMLElement>(':scope > .pane-controls');
+      const side = row?.querySelector<HTMLElement>(':scope > .ph-side');
       const rowW = row ? row.clientWidth : 0;
       // The row's own padding and gap, as styled (a phone's are smaller than
       // the desktop 20 + 16 / 12: a constant 48 under-sized the actions there
@@ -232,7 +252,7 @@
       const chrome = rs ? parseFloat(rs.paddingInlineStart) + parseFloat(rs.paddingInlineEnd) + gap : 48;
       const leadW = lead ? lead.offsetWidth + gap : 0;
       const tabsW = inlineTabs ? inlineTabs.offsetWidth + gap : 0;
-      const paneW = pane ? pane.offsetWidth + gap : 0;
+      const paneW = (pane ? pane.offsetWidth + gap : 0) + (side ? side.offsetWidth + gap : 0);
       const room = row ? rowW - chrome - titleMin - leadW - tabsW - paneW : Infinity;
       if (rootEl && titleEl) styles.set(rootEl, rootEl.style, '--ph-title-min', `${titleMin}px`);
       styles.set(wrapEl, wrapEl.style, 'min-width', `${Math.max(0, Math.min(Math.ceil(keepW) + RING * 2, room))}px`);
@@ -396,13 +416,39 @@
   bind:this={rootEl}
   class="page-header-bar chrome-material {klass}"
   class:tauri-pad={padTraffic}
+  class:phone-top={phoneRow}
   class:has-below={tabsBelow}
   data-tauri-drag-region
   use:windowDrag
   data-testid="page-header"
 >
   <div class="ph-row">
-    {#if leading}<div class="ph-leading">{@render leading()}</div>{/if}
+    {#if leading || phoneRow || showPane}
+      <div class="ph-leading">
+        {#if back}
+          <PhoneBack label={back.label} onclick={back.onclick} />
+        {:else if phoneRow}
+          <button
+            type="button"
+            class="icon-btn ph-phone-btn"
+            onclick={() => (ui.navDrawerOpen = !ui.navDrawerOpen)}
+            title="Open navigator"
+            aria-label="Open navigator"
+            aria-haspopup="dialog"
+            aria-expanded={ui.navDrawerOpen}
+            data-testid="open-navigator"
+          >
+            <Icon name="sidebar" size={20} />
+          </button>
+        {/if}
+        {#if showPane}
+          <button type="button" class="icon-btn" onclick={showPane.onclick} title="Show {showPane.label} (⌘B)" aria-label="Show {showPane.label}" aria-keyshortcuts="Meta+B" data-testid="show-list-pane">
+            <Icon name="sidebar" size={14} />
+          </button>
+        {/if}
+        {@render leading?.()}
+      </div>
+    {/if}
     {#if tabs && !tabsBelow && tabsPlacement === 'start'}
       <div class="ph-tabs-inline">{@render tabs()}</div>
     {/if}
@@ -442,6 +488,20 @@
       {/if}
     </div>
     {#if hostsPane}<PaneControls />{:else if hostsPrimaryPane}<PaneControls pane="primary" />{/if}
+    {#if phoneRow}
+      <button
+        type="button"
+        class="icon-btn ph-phone-btn ph-side"
+        class:on={ui.rightOpenNow}
+        onclick={() => ui.toggleRight()}
+        title={SIDE_PANEL}
+        aria-label={SIDE_PANEL}
+        aria-expanded={ui.rightOpenNow}
+        data-testid="open-side-panel"
+      >
+        <Icon name="panel" size={20} />
+      </button>
+    {/if}
   </div>
   {#if tabs && tabsBelow}
     <div class="ph-tabs-below">{@render tabs()}</div>
@@ -665,6 +725,31 @@
       min-block-size: 44px;
       min-inline-size: 44px;
     }
+  }
+  /* Phone: the ONE top row (design.md §7.1). It reaches up into the status
+     bar strip like the shell bar it replaces, in the same chrome colour. */
+  .page-header-bar.phone-top {
+    background: var(--bg-sidebar);
+    border-bottom-color: var(--border);
+    margin-block-start: calc(-1 * var(--safe-top));
+    padding-block-start: var(--safe-top);
+  }
+  .phone-top .ph-row {
+    padding-inline: 2px;
+    gap: 2px;
+  }
+  .phone-top .ph-title-block {
+    max-width: none;
+    flex: 1 1 auto;
+    padding-inline-start: 4px;
+  }
+  .ph-phone-btn {
+    flex: none;
+    inline-size: 38px;
+    block-size: 44px;
+  }
+  .ph-phone-btn.on {
+    color: var(--accent-text);
   }
   .ph-tabs-below {
     display: flex;

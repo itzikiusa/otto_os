@@ -10,7 +10,6 @@
   import Icon from '../../lib/components/Icon.svelte';
   import { loadPaneWidth } from '../../lib/paneResizer';
   import { foldNavWhileMounted } from '../../lib/foldNavWhileMounted.svelte';
-  import { pageChrome } from '../../lib/stores/pageChrome.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { activity } from '../../lib/stores/activity.svelte';
   import { router } from '../../lib/router.svelte';
@@ -38,7 +37,6 @@
   const phone = $derived(viewport.isPhone);
   /** Phone: `#/agents` is the list, `#/agents/<id>` the session. */
   const phoneList = $derived(phone && !router.parts[1]);
-  onMount(() => pageChrome.set({ foldNav: true }));
   onMount(() =>
     foldNavWhileMounted({
       get: () => lsGet('otto_agents_fold_nav') !== '0',

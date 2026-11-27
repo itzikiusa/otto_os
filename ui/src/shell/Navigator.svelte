@@ -5,9 +5,8 @@
   import { RemovedWorkspacesChunk } from './lazyDialogs';
   import { LS_WS_RECENT, activityText, parseRecent, switcherItems, workspaceActivity } from './workspaceSwitch';
   import { lsGet } from '../lib/storage';
-  // Expanded 240px navigator: modules in foldable macOS source-list sections
-  // (Agents with its nested session lists in Work), workspaces section,
-  // user/settings at the bottom.
+  // Expanded 240px navigator: modules in foldable macOS source-list sections,
+  // workspaces section, user/settings at the bottom.
   import { navBadge } from '../lib/navBadge';
   import SidebarMore from './SidebarMore.svelte';
   import { navUsage } from '../lib/stores/navUsage.svelte';
@@ -26,6 +25,12 @@
   import { sidePane, splitMenuItems, navClick, SPLIT_HINT } from '../lib/stores/sidePane.svelte';
   import { viewport } from '../lib/stores/viewport.svelte';
   import NavLightToggle from './NavLightToggle.svelte';
+  import { listNav } from '../lib/components/side/listNav';
+  import type { Snippet } from 'svelte';
+
+  // `extras`: the phone drawer's rows the BottomNav "Menu" used to carry
+  // (Commands, Machine) — drawn at the top of the footer (PhoneNavDrawer).
+  let { extras }: { extras?: Snippet } = $props();
   import type { WorkspaceWithRole } from '../lib/api/types';
   import { tick, untrack } from 'svelte';
   import {
@@ -178,10 +183,7 @@
     const el = scrollEl;
     if (!el) return;
     void tick().then(() => {
-      const row =
-        el.querySelector<HTMLElement>('.nav-item.nested-item.active') ??
-        el.querySelector<HTMLElement>('.nav-item.active');
-      row?.scrollIntoView({ block: 'nearest' });
+      el.querySelector<HTMLElement>('.nav-item.active')?.scrollIntoView({ block: 'nearest' });
     });
   });
 
@@ -456,15 +458,17 @@
     <button
       class="icon-btn"
       onclick={() => (viewport.navDrawer ? (ui.navDrawerOpen = false) : viewport.isTablet ? viewport.toggleTabletRail(false) : ui.toggleRail())}
-      title={viewport.navDrawer ? 'Close sidebar' : 'Collapse sidebar'}
-      aria-label={viewport.navDrawer ? 'Close sidebar' : 'Collapse sidebar'}
-      aria-keyshortcuts={viewport.navDrawer ? undefined : 'Meta+1'}
+      title={viewport.navDrawer ? 'Close Navigator' : 'Collapse sidebar'}
+      aria-label={viewport.navDrawer ? 'Close Navigator' : 'Collapse sidebar'}
+      aria-keyshortcuts={viewport.navDrawer ? 'Escape' : 'Meta+1'}
     >
-      <Icon name="sidebar" size={14} />
+      <Icon name={viewport.navDrawer ? 'x' : 'sidebar'} size={14} />
     </button>
   </div>
 
-  <div class="nav-scroll" bind:this={scrollEl}>
+  <!-- ↑ / ↓ / Home / End walk the section heads and rows; → / ← open and
+       fold a section (use:listNav, the one keyboard walk of every list). -->
+  <div class="nav-scroll" bind:this={scrollEl} use:listNav={{ rows: '.group-head, .nav-item' }}>
     <div class="nav-section modules" data-testid="sidebar-modules">
       {#if ui.sidebarEditMode}
         <p class="edit-hint">Drag rows and section headers to reorder (or ⌥↑ / ⌥↓). Star to add to Favorites, eye to hide.</p>
@@ -618,6 +622,7 @@
   </div>
 
   <div class="nav-foot">
+    {@render extras?.()}
     {#if ui.sidebarEditMode}
       <!-- Customizing: a button row, not a nav row — "Done" drawn as the
            selected page read as if it were one. -->
@@ -919,10 +924,6 @@
   .nav-item-row .nav-item {
     flex: 1;
   }
-  .twisty {
-    width: 20px;
-    height: 20px;
-  }
   .nav-item {
     position: relative;
     display: flex;
@@ -991,15 +992,6 @@
   }
   .nav-item-row > .nav-item.active {
     background: transparent;
-  }
-  /* A focused session row is the quieter variant: a lighter tint, no bar —
-     the Agents row above it already carries the strong marker. */
-  .nav-item.nested-item.active {
-    background: var(--accent-soft);
-    font-weight: 500;
-  }
-  .nav-item.nested-item.active::before {
-    content: none;
   }
   /* ── Sections (macOS source-list headers) ───────────────────────────── */
   .nav-group + .nav-group {
@@ -1383,17 +1375,11 @@
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }
-  /* Touch: every navigation row and its disclosure twisty is a 40px target. */
+  /* Touch: every navigation row is a 40px target. */
   @media (pointer: coarse), (max-width: 640px) {
-    .nav-item,
-    .nested-item,
-    .nested-row .nested-item {
+    .nav-item {
       height: auto;
       min-block-size: 40px;
-    }
-    .twisty {
-      width: 40px;
-      height: 40px;
     }
   }
 </style>

@@ -161,7 +161,7 @@
   onMount(() => {
     // foldNav: an iPad folds Otto's navigator to its rail, so the thread list
     // gets the left column (App.svelte).
-    const restoreChrome = pageChrome.set({ hideSideRail: true, hideStatusBar: true, foldNav: true });
+    const restoreChrome = pageChrome.set({ hideStatusBar: true });
     const hadTransient = ui.rightTransient !== null;
     if (!hadTransient && ui.rightOpen) ui.rightTransient = { open: false, tab: ui.rightTab };
     return () => {

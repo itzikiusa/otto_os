@@ -1,25 +1,15 @@
-// A page's own, NON-persisted chrome trim (Threads, like T3: no side-panel
-// rail, no status bar). The shell reads it; the page sets it while mounted.
-// The rail still shows once the person opens the panel; the status bar still
-// shows while the daemon is disconnected.
-//
-// `foldNav`: on a tablet the shell's Navigator is a fixed 220 px column; a
-// page with its own list column (Threads) asks for the icon rail instead, as
-// desktop already folds it there (App.svelte). Expanding the rail still shows
-// the full Navigator (`ui.railExpanded`).
+// A page's own, NON-persisted chrome trim (Threads, like T3: no status bar).
+// The shell reads it; the page sets it while mounted. The status bar still
+// shows while the daemon is disconnected. (The Side panel is on every page —
+// design.md §1 — so no page hides its rail any more; a tablet shows the Rail
+// by default, so no page asks the shell to fold the Navigator either.)
 class PageChrome {
-  hideSideRail = $state(false);
   hideStatusBar = $state(false);
-  foldNav = $state(false);
 
-  set(opts: { hideSideRail?: boolean; hideStatusBar?: boolean; foldNav?: boolean }): () => void {
-    this.hideSideRail = !!opts.hideSideRail;
+  set(opts: { hideStatusBar?: boolean }): () => void {
     this.hideStatusBar = !!opts.hideStatusBar;
-    this.foldNav = !!opts.foldNav;
     return () => {
-      this.hideSideRail = false;
       this.hideStatusBar = false;
-      this.foldNav = false;
     };
   }
 }
