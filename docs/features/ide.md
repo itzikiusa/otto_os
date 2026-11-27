@@ -269,7 +269,7 @@ global system directories:
 | **Rust** | `rustup` (`rustc` + `cargo`), `rust-analyzer`, `CodeLLDB` (`codelldb`) |
 | **Zig** | Official Zig SDK tarball (`ziglang.org/download/index.json`, SHA-256 verified), local SDK registration, `zls` (Zig-version-matched), `CodeLLDB` (`codelldb`) / `lldb-dap` / built-in `otto-lldb-dap` with Zig LLDB type formatters |
 | **C / C++ & Unreal Engine** | Clang / GCC / LLVM toolchain discovery & local registration (Otto does not download compilers: install them with Xcode Command Line Tools, Homebrew or `apt` / `dnf`), `clangd` (auto `--compile-commands-dir` including CMake/Meson/Unreal `Intermediate/ProjectFiles` + `textDocument/switchSourceHeader` `⌥O`), `clang-format`, CMake (Presets & CTest), Meson, Make, `vcpkg.json` / `conanfile.txt` / `.uproject` deps, `CodeLLDB` / `lldb-dap` / built-in `otto-lldb-dap` with C++ STL & Unreal pretty-printers, PID/process-name attach, and core-dump debugging |
-| **.NET (C# / F# / Unity / Unreal)** | Official .NET SDK tarball (`dotnetcli.azureedge.net` / `builds.dotnet.microsoft.com`, LTS 8.0 / 9.0), local SDK registration (`DOTNET_ROOT`), SDK-matched `csharp-ls` + `fsautocomplete` (with OmniSharp / Roslyn fallback), NuGet inspector & OSV vulnerabilities, `netcoredbg` (and `vsdbg` fallback) with `VSTEST_HOST_DEBUG` test debugging (one test project per session) & explicit PID attach (Unity Editor attach is not supported) |
+| **.NET (C# / F# / Unity / Unreal)** | Official .NET SDK tarball (`dotnetcli.azureedge.net` / `builds.dotnet.microsoft.com`, LTS 8.0 / 9.0), local SDK registration (`DOTNET_ROOT`), SDK-matched `csharp-ls` + `fsautocomplete` (with OmniSharp / Roslyn fallback), NuGet inspector & OSV vulnerabilities, `netcoredbg` (and `vsdbg` fallback) with `VSTEST_HOST_DEBUG` test debugging (several test projects or frameworks run as Debug All steps) & explicit PID attach (Unity Editor attach is not supported) |
 | **Go** | Official Go SDK tarball, local SDK registration (`POST /ide/toolchains/local`), `gopls`, Delve (`dlv`), `gofumpt` |
 | **Node / TypeScript & Web Frameworks** | Node LTS (22), `pnpm`, `typescript-language-server`, `svelteserver` (Svelte/SvelteKit, untrusted mode), `vue-language-server` (Vue/Nuxt standalone mode), `ngserver` (Angular with `--tsProbeLocations`/`--ngProbeLocations`), `vscode-langservers-extracted`, `prettier`, `js-debug` & built-in `otto-node-cdp` (Node + Browser CDP attach with Vite/webpack URL mapping) |
 | **Shell (Bash / Zsh)** | `bash-language-server`, `shellcheck`, `shfmt`, built-in `otto-sh-dap` (`DEBUG` trap DAP debugger) |
@@ -475,13 +475,7 @@ source maps); one that never binds stays hollow with js-debug's reason.
   Karma in Angular CLI projects…"), and Playwright / Karma Debug on SSH targets
   (use Run there).
 
-Some starts are refused with a message instead of opening a session: a .NET Debug of all tests (local or SSH) in a folder or solution with
-more than one test project (a session attaches to one test host; debug one test
-from the gutter, or a ".NET Test" configuration that targets one project; add it
-in Launch settings when discovery lists none, as for solutions of more than 6
-projects), and
-`unity://attach`. Debug All Tests on a Zig project with several test suites
-debugs one suite and names the others.
+`unity://attach` is refused with a message instead of opening a session.
 
 A Java Debug (or `java_main` Run) of a file in a Maven module takes the classpath
 from Maven itself (run from the reactor root with `-pl <module> -am`, using
