@@ -390,6 +390,15 @@ pub(super) async fn execute_run_task(
                     }
                     cfg.args.insert(1, rp);
                     cfg.args.insert(1, "--build-runner".into());
+                } else if cfg
+                    .target_path
+                    .as_deref()
+                    .is_some_and(|p| p.ends_with(".zig"))
+                {
+                    append_run_line(
+                        &handle,
+                        "otto: selected-test runs inside build.zig need Zig 0.14.x's build runner, which this SDK lacks; falling back to a standalone zig test of the file".into(),
+                    );
                 }
             }
         }

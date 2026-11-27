@@ -494,7 +494,7 @@ async fn compile_zig_debug_artifact(
 
         let test_file = raw_prog.to_string();
         let out_bin =
-            zig_debug_cache_bin_path(data_dir, req.target.kind, &zig_cwd, &test_file, true)?;
+            zig_debug_out_bin(data_dir, req, ctx, &zig_cwd, env, &test_file, true).await?;
         let mut args = vec![
             "test".to_string(),
             "--test-no-exec".to_string(),
@@ -565,7 +565,7 @@ async fn compile_zig_debug_artifact(
         ));
     }
 
-    let out_bin = zig_debug_cache_bin_path(data_dir, req.target.kind, &zig_cwd, raw_prog, false)?;
+    let out_bin = zig_debug_out_bin(data_dir, req, ctx, &zig_cwd, env, raw_prog, false).await?;
     let mut args = vec!["build-exe".to_string(), format!("-femit-bin={out_bin}")];
     args.extend(extra_flags);
     args.push(raw_prog.to_string());
@@ -715,10 +715,29 @@ async fn resolve_zig_binary(
         })
 }
 
+/// Debug executable path: Otto's data dir locally, the SSH user's private
+/// `$HOME/.otto/cache/zig-debug` remotely (never the shared `/tmp`, SEC3-1).
+async fn zig_debug_out_bin(
+    data_dir: &Path,
+    req: &IdeStartDebugReq,
+    ctx: &DapStartContext,
+    zig_cwd: &str,
+    env: &BTreeMap<String, String>,
+    source: &str,
+    is_test: bool,
+) -> Result<String> {
+    let remote_dir = if req.target.kind == IdeTargetKind::Local {
+        None
+    } else {
+        Some(ssh_private_zig_debug_dir(req, ctx, zig_cwd, env).await?)
+    };
+    zig_debug_cache_bin_path(data_dir, remote_dir.as_deref(), zig_cwd, source, is_test)
+}
+
 #[allow(clippy::disallowed_methods)]
 fn zig_debug_cache_bin_path(
     data_dir: &Path,
-    target_kind: IdeTargetKind,
+    remote_dir: Option<&str>,
     cwd: &str,
     source: &str,
     is_test: bool,
@@ -739,7 +758,9 @@ fn zig_debug_cache_bin_path(
         .filter(|s| !s.is_empty())
         .unwrap_or("zig_app");
     let suffix = if is_test { "test" } else { "bin" };
-    if target_kind == IdeTargetKind::Local {
+    if let Some(dir) = remote_dir {
+        Ok(format!("{dir}/{}-{stem}-{suffix}", &digest[..12]))
+    } else {
         let dir = data_dir
             .join("ide-build-cache")
             .join("zig")
@@ -750,11 +771,6 @@ fn zig_debug_cache_bin_path(
             .join(format!("{stem}-{suffix}"))
             .to_string_lossy()
             .into_owned())
-    } else {
-        Ok(format!(
-            "/tmp/otto-zig-dbg-{}-{stem}-{suffix}",
-            &digest[..10]
-        ))
     }
 }
 
@@ -1143,6 +1159,9 @@ const OTTO_ZIG_RUNNER_PRE_HOOK: &str = r#"
                 .entries = otto_entries.items,
             };
             for (otto_entries.items) |e| {
+                // Request the binary while configuring: a test step that only compiles
+                // (no run or install step) never asks for it, and getPath would panic.
+                _ = e.compile.getEmittedBin();
                 emit_step.step.dependOn(&e.compile.step);
             }
             const compile_only = builder.step("__otto_compile_tests", "Compile Zig tests without running");
@@ -1253,6 +1272,13 @@ pub(crate) fn select_zig_test_bin(
         }) {
             return Some((matched.path.clone(), None));
         }
+        // A test in a non-root file lives in the suite whose root imports that file.
+        if let Some(owner) = bins
+            .iter()
+            .find(|b| zig_file_imports_reach(Path::new(&b.source), Path::new(raw_prog)))
+        {
+            return Some((owner.path.clone(), None));
+        }
     }
     let chosen = bins
         .iter()
@@ -1279,6 +1305,35 @@ pub(crate) fn select_zig_test_bin(
         all_labels.join(", ")
     );
     Some((chosen.path.clone(), Some(notice)))
+}
+
+/// Whether `target` is reachable from the local suite root `root` through relative
+/// `@import("x.zig")` chains (named-module imports belong to other suites).
+#[allow(clippy::disallowed_methods)]
+fn zig_file_imports_reach(root: &Path, target: &Path) -> bool {
+    static RE_IMPORT: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RE_IMPORT.get_or_init(|| regex::Regex::new(r#"@import\("([^"]+\.zig)"\)"#).unwrap());
+    let Ok(target) = std::fs::canonicalize(target) else {
+        return false;
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut queue = vec![root.to_path_buf()];
+    while let Some(p) = queue.pop() {
+        let Ok(p) = std::fs::canonicalize(&p) else {
+            continue;
+        };
+        if p == target {
+            return true;
+        }
+        if seen.len() >= 4096 || !seen.insert(p.clone()) {
+            continue;
+        }
+        let (Ok(src), Some(dir)) = (std::fs::read_to_string(&p), p.parent()) else {
+            continue;
+        };
+        queue.extend(re.captures_iter(&src).map(|c| dir.join(&c[1])));
+    }
+    false
 }
 
 fn parse_zig_env_lib_dir(zig_env_stdout: &str) -> Option<String> {
@@ -1381,17 +1436,7 @@ pub(crate) fn build_ssh_zig_runner_install_script(
     patched: &str,
 ) -> String {
     format!(
-        "set -eu\n\
-         umask 077\n\
-         BASE=\"$HOME/.otto\"\n\
-         CACHE=\"$BASE/cache\"\n\
-         DIR=\"$CACHE/zig-build-runners\"\n\
-         for d in \"$BASE\" \"$CACHE\" \"$DIR\"; do\n\
-           if [ -L \"$d\" ]; then echo 'otto: refusing symlink runner cache dir' >&2; exit 1; fi\n\
-           if [ ! -d \"$d\" ]; then mkdir -m 700 \"$d\"; fi\n\
-           if [ ! -O \"$d\" ]; then echo 'otto: runner cache dir not owned by SSH user' >&2; exit 1; fi\n\
-           chmod 700 \"$d\"\n\
-         done\n\
+        "{}\
          DEST=\"$DIR/runner-{key_prefix}.zig\"\n\
          WANT='{expected_sha256}'\n\
          NEED_WRITE=1\n\
@@ -1410,8 +1455,62 @@ __OTTO_ZIG_RUNNER__\n\
            chmod 600 \"$TMP\"\n\
            mv -f \"$TMP\" \"$DEST\"\n\
          fi\n\
-         printf 'RUNNER_PATH:%s\\n' \"$DEST\"\n"
+         printf 'RUNNER_PATH:%s\\n' \"$DEST\"\n",
+        ssh_private_cache_dir_script("zig-build-runners")
     )
+}
+
+/// POSIX shell lines that create (or verify) `$HOME/.otto/cache/<sub>` as `DIR`: every
+/// level owned by the SSH user, `0700`, never a symlink — never the shared `/tmp` (SEC3-1).
+fn ssh_private_cache_dir_script(sub: &str) -> String {
+    format!(
+        "set -eu\n\
+         umask 077\n\
+         BASE=\"$HOME/.otto\"\n\
+         CACHE=\"$BASE/cache\"\n\
+         DIR=\"$CACHE/{sub}\"\n\
+         for d in \"$BASE\" \"$CACHE\" \"$DIR\"; do\n\
+           if [ -L \"$d\" ]; then echo 'otto: refusing symlink cache dir' >&2; exit 1; fi\n\
+           if [ ! -d \"$d\" ]; then mkdir -m 700 \"$d\"; fi\n\
+           if [ ! -O \"$d\" ]; then echo 'otto: cache dir not owned by SSH user' >&2; exit 1; fi\n\
+           chmod 700 \"$d\"\n\
+         done\n"
+    )
+}
+
+/// The SSH user's private `$HOME/.otto/cache/zig-debug` directory (absolute path) for
+/// debug executables, so another host user can't swap the binary LLDB launches (SEC3-1).
+async fn ssh_private_zig_debug_dir(
+    req: &IdeStartDebugReq,
+    ctx: &DapStartContext,
+    zig_cwd: &str,
+    env: &BTreeMap<String, String>,
+) -> Result<String> {
+    let script = format!(
+        "{}printf 'DIR:%s\\n' \"$DIR\"\n",
+        ssh_private_cache_dir_script("zig-debug")
+    );
+    let out = run_target_command(
+        &req.target,
+        ctx.ssh.as_ref(),
+        "sh",
+        &["-c".into(), script],
+        zig_cwd,
+        env,
+        crate::proc_group::BUILD_STEP_TIMEOUT,
+    )
+    .await?;
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("DIR:"))
+        .filter(|d| out.status.success() && d.starts_with('/'))
+        .map(String::from)
+        .ok_or_else(|| {
+            Error::Upstream(format!(
+                "cannot prepare private Zig debug directory on the SSH host: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ))
+        })
 }
 
 /// Prepare and cache the patched `runner-*.zig` inside the SSH user's private
@@ -2342,5 +2441,135 @@ pub fn build(b: *std.Build) void {
         );
         assert!(!lib_marker.exists(), "BUG2-2: unrelated lib_unit_tests ran");
         assert!(!exe_fail_marker.exists(), "BUG2-2: failing exe sibling ran");
+
+        // 3. BUG3-1: a `test` step that only compiles (no run or install step) never asks
+        //    for the binary; the runner must request it or getPath panics with no marker.
+        let co_proj = tmp.path().join("compile_only");
+        std::fs::create_dir_all(co_proj.join("src")).unwrap();
+        std::fs::write(co_proj.join("src/root.zig"), "test \"t\" {}\n").unwrap();
+        std::fs::write(
+            co_proj.join("build.zig"),
+            r#"const std = @import("std");
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const mod = b.createModule(.{ .root_source_file = b.path("src/root.zig"), .target = target });
+    const t = b.addTest(.{ .root_module = mod });
+    b.step("test", "Compile tests").dependOn(&t.step);
+}
+"#,
+        )
+        .unwrap();
+        let co_runner_bin = tmp.path().join("otto_runner_co_bin");
+        let mut co_compile = tokio::process::Command::new(&zig_exe);
+        co_compile.arg("build-exe");
+        if cfg!(target_os = "macos") {
+            co_compile.args(["-target", "native-macos.15.0"]);
+        }
+        let co_compile_out = co_compile
+            .args([
+                &format!("-femit-bin={}", co_runner_bin.display()),
+                "--dep",
+                "@build",
+                "--dep",
+                "@dependencies",
+                &format!("-Mroot={}", runner_src.display()),
+                &format!("-M@build={}", co_proj.join("build.zig").display()),
+                &format!("-M@dependencies={}", deps_src.display()),
+            ])
+            .output()
+            .await
+            .unwrap();
+        assert!(co_compile_out.status.success());
+        runner_args[2] = co_proj.to_string_lossy().into_owned();
+        runner_args[3] = co_proj.join(".zig-cache").to_string_lossy().into_owned();
+        let co_out = tokio::process::Command::new(&co_runner_bin)
+            .args(&runner_args)
+            .current_dir(&co_proj)
+            .env("OTTO_ZIG_TEST_NO_EXEC", "1")
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            co_out.status.success(),
+            "compile-only test step: {}",
+            String::from_utf8_lossy(&co_out.stderr)
+        );
+        let co_bins = super::parse_otto_zig_test_bins(&String::from_utf8_lossy(&co_out.stdout));
+        assert_eq!(co_bins.len(), 1, "{co_bins:?}");
+        assert!(Path::new(&co_bins[0].path).is_file());
+    }
+
+    #[test]
+    fn zig_single_file_debug_selects_the_suite_that_imports_the_file() {
+        // BUG-35/BUG-5: a test in src/math.zig (imported by the lib root) is in the lib
+        // suite; the exe suite reaches the lib only through a named module.
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            src.join("root.zig"),
+            "pub const m = @import(\"math.zig\");\n",
+        )
+        .unwrap();
+        std::fs::write(src.join("math.zig"), "test \"adds\" {}\n").unwrap();
+        std::fs::write(src.join("main.zig"), "const lib = @import(\"lib\");\n").unwrap();
+        let bin = |name: &str, file: &str| super::ZigEmittedTestBin {
+            name: name.into(),
+            source: src.join(file).to_string_lossy().into_owned(),
+            path: format!("/cache/{name}"),
+        };
+        let bins = [bin("exe", "main.zig"), bin("lib", "root.zig")];
+        let math = src.join("math.zig").to_string_lossy().into_owned();
+        assert_eq!(
+            super::select_zig_test_bin(&bins, &math, true),
+            Some(("/cache/lib".to_string(), None))
+        );
+        // A file no suite reaches keeps the disclosed default.
+        let other = tmp.path().join("other.zig");
+        std::fs::write(&other, "test {}\n").unwrap();
+        let (chosen, notice) =
+            super::select_zig_test_bin(&bins, &other.to_string_lossy(), true).unwrap();
+        assert_eq!(chosen, "/cache/exe");
+        assert!(notice.is_some_and(|n| n.contains("2 test suites")));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ssh_zig_debug_binaries_live_in_the_private_home_cache() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // SEC3-1: SSH debug executables go to a 0700 $HOME/.otto/cache/zig-debug, never /tmp.
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let script = format!(
+            "{}printf 'DIR:%s\\n' \"$DIR\"\n",
+            super::ssh_private_cache_dir_script("zig-debug")
+        );
+        let out = tokio::process::Command::new("sh")
+            .args(["-c", &script])
+            .env("HOME", &home)
+            .output()
+            .await
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let dir = home.join(".otto/cache/zig-debug");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            format!("DIR:{}", dir.display())
+        );
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        let bin = super::zig_debug_cache_bin_path(
+            tmp.path(),
+            Some(&dir.to_string_lossy()),
+            "/srv/proj",
+            "/srv/proj/src/main.zig",
+            true,
+        )
+        .unwrap();
+        assert!(bin.starts_with(&format!("{}/", dir.display())) && bin.ends_with("main-test"));
     }
 }
