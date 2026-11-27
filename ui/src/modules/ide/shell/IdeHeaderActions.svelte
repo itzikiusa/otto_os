@@ -3,7 +3,7 @@
   // rest under ⋯ (AGENTS.md "Less is more"; review G13). Everything here is
   // `data-keep`, so PageHeader never adds a second "⋯" of its own:
   //   workbench: [launch cluster: config ▾ · Run · Debug · Stop · ⚙] [Agent] [⋯]
-  //   stack:     [Run] [⋯]
+  //   stack:     [Run] [Agent] [⋯]
   // Search, Git, Maven/Gradle, Share, colour scheme, Settings and Coverage
   // live in the ⋯ menu (ideShellMenus.ts).
   import Badge from '../../../lib/components/Badge.svelte';
@@ -21,23 +21,22 @@
   interface Props {
     stack: boolean;
     quickPrefs: QuickSchemePrefs;
-    explorerVisible: boolean;
-    onToggleExplorer: () => void;
     onTriggerAgent: () => void;
     onAttachFolder: () => void;
     onShowPane: (pane: IdeStackPane) => void;
     onOpenScratches: () => void;
+    /** A phone: Security is a ⋯ row (one ⋯ in the row). */
+    onOpenSecurity?: () => void;
     onToggleAgentDock: () => void;
   }
   let {
     stack,
     quickPrefs = $bindable(),
-    explorerVisible,
-    onToggleExplorer,
     onTriggerAgent,
     onAttachFolder,
     onShowPane,
     onOpenScratches,
+    onOpenSecurity,
     onToggleAgentDock,
   }: Props = $props();
 
@@ -45,13 +44,12 @@
     const anchor = e.currentTarget instanceof HTMLElement ? e.currentTarget : e;
     void loadShellMenus().then((m) =>
       m.showIdeMoreMenu(anchor, {
-        explorerVisible,
-        onToggleExplorer,
         onTriggerAgent,
         onAttachFolder,
         stack,
         onShowPane,
         onOpenScratches,
+        onOpenSecurity,
         scheme: { cur: quickPrefs, onChange: (next) => (quickPrefs = next) },
       }),
     );
@@ -61,23 +59,24 @@
 {#if ide.hasTarget}
   <LazyMount lazy={IdeRunToolbarLazy} what="launch controls" quiet props={{ compact: stack }} />
 
-  {#if !stack}
-    <button
-      type="button"
-      class="btn small ghost ide-tool-toggle"
-      data-keep
-      aria-pressed={ideAgent.panelOpen}
-      title="Toggle AI Agent (⇧⌘L)"
-      onclick={onToggleAgentDock}
-      data-testid="ide-toggle-agent"
-    >
-      <Icon name="assistant" size={13} />
-      Agent
-      {#if ideAgent.contexts.length > 0}
-        <Badge tone="accent" label={String(ideAgent.contexts.length)} />
-      {/if}
-    </button>
-  {/if}
+  <!-- The Detail pane's toggle: an icon for what it holds (never the panel glyph). -->
+  <button
+    type="button"
+    class={stack ? 'icon-btn ide-tool-toggle' : 'btn small ghost ide-tool-toggle'}
+    data-keep
+    data-icon="assistant"
+    aria-pressed={ideAgent.panelOpen}
+    aria-label={stack ? 'AI agent' : undefined}
+    title="Toggle AI Agent (⇧⌘L)"
+    onclick={onToggleAgentDock}
+    data-testid="ide-toggle-agent"
+  >
+    <Icon name="assistant" size={stack ? 16 : 13} />
+    {#if !stack}Agent{/if}
+    {#if ideAgent.contexts.length > 0}
+      <Badge tone="accent" label={String(ideAgent.contexts.length)} />
+    {/if}
+  </button>
 {/if}
 
 <button

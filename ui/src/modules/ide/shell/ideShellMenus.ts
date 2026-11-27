@@ -52,16 +52,15 @@ export function buildIdePaletteCommands(opts: {
 }
 
 export interface IdeMoreMenuOpts {
-  explorerVisible: boolean;
-  onToggleExplorer: () => void;
   onTriggerAgent: () => void;
   onAttachFolder: () => void;
-  /** The stacked (phone) layout: tool windows open as panes, desktop-only
-   *  toggles (explorer rail, build tool window, dock) are left out, and the
+  /** The stacked (phone) layout: a tool window fills the content (Tools),
+   *  desktop-only toggles (build tool window, dock) are left out, and the
    *  header's Debug / Scratches / search live here. */
   stack?: boolean;
-  onShowPane?: (pane: 'tools' | 'agent') => void;
+  onShowPane?: (pane: 'tools') => void;
   onOpenScratches?: () => void;
+  onOpenSecurity?: () => void;
   /** Kept for the header's call; the colour scheme lives in Settings and ⌘K now. */
   scheme?: { cur: QuickSchemePrefs; onChange: (next: QuickSchemePrefs) => void };
 }

@@ -163,9 +163,10 @@ describe('phone ⋯ rows (ideActions)', () => {
     assert.ok(!labels(desk).some((l) => l.startsWith('Run target')), 'the workbench has the toolbar selector');
   });
 
-  it('the phone ⋯ drops what the pane switcher has and has no Tool windows submenu', () => {
+  it('the phone ⋯ reaches every tool window (no pane switcher any more), flat, with no submenu', () => {
     const all = JSON.stringify(phone);
-    assert.doesNotMatch(all, /"AI agent"|"Git changes"/);
+    assert.match(all, /"Git changes"/);
+    assert.match(all, /AI agent/);
     assert.ok(!labels(phone).includes('Tool windows'));
     assert.ok(labels(phone).includes('Live DB watch') && labels(phone).includes('Scratches'), labels(phone).join(', '));
     // The workbench keeps them, in its Tool windows submenu.

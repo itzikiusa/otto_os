@@ -1,5 +1,6 @@
-// IDE tool windows (round 5, I1-11/14/15/23): the tree's git overlay keys, which dock tabs
-// show, the reveal-active-file folder expansion and the explorer auto-hide rule.
+// IDE tool windows (round 5, I1-11/14/23): the tree's git overlay keys, which dock tabs
+// show and the reveal-active-file folder expansion. (The explorer auto-hide rule, I1-15,
+// went with the shared list pane: ListDetail clamps it so the editor keeps its room.)
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { loadSource } from './sourceHarness.ts';
@@ -78,48 +79,4 @@ test('I1-14: the explicit "show" choice persists, used tabs are per session, res
   assert.deepEqual([...m.shown], []);
   m.reset();
   assert.deepEqual([...m.used], []);
-});
-
-function room() {
-  const toasts: string[] = [];
-  const mod = loadSource(new URL('../src/modules/ide/ideExplorerRoom.ts', import.meta.url), {
-    '../../lib/toast.svelte': { toasts: { info: (t: string, b?: string) => toasts.push(`${t} — ${b}`) } },
-    './shell/ideShortcuts': { ideKeymapPresetOf: (p: unknown) => p, ideShortcutLabel: () => '⌘1' },
-  });
-  return { mod, toasts };
-}
-
-test('I1-15: at 1280 the agent opening hides the explorer and its closing brings it back', () => {
-  const { mod } = room();
-  const room5 = new mod.IdeExplorerRoom();
-  const r = { step: (v: boolean, f: object) => ({ ...room5.step(v, f) }) };
-  const base = { width: 1280, treeW: 270, sideW: 0, sideOpen: false };
-  assert.deepEqual(r.step(true, base), { visible: true, hid: false });
-  // 1280 − 270 − 360 = 650 < 720: make room.
-  assert.deepEqual(r.step(true, { ...base, sideW: 360, sideOpen: true }), { visible: false, hid: true });
-  assert.deepEqual(r.step(false, { ...base, sideW: 360, sideOpen: true }), { visible: false, hid: false });
-  assert.deepEqual(r.step(false, base), { visible: true, hid: false }, 'restored on close');
-  // Wide enough: nothing moves.
-  assert.deepEqual(r.step(true, { ...base, width: 1700, sideW: 360, sideOpen: true }), { visible: true, hid: false });
-});
-
-test('I1-15: a person who toggles the explorer meanwhile keeps their choice', () => {
-  const { mod } = room();
-  const r = new mod.IdeExplorerRoom();
-  const open = { width: 1280, treeW: 270, sideW: 360, sideOpen: true };
-  const closed = { ...open, sideW: 0, sideOpen: false };
-  r.step(true, closed);
-  assert.equal(r.step(true, open).visible, false);
-  assert.equal(r.step(true, open).visible, true, 'shown again with the shortcut: respected');
-  assert.equal(r.step(true, { ...open, width: 1200 }).visible, true, 'a resize does not hide it again');
-  assert.equal(r.step(false, open).visible, false);
-  assert.equal(r.step(false, closed).visible, false, 'hidden by hand: not restored');
-  assert.equal(mod.ideEditorCramped({ width: 0, treeW: 270, sideW: 360, sideOpen: true }), false, 'unmeasured page');
-});
-
-test('I1-15: the hint names the shortcut, once', () => {
-  const { mod, toasts } = room();
-  mod.hintExplorerYield('jetbrains');
-  mod.hintExplorerYield('jetbrains');
-  assert.deepEqual(toasts, ['Explorer hidden to make room — Press ⌘1 to show it again.']);
 });

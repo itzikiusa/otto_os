@@ -1,8 +1,8 @@
-// The IDE's phone layout: the stack/workbench switch is decided by the page's
-// own size (a phone on its side is wide but short), a tap on a file in Files
-// opens the editor, the bottom dock never fills a short column, and the
-// stacked Tools pane lists the terminal first. Plus the viewport's "short"
-// bucket that turns the shell's Navigator into a drawer on a phone on its side.
+// The IDE's phone layout: the stack/workbench switch is the one phone signal
+// (viewport.navDrawer — a phone, or a phone on its side), a tap on a file in
+// Files opens the editor, the bottom dock never fills a short column, and the
+// phone's Tools list the terminal first. Plus the viewport's "short" bucket
+// that turns the shell's Navigator into a drawer on a phone on its side.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadSource } from './sourceHarness.ts';
@@ -22,19 +22,21 @@ function memoryStorage(): Storage {
   } as Storage;
 }
 
-function loadLayout(storage = memoryStorage()) {
-  return loadSource(LAYOUT, {}, { sessionStorage: storage });
+function loadLayout(storage = memoryStorage(), viewport = { navDrawer: false }) {
+  return loadSource(LAYOUT, { '../../../lib/stores/viewport.svelte': { viewport } }, { sessionStorage: storage });
 }
 
-test('a phone, a phone on its side and a narrow window stack; a desktop and an iPad held wide do not', () => {
-  const { isStackLayout } = loadLayout();
-  assert.equal(isStackLayout(430, 640), true, 'phone portrait (narrow)');
-  assert.equal(isStackLayout(814, 344), true, 'phone landscape (wide but short)');
-  assert.equal(isStackLayout(614, 1150), true, 'iPad portrait beside the Navigator');
-  assert.equal(isStackLayout(1138, 790), false, 'iPad landscape');
-  assert.equal(isStackLayout(1280, 760), false, 'desktop');
-  // Not measured yet: no phone-layout flash on a desktop first paint.
-  assert.equal(isStackLayout(0, 0), false);
+test('the stack is the phone signal (viewport.navDrawer), never the page size', () => {
+  const vp = { navDrawer: false };
+  const { ideLayout } = loadLayout(memoryStorage(), vp);
+  // A narrow desktop window (614 px) is a workbench now: the list pane clamps, nothing stacks.
+  ideLayout.width = 614;
+  ideLayout.height = 1150;
+  assert.equal(ideLayout.stack, false);
+  vp.navDrawer = true; // a phone, or a phone on its side
+  ideLayout.width = 1280;
+  ideLayout.height = 900;
+  assert.equal(ideLayout.stack, true);
 });
 
 test('a tap on a file in Files shows the editor; other panes stay where they are', () => {
@@ -42,7 +44,6 @@ test('a tap on a file in Files shows the editor; other panes stay where they are
   assert.equal(paneAfterFileOpen('files'), 'editor');
   assert.equal(paneAfterFileOpen('editor'), 'editor');
   assert.equal(paneAfterFileOpen('tools'), 'tools');
-  assert.equal(paneAfterFileOpen('agent'), 'agent');
 });
 
 test('the bottom dock leaves room for the editor in a short column', () => {
@@ -70,17 +71,15 @@ test('the stack pane is remembered per tab and an unknown stored value falls bac
   assert.equal(loadLayout(storage).ideLayout.pane, 'tools', 'a reload in the same tab keeps the pane');
   storage.setItem('otto.ide.stackPane', 'bogus');
   assert.equal(loadLayout(storage).ideLayout.pane, 'editor');
+  // The agent is a Detail pane now, not a stack pane: an old stored "agent" opens the editor.
+  storage.setItem('otto.ide.stackPane', 'agent');
+  assert.equal(loadLayout(storage).ideLayout.pane, 'editor');
 });
 
-test('the stack follows the measured page size', () => {
-  const { ideLayout } = loadLayout();
-  assert.equal(ideLayout.stack, false);
-  ideLayout.width = 814;
-  ideLayout.height = 344;
-  assert.equal(ideLayout.stack, true);
-  ideLayout.height = 900;
-  ideLayout.width = 1200;
-  assert.equal(ideLayout.stack, false);
+test('the explorer view names the list pane (and the phone Back)', () => {
+  const { ideLayout, EXPLORER_VIEW_LABEL } = loadLayout();
+  assert.equal(ideLayout.explorerView, 'files');
+  assert.equal(JSON.stringify(EXPLORER_VIEW_LABEL), JSON.stringify({ files: 'Files', structure: 'Structure', breakpoints: 'Breakpoints' }));
 });
 
 function loadViewport(matches: (q: string) => boolean) {

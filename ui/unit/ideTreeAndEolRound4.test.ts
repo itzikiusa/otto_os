@@ -172,11 +172,11 @@ test('G11: leaving the IDE page keeps which proposals were applied; a project sw
 
 // ── phone layout: tree row height, compact editor ───────────────────────────
 
-test('tree rows: one height constant the virtualiser reads — 40 px on touch, 26 px otherwise', async () => {
+test('tree rows: one height constant the virtualiser reads — 40 px on touch, the 30 px side row otherwise', async () => {
   const { treeRowHeight, TREE_ROW_H_COARSE, TREE_ROW_H_FINE } = await import('../src/modules/ide/history/ideTreeNav.ts');
   assert.equal(treeRowHeight(true), 40);
-  assert.equal(treeRowHeight(false), 26);
-  assert.ok(TREE_ROW_H_COARSE >= 40 && TREE_ROW_H_FINE === 26);
+  assert.equal(treeRowHeight(false), 30);
+  assert.ok(TREE_ROW_H_COARSE >= 40 && TREE_ROW_H_FINE === 30);
 });
 
 test('compact (stacked) editor: soft wrap and the narrow breakpoint lane follow the layout', async () => {

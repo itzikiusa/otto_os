@@ -6,11 +6,10 @@
   // smart IDE context pills (`IdeContextBar`) and 1-click `IdeProposalCard`
   // Diff Preview + Apply/Undo.
   import { onMount, setContext, untrack } from 'svelte';
-  // Touch devices have no keyboard: no "(⌘…)" hints there.
-  const touchOnly = typeof window !== 'undefined' && Boolean(window.matchMedia?.('(pointer: coarse)').matches);
   import { announceShown } from '../../lib/announce.svelte';
   import type { TurnItem } from '../../lib/api/types';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import DetailPane from '../../lib/components/side/DetailPane.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -155,19 +154,25 @@
     return cleanText;
   }
 
-  function closeAgentPanel(): void {
-    ideAgent.togglePanel(false);
-    requestAnimationFrame(() => {
-      (
-        document.querySelector<HTMLElement>('[data-testid="ide-toggle-agent"]') ??
-        document.querySelector<HTMLElement>('.ide-editor-area .cm-content')
-      )?.focus();
-    });
-  }
+  // The pane closes through DetailPane (✕, Esc); it hands focus back to what opened it.
+  const closeAgentPanel = (): void => ideAgent.togglePanel(false);
 </script>
 
-<aside class="ia-panel" aria-label="AI coding agent" data-testid="ide-agent-panel">
-  <header class="ia-head">
+<!-- The page's Detail pane (design.md §3): the thread switcher IS its header,
+     "New thread" its one action, Open in Threads under ⋯, then Close (⇧⌘L).
+     Inline beside the editor; a right sheet when there is no room, full
+     width on a phone. -->
+<DetailPane
+  module="ide"
+  pane="agent"
+  title="AI coding agent"
+  open
+  onclose={closeAgentPanel}
+  legacy={{ w: 'otto.ide.agentW' }}
+  menu={() => [{ label: 'Open in Threads', icon: 'external', action: () => ideAgent.openActiveInThreads() }]}
+  testid="ide-agent"
+>
+  {#snippet views()}
     <button
       type="button"
       class="ia-session-btn"
@@ -185,7 +190,8 @@
       <span class="ellipsis" dir="auto">{sessionTitle}</span>
       <Icon name="chevronDown" size={12} />
     </button>
-
+  {/snippet}
+  {#snippet action()}
     <button
       type="button"
       class="icon-btn"
@@ -194,29 +200,10 @@
       onclick={() => ideAgent.startNewChat()}
       data-testid="ide-agent-new"
     >
-      <Icon name="plus" size={13} />
+      <Icon name="plus" size={14} />
     </button>
-    <button
-      type="button"
-      class="icon-btn"
-      aria-label="Open in Threads"
-      title="Open in Threads"
-      onclick={() => ideAgent.openActiveInThreads()}
-      data-testid="ide-agent-open-in-threads"
-    >
-      <Icon name="external" size={13} />
-    </button>
-    <button
-      type="button"
-      class="icon-btn"
-      aria-label="Close agent panel"
-      title={touchOnly ? 'Close agent' : 'Close agent (⇧⌘L)'}
-      onclick={closeAgentPanel}
-      data-testid="ide-agent-close"
-    >
-      <Icon name="x" size={13} />
-    </button>
-  </header>
+  {/snippet}
+<div class="ia-panel" data-testid="ide-agent-panel">
 
   {#if ideAgent.error}
     <div class="ia-error" use:announceShown={{ text: ideAgent.error, assertive: true }}>
@@ -415,31 +402,21 @@
 
     <IdeAgentComposer />
   {/if}
-</aside>
+</div>
+</DetailPane>
 
 <style>
   /* Phone, typing to the agent with the keyboard up (IdePage's typing mode): the thread
      header and the context chips step aside so the last messages and the whole input
      stay on screen. The chips come back when the keyboard closes. */
-  :global(.ide-page.typing) .ia-head, :global(.ide-page.typing) .ia-embed-ctx { display: none; }
+  :global(.ide-page.typing) .ia-embed-ctx { display: none; }
   .ia-panel {
     display: flex;
     flex-direction: column;
+    flex: 1;
     inline-size: 100%;
-    block-size: 100%;
     min-inline-size: 0;
     min-block-size: 0;
-    background: var(--surface);
-    border-inline-start: 1px solid var(--border);
-  }
-  .ia-head {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    block-size: 36px;
-    padding-inline: 8px 6px;
-    border-block-end: 1px solid var(--border);
-    flex-shrink: 0;
   }
   .ia-session-btn {
     flex: 1;
@@ -602,11 +579,6 @@
     margin-inline-start: auto;
     color: var(--text-dim);
     flex-shrink: 0;
-  }
-  @media (max-width: 640px) {
-    .ia-panel {
-      border-inline-start: none;
-    }
   }
   @media (pointer: coarse) {
     .ia-session-btn,

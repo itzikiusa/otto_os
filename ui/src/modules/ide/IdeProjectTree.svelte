@@ -4,16 +4,17 @@
 </script>
 
 <script lang="ts">
-  import { tick, untrack } from 'svelte';
+  import { tick, untrack, type Snippet } from 'svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import Tabs, { type TabItem } from '../../lib/components/Tabs.svelte';
+  import ListPane from '../../lib/components/side/ListPane.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   import { scrollBehavior } from '../../lib/motion';
-  import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
+  import type { MenuItem } from '../../lib/contextmenu.svelte';
   import { rowMenu } from '../../lib/rowMenu';
   import { ideDockPrefs } from './debug/ideDockPrefs.svelte';
   import type { ideGit as IdeGitSingleton } from './git/ideGitController.svelte';
@@ -28,6 +29,7 @@
   import { ideProjectHealth } from './store/ideProjectHealth.svelte';
   import { ideBreakpointsNav } from './debug/ideBreakpointsNav.svelte';
   import IdeProjectMissingState from './shell/IdeProjectMissingState.svelte';
+  import { ideLayout, type IdeExplorerView } from './shell/ideLayout.svelte';
   import { newScratchFile, onScratches } from './shell/ideScratches.svelte';
   import { ideTabRestore } from './shell/ideProjectHelpers';
   import { IdeTreeLive, LEASE_HEARTBEAT_MS } from './store/ideTreeLive';
@@ -40,7 +42,6 @@
     () => import('./history/IdeTreeSecondaryTabs.svelte'),
   );
 
-  type ExplorerTab = 'files' | 'structure' | 'breakpoints';
 
   interface CompareModalRequest {
     mode: IdeCompareMode;
@@ -54,9 +55,11 @@
 
   interface Props {
     onOpenCompare?: (opts: CompareModalRequest) => void;
+    /** The pane's footer row (a phone: the project switcher). */
+    footer?: Snippet;
   }
 
-  let { onOpenCompare }: Props = $props();
+  let { onOpenCompare, footer }: Props = $props();
 
   const VIRTUAL_MIN = 150;
   // One row height for the virtualiser AND the CSS (`--tree-row-h`): 40 px touch rows on a
@@ -64,10 +67,11 @@
   const ROW_H = treeRowHeight(typeof window !== 'undefined' && Boolean(window.matchMedia?.('(pointer: coarse)').matches));
   const OVERSCAN = 20;
 
-  let activeTab = $state<ExplorerTab>('files');
-  // "Breakpoints (n)…" in the debugger's ⋯ asks for this tab (`ideBreakpointsNav.seq` bumps).
+  // The active view lives in ideLayout: the page names the pane (and the phone Back) after it.
+  const activeTab = $derived(ideLayout.explorerView);
+  // "Breakpoints (n)…" in the debugger's ⋯ asks for this view (`ideBreakpointsNav.seq` bumps).
   let seenBpSeq = ideBreakpointsNav.seq;
-  $effect(() => { const seq = ideBreakpointsNav.seq; if (seq !== seenBpSeq) { seenBpSeq = seq; activeTab = 'breakpoints'; } });
+  $effect(() => { const seq = ideBreakpointsNav.seq; if (seq !== seenBpSeq) { seenBpSeq = seq; ideLayout.explorerView = 'breakpoints'; } });
   let treeScrollEl = $state<HTMLDivElement | undefined>(undefined);
   let scrollTop = $state(0);
   // Back to the IDE (a remount): the tree goes back to where it was scrolled.
@@ -219,10 +223,11 @@
     return out;
   });
 
-  const explorerTabs = $derived<readonly TabItem<ExplorerTab>[]>([
+  // The views ARE the pane's header; a phone drops their counts (design.md §7.11).
+  const explorerTabs = $derived<readonly TabItem<IdeExplorerView>[]>([
     { id: 'files', label: 'Files', testid: 'ide-tree-tab-files' },
-    { id: 'structure', label: 'Structure', count: flatSymbols.length || undefined, testid: 'ide-tree-tab-structure' },
-    { id: 'breakpoints', label: 'Breakpoints', count: ide.allBreakpoints.length || undefined, testid: 'ide-tree-tab-breakpoints' },
+    { id: 'structure', label: 'Structure', count: (!ideLayout.stack && flatSymbols.length) || undefined, testid: 'ide-tree-tab-structure' },
+    { id: 'breakpoints', label: 'Breakpoints', count: (!ideLayout.stack && ide.allBreakpoints.length) || undefined, testid: 'ide-tree-tab-breakpoints' },
   ]);
 
   // Scale-disciplined multi-root project tree: in 30+ repo projects, attached
@@ -389,7 +394,7 @@
     const req = ide.treeRevealRequest;
     if (!req || req.seq === lastRevealSeq) return;
     lastRevealSeq = req.seq;
-    activeTab = 'files';
+    ideLayout.explorerView = 'files';
     untrack(() => openNestFor(req.path));
     void scrollRowIntoView(req.path);
   });
@@ -475,10 +480,10 @@
     void import('./history/ideTreeNodeMenus').then((m) => m.showTreeNodeContextMenu(savedAnchor, node, menuCallbacks));
   }
 
-  /** The explorer's one ⋯: what used to be five icon buttons. */
-  function openExplorerMenu(e: MouseEvent): void {
+  /** The pane's ⋯ (after "Hide Files ⌘B"): what used to be five icon buttons. */
+  function explorerMenu(): MenuItem[] {
     const local = ide.target.kind === 'local';
-    const items: MenuItem[] = [
+    return [
       ...(local
         ? [
             { label: 'Add folder to project…', icon: 'worktree', action: () => (addFolderPickerOpen = true) },
@@ -490,8 +495,10 @@
       { label: 'Collapse all folders', icon: 'fold', action: () => ide.collapseAllDirs() },
       { label: 'Refresh', icon: 'refresh', action: () => void ide.loadTree() },
     ];
-    ctxMenu.show(e, items);
   }
+  const newFile = $derived(onScratches()
+    ? { icon: 'plus' as const, label: 'New scratch file…', onclick: () => void newScratchFile(), testid: 'ide-tree-new-file' }
+    : { icon: 'plus' as const, label: 'New file…', onclick: () => triggerNewTreeEntry(selectedDirPath || ide.target.root || '', 'create_file'), testid: 'ide-tree-new-file' });
 
   const menuCallbacks = {
     openCompare: openCompareModal,
@@ -500,20 +507,21 @@
   };
 </script>
 
-<aside class="ide-tree" aria-label="Project explorer" data-testid="ide-project-tree">
-  <Tabs size="s" label="Project explorer views" idBase="ide-explorer" tabs={explorerTabs} value={activeTab} onchange={(id) => (activeTab = id)} />
+{#snippet filesSearch()}
+  <input class="input tree-filter" type="search" dir="ltr" aria-label="Filter files" placeholder="Filter files…" value={filterDraft} oninput={(e) => onFilterInput(e.currentTarget.value)} data-testid="ide-tree-filter" />
+{/snippet}
+
+<ListPane
+  searchRow={activeTab === 'files' ? filesSearch : undefined}
+  primary={activeTab === 'files' ? newFile : undefined}
+  menu={activeTab === 'files' ? explorerMenu : undefined}
+  footer={activeTab === 'files' ? footer : undefined}
+  testid="ide-project-tree"
+>
+  {#snippet views()}<Tabs size="s" label="Project explorer views" idBase="ide-explorer" tabs={explorerTabs} value={activeTab} onchange={(id) => (ideLayout.explorerView = id)} />{/snippet}
 
   {#if activeTab === 'files'}
     <div class="tree-panel" role="tabpanel" id="ide-explorer-panel-files" aria-labelledby="ide-explorer-tab-files">
-      <div class="tree-toolbar">
-        <input class="tree-filter" type="search" dir="ltr" aria-label="Filter files" placeholder="Filter…" value={filterDraft} oninput={(e) => onFilterInput(e.currentTarget.value)} data-testid="ide-tree-filter" />
-        <button type="button" class="tree-act" aria-label={onScratches() ? 'New scratch file…' : 'New file…'} title={onScratches() ? 'New scratch file…' : 'New file…'} onclick={() => (onScratches() ? void newScratchFile() : triggerNewTreeEntry(selectedDirPath || ide.target.root || '', 'create_file'))} data-testid="ide-tree-new-file">
-          <Icon name="plus" size={12} />
-        </button>
-        <button type="button" class="tree-act" aria-label="Explorer options" title="Explorer options" aria-haspopup="menu" onclick={openExplorerMenu} data-testid="ide-tree-more-btn">
-          <Icon name="more" size={12} />
-        </button>
-      </div>
 
       <div class="tree-scroll" bind:this={treeScrollEl} onscroll={(e) => { const el = e.currentTarget as HTMLDivElement; scrollTop = el.scrollTop; treeScroll.top = el.scrollTop; clientHeight = el.clientHeight || 720; }}>
         {#if ideProjectHealth.issue && ide.treeError}<IdeProjectMissingState issue={ideProjectHealth.issue} />{:else}
@@ -534,7 +542,7 @@
             {#if treeWin.topPx > 0}<div style:block-size="{treeWin.topPx}px" aria-hidden="true"></div>{/if}
             {#each treeWin.items as node (rowKey(node))}
               {#if node.loadError}
-                <div class="tree-row tree-err-row" role="none" style="padding-inline-start: calc(6px + {node.depth * 12}px)" data-testid="ide-tree-dir-error">
+                <div class="tree-row tree-err-row" role="none" style:padding-inline-start="{8 + node.depth * 12}px" data-testid="ide-tree-dir-error">
                   <LoadState what={`“${ideBasename(node.errorDir ?? '')}”`} variant="compact" error={node.loadError} onretry={() => void ide.loadTree(node.errorDir)} />
                 </div>
               {:else}
@@ -542,16 +550,18 @@
               {@const gitLetter = resolveGitLetter(node)}
               {@const dirtyDir = isDirtyFolder(node)}
               <div
-                class="tree-row"
+                class="tree-row side-row"
                 class:active={!node.isProjectRoot && ide.activePath === node.entry.path}
+                class:selected={!node.isProjectRoot && ide.activePath === node.entry.path}
                 class:is-root={Boolean(node.isProjectRoot)}
                 role="none"
-                style="padding-inline-start: calc(6px + {node.depth * 12}px)"
+                style:--side-depth={node.isProjectRoot ? 0 : node.depth - 1}
                 data-testid={node.isProjectRoot ? (node.isPrimaryRoot ? 'ide-tree-root-node' : 'ide-tree-attached-root') : undefined}
               >
                 <button
                   type="button"
-                  class="tree-item"
+                  class="tree-item side-row-main"
+                  data-side-row
                   dir="ltr"
                   role="treeitem"
                   aria-level={node.depth + 1}
@@ -569,6 +579,12 @@
                   use:rowMenu
                   title={node.isProjectRoot ? node.entry.path : `${ide.relativePath(node.entry.path)}${node.entry.ignored ? ' — ignored by .gitignore' : ''}`}
                 >
+                  {#if node.isProjectRoot}
+                    <!-- A project root is the tree's section head (design.md §7.11: the project's name heads the list). -->
+                    <span class="tree-name side-row-title is-root-name" data-git={gitLetter ?? undefined}>{node.entry.name}</span>
+                    {#if dirtyDir}<span class="tree-dirty-dot" title="Contains uncommitted Git changes" aria-hidden="true"></span>{/if}
+                    <span class="tree-chevron tree-root-chevron"><Icon name={isExpanded ? 'chevronDown' : 'chevronRight'} size={12} noflip /></span>
+                  {:else}
                   {#if node.entry.kind === 'dir'}
                     <span class="tree-chevron"><Icon name={isExpanded ? 'chevronDown' : 'chevronRight'} size={12} noflip /></span>
                   {:else if node.nestKids}
@@ -577,15 +593,16 @@
                     <span class="tree-chevron" aria-hidden="true"></span>
                   {/if}
                   <span class="tree-kind" class:is-dir={node.entry.kind === 'dir'} class:is-ignored={Boolean(node.entry.ignored)}>
-                    <Icon name={node.isProjectRoot && !node.isPrimaryRoot ? 'worktree' : node.entry.kind === 'dir' ? 'folder' : 'file'} size={13} />
+                    <Icon name={node.entry.kind === 'dir' ? 'folder' : 'file'} size={14} />
                   </span>
-                  <span class="tree-name" class:is-root-name={Boolean(node.isProjectRoot)} class:is-ignored={Boolean(node.entry.ignored)} data-git={gitLetter ?? undefined}>{node.entry.name}</span>
+                  <span class="tree-name side-row-title" class:is-ignored={Boolean(node.entry.ignored)} data-git={gitLetter ?? undefined}>{node.entry.name}</span>
                   {#if node.entry.ignored}<span class="sr-only" data-testid="ide-tree-ignored-label">, ignored by .gitignore</span>{/if}
                   {#if dirtyDir}<span class="tree-dirty-dot" title="Contains uncommitted Git changes" aria-hidden="true"></span>{/if}
                   {#if gitLetter}<span class="tree-git-mark mono" data-git={gitLetter} data-testid="ide-tree-git-status">{gitLetter === 'U' ? '?' : gitLetter}</span>{/if}
+                  {/if}
                 </button>
-                <button type="button" class="tree-act tree-more" tabindex="-1" aria-hidden="true" aria-label="Actions for {node.entry.name}" title="Actions for {node.entry.name} (⇧F10)" onclick={(e) => openNodeMenu(e, node)}>
-                  <Icon name="more" size={12} />
+                <button type="button" class="icon-btn side-row-more tree-more" tabindex="-1" aria-hidden="true" aria-label="Actions for {node.entry.name}" title="Actions for {node.entry.name} (⇧F10)" onclick={(e) => openNodeMenu(e, node)}>
+                  <Icon name="more" size={14} />
                 </button>
               </div>
               {/if}
@@ -599,7 +616,7 @@
   {:else}
     <LazyMount lazy={IdeTreeSecondaryTabsLazy} what="structure & breakpoints" variant="panel" props={{ tab: activeTab, flatSymbols }} />
   {/if}
-</aside>
+</ListPane>
 
 {#if addFolderPickerOpen}
   <LazyMount
@@ -622,47 +639,24 @@
 {/if}
 
 <style>
-  .ide-tree {
-    position: relative; display: flex; flex-direction: column; min-inline-size: 0; min-block-size: 0;
-    block-size: 100%; overflow: hidden; contain: layout paint;
-    background: var(--surface); border-inline-end: 1px solid var(--border);
-  }
-  .ide-tree :global(.otabs) { block-size: 34px; min-block-size: 34px; max-block-size: 34px; flex-shrink: 0; }
-  .tree-panel { display: flex; flex-direction: column; flex: 1; min-block-size: 0; min-inline-size: 0; overflow: hidden; }
-  .tree-toolbar {
-    display: flex; align-items: center; gap: 2px;
-    block-size: 30px; min-block-size: 30px; max-block-size: 30px;
-    padding-inline: 6px; border-block-end: 1px solid var(--border); min-inline-size: 0; overflow: hidden; flex-shrink: 0;
-  }
-  .tree-act {
-    display: inline-flex; align-items: center; justify-content: center;
-    block-size: 22px; inline-size: 22px; border: 0; border-radius: var(--radius-s);
-    background: transparent; color: var(--text-dim); cursor: pointer; flex-shrink: 0;
-  }
-  .tree-act:hover:not(:disabled) { background: var(--hover); color: var(--text); }
-  .tree-act:disabled { opacity: var(--disabled-opacity); cursor: default; }
-  .tree-filter {
-    flex: 1; min-inline-size: 96px; block-size: 22px; padding-inline: 6px; font-size: var(--fs-xs);
-    background: var(--surface-2); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius-s);
-  }
-  .tree-scroll { flex: 1; min-block-size: 0; overflow-y: auto; overflow-x: hidden; padding-block: 4px; }
-  .tree-list { display: flex; flex-direction: column; gap: 2px; }
-  .tree-list.is-virtual { gap: 0; }
-  .tree-row { display: flex; align-items: center; padding-inline-end: 4px; min-inline-size: 0; overflow: hidden; }
-  .tree-row.is-root { background: var(--surface-2); border-block-end: 1px solid var(--separator); }
-  .tree-list.is-virtual .tree-row { block-size: var(--tree-row-h, 26px); box-sizing: border-box; }
-  .tree-row:hover, .tree-row.active { background: var(--hover); }
-  .tree-item {
-    flex: 1; min-inline-size: 0; display: flex; align-items: center; gap: 6px;
-    padding-block: var(--ide-row-py, 4px); padding-inline: 2px 4px; background: transparent; border: none;
-    color: var(--text); font-size: var(--fs-xs); text-align: start; cursor: pointer; overflow: hidden;
-  }
-  .tree-list.is-virtual .tree-item { padding-block: 2px; }
+  /* The tree fills the pane's body and scrolls itself (it is virtualised). */
+  .tree-panel { display: flex; flex-direction: column; block-size: 100%; min-block-size: 0; min-inline-size: 0; overflow: hidden; }
+  .tree-filter { inline-size: 100%; }
+  .tree-scroll { flex: 1; min-block-size: 0; overflow-y: auto; overflow-x: hidden; }
+  .tree-list { display: flex; flex-direction: column; }
+  /* Rows are the shared side rows (app.css .side-row); the virtualiser's row height wins. */
+  .tree-list.is-virtual .tree-row { block-size: var(--tree-row-h, 30px); box-sizing: border-box; }
+  .tree-list.is-virtual .tree-item { min-block-size: 0; block-size: 100%; }
+  .tree-item { gap: 6px; }
+  /* A project root is the section head: small caps, dim, its fold at the end. */
+  .tree-row.is-root:hover { background: none; }
+  .tree-row.is-root .tree-item { color: var(--text-dim); }
+  .tree-name.is-root-name { flex: 0 1 auto; font-size: var(--fs-xs); font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; }
+  .tree-root-chevron { margin-inline-start: auto; }
   .tree-chevron { inline-size: 12px; display: inline-flex; align-items: center; justify-content: center; color: var(--text-dim); flex-shrink: 0; }
   .tree-kind { display: inline-flex; color: var(--text-dim); flex-shrink: 0; }
-  .tree-kind.is-dir { color: var(--accent-text); }
-  .tree-name { flex: 1; min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .tree-name.is-root-name { font-weight: 600; flex: 0 1 auto; }
+  .side-row.selected .tree-kind { color: var(--text); }
+  .tree-name { flex: 1; }
   /* Git-ignored entries recede (GoLand's dimmed ignored files); still 4.5:1 on the surface. */
   /* GoLand-style olive: the warning hue pushed toward the dim text colour. */
   .tree-name.is-ignored, .tree-kind.is-ignored { color: color-mix(in oklab, var(--warning) 55%, var(--text-dim)); }
@@ -671,22 +665,9 @@
   .tree-name[data-git='U'], .tree-git-mark[data-git='U'] { color: var(--warning); }
   .tree-name[data-git='D'], .tree-name[data-git='C'], .tree-git-mark[data-git='D'], .tree-git-mark[data-git='C'] { color: var(--danger); }
   .tree-name[data-git='R'], .tree-git-mark[data-git='R'] { color: var(--accent-text); }
-  .tree-row.active .tree-name { font-weight: 600; }
   .tree-dirty-dot { inline-size: 6px; block-size: 6px; border-radius: 50%; background: var(--info); flex-shrink: 0; }
   .tree-git-mark { font-size: var(--fs-xs); font-weight: 600; flex-shrink: 0; }
-  .tree-more { opacity: 0; block-size: 20px; inline-size: 20px; }
-  .tree-item:focus-visible { outline: 2px solid var(--accent-text); outline-offset: -2px; border-radius: var(--radius-s); }
   .tree-err-row { padding-inline-end: 6px; }
   .tree-list.is-virtual .tree-err-row { overflow: hidden; }
-  .tree-row:hover .tree-more, .tree-row:focus-within .tree-more { opacity: 1; }
   .dep-tree-pre { overflow: auto; padding: 10px; background: var(--surface-2); border-radius: var(--radius-s); font-size: var(--fs-xs); white-space: pre; }
-  @media (hover: none) { .tree-more { opacity: 1; } }
-  /* Touch: rows and their buttons are comfortable targets (the row height is the same
-     constant the virtualiser uses, see ROW_H). */
-  @media (pointer: coarse) {
-    .tree-row { min-block-size: var(--tree-row-h, 40px); box-sizing: border-box; }
-    .tree-toolbar { block-size: auto; min-block-size: 40px; max-block-size: none; }
-    .tree-act, .tree-more { block-size: 36px; inline-size: 36px; }
-    .tree-filter { block-size: 32px; }
-  }
 </style>

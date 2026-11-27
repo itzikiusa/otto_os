@@ -3,9 +3,10 @@
   // Collapsible, height-resizable (120px..85vh), maximizable IDE Bottom Tool Dock
   // hosting Terminal, Problems, Git and Run, plus Debug, Usages and DB Watch while they
   // are in use (`ideDockTabs.svelte.ts`).
-  // `stack` (the phone layout's Tools pane): always open, fills the pane, no
-  // resizer, Terminal first, and picking a tab never writes the workbench's
-  // persisted "dock open" preference.
+  // `stack` (a phone's Tools, picked from ⋯ › a tool window): open, fills the
+  // content, no resizer, Terminal first, and picking a tab never writes the
+  // workbench's persisted "dock open" preference; its chevron goes back to
+  // the editor.
   import { untrack } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
@@ -26,7 +27,7 @@
   import { ideGit } from './git/ideGitController.svelte';
   import { IDE_DOCK_ON_DEMAND, ideDockOrder, ideDockTabMemory, ideDockTabVisible } from './ideDockTabs.svelte';
   import { ide, type IdeBottomTab } from './ideStore.svelte';
-  import { dockMaxFor } from './shell/ideLayout.svelte';
+  import { dockMaxFor, ideLayout } from './shell/ideLayout.svelte';
 
   type DockTab = IdeBottomTab | 'git';
 
@@ -344,7 +345,11 @@
         >
           <Icon name="more" size={12} />
         </button>
-        {#if !stack}
+        {#if stack}
+          <button type="button" class="icon-btn dock-act" aria-label="Back to the editor" title="Back to the editor" onclick={() => (ideLayout.pane = 'editor')} data-testid="ide-dock-close-tools">
+            <Icon name="chevronDown" size={13} />
+          </button>
+        {:else}
           <button
             type="button"
             class="icon-btn dock-act"

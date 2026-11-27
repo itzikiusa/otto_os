@@ -14,6 +14,7 @@
   import IdeBreakpointPopover from '../editor/IdeBreakpointPopover.svelte';
   import { ide, ideBasename, type IdeBreakpoint } from '../ideStore.svelte';
   import { mutatePathBreakpoints } from '../shell/ideProjectHelpers';
+  import { ideLayout } from '../shell/ideLayout.svelte';
   import { ideKeymapPresetOf, ideShortcutLabel } from '../shell/ideShortcuts';
   import { groupBreakpoints } from './ideBreakpointList';
 
@@ -74,7 +75,7 @@
               type="button"
               class="bp-jump"
               dir="ltr"
-              onclick={() => void ide.openFile(bp.path, { line: bp.line, preview: false })}
+              onclick={() => { ideLayout.pane = 'editor'; void ide.openFile(bp.path, { line: bp.line, preview: false }); }}
               title={row.unbound ? `Not bound: ${bp.message || 'the debugger could not set it'}` : `${ide.relativePath(bp.path)}:${bp.line}`}
             >
               <span class="bp-line mono">{bp.line}</span>
@@ -100,18 +101,19 @@
 {/if}
 
 <style>
-  .bp-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding-block: 6px; padding-inline: 10px; border-block-end: 1px solid var(--border); }
+  .bp-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding-block: 0 8px; padding-inline: 8px; }
   .bp-switch { display: flex; align-items: center; gap: 6px; font-size: var(--fs-xs); color: var(--text-dim); }
   .bp-remove-all { color: var(--danger); }
   .bp-scroll { flex: 1; min-block-size: 0; overflow-y: auto; overflow-x: hidden; padding-block: 4px; }
+  /* The file heads are the pane's section heads (app.css .side-section-head look). */
   .bp-group + .bp-group { margin-block-start: 4px; }
-  .bp-file { display: flex; align-items: center; gap: 6px; padding-block: 4px; padding-inline: 10px; font-size: var(--fs-xs); font-weight: 600; color: var(--text-dim); }
-  .bp-file-name { min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+  .bp-file { display: flex; align-items: center; gap: 6px; block-size: 22px; padding-inline: 8px 6px; font-size: var(--fs-xs); font-weight: 600; color: var(--text-dim); }
+  .bp-file-name { min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .bp-file-count { font-weight: 400; }
-  .bp-row { display: flex; align-items: center; gap: 6px; padding-block: 2px; padding-inline: 18px 8px; min-inline-size: 0; }
-  .bp-row:hover { background: var(--surface-2); }
+  .bp-row { display: flex; align-items: center; gap: 6px; min-block-size: 30px; padding-inline: 8px 6px; min-inline-size: 0; border-radius: var(--radius-s); }
+  .bp-row:hover { background: var(--hover); }
   .bp-row.is-unbound .bp-jump, .bp-row.is-off .bp-jump { color: var(--text-dim); }
-  .bp-jump { flex: 1; min-inline-size: 0; display: flex; align-items: center; gap: 6px; background: transparent; border: none; color: var(--text); font-size: var(--fs-xs); text-align: start; cursor: pointer; overflow: hidden; }
+  .bp-jump { flex: 1; min-inline-size: 0; display: flex; align-items: center; gap: 6px; background: transparent; border: none; color: var(--text); font-size: var(--fs-s); text-align: start; cursor: pointer; overflow: hidden; }
   .bp-line { flex-shrink: 0; min-inline-size: 2.5ch; text-align: end; color: var(--text-dim); font-variant-numeric: tabular-nums; }
   .bp-code { min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .bp-msg { min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-style: italic; }

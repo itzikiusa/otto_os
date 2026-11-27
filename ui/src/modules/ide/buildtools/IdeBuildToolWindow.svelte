@@ -2,6 +2,7 @@
   // IntelliJ IDEA right-side Maven / Gradle Tool Window:
   // Profiles (Maven/Gradle + Spring Boot), multi-module projects, Lifecycle, Plugins, Dependencies, Repositories.
   import { onDestroy, untrack } from 'svelte';
+  import DetailPane from '../../../lib/components/side/DetailPane.svelte';
   import Badge from '../../../lib/components/Badge.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import type { IdeMobileProject, IdeSpringBootInfo, IdeTargetSpec } from '../../../lib/api/types';
@@ -38,7 +39,6 @@
   let expanded = $state<Record<string, boolean>>({ profiles: false, springBoot: true });
 
   const labelTitle = $derived((ide.buildToolKind ?? tool) === 'gradle' ? 'Gradle' : 'Maven');
-  const badgeMark = $derived((ide.buildToolKind ?? tool) === 'gradle' ? 'G' : 'm');
 
   let refreshSeq = 0;
   const currentTargetSig = (): string => `${ideTargetKey(ide.target)}:${ide.additionalRoots.join('\0')}`;
@@ -321,27 +321,14 @@
   {/if}
 {/snippet}
 
-<aside class="bt-win" aria-label={`${labelTitle} tool window`} data-testid="ide-build-tool-window">
-  <header class="bt-hdr">
-    <div class="bt-hdr-title">
-      <span class="bt-mark is-hdr">{badgeMark}</span>
-      <span>{labelTitle}</span>
-      {#if ide.activeMavenProfiles.length + ide.activeSpringProfiles.length > 0}
-        <Badge tone="accent" label={`${ide.activeMavenProfiles.length + ide.activeSpringProfiles.length} active`} />
-      {/if}
-    </div>
-    <button
-      type="button"
-      class="icon-btn"
-      aria-label={`Hide ${labelTitle} tool window`}
-      title={`Hide ${labelTitle} tool window`}
-      onclick={() => ide.toggleBuildTool(false)}
-    >
-      <Icon name="minus" size={13} />
-    </button>
-  </header>
-
+<!-- A Detail pane (design.md §3): "<tool> tool window", Close; inline beside
+     the editor, a right sheet when there is no room, full width on a phone. -->
+<DetailPane module="ide" pane="build" title={`${labelTitle} tool window`} open onclose={() => ide.toggleBuildTool(false)} legacy={{ w: 'otto.ide.buildToolW' }} testid="ide-build-tool-window">
+<div class="bt-win">
   <div class="bt-toolbar" role="toolbar" aria-label={`${labelTitle} actions`}>
+    {#if ide.activeMavenProfiles.length + ide.activeSpringProfiles.length > 0}
+      <Badge tone="accent" label={`${ide.activeMavenProfiles.length + ide.activeSpringProfiles.length} active`} />
+    {/if}
     <button type="button" class="icon-btn" aria-label={`Reload all ${labelTitle} projects`} title={`Reload all ${labelTitle} projects`} onclick={() => void refreshModel()} data-testid="ide-bt-reload">
       <Icon name="refresh" size={13} />
     </button>
@@ -489,12 +476,11 @@
       {/if}
     </LoadState>
   </div>
-</aside>
+</div>
+</DetailPane>
 
 <style>
-  .bt-win { display: flex; flex-direction: column; block-size: 100%; min-block-size: 0; min-inline-size: 0; background: var(--surface); border-inline-start: 1px solid var(--border); }
-  .bt-hdr { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-block: 6px; padding-inline: 10px; border-block-end: 1px solid var(--border); }
-  .bt-hdr-title { display: flex; align-items: center; gap: 6px; font-size: var(--fs-xs); font-weight: 600; color: var(--text); }
+  .bt-win { display: flex; flex-direction: column; flex: 1; min-block-size: 0; min-inline-size: 0; }
   .bt-mark { display: inline-flex; align-items: center; justify-content: center; inline-size: 15px; block-size: 15px; border-radius: var(--radius-s); background: var(--accent-soft); color: var(--accent-text); font-size: var(--fs-xs); font-weight: 600; flex-shrink: 0; }
   .bt-toolbar { display: flex; align-items: center; gap: 2px; padding-block: 4px; padding-inline: 8px; border-block-end: 1px solid var(--border); background: var(--surface-2); flex-wrap: wrap; }
   .bt-toggle[aria-pressed='true'] { background: var(--accent-soft); color: var(--accent-text); border-color: var(--accent-line); }
