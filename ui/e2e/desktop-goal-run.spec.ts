@@ -82,5 +82,32 @@ test('two review-and-fix loops with the same criterion id show each meter, trend
   await expect(rows.nth(1).getByTestId('wf-criterion-ratio')).toHaveText('81 / 95');
   await expect(rows.nth(1).getByTestId('wf-criterion-trend')).toHaveText('60 → 80 → 81');
   await expect(rows.nth(1).getByTestId('wf-criterion-blocker')).toHaveText('1 must-fix finding left');
+
+  // Loop headers show position in words and name the waiting threads as links.
+  const uiPos = page.locator('[data-testid="wf-step"][data-node-id="ui"] [data-testid="wf-loop-position"]');
+  await expect(uiPos).toHaveText('Round 3 of 5 · reviewing (1 of 3 reviewers done)');
+  const serverPos = page.locator('[data-testid="wf-step"][data-node-id="server"] [data-testid="wf-loop-position"]');
+  await expect(serverPos).toHaveText('Round 3 of 5 · fixing');
+  const stepWaiting = page.getByTestId('wf-step-waiting').first();
+  await expect(stepWaiting).toContainText('Security · Claude');
+  await expect(stepWaiting).toContainText('Correctness · Codex');
+
+  // UI loop rounds: Rounds 1 & 2 folded to one line each, Round 3 open & marked current.
+  const uiRounds = page.locator('[data-testid="wf-loop-rounds"][data-loop-id="ui"] [data-testid="wf-loop-round"]');
+  await expect(uiRounds).toHaveCount(3);
+  await expect(uiRounds.nth(0).getByTestId('wf-loop-round-toggle')).toHaveAttribute('aria-expanded', 'false');
+  await expect(uiRounds.nth(0)).toContainText('Round 1 — 35 / 95 · 68 comments · fixed');
+  await expect(uiRounds.nth(2)).toHaveAttribute('data-current', 'true');
+  await expect(uiRounds.nth(2).getByTestId('wf-loop-round-toggle')).toHaveAttribute('aria-expanded', 'true');
+  await expect(uiRounds.nth(2)).toContainText('Round 3 of 5');
+  await expect(uiRounds.nth(2).getByTestId('wf-summarizer-waiting')).toContainText('Security · Claude');
+
+  // Clicking a waiting thread link opens that thread in the pane.
+  await stepWaiting.locator('[data-testid="wf-waiting-thread"][data-child-id="ui-rev-3.1"]').click();
+  await expect(page.getByTestId('wf-step-pane')).toHaveAttribute('data-child-id', 'ui-rev-3.1');
+
+  // Expanding Round 1 keeps the retried fix attempt inside Round 1.
+  await uiRounds.nth(0).getByTestId('wf-loop-round-toggle').click();
+  await expect(uiRounds.nth(0).locator('[data-testid="wf-round-step"][data-step-kind="agent_prompt"]')).toContainText('fix');
   await expectNoHorizontalOverflow(page);
 });

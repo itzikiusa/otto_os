@@ -618,3 +618,15 @@ export function loopChildren(checkpoints: readonly WorkflowCheckpoint[], loopId:
     };
   });
 }
+
+export {
+  groupLoopRounds,
+  isWaitingOnSubagents,
+  loopPositionLine,
+  waitingReviewers,
+  waitingThreads,
+  type LoopRound,
+  type LoopRoundStep,
+  type LoopRoundsView,
+  type WaitingThreadRef,
+} from './loopRounds.ts';

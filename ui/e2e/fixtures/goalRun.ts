@@ -116,8 +116,8 @@ export async function serveMultiLoopGoalRun(page: Page, workspaceId: string): Pr
     graph: {
       nodes: [
         { id: 'start', kind: 'manual_trigger', name: 'Start', x: 0, y: 0, params: { lane: 'long' } },
-        { id: 'ui', kind: 'loop', name: 'UI', x: 0, y: 120, params: { max_iterations: 5, steps: [{ kind: 'review_run', name: 'review' }, { kind: 'check', name: 'check', params: { criteria: [reviewCriterion] } }] } },
-        { id: 'server', kind: 'loop', name: 'server', x: 240, y: 120, params: { max_iterations: 5, steps: [{ kind: 'review_run', name: 'review' }, { kind: 'check', name: 'check', params: { criteria: [reviewCriterion] } }] } },
+        { id: 'ui', kind: 'loop', name: 'UI', x: 0, y: 120, params: { max_iterations: 5, steps: [{ kind: 'review_run', name: 'review' }, { kind: 'check', name: 'check', params: { criteria: [reviewCriterion] } }, { kind: 'agent_prompt', name: 'fix' }] } },
+        { id: 'server', kind: 'loop', name: 'server', x: 240, y: 120, params: { max_iterations: 5, steps: [{ kind: 'review_run', name: 'review' }, { kind: 'check', name: 'check', params: { criteria: [reviewCriterion] } }, { kind: 'agent_prompt', name: 'fix' }] } },
       ],
       edges: [{ id: 'e1', source: 'start', target: 'ui' }, { id: 'e2', source: 'start', target: 'server' }],
     },
@@ -132,8 +132,15 @@ export async function serveMultiLoopGoalRun(page: Page, workspaceId: string): Pr
     feedback: '', feedback_md: '', repeat_signature: '', repeated_failures: 0,
   });
   const checkpoints = [
+    { node_id: 'ui#1.0#review.0', loop_id: 'ui', iteration: 1, step_index: 0, kind: 'review_run', name: 'review', status: 'success', attempts: 1, input: null, output: { review_id: 'ui-rev-1' }, logs: [], updated_at: '2026-11-20T09:05:00Z' },
+    { node_id: 'ui#1.0', loop_id: 'ui', iteration: 1, step_index: 0, kind: 'review_run', name: 'review', status: 'success', attempts: 1, input: null, output: { review_id: 'ui-rev-1', score: 35, threshold: 95, open: 68 }, logs: [], updated_at: '2026-11-20T09:08:00Z' },
     { node_id: 'ui#1.1', loop_id: 'ui', iteration: 1, step_index: 1, kind: 'check', name: 'check', status: 'success', attempts: 1, input: null, output: mkCheck(false, 35, '4 must-fix findings left'), logs: [], updated_at: '2026-11-20T09:10:00Z' },
+    { node_id: 'ui#1.2', loop_id: 'ui', iteration: 1, step_index: 2, kind: 'agent_prompt', name: 'fix', status: 'success', attempts: 2, input: null, output: {}, logs: ['attempt 1: timed out waiting for tool'], updated_at: '2026-11-20T09:14:00Z', thread_id: 'th-ui-fix-1b' },
+    { node_id: 'ui#2.0#review.0', loop_id: 'ui', iteration: 2, step_index: 0, kind: 'review_run', name: 'review', status: 'success', attempts: 1, input: null, output: { review_id: 'ui-rev-2' }, logs: [], updated_at: '2026-11-20T09:16:00Z' },
+    { node_id: 'ui#2.0', loop_id: 'ui', iteration: 2, step_index: 0, kind: 'review_run', name: 'review', status: 'success', attempts: 1, input: null, output: { review_id: 'ui-rev-2', score: 58, threshold: 95, open: 12 }, logs: [], updated_at: '2026-11-20T09:19:00Z' },
     { node_id: 'ui#2.1', loop_id: 'ui', iteration: 2, step_index: 1, kind: 'check', name: 'check', status: 'success', attempts: 1, input: null, output: mkCheck(false, 58, '3 must-fix findings left'), logs: [], updated_at: '2026-11-20T09:20:00Z' },
+    { node_id: 'ui#2.2', loop_id: 'ui', iteration: 2, step_index: 2, kind: 'agent_prompt', name: 'fix', status: 'success', attempts: 1, input: null, output: {}, logs: [], updated_at: '2026-11-20T09:25:00Z', thread_id: 'th-ui-fix-2' },
+    { node_id: 'ui#3.0#review.0', loop_id: 'ui', iteration: 3, step_index: 0, kind: 'review_run', name: 'review', status: 'running', attempts: 1, input: null, output: { review_id: 'ui-rev-3' }, logs: [], updated_at: '2026-11-20T09:28:00Z' },
     { node_id: 'ui#3.1', loop_id: 'ui', iteration: 3, step_index: 1, kind: 'check', name: 'check', status: 'success', attempts: 1, input: null, output: mkCheck(false, 72, '3 must-fix findings left'), logs: [], updated_at: '2026-11-20T09:30:00Z' },
     { node_id: 'server#1.1', loop_id: 'server', iteration: 1, step_index: 1, kind: 'check', name: 'check', status: 'success', attempts: 1, input: null, output: mkCheck(false, 60, '2 must-fix findings left'), logs: [], updated_at: '2026-11-20T09:10:00Z' },
     { node_id: 'server#2.1', loop_id: 'server', iteration: 2, step_index: 1, kind: 'check', name: 'check', status: 'success', attempts: 1, input: null, output: mkCheck(false, 80, '1 must-fix finding left'), logs: [], updated_at: '2026-11-20T09:20:00Z' },
@@ -142,11 +149,28 @@ export async function serveMultiLoopGoalRun(page: Page, workspaceId: string): Pr
   const run = {
     id: MULTI_LOOP_RUN, workflow_id: MULTI_LOOP_WF, workspace_id: workspaceId, status: 'running', input: { goal: { title: 'Review & fix' } },
     started_at: '2026-11-20T09:00:00Z', finished_at: null, rev: 9, workflow_version: 1,
-    resume_attempts: 0, checkpoint_rev: 6, checkpoint_generation: 0, waiting_approval: false, steering_queued: [],
+    resume_attempts: 0, checkpoint_rev: checkpoints.length, checkpoint_generation: 0, waiting_approval: false, steering_queued: [],
     nodes: [
       { node_id: 'start', status: 'success', logs: [], step_no: 1 },
-      { node_id: 'ui', status: 'running', logs: ['🔁 iteration 3/5'], step_no: 2, phase: 'working' },
-      { node_id: 'server', status: 'running', logs: ['🔁 iteration 3/5'], step_no: 3, phase: 'working' },
+      {
+        node_id: 'ui', status: 'running', logs: ['🔁 iteration 3/5'], step_no: 2, phase: 'finishing',
+        activity: { phase: 'waiting on 2 sub-agent(s)', updated_at: '2026-11-20T09:30:00Z', pending_tasks: 2, subagents: [] },
+        review_ids: ['ui-rev-1', 'ui-rev-2', 'ui-rev-3'],
+        children: [
+          { id: 'ui-rev-1.0', label: 'Correctness', provider: 'codex', status: 'success', note: '68 findings' },
+          { id: 'ui-rev-1.1', label: 'Summarizer', provider: 'claude', status: 'success', note: 'Done' },
+          { id: 'th-ui-fix-1a', label: 'fix · iteration 1', provider: 'claude', status: 'error', thread_id: 'th-ui-fix-1a' },
+          { id: 'th-ui-fix-1b', label: 'fix · iteration 1', provider: 'claude', status: 'success', thread_id: 'th-ui-fix-1b' },
+          { id: 'ui-rev-2.0', label: 'Correctness', provider: 'codex', status: 'success', note: '12 findings' },
+          { id: 'ui-rev-2.1', label: 'Summarizer', provider: 'claude', status: 'success', note: 'Done' },
+          { id: 'th-ui-fix-2', label: 'fix · iteration 2', provider: 'claude', status: 'success', thread_id: 'th-ui-fix-2' },
+          { id: 'ui-rev-3.0', label: 'Design', provider: 'claude', status: 'success', note: '2 findings' },
+          { id: 'ui-rev-3.1', label: 'Security · Claude', provider: 'claude', status: 'running', started_at: '2026-11-20T09:28:00Z', thread_id: 'th-ui-rev-3-1' },
+          { id: 'ui-rev-3.2', label: 'Correctness · Codex', provider: 'codex', status: 'running', started_at: '2026-11-20T09:29:00Z', thread_id: 'th-ui-rev-3-2' },
+          { id: 'ui-rev-3.3', label: 'Summarizer', provider: 'claude', status: 'pending' },
+        ],
+      },
+      { node_id: 'server', status: 'running', logs: ['🔁 iteration 3/5'], step_no: 3, phase: 'working', children: [{ id: 'th-srv-fix-3', label: 'fix · iteration 3', provider: 'claude', status: 'running', thread_id: 'th-srv-fix-3' }] },
     ],
     checkpoints,
     overview: {
