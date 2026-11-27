@@ -14,6 +14,7 @@ pub(in crate::workflow_engine) async fn execute(
         node,
         input,
         env,
+        progress,
         ..
     } = call;
     let run_id: &Id = &env.run_id;
@@ -87,6 +88,10 @@ pub(in crate::workflow_engine) async fn execute(
             "channel_notify: no enabled integration with a default chat configured".into(),
         ));
     }
+
+    // Drain the run's progress pump before posting directly so earlier step
+    // updates and `▶ *step* started` always land ahead of this notification.
+    progress.flush().await;
 
     let mut sent = 0usize;
     for integ in &targets {

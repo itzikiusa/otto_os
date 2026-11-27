@@ -53,6 +53,9 @@ pub struct RecordingAdapter {
     /// ([`Self::fail_next_edit`], [`Self::fail_next_upload`]).
     edit_errors: Mutex<std::collections::VecDeque<String>>,
     upload_errors: Mutex<std::collections::VecDeque<String>>,
+    /// Delay before `send_formatted` records — lets tests simulate chat API
+    /// latency on progress-pump posts without sleeping in production code.
+    formatted_delay: Mutex<std::time::Duration>,
 }
 
 impl RecordingAdapter {
@@ -70,7 +73,13 @@ impl RecordingAdapter {
             log: Mutex::new(vec![]),
             edit_errors: Mutex::default(),
             upload_errors: Mutex::default(),
+            formatted_delay: Mutex::new(std::time::Duration::ZERO),
         })
+    }
+
+    /// Delay every `send_formatted` call by `delay` before recording it.
+    pub fn delay_formatted(&self, delay: std::time::Duration) {
+        *self.formatted_delay.lock().unwrap() = delay;
     }
 
     /// The next edit fails with `error` (e.g. Slack's
@@ -184,6 +193,10 @@ impl Adapter for RecordingAdapter {
         thread: Option<&str>,
         text: &str,
     ) -> anyhow::Result<String> {
+        let delay = *self.formatted_delay.lock().unwrap();
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
         Ok(self.send_inner(chat, thread, text, true))
     }
 
