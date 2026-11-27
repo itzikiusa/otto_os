@@ -483,7 +483,8 @@ pub(super) fn build_gradle_cmd(
 }
 
 /// The build wrapper lives at the top of a multi-module build, above the module the build
-/// runs in: look in `cwd`, then up while the parent still belongs to the build.
+/// runs in: look in `cwd`, then up while the parent still belongs to the build (or across
+/// intermediate markerless folders for Gradle `projectDir` remappings such as `services/backend`).
 pub(crate) fn find_build_wrapper(cwd: &str, wrapper: &str, build_files: &[&str]) -> Option<String> {
     let mut dir = Path::new(cwd);
     loop {
@@ -495,11 +496,23 @@ pub(crate) fn find_build_wrapper(cwd: &str, wrapper: &str, build_files: &[&str])
                 candidate.to_string_lossy().into_owned()
             });
         }
-        dir = dir.parent()?;
+        let Some(parent) = dir.parent() else {
+            break;
+        };
+        dir = parent;
         if !build_files.iter().any(|f| dir.join(f).is_file()) {
-            return None;
+            break;
         }
     }
+    if wrapper == "gradlew" {
+        if let Some(root) = crate::java_workspace::find_owning_gradle_root(Path::new(cwd)) {
+            let candidate = root.join(wrapper);
+            if is_executable_file(&candidate) {
+                return Some(candidate.to_string_lossy().into_owned());
+            }
+        }
+    }
+    None
 }
 
 pub(super) fn build_shell_cmd(

@@ -223,6 +223,8 @@ pub(super) async fn resolve_cpp_adapter(
 
     let is_unreal_project = req.launch.program.trim().ends_with(".uproject")
         || raw_prog.ends_with(".uproject")
+        || req.launch.program.trim().ends_with(".uplugin")
+        || raw_prog.ends_with(".uplugin")
         || ctx
             .run_config
             .as_ref()
@@ -230,13 +232,15 @@ pub(super) async fn resolve_cpp_adapter(
     let mut unreal_uproject_arg: Option<String> = None;
 
     let is_prebuilt_binary = !raw_prog.is_empty()
+        && !is_unreal_project
         && !is_cpp_source_file(&raw_prog)
         && !raw_prog.ends_with("CMakeLists.txt")
         && !raw_prog.ends_with("meson.build")
         && !raw_prog.ends_with(".uproject")
+        && !raw_prog.ends_with(".uplugin")
         && (req.target.kind == IdeTargetKind::Ssh || Path::new(&raw_prog).is_file());
-    let executable = if is_attach_mode || is_prebuilt_binary {
-        raw_prog
+    let executable = if is_attach_mode {
+        raw_prog.clone()
     } else if is_unreal_project {
         let (editor_bin, uproj_arg) = plan_unreal_debug_launch(
             req.launch.program.trim(),
@@ -249,6 +253,8 @@ pub(super) async fn resolve_cpp_adapter(
         )?;
         unreal_uproject_arg = uproj_arg;
         editor_bin
+    } else if is_prebuilt_binary {
+        raw_prog.clone()
     } else {
         compile_cpp_debug_artifact(
             data_dir,
@@ -271,7 +277,7 @@ pub(super) async fn resolve_cpp_adapter(
     }
     if let Some(tname) = req.launch.test_name.as_deref().filter(|s| !s.is_empty()) {
         // GoogleTest uses `Suite.Test` / `--gtest_filter=...`; Catch2 accepts the test name directly.
-        if tname.contains('.')
+        if crate::environments::runner_cmd::is_gtest_filter_for_source(cwd, Some(&raw_prog), tname)
             && !req
                 .launch
                 .args
@@ -521,7 +527,10 @@ pub(crate) fn plan_unreal_debug_launch(
                 .filter(|s| matches!(*s, "build" | "gen-cdb" | "build-plugin" | "editor"))
         })
         .unwrap_or("editor");
-    if matches!(sub, "build" | "gen-cdb" | "build-plugin") {
+    if matches!(sub, "build" | "gen-cdb" | "build-plugin")
+        || raw_launch_program.ends_with(".uplugin")
+        || normalized_program.ends_with(".uplugin")
+    {
         return Err(Error::Invalid(format!(
             "Unreal '{sub}' run configuration is build-only; start Debug on the Unreal Editor launch configuration instead"
         )));
@@ -940,6 +949,15 @@ fn cpp_debug_cache_bin_path(
 
 #[allow(clippy::disallowed_methods)]
 fn infer_cmake_target_hint(project_dir: &Path, raw_prog: &str, want_test: bool) -> Option<String> {
+    if is_cpp_source_file(raw_prog) {
+        if let Some(hit) = crate::environments::runner_cmd::infer_cmake_target_for_source(
+            &project_dir.to_string_lossy(),
+            raw_prog,
+            want_test,
+        ) {
+            return Some(hit);
+        }
+    }
     let cmake_txt = std::fs::read_to_string(project_dir.join("CMakeLists.txt")).ok()?;
     let targets = parse_cmake_executables(&cmake_txt);
     if targets.is_empty() {
@@ -1406,5 +1424,58 @@ int main(int argc, char** argv) {
                 "expected build-only rejection for {subcmd}, got: {build_err}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn resolve_cpp_adapter_rejects_existing_uplugin_as_build_only() {
+        use std::collections::BTreeMap;
+
+        use super::resolve_cpp_adapter;
+        use crate::dap::DapStartContext;
+        use crate::types::{IdeRunConfig, IdeStartDebugReq};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let uplugin = root.join("MyPlugin.uplugin");
+        std::fs::write(&uplugin, r#"{"FileVersion": 3}"#).unwrap();
+
+        let ue_plugin_cfg: IdeRunConfig = serde_json::from_value(serde_json::json!({
+            "id": "ue-plugin-build",
+            "name": "Unreal Build Plugin",
+            "runner": "unreal",
+            "args": ["build-plugin", "MyPlugin.uplugin"],
+            "target_path": "MyPlugin.uplugin",
+            "auto_detected": true
+        }))
+        .unwrap();
+        let req: IdeStartDebugReq = serde_json::from_value(serde_json::json!({
+            "target": {
+                "kind": "local",
+                "root": root.to_string_lossy()
+            },
+            "language": "cpp",
+            "launch": {
+                "program": "MyPlugin.uplugin",
+                "cwd": root.to_string_lossy(),
+                "args": []
+            }
+        }))
+        .unwrap();
+        let ctx = DapStartContext::new().with_run_config(Some(ue_plugin_cfg));
+
+        let err = resolve_cpp_adapter(
+            tmp.path(),
+            &req,
+            &ctx,
+            &root.to_string_lossy(),
+            BTreeMap::new(),
+        )
+        .await
+        .expect_err("BUG-13: existing .uplugin must be rejected as build-only, never launched as a prebuilt binary")
+        .to_string();
+        assert!(
+            err.contains("build-only"),
+            "BUG-13: expected build-only rejection for existing .uplugin, got: {err}"
+        );
     }
 }

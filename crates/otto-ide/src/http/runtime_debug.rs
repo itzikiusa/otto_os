@@ -381,6 +381,17 @@ pub(super) async fn start_debug_session<S: IdeCtx>(
         }
         None => None,
     };
+    let host_key = match req.target.kind {
+        IdeTargetKind::Local => "local".to_string(),
+        IdeTargetKind::Ssh => req
+            .target
+            .connection_id
+            .as_deref()
+            .map(|c| format!("ssh:{c}"))
+            .unwrap_or_else(|| "local".to_string()),
+    };
+    let registered_sdks =
+        crate::toolchains::load_registered_local_sdks_by_host(&ctx.pool(), &host_key).await;
     let go_build_tags = loaded_proj.go_build_tags.clone();
     let project_env = Some(loaded_proj);
     let plugin_adapters = ctx.ide().plugins.active_dap_adapters();
@@ -393,7 +404,8 @@ pub(super) async fn start_debug_session<S: IdeCtx>(
         .with_plugin_adapters(plugin_adapters)
         .with_netbridge(netbridge)
         .with_caller_is_root(has_root_auth)
-        .with_owner_user_id(&user.id);
+        .with_owner_user_id(&user.id)
+        .with_registered_sdks(registered_sdks);
 
     let target_for_collab = req.target.clone();
     let owner_id = user.id.clone();

@@ -3,7 +3,7 @@
 #[path = "runner_cmd_langs.rs"]
 mod runner_cmd_langs;
 #[path = "runner_java.rs"]
-mod runner_java;
+pub(crate) mod runner_java;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -708,7 +708,11 @@ fn build_cmake_target_exec_cmd(
 }
 
 #[allow(clippy::disallowed_methods)]
-fn is_gtest_filter_for_source(cwd: &str, source_path: Option<&str>, filter: &str) -> bool {
+pub(crate) fn is_gtest_filter_for_source(
+    cwd: &str,
+    source_path: Option<&str>,
+    filter: &str,
+) -> bool {
     if let Some(sp) = source_path.filter(|s| is_cpp_source_path(s)) {
         let p = if Path::new(sp).is_absolute() {
             PathBuf::from(sp)
@@ -716,14 +720,25 @@ fn is_gtest_filter_for_source(cwd: &str, source_path: Option<&str>, filter: &str
             Path::new(cwd).join(sp)
         };
         if let Ok(src) = std::fs::read_to_string(&p) {
-            let is_catch2 = src.contains("TEST_CASE(")
-                || src.contains("SCENARIO(")
-                || src.contains("TEMPLATE_TEST_CASE(")
-                || src.contains("catch2/");
-            let is_gtest = src.contains("gtest/gtest.h")
-                || src.contains("TEST_F(")
-                || src.contains("TEST_P(")
-                || src.contains("TEST(");
+            // BUG-11: share the same whitespace-tolerant macro recognition as `gutter/compiled.rs`
+            // and recognize both Catch2 v3 (`catch2/`) and v2 single-header (`catch.hpp` /
+            // `catch_amalgamated.hpp`).
+            static RE_CATCH_SRC: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+            static RE_GTEST_SRC: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+            let re_catch = RE_CATCH_SRC.get_or_init(|| {
+                regex::Regex::new(
+                    r#"(?m)(?:\b(?:TEST_CASE|SCENARIO|TEMPLATE_TEST_CASE|TEST_CASE_METHOD)\s*\(|#\s*include\s*[<"](?:[^>"]*/)?(?:catch2/|catch\.hpp|catch_amalgamated\.hpp))"#,
+                )
+                .unwrap()
+            });
+            let re_gtest = RE_GTEST_SRC.get_or_init(|| {
+                regex::Regex::new(
+                    r#"(?m)(?:\b(?:TEST|TEST_F|TEST_P|TYPED_TEST|TYPED_TEST_P)\s*\(|#\s*include\s*[<"]gtest/gtest\.h[>"])"#,
+                )
+                .unwrap()
+            });
+            let is_catch2 = re_catch.is_match(&src);
+            let is_gtest = re_gtest.is_match(&src);
             if is_catch2 && !is_gtest {
                 return false;
             }
@@ -737,12 +752,20 @@ fn is_gtest_filter_for_source(cwd: &str, source_path: Option<&str>, filter: &str
     !filter.chars().any(char::is_whitespace) && filter.contains('.')
 }
 
+struct CmakeTarget {
+    name: String,
+    is_executable: bool,
+    /// `(declaring_dir_prefix, raw_body)` preserving each `CMakeLists.txt` directory that
+    /// contributed sources (BUG-10) while keeping libraries non-executable (BUG3-2).
+    sources: Vec<(String, String)>,
+}
+
 #[allow(clippy::disallowed_methods)]
 fn collect_cmake_targets_recursive(
     root_canon: &Path,
     dir: &Path,
     depth: usize,
-    targets: &mut Vec<(String, String, String)>,
+    targets: &mut Vec<CmakeTarget>,
     uses_glob: &mut bool,
 ) {
     if depth > 4 {
@@ -766,21 +789,38 @@ fn collect_cmake_targets_recursive(
         for cap in re_exe.captures_iter(&cmake_text) {
             let name = cap[1].to_string();
             let body = cap[2].to_string();
-            if !name.contains("${") {
-                targets.push((name, dir_prefix.clone(), body));
+            if name.contains("${") {
+                continue;
+            }
+            if let Some(existing) = targets.iter_mut().find(|t| t.name == name) {
+                existing.is_executable = true;
+                existing.sources.push((dir_prefix.clone(), body));
+            } else {
+                targets.push(CmakeTarget {
+                    name,
+                    is_executable: true,
+                    sources: vec![(dir_prefix.clone(), body)],
+                });
             }
         }
     }
-    // Also merge `target_sources(<target> PRIVATE/PUBLIC/INTERFACE ...)` into the target's body.
+    // Attach `target_sources(<target> PRIVATE/PUBLIC/INTERFACE ...)` preserving the declaring
+    // `CMakeLists.txt` directory (BUG-10), WITHOUT promoting libraries to runnable executables (BUG3-2).
     if let Ok(re_ts) = regex::Regex::new(r"(?is)target_sources\s*\(\s*([A-Za-z0-9_.-]+)([^)]*)\)") {
         for cap in re_ts.captures_iter(&cmake_text) {
             let name = cap[1].to_string();
             let body = cap[2].to_string();
-            if let Some((_, _, existing)) = targets.iter_mut().find(|(n, _, _)| n == &name) {
-                existing.push(' ');
-                existing.push_str(&body);
-            } else if !name.contains("${") {
-                targets.push((name, dir_prefix.clone(), body));
+            if name.contains("${") {
+                continue;
+            }
+            if let Some(existing) = targets.iter_mut().find(|t| t.name == name) {
+                existing.sources.push((dir_prefix.clone(), body));
+            } else {
+                targets.push(CmakeTarget {
+                    name,
+                    is_executable: false,
+                    sources: vec![(dir_prefix.clone(), body)],
+                });
             }
         }
     }
@@ -813,12 +853,17 @@ fn collect_cmake_targets_recursive(
 }
 
 #[allow(clippy::disallowed_methods)]
-fn infer_cmake_target_for_source(cwd: &str, source_path: &str, want_test: bool) -> Option<String> {
+pub(crate) fn infer_cmake_target_for_source(
+    cwd: &str,
+    source_path: &str,
+    want_test: bool,
+) -> Option<String> {
     let root_canon = std::fs::canonicalize(cwd).unwrap_or_else(|_| PathBuf::from(cwd));
-    let mut targets: Vec<(String, String, String)> = Vec::new();
+    let mut targets: Vec<CmakeTarget> = Vec::new();
     let mut uses_glob = false;
     collect_cmake_targets_recursive(&root_canon, &root_canon, 0, &mut targets, &mut uses_glob);
-    if targets.is_empty() {
+    let exe_targets: Vec<&CmakeTarget> = targets.iter().filter(|t| t.is_executable).collect();
+    if exe_targets.is_empty() {
         return None;
     }
     let src_p = Path::new(source_path);
@@ -833,46 +878,52 @@ fn infer_cmake_target_for_source(cwd: &str, source_path: &str, want_test: bool) 
         source_path.trim_start_matches("./").replace('\\', "/")
     };
     let base = src_p.file_name().and_then(|s| s.to_str()).unwrap_or("");
-    // 1a. Exact directory-relative source-file match so `app/main.cpp` matches `app/CMakeLists.txt`
-    //     rather than an unrelated root `src/main.cpp` target (BUG-10).
+    // 1a. Exact directory-relative source-file match across executable targets so a root
+    //     executable whose `target_sources` runs in `app/CMakeLists.txt` retains its `app/`
+    //     origin and matches `app/main.cpp` instead of an unrelated `src/main.cpp` (BUG-10).
     if !rel_source.is_empty() {
-        if let Some((name, _, _)) = targets.iter().find(|(_, dir_prefix, body)| {
-            if dir_prefix.is_empty() {
-                body.contains(&rel_source)
-            } else {
-                let prefix_slash = format!("{dir_prefix}/");
-                rel_source
-                    .strip_prefix(&prefix_slash)
-                    .is_some_and(|in_dir| body.contains(in_dir))
-                    || body.contains(&rel_source)
-            }
+        if let Some(t) = exe_targets.iter().find(|t| {
+            t.sources.iter().any(|(dir_prefix, body)| {
+                if dir_prefix.is_empty() {
+                    body.contains(&rel_source)
+                } else {
+                    let prefix_slash = format!("{dir_prefix}/");
+                    rel_source
+                        .strip_prefix(&prefix_slash)
+                        .is_some_and(|in_dir| body.contains(in_dir))
+                        || body.contains(&rel_source)
+                }
+            })
         }) {
-            return Some(name.clone());
+            return Some(t.name.clone());
         }
     }
-    // 1b. Basename fallback when target lists sources via variables/computed prefixes.
+    // 1b. Basename fallback across executable targets only (never OBJECT/STATIC libraries, BUG3-2).
     if !base.is_empty() {
-        if let Some((name, _, _)) = targets.iter().find(|(_, _, body)| body.contains(base)) {
-            return Some(name.clone());
+        if let Some(t) = exe_targets
+            .iter()
+            .find(|t| t.sources.iter().any(|(_, body)| body.contains(base)))
+        {
+            return Some(t.name.clone());
         }
     }
-    // 2. For tests, prefer targets whose name contains "test" / "spec"
+    // 2. For tests, prefer executable targets whose name contains "test" / "spec"
     if want_test {
-        if let Some((name, _, _)) = targets.iter().find(|(n, _, _)| {
-            let l = n.to_ascii_lowercase();
+        if let Some(t) = exe_targets.iter().find(|t| {
+            let l = t.name.to_ascii_lowercase();
             l.contains("test") || l.contains("spec")
         }) {
-            return Some(name.clone());
+            return Some(t.name.clone());
         }
         return None;
     }
     // 3. Only fall back to the first non-test executable if CMake globs sources
     if uses_glob {
-        targets
+        exe_targets
             .iter()
-            .find(|(n, _, _)| !n.to_ascii_lowercase().contains("test"))
-            .or_else(|| targets.first())
-            .map(|(n, _, _)| n.clone())
+            .find(|t| !t.name.to_ascii_lowercase().contains("test"))
+            .or_else(|| exe_targets.first())
+            .map(|t| t.name.clone())
     } else {
         None
     }
@@ -1291,7 +1342,46 @@ pub(crate) fn build_runner_command(
         IdeRunnerKind::JavaMain => build_java_main_cmd(cfg, cmd_opt, args, build_flags, filter),
         IdeRunnerKind::JavaJunit => {
             // BUG-16: On Gradle-only projects (including Kotest suites), `JavaJunit`
-            // must dispatch to Gradle (`./gradlew test --tests ...`) rather than Maven.
+            // must dispatch to Gradle (`./gradlew test --tests ...`) rather than Maven —
+            // on BOTH local and remote SSH targets.
+            if target_kind == IdeTargetKind::Ssh && cmd_opt.is_none() {
+                let (_, g_args) = build_gradle_cmd(
+                    cfg,
+                    target_kind,
+                    cwd,
+                    Some("gradle"),
+                    args.clone(),
+                    build_flags.clone(),
+                    filter,
+                );
+                let (_, m_args) = build_maven_cmd(
+                    cfg,
+                    target_kind,
+                    cwd,
+                    Some("mvn"),
+                    args,
+                    build_flags,
+                    filter,
+                );
+                let gq = g_args
+                    .iter()
+                    .map(|a| shell_words::quote(a).into_owned())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let mq = m_args
+                    .iter()
+                    .map(|a| shell_words::quote(a).into_owned())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let script = format!(
+                    "if [ ! -f pom.xml ] && {{ [ -f build.gradle.kts ] || [ -f build.gradle ] || [ -f gradlew ] || [ -f ../gradlew ] || [ -f settings.gradle.kts ] || [ -f settings.gradle ]; }}; then \
+                       if [ -x ./gradlew ]; then exec ./gradlew {gq}; elif [ -x ../gradlew ]; then exec ../gradlew {gq}; else exec gradle {gq}; fi; \
+                     else \
+                       if [ -x ./mvnw ]; then exec ./mvnw {mq}; else exec mvn {mq}; fi; \
+                     fi"
+                );
+                return ("sh".into(), vec!["-c".into(), script]);
+            }
             let is_gradle_only = target_kind == IdeTargetKind::Local
                 && !Path::new(cwd).join("pom.xml").is_file()
                 && (Path::new(cwd).join("build.gradle.kts").is_file()

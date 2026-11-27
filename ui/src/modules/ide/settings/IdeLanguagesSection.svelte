@@ -55,8 +55,7 @@
 
   function openCppPlusMenu(e: MouseEvent): void {
     ctxMenu.show(e, [
-      { label: 'Local toolchain…', icon: 'folder', action: () => (pickerEco = 'cpp') },
-      { label: 'Download LLVM…', icon: 'download', action: () => onnavigate('project.sdks') },
+      { label: 'Add local toolchain…', icon: 'folder', action: () => (pickerEco = 'cpp') },
     ]);
   }
 
@@ -420,12 +419,12 @@
             <option value={det.home_path || det.path}>{det.label || `Detected C/C++ ${det.version}`} ({det.home_path || det.path})</option>
           {/each}
         </select>
-        <button type="button" class="icon-btn goroot-plus" aria-label="Add or download C/C++ toolchain" title="Add local LLVM/GCC toolchain or download LLVM" onclick={openCppPlusMenu} data-testid="ide-cpptoolchain-add-btn">
+        <button type="button" class="icon-btn goroot-plus" aria-label="Add local C/C++ toolchain" title="Register a local Clang/GCC/LLVM toolchain from disk" onclick={openCppPlusMenu} data-testid="ide-cpptoolchain-add-btn">
           <Icon name="plus" size={14} />
         </button>
       </div>
       <p class="lg-sub">
-        Supports <code>compile_commands.json</code>, CMake (Presets &amp; CTest), Make, Meson, GoogleTest/Catch2 gutter runs, Unreal <code>.uproject</code>/<code>.uplugin</code>, header/source switch (<code>⌥O</code>), and LLDB debugging with STL &amp; Unreal pretty-printers, PID attach, and core dumps.
+        Install Clang/GCC/LLVM via your system package manager (Xcode CLT, Homebrew, apt, dnf) and select or register it above. Supports <code>compile_commands.json</code>, CMake (Presets &amp; CTest), Make, Meson, GoogleTest/Catch2 gutter runs, Unreal <code>.uproject</code>/<code>.uplugin</code>, header/source switch (<code>⌥O</code>), and LLDB debugging with STL &amp; Unreal pretty-printers, PID attach, and core dumps.
       </p>
     </div>
   </div>

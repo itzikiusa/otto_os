@@ -476,22 +476,28 @@ fn gradle_module_classpath(
     {
         return None;
     }
-    let gradle_root =
-        crate::lsp_host::servers::climb_to_build_root("kotlin", module_dir, &|_| true);
+    let gradle_root = find_owning_gradle_root(module_dir).unwrap_or_else(|| {
+        crate::lsp_host::servers::climb_to_build_root("kotlin", module_dir, &|_| true)
+    });
     if depends_outside(owner, graph, &gradle_root) {
         return None;
     }
-    let gradle_bin = crate::environments::find_build_wrapper(
-        &module_dir.to_string_lossy(),
-        "gradlew",
-        &[
-            "build.gradle.kts",
-            "build.gradle",
-            "settings.gradle.kts",
-            "settings.gradle",
-        ],
-    )
-    .map(PathBuf::from)
+    let root_wrapper = gradle_root.join("gradlew");
+    let gradle_bin = if crate::toolchains::is_executable_file(&root_wrapper) {
+        Some(root_wrapper)
+    } else {
+        crate::environments::find_build_wrapper(
+            &module_dir.to_string_lossy(),
+            "gradlew",
+            &[
+                "build.gradle.kts",
+                "build.gradle",
+                "settings.gradle.kts",
+                "settings.gradle",
+            ],
+        )
+        .map(PathBuf::from)
+    }
     .or_else(|| {
         let path = env_map.get("PATH")?;
         crate::toolchains::find_executable_in(
@@ -511,7 +517,7 @@ fn gradle_module_classpath(
     // BUG2-6: select ONLY `main` sourceSet for application launches (`include_tests == false`)
     // so `src/test/resources` never overrides production config; reserve `test` for test runs.
     // BUG2-7: compute `cpValue` during configuration (never call `project.extensions` inside
-    // `doLast`) AND pass `--no-configuration-cache` so configuration-cache projects succeed.
+    // `doLast`) AND pass `--no-configuration-cache` when supported (Gradle >= 6.6, BUG3-4).
     let source_set_expr = if include_tests {
         r#"ss.findByName("test") ?: ss.findByName("main")"#
     } else {
@@ -550,20 +556,33 @@ fn gradle_module_classpath(
     };
     let print_task = format!("{task_prefix}ottoPrintClasspath");
 
-    let mut cmd = Command::new(&gradle_bin);
-    cmd.current_dir(&gradle_root);
-    cmd.args([
-        "-q",
-        "--console=plain",
-        "--no-configuration-cache",
-        "--init-script",
-    ]);
-    cmd.arg(&init_script);
-    cmd.arg(&compile_task);
-    cmd.arg(&print_task);
+    let try_no_cfg_cache = gradle_wrapper_supports_no_configuration_cache(&gradle_root);
+    let build_cmd = |with_no_cfg_cache: bool| {
+        let mut cmd = Command::new(&gradle_bin);
+        cmd.current_dir(&gradle_root);
+        cmd.args(["-q", "--console=plain"]);
+        if with_no_cfg_cache {
+            cmd.arg("--no-configuration-cache");
+        }
+        cmd.arg("--init-script");
+        cmd.arg(&init_script);
+        cmd.arg(&compile_task);
+        cmd.arg(&print_task);
+        cmd
+    };
 
     Some((|| {
-        let (status, output) = run_build_tool(cmd, env_map, "gradle")?;
+        let (mut status, mut output) =
+            run_build_tool(build_cmd(try_no_cfg_cache), env_map, "gradle")?;
+        // BUG3-4: older Gradle (< 6.6, e.g. 6.5.1) rejects `--no-configuration-cache` because
+        // configuration-cache was an enum option before 6.6. Retry cleanly without that flag.
+        if !status.success()
+            && try_no_cfg_cache
+            && output.contains("Unknown command-line option '--no-configuration-cache'")
+        {
+            let _ = fs::remove_file(&cp_file);
+            (status, output) = run_build_tool(build_cmd(false), env_map, "gradle")?;
+        }
         if !status.success() {
             return Err(Error::Invalid(format!(
                 "Gradle could not build the module (gradle {compile_task}):\n{}",
@@ -607,21 +626,235 @@ fn gradle_module_classpath(
     })())
 }
 
-/// Parse explicit `project(":api").projectDir = file("backend")` remappings from
-/// `settings.gradle` / `settings.gradle.kts`.
+/// Returns `false` when `gradle/wrapper/gradle-wrapper.properties` pins a Gradle release
+/// older than 6.6 (which predates the boolean `--no-configuration-cache` option, BUG3-4).
+pub(crate) fn gradle_wrapper_supports_no_configuration_cache(gradle_root: &Path) -> bool {
+    let props_path = gradle_root.join("gradle/wrapper/gradle-wrapper.properties");
+    let Ok(raw) = fs::read_to_string(&props_path) else {
+        return true;
+    };
+    let Ok(re) = Regex::new(r"gradle-(\d+)\.(\d+)(?:\.\d+)?(?:-[A-Za-z0-9.]+)?\.zip") else {
+        return true;
+    };
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') || trimmed.starts_with('!') {
+            continue;
+        }
+        if let Some(cap) = re.captures(trimmed) {
+            if let (Ok(maj), Ok(min)) = (cap[1].parse::<u32>(), cap[2].parse::<u32>()) {
+                return (maj, min) >= (6, 6);
+            }
+        }
+    }
+    true
+}
+
+/// Strip `//` line comments and `/* ... */` block comments from Groovy/Kotlin Gradle
+/// settings files while preserving single- and double-quoted string literals (BUG3-3).
+pub(super) fn strip_gradle_comments(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let len = bytes.len();
+    let mut out = String::with_capacity(len);
+    let mut i = 0usize;
+    let mut in_dq = false;
+    let mut in_sq = false;
+    let mut block_depth = 0usize;
+    while i < len {
+        let b = bytes[i];
+        if block_depth > 0 {
+            if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
+                block_depth += 1;
+                i += 2;
+            } else if b == b'*' && i + 1 < len && bytes[i + 1] == b'/' {
+                block_depth -= 1;
+                out.push(' ');
+                i += 2;
+            } else {
+                if b == b'\n' {
+                    out.push('\n');
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if in_dq {
+            if b == b'\\' && i + 1 < len {
+                out.push(bytes[i] as char);
+                out.push(bytes[i + 1] as char);
+                i += 2;
+                continue;
+            }
+            if b == b'"' {
+                in_dq = false;
+            }
+            if let Some(ch) = raw[i..].chars().next() {
+                out.push(ch);
+                i += ch.len_utf8();
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        if in_sq {
+            if b == b'\\' && i + 1 < len {
+                out.push(bytes[i] as char);
+                out.push(bytes[i + 1] as char);
+                i += 2;
+                continue;
+            }
+            if b == b'\'' {
+                in_sq = false;
+            }
+            if let Some(ch) = raw[i..].chars().next() {
+                out.push(ch);
+                i += ch.len_utf8();
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        if b == b'/' && i + 1 < len && bytes[i + 1] == b'/' {
+            while i < len && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
+            block_depth = 1;
+            i += 2;
+            continue;
+        }
+        if b == b'"' {
+            in_dq = true;
+            out.push('"');
+            i += 1;
+            continue;
+        }
+        if b == b'\'' {
+            in_sq = true;
+            out.push('\'');
+            i += 1;
+            continue;
+        }
+        if let Some(ch) = raw[i..].chars().next() {
+            out.push(ch);
+            i += ch.len_utf8();
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+fn normalize_gradle_project_path(raw: &str) -> String {
+    let trimmed = raw.trim().trim_matches(':');
+    if trimmed.is_empty() {
+        ":".to_string()
+    } else {
+        format!(":{trimmed}")
+    }
+}
+
+/// Parse active (uncommented) `include(...)` / `include '...'` project paths from
+/// `settings.gradle` / `settings.gradle.kts` (BUG3-3).
+pub(super) fn parse_gradle_included_projects(raw: &str) -> Vec<String> {
+    let stripped = strip_gradle_comments(raw);
+    let q_re = Regex::new(r#"['"]([^'"]+)['"]"#).unwrap();
+    let paren_re = Regex::new(r#"(?s)\binclude\s*\(([^)]+)\)"#).unwrap();
+    let groovy_re = Regex::new(r#"(?m)\binclude\s+([^(\n]+)"#).unwrap();
+    let mut out = Vec::new();
+    for cap in paren_re.captures_iter(&stripped) {
+        for q in q_re.captures_iter(&cap[1]) {
+            let p = normalize_gradle_project_path(&q[1]);
+            if !out.contains(&p) {
+                out.push(p);
+            }
+        }
+    }
+    for cap in groovy_re.captures_iter(&stripped) {
+        for q in q_re.captures_iter(&cap[1]) {
+            let p = normalize_gradle_project_path(&q[1]);
+            if !out.contains(&p) {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+/// Parse explicit, active (uncommented) `project(":api").projectDir = file("services/backend")`
+/// remappings from `settings.gradle` / `settings.gradle.kts`, restricted strictly to projects
+/// that are actually included by an active `include(...)` statement (BUG3-3).
 pub(super) fn parse_gradle_project_dir_overrides(raw: &str) -> Vec<(String, String)> {
+    let stripped = strip_gradle_comments(raw);
+    let included = parse_gradle_included_projects(&stripped);
     let Ok(re) = Regex::new(
-        r#"project\s*\(\s*['"](:[^'"]+)['"]\s*\)\s*\.projectDir\s*=\s*(?:file|File)\s*\(\s*['"]([^'"]+)['"]\s*\)"#,
+        r#"project\s*\(\s*['"](:[^'"]+)['"]\s*\)\s*\.projectDir\s*=\s*(?:new\s+)?(?:file|File)\s*\(\s*(?:(?:rootDir|settingsDir)\s*,\s*)?['"]([^'"]+)['"]\s*\)"#,
     ) else {
         return Vec::new();
     };
-    re.captures_iter(raw)
-        .map(|cap| (cap[1].trim().to_string(), cap[2].trim().to_string()))
+    re.captures_iter(&stripped)
+        .filter_map(|cap| {
+            let proj = normalize_gradle_project_path(&cap[1]);
+            if !included.is_empty() && !included.contains(&proj) {
+                return None;
+            }
+            Some((proj, cap[2].trim().to_string()))
+        })
         .collect()
 }
 
+/// Find the owning Gradle build root for `module_dir` even when intermediate parent
+/// folders (e.g. `services/` in `project(":api").projectDir = file("services/backend")`)
+/// contain no Gradle build markers themselves (BUG-14).
+pub(crate) fn find_owning_gradle_root(module_dir: &Path) -> Option<PathBuf> {
+    let canon_mod = fs::canonicalize(module_dir).unwrap_or_else(|_| module_dir.to_path_buf());
+    if canon_mod.join("settings.gradle.kts").is_file()
+        || canon_mod.join("settings.gradle").is_file()
+    {
+        return Some(canon_mod);
+    }
+    let mut cur = canon_mod.parent();
+    for _ in 0..8 {
+        let Some(anc) = cur else {
+            break;
+        };
+        for fname in ["settings.gradle.kts", "settings.gradle"] {
+            let sp = anc.join(fname);
+            let Ok(raw) = fs::read_to_string(&sp) else {
+                continue;
+            };
+            let overrides = parse_gradle_project_dir_overrides(&raw);
+            for (_, raw_dir) in &overrides {
+                let cand = if Path::new(raw_dir).is_absolute() {
+                    PathBuf::from(raw_dir)
+                } else {
+                    anc.join(raw_dir)
+                };
+                let canon_cand = fs::canonicalize(&cand).unwrap_or(cand);
+                if canon_cand == canon_mod {
+                    return Some(anc.to_path_buf());
+                }
+            }
+            for inc in parse_gradle_included_projects(&raw) {
+                if overrides.iter().any(|(p, _)| p == &inc) {
+                    continue;
+                }
+                let default_dir = anc.join(inc.replace(':', "/").trim_start_matches('/'));
+                let canon_def = fs::canonicalize(&default_dir).unwrap_or(default_dir);
+                if canon_def == canon_mod {
+                    return Some(anc.to_path_buf());
+                }
+            }
+        }
+        cur = anc.parent();
+    }
+    None
+}
+
 /// Resolve the Gradle task prefix (`""` for root project, `":api:"` for a subproject),
-/// honoring explicit `project(":api").projectDir = file("backend")` remappings in
+/// honoring explicit active `project(":api").projectDir = file("backend")` remappings in
 /// `settings.gradle.kts` / `settings.gradle` before falling back to relative directory paths.
 pub(crate) fn resolve_gradle_project_path(gradle_root: &Path, module_dir: &Path) -> String {
     let canon_root = fs::canonicalize(gradle_root).unwrap_or_else(|_| gradle_root.to_path_buf());

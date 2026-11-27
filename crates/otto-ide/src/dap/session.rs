@@ -54,6 +54,12 @@ pub struct DapStartContext {
     pub(crate) dormant_netbridge: Option<crate::netbridge::DormantNetBridge>,
     pub caller_is_root: bool,
     pub owner_user_id: String,
+    /// Registered SDKs by ecosystem for the target host (`"local"` or `"ssh:<id>"`),
+    /// used to classify custom-path module SDK overrides during Debug (BUG-34).
+    pub registered_sdks: std::collections::HashMap<
+        crate::toolchains_catalog::EcosystemKind,
+        Vec<crate::types::IdeInstalledSdk>,
+    >,
 }
 
 impl std::fmt::Debug for DapStartContext {
@@ -128,6 +134,17 @@ impl DapStartContext {
 
     pub fn with_owner_user_id(mut self, user_id: impl Into<String>) -> Self {
         self.owner_user_id = user_id.into();
+        self
+    }
+
+    pub fn with_registered_sdks(
+        mut self,
+        sdks: std::collections::HashMap<
+            crate::toolchains_catalog::EcosystemKind,
+            Vec<crate::types::IdeInstalledSdk>,
+        >,
+    ) -> Self {
+        self.registered_sdks = sdks;
         self
     }
 }

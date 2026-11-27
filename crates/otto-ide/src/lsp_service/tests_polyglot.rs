@@ -903,18 +903,32 @@ async fn spring_boot_review_fixes_devtools_confinement_profiles_multimodule_and_
 }
 
 #[tokio::test]
-async fn spring_boot_actuator_bypasses_proxy_and_profiles_default_and_multimodule_stay_coherent() {
+async fn spring_boot_actuator_bypasses_ambient_http_proxy_without_mutating_parent_env() {
     use crate::spring_boot::actuator::inspect_actuator;
-    use crate::spring_boot::detect_spring_boot_workspace_scoped;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    static PROXY_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    // SEC-5 & TEST3-2: Subprocess-isolated proxy bypass check so ambient HTTP_PROXY /
+    // http_proxy / ALL_PROXY / all_proxy are exercised with BOTH NO_PROXY and no_proxy
+    // cleared, without mutating parent process env vars during concurrent tests.
+    if std::env::var_os("OTTO_TEST_ACTUATOR_PROXY_CHILD").is_some() {
+        let base_url =
+            std::env::var("OTTO_TEST_ACTUATOR_TARGET_URL").expect("target URL passed to child");
+        let res = inspect_actuator(&crate::types::IdeSpringActuatorReq {
+            target: None,
+            base_url: Some(base_url),
+            port: None,
+            base_path: None,
+        })
+        .await
+        .expect("inspect_actuator should connect directly to loopback");
+        assert!(res.reachable, "actuator should be reachable directly");
+        assert_eq!(res.status.as_deref(), Some("UP"));
+        return;
+    }
 
-    // SEC-5: inspect_actuator must bypass HTTP_PROXY / http_proxy so loopback inspection
-    // never routes through an outbound proxy.
     let trap_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let trap_addr = trap_listener.local_addr().unwrap();
     let trap_hit = Arc::new(AtomicBool::new(false));
@@ -959,51 +973,46 @@ async fn spring_boot_actuator_bypasses_proxy_and_profiles_default_and_multimodul
         }
     });
 
-    let proxy_res = {
-        let _guard = PROXY_ENV_LOCK.lock().await;
-        let prev_upper = std::env::var_os("HTTP_PROXY");
-        let prev_lower = std::env::var_os("http_proxy");
-        let prev_all = std::env::var_os("ALL_PROXY");
-        let prev_no = std::env::var_os("NO_PROXY");
-        let proxy_url = format!("http://{trap_addr}");
-        std::env::set_var("HTTP_PROXY", &proxy_url);
-        std::env::set_var("http_proxy", &proxy_url);
-        std::env::set_var("ALL_PROXY", &proxy_url);
-        std::env::remove_var("NO_PROXY");
-        let out = inspect_actuator(&crate::types::IdeSpringActuatorReq {
-            target: None,
-            base_url: Some(format!("http://{act_addr}/actuator")),
-            port: None,
-            base_path: None,
-        })
-        .await;
-        match prev_upper {
-            Some(v) => std::env::set_var("HTTP_PROXY", v),
-            None => std::env::remove_var("HTTP_PROXY"),
-        }
-        match prev_lower {
-            Some(v) => std::env::set_var("http_proxy", v),
-            None => std::env::remove_var("http_proxy"),
-        }
-        match prev_all {
-            Some(v) => std::env::set_var("ALL_PROXY", v),
-            None => std::env::remove_var("ALL_PROXY"),
-        }
-        match prev_no {
-            Some(v) => std::env::set_var("NO_PROXY", v),
-            None => std::env::remove_var("NO_PROXY"),
-        }
-        out
-    }
-    .expect("inspect_actuator should connect directly to loopback");
+    let exe = std::env::current_exe().expect("current test executable");
+    let proxy_url = format!("http://{trap_addr}");
+    let out = tokio::process::Command::new(exe)
+        .args([
+            "--exact",
+            "lsp_service::tests_polyglot::spring_boot_actuator_bypasses_ambient_http_proxy_without_mutating_parent_env",
+            "--nocapture",
+        ])
+        .env("OTTO_TEST_ACTUATOR_PROXY_CHILD", "1")
+        .env(
+            "OTTO_TEST_ACTUATOR_TARGET_URL",
+            format!("http://{act_addr}/actuator"),
+        )
+        .env("HTTP_PROXY", &proxy_url)
+        .env("http_proxy", &proxy_url)
+        .env("ALL_PROXY", &proxy_url)
+        .env("all_proxy", &proxy_url)
+        .env_remove("NO_PROXY")
+        .env_remove("no_proxy")
+        .output()
+        .await
+        .expect("spawn isolated actuator proxy child");
+
     trap_srv.abort();
     act_srv.abort();
     assert!(
-        !trap_hit.load(Ordering::SeqCst),
-        "SEC-5: inspect_actuator must bypass HTTP_PROXY instead of contacting proxy"
+        out.status.success(),
+        "SEC-5/TEST3-2: child failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
     );
-    assert!(proxy_res.reachable);
-    assert_eq!(proxy_res.status.as_deref(), Some("UP"));
+    assert!(
+        !trap_hit.load(Ordering::SeqCst),
+        "SEC-5: inspect_actuator must bypass HTTP_PROXY/http_proxy/ALL_PROXY even when NO_PROXY and no_proxy are unset"
+    );
+}
+
+#[tokio::test]
+async fn spring_boot_profiles_default_override_and_multimodule_parent_inheritance_work() {
+    use crate::spring_boot::detect_spring_boot_workspace_scoped;
 
     // BUG2-8: `application-default.properties` applies when no active profile is set,
     // and `spring.profiles.default=local` applies `application-local.properties` when inactive.
@@ -1114,6 +1123,112 @@ async fn spring_boot_actuator_bypasses_proxy_and_profiles_default_and_multimodul
     );
     assert!(multi_info.has_actuator);
     assert!(multi_info.has_devtools);
+
+    // BUG3-5: External `config/application.properties` overriding `spring.profiles.default`
+    // must REPLACE (not union with) packaged `src/main/resources/application.properties`.
+    let ext_override = tmp.path().join("ext-prof-override");
+    std::fs::create_dir_all(ext_override.join("src/main/resources")).unwrap();
+    std::fs::create_dir_all(ext_override.join("config")).unwrap();
+    std::fs::write(
+        ext_override.join("pom.xml"),
+        "<project><dependencies><dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-web</artifactId></dependency></dependencies></project>",
+    )
+    .unwrap();
+    std::fs::write(
+        ext_override.join("src/main/resources/application.properties"),
+        "server.port=8080\nspring.profiles.default=local\n",
+    )
+    .unwrap();
+    std::fs::write(
+        ext_override.join("src/main/resources/application-local.properties"),
+        "management.server.port=9090\n",
+    )
+    .unwrap();
+    std::fs::write(
+        ext_override.join("config/application.properties"),
+        "spring.profiles.default=dev\n",
+    )
+    .unwrap();
+    let canon_ext = ext_override.canonicalize().unwrap();
+    let ext_info = detect_spring_boot_workspace_scoped(
+        std::slice::from_ref(&canon_ext),
+        std::slice::from_ref(&canon_ext),
+        false,
+    )
+    .expect("external config override detected");
+    assert_eq!(
+        ext_info.management_port, None,
+        "BUG3-5: external config/application.properties spring.profiles.default=dev must replace local (not union)"
+    );
+    assert!(ext_info.profiles.iter().any(|p| p == "local"));
+    assert!(ext_info.profiles.iter().any(|p| p == "dev"));
+
+    // BUG3-6: Selected Maven Boot child module inherits parent POM direct `<dependencies>`
+    // (such as `spring-boot-devtools`) while ignoring `<dependencyManagement>` BOM entries
+    // and unrelated sibling modules.
+    let parent_inh = tmp.path().join("maven-parent-inherit");
+    let child_app = parent_inh.join("app");
+    let sibling_other = parent_inh.join("other");
+    std::fs::create_dir_all(child_app.join("src/main/java/com/acme")).unwrap();
+    std::fs::create_dir_all(&sibling_other).unwrap();
+    std::fs::write(
+        parent_inh.join("pom.xml"),
+        r#"<project>
+  <groupId>com.acme</groupId><artifactId>parent</artifactId><version>1.0.0</version><packaging>pom</packaging>
+  <modules><module>app</module><module>other</module></modules>
+  <dependencyManagement>
+    <dependencies>
+      <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-actuator</artifactId></dependency>
+    </dependencies>
+  </dependencyManagement>
+  <dependencies>
+    <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-devtools</artifactId></dependency>
+  </dependencies>
+</project>"#,
+    )
+    .unwrap();
+    std::fs::write(
+        child_app.join("pom.xml"),
+        r#"<project>
+  <parent><groupId>com.acme</groupId><artifactId>parent</artifactId><version>1.0.0</version></parent>
+  <artifactId>app</artifactId>
+  <dependencies>
+    <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-web</artifactId></dependency>
+  </dependencies>
+</project>"#,
+    )
+    .unwrap();
+    std::fs::write(
+        child_app.join("src/main/java/com/acme/BootApp.java"),
+        "package com.acme;\nimport org.springframework.boot.autoconfigure.SpringBootApplication;\n@SpringBootApplication\npublic class BootApp { public static void main(String[] args) {} }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        sibling_other.join("pom.xml"),
+        "<project><artifactId>other</artifactId><dependencies><dependency><artifactId>spring-boot-starter-actuator</artifactId></dependency></dependencies></project>",
+    )
+    .unwrap();
+    let canon_pinh = parent_inh.canonicalize().unwrap();
+    let canon_capp = child_app.canonicalize().unwrap();
+    let canon_other = sibling_other.canonicalize().unwrap();
+    let inh_info = detect_spring_boot_workspace_scoped(
+        &[canon_pinh.clone(), canon_capp.clone(), canon_other],
+        std::slice::from_ref(&canon_pinh),
+        false,
+    )
+    .expect("parent-inheriting child Boot module detected");
+    assert_eq!(
+        inh_info.module_root.as_deref(),
+        Some(canon_capp.to_string_lossy().as_ref())
+    );
+    assert!(
+        inh_info.has_devtools,
+        "BUG3-6: child module must inherit direct spring-boot-devtools from parent POM"
+    );
+    assert!(
+        !inh_info.has_actuator,
+        "BUG3-6: <dependencyManagement> BOM entry and sibling module must not mark child as having actuator"
+    );
 }
 
 #[tokio::test]
@@ -1676,6 +1791,359 @@ fn kotlin_gradle_and_standalone_kotlinc_execution_plans_work() {
     );
     let kcall = std::fs::read_to_string(&kotlinc_seen).unwrap();
     assert!(kcall.contains("-include-runtime"), "{kcall}");
+
+    // BUG-14 + BUG3-3 + BUG3-4:
+    // 1. Nested remapped `projectDir = file("services/backend")` across markerless `services/`
+    //    on a WRAPPER-ONLY checkout (no `gradle` on PATH!), with commented-out stale `:old` mapping.
+    // 2. Gradle 6.5.1 wrapper (`gradle-wrapper.properties`) must NOT receive `--no-configuration-cache`
+    //    (fake `gradlew` explicitly rejects `--no-configuration-cache` with exit code 1).
+    let nested_repo = root.join("kt-nested-wrapper-65");
+    let nested_mod = nested_repo.join("services/backend");
+    let nested_src = nested_mod.join("src/main/kotlin/com/acme");
+    std::fs::create_dir_all(&nested_src).unwrap();
+    std::fs::create_dir_all(nested_repo.join("gradle/wrapper")).unwrap();
+    std::fs::write(
+        nested_repo.join("gradle/wrapper/gradle-wrapper.properties"),
+        "distributionUrl=https\\://services.gradle.org/distributions/gradle-6.5.1-bin.zip\n",
+    )
+    .unwrap();
+    std::fs::write(
+        nested_repo.join("settings.gradle.kts"),
+        "// project(\":old\").projectDir = file(\"services/backend\")\n/* project(\":ancient\").projectDir = file(\"services/backend\") */\ninclude(\":api\")\nproject(\":api\").projectDir = file(\"services/backend\")\n",
+    )
+    .unwrap();
+    std::fs::write(
+        nested_mod.join("build.gradle.kts"),
+        "plugins { kotlin(\"jvm\") version \"2.1.20\" }\n",
+    )
+    .unwrap();
+    let nested_kt = nested_src.join("NestedApp.kt");
+    std::fs::write(
+        &nested_kt,
+        "package com.acme\nfun main() { println(\"nested\") }\n",
+    )
+    .unwrap();
+    let wrapper_seen = root.join("nested-gradlew-call");
+    let fake_wrapper = nested_repo.join("gradlew");
+    std::fs::write(
+        &fake_wrapper,
+        format!(
+            "#!/bin/sh\nfor a in \"$@\"; do\n  if [ \"$a\" = \"--no-configuration-cache\" ]; then\n    echo \"Unknown command-line option '--no-configuration-cache'.\" >&2\n    exit 1\n  fi\ndone\necho \"$*\" > {}\ninit=\"\"\nprev=\"\"\nfor a in \"$@\"; do\n  if [ \"$prev\" = \"--init-script\" ]; then init=\"$a\"; fi\n  prev=\"$a\"\ndone\ncpfile=$(sed -n \"s/.*new File('\\([^']*\\)').*/\\1/p\" \"$init\" | head -n 1)\nmkdir -p services/backend/build/classes/kotlin/main\nprintf '/vendor/local.jar' > \"$cpfile\"\n",
+            wrapper_seen.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake_wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    // Empty PATH with NO `gradle` binary — must find root `./gradlew` across markerless `services/`.
+    let no_gradle_env = BTreeMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]);
+    let nested_plan = prepare_java_execution(
+        &nested_kt,
+        None,
+        false,
+        std::slice::from_ref(&nested_repo),
+        &no_gradle_env,
+        "/nonexistent/javac",
+        &root.join("out-nested-wrapper"),
+    )
+    .expect("BUG-14/BUG3-3/BUG3-4: nested remapped Gradle 6.5.1 wrapper-only module must succeed");
+    assert_eq!(nested_plan.main_class, "com.acme.NestedAppKt");
+    assert!(nested_plan.classpath.contains("/vendor/local.jar"));
+    let wcall = std::fs::read_to_string(&wrapper_seen).unwrap();
+    assert!(
+        wcall.contains(":api:classes") && wcall.contains(":api:ottoPrintClasspath"),
+        "BUG-14/BUG3-3: expected :api tasks, got: {wcall}"
+    );
+    assert!(
+        !wcall.contains("--no-configuration-cache") && !wcall.contains(":old:"),
+        "BUG3-3/BUG3-4: must omit --no-configuration-cache on 6.5.1 and ignore commented :old: {wcall}"
+    );
+
+    // BUG3-3: active `include(":backend")` with commented-out `// project(":old").projectDir = file("backend")`
+    // must still resolve to `:backend:`.
+    let renamed_repo = root.join("kt-commented-remap");
+    let renamed_mod = renamed_repo.join("backend");
+    std::fs::create_dir_all(&renamed_mod).unwrap();
+    std::fs::write(
+        renamed_repo.join("settings.gradle.kts"),
+        "include(\":backend\")\n// project(\":old\").projectDir = file(\"backend\")\nproject(\":unincluded\").projectDir = file(\"backend\")\n",
+    )
+    .unwrap();
+    assert_eq!(
+        crate::java_workspace::resolve_gradle_project_path(&renamed_repo, &renamed_mod),
+        ":backend:",
+        "BUG3-3: commented and non-included projectDir remaps must never override active :backend"
+    );
+
+    // BUG2-6: Real `prepare_java_main_run_plan` for a `JavaMain` run config compiles only
+    // main sources (`:api:classes`, NOT `:api:testClasses`) and excludes test resources/classes.
+    let mut main_cfg: crate::types::IdeRunConfig = serde_json::from_value(serde_json::json!({
+        "id": "kt-main-1",
+        "name": "Run App",
+        "target_path": app_kt.to_string_lossy()
+    }))
+    .unwrap();
+    main_cfg.runner = crate::types::IdeRunnerKind::JavaMain;
+    let main_target = crate::types::IdeTargetSpec {
+        kind: crate::types::IdeTargetKind::Local,
+        root: repo_dir.to_string_lossy().into_owned(),
+        connection_id: None,
+        workspace_id: None,
+        additional_roots: Vec::new(),
+        project_folders: Vec::new(),
+    };
+    let (main_plan, _) = crate::environments::runner_cmd::runner_java::prepare_java_main_run_plan(
+        &main_cfg,
+        &main_target,
+        &repo_dir.to_string_lossy(),
+        &env,
+        &root.join("out-java-main-runner"),
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    )
+    .expect("BUG2-6: JavaMain run plan succeeds");
+    let main_call = std::fs::read_to_string(&gradle_seen).unwrap();
+    assert!(
+        main_call.contains(":api:classes") && !main_call.contains("testClasses"),
+        "BUG2-6: JavaMain runner must compile main classes only, got: {main_call}"
+    );
+    assert!(
+        !main_plan.classpath.contains("build/resources/test")
+            && !main_plan.classpath.contains("build/classes/kotlin/test"),
+        "BUG2-6: JavaMain runner classpath must exclude test outputs: {}",
+        main_plan.classpath
+    );
+}
+
+#[tokio::test]
+async fn kotlin_round3_fixes_template_braces_ssh_kotest_configless_jdk_and_registered_sdk_callers()
+{
+    use crate::dap::adapters_env::build_effective_env_with_manager;
+    use crate::dap::java_bridge::infer_kotlin_class_stem;
+    use crate::dap::DapStartContext;
+    use crate::environments::module_sdks::{
+        apply_module_sdk_to_project_env, layer_child_and_module_sdk_for_run_test,
+    };
+    use crate::environments::runner_cmd::build_runner_command;
+    use crate::toolchains::load_registered_local_sdks_by_host;
+    use crate::types::{
+        IdeProjectEnvironment, IdeRunConfig, IdeRunnerKind, IdeStartDebugReq, IdeTargetKind,
+        IdeTargetSpec,
+    };
+    use std::collections::BTreeMap;
+
+    // BUG2-4: String literals inside `${ ... }` template interpolations (including raw strings
+    // and nested templates) must not corrupt brace depth when finding top-level `fun main`.
+    let templated = "val s = \"${\"}{\"}\"\nval r = \"\"\"${\"}{\"}\"\"\"\nval deep = \"${\"a ${\"{\"}\"}\"\nfun main() {}\n";
+    assert_eq!(
+        infer_kotlin_class_stem("Main", templated),
+        "MainKt",
+        "BUG2-4: braces inside strings inside Kotlin ${{...}} templates must preserve top-level depth"
+    );
+    assert_eq!(
+        infer_kotlin_class_stem("Box", "class Box {\n    fun main() {}\n}\n"),
+        "Box",
+        "BUG2-4: member `fun main()` inside a class must remain class stem, not *Kt"
+    );
+
+    // BUG2-5: Config-less Debug (`runner_kind = None`) on a `.kt` file with a JDK override
+    // sets `java_home` and preserves existing `kotlin_home`.
+    let tmp = tempfile::tempdir().unwrap();
+    let jdk21 = tmp.path().join("custom-sdk-21");
+    std::fs::create_dir_all(jdk21.join("bin")).unwrap();
+    std::fs::write(jdk21.join("bin/javac"), "#!/bin/sh\n").unwrap();
+    std::fs::write(jdk21.join("bin/java"), "#!/bin/sh\n").unwrap();
+    let mut env_cfgless = IdeProjectEnvironment {
+        kotlin_home: Some("/opt/kotlin-2.1".into()),
+        ..Default::default()
+    };
+    apply_module_sdk_to_project_env(
+        &mut env_cfgless,
+        &tmp.path().to_string_lossy(),
+        &jdk21.to_string_lossy(),
+        None,
+        Some("src/main/kotlin/App.kt"),
+    );
+    assert_eq!(
+        env_cfgless.java_home.as_deref(),
+        Some(jdk21.to_string_lossy().as_ref()),
+        "BUG2-5: config-less Debug JDK override on .kt file must set java_home"
+    );
+    assert_eq!(
+        env_cfgless.kotlin_home.as_deref(),
+        Some("/opt/kotlin-2.1"),
+        "BUG2-5: config-less Debug JDK override must not overwrite kotlin_home"
+    );
+
+    // BUG-16: SSH `JavaJunit` Kotest command inspects the remote workspace at runtime,
+    // dispatching to Gradle in Gradle-only repos and Maven in Maven repos.
+    let mut kotest_cfg: IdeRunConfig = serde_json::from_value(serde_json::json!({
+        "id": "kotest-ssh",
+        "name": "Kotest CalcSpec",
+        "test_filter": "com.acme.CalcSpec"
+    }))
+    .unwrap();
+    kotest_cfg.runner = IdeRunnerKind::JavaJunit;
+    let (ssh_prog, ssh_args) = build_runner_command(
+        &kotest_cfg,
+        IdeTargetKind::Ssh,
+        "/srv/remote-kt",
+        &BTreeMap::new(),
+    );
+    assert_eq!(ssh_prog, "sh");
+    assert_eq!(ssh_args.first().map(String::as_str), Some("-c"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let script = &ssh_args[1];
+
+        let gdir = tmp.path().join("ssh-gradle-only");
+        std::fs::create_dir_all(&gdir).unwrap();
+        std::fs::write(
+            gdir.join("build.gradle.kts"),
+            "plugins { kotlin(\"jvm\") }\n",
+        )
+        .unwrap();
+        let gseen = tmp.path().join("ssh-gradlew-seen");
+        let gradlew = gdir.join("gradlew");
+        std::fs::write(
+            &gradlew,
+            format!("#!/bin/sh\necho \"$*\" > {}\n", gseen.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&gradlew, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let st = tokio::process::Command::new("sh")
+            .args(["-c", script])
+            .current_dir(&gdir)
+            .status()
+            .await
+            .unwrap();
+        assert!(st.success(), "BUG-16: SSH Gradle dispatcher failed");
+        let gcall = std::fs::read_to_string(&gseen).unwrap();
+        assert!(
+            gcall.contains("test --tests com.acme.CalcSpec"),
+            "BUG-16: SSH Gradle-only Kotest suite must invoke gradlew test --tests, got: {gcall}"
+        );
+
+        let mdir = tmp.path().join("ssh-maven-only");
+        std::fs::create_dir_all(&mdir).unwrap();
+        std::fs::write(mdir.join("pom.xml"), "<project/>").unwrap();
+        let mseen = tmp.path().join("ssh-mvnw-seen");
+        let mvnw = mdir.join("mvnw");
+        std::fs::write(
+            &mvnw,
+            format!("#!/bin/sh\necho \"$*\" > {}\n", mseen.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&mvnw, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let st = tokio::process::Command::new("sh")
+            .args(["-c", script])
+            .current_dir(&mdir)
+            .status()
+            .await
+            .unwrap();
+        assert!(st.success(), "BUG-16: SSH Maven dispatcher failed");
+        let mcall = std::fs::read_to_string(&mseen).unwrap();
+        assert!(
+            mcall.contains("test -Dtest=com.acme.CalcSpec"),
+            "BUG-16: SSH Maven Kotest suite must invoke mvnw test -Dtest=, got: {mcall}"
+        );
+    }
+
+    // BUG-34: Real Run (`layer_child_and_module_sdk_for_run`) AND real Debug
+    // (`build_effective_env_with_manager` + `load_registered_local_sdks_by_host`) resolve a
+    // custom-path registered Kotlin SDK on SSH (`ssh:conn-1`) to `KOTLIN_HOME` while keeping `JAVA_HOME`.
+    let pool = otto_state::db::open(&tmp.path().join("bug34.db"))
+        .await
+        .unwrap();
+    sqlx::query(
+        r#"INSERT INTO ide_local_sdks (id, host_key, ecosystem, version, path, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)"#,
+    )
+    .bind("sdk-kt-ssh-1")
+    .bind("ssh:conn-1")
+    .bind("kotlin")
+    .bind("2.1.20")
+    .bind("/opt/compilers/2.1.20")
+    .bind("2026-01-01T00:00:00Z")
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let ssh_target = IdeTargetSpec {
+        kind: IdeTargetKind::Ssh,
+        root: "/srv/remote-kt".into(),
+        connection_id: Some("conn-1".into()),
+        workspace_id: None,
+        additional_roots: Vec::new(),
+        project_folders: Vec::new(),
+    };
+    let mut gradle_cfg: IdeRunConfig = serde_json::from_value(serde_json::json!({
+        "id": "gradle-ssh-1",
+        "name": "Gradle Run",
+        "target_path": "/srv/remote-kt"
+    }))
+    .unwrap();
+    gradle_cfg.runner = IdeRunnerKind::Gradle;
+
+    let mut run_proj = IdeProjectEnvironment {
+        java_home: Some("/usr/lib/jvm/java-21".into()),
+        module_sdks: BTreeMap::from([(
+            "/srv/remote-kt".to_string(),
+            "/opt/compilers/2.1.20".to_string(),
+        )]),
+        ..Default::default()
+    };
+    layer_child_and_module_sdk_for_run_test(&pool, &ssh_target, Some(&gradle_cfg), &mut run_proj)
+        .await;
+    assert_eq!(
+        run_proj.kotlin_home.as_deref(),
+        Some("/opt/compilers/2.1.20"),
+        "BUG-34: Run caller must map registered SSH Kotlin SDK to kotlin_home"
+    );
+    assert_eq!(
+        run_proj.java_home.as_deref(),
+        Some("/usr/lib/jvm/java-21"),
+        "BUG-34: Run caller must preserve java_home"
+    );
+
+    let registered = load_registered_local_sdks_by_host(&pool, "ssh:conn-1").await;
+    let dbg_req: IdeStartDebugReq = serde_json::from_value(serde_json::json!({
+        "target": {
+            "kind": "ssh",
+            "root": "/srv/remote-kt",
+            "connection_id": "conn-1"
+        },
+        "language": "kotlin",
+        "launch": {
+            "program": "com.acme.AppKt",
+            "cwd": "/srv/remote-kt",
+            "args": []
+        }
+    }))
+    .unwrap();
+    let dbg_proj = IdeProjectEnvironment {
+        java_home: Some("/usr/lib/jvm/java-21".into()),
+        module_sdks: BTreeMap::from([(
+            "/srv/remote-kt".to_string(),
+            "/opt/compilers/2.1.20".to_string(),
+        )]),
+        ..Default::default()
+    };
+    let dbg_ctx = DapStartContext::new()
+        .with_project_env(Some(dbg_proj))
+        .with_run_config(Some(gradle_cfg))
+        .with_registered_sdks(registered);
+    let dbg_env = build_effective_env_with_manager(tmp.path(), &dbg_req, &dbg_ctx, None);
+    assert_eq!(
+        dbg_env.get("KOTLIN_HOME").map(String::as_str),
+        Some("/opt/compilers/2.1.20"),
+        "BUG-34: Debug env builder must map registered SSH Kotlin SDK to KOTLIN_HOME, got: {dbg_env:?}"
+    );
+    assert_eq!(
+        dbg_env.get("JAVA_HOME").map(String::as_str),
+        Some("/usr/lib/jvm/java-21"),
+        "BUG-34: Debug env builder must preserve JAVA_HOME, got: {dbg_env:?}"
+    );
 }
 
 #[cfg(unix)]
@@ -2072,5 +2540,128 @@ async fn cpp_review_fixes_clangd_llvm_codelldb_core_unreal_cc_override_cmake_and
     assert_eq!(
         std::fs::read_to_string(&conan_seen).unwrap().trim(),
         "install . --build=missing"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cpp_round3_fixes_root_subdir_target_sources_object_lib_and_catch2_v2() {
+    use crate::environments::runner_cmd::build_runner_command;
+    use crate::gutter::detect_gutter_items;
+    use crate::types::{IdeGutterKind, IdeRunConfig, IdeRunnerKind, IdeTargetKind};
+    use std::collections::BTreeMap;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let proj = tmp.path().canonicalize().unwrap().join("cpp-r3");
+    std::fs::create_dir_all(proj.join("src")).unwrap();
+    std::fs::create_dir_all(proj.join("subapp")).unwrap();
+    std::fs::create_dir_all(proj.join("objs")).unwrap();
+    std::fs::create_dir_all(proj.join("catch2v2")).unwrap();
+    std::fs::create_dir_all(proj.join("build")).unwrap();
+
+    // BUG-10: `add_executable(root_app)` in root + `target_sources(root_app PRIVATE main.cpp)`
+    // in `subapp/CMakeLists.txt` must keep `subapp/` as the declaring dir (not match `demo`).
+    // BUG3-2: `add_library(test_objs OBJECT)` + `target_sources(test_objs PRIVATE obj_gtest.cpp)`
+    // must NEVER become a runnable executable target; gutter CTest resolves `unit_tests`.
+    std::fs::write(
+        proj.join("CMakeLists.txt"),
+        "cmake_minimum_required(VERSION 3.20)\nproject(r3)\nadd_executable(demo src/main.cpp)\nadd_executable(root_app)\nadd_subdirectory(subapp)\nadd_library(test_objs OBJECT)\ntarget_sources(test_objs PRIVATE objs/obj_gtest.cpp)\nadd_executable(unit_tests objs/runner.cpp)\ntarget_link_libraries(unit_tests PRIVATE test_objs)\nadd_executable(catch2v2_tests catch2v2/v2_test.cpp)\n",
+    )
+    .unwrap();
+    std::fs::write(
+        proj.join("subapp/CMakeLists.txt"),
+        "target_sources(root_app PRIVATE main.cpp)\n",
+    )
+    .unwrap();
+    std::fs::write(proj.join("src/main.cpp"), "int main() { return 0; }\n").unwrap();
+    std::fs::write(proj.join("subapp/main.cpp"), "int main() { return 0; }\n").unwrap();
+    std::fs::write(
+        proj.join("objs/obj_gtest.cpp"),
+        "#include <gtest/gtest.h>\nTEST(ObjSuite, Runs) { EXPECT_TRUE(true); }\n",
+    )
+    .unwrap();
+    std::fs::write(proj.join("objs/runner.cpp"), "int main() { return 0; }\n").unwrap();
+    let catch_v2_src = "#include \"catch.hpp\"\nTEST_CASE (\"case.v1\") { REQUIRE(true); }\n";
+    std::fs::write(proj.join("catch2v2/v2_test.cpp"), catch_v2_src).unwrap();
+
+    let proj_s = proj.to_string_lossy().into_owned();
+    let mk_cfg = |runner: IdeRunnerKind,
+                  target_path: Option<&str>,
+                  test_filter: Option<&str>|
+     -> IdeRunConfig {
+        let mut cfg: IdeRunConfig = serde_json::from_value(serde_json::json!({
+            "id": "r3",
+            "name": "cfg",
+            "target_path": target_path,
+            "test_filter": test_filter
+        }))
+        .unwrap();
+        cfg.runner = runner;
+        cfg
+    };
+
+    // BUG-10 assertion
+    let (p, a) = build_runner_command(
+        &mk_cfg(IdeRunnerKind::CppRun, Some("subapp/main.cpp"), None),
+        IdeTargetKind::Local,
+        &proj_s,
+        &BTreeMap::new(),
+    );
+    assert_eq!(p, "sh");
+    assert!(
+        a[1].contains("--target root_app") && !a[1].contains("--target demo"),
+        "BUG-10: subapp/CMakeLists.txt target_sources(root_app PRIVATE main.cpp) must select root_app, got: {}",
+        a[1]
+    );
+
+    // BUG3-2 assertion
+    let (p, a) = build_runner_command(
+        &mk_cfg(
+            IdeRunnerKind::Ctest,
+            Some("objs/obj_gtest.cpp"),
+            Some("ObjSuite.Runs"),
+        ),
+        IdeTargetKind::Local,
+        &proj_s,
+        &BTreeMap::new(),
+    );
+    assert_eq!(p, "sh");
+    assert!(
+        !a[1].contains("--target test_objs"),
+        "BUG3-2: OBJECT library target_sources must NEVER be selected as runnable target: {}",
+        a[1]
+    );
+    assert!(
+        a[1].contains("--target unit_tests"),
+        "BUG3-2: expected linked/test executable `unit_tests`, got: {}",
+        a[1]
+    );
+
+    // BUG-11 assertion: Catch2 v2 single-header `#include "catch.hpp"` + `TEST_CASE ("case.v1")`
+    let gutter = detect_gutter_items("catch2v2/v2_test.cpp", catch_v2_src, &[]);
+    assert!(
+        gutter.iter().any(|g| g.kind == IdeGutterKind::Test
+            && g.run_spec.test_filter.as_deref() == Some("case.v1")),
+        "BUG-11: spaced Catch2 v2 TEST_CASE (\"case.v1\") must be detected in gutter: {gutter:?}"
+    );
+    let (p, a) = build_runner_command(
+        &mk_cfg(
+            IdeRunnerKind::Ctest,
+            Some("catch2v2/v2_test.cpp"),
+            Some("case.v1"),
+        ),
+        IdeTargetKind::Local,
+        &proj_s,
+        &BTreeMap::new(),
+    );
+    assert_eq!(p, "sh");
+    assert!(a[1].contains("--target catch2v2_tests"), "{}", a[1]);
+    assert!(
+        a.iter().any(|x| x == "case.v1"),
+        "BUG-11: Catch2 v2 test name should be passed verbatim: {a:?}"
+    );
+    assert!(
+        a.iter().all(|x| !x.starts_with("--gtest_filter=")),
+        "BUG-11: Catch2 v2 test with dot must NEVER receive --gtest_filter=: {a:?}"
     );
 }

@@ -138,13 +138,24 @@ pub(in crate::environments) fn has_manual_classpath(cfg: &IdeRunConfig) -> bool 
         .any(|a| a == "-cp" || a == "-classpath" || a == "--class-path")
 }
 
-pub(in crate::environments) async fn compile_java_main_step(
+/// Production `JavaMain` application launches compile and run ONLY main sources/resources
+/// so `src/test/resources/application.properties` never overrides production config (BUG2-6);
+/// only an entry point located directly inside `src/test/{java,kotlin}` includes tests.
+pub(crate) fn java_main_run_include_tests(target_file_or_dir: &Path) -> bool {
+    let s = target_file_or_dir.to_string_lossy();
+    s.contains("/src/test/java") || s.contains("/src/test/kotlin")
+}
+
+/// Prepare the JVM build + classpath plan for a `JavaMain` Run configuration (used by
+/// [`compile_java_main_step`] and directly testable without spawning a live run handle).
+pub(crate) fn prepare_java_main_run_plan(
     cfg: &IdeRunConfig,
     target: &IdeTargetSpec,
     cwd: &str,
     env_map: &BTreeMap<String, String>,
-    handle: &Arc<ActiveRunHandle>,
-) -> std::result::Result<(String, Vec<String>), String> {
+    out_dir: &Path,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+) -> std::result::Result<(crate::java_workspace::JavaExecutionPlan, Vec<String>), String> {
     let mut roots = vec![PathBuf::from(&target.root)];
     for extra in target.merged_extra_roots() {
         let p = PathBuf::from(extra);
@@ -200,30 +211,51 @@ pub(in crate::environments) async fn compile_java_main_step(
         .unwrap_or_else(|| resolve_program_in_env("javac", env_map))
         .to_string_lossy()
         .into_owned();
+    let include_tests = java_main_run_include_tests(&target_file_or_dir);
+    let plan = crate::java_workspace::prepare_java_execution_cancellable(
+        &target_file_or_dir,
+        explicit_main.as_deref(),
+        include_tests,
+        &roots,
+        env_map,
+        &javac_bin,
+        out_dir,
+        cancel,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok((plan, prog_args))
+}
+
+pub(in crate::environments) async fn compile_java_main_step(
+    cfg: &IdeRunConfig,
+    target: &IdeTargetSpec,
+    cwd: &str,
+    env_map: &BTreeMap<String, String>,
+    handle: &Arc<ActiveRunHandle>,
+) -> std::result::Result<(String, Vec<String>), String> {
     let out_dir = ide_build_cache_root()
         .join("java")
         .join(target.project_hash());
+    let cfg_clone = cfg.clone();
+    let target_clone = target.clone();
+    let cwd_clone = cwd.to_string();
     let env_clone = env_map.clone();
-    let out_clone = out_dir.clone();
 
     // Stop drops this step and with it the guard, which kills javac's group.
     let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let _cancel_on_drop = crate::proc_group::CancelOnDrop(Arc::clone(&cancel));
-    let plan = tokio::task::spawn_blocking(move || {
-        crate::java_workspace::prepare_java_execution_cancellable(
-            &target_file_or_dir,
-            explicit_main.as_deref(),
-            true,
-            &roots,
+    let (plan, prog_args) = tokio::task::spawn_blocking(move || {
+        prepare_java_main_run_plan(
+            &cfg_clone,
+            &target_clone,
+            &cwd_clone,
             &env_clone,
-            &javac_bin,
-            &out_clone,
+            &out_dir,
             cancel,
         )
     })
     .await
-    .map_err(|e| format!("java compile worker panicked: {e}"))?
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| format!("java compile worker panicked: {e}"))??;
 
     if !plan.compiler_output.trim().is_empty() {
         for line in plan.compiler_output.lines() {

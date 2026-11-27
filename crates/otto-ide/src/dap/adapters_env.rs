@@ -422,12 +422,19 @@ pub(crate) fn build_effective_env_with_manager(
     let mut effective_proj = ctx.project_env.clone().unwrap_or_default();
     if allow_sdk_and_path_overrides {
         if let Some(sdk_override) = resolve_debug_sdk_override(req, ctx, &effective_cwd) {
-            crate::environments::module_sdks::apply_module_sdk_to_project_env(
+            let norm_sdk = sdk_override.trim().trim_end_matches('/');
+            let registered_eco = ctx.registered_sdks.iter().find_map(|(eco, sdks)| {
+                sdks.iter()
+                    .any(|s| s.path.trim().trim_end_matches('/') == norm_sdk)
+                    .then_some(*eco)
+            });
+            crate::environments::module_sdks::apply_module_sdk_to_project_env_with_ecosystem(
                 &mut effective_proj,
                 &effective_cwd,
                 &sdk_override,
                 ctx.run_config.as_ref().map(|rc| rc.runner),
                 Some(req.language.as_str()),
+                registered_eco,
             );
         }
     }

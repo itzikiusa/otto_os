@@ -120,10 +120,16 @@ fn scan_single_spring_module(
             {
                 has_spring_boot = true;
             }
-            if head.contains("spring-boot-starter-actuator") {
+            let deps_surface = if mf == "pom.xml" {
+                let stripped = crate::java_workspace::strip_xml_comments(&head);
+                crate::java_workspace::remove_all_tag_blocks(&stripped, "dependencyManagement")
+            } else {
+                head
+            };
+            if deps_surface.contains("spring-boot-starter-actuator") {
                 has_actuator = true;
             }
-            if head.contains("spring-boot-devtools") {
+            if deps_surface.contains("spring-boot-devtools") {
                 has_devtools = true;
             }
         }
@@ -150,21 +156,49 @@ fn scan_single_spring_module(
         has_spring_boot = true;
     }
 
-    // 3. Scan `src/main/resources` & `config/` in two passes:
-    //    Pass 1: base config files (`application.*`, `bootstrap.*`) set base ports/paths
-    //            and collect `spring.profiles.active` + `spring.profiles.default`.
+    // BUG3-6: If this module is a Maven Spring Boot module, also inherit direct
+    // `<dependencies>` (excluding `<dependencyManagement>` BOM entries) from its
+    // actual `<parent>` POM chain confined strictly within `allowed_roots`.
+    if has_spring_boot && (!has_devtools || !has_actuator) && root.join("pom.xml").is_file() {
+        inherit_maven_parent_spring_capabilities(
+            root,
+            allowed_roots,
+            is_root_user,
+            &mut has_actuator,
+            &mut has_devtools,
+        );
+    }
+
+    // 3. Scan `src/main/resources`, `src/main/resources/config`, & `config/` in two passes:
+    //    Pass 1: base config files (`application.*`, `bootstrap.*`) ordered in Spring Boot
+    //            precedence (packaged before external `config/`, YAML before `.properties`)
+    //            set base ports/paths and replace `active_profiles` / `default_profiles` when
+    //            a higher-priority file overrides `spring.profiles.{active,default}` (BUG3-5).
     //    Pass 2: profile-specific files apply ONLY when their profile is active — using
     //            `spring.profiles.active` if set, else `spring.profiles.default`, else
     //            Spring Boot's implicit `"default"` profile (BUG2-8).
     let mut base_configs: Vec<(PathBuf, String)> = Vec::new();
     let mut profile_configs: Vec<(PathBuf, String, String)> = Vec::new();
-    for res_rel in ["src/main/resources", "config"] {
+    for res_rel in ["src/main/resources", "src/main/resources/config", "config"] {
         let res_dir = root.join(res_rel);
         let Ok(rd) = fs::read_dir(&res_dir) else {
             continue;
         };
         let mut entries: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
-        entries.sort();
+        // Within one config directory, Spring Boot gives `.properties` higher precedence than
+        // `.yml`/`.yaml`, so sort YAML before `.properties` (lowest -> highest).
+        entries.sort_by(|a, b| {
+            let rank = |p: &Path| {
+                let name = p
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                let is_props = name.ends_with(".properties");
+                (is_props, name)
+            };
+            rank(a).cmp(&rank(b))
+        });
         for path in entries {
             let Some(fname) = path.file_name().and_then(|s| s.to_str()) else {
                 continue;
@@ -242,23 +276,27 @@ fn scan_single_spring_module(
         }
         if collect_profile_selectors {
             if let Some(act_profs) = parsed.get("spring.profiles.active") {
-                for p in act_profs
+                let parsed_list: BTreeSet<String> = act_profs
                     .split(',')
                     .map(str::trim)
                     .filter(|s| !s.is_empty() && !s.contains("${"))
-                {
-                    profiles.insert(p.to_string());
-                    active_profiles.insert(p.to_string());
+                    .map(String::from)
+                    .collect();
+                if !parsed_list.is_empty() {
+                    profiles.extend(parsed_list.iter().cloned());
+                    *active_profiles = parsed_list;
                 }
             }
             if let Some(def_profs) = parsed.get("spring.profiles.default") {
-                for p in def_profs
+                let parsed_list: BTreeSet<String> = def_profs
                     .split(',')
                     .map(str::trim)
                     .filter(|s| !s.is_empty() && !s.contains("${"))
-                {
-                    profiles.insert(p.to_string());
-                    default_profiles.insert(p.to_string());
+                    .map(String::from)
+                    .collect();
+                if !parsed_list.is_empty() {
+                    profiles.extend(parsed_list.iter().cloned());
+                    *default_profiles = parsed_list;
                 }
             }
         }
@@ -439,5 +477,82 @@ fn scan_spring_apps(
             file_path: rel,
             language: if ext == "kt" { "kotlin" } else { "java" }.to_string(),
         });
+    }
+}
+
+/// Walk up to 6 confined `<parent>` POM hops starting from `module_root/pom.xml`
+/// and inherit direct `<dependencies>` signals (`spring-boot-devtools` and
+/// `spring-boot-starter-actuator`), excluding XML comments and BOM-only
+/// `<dependencyManagement>` blocks (BUG3-6).
+#[allow(clippy::disallowed_methods)]
+fn inherit_maven_parent_spring_capabilities(
+    module_root: &Path,
+    allowed_roots: &[PathBuf],
+    is_root_user: bool,
+    has_actuator: &mut bool,
+    has_devtools: &mut bool,
+) {
+    let mut visited = std::collections::HashSet::new();
+    let mut cur_pom = module_root.join("pom.xml");
+    if let Ok(canon) = fs::canonicalize(&cur_pom) {
+        visited.insert(canon);
+    }
+
+    for _ in 0..6 {
+        if *has_actuator && *has_devtools {
+            break;
+        }
+        let Some(raw) = read_confined_bounded(&cur_pom, 128 * 1024, allowed_roots, is_root_user)
+        else {
+            break;
+        };
+        let stripped = crate::java_workspace::strip_xml_comments(&raw);
+        let Some(parent_block) =
+            crate::java_workspace::extract_first_tag_block(&stripped, "parent")
+        else {
+            break;
+        };
+        // Explicit empty `<relativePath/>` or `<relativePath></relativePath>` tells Maven
+        // to resolve the parent exclusively from the repository, never from a local file.
+        let has_self_closing_empty =
+            parent_block.contains("<relativePath/>") || parent_block.contains("<relativePath />");
+        if has_self_closing_empty {
+            break;
+        }
+        let rel = match crate::java_workspace::extract_tag_text(parent_block, "relativePath") {
+            Some(v) if v.is_empty() => break,
+            Some(v) => v,
+            None => "../pom.xml".to_string(),
+        };
+        let Some(cur_dir) = cur_pom.parent() else {
+            break;
+        };
+        let cand = cur_dir.join(&rel);
+        let next_pom = if cand.is_dir() {
+            cand.join("pom.xml")
+        } else {
+            cand
+        };
+        let Ok(canon_next) = fs::canonicalize(&next_pom) else {
+            break;
+        };
+        if !visited.insert(canon_next.clone()) {
+            break;
+        }
+        let Some(parent_raw) =
+            read_confined_bounded(&canon_next, 128 * 1024, allowed_roots, is_root_user)
+        else {
+            break;
+        };
+        let parent_stripped = crate::java_workspace::strip_xml_comments(&parent_raw);
+        let parent_deps =
+            crate::java_workspace::remove_all_tag_blocks(&parent_stripped, "dependencyManagement");
+        if parent_deps.contains("spring-boot-starter-actuator") {
+            *has_actuator = true;
+        }
+        if parent_deps.contains("spring-boot-devtools") {
+            *has_devtools = true;
+        }
+        cur_pom = canon_next;
     }
 }

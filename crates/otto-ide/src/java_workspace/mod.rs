@@ -19,6 +19,9 @@ use std::path::{Path, PathBuf};
 
 use regex::Regex;
 
+pub(crate) use self::builder::find_owning_gradle_root;
+#[cfg(test)]
+pub(crate) use self::builder::resolve_gradle_project_path;
 pub use self::builder::{
     collect_java_files_rec, infer_java_fqcn_from_file, prepare_java_execution,
     prepare_java_execution_cancellable, JavaExecutionPlan,
@@ -503,19 +506,7 @@ fn parse_gradle_module(dir: &Path, raw: &str) -> WorkspaceJavaModule {
 }
 
 fn parse_gradle_includes(raw: &str) -> Vec<String> {
-    let re = Regex::new(r#"include\s*\(?([^)\n]+)\)?"#).unwrap();
-    let q_re = Regex::new(r#"['"]([^'"]+)['"]"#).unwrap();
-    let pdir_re = Regex::new(r#"projectDir\s*=\s*file\s*\(\s*['"]([^'"]+)['"]\s*\)"#).unwrap();
-    let mut out = Vec::new();
-    for cap in re.captures_iter(raw) {
-        for q in q_re.captures_iter(&cap[1]) {
-            out.push(q[1].to_string());
-        }
-    }
-    for cap in pdir_re.captures_iter(raw) {
-        out.push(cap[1].to_string());
-    }
-    out
+    builder::parse_gradle_included_projects(raw)
 }
 
 pub fn strip_xml_comments(xml: &str) -> String {

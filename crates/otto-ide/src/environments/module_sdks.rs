@@ -622,6 +622,17 @@ pub(crate) fn apply_module_sdk_to_project_env_with_ecosystem(
     }
 }
 
+#[cfg(test)]
+pub(crate) async fn layer_child_and_module_sdk_for_run_test(
+    pool: &DbPool,
+    target: &IdeTargetSpec,
+    cfg: Option<&IdeRunConfig>,
+    proj: &mut IdeProjectEnvironment,
+) {
+    let mut stored_vars = Vec::new();
+    layer_child_and_module_sdk_for_run(pool, target, cfg, proj, &mut stored_vars).await;
+}
+
 pub(super) async fn layer_child_and_module_sdk_for_run(
     pool: &DbPool,
     target: &IdeTargetSpec,
