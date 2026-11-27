@@ -18,7 +18,7 @@
     testid?: string;
     /** Keep the header in view while its rows scroll. */
     sticky?: boolean;
-    /** Badge before the fold's label. */
+    /** Badge before the section label. */
     leading?: Snippet;
     /** Controls at the end of a calm heading (a section's ⋯). */
     actions?: Snippet;
@@ -36,9 +36,12 @@
       {#if count}<span class="if-count">{count}</span>{/if}
       <Icon name={expanded ? 'chevronDown' : 'chevronRight'} size={12} />
     </button>
-  {:else if actions || (sticky && count)}
+  {:else if actions || leading || (sticky && count)}
     <div class="if-head">
-      <h2 class="if-label">{label}</h2>
+      <h2 class="if-label" class:with-leading={!!leading}>
+        {@render leading?.()}
+        <span class="ellipsis" dir="auto">{label}</span>
+      </h2>
       {#if count}<span class="if-count">{count}</span>{/if}
       {@render actions?.()}
     </div>
@@ -84,6 +87,11 @@
   .if-head .if-label {
     flex: 1;
     min-width: 0;
+  }
+  .if-label.with-leading {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-3);
   }
   .if-fold {
     display: flex;

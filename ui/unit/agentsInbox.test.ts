@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { byRecent, groupAgentSessions, matchesQuery, sessionListStatus, type SessionListStatus } from '../src/modules/agents/agentsInbox.ts';
 import type { Session } from '../src/lib/api/types';
 import { SCRATCH_ID } from '../src/lib/stores/sessionBuckets.ts';
+import { componentFunctions } from './componentFunctions.ts';
 
 const s = (id: string, at = '2026-11-24T00:00:00Z', extra: Partial<Session> = {}): Session =>
   ({ id, title: id, provider: 'claude', cwd: '/w/' + id, last_active_at: at, ...extra }) as unknown as Session;
@@ -108,3 +109,21 @@ test('search matches title, provider, folder and extra fields', () => {
   assert.ok(!matchesQuery(row, 'nope', ['main']));
   assert.ok(matchesQuery(row, '  '));
 });
+
+for (const [name, query, needsYouFilter] of [
+  ['search', '  Beta  ', false],
+  ['the attention filter', '', true],
+] as const) {
+  test(`${name} reveals matching sessions in a saved collapsed workspace`, () => {
+    const ws = { needsYouFilter };
+    const collapsed = new Set(['beta']);
+    const state = componentFunctions(new URL('../src/modules/agents/AgentsInbox.svelte', import.meta.url),
+      ['isFiltering', 'isCollapsed'], { query, ws, collapsed });
+    const group = { kind: 'workspace', key: 'beta' };
+    assert.equal(state.isCollapsed(group), false);
+
+    state.query = '  ';
+    ws.needsYouFilter = false;
+    assert.equal(state.isCollapsed(group), true, 'clearing filters restores the saved fold');
+  });
+}

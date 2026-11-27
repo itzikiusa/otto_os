@@ -123,7 +123,12 @@
     lsSet(preferencesKey, JSON.stringify(value));
   }
   const collapsed = $derived(new Set(preferences.collapsed));
-  const isCollapsed = (group: InboxGroup): boolean => group.kind === 'workspace' && collapsed.has(group.key);
+  function isFiltering(): boolean {
+    return query.trim() !== '' || ws.needsYouFilter;
+  }
+  function isCollapsed(group: InboxGroup): boolean {
+    return group.kind === 'workspace' && collapsed.has(group.key) && !isFiltering();
+  }
   function toggleWorkspace(id: string): void {
     const next = new Set(collapsed);
     if (!next.delete(id)) next.add(id);
@@ -483,7 +488,7 @@
               {expanded}
               sticky
               testid={`agents-workspace-${group.key}`}
-              ontoggle={() => toggleWorkspace(group.key)}
+              ontoggle={isFiltering() ? undefined : () => toggleWorkspace(group.key)}
             >
               {#snippet leading()}<ProjectBadge {name} />{/snippet}
               {#if expanded}
