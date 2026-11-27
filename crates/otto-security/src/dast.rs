@@ -820,6 +820,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     fn setup_cached_nuclei(
         tools: &Path,
         script: &str,
@@ -840,6 +841,7 @@ mod tests {
         (nuclei_dir, binary)
     }
 
+    #[cfg(target_os = "macos")]
     async fn write_fresh_nuclei_markers(nuclei_dir: &Path) {
         let stamp = store::now();
         write_json(
