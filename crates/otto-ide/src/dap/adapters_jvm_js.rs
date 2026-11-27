@@ -24,6 +24,52 @@ pub(super) async fn resolve_js_ts_adapter(
     cwd: &str,
     env: BTreeMap<String, String>,
 ) -> Result<ResolvedDapAdapter> {
+    let raw_program = req.launch.program.trim();
+    let is_browser_attach = req.language.eq_ignore_ascii_case("browser")
+        || req.language.eq_ignore_ascii_case("chrome")
+        || raw_program.starts_with("chrome://")
+        || raw_program.starts_with("browser://")
+        || raw_program.starts_with("http://")
+        || raw_program.starts_with("https://");
+    let effective_attach_port = req
+        .launch
+        .attach_port
+        .or_else(|| is_browser_attach.then_some(9222));
+
+    if let Some(attach_port) = effective_attach_port {
+        return Ok(ResolvedDapAdapter {
+            adapter_name: if is_browser_attach {
+                "browser-cdp-dap".into()
+            } else {
+                "node-inspector-dap".into()
+            },
+            language: language.to_string(),
+            transport: DapAdapterTransport::NodeInspectorBridge(NodeInspectorBridgeSpec {
+                node_bin: String::new(),
+                node_flags: Vec::new(),
+                program: raw_program.to_string(),
+                args: Vec::new(),
+                cwd: cwd.to_string(),
+                env,
+                attach_port: Some(attach_port),
+            }),
+            initialize_args: json!({
+                "adapterID": if is_browser_attach { "chrome" } else { "node" },
+                "linesStartAt1": true,
+                "columnsStartAt1": true,
+                "pathFormat": "path"
+            }),
+            launch_command: "attach".into(),
+            launch_args: json!({ "program": raw_program, "cwd": cwd, "port": attach_port }),
+            normalized_cwd: cwd.to_string(),
+            initial_output: vec![IdeDebugOutputEntry {
+                category: "console".into(),
+                text: format!("Attaching CDP debugger to 127.0.0.1:{attach_port} (cwd: {cwd})\n"),
+                seq: 0,
+            }],
+        });
+    }
+
     let mut node_candidates = Vec::new();
     if let Some(sdk) = resolve_debug_sdk_override(req, ctx, cwd) {
         let trimmed = sdk.trim_end_matches('/');
@@ -105,7 +151,7 @@ pub(super) async fn resolve_js_ts_adapter(
         }
     }
 
-    let mut node_flags = Vec::new();
+    let mut node_flags = vec!["--enable-source-maps".into()];
     let mut program = program;
     let mut args = req.launch.args.clone();
     let mut cwd = cwd.to_string();
@@ -122,6 +168,11 @@ pub(super) async fn resolve_js_ts_adapter(
                 node_flags.push("--test".into());
                 node_flags.push(format!("--test-name-pattern={pattern}"));
             }
+        }
+    } else if req.target.kind == IdeTargetKind::Local {
+        if let Some((entry, fw_args)) = resolve_web_framework_cli_entry(&cwd, &program, &args) {
+            program = entry;
+            args = fw_args;
         }
     }
     let is_ts = program.ends_with(".ts") || program.ends_with(".mts") || program.ends_with(".cts");
@@ -164,10 +215,48 @@ pub(super) async fn resolve_js_ts_adapter(
     })
 }
 
-/// Debug a Jest/Vitest test through its runner's own entry from the package root, as
-/// `(program, args, cwd)`; a `node:test` file (or no runner installed) keeps `node --test`.
+/// Resolve a web framework dev/CLI entrypoint (`vite`, `next`, `ng`, `nuxt`, `svelte-kit`)
+/// inside local `node_modules` so Node `--inspect-brk` can debug SSR / dev servers directly.
+pub(crate) fn resolve_web_framework_cli_entry(
+    cwd: &str,
+    program: &str,
+    existing_args: &[String],
+) -> Option<(String, Vec<String>)> {
+    let base = Path::new(program)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(program);
+    let candidates: &[(&str, &[&str])] = match base {
+        "vite" => &[("node_modules/vite/bin/vite.js", &[])],
+        "next" => &[("node_modules/next/dist/bin/next", &["dev"])],
+        "ng" => &[("node_modules/@angular/cli/bin/ng.js", &["serve"])],
+        "nuxt" => &[("node_modules/nuxt/bin/nuxt.mjs", &["dev"])],
+        "svelte-kit" => &[("node_modules/@sveltejs/kit/svelte-kit.js", &["dev"])],
+        _ => return None,
+    };
+    let cwd_path = Path::new(cwd);
+    for (rel_entry, default_args) in candidates {
+        if let Some(found) = cwd_path
+            .ancestors()
+            .map(|d| d.join(rel_entry))
+            .find(|p| p.is_file())
+        {
+            let args = if existing_args.is_empty() {
+                default_args.iter().map(|s| (*s).to_string()).collect()
+            } else {
+                existing_args.to_vec()
+            };
+            return Some((found.to_string_lossy().into_owned(), args));
+        }
+    }
+    None
+}
+
+/// Debug a Jest / Vitest / Playwright test through its runner's own entry from the package root,
+/// as `(program, args, cwd)`; a `node:test` file (or no runner installed) keeps `node --test`.
 fn js_runner_debug_launch(file: &str, pattern: &str) -> Option<(String, Vec<String>, String)> {
-    if std::fs::read_to_string(file).ok()?.contains("node:test") {
+    let src = std::fs::read_to_string(file).ok()?;
+    if src.contains("node:test") {
         return None;
     }
     let pkg = crate::gutter::js_test_package(file)?;
@@ -176,36 +265,74 @@ fn js_runner_debug_launch(file: &str, pattern: &str) -> Option<(String, Vec<Stri
         .ok()?
         .to_string_lossy()
         .into_owned();
-    let entry = if pkg.jest {
-        "node_modules/jest/bin/jest.js"
+    let runner = if src.contains("@playwright/test") {
+        crate::gutter::JsTestRunnerKind::Playwright
     } else {
-        "node_modules/vitest/vitest.mjs"
+        pkg.runner
+    };
+    let entry_candidates: &[&str] = match runner {
+        crate::gutter::JsTestRunnerKind::Jest => &["node_modules/jest/bin/jest.js"],
+        crate::gutter::JsTestRunnerKind::Playwright => &[
+            "node_modules/@playwright/test/cli.js",
+            "node_modules/playwright/cli.js",
+        ],
+        crate::gutter::JsTestRunnerKind::Karma => &[
+            "node_modules/@angular/cli/bin/ng.js",
+            "node_modules/karma/bin/karma",
+        ],
+        crate::gutter::JsTestRunnerKind::Vitest => &["node_modules/vitest/vitest.mjs"],
     };
     // A hoisted workspace keeps the runner in an ancestor's node_modules.
-    let entry = pkg
-        .dir
-        .ancestors()
-        .map(|d| d.join(entry))
-        .find(|p| p.is_file())?;
-    let args = if pkg.jest {
-        // Jest runs the tests in this process, under the bridge's inspector.
-        vec!["--runInBand".into(), rel, "-t".into(), pattern.into()]
-    } else {
-        // Vitest runs them in a worker: its own `--inspect-brk` opens the inspector there (it
-        // treats port 0 as "default 9229", so pick a free one).
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .ok()?
-            .local_addr()
-            .ok()?
-            .port();
-        vec![
-            "run".into(),
-            rel,
-            "-t".into(),
-            pattern.into(),
-            "--no-file-parallelism".into(),
-            format!("--inspect-brk=127.0.0.1:{port}"),
-        ]
+    let entry = entry_candidates.iter().find_map(|rel_entry| {
+        pkg.dir
+            .ancestors()
+            .map(|d| d.join(rel_entry))
+            .find(|p| p.is_file())
+    })?;
+    let args = match runner {
+        crate::gutter::JsTestRunnerKind::Jest => {
+            // Jest runs the tests in this process, under the bridge's inspector.
+            vec!["--runInBand".into(), rel, "-t".into(), pattern.into()]
+        }
+        crate::gutter::JsTestRunnerKind::Playwright => {
+            vec![
+                "test".into(),
+                rel,
+                "-g".into(),
+                pattern.into(),
+                "--workers=1".into(),
+                "--timeout=0".into(),
+                "--reporter=list".into(),
+            ]
+        }
+        crate::gutter::JsTestRunnerKind::Karma => {
+            if entry.to_string_lossy().contains("@angular/cli") {
+                vec![
+                    "test".into(),
+                    "--watch=false".into(),
+                    format!("--include={rel}"),
+                ]
+            } else {
+                vec!["start".into(), "--single-run".into()]
+            }
+        }
+        crate::gutter::JsTestRunnerKind::Vitest => {
+            // Vitest runs them in a worker: its own `--inspect-brk` opens the inspector there (it
+            // treats port 0 as "default 9229", so pick a free one).
+            let port = std::net::TcpListener::bind("127.0.0.1:0")
+                .ok()?
+                .local_addr()
+                .ok()?
+                .port();
+            vec![
+                "run".into(),
+                rel,
+                "-t".into(),
+                pattern.into(),
+                "--no-file-parallelism".into(),
+                format!("--inspect-brk=127.0.0.1:{port}"),
+            ]
+        }
     };
     Some((
         entry.to_string_lossy().into_owned(),
@@ -629,5 +756,222 @@ mod tests {
             infer_java_source_root("/repo/java/src/test/java/com/otto/AppTest.java", "/repo"),
             "/repo/java/src/test/java"
         );
+    }
+
+    #[test]
+    fn web_framework_detection_run_configs_gutter_and_parsers_cover_all_frameworks() {
+        use crate::environments::discovery::{detect_web_framework, WebFrameworkKind};
+        use crate::environments::runner_parsers::parse_js_test_line;
+        use crate::gutter::detect_gutter_items;
+        use crate::lsp_host::servers;
+        use crate::types::{IdeRunnerKind, IdeTestCaseStatus};
+
+        // 1. Framework LSPs in registry
+        for (lang, cmd) in [
+            ("svelte", "svelteserver"),
+            ("vue", "vue-language-server"),
+            ("angular", "ngserver"),
+        ] {
+            let def = servers::REGISTRY.iter().find(|d| d.lang == lang);
+            assert!(def.is_some(), "missing LSP def for {lang}");
+            assert_eq!(def.unwrap().cmd, cmd);
+        }
+
+        // 2. Framework detection across Angular, Next.js, SvelteKit, Nuxt, Vue, React, Vite
+        let tmp = tempfile::tempdir().unwrap();
+        let mk = |name: &str, files: &[(&str, &str)]| {
+            let dir = tmp.path().join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            for (rel, body) in files {
+                let p = dir.join(rel);
+                if let Some(par) = p.parent() {
+                    std::fs::create_dir_all(par).unwrap();
+                }
+                std::fs::write(&p, body).unwrap();
+            }
+            dir
+        };
+
+        let ng_dir = mk(
+            "ng-app",
+            &[
+                ("angular.json", "{}"),
+                (
+                    "package.json",
+                    r#"{"dependencies":{"@angular/core":"^19.0.0"},"scripts":{"start":"ng serve","test":"ng test"}}"#,
+                ),
+                (
+                    "src/app/app.component.spec.ts",
+                    "describe('AppComponent', () => {\n  it('should create', () => {});\n});\n",
+                ),
+            ],
+        );
+        let ng_pkg: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(ng_dir.join("package.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            detect_web_framework(&ng_dir, Some(&ng_pkg)),
+            Some(WebFrameworkKind::Angular)
+        );
+        let ng_gutter = detect_gutter_items(
+            &ng_dir
+                .join("src/app/app.component.spec.ts")
+                .to_string_lossy(),
+            &std::fs::read_to_string(ng_dir.join("src/app/app.component.spec.ts")).unwrap(),
+            &[],
+        );
+        assert_eq!(ng_gutter.len(), 2);
+        assert_eq!(ng_gutter[1].run_spec.runner, IdeRunnerKind::Karma);
+        assert!(ng_gutter[1].run_spec.args.iter().any(|a| a == "ng"));
+
+        let next_dir = mk(
+            "next-app",
+            &[
+                ("next.config.mjs", "export default {};"),
+                (
+                    "package.json",
+                    r#"{"dependencies":{"next":"15.0.0","react":"19.0.0"}}"#,
+                ),
+            ],
+        );
+        assert_eq!(
+            detect_web_framework(&next_dir, None),
+            Some(WebFrameworkKind::NextJs)
+        );
+
+        let sk_dir = mk(
+            "sveltekit-app",
+            &[
+                ("svelte.config.js", "export default {};"),
+                (
+                    "package.json",
+                    r#"{"devDependencies":{"@sveltejs/kit":"^2","svelte":"^5"}}"#,
+                ),
+            ],
+        );
+        let sk_pkg: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(sk_dir.join("package.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            detect_web_framework(&sk_dir, Some(&sk_pkg)),
+            Some(WebFrameworkKind::SvelteKit)
+        );
+
+        let nuxt_dir = mk("nuxt-app", &[("nuxt.config.ts", "export default {};")]);
+        assert_eq!(
+            detect_web_framework(&nuxt_dir, None),
+            Some(WebFrameworkKind::Nuxt)
+        );
+
+        let pw_dir = mk(
+            "pw-app",
+            &[
+                ("playwright.config.ts", "export default {};"),
+                ("package.json", r#"{"devDependencies":{"@playwright/test":"^1.49.0"}}"#),
+                (
+                    "e2e/home.spec.ts",
+                    "import { test, expect } from '@playwright/test';\ntest.describe('Home', () => {\n  test('renders hero', async () => {});\n});\n",
+                ),
+            ],
+        );
+        let pw_file = pw_dir.join("e2e/home.spec.ts");
+        let pw_gutter = detect_gutter_items(
+            &pw_file.to_string_lossy(),
+            &std::fs::read_to_string(&pw_file).unwrap(),
+            &[],
+        );
+        assert_eq!(pw_gutter.len(), 2);
+        assert_eq!(pw_gutter[1].run_spec.runner, IdeRunnerKind::Playwright);
+        assert!(pw_gutter[1].run_spec.args.iter().any(|a| a == "playwright"));
+
+        // 3. Structured test line parsing (Playwright, Jest, Karma)
+        let pw_ok = parse_js_test_line(
+            "  ✓  1 [chromium] › e2e/home.spec.ts:12:5 › Home › renders hero (120ms)",
+        )
+        .expect("playwright pass");
+        assert_eq!(pw_ok.status, IdeTestCaseStatus::Passed);
+        assert_eq!(pw_ok.file.as_deref(), Some("e2e/home.spec.ts"));
+        assert_eq!(pw_ok.line, Some(12));
+
+        let jest_fail = parse_js_test_line("  ✕ calculates subtotal (5 ms)").expect("jest fail");
+        assert_eq!(jest_fail.status, IdeTestCaseStatus::Failed);
+        let jest_skip = parse_js_test_line("  ○ skipped pending feature").expect("jest skip");
+        assert_eq!(jest_skip.status, IdeTestCaseStatus::Skipped);
+        let karma_fail = parse_js_test_line(
+            "Chrome Headless 120.0.0.0 (Mac OS 10.15.7) AppComponent should create FAILED",
+        )
+        .expect("karma fail");
+        assert_eq!(karma_fail.status, IdeTestCaseStatus::Failed);
+        assert_eq!(karma_fail.name, "AppComponent should create");
+    }
+
+    #[test]
+    fn browser_cdp_target_selection_and_dev_server_url_mapping() {
+        use crate::dap::node_bridge::cdp::select_cdp_target_ws_url;
+        use crate::dap::node_bridge::{file_url_to_path_in_cwd, path_to_url_regex_in_cwd};
+
+        let targets = json!([
+            { "type": "service_worker", "url": "chrome-extension://abc/sw.js", "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/page/sw" },
+            { "type": "page", "url": "devtools://devtools/bundled/inspector.html", "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/page/dt" },
+            { "type": "page", "url": "http://localhost:5173/", "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/page/APP" }
+        ]);
+        assert_eq!(
+            select_cdp_target_ws_url(&targets).as_deref(),
+            Some("ws://127.0.0.1:9222/devtools/page/APP")
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let app_file = root.join("src/App.svelte");
+        std::fs::create_dir_all(app_file.parent().unwrap()).unwrap();
+        std::fs::write(&app_file, "<script>let x = 1;</script>\n").unwrap();
+        let root_s = root.to_string_lossy();
+
+        assert_eq!(
+            file_url_to_path_in_cwd("http://localhost:5173/src/App.svelte?t=1700000", &root_s)
+                .as_deref(),
+            Some(app_file.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            file_url_to_path_in_cwd("webpack:///./src/App.svelte", &root_s).as_deref(),
+            Some(app_file.to_string_lossy().as_ref())
+        );
+        let re_str = path_to_url_regex_in_cwd(&app_file.to_string_lossy(), &root_s);
+        let re = regex::Regex::new(&re_str).unwrap();
+        assert!(re.is_match("http://localhost:5173/src/App.svelte?t=123"));
+        assert!(re.is_match("webpack:///./src/App.svelte"));
+    }
+
+    #[test]
+    fn playwright_and_framework_cli_debug_entries_resolve_in_node_modules() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("node_modules/@playwright/test")).unwrap();
+        std::fs::write(root.join("node_modules/@playwright/test/cli.js"), "").unwrap();
+        std::fs::create_dir_all(root.join("node_modules/vite/bin")).unwrap();
+        std::fs::write(root.join("node_modules/vite/bin/vite.js"), "").unwrap();
+        std::fs::create_dir_all(root.join("e2e")).unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"devDependencies":{"@playwright/test":"^1.49","vite":"^6"}}"#,
+        )
+        .unwrap();
+        let spec = root.join("e2e/login.spec.ts");
+        std::fs::write(
+            &spec,
+            "import { test } from '@playwright/test';\ntest('logs in', async () => {});\n",
+        )
+        .unwrap();
+
+        let (entry, args, cwd) =
+            js_runner_debug_launch(&spec.to_string_lossy(), "logs in").unwrap();
+        assert!(entry.ends_with("node_modules/@playwright/test/cli.js"));
+        assert_eq!(cwd, root.to_string_lossy());
+        assert_eq!(args[0], "test");
+        assert!(args.iter().any(|a| a == "--workers=1"));
+
+        let (vite_entry, _) =
+            resolve_web_framework_cli_entry(&root.to_string_lossy(), "vite", &[]).unwrap();
+        assert!(vite_entry.ends_with("node_modules/vite/bin/vite.js"));
     }
 }

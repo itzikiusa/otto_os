@@ -168,7 +168,7 @@ pub(crate) fn apply_language_memory_caps(
                 command.arg("-data").arg(data_dir);
             }
         }
-        "typescript" | "javascript" | "shell" | "css" | "html" => {
+        "typescript" | "javascript" | "svelte" | "vue" | "angular" | "shell" | "css" | "html" => {
             set_node_heap_cap(command, inherited);
         }
         "python" if cmd_name.contains("pyright") => {

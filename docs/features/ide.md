@@ -246,7 +246,7 @@ global system directories:
 | **Zig** | Official Zig SDK tarball (`ziglang.org/download/index.json`, SHA-256 verified), local SDK registration, `zls` (Zig-version-matched), `CodeLLDB` (`codelldb`) / `lldb-dap` / built-in `otto-lldb-dap` with Zig LLDB type formatters |
 | **.NET (C# / F# / Unity / Unreal)** | Official .NET SDK tarball (`dotnetcli.azureedge.net` / `builds.dotnet.microsoft.com`, LTS 8.0 / 9.0), local SDK registration (`DOTNET_ROOT`), `csharp-ls` (with OmniSharp / Roslyn / `fsautocomplete` fallback), NuGet inspector & OSV vulnerabilities, `netcoredbg` (and `vsdbg` fallback) with `VSTEST_HOST_DEBUG` test debugging & Unity attach |
 | **Go** | Official Go SDK tarball, local SDK registration (`POST /ide/toolchains/local`), `gopls`, Delve (`dlv`), `gofumpt` |
-| **Node / TypeScript** | Node LTS (22), `pnpm`, `typescript-language-server`, `vscode-langservers-extracted`, `prettier`, `js-debug` |
+| **Node / TypeScript & Web Frameworks** | Node LTS (22), `pnpm`, `typescript-language-server`, `svelteserver` (Svelte/SvelteKit), `vue-language-server` (Vue/Nuxt), `ngserver` (Angular), `vscode-langservers-extracted`, `prettier`, `js-debug` & built-in `otto-node-cdp` (Node + Browser CDP attach with Vite/webpack URL mapping) |
 | **Shell (Bash / Zsh)** | `bash-language-server`, `shellcheck`, `shfmt`, built-in `otto-sh-dap` (`DEBUG` trap DAP debugger) |
 | **JSON & CSV / TSV** | `vscode-json-language-server`, live JSONPath breadcrumb (JSONC files — `.jsonc`, `tsconfig*.json`, `jsconfig*.json`, `.vscode/*.json`, `devcontainer.json`, `.eslintrc.json` — allow comments and trailing commas in the built-in syntax check), Pretty / Minify / Sort Keys, `$ref` navigation, virtualized `IdeCsvView` (`Table ↔ Text` toggle, rainbow columns, sort/filter, inline cell edit + undo, column stats) |
 
@@ -295,7 +295,7 @@ secret environment variable values stored in the macOS Keychain via
 - Instant (`< 25ms`, pure file-stat/manifest scan with zero subprocess spawns)
   runner discovery across primary and attached folders plus reusable **Run
   Configurations** (`go_test`, `go_run`, `java_junit`, `java_main`, `maven`,
-  `gradle`, `cargo_test`, `cargo_run`, `zig_build`, `zig_run`, `zig_test`, `dotnet_build`, `dotnet_run`, `dotnet_test`, `node`, `npm`, `vitest`, `pytest`,
+  `gradle`, `cargo_test`, `cargo_run`, `zig_build`, `zig_run`, `zig_test`, `dotnet_build`, `dotnet_run`, `dotnet_test`, `node`, `npm`, `vitest`, `jest`, `playwright`, `karma`, `pytest`,
   `python`, `shell`, `compound`, `custom`), launched in the **Run** bottom dock
   (`POST /ide/runs`) with live output and structured test-result trees, or
   stopped via `POST /ide/runs/{run_id}/stop`.
@@ -303,7 +303,7 @@ secret environment variable values stored in the macOS Keychain via
   under `**/target/surefire-reports` and `**/build/test-results/**`) for one row
   per test with its time and failure message, instead of the console's one row
   per class. A test run with a filter (`go_test`, `cargo_test`, `zig_test`, `dotnet_test`, `pytest`,
-  `vitest`, `java_junit`, `maven`, `gradle`) that exits 0 with no tests fails
+  `vitest`, `jest`, `playwright`, `karma`, `java_junit`, `maven`, `gradle`) that exits 0 with no tests fails
   with `No tests matched '<filter>'` instead of showing green.
 - A config's `before_launch` hook runs before the program, in its own process
   group, with its stdout/stderr streamed into the Run console. A non-zero exit

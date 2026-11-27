@@ -2,13 +2,13 @@
 // those are everyday (shown) and which fold into "Advanced", plus the draft a
 // new configuration starts from (the active tab's language and file).
 
-import { defaultRunnerForLanguage, type IdeOpenTab } from '../store/ideTypes';
+import { defaultRunnerForLanguage, type IdeOpenTab } from '../store/ideTypes.ts';
 
 export type RunConfigField =
   | 'target' | 'command' | 'test_filter' | 'args' | 'cwd'
   | 'build_flags' | 'sdk' | 'env_file' | 'before_launch' | 'inherit_shell_env';
 
-const TEST_RUNNERS = new Set(['go_test', 'java_junit', 'cargo_test', 'zig_test', 'dotnet_test', 'pytest', 'vitest', 'maven', 'gradle']);
+const TEST_RUNNERS = new Set(['go_test', 'java_junit', 'cargo_test', 'zig_test', 'dotnet_test', 'pytest', 'vitest', 'jest', 'playwright', 'karma', 'maven', 'gradle']);
 const BUILD_FLAG_RUNNERS = new Set(['go_test', 'go_run', 'go_build', 'cargo_test', 'cargo_run', 'zig_build', 'zig_run', 'zig_test', 'dotnet_build', 'dotnet_run', 'dotnet_test', 'maven', 'gradle', 'java_main', 'java_junit']);
 const NO_SDK_RUNNERS = new Set(['shell', 'custom']);
 
@@ -80,6 +80,9 @@ const TARGET_COPY: Record<string, { label: string; placeholder: string }> = {
   node: { label: 'Script', placeholder: 'src/index.js' },
   npm: { label: 'npm script', placeholder: 'dev' },
   vitest: { label: 'Test file or folder', placeholder: 'src/lib' },
+  jest: { label: 'Test file or folder', placeholder: 'src/__tests__' },
+  playwright: { label: 'Spec file or folder', placeholder: 'e2e/' },
+  karma: { label: 'Spec file (optional)', placeholder: 'src/app/app.component.spec.ts' },
   pytest: { label: 'Test file or folder', placeholder: 'tests/' },
   python: { label: 'Script', placeholder: 'main.py' },
   shell: { label: 'Script', placeholder: 'scripts/deploy.sh' },

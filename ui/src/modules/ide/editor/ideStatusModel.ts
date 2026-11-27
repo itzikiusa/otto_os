@@ -85,7 +85,7 @@ export function ideLanguageSettingsSection(path: string, language?: string | nul
   const lang = (language ?? EXT_LANG[extOf(path)] ?? extOf(path)).toLowerCase();
   if (lang === 'go') return 'lang.go';
   if (lang === 'java') return 'lang.java';
-  if (lang === 'typescript' || lang === 'javascript') return 'lang.node';
+  if (lang === 'typescript' || lang === 'javascript' || lang === 'svelte' || lang === 'vue' || lang === 'angular') return 'lang.node';
   if (lang === 'python') return 'lang.python';
   if (lang === 'rust') return 'lang.rust';
   if (lang === 'zig') return 'lang.zig';
@@ -114,11 +114,12 @@ export function ideProblemCounts(problems: readonly { severity: string }[]): { e
 // ── Language server ─────────────────────────────────────────────────────────
 
 const SERVER_NAMES: Record<string, string> = {
-  go: 'gopls', rust: 'rust-analyzer', zig: 'zls', csharp: 'csharp-ls', fsharp: 'fsautocomplete', java: 'jdtls', typescript: 'tsserver', javascript: 'tsserver', python: 'pyright',
+  go: 'gopls', rust: 'rust-analyzer', zig: 'zls', csharp: 'csharp-ls', fsharp: 'fsautocomplete', java: 'jdtls', typescript: 'tsserver', javascript: 'tsserver', svelte: 'svelteserver', vue: 'vue-language-server', angular: 'ngserver', python: 'pyright',
 };
 
 /** The language-server id (`go`, `typescript`, …) for a file, or null when Otto runs none for it. */
 export function ideLspLangFor(path: string, language?: string | null): string | null {
+  if (path.toLowerCase().endsWith('.component.html')) return 'angular';
   const raw = (language || EXT_LANG[extOf(path)] || extOf(path)).toLowerCase();
   const id = raw === 'golang' ? 'go' : raw;
   return SERVER_NAMES[id] ? id : null;

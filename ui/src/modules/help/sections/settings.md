@@ -113,7 +113,7 @@ can open: admin-only panes are hidden rather than shown disabled.
   Connections MCP switch is "Give sessions … Otto's read-only tools" on its Tools page.
 
 **Language Servers**
-- Shows which language servers (Go, Python, TypeScript, JavaScript, Rust, Zig (`zls`), .NET C#/F# (`csharp-ls` / `fsautocomplete`), JSON,
+- Shows which language servers (Go, Python, TypeScript, JavaScript, Svelte (`svelteserver`), Vue (`vue-language-server`), Angular (`ngserver`), Rust, Zig (`zls`), .NET C#/F# (`csharp-ls` / `fsautocomplete`), JSON,
   HTML, CSS, SCSS, Markdown, Java and more) are found on your PATH, with their
   install commands.
 - **Install** one, or **Install all missing**; installs run in a shell session.

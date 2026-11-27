@@ -30,6 +30,10 @@ export function nestParentName(name: string): string | null {
   if (razorCs) return razorCs[1];
   const designerCs = /^(.+)\.Designer\.cs$/i.exec(name);
   if (designerCs) return `${designerCs[1]}.cs`;
+  const ngComp = /^(.+\.component)\.(?:html|scss|sass|css|less|spec\.ts)$/.exec(name);
+  if (ngComp) return `${ngComp[1]}.ts`;
+  if (/^\+page(?:\.server)?\.[jt]s$/.test(name)) return '+page.svelte';
+  if (/^\+layout(?:\.server)?\.[jt]s$/.test(name)) return '+layout.svelte';
   const compiled = /^(.+)\.(?:js|js\.map|d\.ts)$/.exec(name);
   return compiled ? `${compiled[1]}.ts` : null;
 }

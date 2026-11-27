@@ -456,7 +456,8 @@ credentials are refused with 403 (`RootRoute::Lsp`).
   `<data_dir>/toolchains/**/bin` first (prepend to `PATH`, plus managed JDK
   `JAVA_HOME`), then standard developer bin directories (`~/.cargo/bin`,
   `~/go/bin`, `~/.zvm/bin`, `~/.dotnet/tools`, `~/.local/bin`, Homebrew, …), and includes both the built-in
-  language servers (`gopls`, `typescript-language-server`, `jdtls`,
+  language servers (`gopls`, `typescript-language-server`, `svelteserver`,
+  `vue-language-server`, `ngserver`, `jdtls`,
   `rust-analyzer`, `zls`, `csharp-ls` / `OmniSharp` / `fsautocomplete`, `pyright-langserver`, `bash-language-server`,
   `vscode-json-language-server`, `vscode-css-language-server`,
   `vscode-html-language-server`, `marksman`) and any enabled runtime IDE plugin

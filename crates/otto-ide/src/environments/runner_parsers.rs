@@ -93,6 +93,9 @@ impl IncrementalTestTracker {
             }
             IdeRunnerKind::Node
             | IdeRunnerKind::Vitest
+            | IdeRunnerKind::Jest
+            | IdeRunnerKind::Playwright
+            | IdeRunnerKind::Karma
             | IdeRunnerKind::Npm
             | IdeRunnerKind::Shell => {
                 if let Some(tc) = parse_js_test_line(line) {
@@ -383,42 +386,85 @@ fn parse_python_test_line(line: &str) -> Option<IdeTestCaseResult> {
     Some(simple_test_case(left.trim(), status, None))
 }
 
-fn parse_js_test_line(line: &str) -> Option<IdeTestCaseResult> {
+pub(crate) fn parse_js_test_line(line: &str) -> Option<IdeTestCaseResult> {
     let t = line.trim();
-    if let Some(rest) = t
-        .strip_prefix("ok ")
-        .or_else(|| t.strip_prefix("✓ "))
+    // Playwright list reporter:
+    //   `✓  1 [chromium] › e2e/home.spec.ts:12:5 › Home › renders hero (120ms)`
+    //   `✘  2 [chromium] › e2e/home.spec.ts:20:5 › Home › submits form (1.2s)`
+    //   `-  3 [chromium] › e2e/home.spec.ts:28:5 › Home › skipped`
+    if let Some((status, rest)) = t
+        .strip_prefix("✓ ")
         .or_else(|| t.strip_prefix("✔ "))
+        .or_else(|| t.strip_prefix("ok "))
+        .map(|r| (IdeTestCaseStatus::Passed, r))
+        .or_else(|| {
+            t.strip_prefix("✘ ")
+                .or_else(|| t.strip_prefix("✕ "))
+                .or_else(|| t.strip_prefix("✖ "))
+                .or_else(|| t.strip_prefix("× "))
+                .or_else(|| t.strip_prefix("not ok "))
+                .map(|r| (IdeTestCaseStatus::Failed, r))
+        })
+        .or_else(|| {
+            t.strip_prefix("○ skipped ")
+                .or_else(|| t.strip_prefix("↓ "))
+                .or_else(|| t.strip_prefix("-  "))
+                .map(|r| (IdeTestCaseStatus::Skipped, r))
+        })
     {
+        if rest.contains(" › ") {
+            let parts: Vec<&str> = rest.split(" › ").map(str::trim).collect();
+            if parts.len() >= 2 {
+                let raw_tail = parts[1..].join(" › ");
+                let dur = parse_ms_suffix(&raw_tail);
+                let mut tc = simple_test_case(raw_tail.trim(), status, dur);
+                // Extract `file:line:col` if present in second segment.
+                let file_seg = parts.get(1).copied().unwrap_or("");
+                if let Some((f, rest_loc)) = file_seg.split_once(':') {
+                    if f.contains('.') {
+                        tc.file = Some(f.to_string());
+                        if let Some(ln) = rest_loc
+                            .split(':')
+                            .next()
+                            .and_then(|s| s.parse::<u32>().ok())
+                        {
+                            tc.line = Some(ln);
+                        }
+                    }
+                }
+                return Some(tc);
+            }
+        }
         let name = rest
             .split_once(" - ")
             .map(|(_, n)| n)
             .unwrap_or(rest)
             .trim();
         if !name.is_empty() {
-            return Some(simple_test_case(
-                name,
-                IdeTestCaseStatus::Passed,
-                parse_ms_suffix(name),
-            ));
+            return Some(simple_test_case(name, status, parse_ms_suffix(name)));
         }
-    } else if let Some(rest) = t
-        .strip_prefix("not ok ")
-        .or_else(|| t.strip_prefix("✖ "))
-        .or_else(|| t.strip_prefix("× "))
-    {
-        let name = rest
-            .split_once(" - ")
-            .map(|(_, n)| n)
-            .unwrap_or(rest)
-            .trim();
-        if !name.is_empty() {
-            return Some(simple_test_case(
-                name,
-                IdeTestCaseStatus::Failed,
-                parse_ms_suffix(name),
-            ));
+    }
+    // Karma / Jasmine spec lines:
+    //   `Chrome Headless 120.0.0.0 (Mac OS 10.15.7) AppComponent should create FAILED`
+    //   `Chrome Headless ...: Executed 5 of 5 SUCCESS (0.123 secs / 0.1 secs)`
+    if let Some(before_failed) = t.strip_suffix(" FAILED") {
+        if before_failed.contains(") ") {
+            let spec = before_failed
+                .rsplit_once(") ")
+                .map(|(_, s)| s.trim())
+                .unwrap_or(before_failed.trim());
+            if !spec.is_empty() {
+                return Some(simple_test_case(spec, IdeTestCaseStatus::Failed, None));
+            }
         }
+    }
+    if t.contains(": Executed ") && (t.contains(" SUCCESS") || t.contains(" FAILED")) {
+        let status = if t.contains(" FAILED") {
+            IdeTestCaseStatus::Failed
+        } else {
+            IdeTestCaseStatus::Passed
+        };
+        return Some(simple_test_case(t, status, None));
     }
     None
 }

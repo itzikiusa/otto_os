@@ -150,6 +150,11 @@
     if (names.has('build.zig') || names.has('build.zig.zon')) return 'Zig';
     if (names.has('Assets') && names.has('ProjectSettings')) return 'Unity';
     if (names.has('global.json') || [...names].some((n) => n.endsWith('.sln') || n.endsWith('.slnx') || n.endsWith('.csproj') || n.endsWith('.fsproj') || n.endsWith('.uproject'))) return '.NET';
+    if (names.has('angular.json') || names.has('.angular-cli.json')) return 'Angular';
+    if (names.has('next.config.ts') || names.has('next.config.mjs') || names.has('next.config.js')) return 'Next.js';
+    if (names.has('svelte.config.js') || names.has('svelte.config.ts')) return 'Svelte';
+    if (names.has('nuxt.config.ts') || names.has('nuxt.config.js')) return 'Nuxt';
+    if (names.has('vite.config.ts') || names.has('vite.config.js')) return 'Vite';
     if (names.has('package.json')) return 'TS / Node';
     if (names.has('pyproject.toml') || names.has('requirements.txt')) return 'Python';
     return 'Polyglot';

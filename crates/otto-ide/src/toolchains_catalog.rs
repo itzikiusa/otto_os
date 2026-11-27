@@ -28,7 +28,13 @@ pub const GOPLS_PKG: &str = "golang.org/x/tools/gopls@latest";
 pub const DLV_PKG: &str = "github.com/go-delve/delve/cmd/dlv@latest";
 pub const JS_DEBUG_TARBALL_URL: &str =
     "https://github.com/microsoft/vscode-js-debug/releases/download/v1.97.1/js-debug-dap-v1.97.1.tar.gz";
-pub const TS_LSP_NPM_PACKAGES: &[&str] = &["typescript", "typescript-language-server"];
+pub const TS_LSP_NPM_PACKAGES: &[&str] = &[
+    "typescript",
+    "typescript-language-server",
+    "svelte-language-server",
+    "@vue/language-server",
+    "@angular/language-server",
+];
 pub const BASH_LSP_NPM_PACKAGES: &[&str] = &["bash-language-server"];
 pub const JSON_LSP_NPM_PACKAGES: &[&str] = &["vscode-langservers-extracted"];
 pub const PYRIGHT_PKG: &str = "pyright";

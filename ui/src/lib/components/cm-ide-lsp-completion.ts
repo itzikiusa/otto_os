@@ -49,6 +49,9 @@ export const LSP_CODE_LANGUAGES = new Set([
   'java',
   'typescript',
   'javascript',
+  'svelte',
+  'vue',
+  'angular',
   'python',
   'shell',
   'css',
@@ -137,6 +140,9 @@ export function normalizeIdeLspLanguage(langOrExt?: string | null): string | nul
   if (raw === 'js' || raw === 'jsx' || raw === 'mjs' || raw === 'cjs' || raw === 'javascript' || raw === 'javascriptreact') {
     return 'javascript';
   }
+  if (raw === 'svelte') return 'svelte';
+  if (raw === 'vue') return 'vue';
+  if (raw === 'angular' || raw === 'ng-template') return 'angular';
   if (raw === 'py' || raw === 'pyi' || raw === 'python') return 'python';
   if (raw === 'sh' || raw === 'bash' || raw === 'zsh' || raw === 'bats' || raw === 'shell' || raw === 'shellscript') return 'shell';
   if (raw === 'css' || raw === 'scss' || raw === 'less') return 'css';

@@ -10,9 +10,9 @@ use std::path::{Path, PathBuf};
 
 pub(crate) use self::runner_cmd_langs::find_build_wrapper;
 use self::runner_cmd_langs::{
-    build_custom_cmd, build_flutter_cmd, build_gradle_cmd, build_java_main_cmd, build_maven_cmd,
-    build_npm_cmd, build_pytest_cmd, build_react_native_cmd, build_script_cmd, build_shell_cmd,
-    build_vitest_cmd, build_xcode_cmd,
+    build_custom_cmd, build_flutter_cmd, build_gradle_cmd, build_java_main_cmd, build_jest_cmd,
+    build_karma_cmd, build_maven_cmd, build_npm_cmd, build_playwright_cmd, build_pytest_cmd,
+    build_react_native_cmd, build_script_cmd, build_shell_cmd, build_vitest_cmd, build_xcode_cmd,
 };
 pub(crate) use self::runner_java::pytest_rootdir;
 pub(super) use self::runner_java::{
@@ -656,7 +656,10 @@ pub(super) fn build_runner_command(
             build_script_cmd(cfg, env_map, cmd_opt, args, build_flags)
         }
         IdeRunnerKind::Npm => build_npm_cmd(cfg, target_kind, cwd, cmd_opt, args),
-        IdeRunnerKind::Vitest => build_vitest_cmd(cfg, cmd_opt, args, build_flags),
+        IdeRunnerKind::Vitest => build_vitest_cmd(cfg, cmd_opt, args, build_flags, filter),
+        IdeRunnerKind::Jest => build_jest_cmd(cfg, cmd_opt, args, build_flags, filter),
+        IdeRunnerKind::Playwright => build_playwright_cmd(cfg, cmd_opt, args, build_flags, filter),
+        IdeRunnerKind::Karma => build_karma_cmd(cfg, target_kind, cwd, cmd_opt, args, build_flags),
         IdeRunnerKind::JavaMain => build_java_main_cmd(cfg, cmd_opt, args, build_flags, filter),
         IdeRunnerKind::JavaJunit | IdeRunnerKind::Maven => {
             build_maven_cmd(cfg, target_kind, cwd, cmd_opt, args, build_flags, filter)

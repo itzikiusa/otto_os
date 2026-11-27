@@ -249,6 +249,9 @@ fn infer_sdk_kind(
             IdeRunnerKind::Node
             | IdeRunnerKind::Npm
             | IdeRunnerKind::Vitest
+            | IdeRunnerKind::Jest
+            | IdeRunnerKind::Playwright
+            | IdeRunnerKind::Karma
             | IdeRunnerKind::ReactNative => {
                 return SdkKindHint::Node;
             }

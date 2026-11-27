@@ -295,6 +295,9 @@ pub(super) fn apply_run_config_sdk_override(
         IdeRunnerKind::Node
         | IdeRunnerKind::Npm
         | IdeRunnerKind::Vitest
+        | IdeRunnerKind::Jest
+        | IdeRunnerKind::Playwright
+        | IdeRunnerKind::Karma
         | IdeRunnerKind::ReactNative => {
             push_unique(path_dirs, format!("{trimmed}/bin"));
         }

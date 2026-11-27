@@ -286,8 +286,9 @@ fn resolve_debug_launch_spec<'a>(
         "zig" | "zon" => "zig",
         "csharp" | "cs" | "csx" | "c#" | "dotnet" => "csharp",
         "fsharp" | "fs" | "fsx" | "f#" => "fsharp",
-        "javascript" | "js" => "javascript",
-        "typescript" | "ts" | "node" => "typescript",
+        "javascript" | "js" | "jsx" => "javascript",
+        "typescript" | "ts" | "tsx" | "node" | "svelte" | "vue" | "angular" | "browser"
+        | "chrome" => "typescript",
         "java" => "java",
         "shell" | "bash" | "sh" | "zsh" => "shell",
         other => other,

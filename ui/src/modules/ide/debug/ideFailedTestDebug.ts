@@ -46,7 +46,7 @@ export function inferTestDebugLanguage(
   if (lower.endsWith('.fs') || lower.endsWith('.fsx')) return 'fsharp';
   if (lower.endsWith('.py') || lower.endsWith('.pyi')) return 'python';
   if (lower.endsWith('.java')) return 'java';
-  if (lower.endsWith('.ts') || lower.endsWith('.tsx') || lower.endsWith('.mts') || lower.endsWith('.cts')) return 'typescript';
+  if (lower.endsWith('.ts') || lower.endsWith('.tsx') || lower.endsWith('.mts') || lower.endsWith('.cts') || lower.endsWith('.svelte') || lower.endsWith('.vue')) return 'typescript';
   if (lower.endsWith('.js') || lower.endsWith('.jsx') || lower.endsWith('.mjs') || lower.endsWith('.cjs')) return 'javascript';
   if (lower.endsWith('.sh') || lower.endsWith('.bash') || lower.endsWith('.zsh')) return 'shell';
 
@@ -57,7 +57,7 @@ export function inferTestDebugLanguage(
   if (r.startsWith('dotnet_')) return 'csharp';
   if (r.startsWith('java_') || r === 'maven' || r === 'gradle') return 'java';
   if (r === 'pytest' || r === 'python') return 'python';
-  if (r === 'node' || r === 'npm' || r === 'vitest') return 'javascript';
+  if (r === 'node' || r === 'npm' || r === 'vitest' || r === 'jest' || r === 'playwright' || r === 'karma') return 'javascript';
   if (r === 'shell') return 'shell';
 
   return (fallback ?? '').trim() || 'go';

@@ -324,6 +324,84 @@ fn is_broad_system_scan_root(parent: &Path, is_root_user: bool) -> bool {
     false
 }
 
+#[allow(clippy::disallowed_methods)] // runs inside spawn_blocking
+fn detect_web_framework_kind(dir: &Path) -> Option<&'static str> {
+    if dir.join("angular.json").is_file() || dir.join(".angular-cli.json").is_file() {
+        return Some("angular");
+    }
+    if [
+        "next.config.js",
+        "next.config.mjs",
+        "next.config.cjs",
+        "next.config.ts",
+    ]
+    .iter()
+    .any(|f| dir.join(f).is_file())
+    {
+        return Some("nextjs");
+    }
+    if [
+        "svelte.config.js",
+        "svelte.config.mjs",
+        "svelte.config.cjs",
+        "svelte.config.ts",
+    ]
+    .iter()
+    .any(|f| dir.join(f).is_file())
+    {
+        return Some("svelte");
+    }
+    if ["nuxt.config.ts", "nuxt.config.js", "nuxt.config.mjs"]
+        .iter()
+        .any(|f| dir.join(f).is_file())
+    {
+        return Some("nuxt");
+    }
+    if dir.join("vue.config.js").is_file() || dir.join("vue.config.ts").is_file() {
+        return Some("vue");
+    }
+    let pkg = fs::read_to_string(dir.join("package.json")).ok()?;
+    let val: serde_json::Value = serde_json::from_str(&pkg).ok()?;
+    let has_dep = |name: &str| -> bool {
+        val.get("dependencies").and_then(|d| d.get(name)).is_some()
+            || val
+                .get("devDependencies")
+                .and_then(|d| d.get(name))
+                .is_some()
+    };
+    if has_dep("@angular/core") {
+        return Some("angular");
+    }
+    if has_dep("next") {
+        return Some("nextjs");
+    }
+    if has_dep("@sveltejs/kit") || has_dep("svelte") {
+        return Some("svelte");
+    }
+    if has_dep("nuxt") {
+        return Some("nuxt");
+    }
+    if has_dep("vue") {
+        return Some("vue");
+    }
+    if has_dep("react") {
+        return Some("react");
+    }
+    if has_dep("vite")
+        || [
+            "vite.config.ts",
+            "vite.config.js",
+            "vite.config.mjs",
+            "vite.config.mts",
+        ]
+        .iter()
+        .any(|f| dir.join(f).is_file())
+    {
+        return Some("vite");
+    }
+    None
+}
+
 /// Fast 1-level scan of `parent_path` returning child repositories and folders
 /// so users can bulk-select multi-repo workspaces into one Named IDE Project.
 #[allow(clippy::disallowed_methods)] // runs inside spawn_blocking
@@ -395,6 +473,11 @@ pub fn scan_parent_repos(parent_path: &str, is_root_user: bool) -> Result<IdeSca
                 })
             });
         let has_node = canon.join("package.json").is_file();
+        let web_fw = if has_node {
+            detect_web_framework_kind(&canon)
+        } else {
+            None
+        };
         let has_py =
             canon.join("pyproject.toml").is_file() || canon.join("requirements.txt").is_file();
         let has_git = canon.join(".git").exists();
@@ -411,6 +494,8 @@ pub fn scan_parent_repos(parent_path: &str, is_root_user: bool) -> Result<IdeSca
             "unity"
         } else if has_dotnet {
             "dotnet"
+        } else if let Some(fw) = web_fw {
+            fw
         } else if has_node {
             "node"
         } else if has_py {

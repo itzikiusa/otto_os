@@ -918,7 +918,120 @@ fn parse_cargo_bin_names(toml_text: &str) -> Vec<String> {
     bins
 }
 
-// ── 3. JS / TS (`package.json`, `index.js`, `server.js`) ─────────────────────
+// ── 3. JS / TS & Web Frameworks (Angular, React, Next.js, Svelte/SvelteKit, Vue/Nuxt, Vite) ──
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WebFrameworkKind {
+    Angular,
+    NextJs,
+    SvelteKit,
+    Svelte,
+    Nuxt,
+    Vue,
+    React,
+    Vite,
+}
+
+impl WebFrameworkKind {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Angular => "Angular",
+            Self::NextJs => "Next.js",
+            Self::SvelteKit => "SvelteKit",
+            Self::Svelte => "Svelte",
+            Self::Nuxt => "Nuxt",
+            Self::Vue => "Vue",
+            Self::React => "React",
+            Self::Vite => "Vite",
+        }
+    }
+}
+
+pub(crate) fn detect_web_framework(
+    root: &Path,
+    pkg_json: Option<&serde_json::Value>,
+) -> Option<WebFrameworkKind> {
+    let has_dep = |name: &str| -> bool {
+        pkg_json.is_some_and(|v| {
+            v.get("dependencies").and_then(|d| d.get(name)).is_some()
+                || v.get("devDependencies").and_then(|d| d.get(name)).is_some()
+        })
+    };
+    if root.join("angular.json").is_file()
+        || root.join(".angular-cli.json").is_file()
+        || has_dep("@angular/core")
+    {
+        return Some(WebFrameworkKind::Angular);
+    }
+    if [
+        "next.config.ts",
+        "next.config.mjs",
+        "next.config.js",
+        "next.config.cjs",
+    ]
+    .iter()
+    .any(|f| root.join(f).is_file())
+        || has_dep("next")
+    {
+        return Some(WebFrameworkKind::NextJs);
+    }
+    if has_dep("@sveltejs/kit") {
+        return Some(WebFrameworkKind::SvelteKit);
+    }
+    if [
+        "svelte.config.js",
+        "svelte.config.ts",
+        "svelte.config.mjs",
+        "svelte.config.cjs",
+    ]
+    .iter()
+    .any(|f| root.join(f).is_file())
+        || has_dep("svelte")
+    {
+        return Some(WebFrameworkKind::Svelte);
+    }
+    if ["nuxt.config.ts", "nuxt.config.js", "nuxt.config.mjs"]
+        .iter()
+        .any(|f| root.join(f).is_file())
+        || has_dep("nuxt")
+    {
+        return Some(WebFrameworkKind::Nuxt);
+    }
+    if root.join("vue.config.js").is_file()
+        || root.join("vue.config.ts").is_file()
+        || has_dep("vue")
+    {
+        return Some(WebFrameworkKind::Vue);
+    }
+    if has_dep("react") {
+        return Some(WebFrameworkKind::React);
+    }
+    if [
+        "vite.config.ts",
+        "vite.config.js",
+        "vite.config.mjs",
+        "vite.config.mts",
+    ]
+    .iter()
+    .any(|f| root.join(f).is_file())
+        || has_dep("vite")
+    {
+        return Some(WebFrameworkKind::Vite);
+    }
+    None
+}
+
+fn detect_js_package_manager(root: &Path) -> &'static str {
+    if root.join("pnpm-lock.yaml").is_file() {
+        "pnpm"
+    } else if root.join("yarn.lock").is_file() {
+        "yarn"
+    } else if root.join("bun.lock").is_file() || root.join("bun.lockb").is_file() {
+        "bun"
+    } else {
+        "npm"
+    }
+}
 
 fn discover_js_ts(
     root: &Path,
@@ -927,51 +1040,277 @@ fn discover_js_ts(
     out: &mut Vec<IdeRunConfig>,
 ) {
     let pkg_json = root.join("package.json");
-    if let Some(raw) = read_head(&pkg_json) {
-        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
-            if let Some(scripts) = val.get("scripts").and_then(|v| v.as_object()) {
-                const PRIORITY: &[&str] = &["dev", "start", "test", "build", "check", "lint"];
-                let mut ordered: Vec<(&String, &serde_json::Value)> = Vec::new();
-                for p in PRIORITY {
-                    if let Some(kv) = scripts.get_key_value(*p) {
-                        ordered.push(kv);
-                    }
+    let parsed_pkg =
+        read_head(&pkg_json).and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+    let framework = detect_web_framework(root, parsed_pkg.as_ref());
+    let pm = detect_js_package_manager(root);
+    let has_dep = |name: &str| -> bool {
+        parsed_pkg.as_ref().is_some_and(|v| {
+            v.get("dependencies").and_then(|d| d.get(name)).is_some()
+                || v.get("devDependencies").and_then(|d| d.get(name)).is_some()
+        })
+    };
+    let has_playwright = has_dep("@playwright/test")
+        || [
+            "playwright.config.ts",
+            "playwright.config.js",
+            "playwright.config.mjs",
+        ]
+        .iter()
+        .any(|f| root.join(f).is_file());
+    let has_jest = has_dep("jest")
+        || [
+            "jest.config.ts",
+            "jest.config.js",
+            "jest.config.mjs",
+            "jest.config.cjs",
+        ]
+        .iter()
+        .any(|f| root.join(f).is_file());
+    let has_vitest = has_dep("vitest")
+        || [
+            "vitest.config.ts",
+            "vitest.config.js",
+            "vitest.config.mts",
+            "vitest.config.mjs",
+        ]
+        .iter()
+        .any(|f| root.join(f).is_file());
+    let has_karma = has_dep("karma")
+        || root.join("karma.conf.js").is_file()
+        || root.join("karma.conf.ts").is_file()
+        || (framework == Some(WebFrameworkKind::Angular) && !has_jest && !has_vitest);
+
+    if let Some(val) = parsed_pkg.as_ref() {
+        let mut emitted_vitest = false;
+        let mut emitted_jest = false;
+        let mut emitted_playwright = false;
+        let mut emitted_karma = false;
+        if let Some(scripts) = val.get("scripts").and_then(|v| v.as_object()) {
+            const PRIORITY: &[&str] = &[
+                "dev",
+                "start",
+                "serve",
+                "test",
+                "test:unit",
+                "test:e2e",
+                "e2e",
+                "build",
+                "check",
+                "lint",
+            ];
+            let mut ordered: Vec<(&String, &serde_json::Value)> = Vec::new();
+            for p in PRIORITY {
+                if let Some(kv) = scripts.get_key_value(*p) {
+                    ordered.push(kv);
                 }
-                for kv in scripts {
-                    if !PRIORITY.contains(&kv.0.as_str()) {
-                        ordered.push(kv);
-                    }
-                }
-                for (name, cmd_val) in ordered.into_iter().take(8) {
-                    let script_body = cmd_val.as_str().unwrap_or("");
-                    let is_vitest = script_body.contains("vitest") && name == "test";
-                    if is_vitest {
-                        out.push(make_auto_config(
-                            root_badge,
-                            IdeRunnerKind::Vitest,
-                            "vitest",
-                            "Vitest (npm test)".into(),
-                            Some("npx"),
-                            vec!["vitest".into(), "run".into()],
-                            cwd.clone(),
-                            Some("package.json".into()),
-                        ));
-                    } else {
-                        out.push(make_auto_config(
-                            root_badge,
-                            IdeRunnerKind::Npm,
-                            &format!("script-{name}"),
-                            format!("npm run {name}"),
-                            Some("npm"),
-                            vec!["run".into(), name.clone()],
-                            cwd.clone(),
-                            Some("package.json".into()),
-                        ));
-                    }
-                }
-                return;
             }
+            for kv in scripts {
+                if !PRIORITY.contains(&kv.0.as_str()) {
+                    ordered.push(kv);
+                }
+            }
+            for (name, cmd_val) in ordered.into_iter().take(10) {
+                let script_body = cmd_val.as_str().unwrap_or("");
+                if script_body.contains("vitest") && (name == "test" || name == "test:unit") {
+                    emitted_vitest = true;
+                    out.push(make_auto_config(
+                        root_badge,
+                        IdeRunnerKind::Vitest,
+                        &format!("vitest-{name}"),
+                        format!("Vitest ({pm} {name})"),
+                        Some("npx"),
+                        vec!["vitest".into(), "run".into()],
+                        cwd.clone(),
+                        Some("package.json".into()),
+                    ));
+                } else if script_body.contains("jest") && (name == "test" || name == "test:unit") {
+                    emitted_jest = true;
+                    out.push(make_auto_config(
+                        root_badge,
+                        IdeRunnerKind::Jest,
+                        &format!("jest-{name}"),
+                        format!("Jest ({pm} {name})"),
+                        Some("npx"),
+                        vec!["--no-install".into(), "jest".into()],
+                        cwd.clone(),
+                        Some("package.json".into()),
+                    ));
+                } else if script_body.contains("playwright")
+                    && (name == "test" || name.contains("e2e") || name.contains("playwright"))
+                {
+                    emitted_playwright = true;
+                    out.push(make_auto_config(
+                        root_badge,
+                        IdeRunnerKind::Playwright,
+                        &format!("playwright-{name}"),
+                        format!("Playwright E2E ({pm} {name})"),
+                        Some("npx"),
+                        vec!["--no-install".into(), "playwright".into(), "test".into()],
+                        cwd.clone(),
+                        Some("package.json".into()),
+                    ));
+                } else if (script_body.contains("ng test") || script_body.contains("karma"))
+                    && name == "test"
+                {
+                    emitted_karma = true;
+                    let args = if script_body.contains("ng test") {
+                        vec![
+                            "--no-install".into(),
+                            "ng".into(),
+                            "test".into(),
+                            "--watch=false".into(),
+                        ]
+                    } else {
+                        vec![
+                            "--no-install".into(),
+                            "karma".into(),
+                            "start".into(),
+                            "--single-run".into(),
+                        ]
+                    };
+                    out.push(make_auto_config(
+                        root_badge,
+                        IdeRunnerKind::Karma,
+                        "karma-test",
+                        "Karma / Angular Test".into(),
+                        Some("npx"),
+                        args,
+                        cwd.clone(),
+                        Some("package.json".into()),
+                    ));
+                } else {
+                    let display = match (framework, name.as_str()) {
+                        (Some(fw), "dev" | "start" | "serve") => {
+                            format!("{} Dev ({pm} run {name})", fw.label())
+                        }
+                        (Some(fw), "build") => format!("{} Build ({pm} run {name})", fw.label()),
+                        (Some(fw), "lint") => format!("{} Lint ({pm} run {name})", fw.label()),
+                        (Some(fw), "check") => format!("{} Check ({pm} run {name})", fw.label()),
+                        _ => format!("{pm} run {name}"),
+                    };
+                    out.push(make_auto_config(
+                        root_badge,
+                        IdeRunnerKind::Npm,
+                        &format!("script-{name}"),
+                        display,
+                        Some(pm),
+                        vec!["run".into(), name.clone()],
+                        cwd.clone(),
+                        Some("package.json".into()),
+                    ));
+                }
+            }
+        } else if let Some(fw) = framework {
+            // Bare framework project with no `scripts` block — emit canonical dev/build commands.
+            let (dev_args, build_args): (Vec<String>, Vec<String>) = match fw {
+                WebFrameworkKind::Angular => (
+                    vec!["--no-install".into(), "ng".into(), "serve".into()],
+                    vec!["--no-install".into(), "ng".into(), "build".into()],
+                ),
+                WebFrameworkKind::NextJs => (
+                    vec!["--no-install".into(), "next".into(), "dev".into()],
+                    vec!["--no-install".into(), "next".into(), "build".into()],
+                ),
+                WebFrameworkKind::Nuxt => (
+                    vec!["--no-install".into(), "nuxt".into(), "dev".into()],
+                    vec!["--no-install".into(), "nuxt".into(), "build".into()],
+                ),
+                WebFrameworkKind::SvelteKit
+                | WebFrameworkKind::Svelte
+                | WebFrameworkKind::Vue
+                | WebFrameworkKind::React
+                | WebFrameworkKind::Vite => (
+                    vec!["--no-install".into(), "vite".into()],
+                    vec!["--no-install".into(), "vite".into(), "build".into()],
+                ),
+            };
+            out.push(make_auto_config(
+                root_badge,
+                IdeRunnerKind::Npm,
+                "fw-dev",
+                format!("{} Dev", fw.label()),
+                Some("npx"),
+                dev_args,
+                cwd.clone(),
+                Some("package.json".into()),
+            ));
+            out.push(make_auto_config(
+                root_badge,
+                IdeRunnerKind::Npm,
+                "fw-build",
+                format!("{} Build", fw.label()),
+                Some("npx"),
+                build_args,
+                cwd.clone(),
+                Some("package.json".into()),
+            ));
         }
+
+        // Emit dedicated test-runner configs when a framework config/dep exists without a matching script.
+        if has_vitest && !emitted_vitest {
+            out.push(make_auto_config(
+                root_badge,
+                IdeRunnerKind::Vitest,
+                "vitest-auto",
+                "Vitest Run".into(),
+                Some("npx"),
+                vec!["vitest".into(), "run".into()],
+                cwd.clone(),
+                Some("package.json".into()),
+            ));
+        }
+        if has_jest && !emitted_jest && !has_vitest {
+            out.push(make_auto_config(
+                root_badge,
+                IdeRunnerKind::Jest,
+                "jest-auto",
+                "Jest Tests".into(),
+                Some("npx"),
+                vec!["--no-install".into(), "jest".into()],
+                cwd.clone(),
+                Some("package.json".into()),
+            ));
+        }
+        if has_karma && !emitted_karma {
+            out.push(make_auto_config(
+                root_badge,
+                IdeRunnerKind::Karma,
+                "karma-auto",
+                "Karma / Angular Test".into(),
+                Some("npx"),
+                if framework == Some(WebFrameworkKind::Angular) {
+                    vec![
+                        "--no-install".into(),
+                        "ng".into(),
+                        "test".into(),
+                        "--watch=false".into(),
+                    ]
+                } else {
+                    vec![
+                        "--no-install".into(),
+                        "karma".into(),
+                        "start".into(),
+                        "--single-run".into(),
+                    ]
+                },
+                cwd.clone(),
+                Some("package.json".into()),
+            ));
+        }
+        if has_playwright && !emitted_playwright {
+            out.push(make_auto_config(
+                root_badge,
+                IdeRunnerKind::Playwright,
+                "playwright-auto",
+                "Playwright E2E".into(),
+                Some("npx"),
+                vec!["--no-install".into(), "playwright".into(), "test".into()],
+                cwd.clone(),
+                Some("package.json".into()),
+            ));
+        }
+        return;
     }
 
     for entry in ["index.js", "server.js", "app.js", "main.js"] {

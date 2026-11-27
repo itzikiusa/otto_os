@@ -379,6 +379,9 @@ pub enum IdeRunnerKind {
     #[serde(alias = "npm_script")]
     Npm,
     Vitest,
+    Jest,
+    Playwright,
+    Karma,
     Pytest,
     Python,
     #[serde(alias = "sh", alias = "bash")]

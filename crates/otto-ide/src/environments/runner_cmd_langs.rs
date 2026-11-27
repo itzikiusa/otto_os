@@ -183,6 +183,7 @@ pub(super) fn build_vitest_cmd(
     cmd_opt: Option<&str>,
     mut args: Vec<String>,
     build_flags: Vec<String>,
+    filter: Option<&str>,
 ) -> (String, Vec<String>) {
     let prog = cmd_opt.unwrap_or("npx").to_string();
     // `npx --no-install vitest …` (a gutter item) is already a full command line.
@@ -191,6 +192,11 @@ pub(super) fn build_vitest_cmd(
         v.extend(build_flags);
         v.extend(args);
         args = v;
+    }
+    if let Some(f) = filter {
+        if !args.iter().any(|a| a == "-t" || a == "--testNamePattern") {
+            args.extend(["-t".into(), f.to_string()]);
+        }
     }
     // Vitest's default reporter prints no per-test lines (nor console output)
     // without a TTY, so the run had no results and a filtered run read as "No
@@ -204,6 +210,116 @@ pub(super) fn build_vitest_cmd(
             .any(|a| a == "--coverage" || a.starts_with("--coverage="))
     {
         args.push("--coverage".into());
+    }
+    (prog, args)
+}
+
+pub(super) fn build_jest_cmd(
+    cfg: &IdeRunConfig,
+    cmd_opt: Option<&str>,
+    mut args: Vec<String>,
+    build_flags: Vec<String>,
+    filter: Option<&str>,
+) -> (String, Vec<String>) {
+    let prog = cmd_opt.unwrap_or("npx").to_string();
+    if !args.iter().take(2).any(|a| a == "jest") {
+        let mut v = vec!["--no-install".into(), "jest".into()];
+        v.extend(build_flags);
+        v.extend(args);
+        args = v;
+    }
+    if let Some(f) = filter {
+        if !args.iter().any(|a| a == "-t" || a == "--testNamePattern") {
+            args.extend(["-t".into(), f.to_string()]);
+        }
+    }
+    if !args.iter().any(|a| a == "--verbose") {
+        args.push("--verbose".into());
+    }
+    if cfg.coverage && !args.iter().any(|a| a == "--coverage") {
+        args.push("--coverage".into());
+    }
+    (prog, args)
+}
+
+pub(super) fn build_playwright_cmd(
+    cfg: &IdeRunConfig,
+    cmd_opt: Option<&str>,
+    mut args: Vec<String>,
+    build_flags: Vec<String>,
+    filter: Option<&str>,
+) -> (String, Vec<String>) {
+    let prog = cmd_opt.unwrap_or("npx").to_string();
+    if !args.iter().take(2).any(|a| a == "playwright") {
+        let mut v = vec!["--no-install".into(), "playwright".into(), "test".into()];
+        if let Some(tp) = cfg
+            .target_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && *s != "package.json")
+        {
+            if !args.iter().any(|a| a == tp) {
+                v.push(tp.to_string());
+            }
+        }
+        v.extend(build_flags);
+        v.extend(args);
+        args = v;
+    }
+    if let Some(f) = filter {
+        if !args.iter().any(|a| a == "-g" || a == "--grep") {
+            args.extend(["-g".into(), f.to_string()]);
+        }
+    }
+    if !args.iter().any(|a| a.starts_with("--reporter")) {
+        args.push("--reporter=list".into());
+    }
+    (prog, args)
+}
+
+pub(super) fn build_karma_cmd(
+    cfg: &IdeRunConfig,
+    target_kind: IdeTargetKind,
+    cwd: &str,
+    cmd_opt: Option<&str>,
+    mut args: Vec<String>,
+    build_flags: Vec<String>,
+) -> (String, Vec<String>) {
+    let prog = cmd_opt.unwrap_or("npx").to_string();
+    let is_angular =
+        target_kind == IdeTargetKind::Local && Path::new(cwd).join("angular.json").is_file();
+    if !args.iter().take(2).any(|a| a == "ng" || a == "karma") {
+        let mut v = if is_angular {
+            vec![
+                "--no-install".into(),
+                "ng".into(),
+                "test".into(),
+                "--watch=false".into(),
+            ]
+        } else {
+            vec![
+                "--no-install".into(),
+                "karma".into(),
+                "start".into(),
+                "--single-run".into(),
+            ]
+        };
+        if let Some(tp) = cfg
+            .target_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && *s != "angular.json" && *s != "package.json")
+        {
+            if is_angular && !args.iter().any(|a| a.starts_with("--include")) {
+                v.push(format!("--include={tp}"));
+            }
+        }
+        v.extend(build_flags);
+        v.extend(args);
+        args = v;
+    }
+    if cfg.coverage && is_angular && !args.iter().any(|a| a.starts_with("--code-coverage")) {
+        args.push("--code-coverage".into());
     }
     (prog, args)
 }
