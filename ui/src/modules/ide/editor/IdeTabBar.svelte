@@ -5,6 +5,8 @@
   // A WAI-ARIA tablist (roving tabindex, ←/→, Delete closes the focused tab); the active tab
   // is scrolled into view; a preview tab (italic) is kept open by a double-click.
   import Icon from '../../../lib/components/Icon.svelte';
+  import LazyMount from '../../../lib/components/LazyMount.svelte';
+  import { lazyComponent } from '../../../lib/lazy-component.svelte';
   import { rowMenu } from '../../../lib/rowMenu';
   import { onTabKey } from '../../../lib/tabKeys';
   import { ide, type IdeOpenTab } from '../ideStore.svelte';
@@ -24,8 +26,9 @@
   import { ideLayout } from '../shell/ideLayout.svelte';
   import { ideDiskChange } from '../store/ideDiskChange.svelte';
   import { idePhoneChrome } from './idePhoneChrome.svelte';
-  import IdePhoneTabRow from './IdePhoneTabRow.svelte';
   import IdePreviewModeToggle from './IdePreviewModeToggle.svelte';
+
+  const IdePhoneTabRowLazy = lazyComponent(() => import('./IdePhoneTabRow.svelte'));
 
   // Soft wrap + a narrow gutter whenever the IDE is stacked (phone / narrow window).
   followIdeCompactLayout();
@@ -91,7 +94,7 @@
 <!-- A phone gets one row: the active file + "N open" + the editor's ⋯ (IdePhoneTabRow);
      on its side that row lives in the page header, and typing may fold it away. -->
 {#if ideLayout.stack}
-  {#if idePhoneChrome.current.fileRow}<IdePhoneTabRow />{/if}
+  {#if idePhoneChrome.current.fileRow}<LazyMount lazy={IdePhoneTabRowLazy} what="file switcher" quiet />{/if}
 {:else}
 <div class="ide-tabs-row">
   <div class="ide-nav-btns">

@@ -30,12 +30,8 @@
   import { ideEditorDebugProps } from './editor/ideEditorDebugBridge';
   import { computeSplitRatioFromKey } from './editor/ideEditorHelpers';
   import { needsGitBaseRead, settledGitBaseDigest } from './editor/ideGitBaseDigest';
-  import { attachIdeEditorWindowEvents } from './editor/ideEditorWindowEvents';
   import { subscribeIdeBufferEvictions, subscribeIdeFileSaved } from './store/ideBufferPerf';
   import IdeTabBar from './editor/IdeTabBar.svelte';
-  import IdePreviewPane from './editor/IdePreviewPane.svelte';
-  import IdeDiskChangedBanner from './editor/IdeDiskChangedBanner.svelte';
-  import IdeTouchDebugBar from './editor/IdeTouchDebugBar.svelte';
   import {
     areIdeBreakpointsMuted, classifyIdeFile, evictPersistedIdeGitBase, fetchIdeGitBlame,
     flushAutoLocalHistorySnapshot, getIdeProjectFolders, getPersistedIdeGitBaseDigest,
@@ -44,9 +40,10 @@
     setPersistedIdeGitBase,
   } from './editor/ideEditorStoreBridge.svelte';
   import type { ideGit as IdeGitSingleton } from './git/ideGitController.svelte';
-  import { extractGutterHunks, findGutterHunkAtLine, resolveClickedDiffGutterLine, revertHunkInText, type IdeGutterHunk } from './git/ideGutterHunks';
+  import type { IdeGutterHunk } from './git/ideGutterHunks';
   import type { IdeOutlineNode } from './editor/ideLangAnalyzer';
   let langAnalyzerMod = $state<typeof import('./editor/ideLangAnalyzer') | null>(null);
+  let gutterHunksMod = $state<typeof import('./git/ideGutterHunks') | null>(null);
   let liveGit = $state<typeof IdeGitSingleton | null>(null);
   function fastDocKind(filePath: string, language?: string): string {
     const clean = filePath.split('?')[0].toLowerCase();
@@ -76,6 +73,9 @@
   const IdeClipboardHistoryModalLazy = lazyComponent(() => import('./editor/IdeClipboardHistoryModal.svelte'));
   const IdeGitHunkPopoverLazy = lazyComponent(() => import('./editor/IdeGitHunkPopover.svelte'));
   const IdeMarkdownBarLazy = lazyComponent(() => import('./editor/IdeMarkdownBar.svelte'));
+  const IdePreviewPaneLazy = lazyComponent(() => import('./editor/IdePreviewPane.svelte'));
+  const IdeDiskChangedBannerLazy = lazyComponent(() => import('./editor/IdeDiskChangedBanner.svelte'));
+  const IdeTouchDebugBarLazy = lazyComponent(() => import('./editor/IdeTouchDebugBar.svelte'));
 
   const SPLIT_RATIO_KEY = 'otto.ide.splitRatio.v1';
   function readSavedSplitRatio(): number {
@@ -164,6 +164,7 @@
     const cur = ide.activeTab;
     if (!cur) { stagedPrimaryTab = null; return; }
     if (!langAnalyzerMod) void import('./editor/ideLangAnalyzer').then((m) => { langAnalyzerMod = m; });
+    if (!gutterHunksMod) void import('./git/ideGutterHunks').then((m) => { gutterHunksMod = m; });
     if (!liveGit) void import('./git/ideGitController.svelte').then((m) => { liveGit = m.ideGit; });
     if (!cur.loading && !cur.error && histReady) { stagedPrimaryTab = cur; everMountedEditor = true; }
     else if (stagedPrimaryTab && !ide.tabs.some((t) => t.path === stagedPrimaryTab?.path)) stagedPrimaryTab = null;
@@ -197,15 +198,23 @@
     if (liveGit) liveGit.syncExternalRepoChanges();
   });
 
-  $effect(() => attachIdeEditorWindowEvents({
-    onPrefsChanged: () => { prefs = readIdePreferences(); },
-    onOpenClipboardHistory: () => { clipboardModalOpen = true; },
-    getPrimaryPath: () => stagedPrimaryTab?.path ?? null,
-    getSplitPath: () => stagedSplitTab?.path ?? null,
-    applyQuickFixEdits: (pane, edits) => (pane === 'primary' ? primaryEditorRef : splitEditorRef)?.applyQuickFixEdits?.(edits),
-    reconnectLspClients: (rootPath) => { primaryEditorRef?.reconnectLspClients?.(rootPath); splitEditorRef?.reconnectLspClients?.(rootPath); },
-    refreshGitBase: (tab) => refreshGitBaseForTab(tab, true),
-  }));
+  $effect(() => {
+    let dead = false;
+    let stop: (() => void) | null = null;
+    void import('./editor/ideEditorWindowEvents').then((m) => {
+      if (dead) return;
+      stop = m.attachIdeEditorWindowEvents({
+        onPrefsChanged: () => { prefs = readIdePreferences(); },
+        onOpenClipboardHistory: () => { clipboardModalOpen = true; },
+        getPrimaryPath: () => stagedPrimaryTab?.path ?? null,
+        getSplitPath: () => stagedSplitTab?.path ?? null,
+        applyQuickFixEdits: (pane, edits) => (pane === 'primary' ? primaryEditorRef : splitEditorRef)?.applyQuickFixEdits?.(edits),
+        reconnectLspClients: (rootPath) => { primaryEditorRef?.reconnectLspClients?.(rootPath); splitEditorRef?.reconnectLspClients?.(rootPath); },
+        refreshGitBase: (tab) => refreshGitBaseForTab(tab, true),
+      });
+    });
+    return () => { dead = true; stop?.(); };
+  });
 
   function disposeAllPooledLsp(): void {
     primaryEditorRef?.disposeLspClients?.();
@@ -293,17 +302,19 @@
   );
   const pathSegments = $derived(ide.activeTab ? ide.relativePath(ide.activeTab.path).split('/').filter(Boolean) : []);
   const diffBaseFor = (t: IdeOpenTab): string | null => (gitBaseByPath[t.path] !== undefined ? (gitBaseByPath[t.path] ?? null) : t.savedContent);
-  const activeGitHunks = $derived(ide.activeTab ? extractGutterHunks(diffBaseFor(ide.activeTab), ide.activeTab.content, ide.relativePath(ide.activeTab.path)) : []);
-  const activeCursorHunk = $derived(findGutterHunkAtLine(activeGitHunks, ide.cursorInfo.line));
+  const activeGitHunks = $derived(ide.activeTab && gutterHunksMod ? gutterHunksMod.extractGutterHunks(diffBaseFor(ide.activeTab), ide.activeTab.content, ide.relativePath(ide.activeTab.path)) : []);
+  const activeCursorHunk = $derived(gutterHunksMod ? gutterHunksMod.findGutterHunkAtLine(activeGitHunks, ide.cursorInfo.line) : null);
 
   $effect(() => {
     const el = panesEl;
     if (!el) return;
     const onDown = (e: MouseEvent): void => {
-      const ln = resolveClickedDiffGutterLine(e);
+      const gh = gutterHunksMod;
+      if (!gh) return;
+      const ln = gh.resolveClickedDiffGutterLine(e);
       if (ln == null) return;
       const tab = e.target instanceof Element && e.target.closest('.split-secondary') ? stagedSplitTab : stagedPrimaryTab;
-      const hit = tab ? findGutterHunkAtLine(extractGutterHunks(diffBaseFor(tab), tab.content, ide.relativePath(tab.path)), ln) : null;
+      const hit = tab ? gh.findGutterHunkAtLine(gh.extractGutterHunks(diffBaseFor(tab), tab.content, ide.relativePath(tab.path)), ln) : null;
       if (!tab || !hit) return;
       e.preventDefault(); e.stopPropagation();
       hunkPopover = { path: tab.path, hunkIndex: hit.index, x: e.clientX, y: e.clientY };
@@ -459,7 +470,7 @@
     {/if}
 
     {#if ideAgent.inlinePrompt?.open}<LazyMount lazy={IdeInlinePromptBarLazy} what="inline prompt" variant="compact" />{/if}
-    <IdeDiskChangedBanner tab={activeTab} />
+    <LazyMount lazy={IdeDiskChangedBannerLazy} what="disk change notice" quiet props={{ tab: activeTab }} />
     {#if idePreviewMode.kindOf(activeTab.path) === 'markdown' && idePreviewMode.layoutFor(activeTab.path) !== 'only' && !activeTab.readOnly}<LazyMount lazy={IdeMarkdownBarLazy} what="the Markdown toolbar" variant="compact" />{/if}
 
     <div class="ide-panes" class:split-down={ide.splitDirection === 'down'} bind:this={panesEl}>
@@ -558,8 +569,10 @@
           />
         {/if}
 
-        {#if stagedPrimaryTab?.path === activeTab.path}<IdePreviewPane tab={stagedPrimaryTab} />{/if}
-        <IdeTouchDebugBar />
+        {#if stagedPrimaryTab?.path === activeTab.path && (idePreviewMode.layoutFor(stagedPrimaryTab.path) === 'split' || idePreviewMode.layoutFor(stagedPrimaryTab.path) === 'only')}
+          <LazyMount lazy={IdePreviewPaneLazy} what="preview" variant="panel" props={{ tab: stagedPrimaryTab }} />
+        {/if}
+        {#if ide.activeDebug}<LazyMount lazy={IdeTouchDebugBarLazy} what="debugger controls" quiet />{/if}
         {#if activeIsManifest}
           <div class="ide-manifest-tabs" role="group" aria-label="Manifest editor mode" data-testid="ide-dep-mode-switcher">
             <button type="button" class="ide-man-tab" class:active={effectiveManifestMode === 'text'} aria-pressed={effectiveManifestMode === 'text'} onclick={() => (manifestModeByPath = { ...manifestModeByPath, [activeTab.path]: 'text' })}>Text</button>
@@ -592,7 +605,7 @@
             <span class="split-title">{ide.relativePath(splitTab.path)}</span>
             <button type="button" class="icon-btn" aria-label="Close split pane" title="Close split pane" onclick={() => ide.closeSplit()}><Icon name="x" size={12} /></button>
           </div>
-          {#if splitTab.path !== activeTab.path}<IdeDiskChangedBanner tab={splitTab} watch={false} />{/if}
+          {#if splitTab.path !== activeTab.path}<LazyMount lazy={IdeDiskChangedBannerLazy} what="disk change notice" quiet props={{ tab: splitTab, watch: false }} />{/if}
           <div class="split-body">
             {#if splitTab.error || !stagedSplitTab}
               <LoadState what={splitTab.name} variant="panel" loading={splitTab.loading} error={splitTab.error} empty={!stagedSplitTab} onretry={() => void ide.openFile(splitTab.path, { inSplit: true })} />
@@ -699,7 +712,7 @@
 {#if hunkPopover}
   {@const hTab = ide.tabs.find((t) => t.path === hunkPopover?.path)}
   {@const hBase = hTab ? diffBaseFor(hTab) : null}
-  {@const hList = hTab && hBase != null ? extractGutterHunks(hBase, hTab.content, ide.relativePath(hTab.path)) : []}
+  {@const hList = hTab && hBase != null && gutterHunksMod ? gutterHunksMod.extractGutterHunks(hBase, hTab.content, ide.relativePath(hTab.path)) : []}
   {@const hRef = hunkPopover.path !== stagedPrimaryTab?.path && hunkPopover.path === stagedSplitTab?.path ? splitEditorRef : primaryEditorRef}
   {#if hTab && hBase != null && hList.length > 0}
     <LazyMount lazy={IdeGitHunkPopoverLazy} what="git hunk details" quiet onerror={() => (hunkPopover = null)} props={{
@@ -710,7 +723,8 @@
         if (nextH) hRef?.goToLine(nextH.anchorLine, 1);
       },
       onrevert: (h: IdeGutterHunk) => {
-        const nextText = revertHunkInText(hBase, hTab.content, h.index);
+        if (!gutterHunksMod) return;
+        const nextText = gutterHunksMod.revertHunkInText(hBase, hTab.content, h.index);
         if (nextText !== hTab.content && !hRef?.replaceBufferContent?.(nextText)) ide.updateBuffer(hTab.path, nextText);
       },
       onaskagent: (h: IdeGutterHunk) => {

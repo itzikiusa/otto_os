@@ -33,8 +33,6 @@
   import IdeWorkspaceSwitcher from './shell/IdeWorkspaceSwitcher.svelte';
   import { loadScratchesRoot, newScratchFile, openScratches } from './shell/ideScratches.svelte';
   import IdeHeaderActions from './shell/IdeHeaderActions.svelte';
-  import IdeStackSwitcher from './shell/IdeStackSwitcher.svelte';
-  import IdePhoneTabRow from './editor/IdePhoneTabRow.svelte';
   import { IDE_TYPING_SELECTOR, idePhoneChrome } from './editor/idePhoneChrome.svelte';
   import { ideLayout, paneAfterFileOpen, STACK_MAX_H, type IdeStackPane } from './shell/ideLayout.svelte';
   import { ideTabRestore } from './shell/ideProjectHelpers';
@@ -65,6 +63,8 @@
   const IdeShareModalLazy = lazyComponent(() => import('./IdeShareModal.svelte'));
   const IdePluginsModalLazy = lazyComponent(() => import('./IdePluginsModal.svelte'));
   const IdeComparisonModalLazy = lazyComponent(() => import('./history/IdeComparisonModal.svelte'));
+  const IdeStackSwitcherLazy = lazyComponent(() => import('./shell/IdeStackSwitcher.svelte'));
+  const IdePhoneTabRowLazy = lazyComponent(() => import('./editor/IdePhoneTabRow.svelte'));
 
   const TREE_W_KEY = 'otto.ide.treeW';
   const BUILD_TOOL_W_KEY = 'otto.ide.buildToolW';
@@ -515,7 +515,7 @@
        (below the bar when the page is tall, inline when it is short); wide, the
        optional project tabs (Settings › Appearance) do, and then carry the
        switcher's ▾ themselves. -->
-  {#snippet stackTabs()}<IdeStackSwitcher onshow={showPane} />{#if phone.fileRowInHeader && pane === 'editor'}<IdePhoneTabRow inHeader />{/if}{/snippet}
+  {#snippet stackTabs()}<LazyMount lazy={IdeStackSwitcherLazy} what="pane switcher" quiet props={{ onshow: showPane }} />{#if phone.fileRowInHeader && pane === 'editor'}<LazyMount lazy={IdePhoneTabRowLazy} what="file switcher" quiet props={{ inHeader: true }} />{/if}{/snippet}
   {#snippet projectTabs()}<IdeWorkspaceSwitcher mode="tabs" onpickfolder={(m) => (folderPickerMode = m)} />{/snippet}
   <PageHeader
     title={stack ? 'IDE' : 'IDE (Beta)'}
