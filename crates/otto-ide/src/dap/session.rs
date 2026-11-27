@@ -25,6 +25,8 @@ pub use super::session_inline::compute_inline_values;
 pub(super) use super::session_inline::mark_resumed;
 use super::session_inline::{build_session_title, shutdown_entry, stop_entry};
 use super::session_inspect::{select_frame_and_refresh, sync_all_breakpoints};
+use super::session_steps::{install_plan, skip_step, start_next_step, AdapterResolver};
+pub(crate) use super::session_steps::{DebugPlan, DebugResolver, PlannedStep, StepKind};
 use super::session_transport::{
     boot_session_connection, evict_terminated_sessions, handshake_and_run,
 };
@@ -174,6 +176,8 @@ pub struct DapManager {
     pub(super) environments: EnvironmentManager,
     pub(super) sessions: Arc<DashMap<String, Arc<SessionEntry>>>,
     seq_counter: Arc<AtomicU64>,
+    /// Plans (Debug All steps) and resolves sessions: the adapters, or a test double.
+    pub(super) resolver: Arc<dyn DebugResolver>,
 }
 
 impl Default for DapManager {
@@ -189,12 +193,23 @@ impl DapManager {
     }
 
     pub fn with_environments(data_dir: PathBuf, environments: EnvironmentManager) -> Self {
+        let resolver = Arc::new(AdapterResolver {
+            data_dir: data_dir.clone(),
+            environments: environments.clone(),
+        });
         Self {
             data_dir,
             environments,
             sessions: Arc::new(DashMap::new()),
             seq_counter: Arc::new(AtomicU64::new(0)),
+            resolver,
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_resolver(mut self, resolver: Arc<dyn DebugResolver>) -> Self {
+        self.resolver = resolver;
+        self
     }
 
     /// Sample live RSS and open file-descriptor counts for all active debug
@@ -549,8 +564,8 @@ impl DapManager {
         let rx = entry.events_tx.subscribe();
         let initial_snap = entry.read_snapshot();
 
-        let data_dir = self.data_dir.clone();
         let environments = self.environments.clone();
+        let resolver = Arc::clone(&self.resolver);
         let sessions = Arc::clone(&self.sessions);
         tokio::spawn(async move {
             let inherit_shell = ctx
@@ -575,11 +590,38 @@ impl DapManager {
             if entry.boot_generation.load(Ordering::SeqCst) != my_gen || entry.is_terminal() {
                 return;
             }
+            // Debug All: a plan of steps, booted one at a time.
+            let plan = resolver.plan(&req, &ctx);
+            let Some(plan) = entry.unless_superseded(my_gen, plan).await else {
+                return;
+            };
+            match plan {
+                Ok(Some(plan)) => {
+                    let _guard = entry.lifecycle_lock.lock().await;
+                    if entry.boot_generation.load(Ordering::SeqCst) == my_gen
+                        && !entry.is_terminal()
+                    {
+                        install_plan(&entry, Arc::clone(&resolver), plan);
+                        start_next_step(&sessions, &entry, my_gen).await;
+                    }
+                    return;
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    let _guard = entry.lifecycle_lock.lock().await;
+                    if entry.boot_generation.load(Ordering::SeqCst) == my_gen
+                        && !entry.is_terminal()
+                    {
+                        entry.fail_start(&sessions, &err);
+                    }
+                    return;
+                }
+            }
             // Stop while the target is still compiling drops the build (and
             // kills its process group) instead of letting it run to the end.
             let resolve = otto_telemetry::context::measure_result(
                 "ide.dap.resolve_adapter",
-                resolve_dap_adapter_with_manager(&data_dir, &req, &ctx, Some(&environments)),
+                resolver.resolve(&req, &ctx),
             );
             let Some(resolved) = entry.unless_superseded(my_gen, resolve).await else {
                 return;
@@ -711,6 +753,13 @@ impl DapManager {
                 return Ok(entry.read_snapshot());
             }
             IdeDebugAction::Restart => return self.restart_entry(&entry).await,
+            IdeDebugAction::SkipStep => {
+                if !skip_step(&self.sessions, &entry).await {
+                    stop_entry(&entry).await;
+                    evict_terminated_sessions(&self.sessions);
+                }
+                return Ok(entry.read_snapshot());
+            }
             IdeDebugAction::SelectFrame => {
                 let conn = entry.active_conn()?;
                 select_frame_and_refresh(&entry, &conn, req.thread_id, req.frame_id).await?;
@@ -762,7 +811,10 @@ impl DapManager {
                 mark_resumed(&entry);
                 conn.wire.request("continue", tid_arg).await?;
             }
-            IdeDebugAction::SelectFrame | IdeDebugAction::Restart | IdeDebugAction::Stop => {}
+            IdeDebugAction::SelectFrame
+            | IdeDebugAction::Restart
+            | IdeDebugAction::Stop
+            | IdeDebugAction::SkipStep => {}
         }
         Ok(entry.read_snapshot())
     }

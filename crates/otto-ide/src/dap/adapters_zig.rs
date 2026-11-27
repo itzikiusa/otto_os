@@ -185,6 +185,7 @@ pub(super) async fn resolve_zig_adapter(
             want_test,
             &env,
             &mut initial_output,
+            None,
         )
         .await?
     };
@@ -358,6 +359,122 @@ pub(super) async fn resolve_zig_adapter(
     ))
 }
 
+/// Debug All Tests of a `build.zig` project with several test suites: every
+/// suite is compiled once (nothing runs, BUG2-1) and debugged in its own step,
+/// `src/main.zig`'s suite last. `None` for one suite, a single file or test,
+/// and an attach.
+pub(crate) async fn plan_zig_test_steps(
+    data_dir: &Path,
+    req: &IdeStartDebugReq,
+    ctx: &DapStartContext,
+    cwd: &str,
+    env: BTreeMap<String, String>,
+) -> Result<Option<super::session::DebugPlan>> {
+    use super::session::{DebugPlan, PlannedStep, StepKind};
+    let raw_prog = normalize_target_path(&req.target, &req.launch.program);
+    let want_test = req.launch.is_test
+        || ctx
+            .run_config
+            .as_ref()
+            .is_some_and(|rc| rc.runner == IdeRunnerKind::ZigTest);
+    let filtered = req
+        .launch
+        .test_name
+        .as_deref()
+        .is_some_and(|t| !t.trim().is_empty());
+    let is_zig_file = raw_prog.ends_with(".zig") && !raw_prog.ends_with("/build.zig");
+    let prebuilt = !raw_prog.is_empty()
+        && !raw_prog.ends_with(".zig")
+        && !raw_prog.ends_with(".zon")
+        && (req.target.kind == IdeTargetKind::Ssh || Path::new(&raw_prog).is_file());
+    if !want_test || filtered || is_zig_file || prebuilt {
+        return Ok(None);
+    }
+    let mut output = Vec::new();
+    let mut bins = Vec::new();
+    compile_zig_debug_artifact(
+        data_dir,
+        req,
+        ctx,
+        cwd,
+        &raw_prog,
+        true,
+        &env,
+        &mut output,
+        Some(&mut bins),
+    )
+    .await?;
+    if bins.len() < 2 {
+        return Ok(None);
+    }
+    bins.sort_by_key(|b| b.source.ends_with("src/main.zig"));
+    // Zig prints canonical paths (`/private/var/…` for `/var/…`).
+    let root = req.target.root.trim_end_matches('/').to_string();
+    let canon_root = std::fs::canonicalize(&root)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| root.clone());
+    let steps: Vec<PlannedStep> = bins
+        .into_iter()
+        .map(|b| {
+            let src = b
+                .source
+                .strip_prefix(canon_root.as_str())
+                .or_else(|| b.source.strip_prefix(root.as_str()))
+                .map_or(b.source.as_str(), |s| s.trim_start_matches('/'));
+            let label = if src.is_empty() {
+                b.name.clone()
+            } else {
+                format!("{} ({src})", b.name)
+            };
+            let mut step_req = req.clone();
+            step_req.launch.program = b.path;
+            step_req.launch.debug_step = true;
+            PlannedStep {
+                label,
+                req: step_req,
+                kind: StepKind::Zig,
+                error: None,
+                program: b.source,
+            }
+        })
+        .collect();
+    let title = format!("Debug all tests · {} test suites", steps.len());
+    let output = output
+        .into_iter()
+        .flat_map(|o| o.text.lines().map(str::to_string).collect::<Vec<_>>())
+        .collect();
+    Ok(Some(DebugPlan {
+        title,
+        steps,
+        output,
+    }))
+}
+
+/// `zig version` of `zig_bin` on the target, for the "supports" message.
+async fn zig_version(
+    req: &IdeStartDebugReq,
+    ctx: &DapStartContext,
+    zig_bin: &str,
+    cwd: &str,
+    env: &BTreeMap<String, String>,
+) -> String {
+    let out = run_target_command(
+        &req.target,
+        ctx.ssh.as_ref(),
+        zig_bin,
+        &["version".to_string()],
+        cwd,
+        env,
+        std::time::Duration::from_secs(10),
+    )
+    .await;
+    out.ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "a Zig version Otto can't read".into())
+}
+
 #[allow(clippy::too_many_arguments, clippy::disallowed_methods)]
 async fn compile_zig_debug_artifact(
     data_dir: &Path,
@@ -368,6 +485,7 @@ async fn compile_zig_debug_artifact(
     want_test: bool,
     env: &BTreeMap<String, String>,
     initial_output: &mut Vec<IdeDebugOutputEntry>,
+    all_bins: Option<&mut Vec<ZigEmittedTestBin>>,
 ) -> Result<String> {
     let zig_bin = resolve_zig_binary(req, ctx, cwd, env).await?;
     let allowed_roots = if ctx.caller_is_root {
@@ -430,71 +548,66 @@ async fn compile_zig_debug_artifact(
             && (has_build_zig || req.target.kind == IdeTargetKind::Ssh))
             || (is_zig_file && has_test_step);
         if try_build_runner {
-            if let Some(runner_path) =
+            let Some(runner_path) =
                 prepare_zig_build_runner_for_target(req, ctx, &zig_bin, &zig_cwd, env, data_dir)
                     .await
-            {
-                let mut runner_env = env.clone();
-                runner_env.insert("OTTO_ZIG_TEST_NO_EXEC".into(), "1".into());
-                if let Some(tname) = selected_filter {
-                    runner_env.insert("OTTO_ZIG_TEST_FILTER".into(), tname.to_string());
-                }
-                if is_zig_file {
-                    runner_env.insert("OTTO_ZIG_TEST_FILE".into(), raw_prog.to_string());
-                }
-                let mut build_args = vec![
-                    "build".to_string(),
-                    "--build-runner".to_string(),
-                    runner_path,
-                    "test".to_string(),
-                ];
-                build_args.extend(extra_flags.clone());
-                match run_zig_build_with_macos_fallback(
-                    req,
-                    ctx,
-                    &zig_bin,
-                    build_args,
-                    &zig_cwd,
-                    &runner_env,
-                    true,
-                    initial_output,
-                )
-                .await
-                {
-                    Ok(stdout) => {
-                        let bins = parse_otto_zig_test_bins(&stdout);
-                        if let Some((bin, notice)) =
-                            select_zig_test_bin(&bins, raw_prog, is_zig_file)
-                        {
-                            if let Some(msg) = notice {
-                                initial_output.push(IdeDebugOutputEntry {
-                                    category: "console".into(),
-                                    text: format!("{msg}\n"),
-                                    seq: 0,
-                                });
-                            }
-                            let abs = if bin.starts_with('/') {
-                                bin
-                            } else {
-                                format!("{}/{}", zig_cwd.trim_end_matches('/'), bin)
-                            };
-                            return Ok(abs);
-                        }
-                        return Err(Error::Upstream(format!(
-                            "zig build test did not emit a test executable in '{zig_cwd}'"
-                        )));
-                    }
-                    Err(err) => {
-                        // BUG-35: Preserve the real build.zig compiler graph; fail clearly
-                        // rather than silently substituting a partial source-only compile.
-                        return Err(err);
-                    }
-                }
-            } else {
+            else {
+                let version = zig_version(req, ctx, &zig_bin, &zig_cwd, env).await;
                 return Err(Error::Upstream(format!(
-                    "Zig no-exec project test debugging requires a supported Zig 0.14.x build runner (unsupported runner layout for '{zig_bin}'); cannot debug build.zig tests without executing them first"
+                    "Debug of build.zig tests supports Zig {OTTO_ZIG_HOOK_VERSIONS}; this project uses {version}. Run tests works for every version."
                 )));
+            };
+            let mut runner_env = env.clone();
+            runner_env.insert("OTTO_ZIG_TEST_NO_EXEC".into(), "1".into());
+            if let Some(tname) = selected_filter {
+                runner_env.insert("OTTO_ZIG_TEST_FILTER".into(), tname.to_string());
             }
+            if is_zig_file {
+                runner_env.insert("OTTO_ZIG_TEST_FILE".into(), raw_prog.to_string());
+            }
+            let mut build_args = vec![
+                "build".to_string(),
+                "--build-runner".to_string(),
+                runner_path,
+                "test".to_string(),
+            ];
+            build_args.extend(extra_flags.clone());
+            // BUG-35: a failing build keeps the real build.zig compiler graph's error
+            // rather than silently substituting a partial source-only compile.
+            let stdout = run_zig_build_with_macos_fallback(
+                req,
+                ctx,
+                &zig_bin,
+                build_args,
+                &zig_cwd,
+                &runner_env,
+                true,
+                initial_output,
+            )
+            .await?;
+            let abs = |p: String| {
+                if p.starts_with('/') {
+                    p
+                } else {
+                    format!("{}/{}", zig_cwd.trim_end_matches('/'), p)
+                }
+            };
+            let bins: Vec<ZigEmittedTestBin> = parse_otto_zig_test_bins(&stdout)
+                .into_iter()
+                .map(|b| ZigEmittedTestBin {
+                    path: abs(b.path),
+                    ..b
+                })
+                .collect();
+            let Some(bin) = select_zig_test_bin(&bins, raw_prog, is_zig_file) else {
+                return Err(Error::Upstream(format!(
+                    "zig build test did not emit a test executable in '{zig_cwd}'"
+                )));
+            };
+            if let Some(all) = all_bins {
+                *all = bins;
+            }
+            return Ok(bin);
         }
 
         if !is_zig_file {
@@ -1097,143 +1210,31 @@ pub(crate) fn append_zig_source_and_modules(
     }
 }
 
-const OTTO_ZIG_RUNNER_PRE_HOOK: &str = r#"
-    const otto_no_exec = if (graph.env_map.get("OTTO_ZIG_TEST_NO_EXEC")) |v| mem.eql(u8, v, "1") else false;
-    const otto_filter = graph.env_map.get("OTTO_ZIG_TEST_FILTER");
-    const otto_file = graph.env_map.get("OTTO_ZIG_TEST_FILE");
-    if (otto_no_exec or (otto_filter != null and otto_filter.?.len > 0)) {
-        const OttoTestEntry = struct {
-            compile: *Step.Compile,
-            run_step: ?*Step.Run,
-        };
-        const OttoWalker = struct {
-            seen: std.AutoHashMap(*Step, void),
-            entries: *ArrayList(OttoTestEntry),
-            fn findCompileIn(s: *Step, depth: usize) ?*Step.Compile {
-                if (depth > 8) return null;
-                if (s.cast(Step.Compile)) |c| {
-                    if (c.kind == .@"test") return c;
-                }
-                for (s.dependencies.items) |d| {
-                    if (findCompileIn(d, depth + 1)) |found| return found;
-                }
-                return null;
-            }
-            fn visit(self: *@This(), s: *Step) !void {
-                if (self.seen.contains(s)) return;
-                try self.seen.put(s, {});
-                if (s.cast(Step.Run)) |r| {
-                    if (findCompileIn(s, 0)) |c| {
-                        try self.entries.append(.{ .compile = c, .run_step = r });
-                        return;
-                    }
-                }
-                if (s.cast(Step.Compile)) |c| {
-                    if (c.kind == .@"test") {
-                        try self.entries.append(.{ .compile = c, .run_step = null });
-                    }
-                }
-                for (s.dependencies.items) |dep| {
-                    try self.visit(dep);
-                }
-            }
-        };
-        var otto_entries = ArrayList(OttoTestEntry).init(arena);
-        var walker = OttoWalker{
-            .seen = std.AutoHashMap(*Step, void).init(arena),
-            .entries = &otto_entries,
-        };
-        if (targets.items.len > 0) {
-            for (targets.items) |tname| {
-                if (builder.top_level_steps.get(tname)) |tls| {
-                    try walker.visit(&tls.step);
-                }
-            }
-        } else if (builder.top_level_steps.get("test")) |tls| {
-            try walker.visit(&tls.step);
-        }
-        var file_matched = false;
-        if (otto_file) |want_file| {
-            if (want_file.len > 0 and otto_entries.items.len > 1) {
-                var matched = ArrayList(OttoTestEntry).init(arena);
-                for (otto_entries.items) |e| {
-                    if (e.compile.root_module.root_source_file) |lp| {
-                        const rp = lp.getPath(builder);
-                        const eq = mem.eql(u8, rp, want_file);
-                        const want_suf = want_file.len > rp.len and want_file[want_file.len - rp.len - 1] == '/' and mem.endsWith(u8, want_file, rp);
-                        const rp_suf = rp.len > want_file.len and rp[rp.len - want_file.len - 1] == '/' and mem.endsWith(u8, rp, want_file);
-                        if (eq or want_suf or rp_suf) {
-                            try matched.append(e);
-                        }
-                    }
-                }
-                if (matched.items.len > 0) {
-                    otto_entries = matched;
-                    file_matched = true;
-                }
-            }
-        }
-        if (otto_filter) |f| {
-            if (f.len > 0) {
-                const slice = try arena.dupe([]const u8, &.{f});
-                for (otto_entries.items) |e| {
-                    e.compile.filters = slice;
-                }
-            }
-        }
-        if (otto_no_exec) {
-            if (otto_entries.items.len == 0) {
-                fatal("otto: no Zig test compile step found in build.zig", .{});
-            }
-            const OttoEmitBinStep = struct {
-                step: Step,
-                entries: []const OttoTestEntry,
-                fn make(step: *Step, _: Step.MakeOptions) anyerror!void {
-                    const self: *@This() = @fieldParentPtr("step", step);
-                    const out = io.getStdOut().writer();
-                    for (self.entries) |e| {
-                        const bp = e.compile.getEmittedBin().getPath(step.owner);
-                        const src: []const u8 = if (e.compile.root_module.root_source_file) |lp| lp.getPath(step.owner) else "";
-                        try out.print("OTTO_ZIG_TEST_BIN:{s}|{s}|{s}\n", .{ e.compile.name, src, bp });
-                    }
-                }
-            };
-            const emit_step = try arena.create(OttoEmitBinStep);
-            emit_step.* = .{
-                .step = Step.init(.{
-                    .id = .custom,
-                    .name = "__otto_emit_test_bins",
-                    .owner = builder,
-                    .makeFn = OttoEmitBinStep.make,
-                }),
-                .entries = otto_entries.items,
-            };
-            for (otto_entries.items) |e| {
-                // Request the binary while configuring: a test step that only compiles
-                // (no run or install step) never asks for it, and getPath would panic.
-                _ = e.compile.getEmittedBin();
-                emit_step.step.dependOn(&e.compile.step);
-            }
-            const compile_only = builder.step("__otto_compile_tests", "Compile Zig tests without running");
-            compile_only.dependOn(&emit_step.step);
-            targets.clearRetainingCapacity();
-            try targets.append("__otto_compile_tests");
-        } else if (file_matched) {
-            const filtered_run = builder.step("__otto_run_filtered_tests", "Run only the selected Zig test suite");
-            var added_any = false;
-            for (otto_entries.items) |e| {
-                if (e.run_step) |rs| {
-                    filtered_run.dependOn(&rs.step);
-                    added_any = true;
-                }
-            }
-            if (added_any) {
-                targets.clearRetainingCapacity();
-                try targets.append("__otto_run_filtered_tests");
-            }
-        }
-    }
-"#;
+/// Otto's no-exec / filtered-run hook, inserted before `if (steps_menu)` of Zig's own
+/// `compiler/build_runner.zig`, one per build-runner layout it was written and run
+/// against, each with the markers that layout must show.
+const OTTO_ZIG_RUNNER_HOOKS: &[(&str, &[&str])] = &[
+    (
+        include_str!("zig_runner_hooks/v0_14.zig"),
+        &[
+            "const io = std.io;",
+            "const Step = std.Build.Step;",
+            "var targets = ArrayList([]const u8).init(arena);",
+        ],
+    ),
+    (
+        include_str!("zig_runner_hooks/v0_16.zig"),
+        &[
+            "const Io = std.Io;",
+            "const Step = std.Build.Step;",
+            "var targets = std.array_list.Managed([]const u8).init(arena);",
+            "graph.environ_map",
+        ],
+    ),
+];
+
+/// The Zig minors whose build runner takes the hook (for the "supports" message).
+const OTTO_ZIG_HOOK_VERSIONS: &str = "0.14 and 0.16";
 
 /// Emitted test suite executable reported by `OttoEmitBinStep.make` before `run.cleanExit()`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1243,30 +1244,24 @@ pub(crate) struct ZigEmittedTestBin {
     pub path: String,
 }
 
-/// Patch Zig 0.14.x's own `compiler/build_runner.zig` so `zig build --build-runner <path> test`:
+/// Patch Zig's own `compiler/build_runner.zig` (the 0.14 or 0.16 layout) so
+/// `zig build --build-runner <path> test`:
 /// - In no-exec debug mode (`OTTO_ZIG_TEST_NO_EXEC=1`): compiles test `Step.Compile` artifacts
 ///   without running `Step.Run` (`addRunArtifact`), and runs `OttoEmitBinStep.make` inside the
 ///   step graph BEFORE `run.cleanExit()` calls `process.exit(0)` (BUG3-1, BUG-5, BUG2-1, BUG-35).
 /// - In filtered single-file run mode (`OTTO_ZIG_TEST_FILTER` + `OTTO_ZIG_TEST_FILE`): routes
 ///   execution through `__otto_run_filtered_tests` depending ONLY on the matched file's `Step.Run`
 ///   so unrelated suites in dual-suite templates never execute (BUG2-2).
-/// - Explicitly gates unsupported Zig SDK runner layouts (e.g., 0.13.0 / 0.15.2) by returning `None`.
+/// - Any other layout (0.13, 0.15, 0.17 has no build runner to replace) gives `None`.
 pub(crate) fn patch_zig_build_runner(orig_source: &str) -> Option<String> {
     const PRE_ANCHOR: &str = "if (steps_menu)";
-    const REQUIRED_MARKERS: &[&str] = &[
-        PRE_ANCHOR,
-        "const io = std.io;",
-        "const Step = std.Build.Step;",
-        "var targets = ArrayList([]const u8).init(arena);",
-    ];
-    if !REQUIRED_MARKERS.iter().all(|m| orig_source.contains(m)) {
+    if !orig_source.contains(PRE_ANCHOR) {
         return None;
     }
-    Some(orig_source.replacen(
-        PRE_ANCHOR,
-        &format!("{OTTO_ZIG_RUNNER_PRE_HOOK}\n    {PRE_ANCHOR}"),
-        1,
-    ))
+    let (hook, _) = OTTO_ZIG_RUNNER_HOOKS
+        .iter()
+        .find(|(_, markers)| markers.iter().all(|m| orig_source.contains(m)))?;
+    Some(orig_source.replacen(PRE_ANCHOR, &format!("{hook}\n    {PRE_ANCHOR}"), 1))
 }
 
 /// Extract emitted test suite binaries from `OTTO_ZIG_TEST_BIN:<name>|<src>|<path>`
@@ -1298,20 +1293,17 @@ pub(crate) fn parse_otto_zig_test_bins(stdout: &str) -> Vec<ZigEmittedTestBin> {
         .collect()
 }
 
-/// Select the test binary to attach to LLDB and, when a project defines multiple test
-/// suites (such as Zig 0.14.0's stock `lib_unit_tests` + `exe_unit_tests` template) and
-/// the user invoked project-wide Debug, return an explicit notice naming the selected
-/// suite and the other suites instead of claiming all suites run in one LLDB session (BUG-5).
+/// Select the test binary of a single-session Debug: the only suite, the suite
+/// whose root is `raw_prog` or imports it (BUG-5), else `src/main.zig`'s suite (or
+/// the first). A project-wide Debug of several suites is a Debug All run instead
+/// (one step per suite, see [`plan_zig_test_steps`]).
 pub(crate) fn select_zig_test_bin(
     bins: &[ZigEmittedTestBin],
     raw_prog: &str,
     is_zig_file: bool,
-) -> Option<(String, Option<String>)> {
-    if bins.is_empty() {
-        return None;
-    }
-    if bins.len() == 1 {
-        return Some((bins[0].path.clone(), None));
+) -> Option<String> {
+    if bins.len() <= 1 {
+        return bins.first().map(|b| b.path.clone());
     }
     if is_zig_file && !raw_prog.is_empty() {
         if let Some(matched) = bins.iter().find(|b| {
@@ -1320,41 +1312,21 @@ pub(crate) fn select_zig_test_bin(
                     || raw_prog.ends_with(&format!("/{}", b.source))
                     || b.source.ends_with(&format!("/{raw_prog}")))
         }) {
-            return Some((matched.path.clone(), None));
+            return Some(matched.path.clone());
         }
         // A test in a non-root file lives in the suite whose root imports that file.
         if let Some(owner) = bins
             .iter()
             .find(|b| zig_file_imports_reach(Path::new(&b.source), Path::new(raw_prog)))
         {
-            return Some((owner.path.clone(), None));
+            return Some(owner.path.clone());
         }
     }
     let chosen = bins
         .iter()
         .find(|b| b.source.ends_with("src/main.zig") || b.source == "src/main.zig")
         .unwrap_or(&bins[0]);
-    let all_labels: Vec<String> = bins
-        .iter()
-        .map(|b| {
-            if b.source.is_empty() {
-                b.name.clone()
-            } else {
-                format!("{} ({})", b.name, b.source)
-            }
-        })
-        .collect();
-    let chosen_label = if chosen.source.is_empty() {
-        chosen.name.clone()
-    } else {
-        format!("{} ({})", chosen.name, chosen.source)
-    };
-    let notice = format!(
-        "Zig project defines {} test suites [{}]; LLDB attaches to one executable per session — debugging suite {chosen_label}. Use a file gutter Debug button to debug another suite.",
-        bins.len(),
-        all_labels.join(", ")
-    );
-    Some((chosen.path.clone(), Some(notice)))
+    Some(chosen.path.clone())
 }
 
 /// Whether `target` is reachable from the local suite root `root` through relative
@@ -2047,6 +2019,7 @@ test "failing sibling" { try std.testing.expectEqual(@as(i32, 1), 2); }
             ..Default::default()
         };
         let mut out = Vec::new();
+        let mut all_bins = Vec::new();
         let resolved_bin = super::compile_zig_debug_artifact(
             &data_dir,
             &req,
@@ -2056,18 +2029,16 @@ test "failing sibling" { try std.testing.expectEqual(@as(i32, 1), 2); }
             true,
             &env,
             &mut out,
+            Some(&mut all_bins),
         )
         .await
         .expect("no-exec build runner must return warm-cached test binary");
         assert_eq!(resolved_bin, warm_exe_test_bin.to_string_lossy());
         assert_ne!(resolved_bin, app_bin.to_string_lossy());
-        // BUG-5: Multi-suite project must explicitly disclose which suite was selected.
-        assert!(
-            out.iter()
-                .any(|e| e.text.contains("2 test suites")
-                    && e.text.contains("exe_test (src/main.zig)")),
-            "expected multi-suite selection notice in initial_output, got: {out:?}"
-        );
+        // Debug All: every suite the runner emitted, in its order (one step each).
+        let names: Vec<&str> = all_bins.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(names, ["lib_test", "exe_test"]);
+        assert_eq!(all_bins[0].path, warm_lib_test_bin.to_string_lossy());
 
         let invoked = std::fs::read_to_string(&marker).unwrap();
         assert!(invoked.starts_with("1|build --build-runner "));
@@ -2085,12 +2056,21 @@ test "failing sibling" { try std.testing.expectEqual(@as(i32, 1), 2); }
         assert!(runner_src.contains("__otto_run_filtered_tests"));
         assert!(runner_src.contains("OTTO_ZIG_TEST_BIN:"));
 
-        // BUG3-1: Unsupported Zig SDK runner layouts (e.g., 0.13.0 or 0.15.2 without
-        // `const io = std.io;` or `ArrayList([]const u8).init(arena)`) are explicitly gated.
+        // BUG3-1: only the 0.14 and 0.16 runner layouts take the hook; 0.13 and 0.15
+        // (`const io = std.io;` with `std.array_list.Managed`) are gated.
         assert!(super::patch_zig_build_runner(
             "const std = @import(\"std\");\npub fn main() !void { if (steps_menu) return; }\n"
         )
         .is_none());
+        let v0_15 = "const io = std.io;\nconst Step = std.Build.Step;\nvar targets = std.array_list.Managed([]const u8).init(arena);\nif (steps_menu) {}\n";
+        assert!(super::patch_zig_build_runner(v0_15).is_none());
+        let v0_16 = "const Io = std.Io;\nconst Step = std.Build.Step;\nvar targets = std.array_list.Managed([]const u8).init(arena);\nconst x = graph.environ_map;\n    if (steps_menu) {}\n";
+        let patched = super::patch_zig_build_runner(v0_16).expect("0.16 layout takes the hook");
+        assert!(patched.contains("graph.environ_map.get(\"OTTO_ZIG_TEST_NO_EXEC\")"));
+        assert!(patched.contains("writerStreaming(step.owner.graph.io"));
+        assert!(
+            patched.find("OttoEmitBinStep").unwrap() < patched.find("if (steps_menu)").unwrap()
+        );
 
         // BUG-35: Single-file Debug inside a build.zig project with a `test` step must fail
         // clearly when the build runner fails rather than silently substituting a partial
@@ -2143,6 +2123,7 @@ test "failing sibling" { try std.testing.expectEqual(@as(i32, 1), 2); }
             true,
             &fail_env,
             &mut Vec::new(),
+            None,
         )
         .await
         .expect_err("BUG-35: must fail clearly instead of partial source-only fallback");
@@ -2519,15 +2500,13 @@ pub fn build(b: *std.Build) void {
         let math = src.join("math.zig").to_string_lossy().into_owned();
         assert_eq!(
             super::select_zig_test_bin(&bins, &math, true),
-            Some(("/cache/lib".to_string(), None))
+            Some("/cache/lib".to_string())
         );
-        // A file no suite reaches keeps the disclosed default.
+        // A file no suite reaches gets the `src/main.zig` suite.
         let other = tmp.path().join("other.zig");
         std::fs::write(&other, "test {}\n").unwrap();
-        let (chosen, notice) =
-            super::select_zig_test_bin(&bins, &other.to_string_lossy(), true).unwrap();
+        let chosen = super::select_zig_test_bin(&bins, &other.to_string_lossy(), true).unwrap();
         assert_eq!(chosen, "/cache/exe");
-        assert!(notice.is_some_and(|n| n.contains("2 test suites")));
     }
 
     #[cfg(unix)]

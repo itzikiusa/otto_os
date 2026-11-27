@@ -10,9 +10,10 @@ use otto_core::{Error, Result};
 use regex::Regex;
 use serde_json::{json, Value};
 
-use super::adapters::{display_target_path, resolve_dap_adapter_with_manager};
+use super::adapters::display_target_path;
 use super::read_target_file_for_inline;
-use super::session::{DapManager, DapWireClient, SessionEntry};
+use super::session::{ActiveConnection, DapManager, DapWireClient, SessionEntry};
+use super::session_steps::{install_plan, start_next_step};
 use super::session_transport::boot_session_connection;
 use crate::types::{
     IdeDebugEvaluateReq, IdeDebugEvaluateResp, IdeDebugSessionSnapshot, IdeDebugSetVariableReq,
@@ -285,16 +286,37 @@ impl DapManager {
             snap.error = None;
             snap.error_kind = None;
             snap.error_ecosystem = None;
+            snap.steps.clear();
+            snap.current_step = None;
         });
+        *entry.steps.lock().unwrap_or_else(|e| e.into_inner()) = None;
         entry.restarting.store(false, Ordering::SeqCst);
         drop(lifecycle_guard);
 
-        let resolve = resolve_dap_adapter_with_manager(
-            &self.data_dir,
-            &orig_req,
-            &orig_ctx,
-            Some(&self.environments),
-        );
+        // A Debug All run restarts from step 1 with a fresh plan (and build).
+        let plan = self.resolver.plan(&orig_req, &orig_ctx);
+        let Some(plan) = entry.unless_superseded(my_gen, plan).await else {
+            return Ok(entry.read_snapshot());
+        };
+        match plan {
+            Ok(Some(plan)) => {
+                let _guard = entry.lifecycle_lock.lock().await;
+                if entry.boot_generation.load(Ordering::SeqCst) == my_gen && !entry.is_terminal() {
+                    install_plan(entry, Arc::clone(&self.resolver), plan);
+                    start_next_step(&self.sessions, entry, my_gen).await;
+                }
+                return Ok(entry.read_snapshot());
+            }
+            Ok(None) => {}
+            Err(err) => {
+                let _guard = entry.lifecycle_lock.lock().await;
+                if entry.boot_generation.load(Ordering::SeqCst) == my_gen && !entry.is_terminal() {
+                    entry.fail_start(&self.sessions, &err);
+                }
+                return Err(err);
+            }
+        }
+        let resolve = self.resolver.resolve(&orig_req, &orig_ctx);
         let Some(resolved) = entry.unless_superseded(my_gen, resolve).await else {
             return Ok(entry.read_snapshot());
         };
@@ -483,25 +505,31 @@ pub(super) fn mark_resumed(entry: &SessionEntry) {
 async fn teardown_connection(entry: &SessionEntry) {
     let old = entry.conn.write().unwrap_or_else(|e| e.into_inner()).take();
     if let Some(conn) = old {
-        conn.wire.retire();
-        if conn.supports_terminate && !conn.attached {
-            let _ = tokio::time::timeout(
-                Duration::from_millis(800),
-                conn.wire.request("terminate", Some(json!({}))),
-            )
-            .await;
-        }
+        teardown_conn(&conn).await;
+    }
+}
+
+/// End one adapter connection: a launched debuggee is terminated, an attached
+/// one detached; then Otto's own processes for it are killed.
+pub(super) async fn teardown_conn(conn: &ActiveConnection) {
+    conn.wire.retire();
+    if conn.supports_terminate && !conn.attached {
         let _ = tokio::time::timeout(
-            Duration::from_millis(900),
-            conn.wire.request(
-                "disconnect",
-                Some(json!({ "terminateDebuggee": !conn.attached })),
-            ),
+            Duration::from_millis(800),
+            conn.wire.request("terminate", Some(json!({}))),
         )
         .await;
-        conn.wire.abort_pending();
-        conn.guard.kill_all();
     }
+    let _ = tokio::time::timeout(
+        Duration::from_millis(900),
+        conn.wire.request(
+            "disconnect",
+            Some(json!({ "terminateDebuggee": !conn.attached })),
+        ),
+    )
+    .await;
+    conn.wire.abort_pending();
+    conn.guard.kill_all();
 }
 
 pub(super) async fn stop_entry(entry: &SessionEntry) {

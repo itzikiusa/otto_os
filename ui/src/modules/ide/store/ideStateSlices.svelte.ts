@@ -43,6 +43,8 @@ export interface IdeDebugLaunchMemo {
     build_flags?: string[];
     cwd?: string;
     test_name?: string;
+    is_test?: boolean;
+    test_framework?: string;
     attach_port?: number;
     env?: Record<string, string>;
     env_file?: string | null;

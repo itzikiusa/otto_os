@@ -96,6 +96,13 @@ pub struct IdeDebugLaunchSpec {
     pub skip_tests: bool,
     #[serde(default)]
     pub offline: bool,
+    /// .NET test debugging: the one target framework to run (`dotnet test -f`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_framework: Option<String>,
+    /// Set by Otto on the request of one Debug All step: the run's plan already
+    /// built everything, so the step neither rebuilds nor plans again.
+    #[serde(skip)]
+    pub debug_step: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -240,6 +247,66 @@ pub struct IdeDebugSessionSnapshot {
     pub target_root: Option<String>,
     #[serde(default)]
     pub supports_set_variable: bool,
+    /// Debug All runs: one step per test project / framework or test suite, run
+    /// one at a time in this order. Empty for an ordinary session.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<IdeDebugStep>,
+    /// Index into `steps` of the step that runs now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_step: Option<u32>,
+    /// js-debug sessions: one entry per debugged process (the Playwright
+    /// worker, a Karma Chrome page). Empty for every other adapter.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub targets: Vec<IdeDebugTarget>,
+}
+
+/// One process of a js-debug session ([`IdeDebugSessionSnapshot::targets`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdeDebugTarget {
+    pub id: String,
+    pub name: String,
+    /// Stopped: the one in focus, or one waiting for the focus to resume.
+    pub paused: bool,
+    /// Why the target could not be attached.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdeDebugStepState {
+    Pending,
+    Running,
+    Passed,
+    Failed,
+    NoTests,
+    Error,
+    Skipped,
+}
+
+/// One step of a Debug All run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdeDebugStep {
+    /// `Api.Tests (net10.0)`, `lib (src/root.zig)`.
+    pub label: String,
+    pub state: IdeDebugStepState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i64>,
+    /// `42 passed`, `1 of 17 failed`, `no tests`, or why it couldn't start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    /// Up to 5 failed test names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed_tests: Vec<String>,
+    /// What a single-test Debug of a failed test launches: the test project or
+    /// the suite's source file, and the .NET target framework.
+    pub program: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_framework: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -271,6 +338,8 @@ pub enum IdeDebugAction {
     SelectFrame,
     Restart,
     Stop,
+    /// Debug All: end the current step and start the next one.
+    SkipStep,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

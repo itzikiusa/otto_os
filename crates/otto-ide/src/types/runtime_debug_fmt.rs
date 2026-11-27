@@ -26,6 +26,8 @@ impl fmt::Debug for IdeDebugLaunchSpec {
             .field("spring_profiles", &self.spring_profiles)
             .field("skip_tests", &self.skip_tests)
             .field("offline", &self.offline)
+            .field("test_framework", &self.test_framework)
+            .field("debug_step", &self.debug_step)
             .finish()
     }
 }

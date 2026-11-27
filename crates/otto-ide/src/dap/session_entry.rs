@@ -17,7 +17,10 @@ use super::session_transport::evict_terminated_sessions;
 use super::start_error::classify_start_error;
 use super::wire::{DapEvent, DapMessage, DapReadItem, DapReader, DapResponse, DapWriter};
 use super::BridgeGuard;
-use crate::types::{IdeDebugOutputEntry, IdeDebugSessionSnapshot, IdeDebugState, IdeStartDebugReq};
+use crate::types::{
+    IdeDebugOutputEntry, IdeDebugSessionSnapshot, IdeDebugState, IdeDebugStepState,
+    IdeStartDebugReq,
+};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 /// How long debuggee output gathers before watchers get one snapshot of it: a
@@ -194,6 +197,20 @@ impl ActiveConnection {
     }
 }
 
+/// A session that ends (Stop, an error) ends its Debug All run: the live and
+/// the pending steps are `skipped`.
+fn skip_unfinished_steps(snap: &mut IdeDebugSessionSnapshot) {
+    for s in &mut snap.steps {
+        if matches!(
+            s.state,
+            IdeDebugStepState::Pending | IdeDebugStepState::Running
+        ) {
+            s.state = IdeDebugStepState::Skipped;
+        }
+    }
+    snap.current_step = None;
+}
+
 pub(super) struct SessionEntry {
     pub(super) created_seq: u64,
     pub(super) owner_user_id: String,
@@ -229,6 +246,8 @@ pub(super) struct SessionEntry {
     output_flush_pending: AtomicBool,
     /// Last `seq` handed to an output entry (monotonic for the session's life).
     output_seq: AtomicU64,
+    /// A Debug All run's remaining plan and live step (`None` for one process).
+    pub(super) steps: Mutex<Option<super::session_steps::StepRun>>,
 }
 
 impl SessionEntry {
@@ -279,6 +298,8 @@ impl SessionEntry {
             error_ecosystem: None,
             target_root: Some(req.target.root.clone()).filter(|r| !r.is_empty()),
             supports_set_variable: false,
+            steps: Vec::new(),
+            current_step: None,
         };
         let initial_break_exc = req.break_on_exceptions;
         Arc::new(Self {
@@ -305,6 +326,7 @@ impl SessionEntry {
             lifecycle_lock: tokio::sync::Mutex::new(()),
             output_flush_pending: AtomicBool::new(false),
             output_seq: AtomicU64::new(last_seq),
+            steps: Mutex::new(None),
         })
     }
 
@@ -386,6 +408,7 @@ impl SessionEntry {
             if snap.state != IdeDebugState::Error {
                 snap.state = IdeDebugState::Terminated;
             }
+            skip_unfinished_steps(snap);
             snap.stopped_reason = None;
             snap.paused_line = None;
             snap.selected_frame_file = None;
@@ -445,6 +468,7 @@ impl SessionEntry {
         self.disconnect_and_kill();
         self.mutate_and_broadcast(|snap| {
             snap.state = IdeDebugState::Error;
+            skip_unfinished_steps(snap);
             snap.threads.clear();
             snap.stack_frames.clear();
             snap.scopes.clear();
@@ -503,6 +527,14 @@ impl SessionEntry {
         } else {
             text
         };
+        if let Some(run) = self
+            .steps
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+        {
+            super::session_steps::capture_step_output(run, &clipped);
+        }
         {
             let mut buf = self.output_buf.lock().unwrap_or_else(|e| e.into_inner());
             if buf.len() >= MAX_DEBUG_OUTPUT {

@@ -423,6 +423,33 @@ pub(crate) async fn resolve_dap_adapter_with_manager(
     }
 }
 
+/// The steps of a Debug All run (several .NET test projects or frameworks,
+/// several Zig test suites), or `None` for an ordinary one-process session.
+pub(crate) async fn plan_debug_steps(
+    data_dir: &Path,
+    req: &IdeStartDebugReq,
+    ctx: &DapStartContext,
+    env_mgr: Option<&EnvironmentManager>,
+) -> Result<Option<super::session::DebugPlan>> {
+    if req.launch.debug_step || req.launch.attach_port.is_some() {
+        return Ok(None);
+    }
+    let spec = resolve_debug_launch_spec(data_dir, req, ctx, env_mgr)?;
+    if spec.plugin_spec.is_some() {
+        return Ok(None);
+    }
+    match spec.canonical_lang.as_str() {
+        "csharp" | "fsharp" => {
+            super::adapters_dotnet::plan_dotnet_test_steps(data_dir, req, ctx, &spec.cwd, spec.env)
+                .await
+        }
+        "zig" => {
+            super::adapters_zig::plan_zig_test_steps(data_dir, req, ctx, &spec.cwd, spec.env).await
+        }
+        _ => Ok(None),
+    }
+}
+
 fn interpolate_json_value(
     val: &Value,
     subst: &dyn Fn(&str) -> String,

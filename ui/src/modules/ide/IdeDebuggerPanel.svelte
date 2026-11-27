@@ -3,7 +3,7 @@
   // + paused location, view switch, and a ⋯ for everything else), Tabbed vs
   // Split layout, one inline failure card with a next step, and a Debug
   // Console that reads like a terminal (stitched lines, evaluations in time).
-  import { onMount, untrack } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import Badge from '../../lib/components/Badge.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -37,6 +37,7 @@
   import { ideCollabNotices } from './store/ideCollabNotices.svelte';
   import { ideDbWatch } from './dbwatch/ideDbWatchState.svelte';
   import IdeDbWatchStrip from './dbwatch/IdeDbWatchStrip.svelte';
+  import { failedTestLaunch, showSteps, stepSeparatorPrefix } from './debug/ideDebugSteps';
 
   let activeSubTab = $state<'debugger' | 'console'>('debugger');
   let replInput = $state('');
@@ -69,6 +70,26 @@
   const isPaused = $derived(dbg?.state === 'paused');
   const isRunning = $derived(dbg?.state === 'running' || dbg?.state === 'starting');
   const isLive = $derived(Boolean(dbg && dbg.state !== 'terminated' && dbg.state !== 'error'));
+  // Debug All: the step line, loaded only for a run of several steps.
+  const hasSteps = $derived(showSteps(dbg?.steps));
+  const canSkipStep = $derived(Boolean(isLive && dbg?.steps?.some((s) => s.state === 'pending')));
+  const stepsView = $derived(hasSteps ? import('./debug/IdeDebugSteps.svelte') : null);
+
+  async function jumpToStep(index: number): Promise<void> {
+    const total = dbg?.steps?.length ?? 0;
+    showConsole();
+    await tick();
+    const prefix = stepSeparatorPrefix(index, total);
+    const rows = document.querySelectorAll<HTMLElement>('[data-testid="ide-debugger-panel"] [data-testid="ide-console-line"]');
+    const row = [...rows].find((r) => r.textContent?.trimStart().startsWith(prefix));
+    row?.scrollIntoView({ block: 'start' });
+  }
+
+  function debugFailedTest(stepIndex: number, name: string): void {
+    const step = dbg?.steps?.[stepIndex];
+    if (!dbg || !step) return;
+    void ide.startDebug({ language: dbg.language, launch: failedTestLaunch(step, name, dbg.target_root || ide.target.root) });
+  }
 
   const errorCard = $derived.by(() => {
     const card = debugErrorCard(ideDebugLaunch.startError, dbg && dbg.id !== dismissedErrorFor ? dbg : null);
@@ -220,6 +241,17 @@
       { label: 'Mute breakpoints', checked: areIdeBreakpointsMuted(), action: () => toggleIdeBreakpointsMuted() },
       { label: 'Break on exceptions', checked: ide.breakOnExceptions, action: () => setExceptions(!ide.breakOnExceptions) },
       { label: `Breakpoints (${ide.allBreakpoints.length})…`, icon: 'dot', action: () => void openBreakpointsList() },
+      ...(hasSteps
+        ? [
+            { separator: true },
+            {
+              label: 'Skip to next step',
+              disabled: !canSkipStep,
+              title: canSkipStep ? undefined : 'No step is left to run',
+              action: () => void ide.debugCommand('skip_step'),
+            },
+          ]
+        : []),
       { separator: true },
       {
         label: 'Ask Agent about this stop',
@@ -310,6 +342,11 @@
     </button>
   </header>
 
+  {#if dbg && stepsView}
+    {#await stepsView then m}
+      <m.default {dbg} onjump={(i) => void jumpToStep(i)} ondebugtest={debugFailedTest} />
+    {/await}
+  {/if}
   {#if dbg && (ideDbWatch.watch || ideDbWatch.prodWaiting)}<IdeDbWatchStrip />{/if}
 
   {#if errorCard}

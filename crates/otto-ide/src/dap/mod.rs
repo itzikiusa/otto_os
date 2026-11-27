@@ -31,6 +31,7 @@ pub mod session;
 pub(crate) mod session_entry;
 pub(crate) mod session_inline;
 pub(crate) mod session_inspect;
+pub(crate) mod session_steps;
 pub(crate) mod session_transport;
 pub(crate) mod shell_bridge;
 #[cfg(unix)]
@@ -67,6 +68,8 @@ pub struct BridgeGuard {
     tunnels: Mutex<Vec<SshTunnel>>,
     temp_dirs: Mutex<Vec<PathBuf>>,
     companions: Mutex<Vec<Arc<BridgeGuard>>>,
+    /// A companion's output lines (`dotnet test`), forwarded to the session console.
+    output: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<String>>>,
 }
 
 impl BridgeGuard {
@@ -78,6 +81,26 @@ impl BridgeGuard {
         if let Ok(mut guard) = self.companions.lock() {
             guard.push(other);
         }
+    }
+
+    pub(crate) fn set_output(&self, rx: tokio::sync::mpsc::UnboundedReceiver<String>) {
+        *self.output.lock().unwrap_or_else(|e| e.into_inner()) = Some(rx);
+    }
+
+    pub(crate) fn take_output(&self) -> Option<tokio::sync::mpsc::UnboundedReceiver<String>> {
+        self.output.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+
+    pub(crate) fn has_companion(&self) -> bool {
+        self.companions.lock().is_ok_and(|c| !c.is_empty())
+    }
+
+    /// The exit code of the first companion's process, once it has exited.
+    pub(crate) fn companion_exit_code(&self) -> Option<i32> {
+        let comps = self.companions.lock().ok()?;
+        let mut children = comps.first()?.children.lock().ok()?;
+        let status = children.first_mut()?.try_wait().ok()??;
+        Some(status.code().unwrap_or(-1))
     }
 
     pub(crate) fn push_child(&self, child: Child) {

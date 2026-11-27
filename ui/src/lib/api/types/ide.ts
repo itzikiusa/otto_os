@@ -673,6 +673,8 @@ export interface IdeDebugLaunch {
   spring_profiles?: string[];
   skip_tests?: boolean;
   offline?: boolean;
+  /** .NET test debugging: the one target framework to run (`dotnet test -f`). */
+  test_framework?: string | null;
 }
 export type IdeDebugLaunchSpec = IdeDebugLaunch;
 
@@ -694,30 +696,6 @@ export interface IdeStartDebugReq {
 export interface IdeSetBreakpointsReq {
   breakpoints: IdeBreakpoint[];
   break_on_exceptions?: boolean;
-}
-
-export interface IdeDebugCommandReq {
-  action: IdeDebugAction;
-  thread_id?: number | null;
-  frame_id?: number | null;
-  path?: string | null;
-  line?: number | null;
-}
-
-export interface IdeDebugVariablesReq {
-  variables_reference: number;
-}
-
-export interface IdeDebugEvaluateReq {
-  expression: string;
-  frame_id?: number | null;
-  context?: string | null;
-}
-
-export interface IdeDebugSetVariableReq {
-  variables_reference: number;
-  name: string;
-  value: string;
 }
 
 export type IdeDebugState = 'starting' | 'running' | 'paused' | 'terminated' | 'error';
@@ -798,18 +776,15 @@ export interface IdeDebugSessionSnapshot {
   error_ecosystem?: string | null;
   /** Root of the IDE target the session was launched from. */
   target_root?: string | null;
+  /** Debug All runs: one step per test project / framework or test suite, in run order. */
+  steps?: IdeDebugStep[];
+  /** Index into `steps` of the step that runs now. */
+  current_step?: number | null;
 }
 
-export type IdeDebugAction =
-  | 'continue'
-  | 'pause'
-  | 'step_over'
-  | 'step_into'
-  | 'step_out'
-  | 'run_to_cursor'
-  | 'select_frame'
-  | 'restart'
-  | 'stop';
+
+export type { IdeDebugAction, IdeDebugCommandReq, IdeDebugEvaluateReq, IdeDebugSetVariableReq, IdeDebugStep, IdeDebugStepState, IdeDebugVariablesReq } from './ide-debug-steps';
+import type { IdeDebugStep } from './ide-debug-steps';
 
 export interface IdeDebugSessionResp { session: IdeDebugSessionSnapshot; }
 export interface IdeDebugSessionsResp { sessions: IdeDebugSessionSnapshot[]; }

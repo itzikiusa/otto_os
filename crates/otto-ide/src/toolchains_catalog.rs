@@ -362,7 +362,7 @@ impl EcosystemKind {
             Self::Kotlin => "2.1.20",
             Self::Go => "1.24.2",
             Self::Rust => "stable",
-            Self::Zig => "0.14.0",
+            Self::Zig => "0.16.0",
             Self::Cpp => "19.1.7",
             Self::Dotnet => "9.0.203",
             Self::Node => "22.14.0",
@@ -736,9 +736,9 @@ pub fn curated_catalog(ecosystem: EcosystemKind, platform: TargetPlatform) -> Ve
         })
         .collect(),
         EcosystemKind::Zig => [
-            ("0.14.0", true, "46 MB"),
+            ("0.16.0", true, "50 MB"),
+            ("0.14.0", false, "46 MB"),
             ("0.13.0", false, "44 MB"),
-            ("0.12.1", false, "43 MB"),
         ]
         .into_iter()
         .map(|(ver, lts, sz)| CatalogSdkEntry {

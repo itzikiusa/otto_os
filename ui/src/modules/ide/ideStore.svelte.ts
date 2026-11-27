@@ -724,7 +724,7 @@ class IdeStore {
     else void loadDebugEnvMod().then(apply);
   }
 
-  async debugCommand(action: 'continue' | 'pause' | 'step_over' | 'step_into' | 'step_out' | 'run_to_cursor' | 'select_frame' | 'restart' | 'stop', extra: { thread_id?: number; frame_id?: number; path?: string; line?: number } = {}): Promise<void> {
+  async debugCommand(action: 'continue' | 'pause' | 'step_over' | 'step_into' | 'step_out' | 'run_to_cursor' | 'select_frame' | 'restart' | 'stop' | 'skip_step', extra: { thread_id?: number; frame_id?: number; path?: string; line?: number } = {}): Promise<void> {
     await (await loadDebugEnvMod()).sendDebugAction(this, action, extra, (s) => this.applyDebugSnapshot(s));
   }
   stepOver = () => this.debugCommand('step_over');

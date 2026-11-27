@@ -20,6 +20,7 @@ use super::session::{
     SessionEntry, MAX_TERMINATED_DEBUG_SESSIONS,
 };
 use super::session_inspect::{apply_breakpoint_event, handle_stopped_event, sync_all_breakpoints};
+use super::session_steps::on_step_end;
 use super::shell_bridge::spawn_shell_dap_bridge;
 use super::wire::DapEvent;
 use super::{spawn_target_process, ssh_tunnel_config, BridgeGuard};
@@ -157,6 +158,14 @@ async fn connect_adapter_transport(
             env,
             companion,
         } => {
+            if let Some(mut lines) = companion.take_output() {
+                let entry_out = entry.clone();
+                tokio::spawn(async move {
+                    while let Some(line) = lines.recv().await {
+                        entry_out.append_output("stdout", format!("{line}\n"));
+                    }
+                });
+            }
             guard.push_companion(companion);
             let mut child =
                 spawn_target_process(&req.target, ctx.ssh.as_ref(), &command, &args, &cwd, &env)
@@ -494,12 +503,22 @@ fn spawn_event_driver(
                         .unwrap_or(0);
                     let cat = if exit_code == 0 { "console" } else { "stderr" };
                     entry.append_output(cat, format!("Process exited with code {exit_code}\n"));
+                    if let Some(run) = entry
+                        .steps
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .as_mut()
+                    {
+                        run.exit_code = Some(exit_code);
+                    }
                     let sessions_fallback = Arc::clone(&sessions);
                     let entry_fallback = entry.clone();
                     let wire_fallback = wire.clone();
                     tokio::spawn(async move {
                         tokio::time::sleep(Duration::from_millis(250)).await;
-                        if wire_fallback.is_retired() {
+                        if wire_fallback.is_retired()
+                            || on_step_end(&sessions_fallback, &entry_fallback, &wire_fallback)
+                        {
                             return;
                         }
                         entry_fallback.disconnect_and_kill();
@@ -510,6 +529,9 @@ fn spawn_event_driver(
                     });
                 }
                 "terminated" | "__eof__" => {
+                    if on_step_end(&sessions, &entry, &wire) {
+                        break;
+                    }
                     entry.disconnect_and_kill();
                     if !entry.is_terminal() {
                         entry.mark_terminated();
