@@ -90,6 +90,22 @@ pub(super) async fn resolve_js_ts_adapter(
     } else {
         program.clone()
     };
+    // On SSH the script is read from the target's own `package.json` (BUG-30).
+    let remote_manifest = if req.target.kind == IdeTargetKind::Ssh
+        && Path::new(&guard_program)
+            .file_name()
+            .is_some_and(|n| n.eq_ignore_ascii_case("package.json"))
+    {
+        super::read_target_file_for_inline(
+            &req.target,
+            ctx.ssh.as_ref(),
+            &guard_program,
+            ctx.caller_is_root,
+        )
+        .await
+    } else {
+        None
+    };
     check_js_debug_supported(
         &guard_program,
         &args,
@@ -98,6 +114,7 @@ pub(super) async fn resolve_js_ts_adapter(
         req.launch.test_name.as_deref(),
         req.launch.is_test,
         req.target.kind == IdeTargetKind::Local,
+        remote_manifest.as_deref(),
     )?;
 
     let mut node_candidates = Vec::new();
@@ -397,7 +414,16 @@ fn inspect_package_json_script(
     is_test: bool,
 ) -> Option<UnsupportedJsRunner> {
     let raw = std::fs::read_to_string(pkg_json_path).ok()?;
-    let val: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    package_json_script_runner(&raw, explicit_script, is_test)
+}
+
+/// Classify the script a `package.json` text runs (`explicit_script`, else `test` for a test launch).
+fn package_json_script_runner(
+    raw: &str,
+    explicit_script: Option<&str>,
+    is_test: bool,
+) -> Option<UnsupportedJsRunner> {
+    let val: serde_json::Value = serde_json::from_str(raw).ok()?;
     let scripts = val.get("scripts")?.as_object()?;
     let script_name = if let Some(s) = explicit_script.filter(|s| !s.is_empty()) {
         s
@@ -421,6 +447,8 @@ fn inspect_package_json_script(
 /// Reject Playwright/Karma Node-inspector debugging explicitly for BOTH single-test
 /// launches and toolbar/run-config launches (BUG-30) while leaving ordinary JS/TS programs
 /// whose directory/file names or CLI arguments mention "playwright" or "karma" untouched (BUG3-9).
+/// On SSH (`!local`) `remote_manifest` is the target's text of `program` when it is a `package.json`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn check_js_debug_supported(
     program: &str,
     args: &[String],
@@ -429,6 +457,7 @@ pub(crate) fn check_js_debug_supported(
     test_name: Option<&str>,
     is_test: bool,
     local: bool,
+    remote_manifest: Option<&str>,
 ) -> Result<()> {
     if let Some(kind) = classify_js_cmd_tokens(program, args) {
         return Err(unsupported_js_runner_error(kind));
@@ -483,10 +512,6 @@ pub(crate) fn check_js_debug_supported(
             return Err(unsupported_js_runner_error(kind));
         }
     }
-    // The checks below read the manifest or source, which only exist on this host.
-    if !local {
-        return Ok(());
-    }
     if prog_base.eq_ignore_ascii_case("package.json") {
         let explicit_script = env.get("OTTO_NPM_SCRIPT").map(String::as_str).or_else(|| {
             if args.first().map(String::as_str) == Some("run") {
@@ -498,10 +523,19 @@ pub(crate) fn check_js_debug_supported(
             }
         });
         let has_test_intent = is_test || test_name.is_some_and(|s| !s.is_empty());
-        if let Some(kind) = inspect_package_json_script(prog_path, explicit_script, has_test_intent)
-        {
+        let kind = if local {
+            inspect_package_json_script(prog_path, explicit_script, has_test_intent)
+        } else {
+            remote_manifest
+                .and_then(|raw| package_json_script_runner(raw, explicit_script, has_test_intent))
+        };
+        if let Some(kind) = kind {
             return Err(unsupported_js_runner_error(kind));
         }
+    }
+    // The checks below read source files, which only exist on this host.
+    if !local {
+        return Ok(());
     }
     if test_name.is_some_and(|s| !s.is_empty()) {
         return check_js_test_debug_supported(program);
@@ -1855,5 +1889,31 @@ mod tests {
         let node_req = req(&app.to_string_lossy(), &["karma"], &ws, false);
         let err = js_guard_error(&data_dir, &node_req, &node_ctx, BTreeMap::new()).await;
         assert_eq!(err, "", "a Node program's own argv must not be classified");
+    }
+
+    /// BUG-30 (SSH): `npm run test` on an SSH target reads the script from the target's
+    /// `package.json` text, so `ng test` / `karma start` / `playwright test` are refused there too.
+    #[test]
+    fn js_debug_guard_reads_remote_package_json_script_on_ssh() {
+        let env = BTreeMap::from([("OTTO_NPM_SCRIPT".to_string(), "test".to_string())]);
+        let check = |manifest: &str| {
+            check_js_debug_supported(
+                "/srv/repo/web/package.json",
+                &[],
+                &env,
+                None,
+                None,
+                true,
+                false,
+                Some(manifest),
+            )
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default()
+        };
+        assert!(check(r#"{"scripts":{"test":"ng test"}}"#).contains("Karma"));
+        assert!(check(r#"{"scripts":{"test":"karma start --single-run"}}"#).contains("Karma"));
+        assert!(check(r#"{"scripts":{"test":"playwright test"}}"#).contains("Playwright"));
+        assert_eq!(check(r#"{"scripts":{"test":"vitest run"}}"#), "");
     }
 }
