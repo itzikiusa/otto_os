@@ -4,7 +4,7 @@
 // first, every other entry kept as it is), then re-attach the language server. A refused
 // save (local trust needs the root account; an agent credential can't) shows in the notice.
 import { api } from '../../../lib/api/client';
-import { retryLspNow } from '../../../lib/components/cm-ide-lsp-reconnect';
+import { IDE_RECONNECT_LSP_EVENT } from '../../../lib/components/cm-ide-lsp-reconnect';
 import { confirmer } from '../../../lib/confirm.svelte';
 import { ide } from '../ideStore.svelte';
 import { ideTargetKey, type IdeProjectEnvironment } from '../store/ideTypes';
@@ -37,7 +37,7 @@ class IdeLspTrustAction {
         env_vars: withProjectTrust(env.env_vars ?? [], true),
       });
       if (ideTargetKey(ide.target) === project) ide.projectEnv = resp.env;
-      retryLspNow(rootPath);
+      window.dispatchEvent(new CustomEvent(IDE_RECONNECT_LSP_EVENT, { detail: { rootPath } }));
     } catch (e) {
       this.error = { project, text: ideTrustErrorText(e) };
     } finally {

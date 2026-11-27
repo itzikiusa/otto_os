@@ -274,6 +274,11 @@ export function disposePooledLspClients(opts?: {
         canonicalModuleRootByDir.delete(dirKey);
       }
     }
+    // An explicit reattach (environment saved, project trusted): the "unavailable" cooldown
+    // of a server refused a moment ago must not swallow it.
+    for (const k of [...unavailableLangUntil.keys()]) {
+      if (k.endsWith(`::${normFilter}`) || k.includes(`::${normFilter}/`)) unavailableLangUntil.delete(k);
+    }
   }
   const uniqueEntries = new Set<PooledClientEntry>(clientPool.values());
   for (const entry of uniqueEntries) {
