@@ -423,9 +423,12 @@ projects), and
 debugs one suite and names the others.
 
 A Java Debug (or `java_main` Run) of a file in a Maven module takes the classpath
-from Maven itself: `mvn -q test-compile dependency:build-classpath` (run from the
-reactor root with `-pl <module> -am`, using `mvnw` when the build has one), then
-`target/test-classes:target/classes:<deps>`. Without a `pom.xml` or Maven, or
+from Maven itself (run from the reactor root with `-pl <module> -am`, using
+`mvnw` when the build has one). An app launch (a `main` under `src/main`) runs
+`mvn -q compile dependency:build-classpath -Dmdep.includeScope=runtime` and gets
+`target/classes:<deps>`, with no test classes, test resources or test-scoped
+JARs; a test, or a `main` under `src/test`, runs `test-compile` with the test
+scope and gets `target/test-classes:target/classes:<deps>`. Without a `pom.xml` or Maven, or
 when Maven can't resolve the module (an attached repo that was never installed),
 Otto compiles with its own `javac -g` instead; a failure shows the first 20 lines
 of the build output.
