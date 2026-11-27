@@ -238,11 +238,12 @@
     }
     if (pathList === 'all') {
       for (const ctl of gitBaseCtlByPath.values()) ctl.abort();
-      gitBaseCtlByPath.clear(); evictPersistedIdeGitBase('all'); gitBaseByPath = {};
+      gitBaseCtlByPath.clear(); evictPersistedIdeGitBase('all'); idePreviewMode.forgetRendered('all'); gitBaseByPath = {};
       blameEnabledByPath = {}; blameByPath = {}; manifestModeByPath = {}; manifestDepsByPath = {};
       bpEditor = null; intentionState = null; hunkPopover = null; disposeAllPooledLsp(); return;
     }
     evictPersistedIdeGitBase(pathList);
+    idePreviewMode.forgetRendered(pathList);
     const nextBlame = { ...blameByPath }, nextBlameOn = { ...blameEnabledByPath }, nextGitBase = { ...gitBaseByPath };
     const nextManMode = { ...manifestModeByPath }, nextManDeps = { ...manifestDepsByPath };
     for (const p of pathList) {

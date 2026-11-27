@@ -311,3 +311,41 @@ test('OBS-4: runManifestDepsAction reports error toast when backend returns ok: 
   assert.equal(okCalls.length, 1);
   assert.equal(okCalls[0][0], 'Sync Python Dependencies');
 });
+
+test('BUG3-12: idePreviewMode retains large-file manual render snapshot across Editor <-> Preview switches', () => {
+  const mod = loadSource(
+    new URL('../src/modules/ide/editor/idePreviewMode.svelte.ts', import.meta.url),
+    {
+      '../../../lib/components/filePreviewKind': {
+        availablePreviewModes: (k: string | null) => (k ? ['source', 'split', 'preview'] : []),
+        effectivePreviewMode: (k: string | null, saved?: string) => (k ? (saved ?? 'source') : 'source'),
+        filePreviewKind: (p: string) => (p.endsWith('.md') ? 'markdown' : null),
+        isNotebookPreviewKind: () => false,
+        isTablePreviewKind: () => false,
+        parsePreviewModes: () => ({}),
+      },
+      '../../../lib/components/cm-ide-manifest': { isIdeManifestPath: () => false },
+      '../shell/ideLayout.svelte': { ideLayout: { stack: false } },
+    },
+  );
+  const store = mod.idePreviewMode;
+  const bigPath = '/ws/docs/huge-spec.md';
+  const bigBody = '# Huge\n' + 'x'.repeat(1_000_050);
+
+  store.set(bigPath, 'preview');
+  assert.equal(store.layoutFor(bigPath), 'only');
+  assert.equal(store.getRendered(bigPath), null);
+
+  // User clicks "Render preview", switches back to Editor (unmounting lazy IdePreviewPane),
+  // then returns to Preview without editing — snapshot must still be present.
+  store.setRendered(bigPath, bigBody);
+  store.set(bigPath, 'source');
+  assert.equal(store.layoutFor(bigPath), 'none');
+  store.set(bigPath, 'preview');
+  assert.equal(store.layoutFor(bigPath), 'only');
+  assert.equal(store.getRendered(bigPath), bigBody);
+
+  // Evicting/closing the tab frees the cached large-file snapshot.
+  store.forgetRendered([bigPath]);
+  assert.equal(store.getRendered(bigPath), null);
+});

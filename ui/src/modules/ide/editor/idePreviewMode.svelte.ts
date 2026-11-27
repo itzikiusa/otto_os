@@ -40,6 +40,34 @@ function readModes(): Partial<Record<FilePreviewKind, FilePreviewMode>> {
 
 class IdePreviewModeStore {
   modes = $state<Partial<Record<FilePreviewKind, FilePreviewMode>>>(readModes());
+  /** Large-file manual render snapshots keyed by path, retained across Editor ↔ Preview
+   *  switches even while lazy IdePreviewPane unmounts (BUG3-12). */
+  renderedByPath = $state<Record<string, string>>({});
+
+  getRendered(path: string): string | null {
+    return Object.prototype.hasOwnProperty.call(this.renderedByPath, path)
+      ? this.renderedByPath[path]
+      : null;
+  }
+
+  setRendered(path: string, text: string): void {
+    this.renderedByPath = { ...this.renderedByPath, [path]: text };
+  }
+
+  forgetRendered(paths: Iterable<string> | 'all'): void {
+    if (paths === 'all') {
+      if (Object.keys(this.renderedByPath).length > 0) this.renderedByPath = {};
+      return;
+    }
+    let next: Record<string, string> | null = null;
+    for (const p of paths) {
+      if (Object.prototype.hasOwnProperty.call(this.renderedByPath, p)) {
+        next ??= { ...this.renderedByPath };
+        delete next[p];
+      }
+    }
+    if (next) this.renderedByPath = next;
+  }
 
   /** The preview kind of an IDE file; null for code, untitled buffers and manifests. */
   kindOf(path: string | null | undefined): FilePreviewKind | null {
