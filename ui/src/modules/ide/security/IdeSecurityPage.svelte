@@ -50,6 +50,7 @@
   let passive = $state<ProjectPassiveAudit | null>(null);
   let passiveConfig = $state('');
   let passiveScheduled = $state(false);
+  let passiveScheduledActive = $state(false);
   let passiveError = $state('');
   let passiveLoading = $state(false);
   let importInput = $state<HTMLInputElement>();
@@ -157,6 +158,7 @@
       passive = result;
       passiveConfig = result.confirmed?.run_config_id ?? result.candidates[0]?.run_config_id ?? '';
       passiveScheduled = result.confirmed?.scheduled ?? false;
+      passiveScheduledActive = result.confirmed?.scheduled_active ?? false;
       passiveError = '';
     } catch (e) {
       if (alive) passiveError = loadErrorText(e);
@@ -169,19 +171,23 @@
     const candidate = passiveCandidate;
     if (!candidate) return;
     const scheduled = passiveScheduled;
+    const scheduledActive = scheduled && passiveScheduledActive;
     const accepted = await confirmer.ask([
       `Audit destination ${candidate.url}`,
-      'Otto sends one HTTP HEAD request without credentials, cookies, or a request body. Redirects are disabled.',
+      'Default audits are passive: Otto sends one HTTP HEAD request without credentials, cookies, or a request body. Redirects are disabled.',
       candidate.public ? 'This is a public destination.' : '',
-      scheduled ? 'Also allow scheduled audits while the saved run configuration is running.' : '',
+      scheduled ? 'Also allow scheduled passive audits while the saved run configuration is running.' : '',
+      scheduledActive
+        ? 'Also allow scheduled active checks (Nuclei): Otto will send rate-limited test HTTP requests to this target (DoS and fuzzing templates excluded) while the saved run configuration is running.'
+        : '',
     ].filter(Boolean).join('\n\n'), {
-      title: candidate.public ? 'Confirm public audit target' : 'Confirm passive audit target',
+      title: candidate.public ? 'Confirm public audit target' : 'Confirm audit target',
       confirmLabel: candidate.public ? 'Confirm public URL' : 'Confirm URL',
     });
     if (!accepted) return;
     const command: ConfirmPassiveAudit = {
       run_config_id: candidate.run_config_id, url: candidate.url,
-      allow_public: candidate.public, scheduled,
+      allow_public: candidate.public, scheduled, scheduled_active: scheduledActive,
     };
     await action(async () => {
       await api.put<PassiveAuditTarget>(`${base}/dast`, command);
@@ -199,6 +205,24 @@
   function runPassive() {
     void action(async () => {
       const scan = await api.post<{ id: string }>(`${base}/dast/run`);
+      await refresh(scan.id);
+    });
+  }
+
+  async function runActiveDast() {
+    const confirmed = passive?.confirmed;
+    if (!confirmed || !passiveRunReady) return;
+    const accepted = await confirmer.ask([
+      `Active DAST target: ${confirmed.url}`,
+      'Active checks run Nuclei and send rate-limited test HTTP requests to this target to detect exposures and misconfigurations. Safe development defaults apply (DoS and fuzzing templates are excluded), but active requests still exercise live endpoints.',
+      confirmed.allow_public ? 'This is a public destination. Confirm that you are authorized to send active test requests to it.' : '',
+    ].filter(Boolean).join('\n\n'), {
+      title: 'Run active DAST scan?',
+      confirmLabel: 'Run active scan',
+    });
+    if (!accepted) return;
+    await action(async () => {
+      const scan = await api.post<{ id: string }>(`${base}/dast/run`, { active: true });
       await refresh(scan.id);
     });
   }
@@ -297,12 +321,20 @@
 
   function securityMore(): MenuItem[] {
     const completed = detail?.scan.status === 'completed';
-    return [
+    const items: MenuItem[] = [
       { label: 'Import SARIF', disabled: acting, action: () => importInput?.click() },
       { label: 'Export SARIF', disabled: acting || !completed, action: exportSarif },
       { label: overview?.baseline && overview.baseline === detail?.scan.id ? 'Clear baseline' : 'Set baseline',
         disabled: acting || !completed, action: selectBaseline },
     ];
+    if (passiveRunReady) {
+      items.push({
+        label: 'Run active scan (Nuclei)…',
+        disabled: acting || passiveLoading || !!active,
+        action: () => void runActiveDast(),
+      });
+    }
+    return items;
   }
 </script>
 
@@ -365,8 +397,8 @@
             </ul>
           {/if}
         </form>
-        <section class="settings" aria-label="Passive HTTP audit">
-          <h2>Passive HTTP audit</h2>
+        <section class="settings" aria-label="HTTP audit and DAST">
+          <h2>HTTP audit &amp; DAST</h2>
           {#if !passiveLoading && passiveError}
             <LoadState what="audit targets" variant="compact" error={passiveError} empty onretry={() => void refreshPassive()} />
           {:else if passiveLoading || !passive}
@@ -380,17 +412,29 @@
             {#if passiveCandidate}
               <p class="audit-url" dir="ltr">{passiveCandidate.url}</p>
             {/if}
-            <label class="audit-toggle"><input type="checkbox" bind:checked={passiveScheduled} /> Include in scheduled scans</label>
+            <label class="audit-toggle">
+              <input type="checkbox" bind:checked={passiveScheduled} onchange={() => { if (!passiveScheduled) passiveScheduledActive = false; }} />
+              Include passive audit in scheduled scans
+            </label>
+            <label class="audit-toggle">
+              <input type="checkbox" bind:checked={passiveScheduledActive} disabled={!passiveScheduled} />
+              Include active Nuclei checks in scheduled scans (sends test requests)
+            </label>
             <div class="actions">
               <button type="button" class="btn small" onclick={() => void confirmPassive()} disabled={acting || !passiveCandidate}>
                 {passive?.confirmed ? 'Update confirmation' : 'Review and confirm'}
               </button>
+              {#if passiveRunReady}
+                <button type="button" class="btn small ghost" onclick={() => void runActiveDast()} disabled={acting || passiveLoading || !!active}>
+                  Run active scan (Nuclei)…
+                </button>
+              {/if}
               {#if passive?.confirmed}
                 <button type="button" class="btn small ghost" onclick={revokePassive} disabled={acting}>Revoke confirmation</button>
               {/if}
             </div>
             {#if passive?.confirmed}
-              <p class="muted">Confirmed {passive.confirmed.url} · {when(passive.confirmed.confirmed_at)}</p>
+              <p class="muted">Confirmed {passive.confirmed.url} · {when(passive.confirmed.confirmed_at)}{passive.confirmed.scheduled_active ? ' · scheduled active enabled' : ''}</p>
             {/if}
           {:else}
             <p class="muted">Set OTTO_SECURITY_URL in a saved run configuration for this project.</p>
@@ -404,9 +448,9 @@
       {#if overview?.schedule && !showSettings}
         <p class="muted">Next scan {overview.schedule.next_runs[0] ? when(overview.schedule.next_runs[0], overview.schedule.timezone) : 'unavailable'} · {overview.schedule.timezone}</p>
       {/if}
-      {#if overview?.engine || overview?.opengrep}
+      {#if overview?.engine || overview?.opengrep || overview?.nuclei}
         <div class="engine-list">
-          {#each [['Trivy', overview.engine], ['Opengrep', overview.opengrep]] as [name, metadata] (name)}
+          {#each [['Trivy', overview.engine], ['Opengrep', overview.opengrep], ['Nuclei', overview.nuclei]] as [name, metadata] (name)}
             {#if typeof metadata === 'object' && metadata}
               <span>{name} {metadata.version} · updated {when(metadata.updated_at)}</span>
             {/if}

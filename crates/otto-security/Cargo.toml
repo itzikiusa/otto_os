@@ -28,6 +28,7 @@ tempfile = { workspace = true }
 tokio = { workspace = true }
 tokio-util = "0.7"
 tracing = { workspace = true }
+zip = { version = "9.2.0", default-features = false, features = ["deflate"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"

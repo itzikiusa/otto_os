@@ -27,6 +27,7 @@ pub(crate) struct Engine {
 pub(crate) enum EngineKind {
     Trivy,
     Opengrep,
+    Nuclei,
 }
 
 impl EngineKind {
@@ -34,6 +35,7 @@ impl EngineKind {
         match self {
             Self::Trivy => "trivy",
             Self::Opengrep => "opengrep",
+            Self::Nuclei => "nuclei",
         }
     }
 
@@ -41,6 +43,7 @@ impl EngineKind {
         match self {
             Self::Trivy => "aquasecurity/trivy",
             Self::Opengrep => "opengrep/opengrep",
+            Self::Nuclei => "projectdiscovery/nuclei",
         }
     }
 
@@ -50,6 +53,8 @@ impl EngineKind {
             (Self::Trivy, "x86_64") => Ok(format!("trivy_{version}_macOS-64bit.tar.gz")),
             (Self::Opengrep, "aarch64") => Ok("opengrep_osx_arm64".into()),
             (Self::Opengrep, "x86_64") => Ok("opengrep_osx_x86".into()),
+            (Self::Nuclei, "aarch64") => Ok(format!("nuclei_{version}_macOS_arm64.zip")),
+            (Self::Nuclei, "x86_64") => Ok(format!("nuclei_{version}_macOS_amd64.zip")),
             _ => Err(Error::Invalid(
                 "This scanner is unavailable on this architecture.".into(),
             )),
@@ -65,8 +70,47 @@ impl Engine {
         }
     }
 
+    pub(crate) fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     pub(crate) async fn status(&self) -> Option<EngineVersion> {
         read_json(&self.dir.join("engine.json")).await
+    }
+
+    pub(crate) async fn prepare_binary(
+        &self,
+        timeout: Duration,
+        cancel: &CancellationToken,
+    ) -> Result<(EngineVersion, PathBuf)> {
+        tokio::fs::create_dir_all(&self.dir)
+            .await
+            .map_err(io_error)?;
+        let client = download::client()?;
+        let updates = cancel.child_token();
+        let prepared = self.refresh_release(&client, &updates);
+        tokio::pin!(prepared);
+        let mut interrupted = None;
+        let result = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                interrupted = Some(cancelled());
+                None
+            }
+            _ = tokio::time::sleep(timeout) => {
+                updates.cancel();
+                interrupted = Some(Error::internal_public("Scanner preparation reached the time limit."));
+                None
+            }
+            result = &mut prepared => Some(result),
+        };
+        if let Some(error) = interrupted {
+            let _ = prepared.await;
+            return Err(error);
+        }
+        let version = result.expect("preparation completed")?;
+        let program = self.binary(&version.version)?;
+        Ok((version, program))
     }
 
     pub(crate) async fn execute<Fut>(
@@ -227,6 +271,7 @@ impl Engine {
                 &path,
                 rules.as_ref().expect("prepared Opengrep rules"),
             ),
+            EngineKind::Nuclei => unreachable!("Nuclei runs through dast::run"),
         })
         .await
         .map_err(|_| Error::Internal("security report worker stopped".into()))??;
@@ -358,15 +403,17 @@ impl Engine {
         let stage = tempfile::tempdir_in(dir).map_err(io_error)?;
         let payload = stage.path().join("release");
         fetch(client.get(url), &payload, digest, 256 * MIB, cancel).await?;
-        let stage = if self.kind == EngineKind::Trivy {
-            unpack(stage, payload, &["trivy"], 512 * MIB, cancel).await?
-        } else {
-            stage
+        let stage = match self.kind {
+            EngineKind::Trivy => unpack(stage, payload, &["trivy"], 512 * MIB, cancel).await?,
+            EngineKind::Nuclei => {
+                unpack_zip(stage, payload, &["nuclei"], 512 * MIB, cancel).await?
+            }
+            EngineKind::Opengrep => stage,
         };
-        let executable = stage.path().join(if self.kind == EngineKind::Trivy {
-            "trivy"
-        } else {
-            "release"
+        let executable = stage.path().join(match self.kind {
+            EngineKind::Trivy => "trivy",
+            EngineKind::Nuclei => "nuclei",
+            EngineKind::Opengrep => "release",
         });
         #[cfg(unix)]
         {
@@ -591,6 +638,22 @@ async fn unpack(
     let cancel = cancel.clone();
     tokio::task::spawn_blocking(move || {
         download::extract(&archive, stage.path(), names, limit, &cancel)?;
+        Ok(stage)
+    })
+    .await
+    .map_err(|_| Error::Internal("security download worker stopped".into()))?
+}
+
+async fn unpack_zip(
+    stage: tempfile::TempDir,
+    archive: PathBuf,
+    names: &'static [&'static str],
+    limit: u64,
+    cancel: &CancellationToken,
+) -> Result<tempfile::TempDir> {
+    let cancel = cancel.clone();
+    tokio::task::spawn_blocking(move || {
+        download::extract_zip(&archive, stage.path(), names, limit, &cancel)?;
         Ok(stage)
     })
     .await

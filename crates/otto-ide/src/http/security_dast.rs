@@ -1,12 +1,15 @@
 use std::path::PathBuf;
 
+use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::{Extension, Json};
 use otto_core::auth::AuthUser;
 use otto_core::domain::{Capability, Feature, User};
 use otto_core::{Error, Result};
-use otto_security::passive::{self, Candidate, ConfirmTarget, ProjectPassive, Target};
+use otto_security::passive::{
+    self, Candidate, ConfirmTarget, ProjectPassive, RunDastRequest, Target,
+};
 use otto_security::ScanSummary;
 
 use super::{security::project_roots, ApiResult};
@@ -140,7 +143,15 @@ pub(super) async fn start<S: IdeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<String>,
+    body: Bytes,
 ) -> ApiResult<(StatusCode, Json<ScanSummary>)> {
+    let request: RunDastRequest = if body.is_empty() {
+        RunDastRequest::default()
+    } else {
+        serde_json::from_slice(&body)
+            .map_err(|_| Error::Invalid("Invalid DAST run options.".into()))?
+    };
+    let active = request.active;
     let roots = project_roots(&ctx, &user, &id).await?;
     let (expected, _) = eligible(&ctx, &user, &id, &roots, false)
         .await?
@@ -150,6 +161,7 @@ pub(super) async fn start<S: IdeCtx>(
             )
         })?;
     let service = ctx.ide().security.clone();
+    let runner = service.clone();
     let job_ctx = ctx.clone();
     let project = id.clone();
     let scan = service
@@ -160,7 +172,7 @@ pub(super) async fn start<S: IdeCtx>(
                 let ctx = ctx.clone();
                 async move { ctx.security_scan_busy().await }
             },
-            move |_, cancel, _| async move {
+            move |settings, cancel, _| async move {
                 let roots = project_roots(&job_ctx, &user, &project).await?;
                 let (target, root) = eligible(&job_ctx, &user, &project, &roots, false)
                     .await?
@@ -170,7 +182,9 @@ pub(super) async fn start<S: IdeCtx>(
                             "The confirmed target or its running configuration changed.".into(),
                         )
                     })?;
-                let (run, findings) = passive::run(&target, &root, &cancel).await?;
+                let (run, findings) = runner
+                    .run_dast(&target, &root, &settings, active, &cancel)
+                    .await?;
                 Ok((vec![run], findings))
             },
         )
@@ -210,15 +224,50 @@ pub(super) async fn enqueue_scheduled<S: IdeCtx>(
                         .filter(|(target, _)| {
                             target.confirmed_at == expected.confirmed_at
                                 && target.url == expected.url
+                                && target.scheduled_active == expected.scheduled_active
                         })
                     {
-                        match passive::run(&target, &root, &cancel).await {
+                        match worker
+                            .run_dast(&target, &root, &settings, false, &cancel)
+                            .await
+                        {
                             Ok((run, mut extra)) => {
                                 runs.push(run);
                                 findings.append(&mut extra);
                             }
                             Err(error) => {
+                                if cancel.is_cancelled() {
+                                    return Err(error);
+                                }
                                 tracing::warn!(%error, "scheduled passive audit did not complete")
+                            }
+                        }
+                        if target.scheduled_active {
+                            otto_security::wait_for_idle(&busy, &cancel).await?;
+                            if let Some((target, root)) =
+                                eligible(&job_ctx, &user, &project, &roots, true)
+                                    .await?
+                                    .filter(|(target, _)| {
+                                        target.confirmed_at == expected.confirmed_at
+                                            && target.url == expected.url
+                                            && target.scheduled_active
+                                    })
+                            {
+                                match worker
+                                    .run_dast(&target, &root, &settings, true, &cancel)
+                                    .await
+                                {
+                                    Ok((run, mut extra)) => {
+                                        runs.push(run);
+                                        findings.append(&mut extra);
+                                    }
+                                    Err(error) => {
+                                        if cancel.is_cancelled() {
+                                            return Err(error);
+                                        }
+                                        tracing::warn!(%error, "scheduled active DAST did not complete")
+                                    }
+                                }
                             }
                         }
                     }

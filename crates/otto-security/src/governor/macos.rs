@@ -10,6 +10,7 @@ use super::*;
 
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(100);
 pub(super) const REPORT_LIMIT: u64 = 32 * 1024 * 1024;
+const TEMPLATE_UPDATE_FSIZE_LIMIT: u64 = 256 * 1024 * 1024;
 
 struct Group(libc::pid_t);
 
@@ -29,13 +30,43 @@ pub(crate) async fn run(
     settings: &ScanSettings,
     cancel: &CancellationToken,
 ) -> Result<ScanMetrics> {
+    run_with_network(
+        program,
+        args,
+        project,
+        cache,
+        output,
+        settings,
+        NetworkScope::Offline,
+        cancel,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_with_network(
+    program: &Path,
+    args: &[String],
+    project: &Path,
+    cache: &Path,
+    output: &Path,
+    settings: &ScanSettings,
+    network: NetworkScope,
+    cancel: &CancellationToken,
+) -> Result<ScanMetrics> {
     if cancel.is_cancelled() {
         return Err(cancelled());
     }
     let tool_dir = program
         .parent()
         .ok_or_else(|| Error::Internal("scanner executable has no parent directory".into()))?;
-    let policy = SandboxPolicy::for_offline_scan(project, tool_dir, cache, output);
+    let policy = match network {
+        NetworkScope::Offline => SandboxPolicy::for_offline_scan(project, tool_dir, cache, output),
+        NetworkScope::LoopbackPort(port) => {
+            SandboxPolicy::for_dast_scan(tool_dir, cache, output, port)
+        }
+        NetworkScope::TemplateUpdate => SandboxPolicy::for_template_update(tool_dir, cache, output),
+    };
     let (launcher, args) = policy.wrap(&program.to_string_lossy(), args);
     let mut command = Command::new("/usr/sbin/taskpolicy");
     command
@@ -46,6 +77,8 @@ pub(crate) async fn run(
         .env("HOME", output)
         .env("TMPDIR", output)
         .env("XDG_CACHE_HOME", output)
+        .env("XDG_CONFIG_HOME", output)
+        .env("NUCLEI_TEMPLATES_DIR", cache)
         .env("GOMAXPROCS", settings.parallelism.to_string())
         .env("GOMEMLIMIT", format!("{}MiB", settings.memory_mib / 2))
         .env("GOENV", "off")
@@ -63,11 +96,15 @@ pub(crate) async fn run(
 
     let timeout = Duration::from_secs(u64::from(settings.timeout_secs));
     let cpu_limit = timeout.as_secs() * u64::from(settings.parallelism);
+    let fsize_limit = match network {
+        NetworkScope::TemplateUpdate => TEMPLATE_UPDATE_FSIZE_LIMIT,
+        NetworkScope::Offline | NetworkScope::LoopbackPort(_) => REPORT_LIMIT,
+    };
     // Only async-signal-safe calls run in the forked child before exec.
     unsafe {
         command.pre_exec(move || {
             limit(libc::RLIMIT_CPU, cpu_limit)?;
-            limit(libc::RLIMIT_FSIZE, REPORT_LIMIT)
+            limit(libc::RLIMIT_FSIZE, fsize_limit)
         });
     }
 

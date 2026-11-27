@@ -5,21 +5,53 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{ScanMetrics, ScanSettings};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NetworkScope {
+    Offline,
+    LoopbackPort(u16),
+    TemplateUpdate,
+}
+
 #[cfg(target_os = "macos")]
 #[path = "governor/macos.rs"]
 mod platform;
 
 #[cfg(target_os = "macos")]
-pub(crate) use platform::run;
+pub(crate) use platform::{run, run_with_network};
 
 #[cfg(not(target_os = "macos"))]
 pub(crate) async fn run(
+    program: &Path,
+    args: &[String],
+    project: &Path,
+    cache: &Path,
+    output: &Path,
+    settings: &ScanSettings,
+    cancel: &CancellationToken,
+) -> Result<ScanMetrics> {
+    run_with_network(
+        program,
+        args,
+        project,
+        cache,
+        output,
+        settings,
+        NetworkScope::Offline,
+        cancel,
+    )
+    .await
+}
+
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_with_network(
     _program: &Path,
     _args: &[String],
     _project: &Path,
     _cache: &Path,
     _output: &Path,
     _settings: &ScanSettings,
+    _network: NetworkScope,
     _cancel: &CancellationToken,
 ) -> Result<ScanMetrics> {
     Err(Error::Invalid(
@@ -98,5 +130,74 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
         panic!("engine descendant survived cancellation");
+    }
+
+    #[tokio::test]
+    async fn dast_sandbox_allows_only_proxy_port_blocks_writes_and_kills_group_on_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let project = root.join("project");
+        let templates = root.join("templates");
+        let output = root.join("output");
+        for path in [&project, &templates, &output] {
+            std::fs::create_dir(path).unwrap();
+        }
+        let allowed_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let allowed_port = allowed_listener.local_addr().unwrap().port();
+        let blocked_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let blocked_port = blocked_listener.local_addr().unwrap().port();
+        let accept_allowed = tokio::spawn(async move { allowed_listener.accept().await.is_ok() });
+
+        let marker = output.join("pid");
+        let args = vec![
+            "-c".into(),
+            format!(
+                "if touch '{}/bad' || touch '{}/bad' || nc -z 127.0.0.1 {blocked_port}; then exit 10; fi; \
+                 nc -z 127.0.0.1 {allowed_port} || exit 11; \
+                 sleep 60 & echo $! > '{}'; wait",
+                project.display(),
+                templates.display(),
+                marker.display(),
+            ),
+        ];
+        let token = CancellationToken::new();
+        let settings = ScanSettings {
+            timeout_secs: 2,
+            ..Default::default()
+        };
+        let result = run_with_network(
+            Path::new("/bin/sh"),
+            &args,
+            &project,
+            &templates,
+            &output,
+            &settings,
+            NetworkScope::LoopbackPort(allowed_port),
+            &token,
+        )
+        .await;
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("reached the scan time limit"),
+            "expected timeout kill"
+        );
+        assert!(accept_allowed.await.unwrap());
+        assert!(!project.join("bad").exists());
+        assert!(!templates.join("bad").exists());
+        let pid: libc::pid_t = tokio::fs::read_to_string(&marker)
+            .await
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        for _ in 0..100 {
+            if unsafe { libc::kill(pid, 0) } == -1 {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!("DAST engine descendant survived timeout");
     }
 }

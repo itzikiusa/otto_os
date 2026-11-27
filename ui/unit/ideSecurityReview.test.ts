@@ -16,7 +16,7 @@ function project(scans: SecurityScanSummary[] = []): ProjectScans {
   return {
     settings: { checks: ['sast'], excludes: ['generated/**'], parallelism: 1, memory_mib: 1024, timeout_secs: 180 },
     schedule: { cron: '0 9 * * *', timezone: 'UTC', next_runs: ['2026-11-28T09:00:00Z'] },
-    scans, baseline: null, engine: null, opengrep: null,
+    scans, baseline: null, engine: null, opengrep: null, nuclei: null,
   };
 }
 
@@ -95,7 +95,7 @@ test('the Security overflow menu uses the selected scan and baseline state', () 
   let opened = false;
   const overview = project();
   const state = componentFunctions(security, ['securityMore'], {
-    overview, detail: { scan: running }, acting: false,
+    overview, detail: { scan: running }, acting: false, passiveRunReady: false,
     importInput: { click() { opened = true; } }, exportSarif() {}, selectBaseline() {},
   });
   const choices = state.securityMore();
@@ -108,4 +108,88 @@ test('the Security overflow menu uses the selected scan and baseline state', () 
   overview.baseline = completed.id;
   assert.equal(state.securityMore()[1].disabled, false);
   assert.equal(state.securityMore()[2].label, 'Clear baseline');
+});
+
+test('active DAST asks for explicit confirmation before posting active: true and passive remains default', async () => {
+  const posts: Array<{ path: string; body?: unknown }> = [];
+  const prompts: Array<{ message: string; title?: string }> = [];
+  let accept = false;
+  const confirmed = {
+    run_config_id: 'cfg-1',
+    url: 'http://127.0.0.1:3000/app',
+    allow_public: false,
+    scheduled: false,
+    scheduled_active: false,
+    confirmed_at: '2026-11-27T12:00:00Z',
+  };
+  const state = componentFunctions(security, ['runActiveDast', 'runPassive', 'securityMore', 'action'], {
+    base: '/security',
+    acting: false,
+    error: '',
+    passiveLoading: false,
+    active: undefined,
+    passiveRunReady: true,
+    passive: { confirmed, candidates: [{ run_config_id: 'cfg-1', run_config_name: 'Dev', url: confirmed.url, public: false }] },
+    overview: project(),
+    detail: { scan: completed },
+    importInput: { click() {} },
+    exportSarif() {},
+    selectBaseline() {},
+    loadErrorText: String,
+    refresh: async () => {},
+    confirmer: {
+      async ask(message: string, opts?: { title?: string }) {
+        prompts.push({ message, title: opts?.title });
+        return accept;
+      },
+    },
+    api: {
+      async post(path: string, body?: unknown) {
+        posts.push({ path, body });
+        return { id: 'scan-active' };
+      },
+    },
+  });
+
+  // Overflow menu includes active scan only when target is confirmed and ready.
+  assert.ok(state.securityMore().some((item: { label: string }) => item.label === 'Run active scan (Nuclei)…'));
+
+  // Declining confirmation sends nothing.
+  await state.runActiveDast();
+  assert.equal(prompts.length, 1);
+  assert.match(prompts[0].message, /test HTTP requests/i);
+  assert.equal(posts.length, 0);
+
+  // Accepting confirmation posts { active: true }.
+  accept = true;
+  await state.runActiveDast();
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].path, '/security/dast/run');
+  assert.equal(JSON.stringify(posts[0].body), '{"active":true}');
+
+  // Passive run sends no active opt-in.
+  state.runPassive();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(posts.length, 2);
+  assert.equal(posts[1].path, '/security/dast/run');
+  assert.equal(posts[1].body, undefined);
+});
+
+test('latestFileScan ignores both passive HTTP and Nuclei DAST-only scans', () => {
+  const { latestFileScan } = loadSource(
+    new URL('../src/modules/ide/security/projectSecurityData.ts', import.meta.url),
+    { '../../../lib/api/client': { api: {} } },
+    {}, { relative: true },
+  );
+  const engine = (name: string) => ({
+    name,
+    version: { version: '1.0.0', updated_at: '2026-11-27T12:00:00Z', checked_at: '2026-11-27T12:00:00Z' },
+    metrics: { wall_ms: 10, peak_cpu_percent: 1, peak_rss_bytes: 1024 },
+    mode: 'full' as const,
+  });
+  const nucleiOnly: SecurityScanSummary = { ...completed, id: 'n1', engines: [engine('nuclei')] };
+  const passiveOnly: SecurityScanSummary = { ...completed, id: 'p1', engines: [engine('otto-passive-http')] };
+  const sastScan: SecurityScanSummary = { ...completed, id: 's1', engines: [engine('opengrep')] };
+  assert.equal(latestFileScan([nucleiOnly, passiveOnly, sastScan])?.id, 's1');
+  assert.equal(latestFileScan([nucleiOnly, passiveOnly]), undefined);
 });

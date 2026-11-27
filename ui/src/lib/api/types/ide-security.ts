@@ -65,6 +65,7 @@ export interface ProjectScans {
   engine: SecurityEngineVersion | null;
   scans: SecurityScanSummary[];
   opengrep: SecurityEngineVersion | null;
+  nuclei: SecurityEngineVersion | null;
   schedule: SecuritySchedule | null;
   baseline: string | null;
 }
@@ -97,6 +98,7 @@ export interface PassiveAuditTarget {
   url: string;
   allow_public: boolean;
   scheduled: boolean;
+  scheduled_active?: boolean;
   confirmed_at: string;
 }
 
@@ -106,3 +108,7 @@ export interface ProjectPassiveAudit {
 }
 
 export type ConfirmPassiveAudit = Omit<PassiveAuditTarget, 'confirmed_at'>;
+
+export interface RunDastRequest {
+  active?: boolean;
+}

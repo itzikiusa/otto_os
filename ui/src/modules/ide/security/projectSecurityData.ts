@@ -17,7 +17,8 @@ export function diagnostics(detail: SecurityScanDetail): IdeDiagnostic[] {
 
 export function latestFileScan(scans: SecurityScanSummary[]): SecurityScanSummary | undefined {
   return scans.find((scan) => scan.status === 'completed'
-    && (scan.engines.length === 0 || scan.engines.some((engine) => engine.name !== 'otto-passive-http')));
+    && (scan.engines.length === 0
+      || scan.engines.some((engine) => engine.name !== 'otto-passive-http' && engine.name !== 'nuclei')));
 }
 
 export function scanDetailChanged(previous: SecurityScanSummary | undefined, next: SecurityScanSummary | undefined): boolean {

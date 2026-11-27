@@ -132,6 +132,7 @@ pub(crate) async fn list(pool: &DbPool, project: &str) -> Result<ProjectScans> {
         engine: None,
         scans,
         opengrep: None,
+        nuclei: None,
         schedule: crate::schedule::get(pool, project).await?,
         baseline: crate::preferences::baseline(pool, project).await?,
     })

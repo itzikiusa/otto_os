@@ -18,6 +18,7 @@ use crate::{
 pub struct SecurityScans {
     engine: Engine,
     sast: Engine,
+    dast: Engine,
     queue: Semaphore,
     shutdown: CancellationToken,
     init: OnceCell<()>,
@@ -34,6 +35,7 @@ impl SecurityScans {
         Self {
             engine: Engine::new(toolchains, EngineKind::Trivy),
             sast: Engine::new(toolchains, EngineKind::Opengrep),
+            dast: Engine::new(toolchains, EngineKind::Nuclei),
             queue: Semaphore::new(1),
             shutdown: CancellationToken::new(),
             init: OnceCell::new(),
@@ -51,7 +53,25 @@ impl SecurityScans {
         let mut status = store::list(pool, project).await?;
         status.engine = self.engine.status().await;
         status.opengrep = self.sast.status().await;
+        status.nuclei = self.dast.status().await;
         Ok(status)
+    }
+
+    /// Runs the confirmed DAST check. Passive HTTP header audit is the default
+    /// (`active == false`), and Nuclei is only invoked when `active == true`.
+    pub async fn run_dast(
+        &self,
+        target: &crate::passive::Target,
+        root: &Path,
+        settings: &ScanSettings,
+        active: bool,
+        cancel: &CancellationToken,
+    ) -> Result<(EngineRun, Vec<Finding>)> {
+        if active {
+            crate::dast::run(&self.dast, target, root, settings, cancel).await
+        } else {
+            crate::passive::run(target, root, cancel).await
+        }
     }
 
     pub async fn configure(
@@ -402,9 +422,13 @@ printf '%s' '{"Results":[]}' > "$2"
             .await
             .unwrap();
         let observed = tokio::time::timeout(Duration::from_secs(5), yielded.notified()).await;
-        let files = std::fs::read_dir(cache)
-            .expect("first folder did not complete")
-            .count();
+        let mut entries = tokio::fs::read_dir(cache)
+            .await
+            .expect("first folder did not complete");
+        let mut files = 0;
+        while entries.next_entry().await.unwrap().is_some() {
+            files += 1;
+        }
         assert!(
             observed.is_ok(),
             "checked no load after first folder; {files} folders completed"

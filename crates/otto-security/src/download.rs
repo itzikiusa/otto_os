@@ -175,6 +175,71 @@ pub(crate) fn extract(
     Ok(())
 }
 
+pub(crate) fn extract_zip(
+    archive: &Path,
+    dir: &Path,
+    names: &[&str],
+    limit: u64,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    let _background = BackgroundThread::enter();
+    let file = File::open(archive).map_err(io_error)?;
+    let mut zip =
+        zip::ZipArchive::new(file).map_err(|_| upstream("The scanner archive was unreadable."))?;
+    let mut found = 0usize;
+    let mut total = 0u64;
+    for index in 0..zip.len() {
+        if cancel.is_cancelled() {
+            return Err(cancelled());
+        }
+        let mut entry = zip
+            .by_index(index)
+            .map_err(|_| upstream("The scanner archive contains an invalid entry."))?;
+        let Some(path) = entry.enclosed_name() else {
+            continue;
+        };
+        let Some(name) = names.iter().find(|name| {
+            path == Path::new(name) || path.strip_prefix(".").ok() == Some(Path::new(name))
+        }) else {
+            continue;
+        };
+        if !entry.is_file() || entry.is_symlink() || entry.size() > limit {
+            return Err(upstream("The scanner archive contains an invalid asset."));
+        }
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(dir.join(name))
+            .map_err(io_error)?;
+        let mut buffer = [0; 64 * 1024];
+        let mut written = 0u64;
+        loop {
+            if cancel.is_cancelled() {
+                return Err(cancelled());
+            }
+            let len = entry.read(&mut buffer).map_err(io_error)?;
+            if len == 0 {
+                break;
+            }
+            written += len as u64;
+            total += len as u64;
+            if total > limit || written > entry.size() {
+                return Err(upstream("The scanner archive exceeded its size cap."));
+            }
+            output.write_all(&buffer[..len]).map_err(io_error)?;
+        }
+        if written != entry.size() {
+            return Err(upstream("The scanner archive contains a truncated asset."));
+        }
+        found += 1;
+    }
+    if found != names.len() {
+        return Err(upstream("The scanner archive is missing required assets."));
+    }
+    Ok(())
+}
+
 pub(crate) fn io_error(error: io::Error) -> Error {
     tracing::warn!(%error, "scanner file operation failed");
     Error::internal_public("Otto could not read or write the scanner's local files.")
@@ -238,5 +303,45 @@ mod tests {
             b"fixture executable bytes"
         );
         assert!(!output.join("ignored.txt").exists());
+    }
+
+    #[test]
+    fn extract_zip_only_writes_requested_regular_assets_and_enforces_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("fixture.zip");
+        let output = dir.path().join("output");
+        std::fs::create_dir(&output).unwrap();
+        let write_zip = |content: &[u8], with_binary: bool| {
+            let file = File::create(&archive).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            zip.start_file("README.md", opts).unwrap();
+            zip.write_all(b"ignored").unwrap();
+            if with_binary {
+                zip.start_file("nuclei", opts).unwrap();
+                zip.write_all(content).unwrap();
+            }
+            zip.finish().unwrap();
+        };
+        let cancel = CancellationToken::new();
+        write_zip(b"", false);
+        assert!(matches!(
+            extract_zip(&archive, &output, &["nuclei"], 4096, &cancel),
+            Err(Error::Upstream(_))
+        ));
+        write_zip(&[b'x'; 200], true);
+        assert!(matches!(
+            extract_zip(&archive, &output, &["nuclei"], 100, &cancel),
+            Err(Error::Upstream(_))
+        ));
+        assert!(!output.join("nuclei").exists());
+        write_zip(b"fixture nuclei binary", true);
+        extract_zip(&archive, &output, &["nuclei"], 4096, &cancel).unwrap();
+        assert_eq!(
+            std::fs::read(output.join("nuclei")).unwrap(),
+            b"fixture nuclei binary"
+        );
+        assert!(!output.join("README.md").exists());
     }
 }

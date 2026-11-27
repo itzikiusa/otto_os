@@ -1,5 +1,6 @@
 //! Security scans for named local IDE projects.
 
+mod dast;
 mod download;
 mod engine;
 mod governor;

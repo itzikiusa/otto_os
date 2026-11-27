@@ -1,6 +1,6 @@
 # IDE security scans
 
-Otto runs Trivy and Opengrep against local named IDE projects. A project can span several
+Otto runs Trivy, Opengrep, and (opt-in) Nuclei against local named IDE projects. A project can span several
 folders. They share one settings record, one scan history and one queue entry.
 
 ## Scan a project
@@ -29,28 +29,46 @@ Use **Import SARIF** and **Export SARIF** to exchange SARIF 2.1.0 results.
 Imports use project-relative file locations. The [IDE security API](../contracts/api.md#ide-project-security-scans)
 describes the settings and scan routes.
 
-## Audit a running HTTP service
+## Audit a running HTTP service (passive and opt-in active DAST)
 
 For a saved local project run configuration, set `OTTO_SECURITY_URL` in its
 environment overrides to the exact HTTP or HTTPS URL it serves. Start that
-configuration. In **Security → Settings → Passive HTTP audit**, select the
+configuration. In **Security → Settings → HTTP audit & DAST**, select the
 configuration and review the destination before confirming it. Public
 destinations require HTTPS and an explicit public-target confirmation.
 
-**Run passive audit** sends one HEAD request without credentials, cookies, a
-query string, or a body. The audit stays at the confirmed URL and checks the
-response's browser security headers and cookie attributes. The audit stores
-rule descriptions and fix hints without saving cookie values. It uses a
+**Run passive audit** (the default) sends one HEAD request without credentials,
+cookies, a query string, or a body. The audit stays at the confirmed URL and
+checks the response's browser security headers and cookie attributes. The audit
+stores rule descriptions and fix hints without saving cookie values. It uses a
 ten-second deadline and the project scan queue.
 Choose a URL that accepts unauthenticated HEAD requests and returns a success
 status. If the URL redirects, confirm the final URL instead.
 
-Enable **Include in scheduled scans** when confirming the URL to allow future
-scheduled audits while the same configuration is running. A changed URL,
-changed live configuration, or revoked confirmation prevents the previous
-approval from being used. Scheduled source scans can proceed when the service
-is unavailable. The built-in HTTP audit ships with Otto and has no separate
-runtime or database install.
+**Run active scan (Nuclei)…** (available from the **⋯** menu and the HTTP audit
+settings panel once a target is confirmed and running) is an explicit per-scan
+opt-in. Before starting, Otto confirms what active scanning does (sending test
+HTTP requests to the confirmed target). On macOS, Otto installs the latest
+ProjectDiscovery Nuclei release into `<data_dir>/toolchains/security-nuclei/`,
+verifies its archive against GitHub's published SHA-256 digest, and has Nuclei
+fetch templates into that engine directory (never your home directory). Active
+scans run under the same resource governor (CPU, RSS, worker count, wall-time
+limit, and whole-process-group cancellation) and macOS Seatbelt with outbound
+traffic confined to an `otto-netguard`-pinned loopback proxy for the single
+confirmed host and port. Dev-safe defaults apply: HTTP exposure templates only
+(`http/exposures/configs`, `http/exposures/files`, `http/exposures/apis`, and
+`http/exposures/logs`), severities `low` through `critical`,
+DoS/fuzzing/intrusive/brute-force tags excluded, Interactsh disabled,
+rate-limited to 20 req/s, and raw matched responses, extracted tokens, and URL
+query strings stripped or redacted before persistence.
+
+Enable **Include passive audit in scheduled scans** when confirming the URL to
+allow future scheduled passive audits while the same configuration is running.
+Scheduled active checks (**Include active Nuclei checks in scheduled scans**)
+are off by default and require explicit opt-in alongside scheduled passive
+audits. A changed URL, changed live configuration, or revoked confirmation
+prevents the previous approval from being used. Scheduled source scans can
+proceed when the service is unavailable.
 
 ## Coverage
 

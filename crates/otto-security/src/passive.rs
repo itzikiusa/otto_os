@@ -20,6 +20,8 @@ pub struct Target {
     pub url: String,
     pub allow_public: bool,
     pub scheduled: bool,
+    #[serde(default)]
+    pub scheduled_active: bool,
     pub confirmed_at: String,
 }
 
@@ -44,6 +46,14 @@ pub struct ConfirmTarget {
     pub url: String,
     pub allow_public: bool,
     pub scheduled: bool,
+    #[serde(default)]
+    pub scheduled_active: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RunDastRequest {
+    pub active: bool,
 }
 
 pub fn parse_url(raw: &str) -> Result<(Url, bool)> {
@@ -89,7 +99,7 @@ pub fn parse_url(raw: &str) -> Result<(Url, bool)> {
 
 pub async fn get(pool: &DbPool, project: &str) -> Result<Option<Target>> {
     sqlx::query_as(
-        "SELECT run_config_id, url, allow_public, scheduled, confirmed_at
+        "SELECT run_config_id, url, allow_public, scheduled, scheduled_active, confirmed_at
                     FROM ide_security_passive_targets WHERE project_id = ?",
     )
     .bind(project)
@@ -114,20 +124,35 @@ pub async fn confirm(
             "Confirm this public destination explicitly.".into(),
         ));
     }
+    if request.scheduled_active && !request.scheduled {
+        return Err(Error::Invalid(
+            "Enable scheduled audits before enabling scheduled active checks.".into(),
+        ));
+    }
     let target = Target {
         url: candidate.url,
         run_config_id: candidate.run_config_id,
         allow_public: candidate.public,
         scheduled: request.scheduled,
+        scheduled_active: request.scheduled_active,
         confirmed_at: now(),
     };
     sqlx::query(
-        "INSERT INTO ide_security_passive_targets (project_id, run_config_id, url, allow_public, scheduled, confirmed_at)
-         VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(project_id) DO UPDATE SET run_config_id = excluded.run_config_id,
+        "INSERT INTO ide_security_passive_targets (project_id, run_config_id, url, allow_public, scheduled, scheduled_active, confirmed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(project_id) DO UPDATE SET run_config_id = excluded.run_config_id,
          url = excluded.url, allow_public = excluded.allow_public, scheduled = excluded.scheduled,
-         confirmed_at = excluded.confirmed_at",
-    ).bind(project).bind(&target.run_config_id).bind(&target.url).bind(target.allow_public)
-        .bind(target.scheduled).bind(&target.confirmed_at).execute(pool).await.map_err(db_error)?;
+         scheduled_active = excluded.scheduled_active, confirmed_at = excluded.confirmed_at",
+    )
+    .bind(project)
+    .bind(&target.run_config_id)
+    .bind(&target.url)
+    .bind(target.allow_public)
+    .bind(target.scheduled)
+    .bind(target.scheduled_active)
+    .bind(&target.confirmed_at)
+    .execute(pool)
+    .await
+    .map_err(db_error)?;
     Ok(target)
 }
 
@@ -355,6 +380,7 @@ mod tests {
             url: candidate.url.clone(),
             allow_public: false,
             scheduled: false,
+            scheduled_active: false,
         };
         assert!(matches!(
             confirm(&pool, "audit-project", candidate.clone(), request).await,
@@ -365,10 +391,22 @@ mod tests {
             url: "https://example.org/changed".into(),
             allow_public: true,
             scheduled: false,
+            scheduled_active: false,
+        };
+        assert!(matches!(
+            confirm(&pool, "audit-project", candidate.clone(), request).await,
+            Err(Error::Conflict(_))
+        ));
+        request = ConfirmTarget {
+            run_config_id: "cfg".into(),
+            url: candidate.url.clone(),
+            allow_public: true,
+            scheduled: false,
+            scheduled_active: true,
         };
         assert!(matches!(
             confirm(&pool, "audit-project", candidate, request).await,
-            Err(Error::Conflict(_))
+            Err(Error::Invalid(_))
         ));
         assert!(get(&pool, "audit-project").await.unwrap().is_none());
     }
@@ -393,6 +431,7 @@ mod tests {
             run_config_id: "test".into(),
             allow_public: false,
             scheduled: false,
+            scheduled_active: false,
             confirmed_at: now(),
         };
         (target, server)

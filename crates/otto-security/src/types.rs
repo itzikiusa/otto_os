@@ -130,6 +130,7 @@ pub struct ProjectScans {
     pub engine: Option<EngineVersion>,
     pub scans: Vec<ScanSummary>,
     pub opengrep: Option<EngineVersion>,
+    pub nuclei: Option<EngineVersion>,
     pub schedule: Option<Schedule>,
     pub baseline: Option<String>,
 }
