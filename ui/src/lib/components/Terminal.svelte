@@ -100,6 +100,7 @@
     /** Output arrived laid out for ANOTHER viewer's grid: the adopter rebuilds
      *  from one snapshot once it sizes the PTY again. */
     gridDirty: boolean;
+    lastFocus: number;
   }
 
   /** What a `grid` frame tells a viewer: the PTY's real grid + who sizes it. */
@@ -138,7 +139,7 @@
     }
   }
 
-  const termPark = new TermPark<ParkedEngine>(disposeParked, undefined, undefined, undefined, undefined, parkedBytes);
+  const termPark = new TermPark<ParkedEngine>(disposeParked, undefined, undefined, undefined, undefined, parkedBytes, undefined, (e) => e.lastFocus);
 
   /** While parked the engine keeps up with its session on its own: bytes
    *  parse (the renderer is paused while detached), credit acks flow, snapshots
@@ -2256,8 +2257,7 @@
       lastCols,
       lastRows,
       needsCompact: needsCompact && preferDom,
-      grid: gridSync.pty ? { ...gridSync.pty, owner: gridSync.owner } : null,
-      gridDirty: gridSync.owed,
+      grid: gridSync.pty ? { ...gridSync.pty, owner: gridSync.owner } : null, gridDirty: gridSync.owed, lastFocus: gpuClient.lastFocus,
     };
     wireParked(key, e);
     termPark.put(key, e);
@@ -2305,7 +2305,7 @@
     gridSync.owed = e.gridDirty;
     // A snapshot the parked socket asked for has landed (or never will):
     // don't let that request suppress the rebuild this engine owes.
-    gridSync.snapshotAsked = false;
+    gridSync.snapshotAsked = false; gpuClient.lastFocus = Math.max(gpuClient.lastFocus, e.lastFocus);
     keyLat?.reset();
     connectedSid = sid;
     closedByUs = false;
@@ -2429,9 +2429,7 @@
       term?.selectAll();
       return true;
     });
-    // Mount-time focus (untracked: autoFocus/readOnly must not re-run this
-    // effect — a rebuild here tears down the whole GPU canvas + WS).
-    if (untrack(() => autoFocus && !readOnly) && !viewport.isPhone) term?.focus();
+    if (untrack(() => autoFocus && !readOnly) && !viewport.isPhone) { gpuClient.lastFocus = performance.now(); term?.focus(); }
     // ── Renderer selection: WebGL (GPU) on desktop, DOM as the fallback ──────
     // xterm draws to a WebGL canvas when WebglAddon is loaded; with no addon it
     // falls back to its DOM renderer (per-cell <span>s in `.xterm-rows`). The DOM
