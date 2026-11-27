@@ -60,6 +60,8 @@ class ActivityStore {
   /** session id -> why its trail/tasks load failed (cleared on success), so
    *  the Activity panel shows "Couldn’t load" + Retry, not an empty board. */
   loadErrorBySession: Record<string, string> = $state({});
+  /** session id -> its trail/tasks read is in flight (the panel's skeleton). */
+  loadingBySession: Record<string, boolean> = $state({});
   /** session ids we've already fetched once (avoid refetch churn) */
   private loaded = new Set<string>();
   private artifactsLoaded = new Set<string>();
@@ -109,6 +111,7 @@ class ActivityStore {
     this.artifactsLoaded.clear();
     this.invalidateReads();
     this.artifactsLoadingBySession = {};
+    this.loadingBySession = {};
     const generation = ++this.recoveryGeneration;
     this.summaryRead++;
     this.summaryPending = false;
@@ -143,6 +146,7 @@ class ActivityStore {
     this.reads.get(sessionId)?.controller.abort();
     const read: ActivityRead = { token: getToken(), controller: new AbortController(), trail: [], addedTasks: new Map() };
     this.reads.set(sessionId, read);
+    this.loadingBySession[sessionId] = true;
     const current = () => this.reads.get(sessionId) === read && read.token === getToken();
     const base = `/workspaces/${workspaceId}/sessions/${sessionId}`;
     try {
@@ -164,7 +168,10 @@ class ActivityStore {
       this.loaded.delete(sessionId);
       this.loadErrorBySession[sessionId] = loadErrorText(e);
     } finally {
-      if (this.reads.get(sessionId) === read) this.reads.delete(sessionId);
+      if (this.reads.get(sessionId) === read) {
+        this.reads.delete(sessionId);
+        this.loadingBySession[sessionId] = false;
+      }
     }
   }
 
@@ -348,6 +355,7 @@ class ActivityStore {
     this.artifactsLoadingBySession = {};
     this.artifactsErrorBySession = {};
     this.loadErrorBySession = {};
+    this.loadingBySession = {};
     this.loaded.clear();
     this.artifactsLoaded.clear();
   }
@@ -368,6 +376,7 @@ class ActivityStore {
     delete this.artifactsBySession[sessionId];
     delete this.artifactsLoadingBySession[sessionId];
     delete this.artifactsErrorBySession[sessionId];
+    delete this.loadingBySession[sessionId];
     this.loaded.delete(sessionId);
     this.artifactsLoaded.delete(sessionId);
   }
