@@ -165,13 +165,18 @@ pub(super) fn discover_java(
             let mut scanned = 0usize;
             let mut mains = Vec::new();
             scan_jvm_mains(&src_dir, root, 0, &mut scanned, &mut mains);
-            for (fqcn, rel_path) in mains.into_iter().take(4) {
+            for (fqcn, rel_path, is_spring_boot) in mains.into_iter().take(4) {
                 let short = fqcn.rsplit('.').next().unwrap_or(&fqcn);
+                let label = if is_spring_boot {
+                    format!("Spring Boot: {short}")
+                } else {
+                    format!("Run {short}.main()")
+                };
                 let mut cfg = make_auto_config(
                     root_badge,
                     IdeRunnerKind::JavaMain,
                     &format!("main-{fqcn}"),
-                    format!("Run {short}.main()"),
+                    label,
                     None,
                     Vec::new(),
                     cwd.clone(),
@@ -189,7 +194,7 @@ fn scan_jvm_mains(
     workspace_root: &Path,
     depth: usize,
     scanned: &mut usize,
-    out: &mut Vec<(String, String)>,
+    out: &mut Vec<(String, String, bool)>,
 ) {
     if depth > 6 || *scanned >= 48 || out.len() >= 4 {
         return;
@@ -210,6 +215,9 @@ fn scan_jvm_mains(
                 let is_kt_main =
                     ext == "kt" && (head.contains("fun main(") || head.contains("fun main ()"));
                 if is_java_main || is_kt_main {
+                    let is_spring_boot = head.contains("@SpringBootApplication")
+                        || head.contains("SpringApplication.run(")
+                        || head.contains("runApplication<");
                     let stem = entry_path
                         .file_stem()
                         .and_then(|s| s.to_str())
@@ -233,7 +241,7 @@ fn scan_jvm_mains(
                         .unwrap_or(&entry_path)
                         .to_string_lossy()
                         .into_owned();
-                    out.push((fqcn, rel));
+                    out.push((fqcn, rel, is_spring_boot));
                 }
             }
         }

@@ -242,6 +242,7 @@ global system directories:
 |-----------|------------|
 | **Java / JVM** | Adoptium Temurin JDK (17, 21 LTS), Maven, Gradle, Eclipse `jdtls`, `java-debug-adapter` |
 | **Kotlin** | Kotlin Compiler (`kotlinc` / `KOTLIN_HOME`, SDKMAN / Homebrew / official archive), `kotlin-language-server`, `ktfmt` / `ktlint`, Gradle Kotlin DSL (`build.gradle.kts`) & Version Catalog (`gradle/libs.versions.toml`), mixed Java/Kotlin Maven & Gradle modules, JUnit 5 (incl. backtick names) & Kotest gutter runs, JVM JDWP debugging via `java-debug` |
+| **Spring Boot** | Auto-detected from `@SpringBootApplication`, `pom.xml`, and `build.gradle*`; Spring Boot run/debug configs & gutter icons with profile activation (`SPRING_PROFILES_ACTIVE` / `-Dspring-boot.run.profiles`), `application*.{properties,yml}` completion, hover, diagnostics + Quick Fixes, bidirectional `@Value` / `@ConfigurationProperties` ↔ config navigation, loopback-only Actuator inspector (Health, Endpoints/Mappings, Beans, redacted Env), and DevTools `.reloadtrigger` live restart |
 | **Python** | `uv`, standalone CPython (3.11 / 3.12 / 3.13), `pyright`, `ruff`, `debugpy` |
 | **Rust** | `rustup` (`rustc` + `cargo`), `rust-analyzer`, `CodeLLDB` (`codelldb`) |
 | **Zig** | Official Zig SDK tarball (`ziglang.org/download/index.json`, SHA-256 verified), local SDK registration, `zls` (Zig-version-matched), `CodeLLDB` (`codelldb`) / `lldb-dap` / built-in `otto-lldb-dap` with Zig LLDB type formatters |
@@ -827,6 +828,7 @@ Full schemas and route tables live in [`docs/contracts/api.md`](../contracts/api
   `GET /ide/toolchains/jobs/{job_id}`, `POST /ide/toolchains/python-venv`,
   `GET /ide/shell-env`, `POST /ide/shell-env/reload`, `POST /ide/deps/inspect`,
   `POST /ide/deps/action`, `POST /ide/build-tools/model`,
+  `POST /ide/spring/actuator`, `POST /ide/spring/devtools-restart`,
   `GET /ide/environments`, `PUT /ide/environments`,
   `POST /ide/environments/python-venv`, `POST /ide/run-configs`,
   `DELETE /ide/run-configs/{id}`.

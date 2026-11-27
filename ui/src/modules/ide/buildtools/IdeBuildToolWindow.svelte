@@ -4,8 +4,9 @@
   import { onDestroy } from 'svelte';
   import Badge from '../../../lib/components/Badge.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
-  import type { IdeMobileProject } from '../../../lib/api/types';
+  import type { IdeMobileProject, IdeSpringBootInfo } from '../../../lib/api/types';
   import { shortenHomePath } from '../../../lib/homePath';
+  import IdeSpringBootSection from './IdeSpringBootSection.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
   import { confirmer } from '../../../lib/confirm.svelte';
   import { loadErrorText } from '../../../lib/loadError';
@@ -31,7 +32,8 @@
   let springProfiles = $state<string[]>([]);
   let modules = $state<IdeBuildToolModule[]>([]);
   let mobileProjects = $state<IdeMobileProject[]>([]);
-  let expanded = $state<Record<string, boolean>>({ profiles: false });
+  let springBoot = $state<IdeSpringBootInfo | null>(null);
+  let expanded = $state<Record<string, boolean>>({ profiles: false, springBoot: true });
 
   const labelTitle = $derived((ide.buildToolKind ?? tool) === 'gradle' ? 'Gradle' : 'Maven');
   const badgeMark = $derived((ide.buildToolKind ?? tool) === 'gradle' ? 'G' : 'm');
@@ -47,6 +49,7 @@
       profiles = [];
       springProfiles = [];
       modules = [];
+      springBoot = null;
       return;
     }
     const targetSig = currentTargetSig();
@@ -61,6 +64,7 @@
       springProfiles = res.springProfiles;
       modules = res.modules;
       mobileProjects = res.mobileProjects;
+      springBoot = res.springBoot;
       const nextExp = { ...expanded };
       if (modules.length <= 4) {
         for (const m of modules) {
@@ -396,6 +400,14 @@
           </div>
         {/if}
       </div>
+
+      {#if springBoot?.detected}
+        <IdeSpringBootSection
+          info={springBoot}
+          open={Boolean(expanded.springBoot)}
+          ontoggle={() => toggleNode('springBoot')}
+        />
+      {/if}
 
       {#if visibleMobileProjects.length > 0}
         {#each visibleMobileProjects as mp (`${mp.framework}:${mp.root_dir}`)}

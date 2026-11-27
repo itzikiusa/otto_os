@@ -281,10 +281,17 @@ pub(super) fn detect_java(path: &str, dir: &str, content: &str, out: &mut Vec<Id
                 .map(|(c, _)| c.as_str())
                 .unwrap_or("Main");
             let fqcn = qualify_java(&package_name, cls_name);
+            let is_spring = content.contains("@SpringBootApplication")
+                || content.contains("SpringApplication.run(");
+            let label = if is_spring {
+                format!("Spring Boot {cls_name}")
+            } else {
+                format!("{cls_name}.main()")
+            };
             out.push(IdeGutterItem {
                 line: line_no,
                 kind: IdeGutterKind::Main,
-                label: format!("{cls_name}.main()"),
+                label,
                 language: "java".into(),
                 run_spec: IdeQuickRunSpec {
                     runner: IdeRunnerKind::JavaMain,
@@ -540,10 +547,18 @@ pub(super) fn detect_kotlin(path: &str, dir: &str, content: &str, out: &mut Vec<
                     .unwrap_or(top_level_cls.as_str())
             };
             let fqcn = qualify_java(&package_name, cls_name);
+            let is_spring = content.contains("@SpringBootApplication")
+                || content.contains("SpringApplication.run(")
+                || content.contains("runApplication<");
+            let label = if is_spring {
+                format!("Spring Boot {cls_name}")
+            } else {
+                format!("{cls_name}.main()")
+            };
             out.push(IdeGutterItem {
                 line: line_no,
                 kind: IdeGutterKind::Main,
-                label: format!("{cls_name}.main()"),
+                label,
                 language: "kotlin".into(),
                 run_spec: IdeQuickRunSpec {
                     runner: IdeRunnerKind::JavaMain,

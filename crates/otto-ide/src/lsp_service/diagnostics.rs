@@ -80,6 +80,14 @@ pub async fn diagnostics<S: IdeCtx>(
         }
     }
 
+    // Spring Boot `application*.{properties,yml,yaml}` diagnostics (deprecated keys + Quick Fix,
+    // duplicate `.properties` keys, integer/boolean/enum validation).
+    if crate::spring_boot::props::is_spring_config_path(&req.path) {
+        let diags =
+            crate::spring_boot::props::analyze_spring_config_diagnostics(&req.path, &content);
+        return Ok(IdeDiagnosticsResp { diagnostics: diags });
+    }
+
     // Lazily materialize toolchain/project environment variables ONLY for languages whose
     // diagnostic analyzers actually read `env_map` (`java`, `go`, `python`).
     let diags = match lang.as_str() {

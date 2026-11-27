@@ -8,7 +8,7 @@ summary: Multi-language IDE with rectangular & multi-cursor editing, LSP navigat
 
 ## What it's for
 
-**IDE** brings JetBrains-grade code editing, navigation, testing and step-through debugging directly into Otto for **Java**, **Kotlin**, **Go**, **Rust**, **Zig**, **C / C++ & Unreal Engine**, **JavaScript / TypeScript** and **Python** — locally or over an SSH connection, with zero external window switching.
+**IDE** brings JetBrains-grade code editing, navigation, testing and step-through debugging directly into Otto for **Java & Spring Boot**, **Kotlin**, **Go**, **Rust**, **Zig**, **C / C++ & Unreal Engine**, **JavaScript / TypeScript** and **Python** — locally or over an SSH connection, with zero external window switching.
 
 ## Getting started
 

@@ -470,7 +470,7 @@ including behaviour changes to know before upgrading.
   hand over and reclaim terminal control at any moment, and generate a local
   structured recap (decisions, actions, open questions) once participants consent.
 - **IDE (Beta)** — a multi-language IDE (`#/ide`) on your local or SSH
-  projects (Go, Java, Kotlin, Rust, Zig, C/C++ & Unreal Engine, TypeScript/JS, Python, Shell): language servers
+  projects (Go, Java & Spring Boot, Kotlin, Rust, Zig, C/C++ & Unreal Engine, TypeScript/JS, Python, Shell): language servers
   (`gopls`, `jdtls`, `kotlin-language-server`, `rust-analyzer`, `zls`, `clangd`, `pyright`, `tsserver`), header/source switch (`⌥O`), a git gutter,
   run configurations (CMake/CTest, Meson, Make, Unreal, Go, Cargo, Zig, Maven/Gradle, pytest, npm) with live output and test trees, a DAP debugger with
   breakpoints, watches, variable editing, PID/core attach, and an agent dock that proposes diffs

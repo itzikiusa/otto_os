@@ -427,6 +427,87 @@ export interface IdeMobileProject {
   tasks: string[];
 }
 
+export interface IdeSpringBootApp {
+  name: string;
+  main_class: string;
+  file_path: string;
+  language: string;
+}
+
+export interface IdeSpringBootInfo {
+  detected: boolean;
+  apps: IdeSpringBootApp[];
+  profiles: string[];
+  config_files: string[];
+  server_port: number;
+  management_port?: number | null;
+  actuator_base_path: string;
+  actuator_url: string;
+  has_actuator: boolean;
+  has_devtools: boolean;
+  trigger_file?: string | null;
+}
+
+export interface IdeSpringActuatorReq {
+  target?: IdeTargetSpec | null;
+  base_url?: string | null;
+  port?: number | null;
+  base_path?: string | null;
+}
+
+export interface IdeSpringHealthComponent {
+  name: string;
+  status: string;
+  detail?: string | null;
+}
+
+export interface IdeSpringEndpoint {
+  method: string;
+  path: string;
+  handler: string;
+  produces: string[];
+  consumes: string[];
+}
+
+export interface IdeSpringBean {
+  name: string;
+  bean_type: string;
+  scope: string;
+  context: string;
+  dependencies: string[];
+}
+
+export interface IdeSpringEnvProp {
+  key: string;
+  value: string;
+  source: string;
+  redacted: boolean;
+}
+
+export interface IdeSpringActuatorResp {
+  base_url: string;
+  reachable: boolean;
+  status?: string | null;
+  active_profiles: string[];
+  available_links: string[];
+  health_components: IdeSpringHealthComponent[];
+  endpoints: IdeSpringEndpoint[];
+  beans: IdeSpringBean[];
+  env_properties: IdeSpringEnvProp[];
+}
+
+export interface IdeSpringDevtoolsRestartReq {
+  target: IdeTargetSpec;
+  trigger_file?: string | null;
+}
+
+export interface IdeSpringDevtoolsRestartResp {
+  ok: boolean;
+  trigger_path: string;
+  restarted_at: string;
+  message: string;
+}
+
 export interface IdeBuildToolsModelResp {
   has_maven: boolean;
   has_gradle: boolean;
@@ -438,6 +519,7 @@ export interface IdeBuildToolsModelResp {
   profiles: IdeBuildToolProfile[];
   projects: IdeBuildToolProject[];
   mobile_projects?: IdeMobileProject[];
+  spring_boot?: IdeSpringBootInfo | null;
 }
 
 // ── Collaborative IDE ("Share with Friends") & Runtime Plugins ───────────────

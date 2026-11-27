@@ -74,6 +74,22 @@ fn ide_routes_require_agents_edit_except_guest_collab_and_person_only_admin() {
         None
     );
     assert_eq!(
+        pol(Method::POST, "/api/v1/ide/spring/actuator"),
+        Require(Agents, Edit)
+    );
+    assert_eq!(
+        route_class(&Method::POST, "/api/v1/ide/spring/actuator"),
+        None
+    );
+    assert_eq!(
+        pol(Method::POST, "/api/v1/ide/spring/devtools-restart"),
+        Require(Agents, Edit)
+    );
+    assert_eq!(
+        route_class(&Method::POST, "/api/v1/ide/spring/devtools-restart"),
+        Some(RouteClass::Admin)
+    );
+    assert_eq!(
         route_class(&Method::POST, "/api/v1/ide/run-configs"),
         Some(RouteClass::Admin)
     );

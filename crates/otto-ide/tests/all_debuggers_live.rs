@@ -2009,3 +2009,259 @@ public final class AppKt {
         "expected KT_JDWP_DONE:42 in output, got: {out}"
     );
 }
+
+#[tokio::test]
+async fn live_spring_boot_actuator_devtools_and_config_intelligence() {
+    if !ensure_bins_or_skip(&["javac", "java"]) {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("spring-live-app");
+    let java_pkg = ws.join("src/main/java/com/acme/boot");
+    let res_dir = ws.join("src/main/resources");
+    let classes_dir = ws.join("target/classes");
+    std::fs::create_dir_all(&java_pkg).unwrap();
+    std::fs::create_dir_all(&res_dir).unwrap();
+    std::fs::create_dir_all(&classes_dir).unwrap();
+
+    std::fs::write(
+        ws.join("pom.xml"),
+        r#"<project>
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.acme</groupId>
+  <artifactId>spring-live-app</artifactId>
+  <version>1.0.0</version>
+  <dependencies>
+    <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-web</artifactId></dependency>
+    <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-actuator</artifactId></dependency>
+    <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-devtools</artifactId></dependency>
+  </dependencies>
+</project>
+"#,
+    )
+    .unwrap();
+
+    let props_file = res_dir.join("application.properties");
+    std::fs::write(
+        &props_file,
+        "server.port=8089\nspring.redis.host=127.0.0.1\nspring.jpa.show-sql=notabool\n",
+    )
+    .unwrap();
+
+    let app_file = java_pkg.join("LiveActuatorApp.java");
+    std::fs::write(
+        &app_file,
+        r#"package com.acme.boot;
+
+import com.sun.net.httpserver.HttpServer;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+
+// @SpringBootApplication
+public class LiveActuatorApp {
+    // @Value("${server.port:8080}")
+    private int port = 8089;
+
+    public static void main(String[] args) throws Exception {
+        HttpServer srv = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        int boundPort = srv.getAddress().getPort();
+        srv.createContext("/actuator", ex -> {
+            String path = ex.getRequestURI().getPath();
+            String body = switch (path) {
+                case "/actuator" -> "{\"_links\":{\"self\":{\"href\":\"http://127.0.0.1:" + boundPort + "/actuator\"},\"health\":{},\"mappings\":{},\"beans\":{},\"env\":{}}}";
+                case "/actuator/health" -> "{\"status\":\"UP\",\"components\":{\"db\":{\"status\":\"UP\",\"details\":{\"database\":\"H2\"}}}}";
+                case "/actuator/mappings" -> "{\"contexts\":{\"application\":{\"mappings\":{\"dispatcherServlets\":{\"dispatcherServlet\":[{\"handler\":\"com.acme.boot.HelloController#hello()\",\"details\":{\"requestMappingConditions\":{\"patterns\":[\"/api/hello\"],\"methods\":[\"GET\"]}}}]}}}}}";
+                case "/actuator/beans" -> "{\"contexts\":{\"application\":{\"beans\":{\"helloController\":{\"type\":\"com.acme.boot.HelloController\",\"scope\":\"singleton\",\"dependencies\":[\"greetingService\"]}}}}}";
+                case "/actuator/env" -> "{\"activeProfiles\":[\"dev\"],\"propertySources\":[{\"name\":\"application.properties\",\"properties\":{\"server.port\":{\"value\":\"8089\"},\"spring.datasource.password\":{\"value\":\"topsecret123\"}}}]}";
+                default -> "{}";
+            };
+            byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().add("Content-Type", "application/json");
+            ex.sendResponseHeaders(200, bytes.length);
+            try (OutputStream os = ex.getResponseBody()) {
+                os.write(bytes);
+            }
+        });
+        srv.start();
+        System.out.println("ACTUATOR_PORT=" + boundPort);
+        System.out.flush();
+        Thread.sleep(20000);
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let javac_st = tokio::process::Command::new("javac")
+        .args([
+            "-g",
+            "-d",
+            &classes_dir.to_string_lossy(),
+            &app_file.to_string_lossy(),
+        ])
+        .status()
+        .await
+        .expect("run javac");
+    assert!(javac_st.success(), "javac failed for LiveActuatorApp");
+
+    // Launch real JDK 27 Actuator mock server on 127.0.0.1:0
+    let mut child = tokio::process::Command::new("java")
+        .args([
+            "-cp",
+            &classes_dir.to_string_lossy(),
+            "com.acme.boot.LiveActuatorApp",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn java LiveActuatorApp");
+
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let port_line = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+        .await
+        .expect("timeout waiting for ACTUATOR_PORT")
+        .expect("read stdout")
+        .expect("eof before ACTUATOR_PORT");
+    let bound_port: u16 = port_line
+        .trim()
+        .strip_prefix("ACTUATOR_PORT=")
+        .expect("ACTUATOR_PORT prefix")
+        .parse()
+        .expect("parse port");
+
+    let (_ctx, app) = build_test_app(tmp.path().join("data"), &tmp.path().join("db.sqlite")).await;
+    let ws_str = ws.to_string_lossy().into_owned();
+    let props_str = props_file.to_string_lossy().into_owned();
+    let app_str = app_file.to_string_lossy().into_owned();
+
+    // 1. Build tools model detects Spring Boot workspace
+    let (st_bt, bt_body) = send_json(
+        &app,
+        Method::POST,
+        "/ide/build-tools/model",
+        Some(json!({ "target": { "kind": "local", "root": ws_str }, "roots": [ws_str] })),
+    )
+    .await;
+    assert_eq!(st_bt, StatusCode::OK, "build-tools model failed: {bt_body}");
+    assert_eq!(bt_body["spring_boot"]["detected"], true);
+    assert_eq!(bt_body["spring_boot"]["has_actuator"], true);
+    assert_eq!(bt_body["spring_boot"]["has_devtools"], true);
+    assert_eq!(bt_body["spring_boot"]["server_port"], 8089);
+
+    // 2. Live Actuator inspection against real JDK 27 HTTP server on 127.0.0.1:<bound_port>
+    let (st_act, act_body) = send_json(
+        &app,
+        Method::POST,
+        "/ide/spring/actuator",
+        Some(json!({
+            "target": { "kind": "local", "root": ws_str },
+            "port": bound_port,
+            "base_path": "/actuator"
+        })),
+    )
+    .await;
+    assert_eq!(
+        st_act,
+        StatusCode::OK,
+        "actuator inspect failed: {act_body}"
+    );
+    assert_eq!(act_body["reachable"], true);
+    assert_eq!(act_body["status"], "UP");
+    assert_eq!(act_body["endpoints"][0]["method"], "GET");
+    assert_eq!(act_body["endpoints"][0]["path"], "/api/hello");
+    assert_eq!(act_body["beans"][0]["name"], "helloController");
+    assert_eq!(act_body["active_profiles"][0], "dev");
+    let env_list = act_body["env_properties"].as_array().unwrap();
+    let pw_entry = env_list
+        .iter()
+        .find(|p| p["key"] == "spring.datasource.password")
+        .expect("password entry present");
+    assert_eq!(pw_entry["redacted"], true);
+    assert_eq!(pw_entry["value"], "******");
+
+    // 3. SSRF guard rejects non-loopback Actuator URL with 403 Forbidden
+    let (st_ssrf, _) = send_json(
+        &app,
+        Method::POST,
+        "/ide/spring/actuator",
+        Some(json!({ "base_url": "http://169.254.169.254/latest/meta-data" })),
+    )
+    .await;
+    assert_eq!(st_ssrf, StatusCode::FORBIDDEN);
+
+    // 4. DevTools restart creates .reloadtrigger inside target/classes
+    let (st_dt, dt_body) = send_json(
+        &app,
+        Method::POST,
+        "/ide/spring/devtools-restart",
+        Some(json!({ "target": { "kind": "local", "root": ws_str } })),
+    )
+    .await;
+    assert_eq!(st_dt, StatusCode::OK, "devtools restart failed: {dt_body}");
+    assert_eq!(dt_body["ok"], true);
+    let trigger_path = std::path::PathBuf::from(dt_body["trigger_path"].as_str().unwrap());
+    assert!(trigger_path.is_file(), "expected trigger file on disk");
+    assert!(trigger_path.ends_with("target/classes/.reloadtrigger"));
+
+    // 5. Spring config diagnostics + hover + definition over HTTP routes
+    let (st_diag, diag_body) = send_json(
+        &app,
+        Method::POST,
+        "/ide/lsp/diagnostics",
+        Some(json!({
+            "target": { "kind": "local", "root": ws_str },
+            "path": props_str,
+        })),
+    )
+    .await;
+    assert_eq!(st_diag, StatusCode::OK);
+    let diags = diag_body["diagnostics"].as_array().unwrap();
+    assert!(
+        diags
+            .iter()
+            .any(|d| d["code"] == "spring_deprecated_property"),
+        "expected deprecated diagnostic: {diags:?}"
+    );
+    assert!(
+        diags.iter().any(|d| d["code"] == "spring_invalid_type"),
+        "expected invalid boolean diagnostic: {diags:?}"
+    );
+
+    let (st_hov, hov_body) = send_json(
+        &app,
+        Method::POST,
+        "/ide/lsp/hover",
+        Some(json!({
+            "target": { "kind": "local", "root": ws_str },
+            "path": app_str,
+            "line": 10,
+            "column": 20,
+        })),
+    )
+    .await;
+    assert_eq!(st_hov, StatusCode::OK);
+    assert_eq!(hov_body["symbol"], "server.port");
+
+    let (st_def, def_body) = send_json(
+        &app,
+        Method::POST,
+        "/ide/lsp/definition",
+        Some(json!({
+            "target": { "kind": "local", "root": ws_str },
+            "path": app_str,
+            "line": 10,
+            "column": 20,
+        })),
+    )
+    .await;
+    assert_eq!(st_def, StatusCode::OK);
+    assert!(def_body["locations"][0]["path"]
+        .as_str()
+        .unwrap_or("")
+        .ends_with("application.properties"));
+
+    let _ = child.kill().await;
+}

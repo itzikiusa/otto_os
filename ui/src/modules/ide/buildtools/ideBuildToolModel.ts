@@ -1,6 +1,11 @@
 // Maven & Gradle multi-module model loader, fallback manifest parser, and goal runner.
 import { api, ApiError } from '../../../lib/api/client';
-import type { IdeMobileProject } from '../../../lib/api/types';
+import type {
+  IdeMobileProject,
+  IdeSpringActuatorResp,
+  IdeSpringBootInfo,
+  IdeSpringDevtoolsRestartResp,
+} from '../../../lib/api/types';
 import { shortenHomePath } from '../../../lib/homePath';
 import { ideDevices } from '../devices/ideDevicesState.svelte';
 import { normalizeRootPath } from '../shell/ideProjectHelpers';
@@ -19,6 +24,7 @@ export interface LoadedBuildToolWorkspace {
   springProfiles: string[];
   modules: IdeBuildToolModule[];
   mobileProjects: IdeMobileProject[];
+  springBoot: IdeSpringBootInfo | null;
 }
 
 export const MAVEN_LIFECYCLE = ['clean', 'validate', 'compile', 'test', 'package', 'verify', 'install', 'site', 'deploy'];
@@ -349,16 +355,19 @@ export async function loadBuildToolWorkspaceModel(): Promise<LoadedBuildToolWork
       projects?: RawBuildToolProject[];
       modules?: RawBuildToolProject[];
       mobile_projects?: IdeMobileProject[];
+      spring_boot?: IdeSpringBootInfo | null;
     }>('/ide/build-tools/model', { target: ide.targetPayload, roots });
     const mobileProjects = resp.mobile_projects ?? [];
+    const springBoot = resp.spring_boot ?? null;
     ideDevices.setMobileProjects(mobileProjects);
     const rawList = resp.projects ?? resp.modules ?? [];
-    if (rawList.length > 0 || resp.has_maven || resp.has_gradle || mobileProjects.length > 0) {
+    if (rawList.length > 0 || resp.has_maven || resp.has_gradle || mobileProjects.length > 0 || springBoot?.detected) {
       const fallbackTool: 'maven' | 'gradle' = resp.has_maven ? 'maven' : resp.has_gradle ? 'gradle' : (resp.tool ?? 'maven');
       const modules = rawList.map((p) => normalizeRawProject(p, fallbackTool));
       const tool: 'maven' | 'gradle' = resp.has_maven ? 'maven' : resp.has_gradle ? 'gradle' : (modules[0]?.tool ?? fallbackTool);
       const buildProfiles: IdeBuildToolProfile[] = [];
       const springSet = new Set<string>(resp.spring_profiles ?? []);
+      for (const sp of springBoot?.profiles ?? []) springSet.add(sp);
       for (const prof of resp.profiles ?? []) {
         if (prof.kind === 'spring') {
           if (prof.id) springSet.add(prof.id);
@@ -373,11 +382,11 @@ export async function loadBuildToolWorkspaceModel(): Promise<LoadedBuildToolWork
           });
         }
       }
-      if (modules.length > 0 || resp.has_maven || resp.has_gradle || mobileProjects.length > 0) {
+      if (modules.length > 0 || resp.has_maven || resp.has_gradle || mobileProjects.length > 0 || springBoot?.detected) {
         if (modules.length > 0 || resp.has_maven || resp.has_gradle) {
           ide.detectedBuildToolOverride = tool;
         }
-        return { tool, profiles: buildProfiles, springProfiles: [...springSet], modules, mobileProjects };
+        return { tool, profiles: buildProfiles, springProfiles: [...springSet], modules, mobileProjects, springBoot };
       }
     }
   } catch (e) {
@@ -401,7 +410,22 @@ export async function loadBuildToolWorkspaceModel(): Promise<LoadedBuildToolWork
     springProfiles: [...springSet],
     modules,
     mobileProjects: [],
+    springBoot: null,
   };
+}
+
+export async function inspectSpringActuator(baseUrl: string): Promise<IdeSpringActuatorResp> {
+  return api.post<IdeSpringActuatorResp>('/ide/spring/actuator', {
+    target: ide.targetPayload,
+    base_url: baseUrl.trim(),
+  });
+}
+
+export async function triggerSpringDevtoolsRestart(triggerFile?: string | null): Promise<IdeSpringDevtoolsRestartResp> {
+  return api.post<IdeSpringDevtoolsRestartResp>('/ide/spring/devtools-restart', {
+    target: ide.targetPayload,
+    trigger_file: triggerFile ?? null,
+  });
 }
 
 export function executeMobileProjectTask(proj: IdeMobileProject, task: string): void {

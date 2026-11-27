@@ -426,3 +426,236 @@ object Registry {
     assert_eq!(kt_diags[0].line, 12);
     assert_eq!(kt_diags[1].severity, "warning");
 }
+
+#[test]
+fn spring_boot_workspace_config_hover_navigation_diagnostics_actuator_and_devtools_work() {
+    use crate::gutter::detect_gutter_items;
+    use crate::spring_boot::actuator::{
+        parse_actuator_beans, parse_actuator_env, parse_actuator_health, parse_actuator_mappings,
+        validate_loopback_actuator_url,
+    };
+    use crate::spring_boot::detect_spring_boot_workspace;
+    use crate::spring_boot::props::{
+        analyze_spring_config_diagnostics, extract_config_map, hover_spring_config,
+        is_spring_config_path, navigate_spring_config,
+    };
+
+    // 1. Workspace detection (pom.xml + @SpringBootApplication + application.properties + application-dev.yml)
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("spring-demo");
+    std::fs::create_dir_all(ws.join("src/main/java/com/acme/demo")).unwrap();
+    std::fs::create_dir_all(ws.join("src/main/resources")).unwrap();
+    std::fs::write(
+        ws.join("pom.xml"),
+        r#"<project>
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>3.4.0</version>
+  </parent>
+  <dependencies>
+    <dependency><artifactId>spring-boot-starter-web</artifactId></dependency>
+    <dependency><artifactId>spring-boot-starter-actuator</artifactId></dependency>
+    <dependency><artifactId>spring-boot-devtools</artifactId></dependency>
+  </dependencies>
+</project>"#,
+    )
+    .unwrap();
+    let app_java = ws.join("src/main/java/com/acme/demo/DemoApplication.java");
+    let app_src = r#"package com.acme.demo;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.beans.factory.annotation.Value;
+
+@SpringBootApplication
+public class DemoApplication {
+    @Value("${server.port:8080}")
+    private int port;
+
+    public static void main(String[] args) {
+        SpringApplication.run(DemoApplication.class, args);
+    }
+}
+"#;
+    std::fs::write(&app_java, app_src).unwrap();
+
+    let props_path = ws.join("src/main/resources/application.properties");
+    let props_src = "\
+server.port=8091
+management.server.port=9091
+management.endpoints.web.base-path=/ops
+spring.devtools.restart.trigger-file=.mytrigger
+spring.redis.host=localhost
+spring.jpa.show-sql=notabool
+server.port=8092
+spring.jpa.hibernate.ddl-auto=bogus
+";
+    std::fs::write(&props_path, props_src).unwrap();
+
+    let yml_path = ws.join("src/main/resources/application-dev.yml");
+    let yml_src = "\
+spring:
+  profiles:
+    active: dev,local
+  datasource:
+    url: jdbc:h2:mem:devdb
+server:
+  shutdown: graceful
+";
+    std::fs::write(&yml_path, yml_src).unwrap();
+
+    let canon_ws = ws.canonicalize().unwrap();
+    let info = detect_spring_boot_workspace(std::slice::from_ref(&canon_ws))
+        .expect("Spring Boot workspace detected");
+    assert!(info.detected);
+    assert!(info.has_actuator);
+    assert!(info.has_devtools);
+    assert_eq!(info.server_port, 8092);
+    assert_eq!(info.management_port, Some(9091));
+    assert_eq!(info.actuator_base_path, "/ops");
+    assert_eq!(info.actuator_url, "http://127.0.0.1:9091/ops");
+    assert_eq!(info.trigger_file.as_deref(), Some(".mytrigger"));
+    assert!(info.profiles.iter().any(|p| p == "dev"));
+    assert!(info.profiles.iter().any(|p| p == "local"));
+    assert_eq!(info.apps.len(), 1);
+    assert_eq!(info.apps[0].main_class, "com.acme.demo.DemoApplication");
+
+    // 2. Gutter marks @SpringBootApplication main() clearly
+    let gutter = detect_gutter_items(&app_java.to_string_lossy(), app_src, &[]);
+    assert!(
+        gutter
+            .iter()
+            .any(|g| g.label == "Spring Boot DemoApplication"),
+        "expected Spring Boot gutter label: {gutter:?}"
+    );
+
+    // 3. YAML nested dotted map + config hover + bidirectional navigation
+    assert!(is_spring_config_path(&props_path.to_string_lossy()));
+    assert!(is_spring_config_path(&yml_path.to_string_lossy()));
+    let yml_map = extract_config_map(&yml_path.to_string_lossy(), yml_src);
+    assert_eq!(
+        yml_map.get("spring.datasource.url").map(String::as_str),
+        Some("jdbc:h2:mem:devdb")
+    );
+    assert_eq!(
+        yml_map.get("server.shutdown").map(String::as_str),
+        Some("graceful")
+    );
+
+    let hover_prop = hover_spring_config(
+        &props_path.to_string_lossy(),
+        props_src,
+        1,
+        std::slice::from_ref(&canon_ws),
+    )
+    .expect("hover on server.port");
+    assert!(hover_prop.found);
+    assert_eq!(hover_prop.symbol.as_deref(), Some("server.port"));
+    assert!(hover_prop
+        .signature
+        .as_deref()
+        .unwrap_or("")
+        .contains("integer"));
+
+    let hover_code = hover_spring_config(
+        &app_java.to_string_lossy(),
+        app_src,
+        9,
+        std::slice::from_ref(&canon_ws),
+    )
+    .expect("hover on @Value(\"${server.port:8080}\")");
+    assert!(hover_code.found);
+    assert_eq!(hover_code.symbol.as_deref(), Some("server.port"));
+    assert!(hover_code
+        .full_doc
+        .as_deref()
+        .unwrap_or("")
+        .contains("application.properties"));
+
+    let (nav_key, nav_locs) = navigate_spring_config(
+        &app_java.to_string_lossy(),
+        app_src,
+        9,
+        std::slice::from_ref(&canon_ws),
+    )
+    .expect("Java @Value -> application.properties");
+    assert_eq!(nav_key, "server.port");
+    assert!(nav_locs[0].path.ends_with("application.properties"));
+
+    let (rev_key, rev_locs) = navigate_spring_config(
+        &props_path.to_string_lossy(),
+        props_src,
+        1,
+        std::slice::from_ref(&canon_ws),
+    )
+    .expect("application.properties -> Java @Value");
+    assert_eq!(rev_key, "server.port");
+    assert!(rev_locs[0].path.ends_with("DemoApplication.java"));
+
+    // 4. Diagnostics: deprecated key + Quick Fix, invalid boolean, duplicate key, invalid enum
+    let diags = analyze_spring_config_diagnostics(&props_path.to_string_lossy(), props_src);
+    let dep = diags
+        .iter()
+        .find(|d| d.code == "spring_deprecated_property")
+        .expect("deprecated spring.redis.host diagnostic");
+    assert_eq!(dep.quick_fixes.len(), 1);
+    assert!(dep.quick_fixes[0]
+        .replacement
+        .contains("spring.data.redis.host"));
+    assert!(diags.iter().any(|d| d.code == "spring_invalid_type"));
+    assert!(diags.iter().any(|d| d.code == "spring_duplicate_property"));
+    assert!(diags.iter().any(|d| d.code == "spring_invalid_enum"));
+
+    // 5. Loopback-only Actuator URL validator (SSRF guard)
+    assert!(validate_loopback_actuator_url("http://127.0.0.1:8080/actuator").is_ok());
+    assert!(validate_loopback_actuator_url("http://localhost:9090/actuator/").is_ok());
+    assert!(validate_loopback_actuator_url("http://[::1]:8080/actuator").is_ok());
+    assert!(validate_loopback_actuator_url("http://169.254.169.254/latest/meta-data").is_err());
+    assert!(validate_loopback_actuator_url("http://example.com:8080/actuator").is_err());
+    assert!(validate_loopback_actuator_url("http://user:pass@127.0.0.1:8080/actuator").is_err());
+
+    // 6. Actuator JSON parsers + automatic secret redaction
+    let (health_st, comps) = parse_actuator_health(&serde_json::json!({
+        "status": "UP",
+        "components": { "db": { "status": "UP", "details": { "database": "PostgreSQL" } } }
+    }));
+    assert_eq!(health_st.as_deref(), Some("UP"));
+    assert_eq!(comps.len(), 1);
+
+    let eps = parse_actuator_mappings(&serde_json::json!({
+        "contexts": { "application": { "mappings": { "dispatcherServlets": { "dispatcherServlet": [{
+            "handler": "com.acme.OrderController#list()",
+            "details": { "requestMappingConditions": { "patterns": ["/api/orders"], "methods": ["GET"] } }
+        }] } } } }
+    }));
+    assert_eq!(eps.len(), 1);
+    assert_eq!(eps[0].method, "GET");
+    assert_eq!(eps[0].path, "/api/orders");
+
+    let beans = parse_actuator_beans(&serde_json::json!({
+        "contexts": { "application": { "beans": { "orderService": {
+            "type": "com.acme.OrderService", "scope": "singleton", "dependencies": ["orderRepo"]
+        } } } }
+    }));
+    assert_eq!(beans.len(), 1);
+    assert_eq!(beans[0].name, "orderService");
+
+    let (profs, env_props) = parse_actuator_env(&serde_json::json!({
+        "activeProfiles": ["dev"],
+        "propertySources": [{
+            "name": "application.properties",
+            "properties": {
+                "server.port": { "value": "8092" },
+                "spring.datasource.password": { "value": "super-secret" }
+            }
+        }]
+    }));
+    assert_eq!(profs, vec!["dev"]);
+    let pw = env_props
+        .iter()
+        .find(|p| p.key == "spring.datasource.password")
+        .unwrap();
+    assert!(pw.redacted);
+    assert_eq!(pw.value, "******");
+}

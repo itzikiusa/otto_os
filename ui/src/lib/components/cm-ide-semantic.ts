@@ -8,6 +8,7 @@ import { Decoration, EditorView, ViewPlugin, type DecorationSet, type ViewUpdate
 import type { IdeDiagnostic } from '../api/types.ts';
 import { hasLiveLspDiagnosticsForFile } from './cm-ide-drafts.ts';
 import { extractGoBuildTagsFromSource, rewriteGoBuildTagDiagnostic } from './cm-ide-lsp-completion.ts';
+import { isSpringConfigPath, springConfigCompletion } from './cm-spring-config.ts';
 import type { IdeEditorPreferences } from './cm-ide-theme.ts';
 import {
   analyzeGoImports,
@@ -528,7 +529,7 @@ export function createIdeSemanticExtensions(opts: CreateIdeSemanticOptions): Ext
       scheduleDiagnostics(view: EditorView, delayMs: number) {
         if (this.timer) clearTimeout(this.timer);
         this.abort?.abort();
-        if (lang !== 'csv' && lang !== 'other' && opts.filePath) {
+        if ((lang !== 'csv' && lang !== 'other' || isSpringConfigPath(opts.filePath)) && opts.filePath) {
           this.timer = setTimeout(() => void this.runDiagnostics(view), delayMs);
         }
       }
@@ -551,7 +552,7 @@ export function createIdeSemanticExtensions(opts: CreateIdeSemanticOptions): Ext
         if (goImp && !lspOwnsDiags) clientDiags.push(...goImp.diagnostics);
         const unresolved = new Set<string>(jRes ? jRes.unresolvedIdents : []);
 
-        if (!lspOwnsDiags && opts.root && (lang === 'java' || lang === 'kotlin' || lang === 'go' || lang === 'zig' || lang === 'cpp' || lang === 'python' || lang === 'shell' || lang === 'json')) {
+        if (!lspOwnsDiags && opts.root && (isSpringConfigPath(opts.filePath) || lang === 'java' || lang === 'kotlin' || lang === 'go' || lang === 'zig' || lang === 'cpp' || lang === 'python' || lang === 'shell' || lang === 'json')) {
           const ctrl = new AbortController();
           this.abort = ctrl;
           try {
@@ -752,5 +753,5 @@ export function createIdeSemanticExtensions(opts: CreateIdeSemanticOptions): Ext
     { decorations: (v) => v.decorations },
   );
 
-  return [lineQuickFixesField, serverUnresolvedField, importFoldExt, vpPlugin];
+  return [lineQuickFixesField, serverUnresolvedField, importFoldExt, springConfigCompletion(opts.filePath), vpPlugin];
 }

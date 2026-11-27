@@ -29,6 +29,7 @@ pub mod plugins;
 pub mod proc_group;
 pub mod projects;
 pub mod scratches;
+pub mod spring_boot;
 pub mod target;
 pub mod terminal_env;
 pub mod text_pos;
