@@ -18,6 +18,7 @@ pub(crate) mod adapters_jvm_js;
 pub(crate) mod adapters_py;
 pub(crate) mod adapters_rust_sh;
 pub(crate) mod adapters_shell;
+pub(crate) mod adapters_zig;
 pub(crate) mod java_bridge;
 pub(crate) mod lldb_bridge;
 pub(crate) mod node_bridge;

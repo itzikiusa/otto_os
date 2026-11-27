@@ -19,7 +19,7 @@ use self::detected::scan_detected_sdks;
 use self::discovery::{
     canonical_key, collect_managed_bin_dirs, discover_local_dap_with_shell,
     discover_local_lsp_with_shell, discover_local_sdks_with_shell, empty_tool, label_builtin_dap,
-    mark_active_sdk, mark_go_tool_outdated,
+    mark_active_sdk, mark_go_tool_outdated, mark_zig_tool_outdated,
 };
 #[cfg(test)]
 use self::discovery::{discover_local_dap, discover_local_lsp, discover_local_sdks};
@@ -433,6 +433,22 @@ impl ToolchainManager {
                             .map(|s| PathBuf::from(&s.path));
                         mark_go_tool_outdated(&mut lsp_status, goroot.as_deref());
                         mark_go_tool_outdated(&mut dap_status, goroot.as_deref());
+                    } else if eco == EcosystemKind::Zig {
+                        let active_zig = installed.iter().find(|s| s.active);
+                        if !lsp_status.available {
+                            if let Some(zh) = active_zig.map(|s| PathBuf::from(&s.path)) {
+                                for cand in [zh.join("zls"), zh.join("bin/zls")] {
+                                    if is_executable_file(&cand) {
+                                        lsp_status.available = true;
+                                        lsp_status.path = Some(cand.to_string_lossy().into_owned());
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        let active_path = active_zig.map(|s| PathBuf::from(&s.path));
+                        let active_ver = active_zig.map(|s| s.version.as_str());
+                        mark_zig_tool_outdated(&mut lsp_status, active_path.as_deref(), active_ver);
                     }
                     let downloadable = catalogs
                         .get(&eco)

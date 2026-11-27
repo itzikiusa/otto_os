@@ -26,6 +26,7 @@ use super::adapters_jvm_js::{resolve_java_adapter, resolve_js_ts_adapter};
 use super::adapters_py::resolve_python_adapter;
 pub use super::adapters_rust_sh::parse_cargo_artifact_executable;
 use super::adapters_rust_sh::{resolve_rust_adapter, resolve_shell_adapter};
+use super::adapters_zig::resolve_zig_adapter;
 use super::java_bridge::JavaJdwpBridgeSpec;
 use super::node_bridge::NodeInspectorBridgeSpec;
 use super::shell_bridge::ShellBridgeSpec;
@@ -281,6 +282,7 @@ fn resolve_debug_launch_spec<'a>(
         "go" | "golang" => "go",
         "python" | "py" => "python",
         "rust" | "rs" => "rust",
+        "zig" | "zon" => "zig",
         "javascript" | "js" => "javascript",
         "typescript" | "ts" | "node" => "typescript",
         "java" => "java",
@@ -303,13 +305,14 @@ fn resolve_debug_launch_spec<'a>(
             "go" => ("go".to_string(), "dlv".to_string(), None),
             "python" => ("python".to_string(), "python-dap".to_string(), None),
             "rust" => ("rust".to_string(), "lldb".to_string(), None),
+            "zig" => ("zig".to_string(), "lldb".to_string(), None),
             "javascript" => ("javascript".to_string(), "node-inspector".to_string(), None),
             "typescript" => ("typescript".to_string(), "node-inspector".to_string(), None),
             "java" => ("java".to_string(), "java-jdwp".to_string(), None),
             "shell" => ("shell".to_string(), "shell-debug".to_string(), None),
             other => {
                 return Err(Error::Invalid(format!(
-                    "unsupported debug language '{other}'; install a DAP plugin or choose go, python, rust, javascript, typescript, java, or shell"
+                    "unsupported debug language '{other}'; install a DAP plugin or choose go, python, rust, zig, javascript, typescript, java, or shell"
                 )));
             }
         }
@@ -361,13 +364,14 @@ pub(crate) async fn resolve_dap_adapter_with_manager(
         "go" => resolve_go_adapter(data_dir, req, ctx, &spec.cwd, spec.env).await,
         "python" => resolve_python_adapter(data_dir, req, ctx, &spec.cwd, spec.env).await,
         "rust" => resolve_rust_adapter(data_dir, req, ctx, &spec.cwd, spec.env).await,
+        "zig" => resolve_zig_adapter(data_dir, req, ctx, &spec.cwd, spec.env).await,
         "javascript" | "typescript" => {
             resolve_js_ts_adapter(data_dir, &spec.raw_lang, req, ctx, &spec.cwd, spec.env).await
         }
         "java" => resolve_java_adapter(data_dir, req, ctx, &spec.cwd, spec.env).await,
         "shell" => resolve_shell_adapter(req, ctx, &spec.cwd, spec.env).await,
         other => Err(Error::Invalid(format!(
-            "unsupported debug language '{other}'; install a DAP plugin or choose go, python, rust, javascript, typescript, java, or shell"
+            "unsupported debug language '{other}'; install a DAP plugin or choose go, python, rust, zig, javascript, typescript, java, or shell"
         ))),
     }
 }

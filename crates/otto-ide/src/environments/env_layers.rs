@@ -123,6 +123,19 @@ pub(crate) fn apply_project_sdk_layers(
             map.insert("RUSTUP_TOOLCHAIN".into(), rt.to_string());
         }
     }
+    if let Some(zh) = proj.zig_home.as_deref().filter(|s| !s.is_empty()) {
+        let base = zh.trim_end_matches('/');
+        if target_kind == IdeTargetKind::Local {
+            let bin_sub = format!("{base}/bin");
+            if Path::new(&bin_sub).join("zig").is_file() {
+                push_unique(&mut proj_path_dirs, bin_sub);
+            }
+            push_unique(&mut proj_path_dirs, base.to_string());
+        } else {
+            push_unique(&mut proj_path_dirs, format!("{base}/bin"));
+            push_unique(&mut proj_path_dirs, base.to_string());
+        }
+    }
     if let Some(nh) = proj.node_home.as_deref().filter(|s| !s.is_empty()) {
         push_unique(
             &mut proj_path_dirs,

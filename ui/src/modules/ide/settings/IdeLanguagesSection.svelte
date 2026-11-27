@@ -24,7 +24,9 @@
   const nodeEco = $derived(ide.toolchains.find((e) => e.ecosystem === 'node') ?? null);
   const pyEco = $derived(ide.toolchains.find((e) => e.ecosystem === 'python') ?? null);
   const rustEco = $derived(ide.toolchains.find((e) => e.ecosystem === 'rust') ?? null);
+  const zigEco = $derived(ide.toolchains.find((e) => e.ecosystem === 'zig') ?? null);
   const goDetected = $derived(ide.detectedSdks.filter((d) => d.ecosystem === 'go'));
+  const zigDetected = $derived(ide.detectedSdks.filter((d) => d.ecosystem === 'zig'));
   const javaDetected = $derived(ide.detectedSdks.filter((d) => d.ecosystem === 'java'));
   const gopathVal = $derived(ide.shellEnv?.vars?.GOPATH || ide.effectiveEnv?.GOPATH || '~/go');
   const goprivateVal = $derived(ide.shellEnv?.vars?.GOPRIVATE || ide.effectiveEnv?.GOPRIVATE || '');
@@ -38,6 +40,13 @@
     ]);
   }
 
+  function openZigPlusMenu(e: MouseEvent): void {
+    ctxMenu.show(e, [
+      { label: 'Local…', icon: 'folder', action: () => (pickerEco = 'zig') },
+      { label: 'Download…', icon: 'download', action: () => onnavigate('project.sdks') },
+    ]);
+  }
+
   async function selectDetected(det: IdeDetectedSdk): Promise<void> {
     const p = det.home_path || det.path || '';
     if (!p) return;
@@ -45,6 +54,7 @@
     const chosen = reg?.path || p;
     if (det.ecosystem === 'java') ideSettings.patchEnv({ java_home: chosen });
     else if (det.ecosystem === 'go') ideSettings.patchEnv({ go_root: chosen });
+    else if (det.ecosystem === 'zig') ideSettings.patchEnv({ zig_home: chosen });
     toasts.success(`Registered ${det.label || `${det.ecosystem.toUpperCase()} ${det.version}`}`);
   }
 
@@ -102,6 +112,7 @@
     if (eco === 'go') ideSettings.patchEnv({ go_root: val });
     else if (eco === 'java') ideSettings.patchEnv({ java_home: val });
     else if (eco === 'node') ideSettings.patchEnv({ node_home: val });
+    else if (eco === 'zig') ideSettings.patchEnv({ zig_home: val });
     else if (eco === 'python') ideSettings.patchEnv({ python_interpreter: val });
   }
 
@@ -249,6 +260,48 @@
           {#each rustEco?.installed ?? [] as sdk (sdk.path)}<option value={sdk.version}>{sdk.version} ({sdk.path})</option>{/each}
         </select>
       </div>
+    </div>
+  </div>
+
+{:else if section === 'lang.zig'}
+  <div class="lg-sec" data-testid="ide-settings-lang-zig">
+    <div class="lg-card">
+      <div class="lg-head-row">
+        <span class="lg-title">Zig SDK (zig / zls / codelldb)</span>
+        {#if zigEco?.lsp_status || zigEco?.lsp}
+          {@const lsp = zigEco.lsp_status ?? zigEco.lsp!}
+          {@const ok = Boolean(lsp.available ?? lsp.installed)}
+          <Badge tone={ok ? 'ok' : 'neutral'} variant="outline" label={ok ? 'zls ✓' : 'zls missing'} />
+        {/if}
+        {#if zigEco?.dap_status || zigEco?.dap}
+          {@const dap = zigEco.dap_status ?? zigEco.dap!}
+          {@const ok = Boolean(dap.available ?? dap.installed)}
+          <Badge tone={ok ? 'ok' : 'neutral'} variant="outline" label={ok ? `${dap.name} ✓` : 'lldb missing'} />
+        {/if}
+      </div>
+      <div class="goroot-bar">
+        <select
+          class="input goroot-sel"
+          aria-label="Zig SDK"
+          value={ideSettings.envDraft.zig_home}
+          onchange={(e) => ideSettings.patchEnv({ zig_home: (e.currentTarget as HTMLSelectElement).value })}
+          data-testid="ide-zighome-select"
+        >
+          <option value="">&lt;Auto-detect from PATH&gt;</option>
+          {#each zigEco?.installed ?? [] as sdk (sdk.path)}
+            <option value={sdk.path}>Zig {sdk.version} ({sdk.path}){isBroken(sdk) ? ' [Invalid]' : ''}</option>
+          {/each}
+          {#each zigDetected as det (`det:${det.home_path || det.path}`)}
+            <option value={det.home_path || det.path}>{det.label || `Detected Zig ${det.version}`} ({det.home_path || det.path})</option>
+          {/each}
+        </select>
+        <button type="button" class="icon-btn goroot-plus" aria-label="Add or download Zig SDK" title="Add local Zig SDK or download official Zig release" onclick={openZigPlusMenu} data-testid="ide-zighome-add-btn">
+          <Icon name="plus" size={14} />
+        </button>
+      </div>
+      <p class="lg-sub">
+        Supports <code>build.zig</code> steps, <code>build.zig.zon</code> dependencies, <code>zig fmt</code>, <code>zig ast-check</code> diagnostics, <code>zls</code>, and native LLDB debugging with Zig slice/string/optional/error-union pretty-printers.
+      </p>
     </div>
   </div>
 

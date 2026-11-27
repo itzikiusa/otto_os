@@ -451,6 +451,8 @@ pub(crate) fn build_effective_env_with_manager(
             "dlv",
             "rust/cargo/bin",
             "rust/bin",
+            "zig/current",
+            "zig/bin",
             "node/current/bin",
             "python/current/bin",
             "python/bin",
@@ -466,7 +468,7 @@ pub(crate) fn build_effective_env_with_manager(
         }
         if !otto_core::e2e::isolated() && ctx.caller_is_root {
             if let Some(home) = dirs::home_dir() {
-                for rel in ["go/bin", ".cargo/bin", ".local/bin"] {
+                for rel in ["go/bin", ".cargo/bin", ".zvm/bin", ".local/bin"] {
                     let p = home.join(rel);
                     if p.is_dir() {
                         crate::environments::push_unique(

@@ -3,10 +3,10 @@
 use std::path::{Path, PathBuf};
 
 use crate::toolchains_catalog::{
-    codelldb_vsix_url, jq_binary_url, rust_analyzer_gz_url, uv_tarball_url, EcosystemKind,
-    TargetPlatform, BASH_LSP_NPM_PACKAGES, DEBUGPY_PKG, DLV_PKG, GOPLS_PKG, JAVA_DEBUG_JAR_NAME,
-    JAVA_DEBUG_JAR_URL, JDTLS_TARBALL_URL, JSON_LSP_NPM_PACKAGES, JS_DEBUG_TARBALL_URL,
-    PYRIGHT_PKG, TS_LSP_NPM_PACKAGES,
+    codelldb_vsix_url, jq_binary_url, rust_analyzer_gz_url, uv_tarball_url, zls_tarball_url,
+    EcosystemKind, TargetPlatform, BASH_LSP_NPM_PACKAGES, DEBUGPY_PKG, DLV_PKG, GOPLS_PKG,
+    JAVA_DEBUG_JAR_NAME, JAVA_DEBUG_JAR_URL, JDTLS_TARBALL_URL, JSON_LSP_NPM_PACKAGES,
+    JS_DEBUG_TARBALL_URL, PYRIGHT_PKG, TS_LSP_NPM_PACKAGES,
 };
 
 use super::installer::{
@@ -31,6 +31,7 @@ pub(super) async fn install_local_lsp(
     eco: EcosystemKind,
     platform: TargetPlatform,
     go_root: Option<&Path>,
+    zig_home: Option<&Path>,
 ) -> std::result::Result<String, String> {
     let tmp = root.join(".downloads");
     tokio::fs::create_dir_all(&tmp)
@@ -105,6 +106,70 @@ pub(super) async fn install_local_lsp(
             tokio::fs::rename(tmp.join("rust-analyzer"), &dest)
                 .await
                 .map_err(|e| e.to_string())?;
+            make_executable(&dest)?;
+            Ok(dest.to_string_lossy().into_owned())
+        }
+        EcosystemKind::Zig => {
+            // Match ZLS release tag (`0.14.0`, `0.13.0`, ...) to the active Zig major.minor.
+            let zig_ver = zig_home
+                .and_then(super::discovery::zig_bin_in_home)
+                .and_then(|b| super::discovery::read_zig_bin_version(&b))
+                .or_else(|| {
+                    find_executable_in(
+                        &system_search_dirs_with_shell(mgr.shell_path().as_deref()),
+                        &["zig"],
+                    )
+                    .and_then(|b| super::discovery::read_zig_bin_version(&b))
+                });
+            let zls_ver = zig_ver
+                .as_deref()
+                .and_then(super::discovery::zig_major_minor)
+                .map(|(maj, min)| format!("{maj}.{min}.0"))
+                .unwrap_or_else(|| EcosystemKind::Zig.default_sdk_version().to_string());
+            let archive = tmp.join(format!("zls-{zls_ver}.tar.xz"));
+            download_https_to_file(
+                mgr,
+                job_id,
+                &zls_tarball_url(&zls_ver, platform),
+                &archive,
+                None,
+                65,
+            )
+            .await?;
+            let bin_dir = root.join("zig/bin");
+            tokio::fs::create_dir_all(&bin_dir)
+                .await
+                .map_err(|e| e.to_string())?;
+            let extract_dir = tmp.join("zls-extract");
+            let _ = tokio::fs::remove_dir_all(&extract_dir).await;
+            tokio::fs::create_dir_all(&extract_dir)
+                .await
+                .map_err(|e| e.to_string())?;
+            run_local_cmd(
+                mgr,
+                job_id,
+                75,
+                Path::new("tar"),
+                &[
+                    "-xJf",
+                    &archive.to_string_lossy(),
+                    "-C",
+                    &extract_dir.to_string_lossy(),
+                ],
+                &[],
+            )
+            .await?;
+            let _ = tokio::fs::remove_file(&archive).await;
+            let src_bin = [extract_dir.join("zls"), extract_dir.join("bin/zls")]
+                .into_iter()
+                .find(|p| p.is_file())
+                .ok_or("ZLS archive missing zls binary")?;
+            let dest = bin_dir.join("zls");
+            let _ = tokio::fs::remove_file(&dest).await;
+            tokio::fs::rename(&src_bin, &dest)
+                .await
+                .map_err(|e| e.to_string())?;
+            let _ = tokio::fs::remove_dir_all(&extract_dir).await;
             make_executable(&dest)?;
             Ok(dest.to_string_lossy().into_owned())
         }
@@ -224,7 +289,7 @@ pub(super) async fn install_local_dap(
             .await?;
             Ok(gobin.join("dlv").to_string_lossy().into_owned())
         }
-        EcosystemKind::Rust => {
+        EcosystemKind::Rust | EcosystemKind::Zig => {
             let vsix = tmp.join("codelldb.vsix");
             download_https_to_file(mgr, job_id, &codelldb_vsix_url(platform), &vsix, None, 85)
                 .await?;

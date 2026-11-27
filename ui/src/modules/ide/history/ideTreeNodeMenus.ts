@@ -57,9 +57,9 @@ export async function promptCreateTreeEntry(
   const name = await confirmer.promptText(
     isDir ? `Folder name inside ${displayDir}` : `File name inside ${displayDir}`,
     {
-      title: isDir ? 'New folder' : extHint === '.go' ? 'New Go file' : 'New file',
+      title: isDir ? 'New folder' : extHint === '.go' ? 'New Go file' : extHint === '.zig' ? 'New Zig file' : 'New file',
       confirmLabel: 'Create',
-      placeholder: isDir ? 'pkg/handlers' : extHint === '.go' ? 'service.go' : 'handler.go',
+      placeholder: isDir ? 'pkg/handlers' : extHint === '.go' ? 'service.go' : extHint === '.zig' ? 'module.zig' : 'handler.go',
       validate: (v) => (v.includes('..') ? 'Relative parent segments (..) aren’t allowed.' : null),
     },
   );
@@ -208,8 +208,10 @@ export function showTreeNodeContextMenu(
   }
   // "New Go file…" only where Go is in play: a go.mod / go.work or .go file among the loaded folders.
   const isGo = Object.values(ide.childrenByDir).some((es) => es.some((e) => e.name === 'go.mod' || e.name === 'go.work' || e.name.endsWith('.go')));
+  const isZig = Object.values(ide.childrenByDir).some((es) => es.some((e) => e.name === 'build.zig' || e.name === 'build.zig.zon' || e.name.endsWith('.zig')));
   items.push({ label: 'New file…', icon: 'plus', action: () => void promptCreateTreeEntry(baseDir, 'create_file') });
   if (isGo) items.push({ label: 'New Go file…', icon: 'file', action: () => void promptCreateTreeEntry(baseDir, 'create_file', '.go') });
+  if (isZig) items.push({ label: 'New Zig file…', icon: 'file', action: () => void promptCreateTreeEntry(baseDir, 'create_file', '.zig') });
   items.push({ label: 'New folder…', icon: 'folder', action: () => void promptCreateTreeEntry(baseDir, 'mkdir') });
   if (ide.target.kind === 'local') {
     items.push(

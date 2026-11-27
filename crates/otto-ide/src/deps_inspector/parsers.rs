@@ -422,6 +422,184 @@ pub fn parse_python_deps(fname: &str, content: &str) -> Vec<IdeDepItem> {
     items
 }
 
+/// Parse `build.zig.zon` `.dependencies = .{ .<name> = .{ .url = "...", .hash = "...", .path = "..." } }`.
+pub fn parse_build_zig_zon(content: &str) -> Vec<IdeDepItem> {
+    static RE_DEP_OPEN: OnceLock<Regex> = OnceLock::new();
+    static RE_URL: OnceLock<Regex> = OnceLock::new();
+    static RE_HASH: OnceLock<Regex> = OnceLock::new();
+    static RE_PATH: OnceLock<Regex> = OnceLock::new();
+    let dep_open_re = RE_DEP_OPEN.get_or_init(|| {
+        Regex::new(r#"^\s*\.(?:@"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*))\s*=\s*\.\{"#).unwrap()
+    });
+    let url_re = RE_URL.get_or_init(|| Regex::new(r#"\.url\s*=\s*"([^"]+)""#).unwrap());
+    let hash_re = RE_HASH.get_or_init(|| Regex::new(r#"\.hash\s*=\s*"([^"]+)""#).unwrap());
+    let path_re = RE_PATH.get_or_init(|| Regex::new(r#"\.path\s*=\s*"([^"]+)""#).unwrap());
+
+    let lines: Vec<&str> = content.lines().collect();
+    let mut items = Vec::new();
+    let mut in_deps = false;
+    let mut deps_depth: i32 = 0;
+
+    let mut i = 0usize;
+    while i < lines.len() {
+        let raw = lines[i];
+        let code = raw.split("//").next().unwrap_or("");
+        let trimmed = code.trim();
+
+        if !in_deps {
+            if trimmed.starts_with(".dependencies") && trimmed.contains(".{") {
+                in_deps = true;
+                deps_depth = 0;
+                for ch in code.chars() {
+                    if ch == '{' {
+                        deps_depth += 1;
+                    } else if ch == '}' {
+                        deps_depth -= 1;
+                    }
+                }
+                if deps_depth <= 0 {
+                    in_deps = false;
+                }
+            }
+            i += 1;
+            continue;
+        }
+
+        if deps_depth == 1 {
+            if let Some(cap) = dep_open_re.captures(code) {
+                let name_m = cap.get(1).or_else(|| cap.get(2)).unwrap();
+                let name = name_m.as_str().to_string();
+                let start_line = (i + 1) as u32;
+                let name_col = (raw[..name_m.start()].chars().count() + 1) as u32;
+                let name_end_col = (raw[..name_m.end()].chars().count() + 1) as u32;
+
+                let mut entry_depth: i32 = 0;
+                let mut ver_str: Option<String> = None;
+                let mut ver_line = start_line;
+                let mut ver_col = name_col;
+                let mut ver_end_col = name_end_col;
+                let mut end_idx = i;
+
+                while end_idx < lines.len() {
+                    let eline = lines[end_idx];
+                    let ecode = strip_zig_line_comment(eline);
+                    if let Some(c) = url_re.captures(ecode) {
+                        let m = c.get(1).unwrap();
+                        ver_str = Some(extract_zig_zon_dep_label(m.as_str()));
+                        ver_line = (end_idx + 1) as u32;
+                        ver_col = (eline[..m.start()].chars().count() + 1) as u32;
+                        ver_end_col = (eline[..m.end()].chars().count() + 1) as u32;
+                    } else if ver_str.is_none() {
+                        if let Some(c) = path_re.captures(ecode) {
+                            let m = c.get(1).unwrap();
+                            ver_str = Some(format!("path:{}", m.as_str()));
+                            ver_line = (end_idx + 1) as u32;
+                            ver_col = (eline[..m.start()].chars().count() + 1) as u32;
+                            ver_end_col = (eline[..m.end()].chars().count() + 1) as u32;
+                        } else if let Some(c) = hash_re.captures(ecode) {
+                            let m = c.get(1).unwrap();
+                            let h = m.as_str();
+                            ver_str = Some(h.chars().take(16).collect());
+                            ver_line = (end_idx + 1) as u32;
+                            ver_col = (eline[..m.start()].chars().count() + 1) as u32;
+                            ver_end_col = (eline[..m.end()].chars().count() + 1) as u32;
+                        }
+                    }
+                    for ch in ecode.chars() {
+                        if ch == '{' {
+                            entry_depth += 1;
+                        } else if ch == '}' {
+                            entry_depth -= 1;
+                        }
+                    }
+                    if entry_depth <= 0 {
+                        break;
+                    }
+                    end_idx += 1;
+                }
+
+                items.push(IdeDepItem {
+                    name,
+                    current_version: ver_str.unwrap_or_else(|| "pinned".into()),
+                    latest_version: None,
+                    latest_patch: None,
+                    indirect: false,
+                    deprecated: None,
+                    line: start_line,
+                    name_col,
+                    name_end_col,
+                    version_line: ver_line,
+                    version_col: ver_col,
+                    version_end_col: ver_end_col,
+                    block_start_line: start_line,
+                    block_end_line: (end_idx.min(lines.len().saturating_sub(1)) + 1) as u32,
+                    property_name: None,
+                    managed_in: None,
+                    vulnerabilities: Vec::new(),
+                    range: false,
+                });
+                i = end_idx + 1;
+                continue;
+            }
+        }
+
+        for ch in code.chars() {
+            if ch == '{' {
+                deps_depth += 1;
+            } else if ch == '}' {
+                deps_depth -= 1;
+            }
+        }
+        if deps_depth <= 0 {
+            in_deps = false;
+        }
+        i += 1;
+    }
+    items
+}
+
+fn strip_zig_line_comment(line: &str) -> &str {
+    let bytes = line.as_bytes();
+    let mut in_str = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        if in_str {
+            if bytes[i] == b'\\' {
+                i += 2;
+                continue;
+            }
+            if bytes[i] == b'"' {
+                in_str = false;
+            }
+        } else if bytes[i] == b'"' {
+            in_str = true;
+        } else if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+            return &line[..i];
+        }
+        i += 1;
+    }
+    line
+}
+
+fn extract_zig_zon_dep_label(url: &str) -> String {
+    let trimmed = url.trim_end_matches('/');
+    let tail = trimmed.rsplit('/').next().unwrap_or(trimmed);
+    let clean = tail
+        .strip_suffix(".tar.gz")
+        .or_else(|| tail.strip_suffix(".tar.xz"))
+        .or_else(|| tail.strip_suffix(".tar.zst"))
+        .or_else(|| tail.strip_suffix(".zip"))
+        .or_else(|| tail.strip_suffix(".git"))
+        .unwrap_or(tail);
+    if clean.len() > 16 && clean.chars().all(|c| c.is_ascii_hexdigit()) {
+        clean[..12].to_string()
+    } else if !clean.is_empty() {
+        clean.to_string()
+    } else {
+        url.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

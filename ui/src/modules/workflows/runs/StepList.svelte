@@ -61,10 +61,15 @@
   {@const w = childWord(c, now)}
   {@const active = selected.node === stepId && (selected.child === c.id || (!!c.thread_id && selected.child === c.thread_id))}
   <li class="kid-item" style:--depth={depth}>
-    <button type="button" class="child" class:on={active} data-nav {onkeydown} data-testid="wf-step-child" data-child-id={c.id} data-thread-id={c.thread_id} data-depth={depth} data-status={c.status} aria-current={active ? 'true' : undefined} onclick={() => onselect(stepId, c.id)}>
+    <button type="button" class="child" class:on={active} title={c.retried_reason || undefined} data-nav {onkeydown} data-testid="wf-step-child" data-child-id={c.id} data-thread-id={c.thread_id} data-depth={depth} data-status={c.status} data-retried={c.retried_attempt != null ? 'true' : undefined} aria-current={active ? 'true' : undefined} onclick={() => onselect(stepId, c.id)}>
       <ProviderIcon provider={c.provider} size={14} />
-      <span class="name ellipsis" dir="auto">{c.label}{#if depth > 0 && parentLabel}<span class="sr-only"> (sub-thread of {parentLabel})</span>{/if}</span>
-      <span class="word {w.tone}">{after ?? w.word}</span>
+      <span class="main">
+        <span class="l1">
+          <span class="name ellipsis" dir="auto">{c.label}{#if depth > 0 && parentLabel}<span class="sr-only"> (sub-thread of {parentLabel})</span>{/if}</span>
+          <span class="word {w.tone}">{after ?? w.word}</span>
+        </span>
+        {#if c.retried_reason}<span class="l2 ellipsis" dir="auto">{c.retried_reason}</span>{/if}
+      </span>
     </button>
   </li>
 {/snippet}

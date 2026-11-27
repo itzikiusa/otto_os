@@ -407,6 +407,7 @@ pub fn detect_language(path: &str) -> Option<&'static str> {
     let ext = base.rsplit_once('.')?.1.to_ascii_lowercase();
     let lang = match ext.as_str() {
         "rs" => "rust",
+        "zig" | "zon" => "zig",
         "go" => "go",
         "java" | "class" => "java",
         "py" | "pyi" => "python",

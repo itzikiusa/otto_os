@@ -50,6 +50,7 @@ const LOADERS: Record<string, () => Promise<Build>> = {
       return () => new LanguageSupport(lang, m.go().support);
     }),
   rs: () => import('@codemirror/lang-rust').then((m) => () => m.rust()),
+  zig: () => import('./cm-lang-zig.ts').then((m) => () => m.zigLang()),
   json: () => import('@codemirror/lang-json').then((m) => () => m.json()),
   jsonc: () => import('@codemirror/lang-json').then((m) => () => m.json()),
   jsonl: () => import('@codemirror/lang-json').then((m) => () => m.json()),

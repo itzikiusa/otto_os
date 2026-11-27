@@ -152,6 +152,7 @@ fn resolve_hover_target(req: &IdeHoverReq) -> Option<IdeTargetSpec> {
                 || d.join("go.mod").is_file()
                 || d.join("pom.xml").is_file()
                 || d.join("Cargo.toml").is_file()
+                || d.join("build.zig").is_file()
                 || d.join("package.json").is_file()
             {
                 root_dir = Some(d.to_path_buf());

@@ -171,6 +171,9 @@ export type IdeRunnerKind =
   | 'gradle'
   | 'cargo_test'
   | 'cargo_run'
+  | 'zig_build'
+  | 'zig_run'
+  | 'zig_test'
   | 'node'
   | 'npm'
   | 'vitest'
@@ -215,6 +218,7 @@ export type IdeEcosystem =
   | 'java'
   | 'go'
   | 'rust'
+  | 'zig'
   | 'node'
   | 'python'
   | 'shell'
@@ -398,6 +402,7 @@ export interface IdeProjectEnvironment {
   java_home?: string | null;
   go_root?: string | null;
   rust_toolchain?: string | null;
+  zig_home?: string | null;
   node_home?: string | null;
   python_interpreter?: string | null;
   android_home?: string | null;
@@ -540,7 +545,7 @@ export interface IdeRunResp {
 
 // ── DAP Debugger Engine ──────────────────────────────────────────────────────
 
-export type IdeDebugLanguage = 'go' | 'java' | 'rust' | 'javascript' | 'typescript' | 'python' | 'shell' | string;
+export type IdeDebugLanguage = 'go' | 'java' | 'rust' | 'zig' | 'javascript' | 'typescript' | 'python' | 'shell' | string;
 
 export interface IdeBreakpoint {
   path: string;
@@ -607,6 +612,12 @@ export interface IdeDebugEvaluateReq {
   expression: string;
   frame_id?: number | null;
   context?: string | null;
+}
+
+export interface IdeDebugSetVariableReq {
+  variables_reference: number;
+  name: string;
+  value: string;
 }
 
 export type IdeDebugState = 'starting' | 'running' | 'paused' | 'terminated' | 'error';
@@ -703,5 +714,6 @@ export interface IdeDebugSessionResp { session: IdeDebugSessionSnapshot; }
 export interface IdeDebugSessionsResp { sessions: IdeDebugSessionSnapshot[]; }
 export interface IdeDebugVariablesResp { variables: IdeVariable[]; }
 export interface IdeDebugEvaluateResp { result: string; var_type?: string | null; variables_reference: number; }
+export interface IdeDebugSetVariableResp { value: string; var_type?: string | null; variables_reference: number; }
 /** GET /ide/debug/sessions/{id}/port?port= — the debuggee listens there (an agent start's `ready_port`). */
 export interface IdeDebugPortResp { open: boolean; }

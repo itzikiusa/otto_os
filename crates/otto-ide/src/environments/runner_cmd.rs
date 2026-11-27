@@ -338,6 +338,101 @@ fn build_cargo_runner_cmd(
     (prog, out)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn build_zig_runner_cmd(
+    runner: IdeRunnerKind,
+    cfg: &IdeRunConfig,
+    cwd: &str,
+    cmd_opt: Option<&str>,
+    mut args: Vec<String>,
+    build_flags: Vec<String>,
+    filter: Option<&str>,
+) -> (String, Vec<String>) {
+    let prog = cmd_opt.unwrap_or("zig").to_string();
+    let tp = cfg
+        .target_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    match runner {
+        IdeRunnerKind::ZigBuild => {
+            if args.first().map(String::as_str) == Some("build") {
+                args.remove(0);
+            }
+            let mut out = vec!["build".to_string()];
+            if let Some(step) = tp {
+                if !args.iter().any(|a| a == step) {
+                    out.push(step.to_string());
+                }
+            }
+            out.extend(build_flags);
+            out.extend(args);
+            (prog, out)
+        }
+        IdeRunnerKind::ZigRun => {
+            if args.first().map(String::as_str) == Some("run") {
+                args.remove(0);
+            }
+            let mut out = vec!["run".to_string()];
+            out.extend(build_flags);
+            if let Some(file) = tp {
+                let already = args.first().map(String::as_str) == Some(file);
+                if already {
+                    args.remove(0);
+                }
+                out.push(file.to_string());
+                if !args.is_empty() {
+                    if args.first().map(String::as_str) != Some("--") {
+                        out.push("--".to_string());
+                    }
+                    out.extend(args);
+                }
+            } else {
+                out.extend(args);
+            }
+            (prog, out)
+        }
+        IdeRunnerKind::ZigTest => {
+            let is_build_test = args.first().map(String::as_str) == Some("build")
+                || (tp.is_none_or(|p| !p.ends_with(".zig"))
+                    && Path::new(cwd).join("build.zig").is_file()
+                    && !args.iter().any(|a| a.ends_with(".zig")));
+            if is_build_test {
+                if args.first().map(String::as_str) == Some("build") {
+                    args.remove(0);
+                }
+                let mut out = vec!["build".to_string()];
+                if args.first().map(String::as_str) != Some("test") {
+                    out.push("test".to_string());
+                }
+                out.extend(build_flags);
+                out.extend(args);
+                return (prog, out);
+            }
+            if args.first().map(String::as_str) == Some("test") {
+                args.remove(0);
+            }
+            let mut out = vec!["test".to_string()];
+            out.extend(build_flags);
+            if let Some(f) = filter {
+                if !args.iter().any(|a| a == "--test-filter") {
+                    out.push("--test-filter".to_string());
+                    out.push(f.to_string());
+                }
+            }
+            if let Some(file) = tp {
+                if !args.iter().any(|a| a == file) {
+                    out.push(file.to_string());
+                }
+            }
+            out.extend(args);
+            (prog, out)
+        }
+        _ => (prog, args),
+    }
+}
+
 pub(super) fn build_runner_command(
     cfg: &IdeRunConfig,
     target_kind: IdeTargetKind,
@@ -416,6 +511,9 @@ pub(super) fn build_runner_command(
             build_flags,
             filter,
         ),
+        IdeRunnerKind::ZigBuild | IdeRunnerKind::ZigRun | IdeRunnerKind::ZigTest => {
+            build_zig_runner_cmd(cfg.runner, cfg, cwd, cmd_opt, args, build_flags, filter)
+        }
         IdeRunnerKind::Pytest => build_pytest_cmd(
             cfg,
             target_kind,

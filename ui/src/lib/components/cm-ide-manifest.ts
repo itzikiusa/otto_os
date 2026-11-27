@@ -6,6 +6,7 @@ const MANIFEST_NAMES = new Set([
   'pom.xml',
   'package.json',
   'cargo.toml',
+  'build.zig.zon',
   'requirements.txt',
   'pyproject.toml',
   'build.gradle',

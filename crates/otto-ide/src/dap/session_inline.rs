@@ -15,8 +15,9 @@ use super::read_target_file_for_inline;
 use super::session::{DapManager, DapWireClient, SessionEntry};
 use super::session_transport::boot_session_connection;
 use crate::types::{
-    IdeDebugEvaluateReq, IdeDebugEvaluateResp, IdeDebugSessionSnapshot, IdeDebugState,
-    IdeInlineValue, IdeScope, IdeStartDebugReq, IdeVariable,
+    IdeDebugEvaluateReq, IdeDebugEvaluateResp, IdeDebugSessionSnapshot, IdeDebugSetVariableReq,
+    IdeDebugSetVariableResp, IdeDebugState, IdeInlineValue, IdeScope, IdeStartDebugReq,
+    IdeVariable,
 };
 
 pub(super) async fn fetch_variables(
@@ -376,6 +377,66 @@ impl DapManager {
                 .and_then(Value::as_i64)
                 .unwrap_or(0),
         })
+    }
+
+    /// Mutate a variable's value in the paused debuggee via DAP `setVariable` and refresh
+    /// the active frame's scopes + inline ghost values.
+    pub async fn set_variable(
+        &self,
+        id: &str,
+        req: IdeDebugSetVariableReq,
+    ) -> Result<IdeDebugSetVariableResp> {
+        let name = req.name.trim();
+        if req.variables_reference <= 0 || name.is_empty() {
+            return Err(Error::Invalid(
+                "variables_reference (> 0) and non-empty variable name are required".into(),
+            ));
+        }
+        let entry = self.get_entry(id)?;
+        let conn = entry.active_conn()?;
+        let resp = conn
+            .wire
+            .request(
+                "setVariable",
+                Some(json!({
+                    "variablesReference": req.variables_reference,
+                    "name": name,
+                    "value": req.value,
+                })),
+            )
+            .await?;
+        let body = resp.body.unwrap_or_else(|| json!({}));
+        let out = IdeDebugSetVariableResp {
+            value: body
+                .get("value")
+                .and_then(Value::as_str)
+                .unwrap_or(&req.value)
+                .to_string(),
+            var_type: body.get("type").and_then(Value::as_str).map(String::from),
+            variables_reference: body
+                .get("variablesReference")
+                .and_then(Value::as_i64)
+                .unwrap_or(0),
+        };
+        let snap = entry.read_snapshot();
+        if let Some(fid) = snap.active_frame_id {
+            if let Ok(scopes) = fetch_scopes_with_variables(&conn.wire, fid).await {
+                let inline = match (
+                    snap.selected_frame_file.as_deref(),
+                    snap.selected_frame_line,
+                ) {
+                    (Some(p), Some(ln)) => {
+                        load_and_compute_inline_values(&entry, Some(p), ln, &scopes).await
+                    }
+                    _ => Vec::new(),
+                };
+                entry.mutate_and_broadcast(|s| {
+                    s.scopes = scopes;
+                    s.inline_values = inline;
+                });
+            }
+        }
+        Ok(out)
     }
 }
 

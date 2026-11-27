@@ -9,7 +9,8 @@ use crate::types::{IdeDetectedSdk, IdeEcosystemKind};
 use super::discovery::{
     bin_prefix, dir_name_version, find_executable_in, is_executable_file, is_goroot,
     node_prefix_version, python_dir_version, read_go_root_version, read_java_release_version,
-    read_subdirs, resolve_java_home_dir, rust_toolchain_label, system_search_dirs,
+    read_subdirs, resolve_java_home_dir, resolve_zig_home_dir, rust_toolchain_label,
+    system_search_dirs, zig_dir_version, zig_home_from_bin,
 };
 
 pub(super) fn scan_detected_sdks(
@@ -95,6 +96,20 @@ pub(super) fn scan_detected_sdks(
                     format!("Rust {v}"),
                     &v,
                     &dir,
+                    "otto",
+                );
+            }
+        }
+        for dir in read_subdirs(&root.join("zig/sdks")) {
+            if let Some(zh) = resolve_zig_home_dir(&dir) {
+                let v = zig_dir_version(&dir);
+                push_det(
+                    &mut out,
+                    &mut seen,
+                    "zig",
+                    format!("Zig {v}"),
+                    &v,
+                    &zh,
                     "otto",
                 );
             }
@@ -469,6 +484,62 @@ fn scan_python_and_rust_sdks(
         }
     }
 
+    // 6b. Zig: Homebrew, zvm, zigup, asdf, mise, /usr/local/zig, PATH
+    for brew_opt in ["/opt/homebrew/opt", "/usr/local/opt"] {
+        for dir in read_subdirs(Path::new(brew_opt)) {
+            let nm = dir.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if nm == "zig" || nm.starts_with("zig@") {
+                if let Some(zh) = resolve_zig_home_dir(&dir) {
+                    let v = zig_dir_version(&zh);
+                    push_det(
+                        out,
+                        seen,
+                        "zig",
+                        format!("Homebrew Zig {v}"),
+                        &v,
+                        &zh,
+                        "homebrew",
+                    );
+                }
+            }
+        }
+    }
+    let usr_zig = PathBuf::from("/usr/local/zig");
+    if let Some(zh) = resolve_zig_home_dir(&usr_zig) {
+        let v = zig_dir_version(&zh);
+        push_det(
+            out,
+            seen,
+            "zig",
+            format!("Zig {v} (/usr/local/zig)"),
+            &v,
+            &zh,
+            "system",
+        );
+    }
+    if let Some(h) = home {
+        for (parent, src, tag) in [
+            (h.join(".zvm"), "zvm", "zvm"),
+            (h.join("zig"), "zigup", "zigup"),
+            (h.join(".local/share/zigup"), "zigup", "zigup"),
+            (h.join(".asdf/installs/zig"), "asdf", "asdf"),
+            (h.join(".local/share/mise/installs/zig"), "mise", "mise"),
+        ] {
+            for dir in read_subdirs(&parent) {
+                if let Some(zh) = resolve_zig_home_dir(&dir) {
+                    let v = zig_dir_version(&dir);
+                    push_det(out, seen, "zig", format!("Zig {v} ({tag})"), &v, &zh, src);
+                }
+            }
+        }
+    }
+    if let Some(zig_bin) = find_executable_in(&system_search_dirs(), &["zig"]) {
+        if let Some(zh) = zig_home_from_bin(&zig_bin) {
+            let v = zig_dir_version(&zh);
+            push_det(out, seen, "zig", format!("Zig {v}"), &v, &zh, "path");
+        }
+    }
+
     // 7. iOS / Xcode, Android SDK, and Flutter (zero-subprocess disk scan)
     scan_mobile_sdks(home, out, seen);
 }
@@ -706,6 +777,7 @@ fn push_det(
         "java" => IdeEcosystemKind::Java,
         "go" => IdeEcosystemKind::Go,
         "rust" => IdeEcosystemKind::Rust,
+        "zig" => IdeEcosystemKind::Zig,
         "node" => IdeEcosystemKind::Node,
         "python" => IdeEcosystemKind::Python,
         "shell" => IdeEcosystemKind::Shell,
@@ -730,6 +802,9 @@ fn push_det(
                 IdeEcosystemKind::Java => path.join("bin/java"),
                 IdeEcosystemKind::Go => path.join("bin/go"),
                 IdeEcosystemKind::Rust => path.join("bin/rustc"),
+                IdeEcosystemKind::Zig => {
+                    super::discovery::zig_bin_in_home(path).unwrap_or_else(|| path.join("zig"))
+                }
                 IdeEcosystemKind::Node => path.join("bin/node"),
                 IdeEcosystemKind::Python => path.join("bin/python3"),
                 IdeEcosystemKind::Ios => path.join("usr/bin/xcodebuild"),

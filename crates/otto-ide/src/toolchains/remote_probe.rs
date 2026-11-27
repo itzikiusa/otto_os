@@ -10,7 +10,7 @@ use super::discovery::dir_name_version;
 
 pub(super) const REMOTE_PROBE_SCRIPT: &str = r#"
 echo "UNAME:$(uname -s) $(uname -m)"
-export PATH="$HOME/.otto/toolchains/java/current/bin:$HOME/.otto/toolchains/go/current/bin:$HOME/.otto/toolchains/node/current/bin:$HOME/.otto/toolchains/go/bin:$HOME/.otto/toolchains/rust/bin:$HOME/.otto/toolchains/rust/cargo/bin:$HOME/.otto/toolchains/python/bin:$HOME/.otto/toolchains/shell/bin:$HOME/.otto/toolchains/json/bin:$HOME/.cargo/bin:$HOME/go/bin:/opt/homebrew/bin:/usr/local/go/bin:/usr/local/bin:$PATH"
+export PATH="$HOME/.otto/toolchains/java/current/bin:$HOME/.otto/toolchains/go/current/bin:$HOME/.otto/toolchains/zig/current:$HOME/.otto/toolchains/zig/current/bin:$HOME/.otto/toolchains/zig/bin:$HOME/.otto/toolchains/node/current/bin:$HOME/.otto/toolchains/go/bin:$HOME/.otto/toolchains/rust/bin:$HOME/.otto/toolchains/rust/cargo/bin:$HOME/.otto/toolchains/python/bin:$HOME/.otto/toolchains/shell/bin:$HOME/.otto/toolchains/json/bin:$HOME/.cargo/bin:$HOME/go/bin:$HOME/.zvm/bin:/opt/homebrew/bin:/usr/local/go/bin:/usr/local/bin:$PATH"
 resolve_real() {
   readlink -f "$1" 2>/dev/null || realpath "$1" 2>/dev/null || python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$1" 2>/dev/null || echo "$1"
 }
@@ -42,6 +42,15 @@ for d in "$HOME"/.otto/toolchains/rust/rustup/toolchains/*; do
     echo "SDK:rust:otto:$rv:$d"
   fi
 done
+for d in "$HOME"/.otto/toolchains/zig/sdks/*; do
+  zb=""
+  if [ -x "$d/zig" ]; then zb="$d/zig"; elif [ -x "$d/bin/zig" ]; then zb="$d/bin/zig"; fi
+  if [ -n "$zb" ]; then
+    zv=$("$zb" version 2>/dev/null | head -n 1)
+    [ -n "$zv" ] || zv=$(basename "$d")
+    echo "SDK:zig:otto:$zv:$d"
+  fi
+done
 for d in "$HOME"/.otto/toolchains/node/sdks/*; do
   if [ -x "$d/bin/node" ]; then
     nv=$("$d/bin/node" --version 2>/dev/null | sed 's/^v//')
@@ -64,7 +73,7 @@ if [ -x "$HOME/.otto/toolchains/json/bin/jq" ]; then
   qv=$("$HOME/.otto/toolchains/json/bin/jq" --version 2>/dev/null | sed 's/^jq-//')
   echo "SDK:json:otto:${qv:-1.7.1}:$HOME/.otto/toolchains/json/bin/jq"
 fi
-for pair in "java:java" "go:go" "rust:rustc" "node:node" "python:python3" "shell:bash" "json:jq"; do
+for pair in "java:java" "go:go" "rust:rustc" "zig:zig" "node:node" "python:python3" "shell:bash" "json:jq"; do
   e="${pair%%:*}"; b="${pair#*:}"
   bin=$(command -v "$b" 2>/dev/null || true)
   [ -n "$bin" ] || continue
@@ -84,6 +93,11 @@ for pair in "java:java" "go:go" "rust:rustc" "node:node" "python:python3" "shell
       sdk_path=$("$bin" --print sysroot 2>/dev/null || dirname "$(dirname "$real")")
       ver=$("$bin" --version 2>/dev/null | awk '{print $2}')
       ;;
+    zig)
+      parent_dir=$(dirname "$real")
+      if [ "$(basename "$parent_dir")" = "bin" ]; then sdk_path=$(dirname "$parent_dir"); else sdk_path="$parent_dir"; fi
+      ver=$("$bin" version 2>/dev/null | head -n 1)
+      ;;
     node)
       sdk_path=$(dirname "$(dirname "$real")")
       ver=$("$bin" --version 2>/dev/null | sed 's/^v//')
@@ -101,13 +115,14 @@ for pair in "java:java" "go:go" "rust:rustc" "node:node" "python:python3" "shell
   [ -n "$ver" ] || ver="system"
   echo "SDK:$e:system:$ver:$sdk_path"
 done
-for pair in "java:jdtls:$HOME/.otto/toolchains/java/lsp/bin/jdtls" "go:gopls:$HOME/.otto/toolchains/go/bin/gopls" "rust:rust-analyzer:$HOME/.otto/toolchains/rust/bin/rust-analyzer" "node:typescript-language-server:$HOME/.otto/toolchains/node/lsp/node_modules/.bin/typescript-language-server" "python:pyright-langserver:$HOME/.otto/toolchains/python/bin/pyright-langserver" "shell:bash-language-server:$HOME/.otto/toolchains/shell/lsp/node_modules/.bin/bash-language-server" "json:vscode-json-language-server:$HOME/.otto/toolchains/json/lsp/node_modules/.bin/vscode-json-language-server"; do
+for pair in "java:jdtls:$HOME/.otto/toolchains/java/lsp/bin/jdtls" "go:gopls:$HOME/.otto/toolchains/go/bin/gopls" "rust:rust-analyzer:$HOME/.otto/toolchains/rust/bin/rust-analyzer" "zig:zls:$HOME/.otto/toolchains/zig/bin/zls" "node:typescript-language-server:$HOME/.otto/toolchains/node/lsp/node_modules/.bin/typescript-language-server" "python:pyright-langserver:$HOME/.otto/toolchains/python/bin/pyright-langserver" "shell:bash-language-server:$HOME/.otto/toolchains/shell/lsp/node_modules/.bin/bash-language-server" "json:vscode-json-language-server:$HOME/.otto/toolchains/json/lsp/node_modules/.bin/vscode-json-language-server"; do
   e="${pair%%:*}"; r="${pair#*:}"; b="${r%%:*}"; m="${r#*:}"
   if [ -x "$m" ]; then echo "LSP:$e:$m"; elif command -v "$b" >/dev/null 2>&1; then echo "LSP:$e:$(command -v "$b")"; fi
 done
 [ -f "$HOME/.otto/toolchains/java/dap/com.microsoft.java.debug.plugin-0.53.1.jar" ] && echo "DAP:java:$HOME/.otto/toolchains/java/dap/com.microsoft.java.debug.plugin-0.53.1.jar" || true
 command -v dlv >/dev/null 2>&1 && echo "DAP:go:$(command -v dlv)" || true
 if [ -x "$HOME/.otto/toolchains/rust/dap/extension/adapter/codelldb" ]; then echo "DAP:rust:$HOME/.otto/toolchains/rust/dap/extension/adapter/codelldb"; elif command -v codelldb >/dev/null 2>&1; then echo "DAP:rust:$(command -v codelldb)"; fi
+if [ -x "$HOME/.otto/toolchains/rust/dap/extension/adapter/codelldb" ]; then echo "DAP:zig:$HOME/.otto/toolchains/rust/dap/extension/adapter/codelldb"; elif command -v codelldb >/dev/null 2>&1; then echo "DAP:zig:$(command -v codelldb)"; elif command -v lldb-dap >/dev/null 2>&1; then echo "DAP:zig:$(command -v lldb-dap)"; elif command -v lldb >/dev/null 2>&1; then echo "DAP:zig:$(command -v lldb)"; fi
 [ -f "$HOME/.otto/toolchains/node/dap/js-debug/src/dapDebugServer.js" ] && echo "DAP:node:$HOME/.otto/toolchains/node/dap/js-debug/src/dapDebugServer.js" || true
 [ -x "$HOME/.otto/toolchains/python/dap/bin/python" ] && echo "DAP:python:$HOME/.otto/toolchains/python/dap/bin/python" || true
 if [ -x "$HOME/.otto/toolchains/shell/bin/bashdb" ]; then echo "DAP:shell:$HOME/.otto/toolchains/shell/bin/bashdb"; elif command -v bashdb >/dev/null 2>&1; then echo "DAP:shell:$(command -v bashdb)"; fi
@@ -124,7 +139,11 @@ pub(crate) struct ProbedRemoteEcosystem {
 fn normalize_remote_sdk_path(eco: EcosystemKind, raw_path: &str) -> String {
     let trimmed = raw_path.trim();
     match eco {
-        EcosystemKind::Java | EcosystemKind::Go | EcosystemKind::Rust | EcosystemKind::Node => {
+        EcosystemKind::Java
+        | EcosystemKind::Go
+        | EcosystemKind::Rust
+        | EcosystemKind::Zig
+        | EcosystemKind::Node => {
             let p = Path::new(trimmed);
             if let (Some(parent), Some(bin_dir)) =
                 (p.parent(), p.parent().and_then(Path::file_name))

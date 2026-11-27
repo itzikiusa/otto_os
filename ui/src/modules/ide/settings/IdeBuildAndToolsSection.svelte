@@ -28,6 +28,7 @@
     { name: 'typescript-language-server', eco: 'node', lang: 'TypeScript / JS' },
     { name: 'pyright', eco: 'python', lang: 'Python' },
     { name: 'rust-analyzer', eco: 'rust', lang: 'Rust' },
+    { name: 'zls', eco: 'zig', lang: 'Zig' },
     { name: 'bash-language-server', eco: 'shell', lang: 'Shell (zsh / bash)' },
   ];
 

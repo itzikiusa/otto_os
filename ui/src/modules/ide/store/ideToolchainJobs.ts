@@ -37,12 +37,20 @@ export async function installToolchainJob(
   ensurePoller: () => void,
 ): Promise<IdeInstallJob | null> {
   try {
-    // gopls / Delve are built with the project's own Go, so they match it.
+    // gopls / Delve are built with the project's own Go, and ZLS matches the project's Zig.
     const goRoot = ecosystem === 'go' && component !== 'sdk'
       ? host.toolchains.find((e) => e.ecosystem === 'go')?.installed.find((s) => s.active)?.path ?? null
       : null;
+    const zigHome = ecosystem === 'zig' && component !== 'sdk'
+      ? host.toolchains.find((e) => e.ecosystem === 'zig')?.installed.find((s) => s.active)?.path ?? null
+      : null;
     const resp = await api.post<{ job: IdeInstallJob }>('/ide/toolchains/install', {
-      target: host.targetPayload, ecosystem, component, version, ...(goRoot ? { go_root: goRoot } : {}),
+      target: host.targetPayload,
+      ecosystem,
+      component,
+      version,
+      ...(goRoot ? { go_root: goRoot } : {}),
+      ...(zigHome ? { zig_home: zigHome } : {}),
     });
     host.installJobs = [resp.job, ...host.installJobs.filter((j) => j.id !== resp.job.id)].slice(0, 12);
     ensurePoller();

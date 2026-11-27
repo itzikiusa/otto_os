@@ -36,6 +36,9 @@ impl CompiledDefMatcher {
             "rust" => format!(
                 r"^(?:pub(?:\([^)]*\))?\s+)?(?:const\s+)?(?:async\s+)?(?:unsafe\s+)?(?:fn|struct|enum|trait|type|const|static|mod|union)\s+{escaped}\b|^macro_rules!\s*{escaped}\b"
             ),
+            "zig" => format!(
+                r#"^(?:pub\s+)?(?:export\s+|extern(?:\s+"[^"]*")?\s+|inline\s+|noinline\s+)?fn\s+{escaped}\s*\(|^(?:pub\s+)?(?:threadlocal\s+)?(?:const|var)\s+{escaped}\b"#
+            ),
             "python" => {
                 format!(r"^(?:async\s+)?(?:def|class)\s+{escaped}\b|^{escaped}\s*(?::[^=]+)?=")
             }
@@ -272,6 +275,9 @@ pub(super) fn find_implementations_in_content(
         }
         "rust" => format!(
             r"^(?:unsafe\s+)?impl(?:<[^>]*>)?\s+(?:[A-Za-z0-9_:]+::)*{escaped}(?:<[^>]*>)?\s+for\b|^\s*(?:pub\s+)?(?:async\s+)?fn\s+{escaped}\s*(?:<[^>]*>)?\s*\("
+        ),
+        "zig" => format!(
+            r#"^\s*(?:pub\s+)?(?:export\s+|extern(?:\s+"[^"]*")?\s+|inline\s+|noinline\s+)?fn\s+{escaped}\s*\("#
         ),
         "java" | "kotlin" => format!(
             r"\b(?:implements|extends)\s+[^{{]*\b{escaped}\b|^(?:(?:public|protected|private|override|open)\s+)+[A-Za-z0-9_<>,.\[\]?\s]+\b{escaped}\s*\("

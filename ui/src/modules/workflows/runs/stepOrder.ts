@@ -12,9 +12,10 @@ import type { ChildThread, ChildThreadStatus, NodeRunState, RunState, RuntimeSes
  *  that ran past the clock or a skewed start never leaves the track. */
 export function timeBar(s: StepItem, clock: { start: number; end: number }): { at: number; w: number } | null {
   if (s.start === null || s.end === null) return null;
+  const end = Number.isFinite(s.end) ? s.end : clock.end;
   const span = Math.max(1, clock.end - clock.start);
   const at = Math.min(99.4, Math.max(0, ((s.start - clock.start) / span) * 100));
-  return { at, w: Math.min(100 - at, Math.max(0.6, ((s.end - s.start) / span) * 100)) };
+  return { at, w: Math.min(100 - at, Math.max(0.6, ((end - s.start) / span) * 100)) };
 }
 
 /** The pseudo-rows the pane can open besides a step. */
@@ -95,8 +96,10 @@ export function settledNodes(nodes: readonly NodeRunState[], live: boolean): rea
   return nodes.map((n): NodeRunState => (n.status === 'running' ? { ...n, status: 'skipped', error_class: 'canceled', phase: undefined, wait: undefined, attention: undefined, activity: undefined } : n));
 }
 
-/** The run's steps as display entries (§4.2). */
-export function orderSteps(nodes: readonly NodeRunState[], graph: WorkflowGraph, now: number): StepEntry[] {
+/** The run's steps as display entries (§4.2). `now` defaults to Infinity so a
+ *  running step overlaps any later sibling without re-running on every 1s clock tick;
+ *  `timeBar` resolves non-finite ends against the run's live clock. */
+export function orderSteps(nodes: readonly NodeRunState[], graph: WorkflowGraph, now = Number.POSITIVE_INFINITY): StepEntry[] {
   const gnodes = new Map(graph.nodes.map((n) => [n.id, n]));
   const topo = topoOrder(graph);
   const rank = (id: string) => (topo.indexOf(id) + 1 || topo.length + 1);
@@ -180,8 +183,9 @@ export interface ChildView {
 export function orderChildren(children: readonly ChildThread[]): ChildView {
   const view: ChildView = { active: [], queued: [], done: [], findings: 0, trailing: [] };
   for (const c of children) {
+    const retried = c.status === 'error' && (c as StepChild).retried_attempt != null;
     if (isSummarizer(c)) view.trailing.push(c);
-    else if (c.status === 'running' || c.status === 'needs_you' || c.status === 'error') view.active.push(c);
+    else if (c.status === 'running' || c.status === 'needs_you' || (c.status === 'error' && !retried)) view.active.push(c);
     else if (c.status === 'queued' || c.status === 'pending') view.queued.push(c);
     else view.done.push(c);
   }
@@ -241,6 +245,10 @@ export interface StepChild extends ChildThread {
   depth?: number;
   /** Parent child id when nested (`depth > 0`); null/undefined for a direct child of the step. */
   parent_child_id?: string | null;
+  /** 1-based attempt number when this failed row was followed by a later attempt of the same label. */
+  retried_attempt?: number | null;
+  /** Reason from checkpoint or node logs for a failed retried attempt, when available. */
+  retried_reason?: string | null;
 }
 
 /** A live `RuntimeSession` status mapped to the step list's child status vocabulary. */
@@ -382,6 +390,115 @@ export function mergeStepChildren(
   return out;
 }
 
+/** Structural equality for merged step children so unrelated runtime-session
+ *  ticks (e.g. `last_active_at` on the step's own thread) don't churn node
+ *  references and re-render the step pane. */
+export function sameStepChildren(a: readonly StepChild[], b: readonly StepChild[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i];
+    const y = b[i];
+    if (
+      x.id !== y.id ||
+      x.label !== y.label ||
+      x.provider !== y.provider ||
+      x.status !== y.status ||
+      x.note !== y.note ||
+      x.thread_id !== y.thread_id ||
+      x.model !== y.model ||
+      x.effort !== y.effort ||
+      x.started_at !== y.started_at ||
+      x.ended_at !== y.ended_at ||
+      x.depth !== y.depth ||
+      x.parent_child_id !== y.parent_child_id ||
+      x.retried_attempt !== y.retried_attempt ||
+      x.retried_reason !== y.retried_reason
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** Parse `"attempt N: <reason>"` from a checkpoint or node log list. */
+function attemptReasonFromLogs(
+  logs: readonly string[] | undefined,
+  attempt: number,
+  prefix?: { iteration: number; name: string } | null,
+): string | null {
+  if (!logs?.length) return null;
+  const tag = prefix ? `[${prefix.iteration}/${prefix.name}]` : null;
+  const re = new RegExp(`^attempt\\s+${attempt}:\\s*(.+)$`, 'i');
+  for (const raw of logs) {
+    let line = raw.trim();
+    if (tag) {
+      if (!line.startsWith(tag)) continue;
+      line = line.slice(tag.length).trim();
+    }
+    const m = re.exec(line);
+    if (m?.[1]?.trim()) return m[1].trim();
+  }
+  return null;
+}
+
+/** Extract the failure reason for a retried child attempt from matching
+ *  `checkpoints[].logs` (first) or the parent step's `logs` (fallback). */
+export function retriedAttemptReason(
+  label: string,
+  attempt: number,
+  opts: { loopId?: string; checkpoints?: readonly WorkflowCheckpoint[]; nodeLogs?: readonly string[] } = {},
+): string | null {
+  const iterMatch = /^(.+?)\s*·\s*iteration\s+(\d+)$/i.exec(label.trim());
+  const stepName = iterMatch ? iterMatch[1].trim() : label.trim();
+  const iteration = iterMatch ? Number(iterMatch[2]) : null;
+  for (const cp of opts.checkpoints ?? []) {
+    if (opts.loopId && cp.loop_id !== opts.loopId) continue;
+    if (cp.name !== stepName) continue;
+    if (iteration !== null && cp.iteration !== iteration) continue;
+    const reason = attemptReasonFromLogs(cp.logs, attempt);
+    if (reason) return reason;
+  }
+  if (iteration !== null) {
+    const prefixed = attemptReasonFromLogs(opts.nodeLogs, attempt, { iteration, name: stepName });
+    if (prefixed) return prefixed;
+  }
+  return attemptReasonFromLogs(opts.nodeLogs, attempt);
+}
+
+/** Mark failed child rows that are followed by a later attempt of the same
+ *  label (`retried_attempt`, plus `retried_reason` from checkpoint/node logs).
+ *  The last attempt for any label keeps its normal status and wording. */
+export function annotateRetriedChildren(
+  children: readonly StepChild[],
+  opts: { loopId?: string; checkpoints?: readonly WorkflowCheckpoint[]; nodeLogs?: readonly string[] } = {},
+): StepChild[] {
+  if (children.length < 2) return children as StepChild[];
+  const groups = new Map<string, number[]>();
+  for (let i = 0; i < children.length; i++) {
+    const c = children[i];
+    const key = `${c.parent_child_id ?? ''}\u0000${c.label}`;
+    const list = groups.get(key);
+    if (list) list.push(i);
+    else groups.set(key, [i]);
+  }
+  let changed = false;
+  const out = children.slice();
+  for (const idxs of groups.values()) {
+    if (idxs.length < 2) continue;
+    for (let pos = 0; pos < idxs.length - 1; pos++) {
+      const idx = idxs[pos];
+      const c = out[idx];
+      if (c.status !== 'error') continue;
+      const attempt = pos + 1;
+      const reason = retriedAttemptReason(c.label, attempt, opts);
+      out[idx] = { ...c, retried_attempt: attempt, ...(reason ? { retried_reason: reason } : {}) };
+      changed = true;
+    }
+  }
+  return changed ? out : (children as StepChild[]);
+}
+
 export interface NestedChildEntry {
   child: StepChild;
   depth: number;
@@ -415,11 +532,12 @@ export function orderChildTree(children: readonly StepChild[]): NestedChildView 
       roots.push(c);
     }
   }
+  const isRetried = (c: StepChild): boolean => c.status === 'error' && c.retried_attempt != null;
   const hasLiveDescendant = (id: string, seen = new Set<string>()): boolean => {
     for (const k of kidsOf.get(id) ?? []) {
       if (seen.has(k.id)) continue;
       seen.add(k.id);
-      if (k.status === 'running' || k.status === 'needs_you' || k.status === 'error') return true;
+      if (k.status === 'running' || k.status === 'needs_you' || (k.status === 'error' && !isRetried(k))) return true;
       if (hasLiveDescendant(k.id, seen)) return true;
     }
     return false;
@@ -441,7 +559,7 @@ export function orderChildTree(children: readonly StepChild[]): NestedChildView 
   for (const r of roots) {
     const branch = expand(r);
     if (isSummarizer(r)) view.trailing.push(...branch);
-    else if (r.status === 'running' || r.status === 'needs_you' || r.status === 'error' || hasLiveDescendant(r.id)) view.active.push(...branch);
+    else if (r.status === 'running' || r.status === 'needs_you' || (r.status === 'error' && !isRetried(r)) || hasLiveDescendant(r.id)) view.active.push(...branch);
     else if (r.status === 'queued' || r.status === 'pending') view.queued.push(...branch);
     else view.done.push(...branch);
   }

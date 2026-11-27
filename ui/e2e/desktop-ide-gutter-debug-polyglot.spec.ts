@@ -118,6 +118,17 @@ const CELLS: Cell[] = [
     needs: ['cargo', 'lldb'],
   },
   {
+    name: 'zig test in src/a/b.zig',
+    files: {
+      'src/a/b.zig': 'const std = @import("std");\n\npub fn mul(a: i32, b: i32) i32 {\n    return a * b;\n}\n\ntest "multiplies deep" {\n    const left: i32 = 6;\n    const product = mul(left, 7);\n    try std.testing.expectEqual(@as(i32, 42), product);\n}\n',
+    },
+    open: 'src/a/b.zig',
+    gutterKind: 'test',
+    menu: /^Debug/,
+    stops: [{ line: 9, text: 'const product', local: 'left' }, { line: 10, text: 'expectEqual', local: 'product' }],
+    needs: ['zig', 'lldb'],
+  },
+  {
     name: 'java JUnit 5 test in a deeper package of a sub-module',
     files: {
       'pom.xml': '<project xmlns="http://maven.apache.org/POM/4.0.0"><modelVersion>4.0.0</modelVersion><groupId>com.acme</groupId><artifactId>parent</artifactId><version>1.0.0</version><packaging>pom</packaging><modules><module>core</module></modules><properties><maven.compiler.release>17</maven.compiler.release><project.build.sourceEncoding>UTF-8</project.build.sourceEncoding></properties><build><pluginManagement><plugins><plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-compiler-plugin</artifactId><version>3.13.0</version></plugin><plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-resources-plugin</artifactId><version>3.3.1</version></plugin><plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-surefire-plugin</artifactId><version>3.2.5</version></plugin></plugins></pluginManagement></build></project>\n',

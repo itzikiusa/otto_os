@@ -25,10 +25,8 @@
     sessionId?: string;
     activity?: Map<string, TurnItem[]>;
     output?: Record<string, string>;
-    /** Render every subagent card directly without the "N subagents" fold. */
-    expandWork?: boolean;
   }
-  let { kids, sessionId = '', activity = new Map(), output = {}, expandWork = false }: Props = $props();
+  let { kids, sessionId = '', activity = new Map(), output = {} }: Props = $props();
 
   const EMPTY: TurnItem[] = [];
   const own = $derived(runtimeThreads.get(sessionId)?.provider ?? null);
@@ -64,14 +62,12 @@
   {#if k.kind === 'thread'}
     <RuntimeChildCard id={k.id} hint={k.hint} removed={k.removed} />
   {:else}
-    <RuntimeSubagentCard {sessionId} item={k.item} activity={activity.get(k.item.id) ?? EMPTY} {output} startOpen={expandWork} />
+    <RuntimeSubagentCard {sessionId} item={k.item} activity={activity.get(k.item.id) ?? EMPTY} {output} />
   {/if}
 {/snippet}
 
 {#if kids.length === 1}
   {@render row(kids[0])}
-{:else if expandWork && kids.length > 1}
-  {#each kids as k (kidKey(k))}{@render row(k)}{/each}
 {:else if kids.length > 1}
   <section class="sg" class:settled={settled && !open} aria-label="{kids.length} subagents" data-testid="runtime-child-group">
     <button type="button" class="sg-head" aria-expanded={open} data-testid="runtime-child-group-toggle" onclick={() => (opened = !open)}>

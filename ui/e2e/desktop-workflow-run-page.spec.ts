@@ -147,7 +147,7 @@ test('a live step thread is read-only and offers neither an agent restart nor Op
   await expect(conv.getByTestId('runtime-mcp-changed')).toHaveCount(0);
 });
 
-test('full timeline without a fold, live agent-opened sub-thread row, and opening its card in the pane', async ({ page }) => {
+test('live agent-opened sub-thread row and opening its card in the pane stay read-only', async ({ page }) => {
   const wf = await createWorkflow(api, 'E2E Live sub-thread', chain(agentStep('work', 'Work step', ['child codex sleep 60000', 'sleep 60000'])));
   const run = await startRun(api, wf);
   await waitRun(api, run, (r) => r.nodes.some((n) => n.node_id === 'work' && n.status === 'running' && !!n.thread?.thread_id));
@@ -163,15 +163,6 @@ test('full timeline without a fold, live agent-opened sub-thread row, and openin
   await expect(childRow).toBeVisible({ timeout: 25_000 });
   await expect(childRow).toHaveAttribute('data-status', 'running');
   await expect(page.getByTestId('wf-run-page')).toHaveAttribute('data-state', 'running');
-
-  // Full timeline stays unfolded (no "N earlier steps", "Worked for …", parallel groups, or subagent group toggles)
-  // and individual expandable work rows / changed-file cards start expanded on arrival.
-  await expect(conv.getByTestId('runtime-earlier-steps')).toHaveCount(0);
-  await expect(conv.locator('[data-testid^="runtime-fold-"]')).toHaveCount(0);
-  await expect(conv.locator('[data-testid^="runtime-group-"]')).toHaveCount(0);
-  await expect(conv.getByTestId('runtime-child-group')).toHaveCount(0);
-  await expect(conv.locator('[data-testid^="runtime-item-"] button.rw-line[aria-expanded="false"]')).toHaveCount(0);
-  await expect(conv.locator('[data-testid="runtime-turn-changes"] button.tc-toggle[aria-expanded="false"]')).toHaveCount(0);
 
   // Clicking the sub-thread card inside the conversation opens it in the same pane and selects its row.
   const childCardOpen = conv.locator('[data-testid^="runtime-child-"] [data-testid="runtime-item-open"]').first();
@@ -252,11 +243,9 @@ test('a settled step\'s conversation is read-only: no Revive, Stop or limit card
   await waitRun(api, run, settled);
   await openRun(page, wf, run, 'one');
   await expect(page.getByTestId('wf-step-conversation')).toBeVisible({ timeout: 20_000 });
-  // The step persona's answer (fake_script.rs): the real thread, read-only once settled, unfolded.
+  // The step persona's answer (fake_script.rs): the real thread, read-only once settled.
   await expect(page.getByTestId('wf-step-conversation').getByText('step done').first()).toBeVisible();
   await expect(page.getByTestId('wf-step-conversation').getByTestId('runtime-composer')).toHaveCount(0);
-  await expect(page.getByTestId('wf-step-conversation').getByTestId('runtime-earlier-steps')).toHaveCount(0);
-  await expect(page.getByTestId('wf-step-conversation').locator('[data-testid^="runtime-fold-"]')).toHaveCount(0);
   for (const id of ['runtime-closed', 'runtime-reopen', 'runtime-background', 'runtime-background-stop-all']) await expect(page.getByTestId(id)).toHaveCount(0);
 });
 
@@ -314,4 +303,136 @@ test('files sent with the message show under Result → Input: a text one previe
   await expect(page.getByTestId('wf-run-attachment-preview')).toContainText('line two');
   await trace.getByRole('button', { name: 'Download' }).click();
   await expect.poll(() => reads.some((u) => u.includes('path=attachments%2Ftrace.log') && u.includes('download=1'))).toBe(true);
+});
+
+test('live conversation opens at bottom, follows tail, and holds scrollTop steady for 3s when scrolled up', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const script: string[] = [
+    ...Array.from({ length: 28 }, (_, i) => `reply Initial item ${i + 1}: ${'verifying workflow conversation tail anchoring '.repeat(6)}`),
+    ...Array.from({ length: 30 }, (_, i) => ['sleep 350', `reply Live arrival ${i + 1}: ${'streaming live workflow step output '.repeat(5)}`]).flat(),
+    'sleep 60000',
+  ];
+  const wf = await createWorkflow(api, 'E2E Conversation tail', chain(agentStep('stream', 'Streaming step', script)));
+  const run = await startRun(api, wf);
+  await waitRun(api, run, (r) => r.nodes.some((n) => n.node_id === 'stream' && n.status === 'running' && !!n.thread?.thread_id));
+  await openRun(page, wf, run, 'stream');
+
+  const conv = page.getByTestId('wf-step-conversation');
+  const scroller = conv.locator('.rt-scroll');
+  await expect(conv.getByText('Initial item 28:', { exact: false })).toBeAttached({ timeout: 25_000 });
+
+  // Single scroll container: `.pane-col` never overflows vertically while showing a live thread.
+  const outerOverflow = await page.locator('.pane-col').evaluate((el) => el.scrollHeight - el.clientHeight);
+  expect(outerOverflow, 'outer .pane-col should not scroll when showing the live conversation').toBeLessThanOrEqual(1);
+
+  // Opens at the bottom and stays pinned to the bottom as live items arrive.
+  await expect.poll(() => scroller.evaluate((el) => el.scrollHeight - el.clientHeight)).toBeGreaterThan(200);
+  await expect.poll(() => scroller.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight)).toBeLessThan(40);
+  const heightWhileFollowing = await scroller.evaluate((el) => el.scrollHeight);
+  await expect.poll(() => scroller.evaluate((el) => el.scrollHeight), { timeout: 10_000 }).toBeGreaterThan(heightWhileFollowing);
+  await expect.poll(() => scroller.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight)).toBeLessThan(40);
+
+  // User scrolls up with the wheel: scrollTop must not move for 3 seconds while new items keep arriving.
+  const box = (await scroller.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.wheel(0, -600);
+  await page.mouse.wheel(0, -600);
+  await expect.poll(() => scroller.getAttribute('data-at-bottom')).toBe('0');
+  const pinnedTop = await scroller.evaluate((el) => el.scrollTop);
+  const beforeHeight = await scroller.evaluate((el) => el.scrollHeight);
+  expect(pinnedTop).toBeGreaterThan(0);
+
+  await page.waitForTimeout(3000); // ui-guards: allow — absence: proves scrollTop stays put for 3s while live items arrive
+  const after = await scroller.evaluate((el) => ({ top: el.scrollTop, height: el.scrollHeight, atBottom: el.dataset.atBottom }));
+  expect(after.height, 'live items arrived during the 3s hold').toBeGreaterThan(beforeHeight);
+  expect(after.atBottom).toBe('0');
+  expect(Math.abs(after.top - pinnedTop), 'scrollTop did not jump while scrolled up').toBeLessThanOrEqual(1);
+
+  // The follow pill returns smoothly to the latest line.
+  await conv.getByTestId('runtime-new-pill').click();
+  await expect.poll(() => scroller.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight)).toBeLessThan(40);
+});
+
+test('long conversation folds like Threads, loads newest page first, and anchors scroll when loading older rows', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const wf = await createWorkflow(api, 'E2E Paged conversation', chain(agentStep('one', 'One step')));
+  const run = await startRun(api, wf);
+  const done = await waitRun(api, run, settled);
+  const threadId = done.nodes.find((n) => n.node_id === 'one')?.thread?.thread_id;
+  expect(threadId, 'step ran on a runtime thread').toBeTruthy();
+
+  const TOTAL_TURNS = 60;
+  const T0 = Date.parse('2026-11-26T10:00:00Z');
+  const at = (s: number) => new Date(T0 + s * 1000).toISOString();
+  const buildPage = (fromOrd: number, toOrd: number) => {
+    const turns = [];
+    const turn_items = [];
+    let ord = (fromOrd - 1) * 5 + 1;
+    for (let t = fromOrd; t <= toOrd; t++) {
+      const tid = `turn-${t}`;
+      turns.push({ id: tid, ordinal: t, status: 'completed', started_at: at(t * 20), completed_at: at(t * 20 + 15), origin: 'user' });
+      turn_items.push(
+        { id: `u-${t}`, turn_id: tid, ordinal: ord++, status: 'completed', title: null, type: 'user_message', text: `Question number ${t}`, started_at: at(t * 20), completed_at: at(t * 20), updated_at: at(t * 20) },
+        { id: `c1-${t}`, turn_id: tid, ordinal: ord++, status: 'completed', title: `rg turn_${t}`, type: 'command_execution', input: `rg turn_${t}`, exit_code: 0, detail_omitted: true, started_at: at(t * 20 + 1), completed_at: at(t * 20 + 4), updated_at: at(t * 20 + 4) },
+        { id: `c2-${t}`, turn_id: tid, ordinal: ord++, status: 'completed', title: `cargo check ${t}`, type: 'command_execution', input: `cargo check ${t}`, exit_code: 0, detail_omitted: true, started_at: at(t * 20 + 5), completed_at: at(t * 20 + 9), updated_at: at(t * 20 + 9) },
+        { id: `a-${t}`, turn_id: tid, ordinal: ord++, status: 'completed', title: null, type: 'assistant_message', message_id: `m-${t}`, streaming: false, text: `Answer for turn ${t}: ${'detailed workflow verification prose '.repeat(5)}`, started_at: at(t * 20 + 10), completed_at: at(t * 20 + 15), updated_at: at(t * 20 + 15) },
+      );
+    }
+    return {
+      provider_session: { status: 'ready', cwd: '/tmp', model: null, updated_at: at(TOTAL_TURNS * 20 + 20), last_error: null },
+      provider_thread: null,
+      turns,
+      turn_items,
+      runtime_requests: [],
+      plans: [],
+      has_older: fromOrd > 1,
+      oldest_turn_ordinal: fromOrd,
+      older_turns: fromOrd - 1,
+    };
+  };
+
+  const eventUrls: string[] = [];
+  const itemFetches: string[] = [];
+  await page.route(`**/api/v1/runtime-sessions/${threadId}/events**`, (route) => {
+    const u = new URL(route.request().url());
+    eventUrls.push(u.pathname + u.search);
+    const before = Number(u.searchParams.get('before_turn_ordinal') ?? '0');
+    const snapshot = before > 1 ? buildPage(Math.max(1, before - 40), before - 1) : buildPage(TOTAL_TURNS - 39, TOTAL_TURNS);
+    return route.fulfill({ json: { kind: 'snapshot', snapshot_sequence: 1000, snapshot } });
+  });
+  await page.route(`**/api/v1/runtime-sessions/${threadId}/items/**`, (route) => {
+    itemFetches.push(route.request().url());
+    return route.fulfill({ status: 200, json: { item: { id: 'noop' } } });
+  });
+
+  await openRun(page, wf, run, 'one');
+  const conv = page.getByTestId('wf-step-conversation');
+  const scroller = conv.locator('.rt-scroll');
+  await expect(conv.getByText('Answer for turn 60:', { exact: false })).toBeVisible({ timeout: 20_000 });
+
+  // Uses Threads' exact tail budget (`tail_turns=40&max_lines=10000&compact=true`), folds finished work, and fires 0 unsolicited item hydrations.
+  expect(eventUrls.some((u) => u.includes('tail_turns=40&max_lines=10000&compact=true'))).toBe(true);
+  expect(itemFetches).toHaveLength(0);
+  await expect(conv.locator('details.rf').first()).toBeVisible();
+  await expect(conv.locator('.rf-body')).toHaveCount(0);
+  await expect(conv.getByText('Answer for turn 15:', { exact: false })).toHaveCount(0);
+
+  // Opens at the bottom with no outer scrollbar.
+  await expect.poll(() => scroller.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight)).toBeLessThan(40);
+  const outerOverflow = await page.locator('.pane-col').evaluate((el) => el.scrollHeight - el.clientHeight);
+  expect(outerOverflow).toBeLessThanOrEqual(1);
+
+  // Scrolling to the top triggers loadOlder and keeps the first visible row anchored in place.
+  const beforeTop21 = await scroller.evaluate((el) => {
+    el.scrollTop = 40;
+    const q21 = Array.from(el.querySelectorAll('*')).find((n) => n.childElementCount === 0 && n.textContent?.trim() === 'Question number 21');
+    return q21 ? q21.getBoundingClientRect().top : NaN;
+  });
+  expect(Number.isFinite(beforeTop21)).toBe(true);
+  await expect(conv.getByText('Answer for turn 15:', { exact: false })).toBeAttached({ timeout: 10_000 });
+  expect(eventUrls.some((u) => u.includes('before_turn_ordinal=21&limit_turns=40&max_lines=10000&compact=true'))).toBe(true);
+  const scrolledDown = await scroller.evaluate((el) => el.scrollTop);
+  expect(scrolledDown, 'scrollTop shifted downward when older turns were prepended').toBeGreaterThan(240);
+  const afterTop21 = await conv.getByText('Question number 21', { exact: true }).evaluate((el) => el.getBoundingClientRect().top);
+  expect(Math.abs(afterTop21 - beforeTop21), 'first visible row stayed anchored within 4px across prepend').toBeLessThanOrEqual(4);
 });

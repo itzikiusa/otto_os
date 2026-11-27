@@ -278,7 +278,7 @@ export interface IdeInstallJob {
 export interface IdeEnvVar { key: string; value?: string; secret: boolean; has_secret?: boolean }
 
 export interface IdeProjectEnvironment {
-  java_home?: string | null; go_root?: string | null; rust_toolchain?: string | null;
+  java_home?: string | null; go_root?: string | null; rust_toolchain?: string | null; zig_home?: string | null;
   node_home?: string | null; python_interpreter?: string | null;
   android_home?: string | null; flutter_root?: string | null; xcode_developer_dir?: string | null;
   dotenv_path?: string | null; extra_path?: string | null;
@@ -429,6 +429,7 @@ export function isReadOnlySdkOrCachePath(p: string): boolean {
   if (/\/toolchain@v[\w.-]+\/src\//.test(p) || /\/go(?:@[\w.-]+)?\/(?:[\w.-]+\/)?libexec\/src\//.test(p) || p.startsWith('/usr/local/go/src/')) return true;
   if (p.includes('/.m2/repository/') || p.includes('/.gradle/caches/')) return true;
   if (p.includes('/.cargo/registry/') || p.includes('/rustlib/src/')) return true;
+  if (p.includes('/.cache/zig/') || p.includes('/lib/zig/std/') || p.includes('/lib/std/') || p.includes('/.zvm/')) return true;
   if (p.includes('/node_modules/') || p.includes('/site-packages/') || p.includes('/dist-packages/')) return true;
   if (p.includes('/.otto/toolchains/')) return true;
   return false;
@@ -450,7 +451,7 @@ export function detectIdeLanguage(p: string): string {
   if (lower === 'bashrc' || lower === '.bashrc' || lower === '.zshrc' || lower === '.zshenv') return 'shell';
   const ext = lower.includes('.') ? (lower.split('.').pop() ?? '') : '';
   const map: Record<string, string> = {
-    go: 'go', java: 'java', class: 'java', rs: 'rust', py: 'python', pyi: 'python',
+    go: 'go', java: 'java', class: 'java', rs: 'rust', zig: 'zig', zon: 'zig', py: 'python', pyi: 'python',
     ts: 'typescript', mts: 'typescript', cts: 'typescript', tsx: 'tsx',
     js: 'javascript', mjs: 'javascript', cjs: 'javascript', jsx: 'jsx',
     json: 'json', jsonc: 'json', jsonl: 'jsonl', csv: 'csv', tsv: 'tsv',
@@ -475,7 +476,7 @@ export const GUTTER_TARGET_ID = 'gutter';
 
 export function defaultRunnerForLanguage(lang: string): string {
   const map: Record<string, string> = {
-    go: 'go_run', rust: 'cargo_run', java: 'java_main', python: 'python',
+    go: 'go_run', rust: 'cargo_run', zig: 'zig_run', java: 'java_main', python: 'python',
     javascript: 'node', typescript: 'node', tsx: 'npm', jsx: 'node', shell: 'shell',
   };
   return map[lang] ?? 'custom';
@@ -502,6 +503,12 @@ export function buildNewFileTemplate(fullPath: string, rootPath: string, sibling
     const m = parentDir.match(/\/src\/(?:main|test)\/java\/(.+)$/);
     const pkgLine = m?.[1] ? `package ${m[1].replace(/\//g, '.')};\n\n` : '';
     return `${pkgLine}public class ${stem} {\n}\n`;
+  }
+  if (lower.endsWith('.zig')) {
+    if (lower === 'main.zig') {
+      return `const std = @import("std");\n\npub fn main() !void {\n}\n`;
+    }
+    return `const std = @import("std");\n\n`;
   }
   if (lower.endsWith('.sh') || lower.endsWith('.bash')) return '#!/usr/bin/env bash\nset -euo pipefail\n\n';
   if (lower.endsWith('.zsh')) return '#!/usr/bin/env zsh\nset -euo pipefail\n\n';
@@ -562,7 +569,7 @@ export async function collabGuestPost<T>(path: string, guestToken: string | null
   return (await resp.json()) as T;
 }
 
-const ENTRY_FILE_NAMES = ['readme.md', 'main.go', 'main.rs', 'main.py', 'index.ts', 'app.svelte', 'go.mod', 'cargo.toml', 'package.json'];
+const ENTRY_FILE_NAMES = ['readme.md', 'main.go', 'main.rs', 'main.zig', 'main.py', 'index.ts', 'app.svelte', 'go.mod', 'cargo.toml', 'build.zig', 'package.json'];
 
 export function pickInitialEntryFile(entries: IdeFsEntry[]): IdeFsEntry | null {
   const files = entries.filter((e) => e.kind === 'file' && !e.name.startsWith('.'));

@@ -259,7 +259,7 @@ pub(super) async fn resolve_rust_adapter(
     ))
 }
 
-async fn locate_lldb_python_bridge(
+pub(super) async fn locate_lldb_python_bridge(
     target: &IdeTargetSpec,
     ctx: &DapStartContext,
     env: &BTreeMap<String, String>,
