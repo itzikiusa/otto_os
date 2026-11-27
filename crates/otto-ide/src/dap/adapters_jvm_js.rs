@@ -71,8 +71,37 @@ pub(super) async fn resolve_js_ts_adapter(
         });
     }
 
+    let mut program = normalize_target_path(&req.target, &req.launch.program);
+    let mut args = req.launch.args.clone();
+    let mut cwd = cwd.to_string();
+
+    // BUG-30 + BUG3-9: Reject Playwright/Karma debugging up front, on local and SSH targets, for
+    // single-test gutter launches AND toolbar/config launches (including auto-discovered
+    // `npm run test` scripts) using structured runner/command/script classification — never
+    // arbitrary path substrings. An auto-discovered script names `package.json` relative to its
+    // own package directory (the launch cwd), not to the first project folder.
+    let guard_program = if !Path::new(raw_program).is_absolute()
+        && Path::new(raw_program).file_name() == Some("package.json".as_ref())
+    {
+        Path::new(&cwd)
+            .join(raw_program)
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        program.clone()
+    };
+    check_js_debug_supported(
+        &guard_program,
+        &args,
+        &env,
+        ctx.run_config.as_ref(),
+        req.launch.test_name.as_deref(),
+        req.launch.is_test,
+        req.target.kind == IdeTargetKind::Local,
+    )?;
+
     let mut node_candidates = Vec::new();
-    if let Some(sdk) = resolve_debug_sdk_override(req, ctx, cwd) {
+    if let Some(sdk) = resolve_debug_sdk_override(req, ctx, &cwd) {
         let trimmed = sdk.trim_end_matches('/');
         if trimmed.ends_with("/node") || Path::new(trimmed).is_file() {
             node_candidates.push(trimmed.to_string());
@@ -105,24 +134,6 @@ pub(super) async fn resolve_js_ts_adapter(
                 "Node.js runtime not found; install Node.js via IDE → Toolchains".into(),
             )
         })?;
-
-    let mut program = normalize_target_path(&req.target, &req.launch.program);
-    let mut args = req.launch.args.clone();
-    let mut cwd = cwd.to_string();
-
-    // BUG-30 + BUG3-9: Reject Playwright/Karma debugging up front for BOTH single-test gutter
-    // launches AND toolbar/config launches (including auto-discovered `npm run test` scripts)
-    // using structured runner/command/script classification — never arbitrary path substrings.
-    if req.target.kind == IdeTargetKind::Local {
-        check_js_debug_supported(
-            &program,
-            &args,
-            &env,
-            ctx.run_config.as_ref(),
-            req.launch.test_name.as_deref(),
-            req.launch.is_test,
-        )?;
-    }
 
     // BUG-27: Resolve framework dev CLIs (vite/next/ng/nuxt/svelte-kit) BEFORE BOTH
     // external `js-debug` and built-in `node-inspector-dap` so neither adapter tries
@@ -417,6 +428,7 @@ pub(crate) fn check_js_debug_supported(
     run_config: Option<&crate::types::IdeRunConfig>,
     test_name: Option<&str>,
     is_test: bool,
+    local: bool,
 ) -> Result<()> {
     if let Some(kind) = classify_js_cmd_tokens(program, args) {
         return Err(unsupported_js_runner_error(kind));
@@ -427,12 +439,9 @@ pub(crate) fn check_js_debug_supported(
                 return Err(unsupported_js_runner_error(kind));
             }
         }
-        if matches!(
-            cfg.runner,
-            crate::types::IdeRunnerKind::Npm
-                | crate::types::IdeRunnerKind::Node
-                | crate::types::IdeRunnerKind::Custom
-        ) {
+        // Only an npm runner's args are a package-manager command line; a Node or custom
+        // runner's args belong to the program (or to `cfg.command`, classified above).
+        if cfg.runner == crate::types::IdeRunnerKind::Npm {
             // Check `npx`/`npm`/`ng` inside structured runner args (e.g. `["--no-install", "ng", "test"]`).
             if let Some(kind) = classify_js_cmd_tokens("npx", &cfg.args) {
                 return Err(unsupported_js_runner_error(kind));
@@ -444,12 +453,16 @@ pub(crate) fn check_js_debug_supported(
             } else {
                 None
             };
-            if let Some(script) = cfg_script {
+            if let Some(script) = cfg_script.filter(|_| local) {
                 if let Some(tp) = cfg.target_path.as_deref() {
+                    let tp = match cfg.cwd.as_deref() {
+                        Some(c) if !Path::new(tp).is_absolute() => Path::new(c).join(tp),
+                        _ => PathBuf::from(tp),
+                    };
                     let pkg = if tp.ends_with("package.json") {
-                        PathBuf::from(tp)
+                        tp
                     } else {
-                        Path::new(tp).join("package.json")
+                        tp.join("package.json")
                     };
                     if let Some(kind) = inspect_package_json_script(&pkg, Some(script), true) {
                         return Err(unsupported_js_runner_error(kind));
@@ -463,6 +476,17 @@ pub(crate) fn check_js_debug_supported(
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or(program);
+    if prog_base.eq_ignore_ascii_case("package.json") {
+        // Toolbar Debug on a tool-runner config (`Karma / Angular Test`, `Playwright E2E`)
+        // forwards that runner's own command line as args: `--no-install ng test`.
+        if let Some(kind) = classify_js_cmd_tokens("npx", args) {
+            return Err(unsupported_js_runner_error(kind));
+        }
+    }
+    // The checks below read the manifest or source, which only exist on this host.
+    if !local {
+        return Ok(());
+    }
     if prog_base.eq_ignore_ascii_case("package.json") {
         let explicit_script = env.get("OTTO_NPM_SCRIPT").map(String::as_str).or_else(|| {
             if args.first().map(String::as_str) == Some("run") {
@@ -1713,5 +1737,123 @@ mod tests {
             Some("ws://127.0.0.1:9222/devtools/page/ROOT"),
             "BUG-28: exact root URL tab must beat earlier /settings tab"
         );
+    }
+
+    async fn js_guard_error(
+        data_dir: &Path,
+        req: &IdeStartDebugReq,
+        ctx: &DapStartContext,
+        env: BTreeMap<String, String>,
+    ) -> String {
+        let cwd = req.launch.cwd.clone().unwrap_or_default();
+        match resolve_js_ts_adapter(data_dir, "typescript", req, ctx, &cwd, env).await {
+            Ok(_) => String::new(),
+            Err(e) => e.to_string(),
+        }
+    }
+
+    /// BUG-30: the toolbar's auto-discovered Karma / Playwright configs (argv only, no
+    /// `config_id`), an npm script in a second project folder, and SSH targets all reach the
+    /// guard; BUG3-9: a Node run configuration's own argv never classifies the program.
+    #[tokio::test]
+    async fn js_debug_guard_covers_toolbar_tool_runners_nested_packages_and_ssh() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        let fake_node = data_dir.join("toolchains/node/current/bin/node");
+        std::fs::create_dir_all(fake_node.parent().unwrap()).unwrap();
+        std::fs::write(&fake_node, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&fake_node, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Two project folders: the first runs vitest, the Angular one runs Karma via `ng test`.
+        let ws = tmp.path().join("ws");
+        let web = tmp.path().join("web");
+        for (dir, test) in [(&ws, "vitest"), (&web, "ng test")] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(
+                dir.join("package.json"),
+                format!(r#"{{"main":"main.js","scripts":{{"test":"{test}"}}}}"#),
+            )
+            .unwrap();
+        }
+        let app = ws.join("app.js");
+        std::fs::write(&app, "console.log('app');\n").unwrap();
+        let ctx = DapStartContext {
+            caller_is_root: true,
+            ..Default::default()
+        };
+        let req = |program: &str, args: &[&str], cwd: &Path, is_test: bool| IdeStartDebugReq {
+            target: IdeTargetSpec::local(ws.to_string_lossy().into_owned()),
+            language: "typescript".into(),
+            launch: crate::types::IdeDebugLaunchSpec {
+                program: program.into(),
+                args: args.iter().map(|a| a.to_string()).collect(),
+                cwd: Some(cwd.to_string_lossy().into_owned()),
+                is_test,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        // Toolbar Debug on "Karma / Angular Test" and "Playwright E2E" sends their argv only.
+        let karma = req(
+            "package.json",
+            &["--no-install", "ng", "test", "--watch=false"],
+            &web,
+            false,
+        );
+        let err = js_guard_error(&data_dir, &karma, &ctx, BTreeMap::new()).await;
+        assert!(
+            err.contains("Karma"),
+            "auto Karma config must be rejected: {err:?}"
+        );
+        let pw = req(
+            "package.json",
+            &["--no-install", "playwright", "test"],
+            &ws,
+            false,
+        );
+        let err = js_guard_error(&data_dir, &pw, &ctx, BTreeMap::new()).await;
+        assert!(
+            err.contains("Playwright"),
+            "auto Playwright config must be rejected: {err:?}"
+        );
+
+        // `npm run test` of the second folder reads that folder's manifest, not the first one's.
+        let npm_test = req("package.json", &[], &web, true);
+        let env = BTreeMap::from([("OTTO_NPM_SCRIPT".to_string(), "test".to_string())]);
+        let err = js_guard_error(&data_dir, &npm_test, &ctx, env).await;
+        assert!(
+            err.contains("Karma"),
+            "nested ng test script must be rejected: {err:?}"
+        );
+
+        // SSH: the structured checks run before any remote probe.
+        let mut ssh_pw = req(
+            "/srv/app/node_modules/@playwright/test/cli.js",
+            &["test"],
+            &ws,
+            false,
+        );
+        ssh_pw.target = IdeTargetSpec::ssh("conn-1".into(), "/srv/app");
+        let err = js_guard_error(&data_dir, &ssh_pw, &ctx, BTreeMap::new()).await;
+        assert!(
+            err.contains("Playwright"),
+            "SSH Playwright CLI must be rejected: {err:?}"
+        );
+
+        // A Node run configuration whose program takes `karma` as an argument still debugs.
+        let mut node_ctx = ctx.clone();
+        node_ctx.run_config = Some(crate::types::IdeRunConfig {
+            id: "cfg:app".into(),
+            name: "app".into(),
+            runner: crate::types::IdeRunnerKind::Node,
+            command: Some("node".into()),
+            target_path: Some(app.to_string_lossy().into_owned()),
+            args: vec!["karma".into()],
+            ..Default::default()
+        });
+        let node_req = req(&app.to_string_lossy(), &["karma"], &ws, false);
+        let err = js_guard_error(&data_dir, &node_req, &node_ctx, BTreeMap::new()).await;
+        assert_eq!(err, "", "a Node program's own argv must not be classified");
     }
 }
