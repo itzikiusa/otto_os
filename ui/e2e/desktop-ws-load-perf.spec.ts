@@ -455,17 +455,25 @@ test('phase-breakdown profile: 160x48 long-scrollback terminals (N=1,5,11,20) wi
         expect(pageRec.wsOpened, `${mode} n=20 page_switch: active terminal adopted from park without WS reopen`).toBe(0);
       }
 
-      // Verify no scrollback or live output loss for a background/hidden terminal at N=20
+      // Verify clicking a queued background tile promotes & focuses it and
+      // preserves both seeded historical scrollback and live output at N=20.
       if (n === 20 && mode === 'tiled') {
-        const bgId = ids[5];
+        const bgIdx = 10;
+        const bgId = ids[bgIdx];
+        const histMarker = `READY_W${n}_${bgIdx}_DONE`;
         const liveTag = `LIVE_HIDDEN_${Date.now()}`;
         await ctx.post(`${base}/api/v1/sessions/${bgId}/input`, { data: { text: `echo ${liveTag}`, submit: true } });
-        // Click tile 5 (focuses/promotes immediately if not yet hydrated) and verify BOTH historical scrollback and live output!
+        const queuedBtn = page.locator(`[data-tile-id="${bgId}"] .tile-placeholder`);
+        await expect(queuedBtn, 'tile 10 starts queued before click').toBeVisible({ timeout: 5_000 });
+        await queuedBtn.click();
+        await expect(page.locator(`[data-tile-id="${bgId}"] .pane.focused`), 'clicked queued tile takes focus').toBeVisible({ timeout: 10_000 });
         await expect.poll(
-          () => page.evaluate(({ id, m }) => {
+          () => page.evaluate(({ id, hist, live }) => {
             const p = ((window as unknown as { __ottoTermProbe?: Probe[] }).__ottoTermProbe ?? []).find((x) => !x.disposed && x.sessionId() === id);
-            return !!p && p.text().includes(m);
-          }, { id: bgId, m: liveTag }),
+            if (!p) return false;
+            const screen = p.text();
+            return screen.includes(hist) && screen.includes(live);
+          }, { id: bgId, hist: histMarker, live: liveTag }),
           { timeout: 15_000 },
         ).toBe(true);
       }
@@ -486,7 +494,7 @@ test('phase-breakdown profile: 160x48 long-scrollback terminals (N=1,5,11,20) wi
   await ctx.dispose();
 });
 
-test('tiled view skips exited/inactive sessions in auto-live budget and preserves scrollback on click', async ({ page }, info) => {
+test('tiled view skips exited/inactive sessions in auto-live budget and attaches them on click', async ({ page }, info) => {
   test.skip(!isDesktopProject(info.project.name), 'desktop projects only');
   test.setTimeout(90_000);
   const { ctx, base } = await apiCtx();
@@ -507,7 +515,7 @@ test('tiled view skips exited/inactive sessions in auto-live budget and preserve
     expect(r.ok()).toBeTruthy();
     const id = (await r.json()).id as string;
     exitedIds.push(id);
-    await ctx.post(`${base}/api/v1/sessions/${id}/input`, { data: { text: 'exit 0', submit: true } });
+    await ctx.post(`${base}/api/v1/sessions/${id}/input`, { data: { text: `echo EXITED_HIST_${i}; exit 0`, submit: true } });
   }
   await expect.poll(async () => {
     const rows = (await (await ctx.get(`${base}/api/v1/workspaces/${wsId}/sessions`)).json()) as { id: string; status: string }[];
@@ -548,6 +556,11 @@ test('tiled view skips exited/inactive sessions in auto-live budget and preserve
     expect(wsUrls.some((u) => u.includes(deadId)), `exited session ${deadId} must not auto-open WS`).toBe(false);
     await expect(page.locator(`[data-tile-id="${deadId}"] .tile-placeholder`)).toBeVisible();
   }
+  // Clicking an exited placeholder attaches and focuses it on demand
+  const firstDead = exitedIds[0];
+  await page.locator(`[data-tile-id="${firstDead}"] .tile-placeholder`).click();
+  await expect(page.locator(`[data-tile-id="${firstDead}"] .pane.focused`)).toBeVisible({ timeout: 10_000 });
+  await expect.poll(() => wsUrls.some((u) => u.includes(firstDead)), { timeout: 10_000 }).toBe(true);
 
   for (const id of [...liveIds, ...exitedIds]) await ctx.delete(`${base}/api/v1/sessions/${id}`).catch(() => {});
   await ctx.dispose();

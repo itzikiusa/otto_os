@@ -13,7 +13,7 @@
   // attached. Off-screen / over-budget tiles render a lightweight placeholder
   // ("click to attach") and open no socket. Demoting a tile unmounts its
   // SessionView → Terminal's cleanup closes the WS → memory is reclaimed.
-  import { onDestroy } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import SessionView from './SessionView.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
@@ -363,38 +363,40 @@
     for (const id of [...visible]) if (!ids.has(id)) visible.delete(id);
   });
 
+  // Frame 0 mounts only the priority tile; remaining live tiles hydrate one by one.
+  // Declared before `liveOrder` so already-mounted tiles stay retained across exit.
+  const tileMounts = createPaneMountState(() => ws.currentId, () => liveOrder, () => priorityTileId);
+  const mountedIds: ReadonlySet<string> = $derived(tileMounts.mounted);
   // Decide which tiles get a live terminal (active, pinned, then live visible —
-  // skipping threads and inactive suspended/exited sessions), capped at MAX_LIVE_TILES.
-  const liveOrder = $derived(
+  // keeping already-mounted visible tiles across exit while skipping cold
+  // suspended/exited sessions and threads), capped at MAX_LIVE_TILES.
+  const liveOrder: string[] = $derived(
     selectLiveTiles(ordered, {
       activeId: ws.activeSessionId,
       pinned,
       visible,
+      retained: untrack(() => mountedIds),
       isThread: (s) => 'thread' in s,
       isInactive: (s) => !('thread' in s) && tileState(s).inactive,
       maxLive: MAX_LIVE_TILES,
     }),
   );
   const liveIds = $derived(new Set(liveOrder));
-  const priorityTileId = $derived(
+  const priorityTileId: string | null = $derived(
     ws.activeSessionId && liveIds.has(ws.activeSessionId) ? ws.activeSessionId : (liveOrder[0] ?? null),
   );
-  // Frame 0 mounts only the priority tile; remaining live tiles hydrate one by one.
-  const tileMounts = createPaneMountState(() => ws.currentId, () => liveOrder, () => priorityTileId);
-  const mountedIds = $derived(tileMounts.mounted);
 
   // True when the live budget is full and some visible tiles had to stay
   // placeholders — surfaced as a hint on those tiles.
   const atCapacity = $derived(liveIds.size >= MAX_LIVE_TILES);
 
   function attach(id: string): void {
-    // Pin so it survives scrolling, and if we're at capacity, focusing it makes
-    // it the always-live active tile (evicting the least-prioritized one).
+    // Pin so it survives scrolling; openSession focuses the session's actual
+    // split leaf (or updates the focused leaf) so it becomes active at once.
     pinned.add(id);
     pinned = new Set(pinned);
     savePinned();
     ws.openSession(id);
-    layout.focusIndex(0);
   }
 
   /** The shared session state (lib/status.ts) for a placeholder tile. */
@@ -483,7 +485,7 @@
         ondragend={onTileDragEnd}
       >
         {#if 'thread' in s}
-          <LazyMount lazy={ThreadPane} what="the thread" variant="panel" props={{ threadId: s.id, focused: ws.activeSessionId === s.id, showClose: false, showGrip: ordered.length > 1, dragKey: s.id, ondragpane: (phase: 'start' | 'end') => (tileDragId = phase === 'start' ? s.id : null), onfocus: () => { ws.openSession(s.id); layout.focusIndex(0); }, onclose: () => ws.closeTab(s.id) }} />
+          <LazyMount lazy={ThreadPane} what="the thread" variant="panel" props={{ threadId: s.id, focused: ws.activeSessionId === s.id, showClose: false, showGrip: ordered.length > 1, dragKey: s.id, ondragpane: (phase: 'start' | 'end') => (tileDragId = phase === 'start' ? s.id : null), onfocus: () => ws.openSession(s.id), onclose: () => ws.closeTab(s.id) }} />
         {:else if mountedIds.has(s.id)}
           <SessionView
             sessionId={s.id}
@@ -495,11 +497,7 @@
             resumeOnOpen={false}
             dragKey={s.id}
             ondragpane={(phase) => (tileDragId = phase === 'start' ? s.id : null)}
-            onfocus={() => {
-              ws.openSession(s.id);
-              // make this the focused/active target without leaving tiled view
-              layout.focusIndex(0);
-            }}
+            onfocus={() => ws.openSession(s.id)}
             onclosepane={() => {}}
           />
         {:else}

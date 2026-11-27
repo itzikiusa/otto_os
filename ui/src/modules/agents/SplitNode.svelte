@@ -31,6 +31,7 @@
   import { splitter } from '../../lib/paneResizer';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import { shouldHandOffPlaceholderFocus } from './paneMountQueue';
   import {
     layout,
     presetItems,
@@ -171,6 +172,26 @@
     ws.focusPane(layout.focusedIndex);
   }
 
+  // Hand keyboard focus to the new pane when hydration replaces a focused
+  // placeholder button, so Tab users never lose their position (FE-2).
+  let leafEl = $state<HTMLDivElement | null>(null);
+  let pendingBtn = $state<HTMLButtonElement | null>(null);
+  let restorePlaceholderFocus = false;
+  const sessionMounted = $derived(node.kind === 'leaf' && (!mountedKeys || mountedKeys.has(node.key)));
+  function capturePlaceholderFocus(): void {
+    if (shouldHandOffPlaceholderFocus(sessionMounted, pendingBtn, document.activeElement)) {
+      restorePlaceholderFocus = true;
+    }
+  }
+  function finishPlaceholderFocus(): void {
+    if (!sessionMounted || !restorePlaceholderFocus) return;
+    restorePlaceholderFocus = false;
+    if (!leafEl || leafEl.contains(document.activeElement)) return;
+    leafEl.querySelector<HTMLElement>('.pane-title, button, textarea, [tabindex]:not([tabindex="-1"])')?.focus();
+  }
+  $effect.pre(capturePlaceholderFocus);
+  $effect(finishPlaceholderFocus);
+
 </script>
 
 {#if node.kind === 'split'}
@@ -200,7 +221,7 @@
     <Self node={node.b} depth={depth + 1} {mountedKeys} />
   </div>
 {:else}
-  <div class="leaf" data-pane-key={node.key} data-session={node.ref.id}>
+  <div class="leaf" bind:this={leafEl} data-pane-key={node.key} data-session={node.ref.id}>
     {#if node.ref.id === DB_PANE_ID}
       <div
         class="db-pane"
@@ -253,7 +274,7 @@
         onfocus: () => ws.focusPane(idx),
         onclose: () => ws.closeTab(id),
       }} />{/key}
-    {:else if !mountedKeys || mountedKeys.has(node.key)}
+    {:else if sessionMounted}
       <SessionView
         sessionId={node.ref.id}
         focused={ws.focusedPane === idx && paneCount > 1}
@@ -270,6 +291,7 @@
       <button
         type="button"
         class="pane pane-pending"
+        bind:this={pendingBtn}
         onclick={() => ws.focusPane(idx)}
         title="Click to focus this terminal now"
       >

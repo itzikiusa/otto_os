@@ -31,13 +31,17 @@ export interface PaneMountQueueOpts {
 /** Decide which tiles in a tiled grid qualify for a live terminal, in priority
  *  order: active first, then explicitly pinned tiles, then live visible tiles
  *  (skipping threads and inactive suspended/exited sessions that hold no live
- *  PTY), capped at `maxLive`. */
+ *  PTY, while keeping already-mounted `retained` visible tiles across exit so
+ *  their failure overlay and Restart control stay visible until scrolled off or
+ *  evicted), capped at `maxLive`. */
 export function selectLiveTiles<T extends { id: string }>(
   ordered: readonly T[],
   opts: {
     activeId: string | null;
     pinned: ReadonlySet<string>;
     visible: ReadonlySet<string>;
+    /** Tile ids already mounted in this view — kept across exit while visible. */
+    retained?: ReadonlySet<string>;
     isInactive: (item: T) => boolean;
     isThread: (item: T) => boolean;
     maxLive: number;
@@ -59,13 +63,23 @@ export function selectLiveTiles<T extends { id: string }>(
     if (out.length >= opts.maxLive) break;
     if (!opts.isThread(s) && opts.pinned.has(s.id)) add(s.id);
   }
-  // Auto-attach only live visible tiles: suspended/exited sessions have no live
-  // PTY and stay lightweight placeholders until clicked.
+  // Auto-attach only live visible tiles (and already-mounted tiles that just
+  // exited while visible): cold suspended/exited sessions stay placeholders.
   for (const s of ordered) {
     if (out.length >= opts.maxLive) break;
-    if (!opts.isThread(s) && opts.visible.has(s.id) && !opts.isInactive(s)) add(s.id);
+    if (!opts.isThread(s) && opts.visible.has(s.id) && (!opts.isInactive(s) || opts.retained?.has(s.id))) add(s.id);
   }
   return out;
+}
+
+/** True when a pane's outgoing placeholder button owned keyboard focus at the
+ *  moment hydration replaces it with the real pane (so focus must transfer). */
+export function shouldHandOffPlaceholderFocus(
+  mounted: boolean,
+  placeholder: { contains(node: unknown): boolean } | null,
+  activeElement: unknown,
+): boolean {
+  return mounted && placeholder !== null && activeElement !== null && (activeElement === placeholder || placeholder.contains(activeElement));
 }
 
 export class PaneMountQueue {
