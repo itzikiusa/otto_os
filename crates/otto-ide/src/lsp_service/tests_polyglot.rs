@@ -818,25 +818,30 @@ async fn spring_boot_review_fixes_devtools_confinement_profiles_multimodule_and_
     assert_eq!(active_sb.server_port, 9999);
     assert_eq!(active_sb.management_port, Some(9998));
 
-    // DATA-2 & RED-1: DevTools restart requires compiled classpath output dir (no src/main/resources fallback),
-    // rejects traversal/invalid filenames, and preserves existing file contents in-place.
+    // DATA-2, RED-1 & API2-1: DevTools restart requires compiled classpath output dir,
+    // rejects traversal/invalid filenames, preserves existing bytes, reports requested_at
+    // without fabricating restarted_at, and authorizes attached writable workspace roots.
     assert!(
-        trigger_devtools_restart(&canon_ws, None, Some(&canon_svc.to_string_lossy()))
-            .await
-            .is_err(),
+        trigger_devtools_restart(
+            std::slice::from_ref(&canon_ws),
+            None,
+            Some(&canon_svc.to_string_lossy())
+        )
+        .await
+        .is_err(),
         "must error when compiled classes output dir does not exist"
     );
     let classes_dir = canon_svc.join("target/classes");
     std::fs::create_dir_all(&classes_dir).unwrap();
     assert!(trigger_devtools_restart(
-        &canon_ws,
+        std::slice::from_ref(&canon_ws),
         Some("../escape"),
         Some(&canon_svc.to_string_lossy())
     )
     .await
     .is_err());
     assert!(trigger_devtools_restart(
-        &canon_ws,
+        std::slice::from_ref(&canon_ws),
         Some("sub/trigger"),
         Some(&canon_svc.to_string_lossy())
     )
@@ -845,7 +850,7 @@ async fn spring_boot_review_fixes_devtools_confinement_profiles_multimodule_and_
     let existing = classes_dir.join("application.properties");
     std::fs::write(&existing, "server.port=8081\n# keep me intact\n").unwrap();
     let resp = trigger_devtools_restart(
-        &canon_ws,
+        std::slice::from_ref(&canon_ws),
         Some("application.properties"),
         Some(&canon_svc.to_string_lossy()),
     )
@@ -853,11 +858,262 @@ async fn spring_boot_review_fixes_devtools_confinement_profiles_multimodule_and_
     .expect("touch existing classpath file");
     assert!(resp.ok);
     assert!(resp.message.contains("restart check requested"));
+    assert!(
+        !resp.requested_at.is_empty(),
+        "requested_at must record trigger write timestamp"
+    );
+    assert_eq!(
+        resp.restarted_at, None,
+        "RED-1: restarted_at must stay None when JVM restart completion is not observed"
+    );
     assert_eq!(
         std::fs::read_to_string(&existing).unwrap(),
         "server.port=8081\n# keep me intact\n",
         "touching an existing trigger file must never truncate or overwrite its bytes"
     );
+
+    // API2-1: attached writable workspace root succeeds, while an outside root is Forbidden.
+    let attached = outer.path().join("attached-boot");
+    std::fs::create_dir_all(attached.join("target/classes")).unwrap();
+    let canon_attached = attached.canonicalize().unwrap();
+    let attached_resp = trigger_devtools_restart(
+        &[canon_ws.clone(), canon_attached.clone()],
+        Some(".reloadtrigger"),
+        Some(&canon_attached.to_string_lossy()),
+    )
+    .await
+    .expect("attached writable workspace root must be accepted");
+    assert!(attached_resp.ok);
+    assert!(canon_attached
+        .join("target/classes/.reloadtrigger")
+        .is_file());
+    let outside_classes = outside.join("target/classes");
+    std::fs::create_dir_all(&outside_classes).unwrap();
+    let canon_outside = outside.canonicalize().unwrap();
+    assert!(
+        trigger_devtools_restart(
+            &[canon_ws.clone(), canon_attached.clone()],
+            Some(".reloadtrigger"),
+            Some(&canon_outside.to_string_lossy()),
+        )
+        .await
+        .is_err(),
+        "module_root outside authorized writable roots must be rejected"
+    );
+}
+
+#[tokio::test]
+async fn spring_boot_actuator_bypasses_proxy_and_profiles_default_and_multimodule_stay_coherent() {
+    use crate::spring_boot::actuator::inspect_actuator;
+    use crate::spring_boot::detect_spring_boot_workspace_scoped;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    static PROXY_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    // SEC-5: inspect_actuator must bypass HTTP_PROXY / http_proxy so loopback inspection
+    // never routes through an outbound proxy.
+    let trap_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let trap_addr = trap_listener.local_addr().unwrap();
+    let trap_hit = Arc::new(AtomicBool::new(false));
+    let trap_hit_cl = Arc::clone(&trap_hit);
+    let trap_srv = tokio::spawn(async move {
+        if let Ok((mut sock, _)) = trap_listener.accept().await {
+            trap_hit_cl.store(true, Ordering::SeqCst);
+            let _ = sock
+                .write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+                .await;
+        }
+    });
+
+    let act_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let act_addr = act_listener.local_addr().unwrap();
+    let act_srv = tokio::spawn(async move {
+        for _ in 0..8 {
+            let Ok((mut sock, _)) = act_listener.accept().await else {
+                break;
+            };
+            let mut buf = [0u8; 2048];
+            let n = sock.read(&mut buf).await.unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..n]);
+            let path = req
+                .lines()
+                .next()
+                .and_then(|l| l.split_whitespace().nth(1))
+                .unwrap_or("/");
+            let (status, body) = match path {
+                "/actuator" => (
+                    "200 OK",
+                    r#"{"_links":{"health":{"href":"/actuator/health"}}}"#,
+                ),
+                "/actuator/health" => ("200 OK", r#"{"status":"UP"}"#),
+                _ => ("404 Not Found", "{}"),
+            };
+            let resp = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+        }
+    });
+
+    let proxy_res = {
+        let _guard = PROXY_ENV_LOCK.lock().await;
+        let prev_upper = std::env::var_os("HTTP_PROXY");
+        let prev_lower = std::env::var_os("http_proxy");
+        let prev_all = std::env::var_os("ALL_PROXY");
+        let prev_no = std::env::var_os("NO_PROXY");
+        let proxy_url = format!("http://{trap_addr}");
+        std::env::set_var("HTTP_PROXY", &proxy_url);
+        std::env::set_var("http_proxy", &proxy_url);
+        std::env::set_var("ALL_PROXY", &proxy_url);
+        std::env::remove_var("NO_PROXY");
+        let out = inspect_actuator(&crate::types::IdeSpringActuatorReq {
+            target: None,
+            base_url: Some(format!("http://{act_addr}/actuator")),
+            port: None,
+            base_path: None,
+        })
+        .await;
+        match prev_upper {
+            Some(v) => std::env::set_var("HTTP_PROXY", v),
+            None => std::env::remove_var("HTTP_PROXY"),
+        }
+        match prev_lower {
+            Some(v) => std::env::set_var("http_proxy", v),
+            None => std::env::remove_var("http_proxy"),
+        }
+        match prev_all {
+            Some(v) => std::env::set_var("ALL_PROXY", v),
+            None => std::env::remove_var("ALL_PROXY"),
+        }
+        match prev_no {
+            Some(v) => std::env::set_var("NO_PROXY", v),
+            None => std::env::remove_var("NO_PROXY"),
+        }
+        out
+    }
+    .expect("inspect_actuator should connect directly to loopback");
+    trap_srv.abort();
+    act_srv.abort();
+    assert!(
+        !trap_hit.load(Ordering::SeqCst),
+        "SEC-5: inspect_actuator must bypass HTTP_PROXY instead of contacting proxy"
+    );
+    assert!(proxy_res.reachable);
+    assert_eq!(proxy_res.status.as_deref(), Some("UP"));
+
+    // BUG2-8: `application-default.properties` applies when no active profile is set,
+    // and `spring.profiles.default=local` applies `application-local.properties` when inactive.
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("default-prof");
+    std::fs::create_dir_all(ws.join("src/main/resources")).unwrap();
+    std::fs::write(
+        ws.join("pom.xml"),
+        "<project><dependencies><dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-web</artifactId></dependency></dependencies></project>",
+    )
+    .unwrap();
+    std::fs::write(
+        ws.join("src/main/resources/application.properties"),
+        "server.port=8080\n",
+    )
+    .unwrap();
+    std::fs::write(
+        ws.join("src/main/resources/application-default.properties"),
+        "server.port=8099\n",
+    )
+    .unwrap();
+    let canon_ws = ws.canonicalize().unwrap();
+    let info_def = detect_spring_boot_workspace_scoped(
+        std::slice::from_ref(&canon_ws),
+        std::slice::from_ref(&canon_ws),
+        false,
+    )
+    .expect("implicit default profile detected");
+    assert_eq!(
+        info_def.server_port, 8099,
+        "application-default.properties must apply when spring.profiles.active is unset"
+    );
+
+    std::fs::write(
+        ws.join("src/main/resources/application.properties"),
+        "server.port=8080\nspring.profiles.default=local\n",
+    )
+    .unwrap();
+    std::fs::write(
+        ws.join("src/main/resources/application-local.properties"),
+        "server.port=8095\n",
+    )
+    .unwrap();
+    let info_named_def = detect_spring_boot_workspace_scoped(
+        std::slice::from_ref(&canon_ws),
+        std::slice::from_ref(&canon_ws),
+        false,
+    )
+    .expect("named spring.profiles.default detected");
+    assert_eq!(
+        info_named_def.server_port, 8095,
+        "spring.profiles.default=local must activate application-local.properties when active is unset"
+    );
+
+    // BUG2-9: multi-module workspace with two Boot services must never mix port/trigger/flags across modules.
+    let multi = tmp.path().join("multi-boot");
+    let alpha = multi.join("alpha-svc");
+    let beta = multi.join("beta-svc");
+    std::fs::create_dir_all(alpha.join("src/main/resources")).unwrap();
+    std::fs::create_dir_all(beta.join("src/main/resources")).unwrap();
+    std::fs::write(
+        multi.join("pom.xml"),
+        "<project><packaging>pom</packaging><modules><module>alpha-svc</module><module>beta-svc</module></modules></project>",
+    )
+    .unwrap();
+    std::fs::write(
+        alpha.join("pom.xml"),
+        "<project><dependencies><dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-web</artifactId></dependency><dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-actuator</artifactId></dependency><dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-devtools</artifactId></dependency></dependencies></project>",
+    )
+    .unwrap();
+    std::fs::write(
+        beta.join("pom.xml"),
+        "<project><dependencies><dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-web</artifactId></dependency></dependencies></project>",
+    )
+    .unwrap();
+    std::fs::write(
+        alpha.join("src/main/resources/application.properties"),
+        "server.port=8081\nmanagement.server.port=9081\nspring.devtools.restart.trigger-file=.alpha-trigger\n",
+    )
+    .unwrap();
+    std::fs::write(
+        beta.join("src/main/resources/application.properties"),
+        "server.port=8082\nmanagement.server.port=9082\nspring.devtools.restart.trigger-file=.beta-trigger\n",
+    )
+    .unwrap();
+    let canon_multi = multi.canonicalize().unwrap();
+    let canon_alpha = alpha.canonicalize().unwrap();
+    let canon_beta = beta.canonicalize().unwrap();
+    let multi_info = detect_spring_boot_workspace_scoped(
+        &[canon_alpha.clone(), canon_beta.clone()],
+        std::slice::from_ref(&canon_multi),
+        false,
+    )
+    .expect("multi-module Spring Boot detected");
+    assert_eq!(
+        multi_info.module_root.as_deref(),
+        Some(canon_alpha.to_string_lossy().as_ref())
+    );
+    assert_eq!(
+        multi_info.server_port, 8081,
+        "BUG2-9: beta-svc port must not overwrite alpha-svc port"
+    );
+    assert_eq!(multi_info.management_port, Some(9081));
+    assert_eq!(
+        multi_info.trigger_file.as_deref(),
+        Some(".alpha-trigger"),
+        "BUG2-9: beta-svc trigger_file must not overwrite alpha-svc trigger_file"
+    );
+    assert!(multi_info.has_actuator);
+    assert!(multi_info.has_devtools);
 }
 
 #[tokio::test]
@@ -973,18 +1229,28 @@ fn java_deep_submodule_junit5_gutter_and_workspace_resolution_preserved() {
     );
 }
 
-#[test]
-fn kotlin_review_fixes_trust_main_stem_deps_guard_remote_probe_sdk_kind_and_ktfmt() {
+#[tokio::test]
+async fn kotlin_review_fixes_trust_main_stem_deps_guard_remote_probe_sdk_kind_and_ktfmt() {
     use crate::dap::java_bridge::infer_kotlin_class_stem;
-    use crate::deps_inspector::actions::bump_manifest_version_in_place_scoped;
+    use crate::deps_inspector::actions::{
+        bump_manifest_version_in_place_scoped, run_deps_action_scoped,
+    };
     use crate::deps_inspector::{parse_gradle_dependencies, parse_gradle_version_catalog};
-    use crate::environments::module_sdks::apply_module_sdk_to_project_env;
+    use crate::environments::module_sdks::{
+        apply_module_sdk_to_project_env, apply_module_sdk_to_project_env_with_ecosystem,
+    };
+    use crate::environments::runner_cmd::build_runner_command;
+    use crate::local_history::LocalHistoryStore;
     use crate::lsp_host::ws_bridge::{
         kotlin_lsp_execution_trusted, TRUST_KOTLIN_LSP_ENV, TRUST_PROJECT_EXECUTION_ENV,
     };
     use crate::toolchains::remote_probe::{parse_ssh_probe_output, REMOTE_PROBE_SCRIPT};
     use crate::toolchains_catalog::EcosystemKind;
-    use crate::types::{IdeEnvVarEntry, IdeProjectEnvironment, IdeRunnerKind};
+    use crate::types::{
+        IdeDepsActionReq, IdeEnvVarEntry, IdeProjectEnvironment, IdeRunConfig, IdeRunnerKind,
+        IdeTargetKind,
+    };
+    use std::collections::BTreeMap;
 
     // SEC-3: kotlin-language-server requires explicit non-secret project trust opt-in.
     let tmp = tempfile::tempdir().unwrap();
@@ -1033,17 +1299,56 @@ fn kotlin_review_fixes_trust_main_stem_deps_guard_remote_probe_sdk_kind_and_ktfm
     );
     assert!(kotlin_lsp_execution_trusted(&envs, &repo_s, Some("ssh-1")));
 
-    // BUG-15: top-level `fun main` in a file that ALSO declares `class DemoApplication`
-    // MUST still resolve to `DemoApplicationKt` (file facade).
+    // BUG-15 & BUG2-4: top-level `fun main` resolves to `*Kt` even with `class DemoApplication`
+    // and even after strings, raw strings, and nested block comments containing `{`.
     let spring_kt = "package com.acme\n\n@SpringBootApplication\nclass DemoApplication\n\nfun main(args: Array<String>) {\n    runApplication<DemoApplication>(*args)\n}\n";
     assert_eq!(
         infer_kotlin_class_stem("DemoApplication", spring_kt),
         "DemoApplicationKt"
     );
+    let braces_in_literals = "val s = \"{\"\nval raw = \"\"\"{\"\"\"\n/* { /* nested { */ */\n// {\nval ch = '{'\nfun main() {}\n";
+    assert_eq!(
+        infer_kotlin_class_stem("Main", braces_in_literals),
+        "MainKt",
+        "BUG2-4: braces inside Kotlin literals/comments must not shift brace depth"
+    );
     let test_cls_kt = "package com.acme\nclass MathTest {\n    fun helper() {}\n}\n";
     assert_eq!(infer_kotlin_class_stem("MathTest", test_cls_kt), "MathTest");
 
-    // DATA-1: plugin-managed `kotlin("stdlib")` & versionless catalog entries cannot be corrupted by in-place bump.
+    // BUG-16: Kotest suite gutter target (`JavaJunit` runner) dispatches to Gradle in Gradle-only repos.
+    let gradle_only = tmp.path().join("gradle-kotest");
+    std::fs::create_dir_all(&gradle_only).unwrap();
+    std::fs::write(
+        gradle_only.join("build.gradle.kts"),
+        "plugins { kotlin(\"jvm\") }\n",
+    )
+    .unwrap();
+    let mut kotest_cfg: IdeRunConfig = serde_json::from_value(serde_json::json!({
+        "id": "kotest-1",
+        "name": "Kotest CalcSpec",
+        "test_filter": "com.acme.CalcSpec"
+    }))
+    .unwrap();
+    kotest_cfg.runner = IdeRunnerKind::JavaJunit;
+    let (kt_prog, kt_args) = build_runner_command(
+        &kotest_cfg,
+        IdeTargetKind::Local,
+        &gradle_only.to_string_lossy(),
+        &BTreeMap::new(),
+    );
+    assert!(
+        kt_prog == "gradle" || kt_prog == "./gradlew",
+        "BUG-16: Gradle-only Kotest suite must invoke gradle, got {kt_prog} {kt_args:?}"
+    );
+    assert!(
+        kt_args
+            .windows(2)
+            .any(|w| w == ["--tests", "com.acme.CalcSpec"]),
+        "BUG-16: expected `--tests com.acme.CalcSpec`, got {kt_args:?}"
+    );
+
+    // DATA-1: plugin-managed `kotlin("stdlib")` has NO fake `managed_in` path, cannot be rewritten
+    // in place, and returns a clear non-editable error instead of "not found".
     let gradle_kts = "dependencies {\n    implementation(kotlin(\"stdlib\"))\n}\n";
     let gdeps = parse_gradle_dependencies(gradle_kts);
     let stdlib = gdeps
@@ -1052,15 +1357,17 @@ fn kotlin_review_fixes_trust_main_stem_deps_guard_remote_probe_sdk_kind_and_ktfm
         .unwrap();
     assert_eq!(stdlib.version_col, 0);
     assert_eq!(
-        stdlib.managed_in.as_ref().map(|m| m.path.as_str()),
-        Some("kotlin-plugin")
+        stdlib.managed_in, None,
+        "DATA-1: must never synthesize fake `kotlin-plugin` path in managed_in"
     );
     let ws = tmp.path().join("ws-deps");
     std::fs::create_dir_all(&ws).unwrap();
     let canon_ws = ws.canonicalize().unwrap();
+    let build_file = canon_ws.join("build.gradle.kts");
+    std::fs::write(&build_file, gradle_kts).unwrap();
     assert!(
         bump_manifest_version_in_place_scoped(
-            &canon_ws.join("build.gradle.kts"),
+            &build_file,
             "build.gradle.kts",
             gradle_kts,
             "org.jetbrains.kotlin:kotlin-stdlib",
@@ -1071,9 +1378,35 @@ fn kotlin_review_fixes_trust_main_stem_deps_guard_remote_probe_sdk_kind_and_ktfm
         .is_none(),
         "versionless kotlin(\"stdlib\") must never be rewritten in place"
     );
+    let hist = LocalHistoryStore::new(tmp.path().join("kt-hist"));
+    let update_err = run_deps_action_scoped(
+        &canon_ws,
+        std::slice::from_ref(&canon_ws),
+        &build_file,
+        &IdeDepsActionReq {
+            target: None,
+            path: build_file.to_string_lossy().into_owned(),
+            action: "update_one".into(),
+            module: Some("org.jetbrains.kotlin:kotlin-stdlib".into()),
+            version: Some("2.1.20".into()),
+        },
+        &BTreeMap::new(),
+        &hist,
+        false,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(
+        update_err.contains("no inline editable version"),
+        "DATA-1: expected clear uneditable-version error, got: {update_err}"
+    );
+    assert_eq!(std::fs::read_to_string(&build_file).unwrap(), gradle_kts);
+
     let unversioned_cat = "[libraries]\nfoo = { module = \"com.acme:foo\" }\n";
     let cdeps = parse_gradle_version_catalog(unversioned_cat);
     assert_eq!(cdeps[0].version_col, 0);
+    assert_eq!(cdeps[0].managed_in, None);
     assert!(bump_manifest_version_in_place_scoped(
         &canon_ws.join("gradle/libs.versions.toml"),
         "libs.versions.toml",
@@ -1097,7 +1430,8 @@ fn kotlin_review_fixes_trust_main_stem_deps_guard_remote_probe_sdk_kind_and_ktfm
     assert!(kt_probe.lsp.as_ref().is_some_and(|t| t.available));
     assert!(kt_probe.dap.as_ref().is_some_and(|t| t.available));
 
-    // BUG-34: Selecting a Kotlin SDK sets `kotlin_home` and preserves `java_home`.
+    // BUG-34 & BUG2-5:
+    // (a) Selecting a Kotlin SDK sets `kotlin_home` and preserves `java_home`.
     let kt_sdk = tmp.path().join("toolchains/kotlin/sdks/2.1.20/kotlinc");
     std::fs::create_dir_all(kt_sdk.join("bin")).unwrap();
     std::fs::write(kt_sdk.join("bin/kotlinc"), "#!/bin/sh\n").unwrap();
@@ -1121,14 +1455,60 @@ fn kotlin_review_fixes_trust_main_stem_deps_guard_remote_probe_sdk_kind_and_ktfm
         Some("/Library/Java/JavaVirtualMachines/temurin-21.jdk/Contents/Home")
     );
 
-    // OBS-2: ktfmt uses documented `--stdin-name` flag (never invalid `--stdinpath`).
+    // (b) BUG2-5: Assigning a JDK to a module when running a `.kt` file MUST set `java_home`, NOT `kotlin_home`!
+    let jdk21 = tmp.path().join("custom-sdk-21");
+    std::fs::create_dir_all(jdk21.join("bin")).unwrap();
+    std::fs::write(jdk21.join("bin/javac"), "#!/bin/sh\n").unwrap();
+    std::fs::write(jdk21.join("bin/java"), "#!/bin/sh\n").unwrap();
+    let mut env_jdk = IdeProjectEnvironment::default();
+    apply_module_sdk_to_project_env(
+        &mut env_jdk,
+        &canon_ws.to_string_lossy(),
+        &jdk21.to_string_lossy(),
+        Some(IdeRunnerKind::Gradle),
+        Some("src/main/kotlin/App.kt"),
+    );
+    assert_eq!(
+        env_jdk.java_home.as_deref(),
+        Some(jdk21.to_string_lossy().as_ref()),
+        "BUG2-5: module JDK on a .kt target must set java_home"
+    );
+    assert_eq!(
+        env_jdk.kotlin_home, None,
+        "BUG2-5: module JDK must NEVER be assigned to kotlin_home"
+    );
+
+    // (c) BUG-34: Registered SSH/custom Kotlin SDK at arbitrary path (e.g. `/opt/compilers/2.1.20`)
+    // routes to `kotlin_home` via registered ecosystem metadata and preserves `java_home`.
+    let mut env_ssh = IdeProjectEnvironment {
+        java_home: Some("/usr/lib/jvm/java-21".into()),
+        ..Default::default()
+    };
+    apply_module_sdk_to_project_env_with_ecosystem(
+        &mut env_ssh,
+        "/srv/remote-kt",
+        "/opt/compilers/2.1.20",
+        Some(IdeRunnerKind::Gradle),
+        None,
+        Some(EcosystemKind::Kotlin),
+    );
+    assert_eq!(
+        env_ssh.kotlin_home.as_deref(),
+        Some("/opt/compilers/2.1.20")
+    );
+    assert_eq!(env_ssh.java_home.as_deref(), Some("/usr/lib/jvm/java-21"));
+
+    // OBS-2: ktfmt passes `--stdin-name=<path> -` (single `=` flag accepted by ktfmt CLI).
     let kt_fmts = formatting::formatter_candidates("kotlin", "src/App.kt", false, false);
     let ktfmt = kt_fmts
         .iter()
         .find(|(name, _, _)| *name == "ktfmt")
         .unwrap();
-    assert!(ktfmt.2.iter().any(|a| a == "--stdin-name"), "{:?}", ktfmt.2);
-    assert!(!ktfmt.2.iter().any(|a| a == "--stdinpath"), "{:?}", ktfmt.2);
+    assert_eq!(
+        ktfmt.2,
+        vec!["--stdin-name=src/App.kt".to_string(), "-".to_string()],
+        "OBS-2: ktfmt requires --stdin-name=<path> (with `=`)"
+    );
 }
 
 #[cfg(unix)]
@@ -1143,29 +1523,36 @@ fn kotlin_gradle_and_standalone_kotlinc_execution_plans_work() {
     let bin = root.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
 
-    // Fake `gradle` that compiles & writes classpath to the init-script target path.
+    // Fake `gradle` that records CLI args AND copies the generated init script so we verify
+    // BUG-14 (renamed projectDir), BUG2-6 (main-only vs test classpath), and BUG2-7 (config cache).
     let gradle_seen = root.join("gradle-call");
+    let init_copy = root.join("gradle-init.gradle");
     let fake_gradle = bin.join("gradle");
     std::fs::write(
         &fake_gradle,
         format!(
-            "#!/bin/sh\necho \"$*\" > {}\ninit=\"\"\nprev=\"\"\nfor a in \"$@\"; do\n  if [ \"$prev\" = \"--init-script\" ]; then init=\"$a\"; fi\n  prev=\"$a\"\ndone\ncpfile=$(sed -n \"s/.*new File('\\([^']*\\)').*/\\1/p\" \"$init\" | head -n 1)\nmkdir -p build/classes/kotlin/main\nprintf '/gradle/kotlin-stdlib.jar' > \"$cpfile\"\n",
-            gradle_seen.display()
+            "#!/bin/sh\necho \"$*\" > {}\ninit=\"\"\nprev=\"\"\nfor a in \"$@\"; do\n  if [ \"$prev\" = \"--init-script\" ]; then init=\"$a\"; fi\n  prev=\"$a\"\ndone\ncp \"$init\" {}\ncpfile=$(sed -n \"s/.*new File('\\([^']*\\)').*/\\1/p\" \"$init\" | head -n 1)\nmkdir -p backend/build/classes/kotlin/main backend/build/classes/kotlin/test backend/build/resources/test\nprintf '/gradle/kotlin-stdlib.jar' > \"$cpfile\"\n",
+            gradle_seen.display(),
+            init_copy.display()
         ),
     )
     .unwrap();
     std::fs::set_permissions(&fake_gradle, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-    let mod_dir = root.join("kt-gradle");
-    let src_dir = mod_dir.join("src/main/kotlin/com/acme");
+    // Multi-module Gradle repo where `:api` is mapped to directory `backend/` (BUG-14).
+    let repo_dir = root.join("kt-gradle-multi");
+    let backend_dir = repo_dir.join("backend");
+    let src_dir = backend_dir.join("src/main/kotlin/com/acme");
+    let test_src_dir = backend_dir.join("src/test/kotlin/com/acme");
     std::fs::create_dir_all(&src_dir).unwrap();
+    std::fs::create_dir_all(&test_src_dir).unwrap();
     std::fs::write(
-        mod_dir.join("settings.gradle.kts"),
-        "rootProject.name = \"kt\"\n",
+        repo_dir.join("settings.gradle.kts"),
+        "rootProject.name = \"multi\"\ninclude(\":api\")\nproject(\":api\").projectDir = file(\"backend\")\n",
     )
     .unwrap();
     std::fs::write(
-        mod_dir.join("build.gradle.kts"),
+        backend_dir.join("build.gradle.kts"),
         "plugins { kotlin(\"jvm\") version \"2.1.20\" }\n",
     )
     .unwrap();
@@ -1184,12 +1571,12 @@ fn kotlin_gradle_and_standalone_kotlinc_execution_plans_work() {
         &app_kt,
         None,
         false,
-        std::slice::from_ref(&mod_dir),
+        std::slice::from_ref(&repo_dir),
         &env,
         "/nonexistent/javac",
         &root.join("out-gradle"),
     )
-    .expect("Gradle Kotlin execution plan");
+    .expect("Gradle Kotlin execution plan for renamed subproject");
     assert_eq!(plan.main_class, "com.acme.AppKt");
     assert!(
         plan.classpath.contains("/gradle/kotlin-stdlib.jar"),
@@ -1197,15 +1584,66 @@ fn kotlin_gradle_and_standalone_kotlinc_execution_plans_work() {
         plan.classpath
     );
     assert!(
-        plan.classpath.contains("build/classes/kotlin/main"),
+        plan.classpath.contains("backend/build/classes/kotlin/main"),
         "{}",
+        plan.classpath
+    );
+    // BUG2-6: main-only run MUST NOT leak test classes/resources onto the runtime classpath!
+    assert!(
+        !plan.classpath.contains("build/classes/kotlin/test")
+            && !plan.classpath.contains("build/resources/test"),
+        "BUG2-6: main run must not include test outputs on classpath: {}",
         plan.classpath
     );
     let call = std::fs::read_to_string(&gradle_seen).unwrap();
     assert!(
-        call.contains("classes") && call.contains("ottoPrintClasspath"),
-        "{call}"
+        call.contains("--no-configuration-cache"),
+        "BUG2-7: Gradle invocation must pass --no-configuration-cache: {call}"
     );
+    assert!(
+        call.contains(":api:classes") && call.contains(":api:ottoPrintClasspath"),
+        "BUG-14: renamed subproject dir `backend` must invoke `:api:*`, got: {call}"
+    );
+    assert!(
+        !call.contains(":backend:"),
+        "BUG-14: must not derive Gradle path from directory name `backend`: {call}"
+    );
+    let init_src = std::fs::read_to_string(&init_copy).unwrap();
+    assert!(
+        init_src.contains(r#"findByName("main")"#) && !init_src.contains(r#"findByName("test")"#),
+        "BUG2-6: main-only init script must not request test sourceSet:\n{init_src}"
+    );
+    let cp_eval_pos = init_src
+        .find("target.runtimeClasspath.asPath")
+        .expect("config-time classpath capture");
+    let dolast_pos = init_src.find("doLast").expect("doLast block");
+    assert!(
+        cp_eval_pos < dolast_pos,
+        "BUG2-7: runtimeClasspath must be captured before doLast:\n{init_src}"
+    );
+
+    // Verify `include_tests = true` DOES include testClasses and test output dirs.
+    let test_kt = test_src_dir.join("AppTest.kt");
+    std::fs::write(&test_kt, "package com.acme\nclass AppTest\n").unwrap();
+    let test_plan = prepare_java_execution(
+        &test_kt,
+        None,
+        true,
+        std::slice::from_ref(&repo_dir),
+        &env,
+        "/nonexistent/javac",
+        &root.join("out-gradle-test"),
+    )
+    .expect("Gradle Kotlin test execution plan");
+    assert!(
+        test_plan
+            .classpath
+            .contains("backend/build/classes/kotlin/test"),
+        "test plan should include test classes: {}",
+        test_plan.classpath
+    );
+    let test_call = std::fs::read_to_string(&gradle_seen).unwrap();
+    assert!(test_call.contains(":api:testClasses"), "{test_call}");
 
     // Standalone `.kt` file compiles via `kotlinc -include-runtime -d <jar>`.
     let kotlinc_seen = root.join("kotlinc-call");
@@ -1260,7 +1698,8 @@ async fn cpp_review_fixes_clangd_llvm_codelldb_core_unreal_cc_override_cmake_and
     use std::collections::BTreeMap;
     use std::os::unix::fs::PermissionsExt;
 
-    // BUG-8 & BUG-9: pinned clangd 19.1.2 (rejects Linux arm64), no broken LLVM tarball downloads.
+    // BUG-8 & BUG-9: pinned clangd 19.1.2 (rejects Linux arm64); managed LLVM tarball download
+    // is cleanly removed from catalog, local installer, and remote installer.
     let mac_arm = TargetPlatform {
         os: TargetOs::Macos,
         arch: TargetArch::Aarch64,
@@ -1282,8 +1721,28 @@ async fn cpp_review_fixes_clangd_llvm_codelldb_core_unreal_cc_override_cmake_and
     assert!(clangd_download_url(lin_arm).is_err());
     assert!(curated_catalog(EcosystemKind::Cpp, mac_arm).is_empty());
     assert!(resolve_sdk_download(EcosystemKind::Cpp, Some("19.1.7"), mac_arm, &[]).is_err());
+    let crafted_llvm = crate::toolchains_catalog::CatalogSdkEntry {
+        version: "19.1.7".into(),
+        label: "LLVM 19.1.7".into(),
+        lts: true,
+        os: "linux".into(),
+        arch: "x86_64".into(),
+        url: "https://example.invalid/llvm.tar.xz".into(),
+        size_hint: None,
+        sha256: None,
+    };
+    assert!(
+        build_remote_install_script(
+            EcosystemKind::Cpp,
+            IdeInstallComponent::Sdk,
+            lin_x64,
+            Some(&crafted_llvm),
+        )
+        .is_err(),
+        "BUG-9: remote C++ SDK tarball script must be cleanly disabled"
+    );
 
-    // CONC-2: job-scoped staging dirs for local + PID-scoped staging for remote CodeLLDB.
+    // CONC-2: job-scoped staging + mutex-serialized promotion for BOTH local and remote CodeLLDB.
     let dl = std::path::Path::new("/tmp/tc/.downloads");
     assert_ne!(
         codelldb_stage_dir(dl, "job-a"),
@@ -1293,8 +1752,35 @@ async fn cpp_review_fixes_clangd_llvm_codelldb_core_unreal_cc_override_cmake_and
         build_remote_install_script(EcosystemKind::Cpp, IdeInstallComponent::Dap, lin_x64, None)
             .unwrap();
     assert!(remote_dap.contains("codelldb-stage-$$"), "{remote_dap}");
+    assert!(
+        remote_dap.contains("codelldb.lock"),
+        "CONC-2: remote CodeLLDB promotion must serialize via mkdir lock:\n{remote_dap}"
+    );
+    let conc_tmp = tempfile::tempdir().unwrap();
+    let tc_root = conc_tmp.path().join("tc");
+    let stage_a = conc_tmp.path().join("stage-a/extract");
+    let stage_b = conc_tmp.path().join("stage-b/extract");
+    std::fs::create_dir_all(stage_a.join("extension/adapter")).unwrap();
+    std::fs::create_dir_all(stage_b.join("extension/adapter")).unwrap();
+    std::fs::write(stage_a.join("extension/adapter/codelldb"), "#!/bin/sh\n").unwrap();
+    std::fs::write(stage_b.join("extension/adapter/codelldb"), "#!/bin/sh\n").unwrap();
+    let (res_a, res_b) = tokio::join!(
+        crate::toolchains::installer_tools::promote_staged_codelldb_dir(&tc_root, &stage_a),
+        crate::toolchains::installer_tools::promote_staged_codelldb_dir(&tc_root, &stage_b),
+    );
+    assert!(
+        res_a.is_ok() && res_b.is_ok(),
+        "CONC-2: {res_a:?} {res_b:?}"
+    );
+    assert!(tc_root
+        .join("rust/dap/extension/adapter/codelldb")
+        .is_file());
+    assert!(
+        !tc_root.join("rust/dap/extract").exists(),
+        "CONC-2: concurrent promotion must never nest extract/ inside rust/dap"
+    );
 
-    // API-9: CodeLLDB core dumps use `launch` + `target create <exe> -c <core>` (not `attach`).
+    // API-9: CodeLLDB 1.11.4 core dumps use `launch` + `targetCreateCommands` (not `initCommands` / `attach`).
     let (cmd, args) = build_codelldb_request(
         "/app/build/demo",
         &[],
@@ -1308,11 +1794,21 @@ async fn cpp_review_fixes_clangd_llvm_codelldb_core_unreal_cc_override_cmake_and
     );
     assert_eq!(cmd, "launch");
     assert!(args.get("pid").is_none());
-    let init_cmds = args["initCommands"].as_array().unwrap();
-    assert!(init_cmds.iter().any(|v| v
+    let target_create = args["targetCreateCommands"]
+        .as_array()
+        .expect("API-9: core dump must use targetCreateCommands");
+    assert!(target_create.iter().any(|v| v
         .as_str()
         .unwrap_or("")
         .contains("target create '/app/build/demo' -c '/app/core.123'")));
+    assert!(
+        args["initCommands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|v| !v.as_str().unwrap_or("").contains("target create")),
+        "API-9: target create must be in targetCreateCommands, not initCommands"
+    );
 
     // BUG-41: per-run C++ SDK override updates CC and CXX (overriding project-level CC/CXX).
     let tmp = tempfile::tempdir().unwrap();
@@ -1432,6 +1928,11 @@ async fn cpp_review_fixes_clangd_llvm_codelldb_core_unreal_cc_override_cmake_and
     );
 
     // BUG-11: GoogleTest gutter run in CMake project builds `math_tests` and passes `--gtest_filter=MathSuite.Adds`.
+    std::fs::write(
+        proj.join("tests/math_test.cpp"),
+        "#include <gtest/gtest.h>\nTEST(MathSuite, Adds) { EXPECT_EQ(1 + 1, 2); }\n",
+    )
+    .unwrap();
     let (p, a) = build_runner_command(
         &mk_cfg(
             IdeRunnerKind::Ctest,
@@ -1448,6 +1949,89 @@ async fn cpp_review_fixes_clangd_llvm_codelldb_core_unreal_cc_override_cmake_and
         a.iter().any(|x| x == "--gtest_filter=MathSuite.Adds"),
         "{a:?}"
     );
+
+    // BUG-10 & BUG-11: subdirectory `CMakeLists.txt` using `target_sources(...)` resolves its target,
+    // and Catch2 tests with periods in their test name MUST NOT receive `--gtest_filter=`.
+    std::fs::create_dir_all(proj.join("app")).unwrap();
+    std::fs::create_dir_all(proj.join("catch")).unwrap();
+    std::fs::write(
+        proj.join("CMakeLists.txt"),
+        "cmake_minimum_required(VERSION 3.20)\nproject(demo)\nadd_executable(demo src/main.cpp src/helper.cpp)\nadd_executable(math_tests tests/math_test.cpp)\nadd_subdirectory(app)\nadd_subdirectory(catch)\n",
+    )
+    .unwrap();
+    std::fs::write(
+        proj.join("app/CMakeLists.txt"),
+        "add_executable(my_app)\ntarget_sources(my_app PRIVATE main.cpp)\n",
+    )
+    .unwrap();
+    std::fs::write(proj.join("app/main.cpp"), "int main() { return 0; }\n").unwrap();
+    std::fs::write(
+        proj.join("catch/CMakeLists.txt"),
+        "add_executable(catch_tests)\ntarget_sources(catch_tests PRIVATE parser_test.cpp)\n",
+    )
+    .unwrap();
+    std::fs::write(
+        proj.join("catch/parser_test.cpp"),
+        "#include <catch2/catch_test_macros.hpp>\nTEST_CASE(\"parses v1.2 format\") { REQUIRE(true); }\n",
+    )
+    .unwrap();
+
+    let (p, a) = build_runner_command(
+        &mk_cfg(IdeRunnerKind::CppRun, Some("app/main.cpp"), None),
+        IdeTargetKind::Local,
+        &proj_s,
+        &BTreeMap::new(),
+    );
+    assert_eq!(p, "sh");
+    assert!(
+        a[1].contains("--target my_app"),
+        "BUG-10: expected subdirectory target_sources target `my_app`, got: {}",
+        a[1]
+    );
+
+    let (p, a) = build_runner_command(
+        &mk_cfg(
+            IdeRunnerKind::Ctest,
+            Some("catch/parser_test.cpp"),
+            Some("parses v1.2 format"),
+        ),
+        IdeTargetKind::Local,
+        &proj_s,
+        &BTreeMap::new(),
+    );
+    assert_eq!(p, "sh");
+    assert!(
+        a[1].contains("--target catch_tests"),
+        "BUG-11: expected subdirectory target `catch_tests`, got: {}",
+        a[1]
+    );
+    assert!(
+        a.iter().any(|x| x == "parses v1.2 format"),
+        "BUG-11: Catch2 test name should be passed verbatim: {a:?}"
+    );
+    assert!(
+        a.iter().all(|x| !x.starts_with("--gtest_filter=")),
+        "BUG-11: Catch2 test with period must NEVER get --gtest_filter=: {a:?}"
+    );
+
+    // BUG2-3: explicit relative executable path (`tools/demo`) under build dir executes directly
+    // instead of passing `tools/demo` to `cmake --build --target`.
+    let tools_bin = proj.join("build/tools/demo");
+    std::fs::create_dir_all(tools_bin.parent().unwrap()).unwrap();
+    std::fs::write(&tools_bin, "#!/bin/sh\necho ok\n").unwrap();
+    std::fs::set_permissions(&tools_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (p, a) = build_runner_command(
+        &mk_cfg(IdeRunnerKind::CppRun, Some("tools/demo"), None),
+        IdeTargetKind::Local,
+        &proj_s,
+        &BTreeMap::new(),
+    );
+    assert_eq!(
+        p,
+        tools_bin.to_string_lossy(),
+        "BUG2-3: built relative executable `tools/demo` must run directly, got {p} {a:?}"
+    );
+    assert!(a.is_empty());
 
     // API-1: `conanfile.txt` `sync` runs `conan install . --build=missing`.
     let bin = root.join("conan-bin");

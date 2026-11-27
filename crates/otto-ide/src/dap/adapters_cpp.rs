@@ -221,7 +221,8 @@ pub(super) async fn resolve_cpp_adapter(
             .as_ref()
             .is_some_and(|rc| rc.runner == IdeRunnerKind::Ctest);
 
-    let is_unreal_project = raw_prog.ends_with(".uproject")
+    let is_unreal_project = req.launch.program.trim().ends_with(".uproject")
+        || raw_prog.ends_with(".uproject")
         || ctx
             .run_config
             .as_ref()
@@ -237,31 +238,17 @@ pub(super) async fn resolve_cpp_adapter(
     let executable = if is_attach_mode || is_prebuilt_binary {
         raw_prog
     } else if is_unreal_project {
-        let sub = ctx
-            .run_config
-            .as_ref()
-            .and_then(|rc| rc.args.first().map(String::as_str))
-            .unwrap_or("editor");
-        if matches!(sub, "build" | "gen-cdb" | "build-plugin") {
-            return Err(Error::Invalid(format!(
-                "Unreal '{sub}' run configuration is build-only; start Debug on the Unreal Editor launch configuration instead"
-            )));
-        }
-        let ue_root =
-            crate::environments::runner_cmd::resolve_unreal_engine_root(&env).ok_or_else(|| {
-                Error::NotFound(
-                    "Unreal Engine not found: set UE_ROOT (or UNREAL_ENGINE_ROOT) in Project Environment, or install Unreal Engine under /Users/Shared/Epic Games/UE_5.*".into(),
-                )
-            })?;
-        let editor_bin = if cfg!(target_os = "macos") {
-            ue_root.join("Engine/Binaries/Mac/UnrealEditor.app/Contents/MacOS/UnrealEditor")
-        } else {
-            ue_root.join("Engine/Binaries/Linux/UnrealEditor")
-        };
-        if raw_prog.ends_with(".uproject") {
-            unreal_uproject_arg = Some(raw_prog);
-        }
-        editor_bin.to_string_lossy().into_owned()
+        let (editor_bin, uproj_arg) = plan_unreal_debug_launch(
+            req.launch.program.trim(),
+            &raw_prog,
+            cwd,
+            ctx.run_config.as_ref(),
+            &req.launch.args,
+            &env,
+            crate::environments::runner_cmd::DEFAULT_UNREAL_SEARCH_BASES,
+        )?;
+        unreal_uproject_arg = uproj_arg;
+        editor_bin
     } else {
         compile_cpp_debug_artifact(
             data_dir,
@@ -513,6 +500,63 @@ pub(super) async fn resolve_cpp_adapter(
     ))
 }
 
+/// Plan an Unreal Engine Editor debug launch (resolving relative `.uproject` against
+/// `cwd` for attached workspaces, rejecting build-only Unreal subcommands, and locating
+/// `UnrealEditor` deterministically against `engine_search_bases`).
+pub(crate) fn plan_unreal_debug_launch(
+    raw_launch_program: &str,
+    normalized_program: &str,
+    cwd: &str,
+    run_config: Option<&crate::types::IdeRunConfig>,
+    launch_args: &[String],
+    env: &BTreeMap<String, String>,
+    engine_search_bases: &[&str],
+) -> Result<(String, Option<String>)> {
+    let sub = run_config
+        .and_then(|rc| rc.args.first().map(String::as_str))
+        .or_else(|| {
+            launch_args
+                .first()
+                .map(String::as_str)
+                .filter(|s| matches!(*s, "build" | "gen-cdb" | "build-plugin" | "editor"))
+        })
+        .unwrap_or("editor");
+    if matches!(sub, "build" | "gen-cdb" | "build-plugin") {
+        return Err(Error::Invalid(format!(
+            "Unreal '{sub}' run configuration is build-only; start Debug on the Unreal Editor launch configuration instead"
+        )));
+    }
+    let ue_root =
+        crate::environments::runner_cmd::resolve_unreal_engine_root_in(env, engine_search_bases)
+            .ok_or_else(|| {
+                Error::NotFound(
+                    "Unreal Engine not found: set UE_ROOT (or UNREAL_ENGINE_ROOT) in Project Environment, or install Unreal Engine under /Users/Shared/Epic Games/UE_5.*".into(),
+                )
+            })?;
+    let editor_bin = if cfg!(target_os = "macos") {
+        ue_root.join("Engine/Binaries/Mac/UnrealEditor.app/Contents/MacOS/UnrealEditor")
+    } else {
+        ue_root.join("Engine/Binaries/Linux/UnrealEditor")
+    };
+    let uproj_arg = if raw_launch_program.ends_with(".uproject") {
+        if Path::new(raw_launch_program).is_absolute() {
+            Some(raw_launch_program.to_string())
+        } else {
+            let rel_to_cwd = Path::new(cwd).join(raw_launch_program);
+            if rel_to_cwd.is_file() || !Path::new(normalized_program).is_file() {
+                Some(rel_to_cwd.to_string_lossy().into_owned())
+            } else {
+                Some(normalized_program.to_string())
+            }
+        }
+    } else if normalized_program.ends_with(".uproject") {
+        Some(normalized_program.to_string())
+    } else {
+        None
+    };
+    Ok((editor_bin.to_string_lossy().into_owned(), uproj_arg))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_codelldb_request(
     executable: &str,
@@ -526,21 +570,21 @@ pub(crate) fn build_codelldb_request(
     attach_port: Option<u16>,
 ) -> (String, serde_json::Value) {
     if let Some(core) = core_file {
-        // CodeLLDB rejects `attach` without `pid`/`program` live process; core dumps
-        // use `launch` with `target create` (custom target creation, no live pid).
-        let mut cmds = init_commands.to_vec();
+        // CodeLLDB 1.11.4 `handle_launch` requires `targetCreateCommands` (or `program`)
+        // on `launch` for custom target / core-dump creation (not `initCommands` alone).
         let q_core = core.replace('\'', "'\\''");
-        if executable.is_empty() {
-            cmds.push(format!("target create -c '{q_core}'"));
+        let target_cmd = if executable.is_empty() {
+            format!("target create -c '{q_core}'")
         } else {
             let q_exe = executable.replace('\'', "'\\''");
-            cmds.push(format!("target create '{q_exe}' -c '{q_core}'"));
-        }
+            format!("target create '{q_exe}' -c '{q_core}'")
+        };
         (
             "launch".to_string(),
             json!({
                 "cwd": cwd,
-                "initCommands": cmds
+                "targetCreateCommands": [target_cmd],
+                "initCommands": init_commands
             }),
         )
     } else if let Some(pid) = attach_pid {
@@ -1268,77 +1312,99 @@ int main(int argc, char** argv) {
         );
     }
 
-    #[tokio::test]
-    async fn unreal_uproject_debug_resolves_editor_or_errors_cleanly_without_compiling_uproject() {
+    #[test]
+    fn unreal_uproject_debug_resolves_editor_or_errors_cleanly_without_compiling_uproject() {
         use std::collections::BTreeMap;
-        use std::path::Path;
 
-        use super::resolve_cpp_adapter;
-        use crate::dap::DapStartContext;
-        use crate::types::{IdeRunConfig, IdeStartDebugReq};
+        use super::plan_unreal_debug_launch;
+        use crate::types::IdeRunConfig;
 
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().canonicalize().unwrap();
-        let uproj = root.join("MyGame.uproject");
+        let primary_root = root.join("primary-ws");
+        let attached_root = root.join("attached-game");
+        let empty_bases_dir = root.join("no-unreal-here");
+        std::fs::create_dir_all(&primary_root).unwrap();
+        std::fs::create_dir_all(&attached_root).unwrap();
+        std::fs::create_dir_all(&empty_bases_dir).unwrap();
+        let uproj = attached_root.join("MyGame.uproject");
         std::fs::write(&uproj, r#"{"FileVersion": 3}"#).unwrap();
 
-        let mk_req = |prog: &Path| -> IdeStartDebugReq {
-            serde_json::from_value(serde_json::json!({
-                "target": {
-                    "kind": "local",
-                    "root": root.to_string_lossy()
-                },
-                "language": "cpp",
-                "launch": {
-                    "program": prog.to_string_lossy(),
-                    "cwd": root.to_string_lossy()
-                }
+        let primary_wrong_norm = primary_root.join("MyGame.uproject");
+        let attached_cwd = attached_root.to_string_lossy().into_owned();
+        let empty_base_str = empty_bases_dir.to_string_lossy().into_owned();
+
+        // TEST2-1: deterministic search bases (never reads host `/Users/Shared/Epic Games`).
+        let err = plan_unreal_debug_launch(
+            "MyGame.uproject",
+            &primary_wrong_norm.to_string_lossy(),
+            &attached_cwd,
+            None,
+            &[],
+            &BTreeMap::new(),
+            &[empty_base_str.as_str()],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("Unreal Engine not found") && err.contains("UE_ROOT"),
+            "unexpected missing-engine error: {err}"
+        );
+
+        // BUG-13: attached-workspace relative `MyGame.uproject` resolves against `cwd` (`attached_root`)
+        // and pairs with the discovered `UnrealEditor` binary under the deterministic search base.
+        let fake_ue = root.join("fake-epic/UE_5.4");
+        let fake_editor = if cfg!(target_os = "macos") {
+            fake_ue.join("Engine/Binaries/Mac/UnrealEditor.app/Contents/MacOS/UnrealEditor")
+        } else {
+            fake_ue.join("Engine/Binaries/Linux/UnrealEditor")
+        };
+        std::fs::create_dir_all(fake_editor.parent().unwrap()).unwrap();
+        std::fs::write(&fake_editor, "#!/bin/sh\nexit 0\n").unwrap();
+        let search_base = root.join("fake-epic").to_string_lossy().into_owned();
+        let resolved = plan_unreal_debug_launch(
+            "MyGame.uproject",
+            &primary_wrong_norm.to_string_lossy(),
+            &attached_cwd,
+            None,
+            &["-game".to_string()],
+            &BTreeMap::new(),
+            &[search_base.as_str()],
+        )
+        .expect("attached-workspace Unreal debug plan should resolve");
+        assert_eq!(resolved.0, fake_editor.to_string_lossy());
+        assert_eq!(
+            resolved.1.as_deref(),
+            Some(uproj.to_string_lossy().as_ref()),
+            "relative .uproject must resolve against attached cwd, not primary root"
+        );
+
+        // BUG-13: build-only Unreal run configs (`build`, `gen-cdb`) must be rejected before launch.
+        for subcmd in ["build", "gen-cdb"] {
+            let ue_build_cfg: IdeRunConfig = serde_json::from_value(serde_json::json!({
+                "id": format!("ue-{subcmd}"),
+                "name": format!("Unreal {subcmd}"),
+                "runner": "unreal",
+                "args": [subcmd, "MyGameEditor"],
+                "target_path": "MyGame.uproject",
+                "auto_detected": true
             }))
-            .unwrap()
-        };
-
-        let empty_ctx = DapStartContext::default();
-        let err = resolve_cpp_adapter(
-            tmp.path(),
-            &mk_req(&uproj),
-            &empty_ctx,
-            &root.to_string_lossy(),
-            BTreeMap::new(),
-        )
-        .await
-        .unwrap_err()
-        .to_string();
-        assert!(
-            err.contains("Unreal Engine not found") || err.contains("UE_ROOT"),
-            "unexpected error: {err}"
-        );
-
-        let ue_build_cfg: IdeRunConfig = serde_json::from_value(serde_json::json!({
-            "id": "ue-build",
-            "name": "Unreal Build",
-            "runner": "unreal",
-            "args": ["build", "MyGameEditor"],
-            "target_path": uproj.to_string_lossy(),
-            "auto_detected": true
-        }))
-        .unwrap();
-        let build_ctx = DapStartContext {
-            run_config: Some(ue_build_cfg),
-            ..DapStartContext::default()
-        };
-        let build_err = resolve_cpp_adapter(
-            tmp.path(),
-            &mk_req(&uproj),
-            &build_ctx,
-            &root.to_string_lossy(),
-            BTreeMap::new(),
-        )
-        .await
-        .unwrap_err()
-        .to_string();
-        assert!(
-            build_err.contains("build-only"),
-            "unexpected build-only error: {build_err}"
-        );
+            .unwrap();
+            let build_err = plan_unreal_debug_launch(
+                "MyGame.uproject",
+                &primary_wrong_norm.to_string_lossy(),
+                &attached_cwd,
+                Some(&ue_build_cfg),
+                &[],
+                &BTreeMap::new(),
+                &[search_base.as_str()],
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(
+                build_err.contains("build-only"),
+                "expected build-only rejection for {subcmd}, got: {build_err}"
+            );
+        }
     }
 }

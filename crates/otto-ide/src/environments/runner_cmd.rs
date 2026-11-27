@@ -394,22 +394,38 @@ pub(crate) fn build_zig_runner_cmd(
             (prog, out)
         }
         IdeRunnerKind::ZigTest => {
-            // Project-wide Zig test runs (no `.zig` file in target_path or args) must use
-            // `zig build test` without checking local disk (so SSH remote projects work too).
-            let is_build_test = args.first().map(String::as_str) == Some("build")
-                || (tp.is_none_or(|p| !p.ends_with(".zig"))
-                    && !args.iter().any(|a| a.ends_with(".zig")));
+            // Project-wide Zig test runs (no `.zig` file and no single-case filter) use
+            // `zig build test` without checking local disk (so SSH remote projects work too, BUG-36).
+            // When a specific test case `filter` is selected (BUG2-2), NEVER silently drop the
+            // filter into unfiltered `zig build test` (which would run failing sibling tests):
+            // - if `--build-runner` was injected by `runner.rs` (carrying `OTTO_ZIG_TEST_FILTER`),
+            //   preserve `zig build --build-runner ... test`;
+            // - otherwise compile and run the selected `.zig` file with `--test-filter` and
+            //   the project's transitive `build.zig` module graph (BUG-35 + BUG2-2).
+            let has_build_runner = args.iter().any(|a| a == "--build-runner");
+            let is_build_test =
+                if filter.is_some() && !has_build_runner && tp.is_some_and(|p| p.ends_with(".zig"))
+                {
+                    false
+                } else {
+                    args.first().map(String::as_str) == Some("build")
+                        || (tp.is_none_or(|p| !p.ends_with(".zig"))
+                            && !args.iter().any(|a| a.ends_with(".zig")))
+                };
             if is_build_test {
                 if args.first().map(String::as_str) == Some("build") {
                     args.remove(0);
                 }
                 let mut out = vec!["build".to_string()];
-                if args.first().map(String::as_str) != Some("test") {
+                if !args.iter().any(|a| a == "test") {
                     out.push("test".to_string());
                 }
                 out.extend(build_flags);
                 out.extend(args);
                 return (prog, out);
+            }
+            if args.first().map(String::as_str) == Some("build") {
+                args.remove(0);
             }
             if args.first().map(String::as_str) == Some("test") {
                 args.remove(0);
@@ -424,7 +440,18 @@ pub(crate) fn build_zig_runner_cmd(
             }
             if let Some(file) = tp {
                 if !args.iter().any(|a| a == file) {
-                    out.push(file.to_string());
+                    let build_zig_path = Path::new(_cwd).join("build.zig");
+                    #[allow(clippy::disallowed_methods)]
+                    let graph = std::fs::read_to_string(&build_zig_path)
+                        .ok()
+                        .map(|src| {
+                            crate::dap::adapters_zig::parse_build_zig_module_graph(
+                                &src,
+                                Path::new(_cwd),
+                            )
+                        })
+                        .unwrap_or_default();
+                    crate::dap::adapters_zig::append_zig_source_and_modules(&mut out, file, &graph);
                 }
             }
             out.extend(args);
@@ -497,21 +524,20 @@ fn build_cpp_runner_cmd(
                 return (explicit.to_string(), out);
             }
             // BUG-11: Gutter GoogleTest/Catch2 run inside a CMake project: build the test
-            // target and invoke the test executable directly with `--gtest_filter` / case
-            // filter (falls back to `ctest -R` only when no test target can be resolved).
-            if cmd_opt.is_none()
-                && args.is_empty()
-                && target_kind == IdeTargetKind::Local
-                && filter.is_some()
-                && Path::new(cwd).join("CMakeLists.txt").is_file()
-            {
+            // target and invoke the test executable directly with `--gtest_filter` (GoogleTest)
+            // or the test name directly (Catch2, even when the name contains a period).
+            if let Some(f) = filter.filter(|_| {
+                cmd_opt.is_none()
+                    && args.is_empty()
+                    && target_kind == IdeTargetKind::Local
+                    && Path::new(cwd).join("CMakeLists.txt").is_file()
+            }) {
                 if let Some(test_target) =
                     infer_cmake_target_for_source(cwd, tp.unwrap_or(""), true)
                 {
-                    let f = filter.unwrap();
                     let build_dir = find_cpp_build_dir(cwd).unwrap_or_else(|| "build".into());
                     let mut test_args = Vec::new();
-                    if f.contains('.') {
+                    if is_gtest_filter_for_source(cwd, tp, f) {
                         test_args.push(format!("--gtest_filter={f}"));
                     } else {
                         test_args.push(f.to_string());
@@ -572,13 +598,26 @@ fn build_cpp_runner_cmd(
             let is_source = tp.is_some_and(is_cpp_source_path);
             if let Some(target_name) = tp.filter(|_| !is_source) {
                 if target_kind == IdeTargetKind::Local {
-                    // BUG-12: For CMake targets, always run incremental `cmake --build` before
-                    // executing so source edits never silently run a stale binary. Only run an
-                    // existing standalone binary directly when no CMake project owns it or the
-                    // user specified an explicit binary path.
-                    let is_explicit_path =
-                        target_name.contains('/') && is_executable_file(Path::new(target_name));
-                    if !is_explicit_path && Path::new(cwd).join("CMakeLists.txt").is_file() {
+                    // BUG2-3: Resolve explicit relative or absolute executable paths against
+                    // `cwd` and existing build directories FIRST before treating bare target
+                    // names as CMake `--target` rebuilds.
+                    if target_name.contains('/') {
+                        let direct = if Path::new(target_name).is_absolute() {
+                            PathBuf::from(target_name)
+                        } else {
+                            Path::new(cwd).join(target_name)
+                        };
+                        if is_executable_file(&direct) {
+                            return (direct.to_string_lossy().into_owned(), args);
+                        }
+                        if let Some(exe) = find_built_cpp_executable(cwd, target_name) {
+                            return (exe, args);
+                        }
+                    }
+                    // BUG-12: For bare CMake target names, always run incremental `cmake --build`
+                    // before executing so source edits never silently run a stale binary.
+                    if !target_name.contains('/') && Path::new(cwd).join("CMakeLists.txt").is_file()
+                    {
                         let build_dir = find_cpp_build_dir(cwd).unwrap_or_else(|| "build".into());
                         return build_cmake_target_exec_cmd(&build_dir, target_name, args);
                     }
@@ -669,33 +708,159 @@ fn build_cmake_target_exec_cmd(
 }
 
 #[allow(clippy::disallowed_methods)]
-fn infer_cmake_target_for_source(cwd: &str, source_path: &str, want_test: bool) -> Option<String> {
-    let cmake_text = std::fs::read_to_string(Path::new(cwd).join("CMakeLists.txt")).ok()?;
-    let base = Path::new(source_path)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-    let re = regex::Regex::new(r"(?is)add_executable\s*\(\s*([A-Za-z0-9_.-]+)([^)]*)\)").ok()?;
-    let mut targets: Vec<(String, String)> = Vec::new();
-    for cap in re.captures_iter(&cmake_text) {
-        let name = cap[1].to_string();
-        let body = cap[2].to_string();
-        if !name.contains("${") {
-            targets.push((name, body));
+fn is_gtest_filter_for_source(cwd: &str, source_path: Option<&str>, filter: &str) -> bool {
+    if let Some(sp) = source_path.filter(|s| is_cpp_source_path(s)) {
+        let p = if Path::new(sp).is_absolute() {
+            PathBuf::from(sp)
+        } else {
+            Path::new(cwd).join(sp)
+        };
+        if let Ok(src) = std::fs::read_to_string(&p) {
+            let is_catch2 = src.contains("TEST_CASE(")
+                || src.contains("SCENARIO(")
+                || src.contains("TEMPLATE_TEST_CASE(")
+                || src.contains("catch2/");
+            let is_gtest = src.contains("gtest/gtest.h")
+                || src.contains("TEST_F(")
+                || src.contains("TEST_P(")
+                || src.contains("TEST(");
+            if is_catch2 && !is_gtest {
+                return false;
+            }
+            if is_gtest && !is_catch2 {
+                return true;
+            }
         }
     }
+    // Heuristic fallback when source cannot be read: GoogleTest `Suite.Test` has a single
+    // `.` separating two identifier-like tokens and never contains spaces.
+    !filter.chars().any(char::is_whitespace) && filter.contains('.')
+}
+
+#[allow(clippy::disallowed_methods)]
+fn collect_cmake_targets_recursive(
+    root_canon: &Path,
+    dir: &Path,
+    depth: usize,
+    targets: &mut Vec<(String, String, String)>,
+    uses_glob: &mut bool,
+) {
+    if depth > 4 {
+        return;
+    }
+    let cm_path = dir.join("CMakeLists.txt");
+    let Ok(cmake_text) = std::fs::read_to_string(&cm_path) else {
+        return;
+    };
+    let dir_prefix = dir
+        .strip_prefix(root_canon)
+        .ok()
+        .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_default();
+    let lower_cm = cmake_text.to_ascii_lowercase();
+    if lower_cm.contains("file(glob") || lower_cm.contains("aux_source_directory") {
+        *uses_glob = true;
+    }
+    if let Ok(re_exe) = regex::Regex::new(r"(?is)add_executable\s*\(\s*([A-Za-z0-9_.-]+)([^)]*)\)")
+    {
+        for cap in re_exe.captures_iter(&cmake_text) {
+            let name = cap[1].to_string();
+            let body = cap[2].to_string();
+            if !name.contains("${") {
+                targets.push((name, dir_prefix.clone(), body));
+            }
+        }
+    }
+    // Also merge `target_sources(<target> PRIVATE/PUBLIC/INTERFACE ...)` into the target's body.
+    if let Ok(re_ts) = regex::Regex::new(r"(?is)target_sources\s*\(\s*([A-Za-z0-9_.-]+)([^)]*)\)") {
+        for cap in re_ts.captures_iter(&cmake_text) {
+            let name = cap[1].to_string();
+            let body = cap[2].to_string();
+            if let Some((_, _, existing)) = targets.iter_mut().find(|(n, _, _)| n == &name) {
+                existing.push(' ');
+                existing.push_str(&body);
+            } else if !name.contains("${") {
+                targets.push((name, dir_prefix.clone(), body));
+            }
+        }
+    }
+    if let Ok(re_sub) = regex::Regex::new(r"(?is)add_subdirectory\s*\(\s*([^\s)#]+)") {
+        for cap in re_sub.captures_iter(&cmake_text) {
+            let sub = cap[1].trim_matches(|c| c == '"' || c == '\'');
+            if sub.is_empty() || sub.contains("${") || sub.contains("..") {
+                continue;
+            }
+            let cand = dir.join(sub);
+            let Ok(meta) = std::fs::symlink_metadata(&cand) else {
+                continue;
+            };
+            if meta.file_type().is_symlink() || !meta.is_dir() {
+                continue;
+            }
+            if let Ok(canon) = std::fs::canonicalize(&cand) {
+                if canon.starts_with(root_canon) {
+                    collect_cmake_targets_recursive(
+                        root_canon,
+                        &canon,
+                        depth + 1,
+                        targets,
+                        uses_glob,
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[allow(clippy::disallowed_methods)]
+fn infer_cmake_target_for_source(cwd: &str, source_path: &str, want_test: bool) -> Option<String> {
+    let root_canon = std::fs::canonicalize(cwd).unwrap_or_else(|_| PathBuf::from(cwd));
+    let mut targets: Vec<(String, String, String)> = Vec::new();
+    let mut uses_glob = false;
+    collect_cmake_targets_recursive(&root_canon, &root_canon, 0, &mut targets, &mut uses_glob);
     if targets.is_empty() {
         return None;
     }
-    // 1. Exact source-file match inside `add_executable(target ... src.cpp ...)`
+    let src_p = Path::new(source_path);
+    let rel_source = if src_p.is_absolute() {
+        std::fs::canonicalize(src_p)
+            .ok()
+            .and_then(|c| c.strip_prefix(&root_canon).ok().map(Path::to_path_buf))
+            .unwrap_or_else(|| src_p.to_path_buf())
+            .to_string_lossy()
+            .replace('\\', "/")
+    } else {
+        source_path
+            .trim_start_matches("./")
+            .replace('\\', "/")
+    };
+    let base = src_p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+    // 1a. Exact directory-relative source-file match so `app/main.cpp` matches `app/CMakeLists.txt`
+    //     rather than an unrelated root `src/main.cpp` target (BUG-10).
+    if !rel_source.is_empty() {
+        if let Some((name, _, _)) = targets.iter().find(|(_, dir_prefix, body)| {
+            if dir_prefix.is_empty() {
+                body.contains(&rel_source)
+            } else {
+                let prefix_slash = format!("{dir_prefix}/");
+                rel_source
+                    .strip_prefix(&prefix_slash)
+                    .is_some_and(|in_dir| body.contains(in_dir))
+                    || body.contains(&rel_source)
+            }
+        }) {
+            return Some(name.clone());
+        }
+    }
+    // 1b. Basename fallback when target lists sources via variables/computed prefixes.
     if !base.is_empty() {
-        if let Some((name, _)) = targets.iter().find(|(_, body)| body.contains(base)) {
+        if let Some((name, _, _)) = targets.iter().find(|(_, _, body)| body.contains(base)) {
             return Some(name.clone());
         }
     }
     // 2. For tests, prefer targets whose name contains "test" / "spec"
     if want_test {
-        if let Some((name, _)) = targets.iter().find(|(n, _)| {
+        if let Some((name, _, _)) = targets.iter().find(|(n, _, _)| {
             let l = n.to_ascii_lowercase();
             l.contains("test") || l.contains("spec")
         }) {
@@ -703,17 +868,13 @@ fn infer_cmake_target_for_source(cwd: &str, source_path: &str, want_test: bool) 
         }
         return None;
     }
-    // 3. Only fall back to the first non-test executable if CMake globs sources or has a single target
-    let lower_cm = cmake_text.to_ascii_lowercase();
-    let uses_glob = lower_cm.contains("file(glob")
-        || lower_cm.contains("aux_source_directory")
-        || lower_cm.contains("add_subdirectory");
+    // 3. Only fall back to the first non-test executable if CMake globs sources
     if uses_glob {
         targets
             .iter()
-            .find(|(n, _)| !n.to_ascii_lowercase().contains("test"))
+            .find(|(n, _, _)| !n.to_ascii_lowercase().contains("test"))
             .or_else(|| targets.first())
-            .map(|(n, _)| n.clone())
+            .map(|(n, _, _)| n.clone())
     } else {
         None
     }
@@ -756,8 +917,19 @@ pub(crate) fn find_built_cpp_executable(cwd: &str, target_name: &str) -> Option<
     None
 }
 
+pub(crate) const DEFAULT_UNREAL_SEARCH_BASES: &[&str] =
+    &["/Users/Shared/Epic Games", "/opt/UnrealEngine"];
+
 #[allow(clippy::disallowed_methods)]
 pub(crate) fn resolve_unreal_engine_root(env_map: &BTreeMap<String, String>) -> Option<PathBuf> {
+    resolve_unreal_engine_root_in(env_map, DEFAULT_UNREAL_SEARCH_BASES)
+}
+
+#[allow(clippy::disallowed_methods)]
+pub(crate) fn resolve_unreal_engine_root_in(
+    env_map: &BTreeMap<String, String>,
+    search_bases: &[&str],
+) -> Option<PathBuf> {
     for key in ["UE_ROOT", "UNREAL_ENGINE_ROOT"] {
         if let Some(val) = env_map.get(key).map(|s| s.trim()).filter(|s| !s.is_empty()) {
             let p = PathBuf::from(val);
@@ -766,7 +938,7 @@ pub(crate) fn resolve_unreal_engine_root(env_map: &BTreeMap<String, String>) -> 
             }
         }
     }
-    for base in ["/Users/Shared/Epic Games", "/opt/UnrealEngine"] {
+    for base in search_bases {
         let bp = Path::new(base);
         if bp.join("Engine").is_dir() {
             return Some(bp.to_path_buf());
@@ -1119,7 +1291,20 @@ pub(crate) fn build_runner_command(
         IdeRunnerKind::Playwright => build_playwright_cmd(cfg, cmd_opt, args, build_flags, filter),
         IdeRunnerKind::Karma => build_karma_cmd(cfg, target_kind, cwd, cmd_opt, args, build_flags),
         IdeRunnerKind::JavaMain => build_java_main_cmd(cfg, cmd_opt, args, build_flags, filter),
-        IdeRunnerKind::JavaJunit | IdeRunnerKind::Maven => {
+        IdeRunnerKind::JavaJunit => {
+            // BUG-16: On Gradle-only projects (including Kotest suites), `JavaJunit`
+            // must dispatch to Gradle (`./gradlew test --tests ...`) rather than Maven.
+            let is_gradle_only = target_kind == IdeTargetKind::Local
+                && !Path::new(cwd).join("pom.xml").is_file()
+                && (Path::new(cwd).join("build.gradle.kts").is_file()
+                    || Path::new(cwd).join("build.gradle").is_file());
+            if is_gradle_only {
+                build_gradle_cmd(cfg, target_kind, cwd, cmd_opt, args, build_flags, filter)
+            } else {
+                build_maven_cmd(cfg, target_kind, cwd, cmd_opt, args, build_flags, filter)
+            }
+        }
+        IdeRunnerKind::Maven => {
             build_maven_cmd(cfg, target_kind, cwd, cmd_opt, args, build_flags, filter)
         }
         IdeRunnerKind::Gradle => {

@@ -648,6 +648,16 @@ export async function launchDebugSession(
   }
   const rawCfgId = opts.configId ?? (plan?.kind === 'config' ? plan.configId : undefined);
   const cfg = rawCfgId ? host.runConfigs.find((c) => c.id === rawCfgId) : undefined;
+  const unrealSub = cfg?.runner === 'unreal' ? (cfg.args?.[0] ?? '').trim() : '';
+  if (unrealSub === 'build' || unrealSub === 'gen-cdb' || unrealSub === 'build-plugin') {
+    host.openBottomTab('debug');
+    ideDebugLaunch.startError = {
+      message: `Unreal '${unrealSub}' run configuration is build-only; start Debug on the Unreal Editor launch configuration instead`,
+      kind: null,
+      ecosystem: null,
+    };
+    return prevCtl;
+  }
   const fallbackLang = host.activeTab?.language || 'go';
   const language = opts.language || languageFromRunner(cfg?.runner, fallbackLang);
   const program = opts.launch?.program || cfg?.target_path || host.activePath || host.target.root;
