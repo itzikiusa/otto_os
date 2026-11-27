@@ -13,6 +13,7 @@
   import { rightPanel } from '../../lib/stores/rightPanel.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   const CommitCard = lazyComponent(() => import('./CommitCard.svelte'));
@@ -32,23 +33,25 @@
     <div class="gp-pad"><Skeleton rows={4} height={26} /></div>
   {:else if !git.primary && git.notARepo && (rightPanel.session || rightPanel.threadFolder)}
     <!-- The details card above (a terminal's or a chat pane's) already says "Not a git repository": one line, no button. -->
+  {:else if !git.primary && git.reposError}
+    <LoadState
+      what="this workspace’s repositories"
+      variant="compact"
+      error={git.reposError}
+      empty
+      onretry={() => ws.currentId && void git.retryRepos(ws.currentId, rightPanel.folder)}
+    />
   {:else if !git.primary}
-    <div class="gp-empty">
-      {#if git.reposError}
-        <LoadState
-          what="this workspace’s repositories"
-          variant="compact"
-          error={git.reposError}
-          empty
-          onretry={() => ws.currentId && void git.retryRepos(ws.currentId, rightPanel.folder)}
-        />
-      {:else if git.notARepo}
-        <p class="dim">{rightPanel.session ? 'This session’s folder' : 'This folder'} isn’t a git repository.</p>
-      {:else}
-        <p class="dim">No repository for {rightPanel.session ? 'this session' : 'this workspace'} yet.</p>
-      {/if}
-      <button class="btn small" onclick={() => router.go('git')}>Open Git module</button>
-    </div>
+    <EmptyState
+      icon="branch"
+      title={git.notARepo ? 'Not a git repository' : 'No repository yet'}
+      body={git.notARepo
+        ? `${rightPanel.session ? 'This session’s folder' : 'This folder'} isn’t a git repository.`
+        : `No repository for ${rightPanel.session ? 'this session' : 'this workspace'} yet.`}
+      actionLabel="Open Git module"
+      actionKind="secondary"
+      onaction={() => router.go('git')}
+    />
   {:else}
     {@const primary = git.primary}
     {#if primary}
@@ -92,13 +95,5 @@
   }
   .gp-pad {
     padding: 12px;
-  }
-  .gp-empty {
-    padding: 16px 12px;
-    text-align: center;
-  }
-  .gp-empty p {
-    font-size: var(--fs-s);
-    margin: 0 0 10px;
   }
 </style>
