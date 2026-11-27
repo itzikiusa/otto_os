@@ -270,3 +270,39 @@ pub(crate) fn parse(bytes: &[u8], root: &Path, rules: &Rules) -> Result<Vec<Find
         })
         .collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compiled_rules_remove_options_and_findings_use_only_static_descriptions() {
+        let pack = json!({"rules": [
+            {"id":"known", "languages":["rust"], "metadata":{"category":"security","confidence":"HIGH"},
+                "message":"Static guidance", "fix":"Static fix", "options":{"interfile":true}},
+            {"id":"style", "languages":["rust"], "metadata":{"category":"style","confidence":"HIGH"}}
+        ]});
+        let rules = compile_rules(&serde_json::to_vec(&pack).unwrap()).unwrap();
+        let selected = rules.config["rules"].as_array().unwrap();
+        assert!(selected.iter().all(|rule| rule.get("options").is_none()));
+        assert!(!rules.descriptions.contains_key("style"));
+
+        let report = json!({"results":[
+            {"check_id":"known", "path":"src/lib.rs", "start":{"line":4,"col":2},
+                "extra":{"message":"Matched input", "fix":"Matched replacement", "severity":"ERROR"}},
+            {"check_id":"style", "path":"src/lib.rs"},
+            {"check_id":"known", "path":"../outside.rs"}
+        ]});
+        let findings = parse(
+            &serde_json::to_vec(&report).unwrap(),
+            Path::new("/project"),
+            &rules,
+        )
+        .unwrap();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].line, Some(4));
+        assert_eq!(findings[0].severity, Severity::High);
+        assert_eq!(findings[0].description, "Static guidance");
+        assert_eq!(findings[0].fix, "Static fix");
+    }
+}

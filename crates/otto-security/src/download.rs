@@ -198,3 +198,45 @@ impl Drop for BackgroundThread {
         unsafe { libc::setpriority(libc::PRIO_DARWIN_THREAD, 0, 0) };
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_only_writes_requested_regular_assets() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("fixture.tar.gz");
+        let output = dir.path().join("output");
+        std::fs::create_dir(&output).unwrap();
+        let pack = |kind: tar::EntryType, content: &[u8]| {
+            let zip = flate2::write::GzEncoder::new(
+                File::create(&archive).unwrap(),
+                flate2::Compression::fast(),
+            );
+            let mut tar = tar::Builder::new(zip);
+            let mut header = tar::Header::new_gnu();
+            header.set_mode(0o600);
+            header.set_size(content.len() as u64);
+            tar.append_data(&mut header, "ignored.txt", content)
+                .unwrap();
+            header.set_entry_type(kind);
+            tar.append_data(&mut header, "./scanner", content).unwrap();
+            tar.into_inner().unwrap().finish().unwrap();
+        };
+        let cancel = CancellationToken::new();
+        pack(tar::EntryType::Directory, b"");
+        assert!(matches!(
+            extract(&archive, &output, &["scanner"], 4096, &cancel),
+            Err(Error::Upstream(_))
+        ));
+        assert!(!output.join("scanner").exists());
+        pack(tar::EntryType::Regular, b"fixture executable bytes");
+        extract(&archive, &output, &["scanner"], 4096, &cancel).unwrap();
+        assert_eq!(
+            std::fs::read(output.join("scanner")).unwrap(),
+            b"fixture executable bytes"
+        );
+        assert!(!output.join("ignored.txt").exists());
+    }
+}
