@@ -161,6 +161,17 @@ export function normalizeIdeLspLanguage(langOrExt?: string | null): string | nul
   return pluginLspLanguages.has(raw) ? raw : null;
 }
 
+/** LSP `textDocument/didOpen` document languageId (distinct from server pooling key):
+ *  Angular's `ngserver` only triggers companion `.ts` project lookup when an external
+ *  `.component.html` template opens with `languageId: 'html'` (API2-2). */
+export function lspDocumentLanguageIdFor(serverOrLangId: string, filePath?: string): string {
+  const norm = normalizeIdeLspLanguage(serverOrLangId);
+  if (norm === 'angular' || filePath?.split('?')[0].toLowerCase().endsWith('.component.html')) {
+    return 'html';
+  }
+  return serverOrLangId;
+}
+
 /** `?query` only exists on URIs (`jdt:`, `jar:`, `file:`); a plain path may contain a literal `?`. */
 function stripUriQuery(p: string): string {
   return /^[a-z][a-z0-9+.-]+:/i.test(p) ? p.split('?')[0] : p;

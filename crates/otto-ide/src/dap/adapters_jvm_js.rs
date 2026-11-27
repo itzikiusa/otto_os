@@ -52,6 +52,7 @@ pub(super) async fn resolve_js_ts_adapter(
                 cwd: cwd.to_string(),
                 env,
                 attach_port: Some(attach_port),
+                is_browser_attach,
             }),
             initialize_args: json!({
                 "adapterID": if is_browser_attach { "chrome" } else { "node" },
@@ -105,7 +106,40 @@ pub(super) async fn resolve_js_ts_adapter(
             )
         })?;
 
-    let program = normalize_target_path(&req.target, &req.launch.program);
+    let mut program = normalize_target_path(&req.target, &req.launch.program);
+    let mut args = req.launch.args.clone();
+    let mut cwd = cwd.to_string();
+
+    // BUG-30: Reject Playwright/Karma debugging up front for BOTH single-test gutter
+    // launches AND toolbar/config launches (with or without `test_name`), before either
+    // external `js-debug` or built-in `node-inspector-dap` runs.
+    if req.target.kind == IdeTargetKind::Local {
+        check_js_debug_supported(
+            &program,
+            &args,
+            ctx.run_config.as_ref(),
+            req.launch.test_name.as_deref(),
+        )?;
+    }
+
+    // BUG-27: Resolve framework dev CLIs (vite/next/ng/nuxt/svelte-kit) BEFORE BOTH
+    // external `js-debug` and built-in `node-inspector-dap` so neither adapter tries
+    // to launch a bare CLI name or `package.json`.
+    let has_test_name = req
+        .launch
+        .test_name
+        .as_deref()
+        .is_some_and(|s| !s.is_empty());
+    if !has_test_name && req.target.kind == IdeTargetKind::Local {
+        let (effective_prog, effective_args) =
+            unwrap_framework_dev_program(&program, &args, ctx.run_config.as_ref());
+        if let Some((entry, fw_args)) =
+            resolve_web_framework_cli_entry(&cwd, &effective_prog, &effective_args)
+        {
+            program = entry;
+            args = fw_args;
+        }
+    }
 
     let js_debug_candidates = [
         data_dir.join("toolchains/node/dap/js-debug/src/dapDebugServer.js"),
@@ -124,7 +158,7 @@ pub(super) async fn resolve_js_ts_adapter(
                         "0".into(),
                         "127.0.0.1".into(),
                     ],
-                    cwd: cwd.to_string(),
+                    cwd: cwd.clone(),
                     env,
                 },
                 initialize_args: json!({
@@ -141,25 +175,19 @@ pub(super) async fn resolve_js_ts_adapter(
                 launch_args: json!({
                     "type": "pwa-node",
                     "program": program,
-                    "args": req.launch.args,
+                    "args": args,
                     "cwd": cwd,
                     "runtimeExecutable": node_bin,
                 }),
-                normalized_cwd: cwd.to_string(),
+                normalized_cwd: cwd,
                 initial_output: Vec::new(),
             });
         }
     }
 
     let mut node_flags = vec!["--enable-source-maps".into()];
-    let mut program = program;
-    let mut args = req.launch.args.clone();
-    let mut cwd = cwd.to_string();
     if let Some(tname) = req.launch.test_name.as_deref().filter(|s| !s.is_empty()) {
         let pattern = regex::escape(tname);
-        if req.target.kind == IdeTargetKind::Local {
-            check_js_test_debug_supported(&program)?;
-        }
         let runner = (req.target.kind == IdeTargetKind::Local)
             .then(|| js_runner_debug_launch(&program, &pattern))
             .flatten();
@@ -171,15 +199,6 @@ pub(super) async fn resolve_js_ts_adapter(
                 node_flags.push("--test".into());
                 node_flags.push(format!("--test-name-pattern={pattern}"));
             }
-        }
-    } else if req.target.kind == IdeTargetKind::Local {
-        let (effective_prog, effective_args) =
-            unwrap_framework_dev_program(&program, &args, ctx.run_config.as_ref());
-        if let Some((entry, fw_args)) =
-            resolve_web_framework_cli_entry(&cwd, &effective_prog, &effective_args)
-        {
-            program = entry;
-            args = fw_args;
         }
     }
     let is_ts = program.ends_with(".ts") || program.ends_with(".mts") || program.ends_with(".cts");
@@ -204,6 +223,7 @@ pub(super) async fn resolve_js_ts_adapter(
             cwd: cwd.clone(),
             env,
             attach_port: req.launch.attach_port,
+            is_browser_attach: false,
         }),
         initialize_args: json!({
             "adapterID": "node",
@@ -248,6 +268,63 @@ pub(crate) fn unwrap_framework_dev_program(
         }
     }
     (program.to_string(), args.to_vec())
+}
+
+/// Reject Playwright/Karma Node-inspector debugging explicitly for BOTH single-test
+/// launches and toolbar/run-config launches (BUG-30): Playwright runs tests inside
+/// separate worker processes and Karma runs inside a browser, so attaching Node DAP to
+/// the CLI launcher will never hit test breakpoints.
+pub(crate) fn check_js_debug_supported(
+    program: &str,
+    args: &[String],
+    run_config: Option<&crate::types::IdeRunConfig>,
+    test_name: Option<&str>,
+) -> Result<()> {
+    let lower_prog = program.to_ascii_lowercase();
+    let cfg_mentions = |needle: &str| -> bool {
+        run_config.is_some_and(|c| {
+            c.name.to_ascii_lowercase().contains(needle)
+                || c.id.to_ascii_lowercase().contains(needle)
+                || c.command
+                    .as_deref()
+                    .is_some_and(|s| s.to_ascii_lowercase().contains(needle))
+                || c.target_path
+                    .as_deref()
+                    .is_some_and(|s| s.to_ascii_lowercase().contains(needle))
+                || c.args
+                    .iter()
+                    .any(|a| a.to_ascii_lowercase().contains(needle))
+        }) || args.iter().any(|a| a.to_ascii_lowercase().contains(needle))
+    };
+    if lower_prog.contains("playwright") || cfg_mentions("playwright") {
+        return Err(Error::Invalid(
+            "Debug is not supported for Playwright under the Node inspector bridge (Playwright runs tests inside a separate worker process). Use Run or Playwright's inspector (`PWDEBUG=1`)."
+                .into(),
+        ));
+    }
+    if lower_prog.contains("karma")
+        || cfg_mentions("karma")
+        || (lower_prog.ends_with("/ng") && args.first().map(String::as_str) == Some("test"))
+        || run_config
+            .is_some_and(|c| c.args.iter().any(|a| a == "ng") && c.args.iter().any(|a| a == "test"))
+    {
+        return Err(Error::Invalid(
+            "Debug is not supported for Karma/Angular browser tests under the Node inspector bridge. Use Run or attach a Chrome CDP session."
+                .into(),
+        ));
+    }
+    if test_name.is_some_and(|s| !s.is_empty()) {
+        return check_js_test_debug_supported(program);
+    }
+    // Even without `test_name`, reject direct debugging of a Playwright test file.
+    let src = std::fs::read_to_string(program).unwrap_or_default();
+    if src.contains("@playwright/test") {
+        return Err(Error::Invalid(
+            "Debug is not supported for Playwright tests under the Node inspector bridge (Playwright runs tests inside a separate worker process). Use Run or Playwright's inspector (`PWDEBUG=1`)."
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Reject Playwright/Karma single-test Node-inspector debugging explicitly (BUG-30):
@@ -1193,5 +1270,165 @@ mod tests {
         let (vite_entry, _) =
             resolve_web_framework_cli_entry(&root.to_string_lossy(), "vite", &[]).unwrap();
         assert!(vite_entry.ends_with("node_modules/vite/bin/vite.js"));
+    }
+
+    #[tokio::test]
+    async fn resolve_js_ts_adapter_resolves_vite_for_js_debug_rejects_toolbar_playwright_karma_and_preserves_browser_alias(
+    ) {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        let root = tmp.path().join("vite-app");
+        let fake_node = data_dir.join("toolchains/node/current/bin/node");
+        let fake_js_debug = data_dir.join("toolchains/node/dap/js-debug/src/dapDebugServer.js");
+        let vite_bin = root.join("node_modules/vite/bin/vite.js");
+        for p in [&fake_node, &fake_js_debug, &vite_bin] {
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, "#!/bin/sh\nexit 0\n").unwrap();
+        }
+        std::fs::set_permissions(&fake_node, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let root_str = root.to_string_lossy().into_owned();
+        let mut ctx = DapStartContext::default();
+        ctx.caller_is_root = true;
+
+        // BUG-27: Even when OTTO_JS_ADAPTER=js-debug is selected, bare `vite` resolves
+        // to `node_modules/vite/bin/vite.js` before returning the js-debug adapter.
+        let vite_req = IdeStartDebugReq {
+            target: IdeTargetSpec::local(root_str.clone()),
+            language: "typescript".into(),
+            config_id: None,
+            launch: crate::types::IdeDebugLaunchSpec {
+                program: "vite".into(),
+                args: vec!["--port".into(), "5173".into()],
+                cwd: Some(root_str.clone()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut env = BTreeMap::new();
+        env.insert("OTTO_JS_ADAPTER".into(), "js-debug".into());
+        let resolved = resolve_js_ts_adapter(
+            &data_dir,
+            "typescript",
+            &vite_req,
+            &ctx,
+            &root_str,
+            env.clone(),
+        )
+        .await
+        .expect("js-debug adapter should resolve vite CLI");
+        assert_eq!(resolved.adapter_name, "js-debug");
+        assert!(
+            resolved.launch_args["program"]
+                .as_str()
+                .unwrap_or("")
+                .ends_with("node_modules/vite/bin/vite.js"),
+            "BUG-27: js-debug must receive resolved node_modules/vite/bin/vite.js, got: {}",
+            resolved.launch_args
+        );
+
+        // BUG-30: Toolbar Debug on Playwright or Karma run configs (with NO test_name) is rejected.
+        let mut pw_ctx = ctx.clone();
+        pw_ctx.run_config = Some(crate::types::IdeRunConfig {
+            id: "auto:playwright".into(),
+            name: "Playwright E2E".into(),
+            runner: crate::types::IdeRunnerKind::Npm,
+            command: Some("npx".into()),
+            args: vec!["playwright".into(), "test".into()],
+            ..Default::default()
+        });
+        let pw_req = IdeStartDebugReq {
+            target: IdeTargetSpec::local(root_str.clone()),
+            language: "typescript".into(),
+            config_id: None,
+            launch: crate::types::IdeDebugLaunchSpec {
+                program: root.join("package.json").to_string_lossy().into_owned(),
+                cwd: Some(root_str.clone()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(
+            resolve_js_ts_adapter(
+                &data_dir,
+                "typescript",
+                &pw_req,
+                &pw_ctx,
+                &root_str,
+                BTreeMap::new()
+            )
+            .await
+            .is_err(),
+            "BUG-30: toolbar Playwright debug without test_name must be rejected"
+        );
+
+        let mut karma_ctx = ctx.clone();
+        karma_ctx.run_config = Some(crate::types::IdeRunConfig {
+            id: "auto:ng-test".into(),
+            name: "Angular Karma Tests".into(),
+            runner: crate::types::IdeRunnerKind::Npm,
+            command: Some("npx".into()),
+            args: vec!["--no-install".into(), "ng".into(), "test".into()],
+            ..Default::default()
+        });
+        assert!(
+            resolve_js_ts_adapter(
+                &data_dir,
+                "typescript",
+                &pw_req,
+                &karma_ctx,
+                &root_str,
+                BTreeMap::new()
+            )
+            .await
+            .is_err(),
+            "BUG-30: toolbar Karma debug without test_name must be rejected"
+        );
+
+        // BUG-31: `language: "browser"` + `attach_port` + empty `program` sets `is_browser_attach = true`.
+        let browser_req = IdeStartDebugReq {
+            target: IdeTargetSpec::local(root_str.clone()),
+            language: "browser".into(),
+            config_id: None,
+            launch: crate::types::IdeDebugLaunchSpec {
+                program: String::new(),
+                attach_port: Some(9222),
+                cwd: Some(root_str.clone()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let browser_res = resolve_js_ts_adapter(
+            &data_dir,
+            "browser",
+            &browser_req,
+            &ctx,
+            &root_str,
+            BTreeMap::new(),
+        )
+        .await
+        .expect("browser alias attach");
+        match browser_res.transport {
+            DapAdapterTransport::NodeInspectorBridge(spec) => {
+                assert!(
+                    spec.is_browser_attach,
+                    "BUG-31: browser language alias must propagate is_browser_attach=true"
+                );
+            }
+            _ => panic!("expected NodeInspectorBridge transport"),
+        }
+
+        // BUG-28: Exact URL match must beat an earlier same-origin descendant tab (`/settings`).
+        use crate::dap::node_bridge::cdp::select_cdp_target_ws_url_for;
+        let tabs = json!([
+            { "type": "page", "url": "http://localhost:5173/settings", "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/page/SETTINGS" },
+            { "type": "page", "url": "http://localhost:5173/", "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/page/ROOT" }
+        ]);
+        assert_eq!(
+            select_cdp_target_ws_url_for(&tabs, Some("http://localhost:5173/")).as_deref(),
+            Some("ws://127.0.0.1:9222/devtools/page/ROOT"),
+            "BUG-28: exact root URL tab must beat earlier /settings tab"
+        );
     }
 }

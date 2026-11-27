@@ -67,6 +67,34 @@ pub(super) async fn handle_node_cdp_msg<W: AsyncWrite + Unpin>(
                 st.script_urls.insert(sid.to_string(), url.to_string());
             }
         }
+        "Debugger.breakpointResolved" => {
+            if let Some(bid) = params
+                .and_then(|p| p.get("breakpointId"))
+                .and_then(Value::as_str)
+            {
+                if let Some((path, orig_line)) = st.bp_meta_by_id.get(bid).cloned() {
+                    let bound_line = params
+                        .and_then(|p| p.get("location"))
+                        .and_then(|l| l.get("lineNumber"))
+                        .and_then(Value::as_u64)
+                        .map(|n| n as u32 + 1)
+                        .unwrap_or(orig_line);
+                    dap_w
+                        .send_event(
+                            "breakpoint",
+                            Some(json!({
+                                "reason": "changed",
+                                "breakpoint": {
+                                    "verified": true,
+                                    "line": bound_line,
+                                    "source": { "path": path }
+                                }
+                            })),
+                        )
+                        .await?;
+                }
+            }
+        }
         "Debugger.paused" => {
             let reason_raw = params
                 .and_then(|p| p.get("reason"))
@@ -184,6 +212,85 @@ async fn handle_node_cdp_reply<W: AsyncWrite + Unpin>(
                     .entry(meta)
                     .or_default()
                     .push(bid.to_string());
+            }
+        }
+        "setBpBrowser" => {
+            let (idx, path) = meta
+                .split_once(':')
+                .and_then(|(i, p)| i.parse::<usize>().ok().map(|idx| (idx, p.to_string())))
+                .unwrap_or((0, meta));
+            let bid = result
+                .and_then(|r| r.get("breakpointId"))
+                .and_then(Value::as_str)
+                .map(String::from);
+            let locations = result
+                .and_then(|r| r.get("locations"))
+                .and_then(Value::as_array);
+            let first_loc = locations.and_then(|arr| arr.first());
+            let is_bound = first_loc.is_some();
+            if let Some(ref b) = bid {
+                st.bp_ids_by_file
+                    .entry(path.clone())
+                    .or_default()
+                    .push(b.clone());
+            }
+            let finished = if let Some(batch) = st.pending_browser_bp_batches.get_mut(&req_seq) {
+                let req_line = batch.requested_lines.get(idx).copied().unwrap_or(1);
+                if let Some(ref b) = bid {
+                    st.bp_meta_by_id.insert(b.clone(), (path.clone(), req_line));
+                }
+                let entry = if is_bound {
+                    let bound_line = first_loc
+                        .and_then(|l| l.get("lineNumber"))
+                        .and_then(Value::as_u64)
+                        .map(|n| n as u32 + 1)
+                        .unwrap_or(req_line);
+                    json!({
+                        "verified": true,
+                        "line": bound_line,
+                        "source": { "path": path }
+                    })
+                } else {
+                    json!({
+                        "verified": false,
+                        "line": req_line,
+                        "source": { "path": path },
+                        "message": "Unbound: browser has not bound a script location for this source path (source maps are not resolved in the built-in browser CDP bridge)"
+                    })
+                };
+                if let Some(slot) = batch.results.get_mut(idx) {
+                    *slot = Some(entry);
+                }
+                batch.remaining = batch.remaining.saturating_sub(1);
+                batch.remaining == 0
+            } else {
+                false
+            };
+            if finished {
+                if let Some(batch) = st.pending_browser_bp_batches.remove(&req_seq) {
+                    let out: Vec<Value> = batch
+                        .results
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, v)| {
+                            v.unwrap_or_else(|| {
+                                let line = batch.requested_lines.get(i).copied().unwrap_or(1);
+                                json!({
+                                    "verified": false,
+                                    "line": line,
+                                    "source": { "path": batch.path }
+                                })
+                            })
+                        })
+                        .collect();
+                    dap_w
+                        .send_response(
+                            batch.req_seq,
+                            "setBreakpoints",
+                            Ok(Some(json!({ "breakpoints": out }))),
+                        )
+                        .await?;
+                }
             }
         }
         "variables" => {

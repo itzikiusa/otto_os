@@ -162,6 +162,7 @@ async fn live_node_typescript_debugger_hits_breakpoint_and_reads_locals() {
         cwd: root.to_string_lossy().into_owned(),
         env: BTreeMap::new(),
         attach_port: None,
+        is_browser_attach: false,
     };
     let (client_io, guard) = spawn_node_inspector_bridge(&target, None, spec)
         .await
@@ -272,4 +273,146 @@ async fn live_node_typescript_debugger_hits_breakpoint_and_reads_locals() {
     .await;
     assert!(saw_output, "expected LIVE_NODE_RES=42 on stdout");
     guard.kill_all();
+}
+
+#[tokio::test]
+async fn browser_cdp_attach_verifies_breakpoints_from_cdp_locations_only() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut req = BufReader::new(&mut sock);
+        let mut line = String::new();
+        while req.read_line(&mut line).await.unwrap() > 0 && line != "\r\n" {
+            line.clear();
+        }
+        sock.write_all(b"HTTP/1.1 101 Switching Protocols\r\n\r\n")
+            .await
+            .unwrap();
+        loop {
+            let Some(msg) = read_client_json(&mut sock).await else {
+                break;
+            };
+            let id = msg["id"].as_i64().unwrap_or(0);
+            let method = msg["method"].as_str().unwrap_or("");
+            match method {
+                "Debugger.setBreakpointByUrl" => {
+                    let url_re = msg["params"]["urlRegex"].as_str().unwrap_or("");
+                    // Unmapped TypeScript source returns empty `locations` from browser CDP;
+                    // a loaded JS script returns a bound location.
+                    let locations = if url_re.contains("app\\.ts") {
+                        json!([])
+                    } else {
+                        json!([{ "scriptId": "s2", "lineNumber": 4, "columnNumber": 0 }])
+                    };
+                    write_server_json(
+                        &mut sock,
+                        json!({
+                            "id": id,
+                            "result": {
+                                "breakpointId": format!("bp-{id}"),
+                                "locations": locations
+                            }
+                        }),
+                    )
+                    .await;
+                }
+                _ => {
+                    write_server_json(&mut sock, json!({ "id": id, "result": {} })).await;
+                }
+            }
+        }
+    });
+
+    let ws = InspectorWs::connect(port, "/x").await.unwrap();
+    let (client_io, server_io) = tokio::io::duplex(65536);
+    let (_out_tx, mut out_rx) = mpsc::unbounded_channel();
+    let bridge = tokio::spawn(async move {
+        let _ = run_node_bridge_loop(
+            server_io,
+            ws,
+            &mut out_rx,
+            BridgeGuard::new(),
+            "/ws".into(),
+            true,
+        )
+        .await;
+    });
+    let (r, w) = tokio::io::split(client_io);
+    let mut dap_r = DapReader::new(r);
+    let mut dap_w = DapWriter::new(w);
+
+    let init_seq = dap_w
+        .send_request("initialize", Some(json!({})))
+        .await
+        .unwrap();
+    loop {
+        if let Some(DapMessage::Response(r)) = dap_r.next_message().await.unwrap() {
+            if r.request_seq == init_seq {
+                break;
+            }
+        }
+    }
+
+    // BUG-31: Unmapped .ts breakpoint in browser attach mode returns verified=false from CDP reply.
+    let ts_seq = dap_w
+        .send_request(
+            "setBreakpoints",
+            Some(json!({
+                "source": { "path": "/ws/src/app.ts" },
+                "breakpoints": [{ "line": 10 }]
+            })),
+        )
+        .await
+        .unwrap();
+    let ts_resp = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(DapMessage::Response(resp)) = dap_r.next_message().await.unwrap() {
+                if resp.request_seq == ts_seq {
+                    return resp;
+                }
+            }
+        }
+    })
+    .await
+    .expect("setBreakpoints response for unmapped .ts");
+    let ts_bps = ts_resp.body.unwrap()["breakpoints"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(ts_bps.len(), 1);
+    assert_eq!(ts_bps[0]["verified"], json!(false));
+
+    // Bound JS breakpoint returns verified=true with CDP's 1-based line (4 + 1 = 5).
+    let js_seq = dap_w
+        .send_request(
+            "setBreakpoints",
+            Some(json!({
+                "source": { "path": "/ws/dist/main.js" },
+                "breakpoints": [{ "line": 5 }]
+            })),
+        )
+        .await
+        .unwrap();
+    let js_resp = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(DapMessage::Response(resp)) = dap_r.next_message().await.unwrap() {
+                if resp.request_seq == js_seq {
+                    return resp;
+                }
+            }
+        }
+    })
+    .await
+    .expect("setBreakpoints response for bound .js");
+    let js_bps = js_resp.body.unwrap()["breakpoints"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(js_bps.len(), 1);
+    assert_eq!(js_bps[0]["verified"], json!(true));
+    assert_eq!(js_bps[0]["line"], json!(5));
+
+    bridge.abort();
+    server.abort();
 }

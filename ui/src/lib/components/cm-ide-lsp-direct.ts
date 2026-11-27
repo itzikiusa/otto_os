@@ -13,6 +13,7 @@ import {
   dedupeLspDiagnostics,
   DEFAULT_LSP_TOKEN_MODIFIERS,
   DEFAULT_LSP_TOKEN_TYPES,
+  lspDocumentLanguageIdFor,
   lspToPos,
   rewriteGoBuildTagDiagnostic,
   shouldAttachIdeLsp,
@@ -118,7 +119,7 @@ export function createDirectLspExtension(
               params: {
                 textDocument: {
                   uri: opts.documentUri,
-                  languageId: opts.languageId,
+                  languageId: lspDocumentLanguageIdFor(opts.languageId, opts.filePath),
                   version,
                   text: view.state.doc.toString(),
                 },

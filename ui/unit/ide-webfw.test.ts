@@ -114,3 +114,87 @@ test('BUG-27: resolveFrameworkDevDebugLaunch forwards framework CLI instead of p
   });
   assert.deepEqual(ngDev, { program: 'ng', args: ['serve'] });
 });
+
+test('API2-2: Angular .component.html connects to angular server but sends languageId html in didOpen', async () => {
+  const { lspDocumentLanguageIdFor, normalizeIdeLspLanguage } = await import('../src/lib/components/cm-ide-lsp-completion.ts');
+  assert.equal(normalizeIdeLspLanguage('angular'), 'angular');
+  assert.equal(lspDocumentLanguageIdFor('angular', '/app/src/app/hero.component.html'), 'html');
+  assert.equal(lspDocumentLanguageIdFor('html', '/app/src/app/hero.component.html'), 'html');
+  assert.equal(lspDocumentLanguageIdFor('svelte', '/app/src/App.svelte'), 'svelte');
+
+  // Exercise the actual direct LSP plugin WebSocket handshake to verify `textDocument/didOpen`.
+  const sent: Record<string, unknown>[] = [];
+  const listeners: Record<string, ((ev?: unknown) => void)[]> = {};
+  class FakeWS {
+    static OPEN = 1;
+    readyState = 1;
+    url: string;
+    constructor(url: string) { this.url = url; }
+    addEventListener(ev: string, cb: (e?: unknown) => void) {
+      (listeners[ev] ??= []).push(cb);
+    }
+    send(raw: string) {
+      const msg = JSON.parse(raw) as Record<string, unknown>;
+      sent.push(msg);
+      if (msg.method === 'initialize') {
+        for (const cb of listeners.message ?? []) {
+          cb({ data: JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { capabilities: {} } }) });
+        }
+      }
+    }
+    close() {}
+  }
+  const prevWS = (globalThis as { WebSocket?: unknown }).WebSocket;
+  (globalThis as { WebSocket?: unknown }).WebSocket = FakeWS;
+  try {
+    let pluginCtor: ((v: unknown) => unknown) | null = null;
+    const directMod = loadSource(
+      new URL('../src/lib/components/cm-ide-lsp-direct.ts', import.meta.url),
+      {
+        '@codemirror/view': {
+          EditorView: { theme: () => ({}) },
+          ViewPlugin: {
+            fromClass: (cls: new (v: unknown) => unknown) => {
+              pluginCtor = (v: unknown) => new cls(v);
+              return {};
+            },
+          },
+        },
+        '@codemirror/lint': { setDiagnostics: () => ({}) },
+        '../fileUri.ts': { fileUriToPath: (u: string) => u.replace(/^file:\/\//, '') },
+        './cm-ide-drafts.ts': { markLiveLspDiagnostics: () => {} },
+        './cm-ide-lsp-completion.ts': {
+          buildLspInitializationOptions: () => undefined,
+          createIdeLspCompletionExtension: () => ({}),
+          createLspSemanticTokensExtension: () => ({}),
+          dedupeLspDiagnostics: (d: unknown) => d,
+          DEFAULT_LSP_TOKEN_MODIFIERS: [],
+          DEFAULT_LSP_TOKEN_TYPES: [],
+          lspDocumentLanguageIdFor,
+          lspToPos: () => 0,
+          rewriteGoBuildTagDiagnostic: (d: unknown) => d,
+          shouldAttachIdeLsp: () => true,
+        },
+      },
+      { WebSocket: FakeWS },
+    );
+    directMod.createDirectLspExtension({
+      wsUri: 'ws://127.0.0.1:7700/ws/lsp?lang=angular&root=/app',
+      rootUri: 'file:///app',
+      documentUri: 'file:///app/src/app/hero.component.html',
+      filePath: '/app/src/app/hero.component.html',
+      languageId: 'angular',
+    });
+    assert.ok(pluginCtor, 'ViewPlugin class should be constructed');
+    (pluginCtor as (v: unknown) => unknown)({ state: { doc: { toString: () => '<h1>{{ name }}</h1>' } } });
+    for (const cb of listeners.open ?? []) cb();
+    const didOpen = sent.find((m) => m.method === 'textDocument/didOpen') as
+      | { params?: { textDocument?: { languageId?: string; uri?: string } } }
+      | undefined;
+    assert.ok(didOpen, 'textDocument/didOpen must be sent after initialize');
+    assert.equal(didOpen?.params?.textDocument?.languageId, 'html');
+    assert.equal(didOpen?.params?.textDocument?.uri, 'file:///app/src/app/hero.component.html');
+  } finally {
+    (globalThis as { WebSocket?: unknown }).WebSocket = prevWS;
+  }
+});

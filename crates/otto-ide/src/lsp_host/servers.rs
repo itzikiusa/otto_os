@@ -109,7 +109,7 @@ pub static REGISTRY: &[ServerDef] = &[
         fallback_cmd: None,
         fallback_args: &[],
         extensions: &[".vue"],
-        install_command: Some("npm install -g @vue/language-server"),
+        install_command: Some("npm install -g @vue/language-server@2.2.10 typescript"),
     },
     ServerDef {
         lang: "angular",
@@ -474,40 +474,52 @@ pub fn detect_toolchain_dotnet_root(data_dir: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Resolve probe directories (`node_modules`) for Angular's `ngserver`
-/// `--tsProbeLocations` and `--ngProbeLocations` flags (BUG-32).
+/// Resolve trusted probe directories (`node_modules`) for Angular's `ngserver`
+/// `--tsProbeLocations` and `--ngProbeLocations` flags (SEC2-1, BUG-32).
 ///
-/// Order of precedence:
-/// 1. Workspace `<root>/node_modules` when `owner_is_root` (uses the repo's exact Angular/TS).
-/// 2. Managed `<data_dir>/toolchains/node/lsp/node_modules`.
-/// 3. Ancestor `node_modules` derived from `ngserver`'s resolved binary path
-///    (e.g. `<prefix>/node_modules/.bin/ngserver` -> `<prefix>/node_modules`).
+/// Security boundary (SEC2-1): NEVER include `<workspace>/node_modules` automatically,
+/// because `ngserver` loads and executes JavaScript plugins from probe locations on file
+/// open without an explicit project execution trust decision.
+///
+/// Trusted probe order:
+/// 1. Managed `<data_dir>/toolchains/node/lsp/node_modules`.
+/// 2. Canonicalized installation `node_modules` directories derived from `ngserver`'s
+///    real binary target (handles global `npm install -g` symlinks such as
+///    `/usr/local/bin/ngserver -> ../lib/node_modules/@angular/language-server/bin/ngserver`).
 #[allow(clippy::disallowed_methods)]
-pub fn resolve_angular_probe_locations(
-    data_dir: &Path,
-    root: &str,
-    ngserver_cmd: &str,
-    owner_is_root: bool,
-) -> Vec<String> {
+pub fn resolve_angular_probe_locations(data_dir: &Path, ngserver_cmd: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut push_dir = |p: PathBuf| {
         if p.is_dir() {
-            let s = p.to_string_lossy().into_owned();
+            let canon = std::fs::canonicalize(&p).unwrap_or(p);
+            let s = canon.to_string_lossy().into_owned();
             if !out.contains(&s) {
                 out.push(s);
             }
         }
     };
-    if owner_is_root && !root.is_empty() {
-        push_dir(Path::new(root).join("node_modules"));
-    }
     push_dir(data_dir.join("toolchains/node/lsp/node_modules"));
     let cmd_path = Path::new(ngserver_cmd);
-    if cmd_path.is_absolute() {
-        for anc in cmd_path.ancestors().skip(1) {
+    let resolved_cmd = if cmd_path.is_absolute() {
+        std::fs::canonicalize(cmd_path).ok()
+    } else {
+        None
+    };
+    if let Some(real) = resolved_cmd {
+        // Walk canonical ancestors to capture both package-private `node_modules`
+        // (e.g. `.../@angular/language-server/node_modules`) and the parent global
+        // `node_modules` containing `typescript` (e.g. `/usr/local/lib/node_modules`).
+        for anc in real.ancestors().skip(1) {
             if anc.file_name().and_then(|n| n.to_str()) == Some("node_modules") {
                 push_dir(anc.to_path_buf());
-                break;
+            } else {
+                let nested = anc.join("node_modules");
+                if nested.is_dir()
+                    && (nested.join("typescript").is_dir()
+                        || nested.join("@angular/language-service").is_dir())
+                {
+                    push_dir(nested);
+                }
             }
         }
     }

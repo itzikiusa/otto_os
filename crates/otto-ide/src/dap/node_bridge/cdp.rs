@@ -307,17 +307,31 @@ pub(crate) fn select_cdp_target_ws_url_for(
     };
     if let Some(req_url) = requested_url.map(str::trim).filter(|s| !s.is_empty()) {
         let norm_req = req_url.trim_end_matches('/');
+        let is_page = |i: &&Value| i.get("type").and_then(Value::as_str) == Some("page");
+        // Pass 1 (BUG-28): prefer an exact normalized URL match over descendants/query variants.
+        if let Some(ws) = items
+            .iter()
+            .filter(is_page)
+            .find(|i| {
+                i.get("url")
+                    .and_then(Value::as_str)
+                    .is_some_and(|u| u.trim_end_matches('/') == norm_req)
+            })
+            .and_then(ws_of)
+        {
+            return Some(ws);
+        }
+        // Pass 2: same-app descendant or query/fragment variant if no exact match is open.
         return items
             .iter()
+            .filter(is_page)
             .find(|i| {
-                i.get("type").and_then(Value::as_str) == Some("page")
-                    && i.get("url").and_then(Value::as_str).is_some_and(|u| {
-                        let norm_u = u.trim_end_matches('/');
-                        norm_u == norm_req
-                            || norm_u.starts_with(&format!("{norm_req}/"))
-                            || norm_u.starts_with(&format!("{norm_req}?"))
-                            || norm_u.starts_with(&format!("{norm_req}#"))
-                    })
+                i.get("url").and_then(Value::as_str).is_some_and(|u| {
+                    let norm_u = u.trim_end_matches('/');
+                    norm_u.starts_with(&format!("{norm_req}/"))
+                        || norm_u.starts_with(&format!("{norm_req}?"))
+                        || norm_u.starts_with(&format!("{norm_req}#"))
+                })
             })
             .and_then(ws_of);
     }

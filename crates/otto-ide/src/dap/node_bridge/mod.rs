@@ -39,6 +39,8 @@ pub struct NodeInspectorBridgeSpec {
     pub cwd: String,
     pub env: BTreeMap<String, String>,
     pub attach_port: Option<u16>,
+    /// True when attaching to a browser CDP target (URL or `browser`/`chrome` language alias).
+    pub is_browser_attach: bool,
 }
 
 /// Spawn the built-in Node/V8 Inspector-to-DAP bridge, returning an in-memory
@@ -54,10 +56,11 @@ pub(crate) async fn spawn_node_inspector_bridge(
     let requested_url = (spec.program.starts_with("http://")
         || spec.program.starts_with("https://"))
     .then_some(spec.program.as_str());
-    let is_browser_attach = spec.attach_port.is_some()
-        && (requested_url.is_some()
-            || spec.program.starts_with("chrome://")
-            || spec.program.starts_with("browser://"));
+    let is_browser_attach = spec.is_browser_attach
+        || (spec.attach_port.is_some()
+            && (requested_url.is_some()
+                || spec.program.starts_with("chrome://")
+                || spec.program.starts_with("browser://")));
 
     let (local_port, ws_path) = if let Some(attach_port) = spec.attach_port {
         let port = maybe_tunnel_port(target, ssh, &guard, attach_port).await?;
@@ -87,6 +90,14 @@ pub(crate) async fn spawn_node_inspector_bridge(
     Ok((client_io, guard))
 }
 
+pub(super) struct PendingBrowserBpBatch {
+    pub(super) req_seq: i64,
+    pub(super) path: String,
+    pub(super) requested_lines: Vec<u32>,
+    pub(super) results: Vec<Option<Value>>,
+    pub(super) remaining: usize,
+}
+
 pub(super) struct NodeBridgeState {
     pub(super) workspace_cwd: String,
     pub(super) is_browser_attach: bool,
@@ -94,6 +105,9 @@ pub(super) struct NodeBridgeState {
     pub(super) pending_cdp: HashMap<i64, (i64, String, String)>,
     pub(super) script_urls: HashMap<String, String>,
     pub(super) bp_ids_by_file: HashMap<String, Vec<String>>,
+    pub(super) bp_meta_by_id: HashMap<String, (String, u32)>,
+    pub(super) pending_browser_bp_batches: HashMap<i64, PendingBrowserBpBatch>,
+    pub(super) next_bp_batch_id: i64,
     pub(super) user_bp_lines: HashMap<String, Vec<u32>>,
     pub(super) initial_brk_skipped: bool,
     /// `configurationDone` arrived, so the debuggee may run.
@@ -112,6 +126,9 @@ impl NodeBridgeState {
             pending_cdp: HashMap::new(),
             script_urls: HashMap::new(),
             bp_ids_by_file: HashMap::new(),
+            bp_meta_by_id: HashMap::new(),
+            pending_browser_bp_batches: HashMap::new(),
+            next_bp_batch_id: 1,
             user_bp_lines: HashMap::new(),
             initial_brk_skipped: false,
             config_done: false,
@@ -343,6 +360,7 @@ fn escape_js_template(s: &str) -> String {
 /// In browser attach mode, compiled source files (`.ts`/`.tsx`/`.svelte`/`.vue`) are
 /// bundled under different URLs without source-map resolution here, so keep them
 /// unverified unless a loaded script URL directly maps to `path`.
+#[cfg(test)]
 pub(crate) fn is_initial_bp_verified(
     path: &str,
     is_browser_attach: bool,
@@ -611,14 +629,50 @@ async fn handle_node_set_bps<W: AsyncWrite + Unpin>(
         .cloned()
         .unwrap_or_default();
     let mut lines = Vec::new();
-    let mut verified = Vec::new();
     let url_re = path_to_url_regex_in_cwd(&path, &st.workspace_cwd);
-    let initial_verified = is_initial_bp_verified(
-        &path,
-        st.is_browser_attach,
-        &st.script_urls,
-        &st.workspace_cwd,
-    );
+    if st.is_browser_attach && !bps.is_empty() {
+        // BUG-31: In browser CDP attach mode, wait for CDP `Debugger.setBreakpointByUrl`
+        // replies before responding so `verified` reflects actual CDP bound `locations`
+        // rather than optimistic path heuristics.
+        let batch_id = st.next_bp_batch_id;
+        st.next_bp_batch_id += 1;
+        for bp in &bps {
+            lines.push(bp.get("line").and_then(Value::as_u64).unwrap_or(1) as u32);
+        }
+        st.pending_browser_bp_batches.insert(
+            batch_id,
+            PendingBrowserBpBatch {
+                req_seq,
+                path: path.clone(),
+                requested_lines: lines.clone(),
+                results: vec![None; bps.len()],
+                remaining: bps.len(),
+            },
+        );
+        for (idx, bp) in bps.iter().enumerate() {
+            let line = lines[idx];
+            let cond = build_cdp_bp_condition(bp);
+            let cid = st.alloc_cdp();
+            st.pending_cdp.insert(
+                cid,
+                (batch_id, "setBpBrowser".into(), format!("{idx}:{path}")),
+            );
+            ws.send_json(&json!({
+                "id": cid,
+                "method": "Debugger.setBreakpointByUrl",
+                "params": {
+                    "lineNumber": line.saturating_sub(1),
+                    "urlRegex": url_re,
+                    "condition": cond
+                }
+            }))
+            .await?;
+        }
+        st.user_bp_lines.insert(path, lines);
+        return Ok(());
+    }
+
+    let mut verified = Vec::new();
     for bp in bps {
         let line = bp.get("line").and_then(Value::as_u64).unwrap_or(1) as u32;
         let cond = build_cdp_bp_condition(&bp);
@@ -636,16 +690,7 @@ async fn handle_node_set_bps<W: AsyncWrite + Unpin>(
             }
         }))
         .await?;
-        if initial_verified {
-            verified.push(json!({ "verified": true, "line": line, "source": { "path": path } }));
-        } else {
-            verified.push(json!({
-                "verified": false,
-                "line": line,
-                "source": { "path": path },
-                "message": "Unbound: browser bundle has no loaded script matching this source path (source maps are not resolved in the built-in browser CDP bridge)"
-            }));
-        }
+        verified.push(json!({ "verified": true, "line": line, "source": { "path": path } }));
     }
     st.user_bp_lines.insert(path, lines);
     dap_w
