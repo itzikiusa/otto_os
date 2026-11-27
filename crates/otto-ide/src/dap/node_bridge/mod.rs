@@ -105,7 +105,9 @@ pub(super) struct NodeBridgeState {
     pub(super) pending_cdp: HashMap<i64, (i64, String, String)>,
     pub(super) script_urls: HashMap<String, String>,
     pub(super) bp_ids_by_file: HashMap<String, Vec<String>>,
-    pub(super) bp_meta_by_id: HashMap<String, (String, u32)>,
+    /// Maps CDP `breakpointId` -> `(dap_bp_id, orig_path, current_1based_line)`.
+    pub(super) bp_meta_by_id: HashMap<String, (i64, String, u32)>,
+    pub(super) next_dap_bp_id: i64,
     pub(super) pending_browser_bp_batches: HashMap<i64, PendingBrowserBpBatch>,
     pub(super) next_bp_batch_id: i64,
     pub(super) user_bp_lines: HashMap<String, Vec<u32>>,
@@ -127,6 +129,7 @@ impl NodeBridgeState {
             script_urls: HashMap::new(),
             bp_ids_by_file: HashMap::new(),
             bp_meta_by_id: HashMap::new(),
+            next_dap_bp_id: 1,
             pending_browser_bp_batches: HashMap::new(),
             next_bp_batch_id: 1,
             user_bp_lines: HashMap::new(),

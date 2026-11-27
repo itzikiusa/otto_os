@@ -25,6 +25,7 @@ import {
 } from './ideDebugSnapshotSync';
 import {
   mergeGoBuildTagsIntoFlags,
+  resolveConfigDebugHints,
   resolveRepoGoBuildTags,
   resolveRepoRootForPath,
 } from './ideRepoTestAndBuildTags';
@@ -676,6 +677,7 @@ export async function launchDebugSession(
       : {};
     const tcEnv: Record<string, string> = host.keepTestcontainersAlive ? { TESTCONTAINERS_RYUK_DISABLED: 'true' } : {};
     const fwCliDebug = cfg ? resolveFrameworkDevDebugLaunch(cfg) : null;
+    const { isTest, envHints } = resolveConfigDebugHints(cfg);
     const baseLaunch = opts.launch ?? {
       program: fwCliDebug?.program ?? program,
       // A tool runner's args are its own command line (`run ./cmd/x`, `test -v ./...`),
@@ -687,10 +689,8 @@ export async function launchDebugSession(
       build_flags: cfg?.build_flags ?? [],
       cwd: cfg?.cwd || repoInfo.path || host.target.root,
       test_name: cfg?.test_filter || undefined,
-      env: {
-        ...(cfg?.runner === 'dotnet_test' ? { OTTO_DOTNET_TEST_DEBUG: '1' } : {}),
-        ...(cfg?.env_overrides ?? {}),
-      },
+      is_test: isTest,
+      env: { ...envHints, ...(cfg?.env_overrides ?? {}) },
       env_file: cfg?.env_file ?? null,
       inherit_shell_env: cfg?.inherit_shell_env ?? host.projectEnv?.inherit_shell_env ?? true,
       sdk_path: cfg?.sdk_path ?? modSdk ?? null,

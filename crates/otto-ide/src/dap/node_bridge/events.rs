@@ -72,21 +72,25 @@ pub(super) async fn handle_node_cdp_msg<W: AsyncWrite + Unpin>(
                 .and_then(|p| p.get("breakpointId"))
                 .and_then(Value::as_str)
             {
-                if let Some((path, orig_line)) = st.bp_meta_by_id.get(bid).cloned() {
+                if let Some((dap_bp_id, path, orig_line)) = st.bp_meta_by_id.get(bid).cloned() {
                     let bound_line = params
                         .and_then(|p| p.get("location"))
                         .and_then(|l| l.get("lineNumber"))
                         .and_then(Value::as_u64)
                         .map(|n| n as u32 + 1)
                         .unwrap_or(orig_line);
+                    st.bp_meta_by_id
+                        .insert(bid.to_string(), (dap_bp_id, path.clone(), bound_line));
                     dap_w
                         .send_event(
                             "breakpoint",
                             Some(json!({
                                 "reason": "changed",
                                 "breakpoint": {
+                                    "id": dap_bp_id,
                                     "verified": true,
                                     "line": bound_line,
+                                    "originalLine": orig_line,
                                     "source": { "path": path }
                                 }
                             })),
@@ -236,22 +240,31 @@ async fn handle_node_cdp_reply<W: AsyncWrite + Unpin>(
             }
             let finished = if let Some(batch) = st.pending_browser_bp_batches.get_mut(&req_seq) {
                 let req_line = batch.requested_lines.get(idx).copied().unwrap_or(1);
-                if let Some(ref b) = bid {
-                    st.bp_meta_by_id.insert(b.clone(), (path.clone(), req_line));
-                }
+                let dap_bp_id = st.next_dap_bp_id;
+                st.next_dap_bp_id += 1;
                 let entry = if is_bound {
                     let bound_line = first_loc
                         .and_then(|l| l.get("lineNumber"))
                         .and_then(Value::as_u64)
                         .map(|n| n as u32 + 1)
                         .unwrap_or(req_line);
+                    if let Some(ref b) = bid {
+                        st.bp_meta_by_id
+                            .insert(b.clone(), (dap_bp_id, path.clone(), bound_line));
+                    }
                     json!({
+                        "id": dap_bp_id,
                         "verified": true,
                         "line": bound_line,
                         "source": { "path": path }
                     })
                 } else {
+                    if let Some(ref b) = bid {
+                        st.bp_meta_by_id
+                            .insert(b.clone(), (dap_bp_id, path.clone(), req_line));
+                    }
                     json!({
+                        "id": dap_bp_id,
                         "verified": false,
                         "line": req_line,
                         "source": { "path": path },

@@ -81,6 +81,8 @@ pub(super) async fn sync_all_breakpoints(
         }
     }
 
+    let mut adapter_bp_locs: std::collections::HashMap<i64, (String, u32)> =
+        std::collections::HashMap::new();
     let mut active_files = BTreeSet::new();
     let can_parallel =
         !need_halt_resume && snap_before.state == IdeDebugState::Starting && by_file.len() > 1;
@@ -103,7 +105,7 @@ pub(super) async fn sync_all_breakpoints(
             });
         }
         for (indexed_bps, resp_res) in join_all(tasks).await {
-            apply_set_breakpoints_result(&mut bps, &indexed_bps, resp_res);
+            apply_set_breakpoints_result(&mut bps, &mut adapter_bp_locs, &indexed_bps, resp_res);
         }
     } else {
         for (path, indexed_bps) in by_file {
@@ -144,7 +146,7 @@ pub(super) async fn sync_all_breakpoints(
                         .await;
                 }
             }
-            apply_set_breakpoints_result(&mut bps, &indexed_bps, resp_res);
+            apply_set_breakpoints_result(&mut bps, &mut adapter_bp_locs, &indexed_bps, resp_res);
         }
     }
 
@@ -159,6 +161,9 @@ pub(super) async fn sync_all_breakpoints(
     }
     if let Ok(mut prev_files) = entry.configured_bp_files.lock() {
         *prev_files = active_files;
+    }
+    if let Ok(mut locs) = entry.bp_locs_by_adapter_id.lock() {
+        *locs = adapter_bp_locs;
     }
     entry.mutate_and_broadcast(|snap| {
         snap.breakpoints = bps;
@@ -225,6 +230,7 @@ pub(super) async fn sync_all_breakpoints(
 
 fn apply_set_breakpoints_result(
     bps: &mut [IdeBreakpoint],
+    adapter_bp_locs: &mut std::collections::HashMap<i64, (String, u32)>,
     indexed_bps: &[(Option<usize>, Value)],
     resp_res: Result<super::wire::DapResponse>,
 ) {
@@ -256,6 +262,9 @@ fn apply_set_breakpoints_result(
                             bps[bp_idx].line = adj_ln as u32;
                         }
                     }
+                    if let Some(bp_id) = ack.get("id").and_then(Value::as_i64) {
+                        adapter_bp_locs.insert(bp_id, (bps[bp_idx].path.clone(), bps[bp_idx].line));
+                    }
                 } else {
                     bps[bp_idx].verified = Some(true);
                 }
@@ -281,7 +290,12 @@ pub(super) fn apply_breakpoint_event(entry: &SessionEntry, body: &Value) {
     let Some(verified) = bp_obj.get("verified").and_then(Value::as_bool) else {
         return;
     };
+    let bp_id = bp_obj.get("id").and_then(Value::as_i64);
     let line = bp_obj.get("line").and_then(Value::as_u64).map(|l| l as u32);
+    let orig_line = bp_obj
+        .get("originalLine")
+        .and_then(Value::as_u64)
+        .map(|l| l as u32);
     let message = bp_obj
         .get("message")
         .and_then(Value::as_str)
@@ -299,25 +313,50 @@ pub(super) fn apply_breakpoint_event(entry: &SessionEntry, body: &Value) {
         .clone();
     let norm_path = raw_path.map(|p| normalize_target_path(&target, p));
     let disp_path = raw_path.map(|p| display_target_path(&target, p));
+    let tracked_loc = bp_id.and_then(|id| {
+        entry
+            .bp_locs_by_adapter_id
+            .lock()
+            .ok()
+            .and_then(|m| m.get(&id).cloned())
+    });
 
+    let mut updated_loc: Option<(String, u32)> = None;
     entry.mutate_and_broadcast(|snap| {
         for bp in &mut snap.breakpoints {
+            let matched_by_id = tracked_loc.as_ref().is_some_and(|(tp, tl)| {
+                let bp_disp = display_target_path(&target, &bp.path);
+                let tp_disp = display_target_path(&target, tp);
+                (bp.path == *tp || bp_disp == tp_disp) && bp.line == *tl
+            });
             let path_matches = match (disp_path.as_deref(), norm_path.as_deref()) {
                 (Some(dp), Some(np)) => bp.path == dp || bp.path == np,
                 (Some(dp), None) => bp.path == dp,
                 (None, Some(np)) => bp.path == np,
                 (None, None) => true,
             };
-            let line_matches = line.is_some_and(|ln| bp.line == ln);
-            if path_matches && line_matches {
+            let line_matches =
+                line.is_some_and(|ln| bp.line == ln) || orig_line.is_some_and(|ol| bp.line == ol);
+            if matched_by_id || (path_matches && line_matches) {
                 bp.path = display_target_path(&target, &bp.path);
                 bp.verified = Some(verified);
-                if message.is_some() {
+                if verified {
+                    if let Some(ln) = line.filter(|&l| l > 0) {
+                        bp.line = ln;
+                    }
+                    bp.message = message.clone();
+                } else if message.is_some() {
                     bp.message = message.clone();
                 }
+                updated_loc = Some((bp.path.clone(), bp.line));
             }
         }
     });
+    if let (Some(id), Some(loc)) = (bp_id, updated_loc) {
+        if let Ok(mut locs) = entry.bp_locs_by_adapter_id.lock() {
+            locs.insert(id, loc);
+        }
+    }
 }
 
 pub(super) async fn handle_stopped_event(
@@ -597,4 +636,92 @@ async fn fetch_stack_frames(
         })
         .collect();
     Ok((frames, top_ip))
+}
+
+#[cfg(test)]
+mod breakpoint_relocation_tests {
+    use super::*;
+    use crate::dap::session::DapStartContext;
+    use crate::dap::wire::DapResponse;
+    use crate::types::{IdeStartDebugReq, IdeTargetSpec};
+
+    #[test]
+    fn apply_breakpoint_event_relocates_deferred_unbound_breakpoint_by_id_and_original_line() {
+        let bp_path = "/ws/src/app.js".to_string();
+        let req = IdeStartDebugReq {
+            target: IdeTargetSpec::local("/ws"),
+            language: "browser".into(),
+            breakpoints: vec![IdeBreakpoint {
+                path: bp_path.clone(),
+                line: 10,
+                enabled: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let entry = SessionEntry::new(
+            1,
+            (
+                "s1".into(),
+                "Browser".into(),
+                "browser".into(),
+                "node-inspector-dap".into(),
+            ),
+            Vec::new(),
+            req,
+            DapStartContext::default(),
+        );
+        let mut bps = entry.read_snapshot().breakpoints;
+        let mut locs = std::collections::HashMap::new();
+        let indexed = vec![(Some(0usize), json!({ "line": 10 }))];
+        let unbound_resp = DapResponse {
+            seq: 1,
+            request_seq: 1,
+            success: true,
+            command: "setBreakpoints".into(),
+            message: None,
+            body: Some(json!({
+                "breakpoints": [{
+                    "id": 42,
+                    "verified": false,
+                    "line": 10,
+                    "source": { "path": bp_path },
+                    "message": "Unbound: waiting for script"
+                }]
+            })),
+        };
+        apply_set_breakpoints_result(&mut bps, &mut locs, &indexed, Ok(unbound_resp));
+        assert_eq!(bps[0].verified, Some(false));
+        assert_eq!(locs.get(&42), Some(&(bp_path.clone(), 10)));
+        entry.mutate_and_broadcast(|snap| snap.breakpoints = bps);
+        *entry.bp_locs_by_adapter_id.lock().unwrap() = locs;
+
+        // BUG3-10: Deferred CDP relocation to line 15 arrives with id=42 (no match on line 10!).
+        apply_breakpoint_event(
+            &entry,
+            &json!({
+                "reason": "changed",
+                "breakpoint": {
+                    "id": 42,
+                    "verified": true,
+                    "line": 15,
+                    "source": { "path": bp_path }
+                }
+            }),
+        );
+        let snap = entry.read_snapshot();
+        assert_eq!(
+            snap.breakpoints[0].verified,
+            Some(true),
+            "BUG3-10: relocated breakpoint must become verified"
+        );
+        assert_eq!(
+            snap.breakpoints[0].line, 15,
+            "BUG3-10: relocated breakpoint must update to resolved executable line 15"
+        );
+        assert_eq!(
+            snap.breakpoints[0].message, None,
+            "BUG3-10: stale Unbound message must be cleared once verified"
+        );
+    }
 }

@@ -512,6 +512,7 @@ pub fn resolve_angular_probe_locations(data_dir: &Path, ngserver_cmd: &str) -> V
         for anc in real.ancestors().skip(1) {
             if anc.file_name().and_then(|n| n.to_str()) == Some("node_modules") {
                 push_dir(anc.to_path_buf());
+                break;
             } else {
                 let nested = anc.join("node_modules");
                 if nested.is_dir()
@@ -524,6 +525,48 @@ pub fn resolve_angular_probe_locations(data_dir: &Path, ngserver_cmd: &str) -> V
         }
     }
     out
+}
+
+/// Locate a trusted local TypeScript `tsdk` (`typescript/lib`) directory for standalone
+/// `@vue/language-server@2.2.10` (`RED-2`) without ever touching workspace `node_modules`.
+#[allow(clippy::disallowed_methods)]
+pub fn detect_local_typescript_tsdk(data_dir: &Path, server_cmd: Option<&str>) -> Option<String> {
+    let is_tsdk =
+        |p: &Path| p.join("tsserverlibrary.js").is_file() || p.join("typescript.js").is_file();
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    candidates.push(data_dir.join("toolchains/node/lsp/node_modules/typescript/lib"));
+    for data in otto_core::secret_paths::otto_data_dirs() {
+        let p = data.join("toolchains/node/lsp/node_modules/typescript/lib");
+        if !candidates.contains(&p) {
+            candidates.push(p);
+        }
+    }
+    if let Some(cmd) = server_cmd {
+        let cmd_path = Path::new(cmd);
+        if cmd_path.is_absolute() {
+            if let Ok(real) = std::fs::canonicalize(cmd_path) {
+                for anc in real.ancestors().skip(1) {
+                    if anc.file_name().and_then(|n| n.to_str()) == Some("node_modules") {
+                        candidates.push(anc.join("typescript/lib"));
+                        break;
+                    }
+                    candidates.push(anc.join("node_modules/typescript/lib"));
+                }
+            }
+        }
+    }
+    for sys in [
+        "/opt/homebrew/lib/node_modules/typescript/lib",
+        "/usr/local/lib/node_modules/typescript/lib",
+        "/usr/lib/node_modules/typescript/lib",
+    ] {
+        candidates.push(PathBuf::from(sys));
+    }
+    candidates
+        .into_iter()
+        .find(|p| is_tsdk(p))
+        .map(|p| std::fs::canonicalize(&p).unwrap_or(p))
+        .map(|p| p.to_string_lossy().into_owned())
 }
 
 fn which_in(executable: &str, extra_dirs: &[PathBuf]) -> Option<String> {

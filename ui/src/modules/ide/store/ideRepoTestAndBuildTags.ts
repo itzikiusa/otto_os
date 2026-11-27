@@ -408,3 +408,20 @@ export function resolveRepoTestPlan(opts: {
       };
   }
 }
+
+/** Extract `is_test` and `OTTO_NPM_SCRIPT` hints from a selected run configuration
+ *  so auto-discovered `npm run test` / `dotnet_test` configs still carry test/script
+ *  intent to `/ide/debug/sessions` even when `config_id` is omitted (BUG-30, BUG-25). */
+export function resolveConfigDebugHints(
+  cfg?: { runner?: string; kind?: string; args?: readonly string[] } | null,
+): { isTest: boolean; envHints: Record<string, string> } {
+  const args = cfg?.args ?? [];
+  const npmScript = cfg?.runner === 'npm'
+    ? (args[0] === 'run' ? args[1] : args[0] === 'test' ? 'test' : undefined)
+    : undefined;
+  const isTest = Boolean(cfg?.runner === 'dotnet_test' || cfg?.kind === 'test' || npmScript === 'test');
+  const envHints: Record<string, string> = {};
+  if (cfg?.runner === 'dotnet_test') envHints.OTTO_DOTNET_TEST_DEBUG = '1';
+  if (npmScript) envHints.OTTO_NPM_SCRIPT = npmScript;
+  return { isTest, envHints };
+}

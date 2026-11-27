@@ -98,11 +98,22 @@ pub(crate) fn svelte_untrusted_init_options() -> Value {
 
 /// Vue Language Server standalone options (`hybridMode: false`, requires `@vue/language-server@2.2.10`)
 /// so SFC script/template features work without a separate `tsserver/request` relay (RED-2).
-pub(crate) fn vue_standalone_init_options() -> Value {
+///
+/// For SSH targets (`allow_local_scan = false`), only the verified remote `explicit_tsdk` is used;
+/// daemon-local host paths are NEVER probed or leaked to a remote server.
+pub(crate) fn vue_standalone_init_options(
+    explicit_tsdk: Option<&str>,
+    allow_local_scan: bool,
+) -> Value {
     let mut opts = json!({
         "vue": { "hybridMode": false }
     });
-    if let Some(tsdk) = detect_typescript_tsdk() {
+    let tsdk = explicit_tsdk
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .or_else(|| allow_local_scan.then(detect_typescript_tsdk).flatten());
+    if let Some(tsdk) = tsdk {
         opts["typescript"] = json!({ "tsdk": tsdk });
     }
     opts
@@ -457,13 +468,15 @@ impl Mux {
             params.insert("initializationOptions".into(), opts);
         } else if norm_lang == "vue" {
             // RED-2: Run `@vue/language-server` in standalone mode (`hybridMode: false`)
-            // with a managed TypeScript `tsdk` when available, since Otto does not relay
-            // hybrid `tsserver/request` notifications.
+            // with a target-verified TypeScript `tsdk` (never a daemon-local path on SSH).
             let mut opts = params
                 .remove("initializationOptions")
                 .filter(|o| self.owner_is_root && o.is_object())
                 .unwrap_or_else(|| json!({}));
-            merge_json(&mut opts, vue_standalone_init_options());
+            merge_json(
+                &mut opts,
+                vue_standalone_init_options(self.vue_tsdk.as_deref(), self.key.ssh.is_none()),
+            );
             params.insert("initializationOptions".into(), opts);
         } else if !self.owner_is_root && norm_lang == "rust" {
             params.insert("initializationOptions".into(), non_root_rust_settings());
@@ -915,6 +928,7 @@ mod python_path_tests {
                 Arc::new(AtomicU64::new(0)),
                 owner_is_root,
                 Vec::new(),
+                None,
             );
             mux.attach(1, c_tx);
             let init_req = serde_json::json!({
@@ -954,6 +968,11 @@ mod python_path_tests {
         std::fs::write(ws_tsdk.join("tsserverlibrary.js"), "// untrusted").unwrap();
         let root = ws.path().to_str().unwrap().to_string();
 
+        let managed_tsdk = ws.path().join("managed-tsdk/typescript/lib");
+        std::fs::create_dir_all(&managed_tsdk).unwrap();
+        std::fs::write(managed_tsdk.join("tsserverlibrary.js"), "// managed").unwrap();
+        let managed_tsdk_str = managed_tsdk.to_string_lossy().into_owned();
+
         let (w_tx, mut w_rx) = mpsc::unbounded_channel::<Vec<u8>>();
         let (c_tx, _c_rx) = mpsc::channel::<String>(8);
         let key = crate::lsp_host::pool::PoolKey {
@@ -972,6 +991,7 @@ mod python_path_tests {
             Arc::new(AtomicU64::new(0)),
             true,
             Vec::new(),
+            Some(managed_tsdk_str.clone()),
         );
         mux.attach(1, c_tx);
         let init_req = serde_json::json!({
@@ -995,14 +1015,86 @@ mod python_path_tests {
             Some(&serde_json::json!(false)),
             "RED-2: Mux::on_client must force vue.hybridMode=false: {forwarded}"
         );
-        if let Some(tsdk) = forwarded
-            .pointer("/params/initializationOptions/typescript/tsdk")
-            .and_then(|v| v.as_str())
-        {
-            assert!(
-                !tsdk.starts_with(&root),
-                "must never load untrusted workspace node_modules tsdk: {tsdk}"
-            );
-        }
+        assert_eq!(
+            forwarded
+                .pointer("/params/initializationOptions/typescript/tsdk")
+                .and_then(|v| v.as_str()),
+            Some(managed_tsdk_str.as_str()),
+            "RED-2: local Vue initialize must send resolved typescript.tsdk: {forwarded}"
+        );
+
+        // RED-2 (SSH): SSH Vue initialize MUST forward the verified remote tsdk path and
+        // MUST NEVER fall back to daemon-local macOS/host filesystem paths when absent.
+        let ssh_spec = crate::types::IdeSshSpec {
+            connection_id: "ssh-vue".into(),
+            name: "ssh-vue".into(),
+            host: "remote.example".into(),
+            port: Some(22),
+            user: "dev".into(),
+            identity_file: None,
+            proxy_jump: None,
+            environment: None,
+        };
+        let remote_tsdk = "/home/dev/.otto/toolchains/node/lsp/node_modules/typescript/lib";
+        let (w_tx_ssh, mut w_rx_ssh) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (c_tx_ssh, _c_rx_ssh) = mpsc::channel::<String>(8);
+        let mut mux_ssh = super::Mux::new(
+            crate::lsp_host::pool::PoolKey {
+                owner: "u1".into(),
+                lang: "vue".into(),
+                root: "/srv/vue-app".into(),
+                ssh: Some(ssh_spec.clone()),
+                go_build_tags: Vec::new(),
+            },
+            w_tx_ssh,
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            true,
+            Vec::new(),
+            Some(remote_tsdk.into()),
+        );
+        mux_ssh.attach(1, c_tx_ssh);
+        mux_ssh.on_client(1, &init_req.to_string());
+        let forwarded_ssh: serde_json::Value =
+            serde_json::from_slice(&w_rx_ssh.try_recv().unwrap()).unwrap();
+        assert_eq!(
+            forwarded_ssh
+                .pointer("/params/initializationOptions/typescript/tsdk")
+                .and_then(|v| v.as_str()),
+            Some(remote_tsdk),
+            "RED-2: SSH Vue initialize must carry remote host tsdk: {forwarded_ssh}"
+        );
+
+        let (w_tx_ssh_none, mut w_rx_ssh_none) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (c_tx_ssh_none, _c_rx_ssh_none) = mpsc::channel::<String>(8);
+        let mut mux_ssh_none = super::Mux::new(
+            crate::lsp_host::pool::PoolKey {
+                owner: "u1".into(),
+                lang: "vue".into(),
+                root: "/srv/vue-app".into(),
+                ssh: Some(ssh_spec),
+                go_build_tags: Vec::new(),
+            },
+            w_tx_ssh_none,
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            true,
+            Vec::new(),
+            None,
+        );
+        mux_ssh_none.attach(1, c_tx_ssh_none);
+        mux_ssh_none.on_client(1, &init_req.to_string());
+        let forwarded_ssh_none: serde_json::Value =
+            serde_json::from_slice(&w_rx_ssh_none.try_recv().unwrap()).unwrap();
+        assert!(
+            forwarded_ssh_none
+                .pointer("/params/initializationOptions/typescript/tsdk")
+                .is_none(),
+            "RED-2: SSH Vue mux must never inject daemon-local tsdk path: {forwarded_ssh_none}"
+        );
     }
 }

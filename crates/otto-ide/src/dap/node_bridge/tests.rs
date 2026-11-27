@@ -289,6 +289,7 @@ async fn browser_cdp_attach_verifies_breakpoints_from_cdp_locations_only() {
         sock.write_all(b"HTTP/1.1 101 Switching Protocols\r\n\r\n")
             .await
             .unwrap();
+        let mut pending_ts_bp_id: Option<String> = None;
         loop {
             let Some(msg) = read_client_json(&mut sock).await else {
                 break;
@@ -300,7 +301,9 @@ async fn browser_cdp_attach_verifies_breakpoints_from_cdp_locations_only() {
                     let url_re = msg["params"]["urlRegex"].as_str().unwrap_or("");
                     // Unmapped TypeScript source returns empty `locations` from browser CDP;
                     // a loaded JS script returns a bound location.
-                    let locations = if url_re.contains("app\\.ts") {
+                    let is_ts = url_re.contains("app\\.ts");
+                    let locations = if is_ts {
+                        pending_ts_bp_id = Some(format!("bp-{id}"));
                         json!([])
                     } else {
                         json!([{ "scriptId": "s2", "lineNumber": 4, "columnNumber": 0 }])
@@ -316,6 +319,23 @@ async fn browser_cdp_attach_verifies_breakpoints_from_cdp_locations_only() {
                         }),
                     )
                     .await;
+                    if !is_ts {
+                        if let Some(ts_bid) = pending_ts_bp_id.take() {
+                            // BUG3-10: Simulate CDP resolving the earlier unbound breakpoint
+                            // to a nearby executable line (0-based 14 -> 1-based 15).
+                            write_server_json(
+                                &mut sock,
+                                json!({
+                                    "method": "Debugger.breakpointResolved",
+                                    "params": {
+                                        "breakpointId": ts_bid,
+                                        "location": { "scriptId": "s1", "lineNumber": 14, "columnNumber": 0 }
+                                    }
+                                }),
+                            )
+                            .await;
+                        }
+                    }
                 }
                 _ => {
                     write_server_json(&mut sock, json!({ "id": id, "result": {} })).await;
@@ -382,6 +402,7 @@ async fn browser_cdp_attach_verifies_breakpoints_from_cdp_locations_only() {
         .clone();
     assert_eq!(ts_bps.len(), 1);
     assert_eq!(ts_bps[0]["verified"], json!(false));
+    let ts_bp_id = ts_bps[0]["id"].as_i64().expect("DAP breakpoint id");
 
     // Bound JS breakpoint returns verified=true with CDP's 1-based line (4 + 1 = 5).
     let js_seq = dap_w
@@ -412,6 +433,26 @@ async fn browser_cdp_attach_verifies_breakpoints_from_cdp_locations_only() {
     assert_eq!(js_bps.len(), 1);
     assert_eq!(js_bps[0]["verified"], json!(true));
     assert_eq!(js_bps[0]["line"], json!(5));
+
+    // BUG3-10: When CDP later resolves the initially unbound breakpoint to a relocated
+    // executable line (0-based 14 -> 1-based 15), the bridge emits a `breakpoint` changed
+    // event carrying both the correlated `id` and `originalLine` (10) plus resolved `line` (15).
+    let resolved_ev = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(DapMessage::Event(ev)) = dap_r.next_message().await.unwrap() {
+                if ev.event == "breakpoint" {
+                    return ev;
+                }
+            }
+        }
+    })
+    .await
+    .expect("deferred breakpoint resolved event");
+    let bp_body = &resolved_ev.body.unwrap()["breakpoint"];
+    assert_eq!(bp_body["id"], json!(ts_bp_id));
+    assert_eq!(bp_body["verified"], json!(true));
+    assert_eq!(bp_body["line"], json!(15));
+    assert_eq!(bp_body["originalLine"], json!(10));
 
     bridge.abort();
     server.abort();

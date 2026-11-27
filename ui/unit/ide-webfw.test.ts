@@ -8,7 +8,7 @@ import { buildDedupedBulkRepos } from '../src/modules/ide/shell/bulkRepoModel.ts
 import { inferTestDebugLanguage } from '../src/modules/ide/debug/ideFailedTestDebug.ts';
 import { langGutters, langKeyFor } from '../src/lib/components/langForPath.ts';
 
-test('Web framework LSP gating, status strip labels, and settings links', () => {
+test('Web framework LSP gating, status strip labels, and settings links', async () => {
   assert.equal(normalizeIdeLspLanguage('svelte'), 'svelte');
   assert.equal(normalizeIdeLspLanguage('vue'), 'vue');
   assert.equal(normalizeIdeLspLanguage('angular'), 'angular');
@@ -28,6 +28,18 @@ test('Web framework LSP gating, status strip labels, and settings links', () => 
   assert.equal(ideLspServerName('svelte'), 'svelteserver');
   assert.equal(ideLspServerName('vue'), 'vue-language-server');
   assert.equal(ideLspServerName('angular'), 'ngserver');
+
+  // SEC3-2: Vue LSP trust refusal surfaces the trust opt-in message in the status strip.
+  const { lspHandshakeFailureReason } = await import('../src/lib/components/cm-ide-lsp-reconnect.ts');
+  const { ideLspItem } = await import('../src/modules/ide/editor/ideStatusModel.ts');
+  assert.equal(lspHandshakeFailureReason('vue'), 'trust_or_unavailable');
+  const vueItem = ideLspItem('vue', {
+    lang: 'vue',
+    rootPath: '/app',
+    phase: 'unavailable',
+    reason: 'trust_or_unavailable',
+  });
+  assert.ok(vueItem?.title.includes('OTTO_IDE_TRUST_VUE_LSP=1'));
 });
 
 test('Angular and SvelteKit tree nesting, repo badges, and runner/debug metadata', () => {
@@ -113,6 +125,12 @@ test('BUG-27: resolveFrameworkDevDebugLaunch forwards framework CLI instead of p
     auto_detected: true,
   });
   assert.deepEqual(ngDev, { program: 'ng', args: ['serve'] });
+
+  // BUG-30: auto-discovered `npm run test` config preserves OTTO_NPM_SCRIPT=test and is_test=true
+  const { resolveConfigDebugHints } = await import('../src/modules/ide/store/ideRepoTestAndBuildTags.ts');
+  const npmTestHints = resolveConfigDebugHints({ runner: 'npm', kind: 'test', args: ['run', 'test'] });
+  assert.equal(npmTestHints.isTest, true);
+  assert.equal(npmTestHints.envHints.OTTO_NPM_SCRIPT, 'test');
 });
 
 test('API2-2: Angular .component.html connects to angular server but sends languageId html in didOpen', async () => {
