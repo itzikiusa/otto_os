@@ -603,9 +603,16 @@ async fn after_a_restart_a_held_reviewer_is_awaited_and_only_the_lost_one_re_run
         2,
         "one resume + one fresh run for the lost row"
     );
-    assert_eq!(turns[1].title, "Lost");
     assert!(
-        turns[1].prompt.contains("Review the diff."),
+        turns.iter().any(|t| t.title == "Held"),
+        "expected held reviewer resume turn in {turns:?}"
+    );
+    let lost = turns
+        .iter()
+        .find(|t| t.title == "Lost")
+        .expect("expected fresh run turn for the lost row");
+    assert!(
+        lost.prompt.contains("Review the diff."),
         "re-run from its persisted prompt"
     );
     let after = r.reviews.get_review(&id).await.unwrap().agents;
