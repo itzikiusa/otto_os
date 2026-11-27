@@ -1311,6 +1311,41 @@ pub fn parse_dotnet_releases_index_json(
     out
 }
 
+/// Official ZLS release artifact returned by `releases.zigtools.org/v1/zls/select-version`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZlsReleaseAsset {
+    pub version: String,
+    pub url: String,
+    pub sha256: Option<String>,
+}
+
+/// Parse `https://releases.zigtools.org/v1/zls/select-version` JSON for `platform`,
+/// extracting the HTTPS tarball URL and official 64-hex SHA-256 digest (`shasum`).
+pub fn parse_zls_select_version_json(
+    raw: &str,
+    platform: TargetPlatform,
+) -> Option<ZlsReleaseAsset> {
+    let root: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let version = root
+        .get("version")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| is_safe_version_token(v))?
+        .to_string();
+    let target_obj = root.get(platform.zig_index_key())?;
+    let url = target_obj
+        .get("tarball")
+        .and_then(|v| v.as_str())
+        .filter(|u| u.starts_with("https://"))?
+        .to_string();
+    let sha256 = normalize_sha256(target_obj.get("shasum").and_then(|v| v.as_str()));
+    Some(ZlsReleaseAsset {
+        version,
+        url,
+        sha256,
+    })
+}
+
 // ── Live + Cached Catalog Client ─────────────────────────────────────────────
 
 struct CachedPlatformCatalog {
@@ -1567,6 +1602,25 @@ impl CatalogClient {
         curated_catalog(EcosystemKind::Dotnet, platform)
     }
 
+    /// Resolve the official ZLS tarball URL + SHA-256 checksum matching `zig_version`
+    /// from `releases.zigtools.org` (returns `None` offline or when upstream has no match).
+    pub async fn fetch_zls_release(
+        &self,
+        zig_version: &str,
+        platform: TargetPlatform,
+    ) -> Option<ZlsReleaseAsset> {
+        let ver = zig_version.trim();
+        if Self::offline_mode() || !is_safe_version_token(ver) {
+            return None;
+        }
+        let encoded = ver.replace('+', "%2B");
+        let url = format!(
+            "https://releases.zigtools.org/v1/zls/select-version?zig_version={encoded}&compatibility=only-runtime"
+        );
+        let raw = self.get_text(&url).await?;
+        parse_zls_select_version_json(&raw, platform)
+    }
+
     async fn fetch_node(&self, platform: TargetPlatform) -> Vec<CatalogSdkEntry> {
         if let Some(raw) = self.get_text("https://nodejs.org/dist/index.json").await {
             let parsed = parse_node_dist_json(&raw, platform);
@@ -1759,5 +1813,44 @@ mod tests {
         assert!(!is_safe_version_token("-rf"));
         assert!(!is_safe_version_token("../etc"));
         assert!(!is_safe_version_token("21; rm -rf /"));
+    }
+
+    #[test]
+    fn zls_select_version_parser_extracts_tarball_and_sha256() {
+        let mac_arm = ALL_PLATFORMS[0];
+        let linux_x64 = ALL_PLATFORMS[3];
+        let raw = r#"{
+            "version": "0.14.0",
+            "aarch64-macos": {
+                "tarball": "https://builds.zigtools.org/zls-macos-aarch64-0.14.0.tar.xz",
+                "shasum": "DFB627E1F9603583678F552D8035A12DCE878215C0A507B32D6F1B9D074D6C4D",
+                "size": "927968"
+            },
+            "x86_64-linux": {
+                "tarball": "https://builds.zigtools.org/zls-linux-x86_64-0.14.0.tar.xz",
+                "shasum": "not-a-valid-sha256"
+            }
+        }"#;
+        let mac = parse_zls_select_version_json(raw, mac_arm).expect("mac arm release");
+        assert_eq!(mac.version, "0.14.0");
+        assert_eq!(
+            mac.url,
+            "https://builds.zigtools.org/zls-macos-aarch64-0.14.0.tar.xz"
+        );
+        assert_eq!(
+            mac.sha256.as_deref(),
+            Some("dfb627e1f9603583678f552d8035a12dce878215c0a507b32d6f1b9d074d6c4d")
+        );
+
+        let lin = parse_zls_select_version_json(raw, linux_x64).expect("linux x64 release");
+        assert_eq!(lin.sha256, None);
+
+        // Non-HTTPS URLs and upstream error payloads must be rejected.
+        let insecure = r#"{"version":"0.14.0","aarch64-macos":{"tarball":"http://example.com/zls.tar.xz","shasum":"dfb627e1f9603583678f552d8035a12dce878215c0a507b32d6f1b9d074d6c4d"}}"#;
+        assert!(parse_zls_select_version_json(insecure, mac_arm).is_none());
+        assert!(
+            parse_zls_select_version_json(r#"{"code":1,"message":"incompatible"}"#, mac_arm)
+                .is_none()
+        );
     }
 }
