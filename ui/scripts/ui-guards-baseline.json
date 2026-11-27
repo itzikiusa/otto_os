@@ -355,8 +355,6 @@
     "src/modules/plugins/PluginFrame.svelte": 1,
     "src/modules/product/MockupAnnotations.svelte": 1,
     "src/modules/product/ui/ListPane.svelte": 2,
-    "src/modules/settings/AccessGroups.svelte": 1,
-    "src/modules/settings/ContextLibrary.svelte": 2,
     "src/modules/skills-lab/SkillsBrowser.svelte": 3,
     "src/modules/threads/ThreadFileTabs.svelte": 1,
     "src/modules/threads/ThreadPane.svelte": 1,

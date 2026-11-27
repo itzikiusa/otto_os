@@ -12,7 +12,7 @@ test.beforeEach(async ({ page }) => {
   test.skip((page.viewportSize()?.width ?? 0) > 640, 'phone-width layout only');
 });
 
-const nav = (page: Page) => page.getByRole('navigation', { name: 'Settings sections' });
+const nav = (page: Page) => page.getByRole('navigation', { name: 'Settings', exact: true });
 const filter = (page: Page) => page.getByRole('searchbox', { name: 'Filter settings' });
 const title = (page: Page) => page.locator('.settings-body h1.ph-title');
 const back = (page: Page) => page.getByRole('button', { name: 'Back to Settings' });
@@ -43,9 +43,10 @@ test('list → filter → section → back, and deep links open the section', as
   // The way back is a finger-sized (44 px) target.
   expect(Math.round((await back(page).boundingBox())!.height)).toBeGreaterThanOrEqual(44);
 
+  // Back keeps the section (still marked in the list, its page kept).
   await back(page).click();
-  await expect.poll(() => page.evaluate(() => location.hash)).toBe('#/settings');
   await expect(filter(page)).toBeVisible();
+  await expect(nav(page).locator('.settings-nav-item[aria-current="page"] .settings-nav-label')).toHaveText('Appearance');
   await filter(page).fill('');
   await expect(nav(page).locator('.settings-nav-heading').first()).toBeVisible();
 

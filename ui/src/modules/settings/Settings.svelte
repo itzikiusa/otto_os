@@ -30,6 +30,10 @@
     type SettingsSectionId,
   } from './sections';
   import { viewport } from '../../lib/stores/viewport.svelte';
+  import ListDetail from '../../lib/components/side/ListDetail.svelte';
+  import ListPane from '../../lib/components/side/ListPane.svelte';
+  import PhoneBack from '../../lib/components/side/PhoneBack.svelte';
+  import type { MenuItem } from '../../lib/contextmenu.svelte';
   import { daemonStatus } from './daemonStatus.svelte';
   import { settingsUi } from './settingsUiState.svelte';
 
@@ -37,11 +41,12 @@
   // section instead of routing, and ✕ closes the sheet.
   let { sheet = null }: { sheet?: { onclose: () => void } | null } = $props();
 
-  // Phone (≤640 px) and phone landscape (short touch screen): two levels, like
-  // iOS Settings — the grouped list (with the filter) first, then one section
-  // with a back control. A deep link (#/settings/<id>) opens the section
-  // directly; bare #/settings is the list. Wider tablets/desktop keep the split.
-  const phone = $derived(viewport.mode === 'phone' || viewport.isShort);
+  // The section nav is the page's list pane (ListDetail, 240 px). On a phone
+  // (and a phone on its side) it is two levels, like iOS Settings: the grouped
+  // list (with the filter) is the page, a section is pushed with "‹ Settings"
+  // in its page header. A deep link (#/settings/<id>) opens the section
+  // pushed; bare #/settings is the list. Back keeps the section (marked).
+  let phoneOpen = $state(false);
 
   // Explicit exit: go back to where you were, or home (Agents) if there's no
   // history — so you don't have to click another module to leave Settings.
@@ -51,13 +56,13 @@
     else router.go('agents');
   }
   function goPage(id: string): void {
+    phoneOpen = true;
     if (sheet) settingsUi.sheetPage = id;
     else router.go(`settings/${id}`);
   }
-  /** Phone: back from a section to the list. */
-  function backToList(): void {
-    if (sheet) settingsUi.sheetPage = '';
-    else router.go('settings');
+  /** The nav's ⋯ (after Hide Settings ⌘B). */
+  function paneMenu(): MenuItem[] {
+    return sheet ? [] : [{ label: 'Close settings', icon: 'x', hint: '⌘⇧←', action: exit }];
   }
 
   // Root sees a dot on Trust & safety while secrets sit unencrypted (one
@@ -110,7 +115,9 @@
 
   const routedId = $derived(sheet ? settingsUi.sheetPage : (router.parts[1] ?? ''));
   const pageId = $derived(routedId || 'appearance');
-  const atList = $derived(phone && !routedId);
+  $effect(() => {
+    phoneOpen = !!routedId;
+  });
   const section = $derived(findSection(pageId));
   // A routed section is openable, known-but-forbidden (a stale link or a role
   // change) or unknown — the last two get an explicit empty state instead of
@@ -139,7 +146,7 @@
   }
 
   function navItems(): HTMLButtonElement[] {
-    return listEl ? [...listEl.querySelectorAll<HTMLButtonElement>('.settings-nav-item')] : [];
+    return listEl?.closest('.side-list') ? [...listEl.closest('.side-list')!.querySelectorAll<HTMLButtonElement>('.settings-nav-item')] : [];
   }
 
   function onFilterKey(e: KeyboardEvent): void {
@@ -164,19 +171,16 @@
     }
   }
 
-  // Arrow keys move between rows; ↑ from the first row returns to the filter,
-  // and typing a character on a row carries it into the filter.
+  // The rows walk with the list pane's keys (use:listNav); on top of that ↑
+  // from the first row returns to the filter, and typing a character on a row
+  // carries it into the filter.
   function onListKey(e: KeyboardEvent): void {
     const items = navItems();
     const i = items.indexOf(document.activeElement as HTMLButtonElement);
     if (i < 0) return;
-    if (e.key === 'ArrowDown') {
+    if (e.key === 'ArrowUp' && i === 0) {
       e.preventDefault();
-      items[Math.min(i + 1, items.length - 1)]?.focus();
-    } else if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      if (i === 0) filterEl?.focus();
-      else items[i - 1]?.focus();
+      filterEl?.focus();
     } else if (e.key === 'Escape' && settingsUi.query) {
       e.preventDefault();
       e.stopPropagation();
@@ -237,33 +241,36 @@
 
 {#snippet navRow(s: SettingsSection, detail?: string)}
   {@const match = settingsUi.query.trim() ? matchedSetting(s, settingsUi.query) : null}
-  {@const current = !atList && pageId === s.id}
-  <!-- The scope tag and warning dot are aria-hidden so the row's name stays
-       its label; both are in the title (the row's description). -->
-  <button use:rowMenuKeys
-    class="settings-nav-item"
-    class:active={current}
-    class:has-match={!!match}
-    aria-current={current ? 'page' : undefined}
-    title={warnSecrets(s) ? `${scopeDescription(s)} Secrets are not encrypted.` : scopeDescription(s)}
-    onclick={() => open(s)}
-    onkeydown={onListKey}
-    onpointerenter={() => VIEWS[s.id].prefetch()}
-    onfocus={() => VIEWS[s.id].prefetch()}
-    oncontextmenu={(e) => rowMenu(e, s)}
-  >
-    <span class="settings-nav-text">
-      <span class="settings-nav-label">{s.label}</span>
-      {#if match}<span class="settings-nav-match">{match}</span>{/if}
-    </span>
-    {#if warnSecrets(s)}<span class="settings-nav-dot" aria-hidden="true" data-testid="settings-nav-secrets-dot"></span>{/if}
-    {#if detail}
-      <span class="settings-nav-detail">{detail}</span>
-    {:else}
-      <span class="settings-nav-scope" aria-hidden="true">{SCOPE_LABEL[s.scope]}</span>
-    {/if}
-    <span class="settings-nav-chevron" aria-hidden="true"><Icon name="chevronRight" size={12} /></span>
-  </button>
+  {@const current = pageId === s.id}
+  <!-- The shared row look (.side-row); the scope tag and warning dot are
+       aria-hidden so the row's name stays its label; both are in the title
+       (the row's description). -->
+  <div class="side-row" class:two-line={!!match} class:selected={current}>
+    <button use:rowMenuKeys
+      class="side-row-main settings-nav-item"
+      data-side-row
+      aria-current={current ? 'page' : undefined}
+      title={warnSecrets(s) ? `${scopeDescription(s)} Secrets are not encrypted.` : scopeDescription(s)}
+      onclick={() => open(s)}
+      onkeydown={onListKey}
+      onpointerenter={() => VIEWS[s.id].prefetch()}
+      onfocus={() => VIEWS[s.id].prefetch()}
+      oncontextmenu={(e) => rowMenu(e, s)}
+    >
+      <span class="side-row-text">
+        <span class="side-row-title settings-nav-label">{s.label}</span>
+        {#if match}<span class="side-row-meta settings-nav-match">{match}</span>{/if}
+      </span>
+      <span class="side-row-trailing">
+        {#if warnSecrets(s)}<span class="settings-nav-dot" aria-hidden="true" data-testid="settings-nav-secrets-dot"></span>{/if}
+        {#if detail}
+          <span class="settings-nav-detail">{detail}</span>
+        {:else}
+          <span class="settings-nav-scope" aria-hidden="true">{SCOPE_LABEL[s.scope]}</span>
+        {/if}
+      </span>
+    </button>
+  </div>
 {/snippet}
 
 <svelte:window
@@ -276,134 +283,117 @@
   }}
 />
 
-<div class="settings" class:sheet class:at-list={atList} class:at-section={phone && !atList}>
-  <nav class="settings-nav" aria-label="Settings sections">
-    <div class="settings-nav-title">
-      <span>Settings</span>
-      <button class="icon-btn" title="Close settings (⌘⇧←)" aria-label="Close settings" onclick={exit}>
-        <Icon name="x" size={14} />
-      </button>
-    </div>
-    <label class="settings-nav-filter">
-      <Icon name="search" size={12} />
-      <input dir="ltr"
-        bind:this={filterEl}
-        bind:value={settingsUi.query}
-        class="settings-filter-input"
-        type="search"
-        placeholder={sheet ? 'Search settings  /' : 'Filter settings…'}
-        aria-label="Filter settings"
-        aria-controls="settings-nav-list"
-        autocomplete="off"
-        spellcheck="false"
-        onkeydown={onFilterKey}
-      />
-    </label>
-    <!-- Arrow-key roving between the row buttons (each row is a real button). -->
-    <div class="settings-nav-list" id="settings-nav-list" bind:this={listEl}>
-      {#if results}
-        <div class="settings-nav-group">
-          {#each results as s (s.id)}
-            {@render navRow(s, groupLabel(s.group))}
-          {:else}
-            <p class="settings-nav-empty">No sections match “{settingsUi.query.trim()}”</p>
-          {/each}
-        </div>
-      {:else}
-        {#each groups as g (g.id)}
-          <div class="settings-nav-group" role="group" aria-label={g.label}>
-            <div class="settings-nav-heading" aria-hidden="true">{g.label}</div>
-            {#each g.items as s (s.id)}
-              {@render navRow(s)}
-            {/each}
+<div class="settings" class:sheet>
+  {#if viewport.navDrawer && !phoneOpen && !sheet}
+    <!-- Phone, the list is the page: this header carries ☰ · Settings · ⋯ ·
+         Side panel (the section's own PageHeader is hidden with it). -->
+    <PageHeader title="Settings" />
+  {/if}
+  <ListDetail module="settings" name="Settings" open={phoneOpen} onback={() => (phoneOpen = false)} defaultWidth={240}>
+    {#snippet list()}
+      <div class="settings-nav">
+        <ListPane as="nav" menu={paneMenu} testid="settings-nav">
+          {#snippet searchRow()}
+            <label class="settings-nav-filter">
+              <Icon name="search" size={12} />
+              <input dir="ltr"
+                bind:this={filterEl}
+                bind:value={settingsUi.query}
+                class="settings-filter-input"
+                type="search"
+                placeholder={sheet ? 'Search settings  /' : 'Filter settings…'}
+                aria-label="Filter settings"
+                aria-controls="settings-nav-list"
+                autocomplete="off"
+                spellcheck="false"
+                onkeydown={onFilterKey}
+              />
+            </label>
+          {/snippet}
+          <div id="settings-nav-list" bind:this={listEl}>
+            {#if results}
+              <div class="side-section">
+                {#each results as s (s.id)}
+                  {@render navRow(s, groupLabel(s.group))}
+                {:else}
+                  <p class="settings-nav-empty">No sections match “{settingsUi.query.trim()}”</p>
+                {/each}
+              </div>
+            {:else}
+              {#each groups as g (g.id)}
+                <div class="side-section" role="group" aria-label={g.label}>
+                  <div class="side-section-head"><h3 class="ssh-title settings-nav-heading" aria-hidden="true">{g.label}</h3></div>
+                  {#each g.items as s (s.id)}
+                    {@render navRow(s)}
+                  {/each}
+                </div>
+              {/each}
+            {/if}
           </div>
-        {/each}
+        </ListPane>
+      </div>
+    {/snippet}
+
+    <div class="settings-body">
+      {#if sheet && viewport.navDrawer}
+        <!-- A sheet has no page header of its own: the one Back sits on top. -->
+        <div class="settings-back"><PhoneBack label="Settings" onclick={() => (phoneOpen = false)} /></div>
+      {/if}
+      {#if View}
+        <LazyMount lazy={View} what={`${section?.label ?? 'these'} settings`} />
+      {:else if section}
+        <PageHeader title={section.label} />
+        <PageBody>
+          <EmptyState
+            variant="page"
+            icon="lock"
+            title={`You don’t have access to ${section.label}`}
+            body={gateHint(section)}
+            actionLabel="Open Appearance"
+            onaction={() => goPage('appearance')}
+          >
+            {#if router.canBack && !sheet}
+              <button class="btn ghost" onclick={() => router.back()}>Go back</button>
+            {/if}
+          </EmptyState>
+        </PageBody>
+      {:else}
+        <PageHeader title="Settings" />
+        <PageBody>
+          <EmptyState
+            variant="page"
+            icon="gear"
+            title={`No settings section called “${pageId}”`}
+            body="The link may be out of date. Pick a section from the list, or filter it by name."
+            actionLabel="Open Appearance"
+            onaction={() => goPage('appearance')}
+          />
+        </PageBody>
       {/if}
     </div>
-  </nav>
-
-  <div class="settings-body">
-    {#if phone}
-      <div class="settings-back">
-        <button class="btn ghost small settings-back-btn" onclick={backToList} aria-label="Back to Settings" title="Back to Settings">
-          <Icon name="chevronLeft" size={14} /> Settings
-        </button>
-      </div>
-    {/if}
-    {#if View}
-      <LazyMount lazy={View} what={`${section?.label ?? 'these'} settings`} />
-    {:else if section}
-      <PageHeader title={section.label} />
-      <PageBody>
-        <EmptyState
-          variant="page"
-          icon="lock"
-          title={`You don’t have access to ${section.label}`}
-          body={gateHint(section)}
-          actionLabel="Open Appearance"
-          onaction={() => goPage('appearance')}
-        >
-          {#if router.canBack && !sheet}
-            <button class="btn ghost" onclick={() => router.back()}>Go back</button>
-          {/if}
-        </EmptyState>
-      </PageBody>
-    {:else}
-      <PageHeader title="Settings" />
-      <PageBody>
-        <EmptyState
-          variant="page"
-          icon="gear"
-          title={`No settings section called “${pageId}”`}
-          body="The link may be out of date. Pick a section from the list, or filter it by name."
-          actionLabel="Open Appearance"
-          onaction={() => goPage('appearance')}
-        />
-      </PageBody>
-    {/if}
-  </div>
+  </ListDetail>
 </div>
 
 <style>
   .settings {
     display: flex;
+    flex-direction: column;
     height: 100%;
     min-height: 0;
   }
   .settings-nav {
-    width: 224px;
-    flex-shrink: 0;
-    border-inline-end: 1px solid var(--separator);
+    flex: 1;
     display: flex;
     flex-direction: column;
     min-height: 0;
   }
-  /* Same 46px bar + bottom border as the section's PageHeader, so the two
-     read as one toolbar row across the split. */
-  .settings-nav-title {
-    height: 46px;
-    flex-shrink: 0;
-    box-sizing: border-box;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding-block: 0;
-    padding-inline: 18px 10px;
-    border-bottom: 1px solid var(--separator);
-    font-size: var(--fs-l);
-    font-weight: 600;
-    letter-spacing: -0.01em;
-    color: var(--text);
-  }
   /* Filter field: a quiet search box pinned above the (scrolling) list. */
   .settings-nav-filter {
-    flex-shrink: 0;
     display: flex;
     align-items: center;
     gap: 6px;
-    margin: 10px 10px 2px;
     padding-inline: 8px;
-    height: 27px;
+    height: 28px;
     border-radius: var(--radius-s);
     border: 1px solid var(--border);
     background: var(--surface-2);
@@ -427,75 +417,14 @@
   .settings-filter-input::placeholder {
     color: var(--text-dim);
   }
-  .settings-nav-list {
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
-    padding: 6px 10px 16px;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-  }
-  .settings-nav-group {
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-  }
-  /* Same section-label treatment as the main sidebar's groups. */
-  .settings-nav-heading {
-    padding: 8px 10px 2px;
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    color: var(--text-dim);
-  }
-  .settings-nav-item {
-    height: 28px;
-    flex-shrink: 0;
-    padding: 0 10px;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    text-align: start;
-    border: none;
-    background: transparent;
-    border-radius: var(--radius-s);
-    font-size: var(--fs-m);
-    color: var(--text);
-    cursor: pointer;
-    transition: background var(--dur-fast) ease-out;
-  }
-  .settings-nav-text {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-  }
-  .settings-nav-label,
-  .settings-nav-match {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  /* The setting a search found, under its section ("Archive idle sessions"). */
-  .settings-nav-match {
-    font-size: var(--fs-xs);
-    font-weight: 400;
-    color: var(--text-dim);
-  }
-  .settings-nav-item.has-match {
-    height: auto;
-    min-height: 28px;
-    padding-block: 4px;
+  @media (pointer: coarse) {
+    .settings-nav-filter {
+      height: 36px;
+    }
   }
   .settings-nav-detail,
   .settings-nav-scope {
     flex-shrink: 0;
-    font-size: var(--fs-xs);
-    font-weight: 400;
-    color: var(--text-dim);
   }
   /* Root: Trust & safety while the secret store is unencrypted. */
   .settings-nav-dot {
@@ -505,28 +434,15 @@
     border-radius: 50%;
     background: var(--warning);
   }
-  .settings-nav-chevron {
-    display: none;
-    color: var(--text-dim);
-  }
-  .settings-back {
-    display: none;
-  }
   .settings-nav-empty {
     margin: 0;
-    padding: 8px 10px;
+    padding: 8px;
     font-size: var(--fs-s);
     color: var(--text-dim);
   }
-  .settings-nav-item:hover {
-    background: var(--hover);
-  }
-  /* The sidebar's active row: accent tint + --text at 600 (accent is never
-     text — it fails contrast in several themes). */
-  .settings-nav-item.active {
-    background: var(--accent-soft);
-    color: var(--text);
-    font-weight: 600;
+  .settings-back {
+    flex: none;
+    padding: 6px 8px 0;
   }
   /* Each section owns its chrome (PageHeader) and scroll (PageBody).
      --settings-col: the ONE column width every Settings page caps its form
@@ -551,93 +467,8 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .settings-nav-item,
     .settings-nav-filter {
       transition: none;
-    }
-  }
-
-  /* Tablet: trim the settings subnav so the form pane keeps generous width
-     even beside the shell Navigator on iPad / Android tablet portrait. */
-  @media (min-width: 641px) and (max-width: 1024px) {
-    .settings-nav {
-      width: min(190px, 32%);
-      min-width: 160px;
-    }
-  }
-
-  /* Phone (and phone landscape): a two-level list (iOS Settings). Level one is
-     the filter plus the grouped sections as full-width rows; level two is one
-     section with a back control above its own PageHeader (which carries the title). */
-  @media (max-width: 640px), (max-height: 500px) and (pointer: coarse) {
-    .settings {
-      flex-direction: column;
-    }
-    .settings.at-list .settings-body,
-    .settings.at-section .settings-nav {
-      display: none;
-    }
-    .settings-nav {
-      flex: 1;
-      width: 100%;
-      border-inline-end: none;
-    }
-    .settings-nav-title {
-      display: none;
-    }
-    .settings-nav-filter {
-      margin: 10px 12px 4px;
-      height: 36px;
-    }
-    .settings-nav-list {
-      padding: 6px 12px 24px;
-      gap: 14px;
-    }
-    .settings-nav-group {
-      gap: 0;
-    }
-    .settings-nav-heading {
-      padding: 0 4px 6px;
-    }
-    /* Each group's rows read as one inset card; filtered results too. */
-    .settings-nav-item,
-    .settings-nav-item.has-match {
-      height: auto;
-      min-height: 44px;
-      padding-block: 6px;
-      padding-inline: 12px 10px;
-      border-radius: 0;
-      background: var(--surface);
-    }
-    .settings-nav-item + .settings-nav-item {
-      border-top: 1px solid var(--separator);
-    }
-    .settings-nav-heading + .settings-nav-item,
-    .settings-nav-group > .settings-nav-item:first-child {
-      border-start-start-radius: var(--radius-m);
-      border-start-end-radius: var(--radius-m);
-    }
-    .settings-nav-item:last-child {
-      border-end-start-radius: var(--radius-m);
-      border-end-end-radius: var(--radius-m);
-    }
-    .settings-nav-item.active {
-      background: var(--surface);
-      font-weight: 400;
-    }
-    .settings-nav-item:hover {
-      background: var(--hover);
-    }
-    .settings-nav-chevron {
-      display: inline-flex;
-    }
-    .settings-back {
-      display: flex;
-      flex-shrink: 0;
-      padding: 6px 8px 0;
-    }
-    .settings-back-btn {
-      min-block-size: 44px;
     }
   }
 </style>
