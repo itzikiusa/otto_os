@@ -19,7 +19,6 @@ const DESKTOP = { width: 1440, height: 900 };
 async function shot(page: Page, name: string): Promise<void> {
   if (!SHOTS) return;
   await page.evaluate(() => document.fonts.ready);
-  await page.waitForTimeout(200);
   await page.screenshot({ path: `${SHOTS}/${name}.png` });
 }
 
