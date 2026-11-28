@@ -31,6 +31,28 @@ test.afterEach(async () => {
   await ctx?.dispose();
 });
 
+test('a long session title shrinks before the Back label does: "‹ Sessions" stays whole', async ({ page }) => {
+  const title = 'A very long session title that cannot fit beside the Back on any phone at all';
+  const r = await ctx.post(`${base}/api/v1/workspaces/${wsId}/sessions`, {
+    data: { kind: 'agent', provider: 'shell', title, cwd: '/tmp', meta: { origin: 'e2e' } },
+  });
+  expect(r.ok()).toBeTruthy();
+  await page.goto('/#/agents');
+  const row = page.locator(`.ai-row[data-workspace="${wsId}"] .tr-main`, { hasText: 'A very long' });
+  await expect(row).toBeVisible({ timeout: 20_000 });
+  await row.tap();
+  const back = page.getByTestId('agents-back-to-list');
+  await expect(back).toHaveText('Sessions');
+  // The laid-out label is as wide as its first word's text (nothing ellipsized).
+  const { shown, needed } = await back.evaluate((b) => {
+    const label = b.querySelector('.pb-label') as HTMLElement;
+    const range = document.createRange();
+    range.selectNodeContents(label);
+    return { shown: label.getBoundingClientRect().width, needed: range.getBoundingClientRect().width };
+  });
+  expect(shown).toBeGreaterThanOrEqual(needed - 1);
+});
+
 test('the list is the page; a tap pushes the terminal; Back returns', async ({ page }, info) => {
   await page.goto('/#/agents');
   const row = page.locator(`.ai-row[data-workspace="${wsId}"] .tr-main`, { hasText: 'Gullit' });

@@ -4,7 +4,8 @@
   // leading slot — PageHeader draws it from the innermost ListDetail
   // (pageNav.back), so a page never places it by hand. A page with no
   // PageHeader (the Agents session pane) uses this same component in its own
-  // header row. A long label shortens before the page title does.
+  // header row. A long label shortens before the page title does, but never
+  // below its first word ("‹ Pull…", never "‹ Ses…"): then the title gives way.
   import Icon from '../Icon.svelte';
 
   interface Props {
@@ -14,11 +15,12 @@
     testid?: string;
   }
   let { label, onclick, testid = 'phone-back' }: Props = $props();
+  const cut = $derived(label.indexOf(' '));
 </script>
 
 <button type="button" class="phone-back" aria-label="Back to {label}" title="Back to {label}" data-testid={testid} {onclick}>
   <Icon name="chevronLeft" size={20} />
-  <span class="pb-label">{label}</span>
+  <span class="pb-label"><span class="pb-first">{cut < 0 ? label : label.slice(0, cut)}</span>{#if cut >= 0}<span class="pb-rest">{label.slice(cut)}</span>{/if}</span>
 </button>
 
 <style>
@@ -26,7 +28,7 @@
     display: inline-flex;
     align-items: center;
     gap: 2px;
-    min-inline-size: 0;
+    /* auto: the chevron and the first word (pb-first) always show. */
     max-inline-size: 40vw;
     block-size: 44px;
     padding-block: 0;
@@ -46,10 +48,17 @@
     flex: none;
   }
   .pb-label {
+    display: flex;
+    min-inline-size: 0;
+    white-space: pre;
+  }
+  .pb-first {
+    flex: none;
+  }
+  .pb-rest {
     min-inline-size: 0;
     overflow: hidden;
     text-overflow: ellipsis;
-    white-space: nowrap;
   }
   .phone-back:hover {
     background: var(--hover);
