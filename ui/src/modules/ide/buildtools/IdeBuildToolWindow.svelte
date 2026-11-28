@@ -12,7 +12,6 @@
   import { confirmer } from '../../../lib/confirm.svelte';
   import { loadErrorText } from '../../../lib/loadError';
   import { ide, ideTargetKey, type IdeBuildToolModule, type IdeBuildToolProfile } from '../ideStore.svelte';
-  import { IDE_EDITOR_MIN } from '../shell/ideLayout.svelte';
   import {
     executeBuildToolGoal,
     executeMobileProjectTask,
@@ -324,7 +323,7 @@
 
 <!-- A Detail pane (design.md §3): "<tool> tool window", Close; inline beside
      the editor, a right sheet when there is no room, full width on a phone. -->
-<DetailPane module="ide" pane="build" title={`${labelTitle} tool window`} open onclose={() => ide.toggleBuildTool(false)} legacy={{ w: 'otto.ide.buildToolW' }} minContent={IDE_EDITOR_MIN} testid="ide-build-tool-window">
+<DetailPane module="ide" pane="build" title={`${labelTitle} tool window`} open onclose={() => ide.toggleBuildTool(false)} legacy={{ w: 'otto.ide.buildToolW' }} testid="ide-build-tool-window">
 <div class="bt-win">
   <div class="bt-toolbar" role="toolbar" aria-label={`${labelTitle} actions`}>
     {#if ide.activeMavenProfiles.length + ide.activeSpringProfiles.length > 0}

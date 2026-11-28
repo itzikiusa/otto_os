@@ -6,7 +6,9 @@ test.use({ serviceWorkers: 'block' });
 // Desktop (1440×900): the IDE's tool-window lists and dialog lists on the shared
 // side panes (rc6-side-b2) — header (name · count · ⋯), rows, the keyboard walk,
 // widths under otto.pane.ide.* (old keys read once) — and the editor rule: the
-// agent Detail pane becomes a sheet before the editor drops under 640 px.
+// agent Detail pane becomes a sheet before the editor drops under the shared
+// 480 px (design.md: the content keeps 480; the agent beside the editor is the
+// IDE's main way of working, inline at 1440 with the Navigator and explorer).
 
 const pane = (page: Page, name: string) => page.locator(`aside[aria-label="${name}"]`);
 
@@ -58,7 +60,7 @@ test('tool lists: Tests, Changes, Frames + Variables, Devices', async ({ page })
   await shot(page, 'ide-desktop-devices');
 });
 
-test('agent: a sheet at 1280, inline beside a 640 px editor when there is room', async ({ page }) => {
+test('agent: a sheet at 1280, inline at 1440 beside a 480 px editor', async ({ page }) => {
   test.setTimeout(90_000);
   await page.setViewportSize({ width: 1280, height: 800 });
   await bootToolsIde(page, 'files');
@@ -70,13 +72,14 @@ test('agent: a sheet at 1280, inline beside a 640 px editor when there is room',
   await shot(page, 'ide-desktop-1280-agent-sheet');
   await page.keyboard.press('Escape');
   await expect(agent).toHaveCount(0);
-  // Wider: inline, and the editor keeps 640.
-  await page.setViewportSize({ width: 1600, height: 900 });
+  // 1440 with the Navigator expanded and the explorer shown: inline, and the editor keeps 480.
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await expect(page.getByTestId('ide-project-tree')).toBeVisible();
   await page.getByTestId('ide-toggle-agent').click();
   await expect(agent).toBeVisible();
   await expect(agent).not.toHaveClass(/sheet/);
   const editor = await page.getByTestId('ide-editor-area').boundingBox();
-  expect(editor!.width).toBeGreaterThanOrEqual(640);
+  expect(editor!.width).toBeGreaterThanOrEqual(480);
   await shot(page, 'ide-desktop-agent-inline');
 });
 
