@@ -8,6 +8,12 @@ import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 // Route fixtures must bypass the mobile service worker.
 test.use({ serviceWorkers: 'block' });
 
+/** The PR's details card is the workspace's Detail pane: inline when there is room, else a sheet behind ⓘ. */
+async function openPrDetails(page: Page): Promise<void> {
+  if (!(await page.getByTestId('pr-details-card').isVisible())) await page.getByTestId('pr-details-toggle').click();
+  await expect(page.getByTestId('pr-details-card')).toBeVisible();
+}
+
 // Real isolated repository; only errors, races and forge responses are stubbed.
 let repoId = '';
 let workspaceId = '';
@@ -246,7 +252,8 @@ test('PR Decline: confirms which PR and what happens, posts it, then reads close
   await expect(decline).toBeVisible();
   await expect(page.getByRole('menuitem', { name: /^Check out/ })).toHaveCount(0);
   await expect(page.locator('.prd-body').getByRole('button', { name: /Close PR|Decline/ })).toHaveCount(0);
-  await expect(page.getByTestId('pr-checkout')).toHaveCount(1);
+  // (the card is the Detail pane: a closed sheet at this width, so at most one)
+  expect(await page.getByTestId('pr-checkout').count()).toBeLessThanOrEqual(1);
   // Cancel sends nothing.
   await decline.click();
   const dialog = page.getByRole('dialog', { name: 'Close pull request #1?' });
@@ -325,8 +332,7 @@ for (const scenario of [
     await expectNoHorizontalOverflow(page);
     await page.screenshot({ path: testInfo.outputPath('pr-files.png'), fullPage: true });
     await page.getByRole('tab', { name: 'Conversation', exact: true }).click();
-    // The details card is the Detail pane: a sheet on a tablet / phone, opened by ⓘ (a door in it closes the sheet).
-    if (!(await page.getByTestId('pr-details-card').isVisible())) await page.getByTestId('pr-details-toggle').click();
+    await openPrDetails(page);
     await page.getByRole('button', { name: 'AI review', exact: true }).click();
     await expect(page.locator('.rp-comment')).toBeVisible();
     await page.getByTestId('rp-post-comment').scrollIntoViewIfNeeded();
@@ -370,6 +376,7 @@ test('PR files and review code keep LTR gutters in an RTL interface', async ({ p
   await expect(page.locator('.dtable')).toHaveCSS('direction', 'ltr');
   await expect(page.locator('.hunk-header')).toHaveCSS('direction', 'ltr');
   await page.getByRole('tab', { name: 'Conversation', exact: true }).click();
+  await openPrDetails(page);
   await page.getByRole('button', { name: 'AI review', exact: true }).click();
   await expect(page.locator('.rp-diff-snippet')).toHaveCSS('direction', 'ltr');
 });
@@ -382,6 +389,7 @@ test('draft review posting previews destination and audience before sending', as
   });
   await page.goto(`/#/git/${repoId}/pr/1`);
   await page.getByRole('tab', { name: 'Conversation', exact: true }).click();
+  await openPrDetails(page);
   await page.getByRole('button', { name: 'AI review', exact: true }).click();
   await page.getByTestId('rp-post-comment').click();
   const dialog = page.getByRole('dialog', { name: 'Post comment to PR #1?' });

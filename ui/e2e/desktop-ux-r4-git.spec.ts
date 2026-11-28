@@ -8,6 +8,12 @@ import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 // Route fixtures must bypass the mobile service worker.
 test.use({ serviceWorkers: 'block' });
 
+/** The PR's details card is the workspace's Detail pane: inline when there is room, else a sheet behind ⓘ. */
+async function openPrDetails(page: Page): Promise<void> {
+  if (!(await page.getByTestId('pr-details-card').isVisible())) await page.getByTestId('pr-details-toggle').click();
+  await expect(page.getByTestId('pr-details-card')).toBeVisible();
+}
+
 // Real isolated repository; only errors, races and forge responses are stubbed.
 let repoId = '';
 let workspaceId = '';
@@ -89,6 +95,7 @@ test('summary reply survives Code and Timeline subtab round trips', async ({ pag
   await page.getByRole('tab', { name: 'Files', exact: true }).click();
   await expect(page.locator('.prd-code')).toBeVisible();
   await page.getByRole('tab', { name: 'Conversation', exact: true }).click();
+  await openPrDetails(page);
   await page.getByRole('button', { name: 'Timeline', exact: true }).click();
   await page.getByRole('tab', { name: 'Conversation', exact: true }).click();
   await expect(thread.getByPlaceholder('Reply…')).toHaveValue('Keep this reply while I inspect the diff');
@@ -172,6 +179,7 @@ test('cancelled active PR review cannot be resurrected by an older poll', async 
   await page.route('**/api/v1/reviews/review-4/cancel', r => r.fulfill({json: {...active, status: 'cancelled'}}));
   await page.goto(`/#/git/${repoId}/pr/1`);
   await page.getByRole('tab', { name: 'Conversation', exact: true }).click();
+  await openPrDetails(page);
   await page.getByRole('button', { name: 'AI review', exact: true }).click();
   await expect(page.locator('.rp-agent').first()).toContainText('Correctness reviewer');
   await expect.poll(() => !!sendEvent).toBe(true);
@@ -264,6 +272,7 @@ test('active PR agent output and progress update without remounting the terminal
   await page.route('**/api/v1/repos/*/prs/1/review', r => r.fulfill({json: active}));
   await page.goto(`/#/git/${repoId}/pr/1`);
   await page.getByRole('tab', { name: 'Conversation', exact: true }).click();
+  await openPrDetails(page);
   await page.getByRole('button', { name: 'AI review', exact: true }).click();
   await page.locator('.rp-agent').first().getByRole('button', {name: 'Open', exact: true}).click();
   await expect(page.locator('.rp-term')).toContainText('Synthetic live reviewer output');
