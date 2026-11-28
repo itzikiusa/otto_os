@@ -41,6 +41,9 @@ pub(super) struct DapWireClient {
     /// breakpoint update the matching entry in `snapshot.breakpoints` (BUG3-10). Ids
     /// are per connection: each js-debug child numbers its own.
     pub(super) bp_ids: Mutex<HashMap<i64, (String, u32)>>,
+    /// The files this connection last sent breakpoints for, so a file that lost
+    /// its last one gets an empty `setBreakpoints` on every connection.
+    pub(super) bp_files: Mutex<BTreeSet<String>>,
 }
 
 impl DapWireClient {
@@ -54,6 +57,7 @@ impl DapWireClient {
             pending: Mutex::new(HashMap::new()),
             retired: AtomicBool::new(false),
             bp_ids: Mutex::new(HashMap::new()),
+            bp_files: Mutex::new(BTreeSet::new()),
         });
         let client_ref = client.clone();
         tokio::spawn(async move {
@@ -249,7 +253,6 @@ pub(super) struct SessionEntry {
     pub(super) orig_ctx: RwLock<DapStartContext>,
     pub(super) snapshot: RwLock<IdeDebugSessionSnapshot>,
     pub(super) output_buf: Mutex<VecDeque<IdeDebugOutputEntry>>,
-    pub(super) configured_bp_files: Mutex<BTreeSet<String>>,
     pub(super) temp_run_to_cursor: Mutex<Option<(String, u32)>>,
     /// The last breakpoint stop: where it was and its instruction pointer
     /// (see `is_same_line_relocation`).
@@ -339,7 +342,6 @@ impl SessionEntry {
             orig_ctx: RwLock::new(ctx),
             snapshot: RwLock::new(initial_snap),
             output_buf: Mutex::new(output_buf),
-            configured_bp_files: Mutex::new(BTreeSet::new()),
             temp_run_to_cursor: Mutex::new(None),
             last_bp_stop: Mutex::new(None),
             break_on_exceptions: Mutex::new(initial_break_exc),

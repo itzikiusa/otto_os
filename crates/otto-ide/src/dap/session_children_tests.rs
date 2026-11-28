@@ -22,6 +22,18 @@ const BP_FILE: &str = "/ws/tests/app.spec.ts";
 /// targets after `configurationDone` and reports the answers on `answers`; a
 /// child verifies breakpoint 1, stops in its own file, and resumes on `continue`.
 async fn serve(stream: TcpStream, workers: usize, answers: mpsc::UnboundedSender<bool>) {
+    serve_logged(stream, workers, answers, None).await;
+}
+
+/// One `setBreakpoints` a connection received: (its target, the source path, how many).
+type BpCall = (Option<String>, String, usize);
+
+async fn serve_logged(
+    stream: TcpStream,
+    workers: usize,
+    answers: mpsc::UnboundedSender<bool>,
+    bp_log: Option<mpsc::UnboundedSender<BpCall>>,
+) {
     let (r, w) = stream.into_split();
     let mut reader = DapReader::new(r);
     let mut writer = DapWriter::new(w);
@@ -49,6 +61,10 @@ async fn serve(stream: TcpStream, workers: usize, answers: mpsc::UnboundedSender
             }
             "setBreakpoints" => {
                 let n = args["breakpoints"].as_array().map_or(0, Vec::len);
+                if let Some(log) = &bp_log {
+                    let path = args["source"]["path"].as_str().unwrap_or("").to_string();
+                    let _ = log.send((target.clone(), path, n));
+                }
                 let bps: Vec<Value> = (1..=n)
                     .map(|id| json!({ "id": id, "verified": false, "message": "Unbound breakpoint" }))
                     .collect();
@@ -232,6 +248,81 @@ async fn child_targets_attach_verify_breakpoints_and_hand_the_focus_on_continue(
 
     entry.disconnect_and_kill();
     assert!(entry.targets.connections().is_empty());
+}
+
+#[tokio::test]
+async fn removing_a_files_last_breakpoint_clears_it_in_every_child() {
+    // SEC6-3: each js-debug connection must be told when a file loses its last breakpoint.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (answers_tx, _answers) = mpsc::unbounded_channel();
+    let (log_tx, mut log) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            tokio::spawn(serve_logged(
+                stream,
+                2,
+                answers_tx.clone(),
+                Some(log_tx.clone()),
+            ));
+        }
+    });
+    let req = IdeStartDebugReq {
+        target: IdeTargetSpec::local("/ws"),
+        language: "typescript".into(),
+        breakpoints: vec![IdeBreakpoint {
+            path: BP_FILE.into(),
+            line: 3,
+            enabled: true,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let meta = (
+        "s2".into(),
+        "Playwright".into(),
+        "typescript".into(),
+        "js-debug".into(),
+    );
+    let entry = SessionEntry::new(1, meta, Vec::new(), req, DapStartContext::default());
+    entry.targets.enable("127.0.0.1".into(), port);
+    let sessions = Arc::new(DashMap::new());
+    sessions.insert("s2".to_string(), entry.clone());
+    let (r, w) = TcpStream::connect(("127.0.0.1", port))
+        .await
+        .unwrap()
+        .into_split();
+    let io = (
+        Box::new(r) as BoxRead,
+        Box::new(w) as BoxWrite,
+        BridgeGuard::new(),
+    );
+    handshake_and_run(&sessions, &entry, io, (json!({}), "launch", json!({})))
+        .await
+        .unwrap();
+    wait_for(&entry, "both targets paused", |s| {
+        s.targets.len() == 2 && s.targets.iter().all(|t| t.paused)
+    })
+    .await;
+    while log.try_recv().is_ok() {}
+
+    entry.mutate_and_broadcast(|snap| snap.breakpoints.clear());
+    crate::dap::session_inspect::sync_breakpoints_everywhere(&entry)
+        .await
+        .unwrap();
+    let mut cleared: Vec<Option<String>> = Vec::new();
+    while let Ok((target, path, n)) = log.try_recv() {
+        if path == BP_FILE && n == 0 {
+            cleared.push(target);
+        }
+    }
+    cleared.sort();
+    assert_eq!(
+        cleared,
+        vec![None, Some("w0".to_string()), Some("w1".to_string())],
+        "the root and both workers get the empty setBreakpoints"
+    );
+    entry.disconnect_and_kill();
 }
 
 #[tokio::test]

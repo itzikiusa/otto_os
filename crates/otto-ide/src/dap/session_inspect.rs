@@ -26,7 +26,7 @@ pub(super) async fn sync_all_breakpoints(
     let temp_rtc = entry.temp_run_to_cursor.lock().ok().and_then(|g| g.clone());
 
     let mut by_file: BTreeMap<String, Vec<(Option<usize>, Value)>> = BTreeMap::new();
-    if let Ok(prev_files) = entry.configured_bp_files.lock() {
+    if let Ok(prev_files) = conn.wire.bp_files.lock() {
         for f in prev_files.iter() {
             by_file.insert(f.clone(), Vec::new());
         }
@@ -174,7 +174,7 @@ pub(super) async fn sync_all_breakpoints(
             .request("continue", Some(json!({ "threadId": 1 })))
             .await;
     }
-    if let Ok(mut prev_files) = entry.configured_bp_files.lock() {
+    if let Ok(mut prev_files) = conn.wire.bp_files.lock() {
         *prev_files = active_files;
     }
     if let Ok(mut locs) = conn.wire.bp_ids.lock() {

@@ -271,9 +271,6 @@ fn begin_next_step(entry: &Arc<SessionEntry>) -> Option<(PlannedStep, Arc<dyn De
         let idx = run.total - run.pending.len() - 1;
         (step, idx, run.total, Arc::clone(&run.resolver))
     };
-    if let Ok(mut files) = entry.configured_bp_files.lock() {
-        files.clear();
-    }
     entry.append_output(
         "console",
         format!("── Step {}/{total} · {} ──\n", idx + 1, step.label),

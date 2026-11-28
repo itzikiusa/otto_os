@@ -229,9 +229,6 @@ impl DapManager {
         }
         tokio::task::yield_now().await;
 
-        if let Ok(mut files) = entry.configured_bp_files.lock() {
-            files.clear();
-        }
         if let Ok(mut rtc) = entry.temp_run_to_cursor.lock() {
             *rtc = None;
         }
