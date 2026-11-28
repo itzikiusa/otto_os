@@ -21,6 +21,9 @@
   import EmptyState from '../../../lib/components/EmptyState.svelte';
   import Skeleton from '../../../lib/components/Skeleton.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
+  import ListDetail from '../../../lib/components/side/ListDetail.svelte';
+  import ListPane from '../../../lib/components/side/ListPane.svelte';
+  import SideRow from '../../../lib/components/side/SideRow.svelte';
   import AgentEditSheet from '../../personal-agents/AgentEditSheet.svelte';
   import { K8S_WATCHDOG_MARK } from '../../personal-agents/templates';
   import { verdictOf } from './monitor-util';
@@ -28,6 +31,8 @@
   let agent = $state<PersonalAgent | null>(null);
   let runs = $state<PersonalAgentRun[]>([]);
   let selected = $state<PersonalAgentRun | null>(null);
+  /** Phone: the runs are the page until one is opened. */
+  let phoneOpen = $state(false);
   let report = $state('');
   let loading = $state(true);
   let reportLoading = $state(false);
@@ -162,21 +167,25 @@
       </div>
     </div>
 
-    <div class="body">
-      <aside class="runs card">
-        <div class="section-title">Runs</div>
-        {#if !runs.length}
-          <div class="dim small">No runs yet.</div>
-        {/if}
-        {#each runs as r (r.id)}
-          <button class="run" class:on={selected?.id === r.id} aria-pressed={selected?.id === r.id} title={r.summary || r.error || r.status} onclick={() => void openRun(r)}>
-            <span class="st {r.status}"></span>
-            <span class="when">{r.started_at ? rel(r.started_at) : 'never'}</span>
-            <span class="sum dim">{r.summary || r.error || r.status}</span>
-          </button>
-        {/each}
-      </aside>
-      <article class="report card">
+    <!-- Runs | report: the shared list pane (push on a phone, "‹ Runs"). -->
+    <div class="body card">
+      <ListDetail module="kubernetes" pane="insights" name="Runs" open={phoneOpen} onback={() => (phoneOpen = false)} empty={!runs.length}>
+        {#snippet list()}
+          <ListPane count={runs.length}>
+            {#each runs as r (r.id)}
+              <SideRow
+                title={r.started_at ? rel(r.started_at) : 'never'}
+                meta={r.summary || r.error || r.status}
+                selected={selected?.id === r.id}
+                tip={r.summary || r.error || r.status}
+                onclick={() => { phoneOpen = true; void openRun(r); }}
+              >
+                {#snippet trailing()}<span class="st {r.status}">{r.status}</span>{/snippet}
+              </SideRow>
+            {/each}
+          </ListPane>
+        {/snippet}
+      <article class="report">
         {#if reportLoading}
           <Skeleton rows={6} height={16} />
         {:else if reportError}
@@ -185,10 +194,13 @@
           <div class="md">{@html html}</div>
         {:else if selected}
           <div class="dim">This run has no report{selected.error ? `: ${selected.error}` : '.'}</div>
+        {:else if !runs.length}
+          <EmptyState icon="clock" title="No runs yet" body="Run now, or wait for the watchdog’s next scheduled run." />
         {:else}
           <div class="dim">Select a run.</div>
         {/if}
       </article>
+      </ListDetail>
     </div>
   {/if}
 </div>
@@ -253,67 +265,30 @@
     color: var(--danger);
     border-color: color-mix(in srgb, var(--danger) 40%, transparent);
   }
+  /* A bounded box: the runs pane and the report scroll inside it. */
   .body {
-    display: grid;
-    grid-template-columns: 240px minmax(0, 1fr);
-    gap: 12px;
-    min-height: 300px;
-  }
-  .runs {
-    padding: 10px;
     display: flex;
-    flex-direction: column;
-    gap: 4px;
-    max-height: 70vh;
-    overflow: auto;
+    block-size: min(70vh, 720px);
+    min-block-size: 300px;
+    overflow: hidden;
   }
-  .run {
-    display: grid;
-    grid-template-columns: auto auto 1fr;
-    gap: 6px;
-    align-items: center;
-    text-align: start;
-    background: none;
-    border: 1px solid transparent;
-    border-radius: var(--radius-s);
-    padding: 4px 6px;
-    font-size: var(--fs-s);
-    cursor: pointer;
-    color: inherit;
-  }
-  .run.on {
-    background: var(--surface-2);
-    border-color: var(--border);
-  }
-  .st {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--text-dim);
-  }
+  /* The run's status as a word, coloured as before. */
   .st.done,
   .st.ok {
-    background: var(--status-working);
+    color: var(--success);
   }
   .st.failed,
   .st.error {
-    background: var(--status-exited);
+    color: var(--danger);
   }
   .st.running {
-    background: var(--accent);
-  }
-  .when {
-    white-space: nowrap;
-  }
-  .sum {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    color: var(--accent-text);
   }
   .report {
+    flex: 1;
+    min-width: 0;
     padding: 14px 18px;
     overflow: auto;
-    max-height: 70vh;
   }
   .md :global(h1) {
     font-size: var(--fs-l);
@@ -365,13 +340,5 @@
   @container (max-width: 620px) {
     .head { flex-direction: column; align-items: stretch; }
     .who { width: 100%; }
-    .body { grid-template-columns: minmax(0, 1fr); }
-    .runs { max-height: 180px; }
-    .report { max-height: none; }
-  }
-  @media (max-width: 640px) {
-    .body {
-      grid-template-columns: 1fr;
-    }
   }
 </style>

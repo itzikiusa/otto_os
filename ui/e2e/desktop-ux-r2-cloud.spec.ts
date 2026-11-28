@@ -100,7 +100,7 @@ test('Kubernetes splitter supports RTL pointer and keyboard resize', async ({ pa
   await page.addInitScript(() => localStorage.setItem('otto_direction', 'rtl'));
   await openPage(page, `kubernetes/ux-cluster/pods/default/${pod.name}`);
   // The ARIA window splitter: a focusable separator carrying aria-valuenow.
-  const splitter = page.getByRole('separator', { name: 'Resize details' });
+  const splitter = page.getByRole('separator', { name: 'Resize Pod details' });
   const drawer = page.getByTestId('k8s-drawer');
   const before = (await drawer.boundingBox())!.width;
   const box = (await splitter.boundingBox())!;
@@ -112,7 +112,7 @@ test('Kubernetes splitter supports RTL pointer and keyboard resize', async ({ pa
   await page.keyboard.press('ArrowRight');
   expect((await drawer.boundingBox())!.width).toBeGreaterThan(dragged);
   await page.keyboard.press('Home');
-  await expect(splitter).toHaveAttribute('aria-valuenow', '320');
+  await expect(splitter).toHaveAttribute('aria-valuenow', '300');
 });
 
 test('Kubernetes RTL logs retain LTR punctuation and metrics retry recovers', async ({ page }) => {

@@ -68,6 +68,8 @@ test.beforeEach(({}, testInfo) => {
 });
 
 test('a module switch and a reload bring the Kubernetes view back; the active module goes home', async ({ page }) => {
+  // Wide enough that the details sit beside the table (a narrower window shows them as a sheet).
+  await page.setViewportSize({ width: 1440, height: 900 });
   await fixture(page);
   await openPage(page, `kubernetes/${cluster.id}/pods/default/${POD}`);
   await expect(page.getByTestId('k8s-drawer')).toBeVisible();
