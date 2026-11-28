@@ -144,13 +144,13 @@ async function openGraph(page: Page): Promise<void> {
 async function showGraph(page: Page): Promise<void> {
   const graph = page.locator('.graph-row').first();
   const current = page.locator('.refs-panel .ref-row.current');
-  await expect(graph.or(current).first()).toBeVisible({ timeout: 25_000 });
+  await expect(page.locator('.graph-row:visible, .refs-panel .ref-row.current:visible').first()).toBeVisible({ timeout: 25_000 });
   if (await graph.isHidden()) await current.tap();
   await expect(graph).toBeVisible({ timeout: 25_000 });
 }
 
 /** History opens on the WIP row of a dirty tree: the WIP panel in the Detail
- *  pane (a sheet over the Branches list on a phone, over the graph on a tablet). */
+ *  pane (a sheet over the graph on a phone or a tablet). */
 async function openWip(page: Page): Promise<void> {
   await page.goto(`/#/git/${dirtyRepoId}/graph`);
   await expect(page.locator('.wip-row')).toHaveAttribute('aria-pressed', 'true', { timeout: 25_000 });
