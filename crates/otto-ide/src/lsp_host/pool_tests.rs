@@ -637,8 +637,16 @@ async fn a_changed_cpp_toolchain_stops_only_that_projects_local_clangd() {
     let note = recv(&mut proj).await;
     assert_eq!(note["method"], "otto/lspEvicted");
     assert_eq!(note["params"]["reason"], "toolchain_changed");
-    assert_eq!(pool.live_servers(), 2, "the other project's clangd and tsls stay");
+    assert_eq!(
+        pool.live_servers(),
+        2,
+        "the other project's clangd and tsls stay"
+    );
 
     let _again = pool.attach(cpp("/proj"), "clangd", &[]).unwrap();
-    assert_eq!(fake.spawns.load(Ordering::SeqCst), 4, "reattach spawns a new server");
+    assert_eq!(
+        fake.spawns.load(Ordering::SeqCst),
+        4,
+        "reattach spawns a new server"
+    );
 }

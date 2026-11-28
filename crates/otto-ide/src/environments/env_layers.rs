@@ -554,7 +554,10 @@ mod cpp_sdkroot_tests {
         assert_eq!(managed["CXX"], format!("{llvm}/bin/clang++"));
         let clt = apply("/Library/Developer/CommandLineTools/usr", BTreeMap::new());
         assert!(!clt.contains_key("SDKROOT"));
-        let own = apply(&llvm, BTreeMap::from([("SDKROOT".into(), "/custom".into())]));
+        let own = apply(
+            &llvm,
+            BTreeMap::from([("SDKROOT".into(), "/custom".into())]),
+        );
         assert_eq!(own["SDKROOT"], "/custom");
     }
 }
