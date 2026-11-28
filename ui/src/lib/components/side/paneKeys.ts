@@ -107,6 +107,15 @@ export function fitPaneMax(rowW: number, range: PaneRange, minContent = MIN_CONT
   return Math.max(range.min, Math.min(range.max, Math.floor(rowW - minContent)));
 }
 
+/** A list nested in another list's content (Brokers › Consumer groups,
+ *  Settings › Access groups) whose row cannot hold its list at the minimum
+ *  AND the content's `minContent` (a tablet beside the outer list) pushes
+ *  like a phone: the list is the content until an item opens, then the item
+ *  with a Back. A top-level list never does (it clamps). Unknown width → no. */
+export function nestedPush(rowW: number, range: PaneRange, nested: boolean, minContent = MIN_CONTENT): boolean {
+  return nested && rowW > 0 && rowW < range.min + minContent;
+}
+
 /** A Detail pane in a row `rowW` wide: inline while the content keeps
  *  `minContent` beside the pane at its minimum, else a sheet over the content.
  *  `shown` is the inline width (the user's, or all the room when maximized,

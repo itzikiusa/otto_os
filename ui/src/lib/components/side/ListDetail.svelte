@@ -15,6 +15,9 @@
   //                     list's scroll and the content's state.
   //   empty             no pane at all: the content (the page's EmptyState)
   //                     owns the page.
+  //   nested, no room   a ListDetail inside another's content whose row can't
+  //                     hold the list (min) + 480 pushes like a phone, its Back
+  //                     in PageHeader at every size (paneKeys nestedPush).
   //
   // Width and hidden persist as otto.pane.<module>.<pane>.{w,hidden}; a page
   // that used other keys passes them once as `legacy`. Open on an item (the
@@ -28,7 +31,7 @@
   import PaneDivider from '../PaneDivider.svelte';
   import { viewport } from '../../stores/viewport.svelte';
   import { pageNav } from './pageNav.svelte';
-  import { LIST_PANE, WIDE_LIST_PANE, fitPaneMax, loadPaneHidden, loadPaneW, paneKey, paneStorage, savePaneHidden, type PaneLegacy } from './paneKeys';
+  import { LIST_PANE, WIDE_LIST_PANE, fitPaneMax, loadPaneHidden, loadPaneW, nestedPush, paneKey, paneStorage, savePaneHidden, type PaneLegacy } from './paneKeys';
   import { LIST_DETAIL, type ListDetailCtx, type PaneHeader } from './context';
 
   interface Props {
@@ -68,21 +71,23 @@
   let hidden = $state(loadPaneHidden(store, module, pane, legacy));
   let rowW = $state(0);
 
-  // A phone, or a phone on its side (viewport.navDrawer): the list pushes.
-  const phone = $derived(viewport.navDrawer);
+  const parent = getContext<ListDetailCtx | undefined>(LIST_DETAIL);
+  // A phone, or a phone on its side (viewport.navDrawer), or a nested list
+  // with no room beside its content (nestedPush): the list pushes.
+  const phone = $derived(viewport.navDrawer || nestedPush(rowW, range, !!parent));
   const max = $derived(fitPaneMax(rowW, range));
   const listShown = $derived(!empty && (phone ? !open : !hidden));
   const contentShown = $derived(empty || !phone || open);
 
   let header = $state.raw<PaneHeader | null>(null);
-  const phoneList = $derived(phone && listShown);
+  // Only a real phone hands the pane's header to the page header.
+  const phoneList = $derived(viewport.navDrawer && listShown);
 
   function setHidden(h: boolean): void {
     hidden = h;
     savePaneHidden(store, module, pane, h);
   }
 
-  const parent = getContext<ListDetailCtx | undefined>(LIST_DETAIL);
   const visible = (): boolean => (parent ? parent.contentVisible() : true);
   setContext<ListDetailCtx>(LIST_DETAIL, {
     get name() {

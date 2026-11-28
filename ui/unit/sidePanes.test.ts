@@ -8,6 +8,7 @@ import {
   LIST_PANE,
   WIDE_LIST_PANE,
   detailFit,
+  nestedPush,
   fitPaneMax,
   loadPaneHidden,
   loadPaneW,
@@ -103,4 +104,11 @@ test('a phone list page keeps the page: its ⋯ = the pane menu, then the page m
   assert.equal(listPageMenu(undefined, page), page);
   assert.equal(listPageMenu(undefined, undefined), undefined);
   assert.deepEqual(listPageMenu(() => [], page)?.().map((i) => ('label' in i ? i.label : '—')), ['Switch context'], 'no separator around nothing');
+});
+
+test('a nested list with no room beside its content pushes; a top-level one never does', () => {
+  assert.equal(nestedPush(517, LIST_PANE, true), true, 'tablet: 517 < 220 + 480');
+  assert.equal(nestedPush(900, LIST_PANE, true), false, 'room for 220 + 480');
+  assert.equal(nestedPush(517, LIST_PANE, false), false, 'top-level lists clamp instead');
+  assert.equal(nestedPush(0, LIST_PANE, true), false, 'not measured yet');
 });

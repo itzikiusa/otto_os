@@ -137,7 +137,9 @@
   });
   const compactRow = $derived(pageTop && inCenter && !isTauri);
   const phoneRow = $derived(compactRow && viewport.navDrawer);
-  const back = $derived(phoneRow ? pageNav.back : null);
+  // (A nested list that pushes for want of room — paneKeys nestedPush — has its
+  // Back here on a tablet or desktop too.)
+  const back = $derived(phoneRow || pageTop ? pageNav.back : null);
   // …and while a list IS the page (ListDetail on a phone), the row is that
   // list's header: ☰ · name count · its one primary · its ⋯ · Side panel.
   // The page's own `more` rows follow the pane's in that ⋯, and its `tabs`
@@ -432,7 +434,7 @@
   data-testid="page-header"
 >
   <div class="ph-row">
-    {#if (leading && !listPage) || phoneRow || showPane}
+    {#if (leading && !listPage) || phoneRow || showPane || back}
       <div class="ph-leading">
         <HeaderChrome part="lead" drawer={phoneRow} {back} show={showPane} />
         {#if !listPage}{@render leading?.()}{/if}
