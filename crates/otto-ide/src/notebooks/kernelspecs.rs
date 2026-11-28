@@ -256,10 +256,13 @@ pub async fn discover_kernels(
             }
             let env_map: BTreeMap<String, String> =
                 ks.env.clone().unwrap_or_default().into_iter().collect();
+            // The env's own ipykernel runs the env's python itself (the same
+            // file in the same prefix), not just any binary under its prefix.
             let owner_env = envs.iter().position(|e| {
                 argv.len() == 5
                     && argv[1..] == IPYKERNEL_TAIL
                     && prefix_of(&argv[0]) == prefix_of(&e.python)
+                    && canon(Path::new(&argv[0])) == canon(Path::new(&e.python))
             });
             let standard = owner_env.is_some() && env_map.is_empty();
             if let Some(i) = owner_env {
@@ -538,5 +541,41 @@ mod tests {
             panic!()
         };
         assert_eq!(spec.argv, ipykernel_argv(&venv_py));
+    }
+
+    #[tokio::test]
+    async fn a_project_spec_that_runs_another_binary_of_the_env_asks_first() {
+        // SEC6-6: same env prefix, ipykernel argv tail, no env, but not the env's python.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("proj");
+        let data = tmp.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let real_py = tmp.path().join("base/bin/python3.12");
+        write(&real_py, "");
+        write(&root.join(".venv/pyvenv.cfg"), "version = 3.12.1\n");
+        write(&root.join(".venv/bin/bash"), "");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real_py, root.join(".venv/bin/python")).unwrap();
+        write(
+            &root.join(".venv/lib/python3.12/site-packages/ipykernel/__init__.py"),
+            "",
+        );
+        let bash = root.join(".venv/bin/bash").to_string_lossy().into_owned();
+        write(
+            &root.join(".venv/share/jupyter/kernels/python3/kernel.json"),
+            &format!(
+                r#"{{"argv":["{bash}","-m","ipykernel_launcher","-f","{{connection_file}}"],"display_name":"Python 3 (ipykernel)","language":"python"}}"#
+            ),
+        );
+        let found = discover_kernels(&root, &data, "local:proj", None).await;
+        let k = found
+            .iter()
+            .find(|k| k.info.interpreter == bash)
+            .unwrap_or_else(|| panic!("the spec is listed: {found:#?}"));
+        assert_eq!(k.info.origin.as_deref(), Some("workspace"));
+        assert!(
+            k.info.needs_trust,
+            "a spec that is not the env's python asks first"
+        );
     }
 }
