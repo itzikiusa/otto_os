@@ -71,6 +71,11 @@
   // Phone: the list is the page until something is opened (pushed, "‹ Collections").
   // A `#/api/<id>` link opens on the request.
   let phoneOpen = $state(untrack(() => router.parts[0] === 'api' && !!router.parts[1]));
+  // Beside the list (desktop / tablet) the request IS open: a window narrowed to a
+  // phone keeps it on screen, draft and focus included, with "‹ Collections".
+  $effect(() => {
+    if (!viewport.navDrawer) phoneOpen = true;
+  });
 
   let automationEditor: { approveLeave: () => Promise<boolean> } | undefined = $state();
   let environmentEditor: { approveLeave: () => Promise<boolean>; create: () => Promise<void> } | undefined = $state();
