@@ -218,6 +218,7 @@ class CombinedGutterMarker extends GutterMarker {
             ? [{ label: `Run '${item.label}' (keep containers)`, icon: 'play' as const, action: () => cbs.onGutterAction?.(item, 'run_keep_tc') }]
             : []),
           ...(debuggable ? [{ label: `Debug '${item.label}'`, icon: isIconName('bug') ? ('bug' as const) : ('target' as const), action: () => cbs.onGutterAction?.(item, 'debug') }] : []),
+          ...(item.note ? [{ separator: true }, { label: item.note, icon: 'info' as const, disabled: true, title: item.note }] : []),
         ]);
       });
       actSlot.appendChild(btn);

@@ -195,6 +195,7 @@ export type IdeRunnerKind =
   | 'xcode'
   | 'flutter'
   | 'react_native'
+  | 'kotest'
   | 'compound'
   | 'custom';
 
@@ -210,6 +211,8 @@ export interface IdeQuickRunSpec {
   debug_program?: string | null;
   debug_test_name?: string | null;
   language?: string | null;
+  /** Kotest: the names from the spec down to the container or test (empty: the whole spec). */
+  test_path?: string[] | null;
 }
 
 export interface IdeGutterItem {
@@ -218,6 +221,8 @@ export interface IdeGutterItem {
   label: string;
   language: string;
   run_spec: IdeQuickRunSpec;
+  /** A one-line note the item's menu shows (why a Kotest spec has no test items). */
+  note?: string | null;
 }
 
 export interface IdeGutterResp {
@@ -475,6 +480,8 @@ export interface IdeRunConfig {
   before_launch?: string | null;
   target_path?: string | null;
   test_filter?: string | null;
+  /** Kotest: the names from the spec (`test_filter`) down to the container or test; gutter runs only. */
+  test_path?: string[];
   maven_profiles?: string[];
   spring_profiles?: string[];
   skip_tests?: boolean;
@@ -654,32 +661,6 @@ export interface IdeBreakpoint {
   message?: string | null;
 }
 
-export interface IdeDebugLaunch {
-  program: string;
-  args?: string[];
-  build_flags?: string[];
-  cwd?: string | null;
-  test_name?: string | null;
-  /** The line of the test's `test(` call (Playwright selects `file:line`). */
-  test_line?: number | null;
-  is_test?: boolean;
-  attach_port?: number | null;
-  attach_pid?: number | null;
-  attach_process_name?: string | null;
-  core_file?: string | null;
-  env?: Record<string, string>;
-  env_file?: string | null;
-  inherit_shell_env?: boolean;
-  sdk_path?: string | null;
-  maven_profiles?: string[];
-  spring_profiles?: string[];
-  skip_tests?: boolean;
-  offline?: boolean;
-  /** .NET test debugging: the one target framework to run (`dotnet test -f`). */
-  test_framework?: string | null;
-}
-export type IdeDebugLaunchSpec = IdeDebugLaunch;
-
 export interface IdeStartDebugReq {
   target: IdeTargetSpec;
   language: string;
@@ -737,8 +718,8 @@ export interface IdeInlineValue {
   value: string;
 }
 
-export type { IdeDebugOutput, IdeDebugTarget } from './ide-debug';
-import type { IdeDebugOutput, IdeDebugTarget } from './ide-debug';
+export type { IdeDebugLaunch, IdeDebugLaunchSpec, IdeDebugOutput, IdeDebugTarget } from './ide-debug';
+import type { IdeDebugLaunch, IdeDebugOutput, IdeDebugTarget } from './ide-debug';
 
 export interface IdeDebugSessionSnapshot {
   id: string;

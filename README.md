@@ -41,7 +41,7 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
   Unreal formatters, exception breakpoints, PID/process-name attach and core
   dumps). Kotlin & Spring Boot get Kotlin highlighting,
   `kotlin-language-server`, mixed Java/Kotlin modules, JUnit 5 gutter runs
-  and Kotest spec-level gutter runs, Gradle `libs.versions.toml` inspection, JVM JDWP debugging,
+  and Kotest gutter Run / Debug of one spec, container or test (Kotest 6.1+, Gradle or Maven), Gradle `libs.versions.toml` inspection, JVM JDWP debugging,
   `application.properties`/`application.yml` completion, hover, and navigation
   (plus `.properties` deprecation quick fixes), a loopback-only Actuator
   inspector (every `/env` value redacted), and DevTools `.reloadtrigger` restart check. .NET (C# / F# / Unity / Unreal C#) gets

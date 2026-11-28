@@ -580,7 +580,7 @@ export function launchGutterAction(
   item: IdeGutterItem,
   mode: 'run' | 'debug' | 'run_keep_tc',
   onRun: (adhoc: Partial<IdeRunConfig>, keepTestcontainers?: boolean) => void,
-  onDebug: (opts: { language: string; launch: { program: string; args: string[]; build_flags?: string[]; cwd: string; test_name?: string; test_line?: number } }) => void,
+  onDebug: (opts: { language: string; launch: { program: string; args: string[]; build_flags?: string[]; cwd: string; test_name?: string; test_line?: number; test_path?: string[] } }) => void,
 ): void {
   const spec = item.run_spec ?? {};
   const filePath = spec.target_path || spec.program || host.activePath || '';
@@ -604,8 +604,8 @@ export function launchGutterAction(
         ...(goFlags.length > 0 ? { build_flags: goFlags } : {}),
         cwd: spec.cwd || repoInfo.path || host.target.root,
         test_name: spec.debug_test_name || spec.test_name || spec.test_filter || (item.kind === 'test' ? item.label : undefined),
-        // Playwright selects a test or a describe by the line of its call.
-        ...(spec.runner === 'playwright' ? { test_line: item.line } : {}),
+        // Playwright selects a test by its line; Kotest a container or test by its path of names.
+        ...(spec.runner === 'playwright' ? { test_line: item.line } : {}), ...(spec.runner === 'kotest' ? { test_path: spec.test_path ?? [] } : {}),
       },
     });
     return;
@@ -619,7 +619,7 @@ export function launchGutterAction(
       cwd: spec.cwd ?? repoInfo.path ?? null,
       env_overrides: keepTc ? { TESTCONTAINERS_RYUK_DISABLED: 'true' } : {},
       inherit_shell_env: host.projectEnv?.inherit_shell_env ?? true,
-      target_path: filePath || null, test_filter: spec.test_filter || spec.test_name || null,
+      target_path: filePath || null, test_filter: spec.test_filter || spec.test_name || null, ...(spec.runner === 'kotest' ? { test_path: spec.test_path ?? [] } : {}),
     },
     keepTc,
   );
@@ -631,7 +631,7 @@ export async function launchDebugSession(
     configId?: string;
     language?: string;
     confirmProdTargets?: boolean;
-    launch?: { program: string; args?: string[]; build_flags?: string[]; cwd?: string; test_name?: string; test_line?: number; attach_port?: number; env?: Record<string, string>; env_file?: string | null; inherit_shell_env?: boolean; sdk_path?: string | null };
+    launch?: { program: string; args?: string[]; build_flags?: string[]; cwd?: string; test_name?: string; test_line?: number; test_path?: string[]; attach_port?: number; env?: Record<string, string>; env_file?: string | null; inherit_shell_env?: boolean; sdk_path?: string | null };
   },
   prevCtl: AbortController | null,
   onSnapshot: (snap: IdeDebugSessionSnapshot) => void,

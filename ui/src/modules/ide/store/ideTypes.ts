@@ -212,11 +212,12 @@ export interface IdeQuickRunSpec {
   runner?: string; command?: string | null; args?: string[]; cwd?: string | null;
   target_path?: string | null; test_filter?: string | null; test_name?: string | null;
   program?: string | null; debug_program?: string | null; debug_test_name?: string | null; language?: string | null;
+  test_path?: string[] | null;
 }
 
 export interface IdeGutterItem {
   line: number; kind: 'test' | 'suite' | 'main' | 'bench';
-  label: string; language: string; run_spec: IdeQuickRunSpec;
+  label: string; language: string; run_spec: IdeQuickRunSpec; note?: string | null;
 }
 
 export interface IdeSymbolNode {
@@ -334,7 +335,7 @@ export interface IdeRunConfig {
   build_flags?: string[]; cwd?: string | null; env_overrides: Record<string, string>;
   env_file?: string | null; inherit_shell_env?: boolean; sdk_path?: string | null;
   toolchain_id?: string | null; compound_configs?: string[]; auto_detected?: boolean;
-  before_launch?: string | null; target_path?: string | null; test_filter?: string | null;
+  before_launch?: string | null; target_path?: string | null; test_filter?: string | null; test_path?: string[];
   maven_profiles?: string[]; spring_profiles?: string[]; skip_tests?: boolean; offline?: boolean; coverage?: boolean;
 }
 
