@@ -129,8 +129,9 @@ export function threadOptionLabel(
 }
 
 /** The Frames column: wide enough for `testing.tRunner  testing.go:2195` and the
- *  goroutine picker (at 190px names were cut to ~9 characters). */
-export const FRAMES_PANE = { default: 280, min: 220, max: 560 } as const;
+ *  goroutine picker (at 190px names were cut to ~9 characters). The shared list
+ *  pane range (LIST_PANE, 220–420), default 280. */
+export const FRAMES_PANE = { default: 280, min: 220, max: 420 } as const;
 
 /** Hover text for the thread picker: the active thread's full label. */
 export function activeThreadTitle(

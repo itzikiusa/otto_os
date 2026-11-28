@@ -10,7 +10,7 @@
   import PhoneBack from '../../../lib/components/side/PhoneBack.svelte';
   import SideRow from '../../../lib/components/side/SideRow.svelte';
   import SideSection from '../../../lib/components/side/SideSection.svelte';
-  import { LIST_PANE, loadPaneW, paneKey, paneStorage, type PaneRange } from '../../../lib/components/side/paneKeys';
+  import { loadPaneW, paneKey, paneStorage, type PaneRange } from '../../../lib/components/side/paneKeys';
   import { copyWithToast } from '../../../lib/clipboard';
   import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
   import { rowMenu } from '../../../lib/rowMenu';
@@ -25,7 +25,7 @@
   } from '../ideStore.svelte';
   import { ideDockPrefs } from './ideDockPrefs.svelte';
   import IdeVarRows from './IdeVarRows.svelte';
-  import { activeThreadTitle, threadOptionLabel } from './ideDebugPanelModel';
+  import { activeThreadTitle, FRAMES_PANE, threadOptionLabel } from './ideDebugPanelModel';
   import { selectDebugThread } from './ideDebugThread';
   import { collectValues, reexpandOpenPaths, VarChangeTracker } from './ideVarTree';
 
@@ -48,9 +48,9 @@
     phoneOpen = $bindable(false),
   }: Props = $props();
 
-  // Frames is a list pane (the shared range); Variables keeps its own wider range. Old keys read once.
+  // Frames is a list pane (the shared list range, FRAMES_PANE); Variables keeps its own wider range. Old keys read once.
   const VARS_PANE: PaneRange = { default: 340, min: 200, max: 680 };
-  let framesW = $state(loadPaneW(paneStorage(), 'ide', 'dbgFrames', LIST_PANE, { w: 'otto.ide.dbgFramesW' }, 280));
+  let framesW = $state(loadPaneW(paneStorage(), 'ide', 'dbgFrames', FRAMES_PANE, { w: 'otto.ide.dbgFramesW' }));
   let varsW = $state(loadPaneW(paneStorage(), 'ide', 'dbgVars', VARS_PANE, { w: 'otto.ide.dbgVarsW' }));
   /** Open scopes by NAME and open variables by PATH: both outlive a stop. */
   let openScopes = $state<Record<string, boolean>>({});
@@ -236,7 +236,7 @@
   </section>
 
   {#if (showVariables || hasTrailingConsole) && !phone}
-    <PaneDivider bind:width={framesW} storageKey={paneKey('ide', 'dbgFrames', 'w')} min={LIST_PANE.min} max={LIST_PANE.max} defaultWidth={280} label="Resize Frames" />
+    <PaneDivider bind:width={framesW} storageKey={paneKey('ide', 'dbgFrames', 'w')} min={FRAMES_PANE.min} max={FRAMES_PANE.max} defaultWidth={FRAMES_PANE.default} label="Resize Frames" />
   {/if}
 {/if}
 
