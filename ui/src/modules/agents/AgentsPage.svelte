@@ -10,7 +10,6 @@
   import { onMount, untrack } from 'svelte';
   import AgentsInbox from './AgentsInbox.svelte';
   import ListDetail from '../../lib/components/side/ListDetail.svelte';
-  import PageHeader from '../../lib/components/PageHeader.svelte';
   import { foldNavWhileMounted } from '../../lib/foldNavWhileMounted.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { activity } from '../../lib/stores/activity.svelte';
@@ -37,6 +36,12 @@
   // loaded only when the tab is shown).
   const SessionDetails = lazyComponent(() => import('./SessionDetailsCard.svelte'));
   const SESSION_TAB = 'page:agents-session' as const;
+  // The phone list page's header row is a PageHeader; desktop and tablet never
+  // draw one here (the tab strip is Agents' row), so it loads on a phone only.
+  const PhoneHeader = lazyComponent(() => import('../../lib/components/PageHeader.svelte'));
+  $effect(() => {
+    if (viewport.navDrawer) PhoneHeader.prefetch();
+  });
   const sessionDetails = $derived.by(() => {
     if (router.module !== 'agents' && router.module !== '') return null; // kept alive under another page
     const id = ws.activeSessionId;
@@ -159,7 +164,7 @@
 <div class="agents-page">
 {#if viewport.navDrawer && !sessionRouted}
   <!-- Phone: the list page's one header row (☰ · Sessions N · New · ⋯ · Side panel). -->
-  <PageHeader title="Agents" />
+  {#if PhoneHeader.component}<PhoneHeader.component title="Agents" />{/if}
 {/if}
 <div class="agents">
   <ListDetail
