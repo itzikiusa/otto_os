@@ -21,6 +21,8 @@ export interface GraphSelectionHost {
    *  tablet): History doesn't land on it, and a ref picked in the Branches
    *  list only shows its commit on the graph (a tap on the row opens it). */
   readonly compact: boolean;
+  /** A phone (or one on its side): the list pushes, a dirty tree still lands on its WIP sheet. */
+  readonly phone: boolean;
   /** Phone: push the graph on screen before a jump from the Branches list. */
   showGraph(): Promise<void>;
   readonly refs: RefsResp | null;
@@ -117,11 +119,11 @@ export function createGraphSelection(h: GraphSelectionHost) {
   }
 
   // Landing: History opens on the work, so the detail pane is never an empty
-  // "select a commit": the WIP row with uncommitted changes (on a phone, a
-  // sheet over the pushed graph — the commit card first), else the
-  // checked-out commit, but only where the pane sits beside the graph (a
-  // phone lands on the Branches list). Once per mount; a branch deep link or
-  // a reveal request then moves it.
+  // "select a commit": the WIP row with uncommitted changes, else the
+  // checked-out commit — only where the pane sits beside the graph, so a
+  // sheet never covers a tablet's page on arrival. A phone lands on its
+  // Branches list, or on a dirty tree's WIP sheet (the commit card first).
+  // Once per mount; a branch deep link or a reveal request then moves it.
   let landed = false;
   $effect(() => {
     if (landed) return;
@@ -131,7 +133,7 @@ export function createGraphSelection(h: GraphSelectionHost) {
     // After a tick: the Detail pane has measured its row by then (compact).
     untrack(() => void tick().then(() => {
       if (wipSelected || selectedSha) return;
-      if (dirty) openWip();
+      if (dirty && (!h.compact || h.phone)) openWip();
       else if (!h.compact) selectHead();
     }));
   });

@@ -117,6 +117,7 @@
     get repoId() { return repoId; },
     get status() { return status; },
     get compact() { return detailSheet; },
+    get phone() { return viewport.navDrawer; },
     showGraph: () => {
       if (!viewport.navDrawer) return Promise.resolve();
       phoneOpen = true;
