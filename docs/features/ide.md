@@ -269,7 +269,7 @@ global system directories:
 | **Rust** | `rustup` (`rustc` + `cargo`), `rust-analyzer`, `CodeLLDB` (`codelldb`) |
 | **Zig** | Official Zig SDK tarball (`ziglang.org/download/index.json`, SHA-256 verified), local SDK registration, `zls` (Zig-version-matched), `CodeLLDB` (`codelldb`) / `lldb-dap` / built-in `otto-lldb-dap` with Zig LLDB type formatters |
 | **C / C++ & Unreal Engine** | Clang / GCC / LLVM toolchain discovery & local registration, a managed **LLVM** download on the Mac (see below), `clangd` 23.1.0 (SHA-256 verified) (auto `--compile-commands-dir` including CMake/Meson/Unreal `Intermediate/ProjectFiles` + `textDocument/switchSourceHeader` `⌥O`), `clang-format`, CMake (Presets & CTest), Meson, Make, `vcpkg.json` / `conanfile.txt` / `.uproject` deps, `CodeLLDB` / `lldb-dap` / built-in `otto-lldb-dap` with C++ STL & Unreal pretty-printers, PID/process-name attach, and core-dump debugging |
-| **.NET (C# / F# / Unity / Unreal)** | Official .NET SDK tarball (`dotnetcli.azureedge.net` / `builds.dotnet.microsoft.com`, LTS 8.0 / 9.0), local SDK registration (`DOTNET_ROOT`), SDK-matched `csharp-ls` + `fsautocomplete` (with OmniSharp / Roslyn fallback), NuGet inspector & OSV vulnerabilities, `netcoredbg` (and `vsdbg` fallback) with `VSTEST_HOST_DEBUG` test debugging (several test projects or frameworks run as Debug All steps) & explicit PID attach (Unity Editor attach is not supported) |
+| **.NET (C# / F# / Unity / Unreal)** | Official .NET SDK tarball (`builds.dotnet.microsoft.com`, 10.0 LTS by default and 11.0 STS; 8.0 and 9.0 are end of life), local SDK registration (`DOTNET_ROOT`), SDK-matched `csharp-ls` + `fsautocomplete` (with OmniSharp / Roslyn fallback), NuGet inspector & OSV vulnerabilities, `netcoredbg` (and `vsdbg` fallback) with `VSTEST_HOST_DEBUG` test debugging (several test projects or frameworks run as Debug All steps) & explicit PID attach, and **Unity Editor attach** through DotRush's Mono debugger (`monodbg` 2026.11, installed on request from the .NET page; see §6) |
 | **Go** | Official Go SDK tarball, local SDK registration (`POST /ide/toolchains/local`), `gopls`, Delve (`dlv`), `gofumpt` |
 | **Node / TypeScript & Web Frameworks** | Node LTS (22), `pnpm`, `typescript-language-server`, `svelteserver` (Svelte/SvelteKit, untrusted mode), `vue-language-server` (Vue/Nuxt standalone mode), `ngserver` (Angular with `--tsProbeLocations`/`--ngProbeLocations`), `vscode-langservers-extracted`, `prettier`, `js-debug` & built-in `otto-node-cdp` (Node + Browser CDP attach with Vite/webpack URL mapping) |
 | **Shell (Bash / Zsh)** | `bash-language-server`, `shellcheck`, `shfmt`, built-in `otto-sh-dap` (`DEBUG` trap DAP debugger) |
@@ -504,7 +504,36 @@ source maps); one that never binds stays hollow with js-debug's reason.
   Karma in Angular CLI projects…"), and Playwright / Karma Debug on SSH targets
   (use Run there).
 
-`unity://attach` is refused with a message instead of opening a session.
+**Unity Editor attach** (this Mac; *verified against a Mono stand-in, not a
+real Unity Editor*). A Unity project folder (`Assets/` + `ProjectSettings/`)
+gets the launch target **Attach to Unity Editor**, which reads "· 6000.0.23f1 ·
+running" or "· not running" when the target menu opens (from the project's
+`Library/EditorInstance.json`: the PID must be alive and run an executable
+inside the Editor's `app_path`). It is debug-only: Run is disabled ("Attach
+targets can only be debugged"); **Debug** (⌃D) attaches to the Editor's Mono
+soft debugger on `127.0.0.1:56000 + pid % 1000` (Unity's formula) through
+DotRush's open-source Mono debug adapter `monodbg` (MIT), run as `dotnet
+monodbg.dll`. The adapter is not bundled: its release also carries Microsoft's
+`VSCodeDebugProtocol` library under Microsoft's own terms, so **Toolchains →
+.NET → Unity debugger** (or **Install Unity debugger** on the debugger's error
+card) downloads the pinned DotRush `2026.11` bundle (8.7 MB, SHA-256 checked)
+into `toolchains/dotnet/monodbg/2026.11/`, and the .NET 10 SDK too when no .NET
+10+ runtime is found (`monodbg` is `net10.0`). The symbols come from every
+`Library/ScriptAssemblies/*.dll` with a `.pdb` except Unity's own
+(`Unity.*`, `UnityEngine.*`, `UnityEditor.*`), so `.asmdef` assemblies count.
+Breakpoints, stepping, locals, watches, evaluate (method calls included),
+conditional breakpoints, logpoints and exception breakpoints work as in any
+session. **Stop detaches**: the Editor keeps running. Messages: no Editor has
+the project open ("No Unity Editor has this project open. Open it in Unity,
+then attach."), and a refused attach ("Couldn't attach to the Unity Editor on
+port N. Set Code Optimization to Debug (bug icon, bottom right of the Editor)
+and try again."). Attach to a local process needs a root caller, like PID
+attach. **Not verified** (no Unity Editor was available when this shipped):
+the real Editor's script reload (domain reload) while attached, Play mode, the
+Release code-optimization message against a real Editor, and `Vector3`-style
+engine types. **Out of scope:** players (on this Mac or other devices),
+iOS/Android/console players, IL2CPP builds and SSH targets. The old raw
+`unity://attach` is still refused.
 
 A Java Debug (or `java_main` Run) of a file in a Maven module takes the classpath
 from Maven itself (run from the reactor root with `-pl <module> -am`, using
