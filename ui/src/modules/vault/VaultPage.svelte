@@ -13,10 +13,11 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
-  import { lsGet, lsSet } from '../../lib/storage';
+  import { lsGet } from '../../lib/storage';
   import PageBody from '../../lib/components/PageBody.svelte';
   import ListDetail from '../../lib/components/side/ListDetail.svelte';
   import DetailPane from '../../lib/components/side/DetailPane.svelte';
+  import { DetailOpen } from '../../lib/components/side/detailOpen.svelte';
   import Tabs from '../../lib/components/Tabs.svelte';
   import { onTabKey } from '../../lib/tabKeys';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -47,11 +48,8 @@
   // otto_vault_right_open (default on). Where it would be a sheet over the
   // note (a phone, a narrow window) it opens only when asked, and that choice
   // isn't remembered — a sheet never covers a note by itself.
-  const DETAILS_KEY = 'otto_vault_right_open';
-  let detailsPref = $state(lsGet(DETAILS_KEY) !== '0');
-  let detailsSheet = $state(false);
-  let sheetOpen = $state(false);
-  const detailsShown = $derived(vault.centerMode === 'note' && !!vault.note && (detailsSheet ? sheetOpen : detailsPref));
+  const details = new DetailOpen('otto_vault_right_open');
+  const detailsShown = $derived(vault.centerMode === 'note' && !!vault.note && details.open);
   // The pane's two views: the note's details, or "Refine with Otto" (a live
   // agent on this note; NoteView's sparkle button and the tree's Review + fix
   // open it). Another note starts on Details again.
@@ -79,14 +77,7 @@
       setDetails(true);
     });
   });
-  function setDetails(show: boolean): void {
-    if (detailsSheet) {
-      sheetOpen = show;
-      return;
-    }
-    detailsPref = show;
-    lsSet(DETAILS_KEY, show ? '1' : '0');
-  }
+  const setDetails = (show: boolean): void => details.set(show);
   // a11y-6-01: a backlinks refresh failure is announced at its edge (the status-bar glyph is no live region).
   const backlinksError = $derived(vault.note ? (vault.backlinksError ?? '') : '');
   $effect(() => { if (backlinksError) announce(`Couldn’t refresh the backlinks. ${backlinksError}`); });
@@ -538,10 +529,8 @@
             module="vault"
             pane="details"
             title={detailView === 'refine' ? 'Refine with Otto' : 'Note details'}
-            open={detailsShown}
-            onclose={() => setDetails(false)}
-            ontoggle={() => setDetails(!detailsShown)}
-            bind:sheet={detailsSheet}
+            open={vault.centerMode === 'note' && !!vault.note}
+            control={details}
             testid="vault-details"
           >
             {#snippet views()}

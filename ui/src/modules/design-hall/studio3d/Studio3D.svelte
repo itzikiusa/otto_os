@@ -4,6 +4,7 @@
   import ListDetail from '../../../lib/components/side/ListDetail.svelte';
   import ListPane from '../../../lib/components/side/ListPane.svelte';
   import DetailPane from '../../../lib/components/side/DetailPane.svelte';
+  import { DetailOpen } from '../../../lib/components/side/detailOpen.svelte';
   import { toastError } from '../../../lib/toastError';
   import { copyWithToast } from '../../../lib/clipboard';
   import { untrack, type Snippet } from 'svelte';
@@ -152,14 +153,8 @@
   // Details is its Detail pane — beside the viewport while it keeps 480 px
   // (starts open), else a sheet that opens on request.
   let phoneOpen = $state(true);
-  let detailsInline = $state(true);
-  let detailsSheet = $state(false);
-  let detailsSheetOpen = $state(false);
-  const showDetailsDrawer = $derived(detailsSheet ? detailsSheetOpen : detailsInline);
-  function setDetails(open: boolean): void {
-    if (detailsSheet) detailsSheetOpen = open;
-    else detailsInline = open;
-  }
+  const details = new DetailOpen();
+  const setDetails = (open: boolean): void => details.set(open);
   let turntable = $state(false);
   // ── 3D Inspection & Polygon Commenting ────────────────────────────────────
   let shading = $state<ShadingMode>('shaded');
@@ -702,8 +697,8 @@
         {isModelArtifact}
         canEdit={auth.can('design', 'edit')}
         {canComment}
-        detailsOpen={showDetailsDrawer}
-        ondetails={() => setDetails(!showDetailsDrawer)}
+        detailsOpen={details.open}
+        ondetails={() => details.toggle()}
         ongenerate={generateMenu}
         {exportItems}
         {pipelineItems}
@@ -804,7 +799,7 @@
     </section>
 
     {#snippet detail()}
-    <DetailPane module="design" pane="details3d" title="Details" open={showDetailsDrawer} onclose={() => setDetails(false)} ontoggle={() => setDetails(!showDetailsDrawer)} bind:sheet={detailsSheet} testid="s3d-details-panel">
+    <DetailPane module="design" pane="details3d" title="Details" control={details} testid="s3d-details-panel">
       {#snippet views()}
         <div class="s3d-views"><Tabs size="s" label="Details panel" idBase="s3d" tabs={rightTabs} value={rightTab} onchange={(id) => (rightTab = id)} /></div>
       {/snippet}

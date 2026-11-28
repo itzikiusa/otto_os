@@ -25,6 +25,7 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import DetailPane from '../../lib/components/side/DetailPane.svelte';
+  import { DetailOpen } from '../../lib/components/side/detailOpen.svelte';
   import type { GraphWorkerIn, GraphWorkerOut } from './graph.worker';
   import { carrySeed } from './graphSeed';
   import { truncationNote, type TruncationNote } from './graphTruncation';
@@ -97,14 +98,7 @@
   let dataRev = $state(0); // bumped per adopted payload (re-runs dependent effects)
   // The controls are the Graph view's Detail pane: beside the graph (while it
   // keeps 480 px) they start open; as a sheet over it they open on request.
-  let panelInline = $state(true);
-  let panelSheet = $state(false);
-  let sheetOpen = $state(false);
-  const panelOpen = $derived(panelSheet ? sheetOpen : panelInline);
-  function setPanel(open: boolean): void {
-    if (panelSheet) sheetOpen = open;
-    else panelInline = open;
-  }
+  const panel = new DetailOpen();
 
   let rawNodeCount = $state(0); // pre-filter totals, for the "312 / 9,179" readout
   let rawEdgeCount = $state(0);
@@ -1369,8 +1363,8 @@
     {/if}
   </div>
 
-  {#if !panelOpen}
-    <button class="mini panel-open" onclick={() => setPanel(true)} aria-label="Graph controls" title="Graph controls: filter, focus, forces, display (⌥⌘B)" data-testid="vault-graph-controls">
+  {#if !panel.open}
+    <button class="mini panel-open" onclick={() => panel.set(true)} aria-label="Graph controls" title="Graph controls: filter, focus, forces, display (⌥⌘B)" data-testid="vault-graph-controls">
       <Icon name="filter" size={12} /> Controls
     </button>
   {/if}
@@ -1386,10 +1380,7 @@
   module="vault"
   pane="graph"
   title="Graph"
-  open={panelOpen}
-  onclose={() => setPanel(false)}
-  ontoggle={() => setPanel(!panelOpen)}
-  bind:sheet={panelSheet}
+  control={panel}
   legacy={{ w: 'otto_vault_graph_panel_width' }}
   testid="vault-graph-panel"
 >

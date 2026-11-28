@@ -32,6 +32,7 @@
   import ListDetail from '../../../lib/components/side/ListDetail.svelte';
   import ListPane from '../../../lib/components/side/ListPane.svelte';
   import DetailPane from '../../../lib/components/side/DetailPane.svelte';
+  import { DetailOpen } from '../../../lib/components/side/detailOpen.svelte';
   import { toastError } from '../../../lib/toastError';
   import { onDestroy, untrack } from 'svelte';
   import { product, toBase64 } from '../../../lib/stores/product.svelte';
@@ -200,14 +201,9 @@
   // beside the stage while it keeps 480 px (starts open), else a sheet that
   // opens on request (Refine opens it).
   let phoneOpen = $state(false);
-  let inspInline = $state(true);
-  let inspSheet = $state(false);
-  let inspSheetOpen = $state(false);
-  const inspOpen = $derived(inspSheet ? inspSheetOpen : inspInline);
-  function setInsp(open: boolean): void {
-    if (inspSheet) inspSheetOpen = open;
-    else inspInline = open;
-  }
+  const insp = new DetailOpen();
+  const inspOpen = $derived(insp.open);
+  const setInsp = (open: boolean): void => insp.set(open);
   let importInput = $state<HTMLInputElement | null>(null);
   let importing = $state(false);
   /** How the Assistant is shown: creating (full stage, own live preview) or
@@ -1065,10 +1061,8 @@
     module="product"
     pane="inspector"
     title="Inspector"
-    open={inspOpen && !assistCreating}
-    onclose={() => setInsp(false)}
-    ontoggle={() => setInsp(!inspOpen)}
-    bind:sheet={inspSheet}
+    open={!assistCreating}
+    control={insp}
     testid="arena-inspector-pane"
   >
   <div class="arena-inspector">

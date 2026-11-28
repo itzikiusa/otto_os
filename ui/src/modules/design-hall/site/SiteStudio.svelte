@@ -33,6 +33,7 @@
   import ListDetail from '../../../lib/components/side/ListDetail.svelte';
   import ListPane from '../../../lib/components/side/ListPane.svelte';
   import DetailPane from '../../../lib/components/side/DetailPane.svelte';
+  import { DetailOpen } from '../../../lib/components/side/detailOpen.svelte';
   import Tabs from '../../../lib/components/Tabs.svelte';
   import Inspector from './Inspector.svelte';
   import TemplatePicker from './TemplatePicker.svelte';
@@ -83,18 +84,11 @@
   // chosen ("‹ Layers"). The Design inspector is the Detail pane (ArtifactView's
   // details, or a plain one).
   let phoneOpen = $state(false);
-  let inspInline = $state(true);
-  let inspSheet = $state(false);
-  let inspSheetOpen = $state(false);
-  const plainInsp = $derived(inspSheet ? inspSheetOpen : inspInline);
-  function setInsp(open: boolean): void {
-    if (inspSheet) inspSheetOpen = open;
-    else inspInline = open;
-  }
-  const inspShown = $derived(details ? detailsShown : plainInsp);
+  const plain = new DetailOpen();
+  const inspShown = $derived(details ? detailsShown : plain.open);
   function showInsp(open: boolean): void {
     if (details) ontoggledetails?.(open);
-    else setInsp(open);
+    else plain.set(open);
   }
   const LEFT_TABS = [
     { id: 'pages', label: 'Pages', icon: 'file', testid: 'site-tab-pages' },
@@ -751,7 +745,7 @@
         {#snippet detail()}
           {#if details}{@render details(inspector)}
           {:else}
-            <DetailPane module="design" pane="site-design" title="Design" open={plainInsp} onclose={() => setInsp(false)} ontoggle={() => setInsp(!plainInsp)} bind:sheet={inspSheet}>
+            <DetailPane module="design" pane="site-design" title="Design" control={plain}>
               <div class="insp">{@render inspector()}</div>
             </DetailPane>
           {/if}

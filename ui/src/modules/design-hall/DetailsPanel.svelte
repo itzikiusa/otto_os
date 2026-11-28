@@ -7,18 +7,16 @@
   // Comments as its views (Site Studio puts its Design inspector first). Otto
   // is the default (the Otto panel pins the brief on top); "Find references"
   // lives inside Links (LinksTab). Beside the stage while it keeps 480 px,
-  // else a right sheet (full width on a phone) — the host decides open.
+  // else a right sheet (full width on a phone), opened on request — the
+  // host's DetailOpen (`control`).
   import type { Snippet } from 'svelte';
   import DetailPane from '../../lib/components/side/DetailPane.svelte';
+  import type { DetailOpen } from '../../lib/components/side/detailOpen.svelte';
   import Tabs, { type TabItem } from '../../lib/components/Tabs.svelte';
 
   interface Props {
     tab: DetailsTab;
-    open: boolean;
-    onclose: () => void;
-    ontoggle: () => void;
-    /** Bound: presented as a sheet right now. */
-    sheet?: boolean;
+    control: DetailOpen;
     linkCount: number;
     versionCount: number | null;
     otto: Snippet;
@@ -32,10 +30,7 @@
   }
   let {
     tab = $bindable(),
-    open,
-    onclose,
-    ontoggle,
-    sheet = $bindable(false),
+    control,
     linkCount,
     versionCount,
     otto,
@@ -55,7 +50,7 @@
   ]);
 </script>
 
-<DetailPane module="design" pane="details" title="Design details" {open} {onclose} {ontoggle} bind:sheet testid="design-details">
+<DetailPane module="design" pane="details" title="Design details" {control} testid="design-details">
   {#snippet views()}
     <Tabs size="s" label="Details panel" idBase="dh" {tabs} value={tab} onchange={(id) => (tab = id)} />
   {/snippet}

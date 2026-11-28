@@ -37,6 +37,7 @@
   import ArtifactStage, { d2Svg } from './ArtifactStage.svelte';
   import VersionsPanel from './VersionsPanel.svelte';
   import DetailsPanel, { type DetailsTab } from './DetailsPanel.svelte';
+  import { DetailOpen } from '../../lib/components/side/detailOpen.svelte';
   import LinksTab from './LinksTab.svelte';
   import MirrorBanner from './MirrorBanner.svelte';
   import SaveIndicator from './SaveIndicator.svelte';
@@ -102,14 +103,9 @@
   // Design details is the view's Detail pane: beside the stage (while it
   // keeps 480 px) it starts open; as a sheet over the stage it opens on
   // request (the toolbar's Details, a hand-off to Otto, a pinned comment).
-  let detailsInline = $state(true);
-  let detailsSheet = $state(false);
-  let detailsSheetOpen = $state(false);
-  const detailsShown = $derived(detailsSheet ? detailsSheetOpen : detailsInline);
-  function setDetails(open: boolean): void {
-    if (detailsSheet) detailsSheetOpen = open;
-    else detailsInline = open;
-  }
+  const detailsOpen = new DetailOpen();
+  const detailsShown = $derived(detailsOpen.open);
+  const setDetails = (open: boolean): void => detailsOpen.set(open);
   let rightTab = $state<DetailsTab>('otto');
   let refs = $state(false);
   let showSource = $state(false);
@@ -274,8 +270,8 @@
       // `#/design/a/<id>/otto` (the lobby's Generate hand-off) opens on Otto.
       rightTab = 'otto';
       refs = false;
-      detailsSheetOpen = ottoHandoff;
-      if (ottoHandoff) detailsInline = true;
+      detailsOpen.asked = ottoHandoff;
+      if (ottoHandoff) detailsOpen.inline = true;
       phase = 'loading';
       void load(target);
       void vlist.load();
@@ -861,13 +857,13 @@
       {/snippet}
       {#snippet ottoTab()}{@render ottoPanel(null)}{/snippet}
       {#snippet commentsPanel()}<CommentsTab store={comments} {versions} shownVersionId={viewing?.v.id ?? head?.id ?? null} shownVersionSeq={viewing?.v.seq ?? head?.seq ?? null} {artifact} storyId={split.uses.find((r) => r.link.dst_kind === 'story')?.link.dst_id ?? fromStory} canComment={auth.can('design', 'edit')} {meId} canDeleteAny={auth.isRoot}
-          onview={(v) => void view(v)} onpin={artifact.format === 'otto-site' ? undefined : () => { if (detailsSheet) setDetails(false); }} />{/snippet}
+          onview={(v) => void view(v)} onpin={artifact.format === 'otto-site' ? undefined : () => { if (detailsOpen.sheet) setDetails(false); }} />{/snippet}
       {#snippet commentsPanel3d(hooks: { onfocus3d: (pin: CommentPin3d) => void; onregenerate3d: (prompt: string) => void })}
         <CommentsTab store={comments} {versions} shownVersionId={viewing?.v.id ?? head?.id ?? null} shownVersionSeq={viewing?.v.seq ?? head?.seq ?? null} {artifact} storyId={split.uses.find((r) => r.link.dst_kind === 'story')?.link.dst_id ?? fromStory} canComment={auth.can('design', 'edit')} {meId} canDeleteAny={auth.isRoot}
           onview={(v) => void view(v)} onfocus3d={hooks.onfocus3d} onregenerate3d={hooks.onregenerate3d} />
       {/snippet}
       {#snippet details(design: Snippet | undefined)}
-        <DetailsPanel bind:tab={rightTab} open={detailsShown} onclose={() => setDetails(false)} ontoggle={() => setDetails(!detailsShown)} bind:sheet={detailsSheet}
+        <DetailsPanel bind:tab={rightTab} control={detailsOpen}
           linkCount={split.uses.length + split.usedIn.length}
           versionCount={vlist.total ?? (versions.length || null)} otto={ottoTab} versions={versionsPanel} links={linksPanel} {design}
           comments={commentsPanel} commentCount={comments.loaded ? openCount(comments.threads) : null} />

@@ -8,9 +8,13 @@
   //   inline   while the content beside it keeps `minContent` (480 px):
   //            resizable (300–560, default 380), persisted as
   //            otto.pane.<module>.<pane>.w; Esc closes, focus returns.
-  //   sheet    otherwise (and always on a phone): a right sheet over the
-  //            content — full width on a phone — with the shell Drawer's
+  //   sheet    otherwise (and always on a phone, or a phone on its side —
+  //            viewport.navDrawer): a right sheet over the content — full
+  //            width there — with the shell Drawer's
   //            backdrop, focus trap and Esc.
+  //
+  // `control` (a DetailOpen) instead of open / onclose / ontoggle: open beside
+  // the content by default, as a sheet only when asked (detailOpen.svelte.ts).
   //
   // `ontoggle` makes ⌥⌘B open / close it. Put it at the end of a ListDetail's
   // content row (its `detail` snippet) or of any flex row.
@@ -23,14 +27,19 @@
   import { ctxMenu, type MenuItem } from '../../contextmenu.svelte';
   import { dialogReturnTarget } from '../../dialogFocus';
   import { viewport } from '../../stores/viewport.svelte';
+  import { untrack } from 'svelte';
   import { pageNav } from './pageNav.svelte';
+  import type { DetailOpen } from './detailOpen.svelte';
   import { DETAIL_PANE, MIN_CONTENT, detailFit, fitPaneMax, loadPaneW, paneKey, paneStorage, type PaneLegacy, type PaneRange } from './paneKeys';
 
   interface Props {
-    open: boolean;
+    /** With `control`: an extra condition (e.g. "a note is open"). */
+    open?: boolean;
+    /** Inline by default, a sheet only when asked: replaces open / onclose / ontoggle. */
+    control?: DetailOpen;
     /** Heading and accessible name ("Thread details"). */
     title: string;
-    onclose: () => void;
+    onclose?: () => void;
     /** ⌥⌘B: open / close from the keyboard. */
     ontoggle?: () => void;
     module: string;
@@ -55,10 +64,11 @@
     children: Snippet;
   }
   let {
-    open,
+    open: openProp = true,
+    control,
     title,
-    onclose,
-    ontoggle,
+    onclose: oncloseProp,
+    ontoggle: ontoggleProp,
     module,
     pane = 'detail',
     range = DETAIL_PANE,
@@ -98,9 +108,15 @@
     return () => ro.disconnect();
   });
   const fit = $derived(detailFit(rowW, width, range, minContent, maximized));
+  // A phone, or a phone on its side (navDrawer): always a sheet.
   $effect.pre(() => {
-    sheet = viewport.isPhone || fit.sheet;
+    sheet = viewport.navDrawer || fit.sheet;
+    const s = sheet;
+    untrack(() => control?.present(s));
   });
+  const open = $derived(openProp && (control?.open ?? true));
+  const onclose = (): void => (control ? control.set(false) : oncloseProp?.());
+  const ontoggle = $derived(ontoggleProp ?? (control ? () => control.toggle() : undefined));
 
   $effect(() => (ontoggle ? pageNav.claimDetail(ontoggle) : undefined));
 
@@ -158,7 +174,7 @@
 {/snippet}
 
 {#if sheet}
-  <Drawer {open} side="right" label={title} width={viewport.isPhone ? '100vw' : 'min(92vw, 420px)'} bare {onclose}>
+  <Drawer {open} side="right" label={title} width={viewport.navDrawer ? '100vw' : 'min(92vw, 420px)'} bare {onclose}>
     <div class="detail-pane sheet" data-testid={testid}>
       {@render head()}
       <div class="dp-body">{@render children()}</div>

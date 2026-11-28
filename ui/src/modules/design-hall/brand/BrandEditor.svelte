@@ -46,6 +46,7 @@
   import StatusPill from '../StatusPill.svelte';
   import AppliedPreview from './AppliedPreview.svelte';
   import DetailPane from '../../../lib/components/side/DetailPane.svelte';
+  import { DetailOpen } from '../../../lib/components/side/detailOpen.svelte';
   import { scrollBehavior } from '../../../lib/motion';
   import ColorsSection from './ColorsSection.svelte';
   import TypeSection from './TypeSection.svelte';
@@ -448,14 +449,7 @@
     document.getElementById(target)?.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
   }
   // "Applied to" is the Detail pane: inline it starts open, as a sheet on request.
-  let previewInline = $state(true);
-  let previewSheet = $state(false);
-  let previewSheetOpen = $state(false);
-  const previewShown = $derived(previewSheet ? previewSheetOpen : previewInline);
-  function setPreview(open: boolean): void {
-    if (previewSheet) previewSheetOpen = open;
-    else previewInline = open;
-  }
+  const preview = new DetailOpen();
 
   function onKey(e: KeyboardEvent): void {
     if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === 's') {
@@ -539,7 +533,7 @@
       <StatusPill status={needsApproval && artifact?.status === 'approved' ? 'draft' : (artifact?.status ?? 'draft')} />
     {/snippet}
     {#snippet actions()}
-      <button class="icon-btn" class:on={previewShown} aria-pressed={previewShown} aria-label="Applied to — live preview" title={previewShown ? 'Hide the live preview (⌥⌘B)' : 'Show the live preview: the kit applied to a sample (⌥⌘B)'} onclick={() => setPreview(!previewShown)} data-icon="eye" data-keep data-testid="brand-preview-toggle"><Icon name="eye" size={14} /></button>
+      <button class="icon-btn" class:on={preview.open} aria-pressed={preview.open} aria-label="Applied to — live preview" title={preview.open ? 'Hide the live preview (⌥⌘B)' : 'Show the live preview: the kit applied to a sample (⌥⌘B)'} onclick={() => preview.toggle()} data-icon="eye" data-keep data-testid="brand-preview-toggle"><Icon name="eye" size={14} /></button>
       <button class="btn small" data-overflow="2" onclick={() => jump('brand-used')} data-testid="brand-used-btn" data-icon="link">
         <Icon name="link" size={12} /> Used in {usage ? usage.artifact_count : '…'}
       </button>
@@ -639,7 +633,7 @@
         <UsedIn usage={usage} loading={usageLoading} error={usageError} kitId={id} onretry={() => void loadUsage()} />
       </div>
     </div></div>
-    <DetailPane module="design" pane="brand-preview" title="Applied to — live preview" open={previewShown} onclose={() => setPreview(false)} ontoggle={() => setPreview(!previewShown)} bind:sheet={previewSheet} testid="brand-preview">
+    <DetailPane module="design" pane="brand-preview" title="Applied to — live preview" control={preview} testid="brand-preview">
       <div class="preview-body"><AppliedPreview {doc} /></div>
     </DetailPane>
     </div>
