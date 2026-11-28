@@ -180,13 +180,12 @@
   }
 
   // A phone list page draws the list pane's header in this one row: the
-  // repository switcher and the view switch move under its ⋯ (gitPhoneMenu).
+  // repository switcher (the title) moves under its ⋯ (gitPhoneMenu); the
+  // view switch keeps its row under the header.
   $effect(() =>
     gitPhoneMenu.set(() => {
       const open = git.openRepoIds.map((id) => git.allRepos.find((r) => r.id === id)).filter((r) => !!r);
-      const v = repoView?.viewState();
       return [
-        ...(v && !v.resolving ? [{ label: 'View', icon: 'eye' as const, children: VIEWS.map((t) => ({ label: t.label, icon: t.icon, checked: t.id === v.tab, action: () => repoView?.selectTab(t.id) })) }] : []),
         {
           label: 'Repository',
           icon: 'branch',

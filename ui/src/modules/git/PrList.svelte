@@ -22,7 +22,7 @@
   import { invalidatePr, prListCache, prListKey } from './pr-cache';
   import { accountCause, ciOf, groupPrs, hasClientFilter, isMine, matchesPr, mergeRefreshed, parsePrQuery, sortPrs, SORT_LABEL, type PrGroup } from './pr-query';
   import { needsYou } from './prStatus';
-  import InboxFold from '../../lib/components/InboxFold.svelte';
+  import SideSection from '../../lib/components/side/SideSection.svelte';
   import { PrStatsLoader } from './pr-stats.svelte';
   import PrListRow from './PrListRow.svelte';
   import { CLEARED_FILTERS, DEFAULT_PREFS, activeFilters, authorItems, filterItems, listToken, prListUrl, readPrefs, sortItems, writePrefs, type PrListPrefs } from './pr-list-prefs';
@@ -515,7 +515,7 @@
         {#if g.id === 'all'}
           {@render rows(g.items, false)}
         {:else}
-          <InboxFold label={g.label}>{@render rows(g.items, g.id === 'needs')}</InboxFold>
+          <SideSection title={g.label} count={g.items.length}>{@render rows(g.items, g.id === 'needs')}</SideSection>
         {/if}
       {/each}
       {#if visible.length === 0}
