@@ -73,6 +73,11 @@
   let phoneOpen = $state(false);
   /** The Detail pane is a sheet over the graph right now (DetailPane decides). */
   let detailSheet = $state(false);
+  // The sheet belongs to the graph: on a phone, whatever opens it (the
+  // landing on a dirty tree, an agent's WIP request) pushes the graph first.
+  $effect(() => {
+    if (sel.detailOpen && viewport.navDrawer) phoneOpen = true;
+  });
   /** The Detail pane holds diffs, so it may grow past the shared range; the
    *  graph keeps 320 px beside it (its old commit-list floor) or the pane
    *  becomes a sheet. */

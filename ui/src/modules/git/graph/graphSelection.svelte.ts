@@ -118,7 +118,7 @@ export function createGraphSelection(h: GraphSelectionHost) {
 
   // Landing: History opens on the work, so the detail pane is never an empty
   // "select a commit": the WIP row with uncommitted changes (on a phone, a
-  // sheet over the Branches list — the commit card first), else the
+  // sheet over the pushed graph — the commit card first), else the
   // checked-out commit, but only where the pane sits beside the graph (a
   // phone lands on the Branches list). Once per mount; a branch deep link or
   // a reveal request then moves it.
