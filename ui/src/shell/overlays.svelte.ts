@@ -26,3 +26,8 @@ export const ShortcutsOverlayChunk = lazyComponent(() => import('./ShortcutsOver
 /** Desktop updates: the shell's updater state + the Update dialog. */
 export const UpdateHostChunk = lazyComponent(() => import('./UpdateHost.svelte'));
 export const FloatingBarChunk = lazyComponent(() => import('../lib/components/FloatingBar.svelte'));
+/** Phone only: the tab bar and the one Navigator drawer's contents load as
+ *  the shell mounts on a phone (both are on screen or one tap away there) and
+ *  never on a tablet or desktop. */
+export const BottomNavChunk = lazyComponent(() => import('./BottomNav.svelte'));
+export const PhoneNavDrawerChunk = lazyComponent(() => import('./PhoneNavDrawer.svelte'));
