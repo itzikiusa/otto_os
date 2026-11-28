@@ -84,8 +84,13 @@ struct Live {
 }
 
 impl Live {
-    fn new(launch: KernelLaunch, env: BTreeMap<String, String>) -> Self {
+    fn new(launch: KernelLaunch, mut env: BTreeMap<String, String>) -> Self {
         let tmp = tempfile::tempdir().unwrap();
+        // The kernel's HOME is throwaway: IPython writes ~/.ipython and
+        // bash_kernel's interactive bash appends ~/.bash_history.
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        env.insert("HOME".into(), home.to_string_lossy().into_owned());
         Live {
             mgr: NotebookManager::new(),
             env,
@@ -335,18 +340,17 @@ async fn live_ipykernel_scenarios() {
 #[ignore = "live: needs OTTO_JUPYTER_LIVE_PYTHON"]
 async fn live_message_interrupt_and_spec_env() {
     let Some(py) = live_python() else { return };
-    let mut env = base_env();
-    env.insert("HOME".into(), "/tmp/otto-live-home".into());
     let spec_env = BTreeMap::from([("OTTO_SPEC_PROBE".to_string(), "${HOME}/x".to_string())]);
     let live = std::sync::Arc::new(Live::new(
         ipykernel(&py, InterruptMode::Message, spec_env),
-        env,
+        base_env(),
     ));
+    let probe = format!("{}/x", live.env["HOME"]);
     // J8: ${VAR} expands from the kernel env only; the daemon's own env stays out.
     let r = live
         .run("import os\n(os.environ['OTTO_SPEC_PROBE'], 'CARGO' in os.environ)")
         .await;
-    assert_eq!(text_of(&r), "('/tmp/otto-live-home/x', False)");
+    assert_eq!(text_of(&r), format!("('{probe}', False)"));
     let l2 = live.clone();
     let cell = tokio::spawn(async move { l2.run("import time\ntime.sleep(60)").await });
     tokio::time::sleep(Duration::from_millis(800)).await;
