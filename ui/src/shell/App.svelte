@@ -178,7 +178,10 @@
   const navFolded = $derived(compactShell && viewport.isTablet && viewport.tabletNavFolded);
   // The page draws its own PageHeader (the first registered header, in the
   // centre column — not one inside the right panel's browser tab).
-  const pageTitled = $derived(compactShell && !!uiControl.barOwner?.closest('.mcenter'));
+  // Never a class the compact layout toggles in the same update (`.mcenter`):
+  // read before the DOM catches up, it stayed false after a resize to a phone
+  // and the shell bar sat above the page's own header (two rows).
+  const pageTitled = $derived(compactShell && !!uiControl.barOwner?.closest('[data-shell-center]'));
 
   // Native sidebar vibrancy (desktop shell): the window has an NSVisualEffect
   // view behind the page, so the document goes transparent and ONLY chrome
@@ -1097,7 +1100,7 @@
     >
       <div class="primary-pane">
         <div class="primary-row">
-          <div class="center" class:mcenter={compactShell}>
+          <div class="center" class:mcenter={compactShell} data-shell-center>
             {@render centerContent()}
             {#if !isPopout && !isEmbedded && viewport.isDesktop}
               <!-- The floating "Type or speak… ⌘K" bar (layout.md §7): bottom-

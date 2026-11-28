@@ -129,12 +129,10 @@
   // ‹ Back on a page pushed from it (pageNav, from ListDetail). History arrows
   // and the bell stay in the Rail / Navigator / drawer. A narrow Mac window
   // keeps the shell bar for its traffic lights.
-  let inCenter = $state(false);
-  $effect(() => {
-    void viewport.mode;
-    inCenter = !!rootEl?.closest('.mcenter');
-  });
-  const compactRow = $derived(pageTop && inCenter && !isTauri);
+  // The shell's centre column (App's data-shell-center): a static marker, so
+  // the answer never waits for the compact layout's classes after a resize.
+  const inCenter = $derived(!!rootEl?.closest('[data-shell-center]'));
+  const compactRow = $derived(pageTop && inCenter && !viewport.isDesktop && !isTauri);
   const phoneRow = $derived(compactRow && viewport.navDrawer);
   // (A nested list that pushes for want of room — paneKeys nestedPush — has its
   // Back here on a tablet or desktop too.)

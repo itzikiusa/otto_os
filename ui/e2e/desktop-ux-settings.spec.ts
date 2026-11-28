@@ -93,6 +93,9 @@ test('Settings sections remain reachable and titled at desktop and phone widths'
   const labels = await nav.locator('.settings-nav-label').allTextContents();
   for (const width of [1440, 375]) {
     await page.setViewportSize({ width, height: 900 });
+    // The shell switches layout on the matchMedia change, a moment after the
+    // resize: wait for it, or the desktop list is still on screen at 375 px.
+    await expect(page.locator(width <= 640 ? '.shell.bnav' : '.shell:not(.mobile)')).toBeVisible();
     for (const label of labels) {
       // Phone width is a two-level list: an open section hides the list, so
       // go back to it before filtering for the next section.
