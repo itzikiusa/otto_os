@@ -13,7 +13,9 @@
   import Rail from './Rail.svelte';
   import Navigator from './Navigator.svelte';
   import TabBar from './TabBar.svelte';
+  import BottomNav from './BottomNav.svelte';
   import Drawer from './Drawer.svelte';
+  import PhoneNavDrawer from './PhoneNavDrawer.svelte';
   import { DRAWER_LEFT_WIDTH } from '../lib/components/side/paneKeys';
   import Skeleton from '../lib/components/Skeleton.svelte';
   import Icon from '../lib/components/Icon.svelte';
@@ -23,7 +25,6 @@
     SharePageChunk, HandoverChunk, AttachIssueChunk, AttachProductStoryChunk,
     BroadcastModalChunk, NewSessionChunk, NewWorkspaceChunk, SlackSendChunk,
     PaletteChunk, TriageBarChunk, ShortcutsOverlayChunk, FloatingBarChunk, UpdateHostChunk,
-    BottomNavChunk, PhoneNavDrawerChunk,
   } from './overlays.svelte';
   import { triage } from './triage.svelte';
   import { loadErrorText } from '../lib/loadError';
@@ -1130,7 +1131,7 @@
 
   <CapsBanner />
   {#if compactShell && viewport.isPhone}
-    <LazyMount lazy={BottomNavChunk} what="the tab bar" quiet />
+    <BottomNav />
   {/if}
   {#if !isPopout && !isEmbedded && (!viewport.navDrawer || events.state !== 'connected')}
     <StatusBar />
@@ -1141,7 +1142,7 @@
      not persisted, closed on load/navigation/rotation. Tablet keeps the Navigator / Rail column. -->
 {#if compactShell && viewport.navDrawer}
   <Drawer bind:open={ui.navDrawerOpen} side="left" label="Navigator" width={DRAWER_LEFT_WIDTH} bare>
-    <LazyMount lazy={PhoneNavDrawerChunk} what="the navigator" quiet />
+    <PhoneNavDrawer />
   </Drawer>
 {/if}
 
