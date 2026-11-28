@@ -80,10 +80,7 @@ const LS = {
   sidebarCollapsedGroups: 'otto_sidebar_groups_collapsed',
   sidebarFavorites: 'otto_sidebar_favorites',
   sidebarGroupOrder: 'otto_sidebar_group_order',
-  gitGraphListWidth: 'otto_git_graph_list_width',
-  gitGraphSideWidth: 'otto_git_graph_side_width',
   apiBuilderH: 'otto_api_builder_h',
-  vaultGraphPanelWidth: 'otto_vault_graph_panel_width',
 };
 
 export const RIGHT_MIN = 260;
@@ -156,21 +153,8 @@ function clampRail(px: number): number {
 }
 /** DB Explorer "auto-Vertical past N columns" threshold: 0 = never, capped so
  *  a typo can't disable the feature by accident; NaN → the default (10). */
-/** Git graph list pane when a commit detail is open. */
-function clampGitGraphList(px: number): number {
-  return Math.max(300, Math.min(720, Math.round(px)));
-}
 /** Git graph LEFT refs sidebar (LOCAL/REMOTE/TAGS/…). Floor keeps the section
  *  headers legible; cap stops it from crowding out the commit graph. */
-function clampGitGraphSide(px: number): number {
-  return Math.max(180, Math.min(480, Math.round(px)));
-}
-/** Vault graph controls panel. Floor keeps the section labels + counts legible;
- *  cap stops the panel from eating the graph it is filtering. Service/tag names
- *  are long, so the ceiling is generous. */
-function clampVaultGraphPanel(px: number): number {
-  return Math.max(200, Math.min(560, Math.round(px)));
-}
 /** API client builder pane height (above the response pane). */
 function clampApiBuilder(px: number): number {
   const vh = typeof window !== 'undefined' ? window.innerHeight : 900;
@@ -194,14 +178,6 @@ class UiStore {
   );
   /** Browser page: the agent (terminal + ask bar, the Detail pane's Agent view) is shown. */
   browserAgentOpen = $state(lsGet(LS.browserAgentOpen) !== '0'); // default open
-  // Git graph list pane width in detail mode.
-  gitGraphListWidth = $state(clampGitGraphList(Number(lsGet(LS.gitGraphListWidth)) || 420));
-  // Git graph LEFT refs sidebar width (drag-resizable; default matches the CSS 220px).
-  gitGraphSideWidth = $state(clampGitGraphSide(Number(lsGet(LS.gitGraphSideWidth)) || 220));
-  // Vault graph controls panel width (drag-resizable; default matches the CSS).
-  vaultGraphPanelWidth = $state(
-    clampVaultGraphPanel(Number(lsGet(LS.vaultGraphPanelWidth)) || 210),
-  );
   // API client builder pane height (0 = unset → CSS default).
   apiBuilderHeight = $state(
     Number(lsGet(LS.apiBuilderH)) > 0 ? clampApiBuilder(Number(lsGet(LS.apiBuilderH))) : 0,
@@ -560,21 +536,6 @@ class UiStore {
     if (persist) lsSet(LS.railWidth, String(this.railWidth));
   }
 
-  /** `persist=false` while dragging (one localStorage write on release). */
-  setGitGraphListWidth(px: number, persist = true): void {
-    this.gitGraphListWidth = clampGitGraphList(px);
-    if (persist) lsSet(LS.gitGraphListWidth, String(this.gitGraphListWidth));
-  }
-  /** `persist=false` while dragging (one localStorage write on release). */
-  setGitGraphSideWidth(px: number, persist = true): void {
-    this.gitGraphSideWidth = clampGitGraphSide(px);
-    if (persist) lsSet(LS.gitGraphSideWidth, String(this.gitGraphSideWidth));
-  }
-  /** `persist=false` while dragging (one localStorage write on release). */
-  setVaultGraphPanelWidth(px: number, persist = true): void {
-    this.vaultGraphPanelWidth = clampVaultGraphPanel(px);
-    if (persist) lsSet(LS.vaultGraphPanelWidth, String(this.vaultGraphPanelWidth));
-  }
   setApiBuilderHeight(px: number, persist = true): void {
     this.apiBuilderHeight = clampApiBuilder(px);
     if (persist) lsSet(LS.apiBuilderH, String(this.apiBuilderHeight));

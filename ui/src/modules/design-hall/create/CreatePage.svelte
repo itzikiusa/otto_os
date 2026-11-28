@@ -273,12 +273,6 @@
     block-size: 100%;
     object-fit: cover;
   }
-  .create-body :global(.cr-row) {
-    display: flex;
-    align-items: center;
-    gap: var(--sp-3);
-    flex-wrap: wrap;
-  }
   .create-body :global(.cr-two) {
     display: grid;
     grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);

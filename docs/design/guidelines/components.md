@@ -312,8 +312,7 @@ Rules:
   drawer and the Side panel sheet — on `shell/Drawer.svelte` (focus trap via
   `dialogFocus`, Esc, backdrop, `ui.pushModal()`). A module does not mount a
   Drawer: its right-hand overlay is a `DetailPane`, which brings the same
-  plumbing. `DockedDrawer` is the old name of the Detail pane and is being
-  migrated onto `DetailPane`; don't add a new user (the `side-pane` ratchet).
+  plumbing (the `side-pane` ratchet fails a module `Drawer`).
 
 ## 8. Confirm, prompt and choose: `confirmer`
 

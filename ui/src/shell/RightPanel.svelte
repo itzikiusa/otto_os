@@ -139,7 +139,7 @@
 
   // Closing the panel unmounts (or hides) whatever had focus inside it — the
   // Collapse button, the notes textarea on ⌘J. Hand focus to the rail button
-  // of the tab that was showing (DockedDrawer's "refocus the opener" rule), but
+  // of the tab that was showing (DetailPane's "refocus the opener" rule), but
   // only when focus was in the panel or fell to <body>: a ⌘J from elsewhere
   // leaves focus where it is.
   let asideEl = $state<HTMLElement | null>(null);

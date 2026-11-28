@@ -72,7 +72,7 @@
   --z-sticky: 10; /* in-pane: sticky headers, resize handles */
   --z-floating-bar: 40; /* FloatingBar over the content column */
   --z-mobile-nav: 60; /* BottomNav */
-  --z-drawer: 90; /* Drawer (+1 panel) — also the phone "More" overflow and DockedDrawer sheets */
+  --z-drawer: 90; /* Drawer (+1 panel) — also the phone "More" overflow and Detail pane sheets */
   --z-command: 150; /* Palette, ShortcutsOverlay */
   --z-modal: 200; /* Modal (and ConfirmDialog) */
   --z-toast: 300; /* Toasts */

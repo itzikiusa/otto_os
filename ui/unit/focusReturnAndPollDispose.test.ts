@@ -54,8 +54,8 @@ test('closing the event detail returns focus to the selected row', () => {
   assert.equal(focused, 'row');
 });
 
-test('the inline DockedDrawer column restores focus to its opener on close', () => {
-  const s = readFileSync(src('lib/components/DockedDrawer.svelte'), 'utf8');
+test('the inline Detail pane column restores focus to its opener on close', () => {
+  const s = readFileSync(src('lib/components/side/DetailPane.svelte'), 'utf8');
   assert.match(s, /dialogReturnTarget\(\)/, 'records the opener when the column opens');
   assert.match(s, /queueMicrotask\(/, 'restores after the column unmounts');
   assert.match(s, /target\?\.isConnected/, 'only an opener still in the document');

@@ -330,7 +330,7 @@ blocks' own header comments):
 
 There is no fifth kind. `npm run check` fails a NEW hand-rolled one
 (`side-pane` ratchet: a local `.list-pane` / `.side` / `.sidebar`, a private
-width threshold, a module-level `Drawer` / `DockedDrawer`).
+width threshold, a module-level `Drawer`).
 
 ```
 ┌ Threads  12          ＋  ⋯ ┐  header 36 px: name · count · ONE primary · ⋯ (Hide <name> ⌘B first)

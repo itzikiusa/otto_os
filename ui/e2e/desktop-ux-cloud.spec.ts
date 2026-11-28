@@ -116,7 +116,7 @@ for (const variant of [
     await page.getByRole('cell', { name: 'checkout-api', exact: true }).click();
     await expect(page.getByTestId('aws-drawer')).toBeVisible();
     await expectNoHorizontalOverflow(page);
-    // The ✕ sits in the drawer chrome (DockedDrawer), outside the testid'd body on a phone sheet.
+    // The ✕ sits in the drawer chrome (DetailPane), outside the testid'd body on a phone sheet.
     await expectFullyInViewport(page, page.getByRole('button', { name: 'Close instance details' }));
     await page.screenshot({ path: `/tmp/otto-ux-cloud-${variant.name}-aws-loaded.png` });
     await openPage(page, `kubernetes/ux-cluster/pods/default/${pod.name}`);
@@ -183,7 +183,7 @@ test('Kubernetes setup source selection works with arrow keys', async ({ page })
 test('phone Kubernetes details cover navigation and contain keyboard focus', async ({ page }) => {
   await page.setViewportSize({ width: 375, height: 812 });
   await openPage(page, `kubernetes/ux-cluster/pods/default/${pod.name}`);
-  // Phone: DockedDrawer presents the shell Drawer sheet (the dialog wraps the testid'd body).
+  // Phone: DetailPane presents the shell Drawer sheet (the dialog wraps the testid'd body).
   const drawer = page.getByRole('dialog', { name: 'Pod details' });
   await expect(page.getByTestId('k8s-drawer')).toBeVisible();
   await expect(drawer).toHaveAttribute('aria-modal', 'true');

@@ -173,7 +173,7 @@
 //                     a locally defined .list-pane / .side / .sidebar rule set,
 //                     a private width threshold (matchMedia(…), or a
 //                     …Width / …W compared to a 480–1499 px number), an
-//                     import of shell/Drawer or DockedDrawer, or a copy of
+//                     import of shell/Drawer, or a copy of
 //                     ListPane's chrome (class="side-list" / "side-pane-head"
 //                     on a module's own markup) → the shared
 //                     blocks in lib/components/side (ListDetail, ListPane,
@@ -473,7 +473,7 @@ const RULES = {
   'icon-size': 'off-scale <Icon size> — 12, 13–14, 16, 24–26 (20 in phone touch chrome only); run scripts/codemods/icon-sizes.mjs (foundations §9)',
   'inline-retry': 'hand-rolled Retry button — use LoadState (error + onretry) or EmptyState tone="error" (components.md §11)',
   'local-tablist': 'local role="tablist" — use <Tabs> (lib/components/Tabs.svelte; components.md §3)',
-  'side-pane': 'hand-rolled side surface — build it from lib/components/side (ListDetail, ListPane, SideRow, DetailPane; layout.md "Side surfaces", sidebars/MIGRATION.md): no local .list-pane / .side / .sidebar, no private width threshold (matchMedia, a width compared to a px number — use viewport.isPhone/isTablet or a container query), no module Drawer / DockedDrawer',
+  'side-pane': 'hand-rolled side surface — build it from lib/components/side (ListDetail, ListPane, SideRow, DetailPane; layout.md "Side surfaces", sidebars/MIGRATION.md): no local .list-pane / .side / .sidebar, no private width threshold (matchMedia, a width compared to a px number — use viewport.isPhone/isTablet or a container query), no module Drawer',
   'focus-ring-token': 'focus ring in var(--accent-solid) — under 3:1 on dark grounds; use var(--accent-text) like the global :focus-visible (app.css)',
   'destructive-confirm': 'confirmer.ask whose confirmLabel deletes / removes / revokes / stops without danger: true — destructive confirms use the red button (components.md)',
   'radio-key': 'role="radio" with no arrow-key model — add tabindex={checked ? 0 : -1} and onkeydown={radioKey} (lib/radioKey.ts), or an onkeydown on the radiogroup',
@@ -897,7 +897,7 @@ for (const f of files) {
     const code = f.path.endsWith('.svelte') ? f.text.replace(/<style\b[\s\S]*?<\/style[^>]*>/gi, blank) : f.text;
     for (const m of code.matchAll(/\bmatchMedia\s*\(/g)) hit('side-pane', f, m.index, 'private matchMedia(…)');
     for (const m of code.matchAll(/\b[A-Za-z_$][\w$]*(?:Width|W)\s*[<>]=?\s*(?:[4-9]\d\d|1[0-4]\d\d)\b/g)) hit('side-pane', f, m.index, `private width threshold ${m[0]}`);
-    for (const m of code.matchAll(/import\s+\w+\s+from\s+['"][^'"]*\/(?:shell\/Drawer|DockedDrawer)\.svelte['"]/g)) hit('side-pane', f, m.index, m[0].slice(0, 90));
+    for (const m of code.matchAll(/import\s+\w+\s+from\s+['"][^'"]*\/shell\/Drawer\.svelte['"]/g)) hit('side-pane', f, m.index, m[0].slice(0, 90));
     // A copy of ListPane's chrome on a module's own markup (a list inside the
     // page's content): use a standalone <ListPane name=…> instead.
     for (const m of code.matchAll(/\bclass="(?:side-list|side-pane-head)[\s"]/g)) hit('side-pane', f, m.index, `hand-made list pane ${m[0]}`);
