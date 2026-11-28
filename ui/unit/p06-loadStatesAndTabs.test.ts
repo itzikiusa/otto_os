@@ -17,8 +17,8 @@ test('a failed agents load is not "Agent not found" (ux-design-6-04)', () => {
   assert.match(s.slice(err, notFound), /<LoadState what="this agent"[^>]*onretry=/);
 });
 
-test('PR list load errors use LoadState (ux-design-6-02)', () => {
-  assert.match(src('git/PrList.svelte'), /<LoadState what="pull requests"/);
+test('PR list load errors use LoadState (ux-design-6-02) — the list pane\'s, with Retry', () => {
+  assert.match(src('git/PrList.svelte'), /<ListPane[\s\S]*?error=\{error \? failText\(errorCause, error\) : null\}[\s\S]*?onretry=/);
   assert.doesNotMatch(src('git/PrList.svelte'), /title=\{errorTitle\}/);
 });
 

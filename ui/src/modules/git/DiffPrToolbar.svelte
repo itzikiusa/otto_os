@@ -6,6 +6,7 @@
   // hide test files. Wraps instead of overflowing ≤1024px, where the file
   // stepper (DiffFileStepper) gets a row of its own. State lives in DiffViewer.
   import type { Snippet } from 'svelte';
+  import { viewport } from '../../lib/stores/viewport.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { plural } from '../../lib/plural';
   import DiffFileStepper from './DiffFileStepper.svelte';
@@ -192,7 +193,7 @@
       onclick={ontoggletests}
     ><Icon name="flask" size={14} /></button>
   </div>
-  {#if isMobile && feedKey}<DiffFileStepper {feedKey} />{/if}
+  {#if viewport.navDrawer && feedKey}<DiffFileStepper {feedKey} />{/if}
 </div>
 
 <style>

@@ -337,7 +337,7 @@
               {repoId}
               number={tabs.active}
               onloaded={(p) => { patch = p; remember(p); }}
-              onview={(v) => (prView = v)}
+              onview={(v) => { prView = v; if (sheet) asked = false; }}
               ondetails={(card) => (detailsCard = card)}
               lead={strip ? undefined : paneToggles}
             />

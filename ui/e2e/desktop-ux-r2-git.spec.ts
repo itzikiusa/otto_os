@@ -325,7 +325,9 @@ for (const scenario of [
     await expectNoHorizontalOverflow(page);
     await page.screenshot({ path: testInfo.outputPath('pr-files.png'), fullPage: true });
     await page.getByRole('tab', { name: 'Conversation', exact: true }).click();
-  await page.getByRole('button', { name: 'AI review', exact: true }).click();
+    // The details card is the Detail pane: a sheet on a tablet / phone, opened by ⓘ (a door in it closes the sheet).
+    if (!(await page.getByTestId('pr-details-card').isVisible())) await page.getByTestId('pr-details-toggle').click();
+    await page.getByRole('button', { name: 'AI review', exact: true }).click();
     await expect(page.locator('.rp-comment')).toBeVisible();
     await page.getByTestId('rp-post-comment').scrollIntoViewIfNeeded();
     await expectFullyInViewport(page, page.getByTestId('rp-post-comment'));
