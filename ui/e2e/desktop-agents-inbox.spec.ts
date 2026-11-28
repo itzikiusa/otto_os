@@ -167,6 +167,8 @@ test('a row opens its session; rename from the row menu; hide and show the list;
   await expect(inbox.locator('.side-pane-head .sph-title')).toHaveText('Sessions');
   await expect(inbox.locator('.side-pane-head .sph-count')).toHaveText('3');
   await page.getByTestId('agents-inbox-more').click();
+  // …then the pane's own: no-workspace session, Usage (the footer meter hides without numbers), workspaces.
+  await expect(page.getByRole('menuitem', { name: 'Usage' })).toBeVisible();
   await page.getByRole('menuitem', { name: 'Hide Sessions' }).click();
   await expect(inbox).toBeHidden();
   await page.getByTestId('show-list-pane').click();

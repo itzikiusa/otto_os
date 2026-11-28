@@ -353,7 +353,6 @@
       { separator: true },
       home ? { label: `New session in “${wsName(home)}”…`, icon: 'plus', action: () => void newSessionIn(home) } : { label: 'New session…', icon: 'plus', action: () => (ui.newSessionOpen = true) },
       { label: 'New session (no workspace)…', icon: 'home', action: newScratchSession },
-      { label: 'Usage', icon: 'chart', action: () => router.go('usage') },
     );
     ctxMenu.show(e, items);
   }
@@ -403,6 +402,7 @@
   function paneMenu(): MenuItem[] {
     return [
       { label: 'New session (no workspace)…', icon: 'home', action: newScratchSession },
+      { label: 'Usage', icon: 'chart', action: () => router.go('usage') },
       { label: 'Add workspace…', icon: 'folder', action: () => (ui.newWorkspaceOpen = true) },
       { label: 'Removed workspaces…', icon: 'archive', action: () => (removedOpen = true) },
     ];
