@@ -181,7 +181,7 @@ test('phone Product supports a populated story, draft editing and every workflow
   await page.reload();
   await expect(page.locator('#draft-title')).toHaveValue(editedTitle);
   if (page.viewportSize()!.width <= 640) {
-    await page.getByRole('button', { name: 'Back to stories', exact: true }).click();
+    await page.getByRole('button', { name: 'Back to Stories', exact: true }).click();
     await expect(page.locator('.story-list')).toBeVisible();
     await page.locator('.story-row', { hasText: editedTitle }).click();
     await expect(page.locator('#draft-title')).toBeVisible();

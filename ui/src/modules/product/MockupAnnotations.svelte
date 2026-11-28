@@ -380,8 +380,8 @@
 
 <!-- Controls + side list (rendered outside the render box; absolutely placed
      against the viewer so it doesn't disturb the render box's geometry). -->
-<div class="side">
-  <div class="side-head">
+<div class="ann-list">
+  <div class="ann-list-head">
     <div class="mode-toggle" role="group" aria-label="Annotation mode">
       <button
         class="mt"
@@ -568,13 +568,13 @@
   }
 
   /* ── Side list — placed below the render box (in normal flow of the viewer). */
-  .side {
+  .ann-list {
     margin-top: 10px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     overflow: hidden;
   }
-  .side-head {
+  .ann-list-head {
     display: flex;
     align-items: center;
     justify-content: space-between;

@@ -108,6 +108,13 @@ async function openArena(page: Page, navigate = true): Promise<void> {
   await expect(page.locator('.design-arena')).toBeVisible({ timeout: 15_000 });
 }
 
+/** The inspector is the arena's Detail pane: open it from the stage toolbar if
+ *  it isn't showing (a sheet on a narrow screen starts closed). */
+async function showInspector(page: Page): Promise<void> {
+  const toggle = page.getByTestId('arena-inspector-toggle');
+  if ((await toggle.getAttribute('aria-pressed')) !== 'true') await toggle.click();
+}
+
 test('arena: grouped assets; an Excalidraw board renders the React island', async ({ page }) => {
   test.setTimeout(90_000);
   await openArena(page);
@@ -121,7 +128,10 @@ test('arena: grouped assets; an Excalidraw board renders the React island', asyn
   // The island mounted Excalidraw (its root class) inside our board host.
   await expect(page.locator('.design-board .excalidraw')).toBeVisible({ timeout: 30_000 });
   await expect(page.locator('.stage-status')).toContainText(/1 elements/);
-  // Inspector shows the type; the Annotate toggle exists for boards.
+  // Inspector shows the type; the Annotate toggle exists for boards. The
+  // inspector is the arena's Detail pane: a sheet on a narrow screen, opened
+  // from the stage toolbar.
+  await showInspector(page);
   await expect(page.locator('.arena-inspector')).toContainText('Board');
   await expect(page.locator('.stage-toolbar').getByRole('button', { name: 'Annotate', exact: true })).toBeVisible();
 });
@@ -131,19 +141,24 @@ test('arena: a scene3d opens with the Hierarchy pane and an object count', async
   await openArena(page);
   await page.locator('.mockup-row', { hasText: 'level.scene3d.json' }).click();
 
-  // The left pane flips to Hierarchy while a scene is open; the status line counts.
-  const hierTab = page.locator('.pane-switch .ss', { hasText: 'Hierarchy' });
-  await expect(hierTab).toBeVisible({ timeout: 15_000 });
-  await expect(hierTab).toHaveClass(/active/);
+  // The status line counts; Play toggle + Blender section in the inspector
+  // (installed or not, the script download is always offered).
   await expect(page.locator('.stage-status')).toContainText(/2 objects · 2 lights/);
+  await expect(page.locator('.stage-toolbar').getByRole('button', { name: 'Play', exact: true })).toBeVisible();
+  await showInspector(page);
+  await expect(page.locator('.arena-inspector .btn', { hasText: 'Download script' })).toBeVisible({ timeout: 15_000 });
+  if (await page.getByRole('dialog', { name: 'Inspector' }).isVisible()) await page.keyboard.press('Escape');
+  // A phone pushed the stage: Back returns to the list pane.
+  if (await page.getByTestId('phone-back').isVisible()) await page.getByTestId('phone-back').click();
+  // The list pane's views flip to Hierarchy while a scene is open.
+  const views = page.getByRole('tablist', { name: 'Left pane' });
+  const hierTab = views.getByRole('tab', { name: 'Hierarchy' });
+  await expect(hierTab).toBeVisible({ timeout: 15_000 });
+  await expect(hierTab).toHaveAttribute('aria-selected', 'true');
   // The hierarchy names the objects (or, with Track C's placeholder, counts them).
   await expect(page.locator('.arena-assets .pane-body')).toContainText(/Floor|Crate|2 objects/);
-  // Play toggle + Blender section in the inspector (installed or not, the
-  // script download is always offered).
-  await expect(page.locator('.stage-toolbar').getByRole('button', { name: 'Play', exact: true })).toBeVisible();
-  await expect(page.locator('.arena-inspector .btn', { hasText: 'Download script' })).toBeVisible({ timeout: 15_000 });
-  // Back to the asset list via the switch.
-  await page.locator('.pane-switch .ss', { hasText: 'Assets' }).click();
+  // Back to the asset list via the views.
+  await views.getByRole('tab', { name: 'Assets' }).click();
   await expect(page.locator('.mockup-row', { hasText: 'level.scene3d.json' })).toBeVisible();
 });
 
@@ -194,7 +209,9 @@ test('arena: New ▾ → template creates an HTML screen in a device frame (sand
   test.setTimeout(90_000);
   await openArena(page);
 
-  await page.locator('.arena-assets .btn', { hasText: 'New' }).first().click();
+  // New lives under the assets pane's ⋯ (Create with AI is its one primary).
+  await page.getByTestId('arena-assets-more').click();
+  await page.getByRole('menuitem', { name: 'New artifact…' }).click();
   const menu = page.locator('.ctx-menu');
   await expect(menu).toBeVisible();
   await menu.locator('.ctx-search-input').fill('Landing');
@@ -230,7 +247,7 @@ test('arena: New ▾ → template creates an HTML screen in a device frame (sand
   expect(body).toContain('Withdrawals that settle before the kettle boils');
 });
 
-test('arena: ≤640px collapses to a segmented single pane', async ({ page }) => {
+test('arena: a phone pushes the stage from the assets list (standard Back)', async ({ page }) => {
   test.setTimeout(60_000);
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/#/product');
@@ -241,17 +258,18 @@ test('arena: ≤640px collapses to a segmented single pane', async ({ page }) =>
   await openClassicArena(page);
   const arena = page.locator('.design-arena');
   await expect(arena).toBeVisible({ timeout: 15_000 });
-  const seg = arena.locator('.arena-seg');
-  await expect(seg).toBeVisible();
-  // Assets first; the stage/inspector are hidden until their segment is tapped.
+  // The assets list is the page; the stage is pushed by a row, Back returns.
   await expect(arena.locator('.arena-assets')).toBeVisible();
   await expect(arena.locator('.arena-stage')).toBeHidden();
   await arena.locator('.mockup-row', { hasText: 'flow.mmd' }).click();
   await expect(arena.locator('.arena-stage')).toBeVisible();
   await expect(arena.locator('.arena-assets')).toBeHidden();
-  await seg.locator('.seg', { hasText: 'Inspector' }).click();
-  await expect(arena.locator('.arena-inspector')).toBeVisible();
-  await expect(arena.locator('.arena-stage')).toBeHidden();
+  await showInspector(page);
+  await expect(page.locator('.arena-inspector')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await page.getByTestId('phone-back').click();
+  await expect(arena.locator('.arena-assets')).toBeVisible();
+  await expect(arena.locator('.mockup-row.active', { hasText: 'flow.mmd' })).toBeVisible();
   // No horizontal overflow on the phone.
   const over = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1);
   expect(over).toBe(false);

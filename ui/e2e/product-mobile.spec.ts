@@ -80,13 +80,13 @@ test('product (phone): story selection and Back use the available reading space'
   await page.locator('.story-row').first().click();
   const main = page.locator('.product-main');
   await expect(page.locator('.product-page')).toHaveClass(/m-content-open/);
-  await expect(page.getByRole('button', { name: 'Back to stories' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Back to Stories' })).toBeVisible();
   await expect(page.locator('.m-acc-head')).toHaveCount(0);
   expect((await main.boundingBox())!.height).toBeGreaterThan(200);
   await expect(page.locator('.story-details')).not.toHaveAttribute('open');
   await page.locator('.story-details > summary').click();
   await expect(page.locator('.story-details')).toHaveAttribute('open');
-  await page.getByRole('button', { name: 'Back to stories' }).click();
+  await page.getByRole('button', { name: 'Back to Stories' }).click();
   await expect(page.locator('.product-page')).toHaveClass(/m-list-open/);
   await expect(page.locator('.story-list')).toBeVisible();
   expect((await main.boundingBox())?.height ?? 0).toBeLessThan(8);
@@ -101,7 +101,7 @@ test('product (wide): keeps the side-by-side layout, no accordion', async ({ pag
   await expect(page.locator('.m-acc-head')).toHaveCount(0);
 
   // Sidebar and main sit side by side (sidebar to the left of main).
-  const side = (await page.locator('.product-side').boundingBox())!;
+  const side = (await page.getByTestId('product-stories').boundingBox())!;
   const main = (await page.locator('.product-main').boundingBox())!;
   expect(side.x + side.width, 'sidebar should sit left of the main column').toBeLessThanOrEqual(
     main.x + 2,

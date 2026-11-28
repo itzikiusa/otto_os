@@ -96,12 +96,11 @@ test('Product dashboard template has readable labels and pin annotations',async(
  const {ctx,base}=await apiCtx();const response=await ctx.post(`${base}/api/v1/workspaces/${workspaceId}/product/drafts`,{data:{title:`R3 template story ${workspaceId}`} });expect(response.ok()).toBeTruthy();await ctx.dispose();
  await openPage(page,'product');await page.locator('.story-row',{hasText:`R3 template story ${workspaceId}`}).click();await page.getByRole('tab',{name:'Story',exact:true}).click();await page.locator('.sub-tab-strip .st',{hasText:'Design'}).click();await openClassicArena(page);
  const initialPanes=page.getByRole('tablist',{name:'Design panes'});if(await initialPanes.isVisible())await initialPanes.getByRole('tab',{name:'Assets',exact:true}).click();
- await page.getByTitle('New artifact (blank or from a template)').click();await page.getByRole('menuitem',{name:'Template: Dashboard',exact:true}).click();
+ await page.getByTestId('arena-assets-more').click();await page.getByRole('menuitem',{name:'New artifact…'}).click();await page.getByRole('menuitem',{name:'Template: Dashboard',exact:true}).click();
  const frame=page.frameLocator('iframe.mockup-frame');await expect(frame.locator('.kpi').first()).toBeVisible();
  expect((await page.locator('.arena-stage').boundingBox())!.width).toBeGreaterThan(400);
  expect(await frame.locator('.kpi small').first().evaluate(el=>parseFloat(getComputedStyle(el).fontSize))).toBeGreaterThanOrEqual(11);
  await page.screenshot({path:'/tmp/otto-ux-r3-content-product-dashboard.png'});
- const panes=page.getByRole('tablist',{name:'Design panes'});await panes.getByRole('tab',{name:'Canvas',exact:true}).focus();await page.keyboard.press('End');await expect(panes.getByRole('tab',{name:'Inspector',exact:true})).toBeFocused();await page.keyboard.press('Home');await expect(panes.getByRole('tab',{name:'Assets',exact:true})).toBeFocused();await panes.getByRole('tab',{name:'Canvas',exact:true}).click();
  await page.setViewportSize({width:1800,height:900});await expect(frame.locator('.kpi').first()).toBeVisible();await page.setViewportSize({width:1024,height:900});await expect(frame.locator('.kpi').first()).toBeVisible();
  const overlay=page.locator('.overlay.annotate');await overlay.click({position:{x:120,y:90}});await page.locator('.editor textarea').fill('Please align this card');await page.locator('.editor').getByRole('button',{name:'Add',exact:true}).click();await expect(page.locator('.editor')).toHaveCount(0);
 });

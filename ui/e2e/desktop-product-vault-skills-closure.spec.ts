@@ -87,7 +87,7 @@ for (const scheme of ['light', 'dark'] as const) {
 
     // Selecting a story on phone auto-opens content and surfaces Back to stories in PageHeader.
     await expect(page.locator('.product-page')).toHaveClass(/m-content-open/);
-    const backBtn = page.getByRole('button', { name: 'Back to stories', exact: true });
+    const backBtn = page.getByRole('button', { name: 'Back to Stories', exact: true });
     await expect(backBtn).toBeVisible();
     await expectNoHorizontalOverflow(page);
 

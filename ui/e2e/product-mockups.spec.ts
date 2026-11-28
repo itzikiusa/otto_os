@@ -181,7 +181,7 @@ test('mockups: manual Import adds a mockup straight from the Design tab', async 
   test.setTimeout(60_000);
   await openMockups(page);
   const before = await page.locator('.mockup-row').count();
-  await page.locator('.list-actions input[type="file"]').setInputFiles(HTML_FIXTURE);
+  await page.getByTestId('arena-import-input').setInputFiles(HTML_FIXTURE);
   // The list grows by one (a fresh user-source mockup row).
   await expect(async () => {
     expect(await page.locator('.mockup-row').count()).toBe(before + 1);
@@ -194,7 +194,7 @@ test('mockups: Create with AI (HTML) builds an agent mockup in place', async ({ 
 
   // Open the Create-with-AI menu (the global, viewport-clamped ctxMenu) → HTML
   // screen → the in-place panel appears (not Agents).
-  await page.locator('.act-btn.primary', { hasText: 'Create with AI' }).click();
+  await page.getByTestId('arena-create-ai').locator('visible=true').first().click();
   await page.getByRole('menuitem', { name: 'HTML screen' }).click();
   const panel = page.locator('.mockup-assist');
   await expect(panel).toBeVisible({ timeout: 10_000 });
@@ -223,7 +223,7 @@ test('mockups: Create with AI (Diagram) commits a Mermaid mockup', async ({ page
   test.setTimeout(90_000);
   await openMockups(page);
 
-  await page.locator('.act-btn.primary', { hasText: 'Create with AI' }).click();
+  await page.getByTestId('arena-create-ai').locator('visible=true').first().click();
   await page.getByRole('menuitem', { name: 'Diagram', exact: true }).click();
   const panel = page.locator('.mockup-assist');
   await expect(panel).toBeVisible({ timeout: 10_000 });
