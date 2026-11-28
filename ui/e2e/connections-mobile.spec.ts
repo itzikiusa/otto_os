@@ -198,8 +198,9 @@ test.describe('connections list — responsive', () => {
     await expect(tree).toBeVisible();
     await expect(page.getByTestId('db-conn-state')).toBeHidden();
     // A table opens its structure: pushed back to the workbench.
-    await tree.getByRole('treeitem', { name: /^Tables/ }).first().tap();
-    await tree.getByRole('treeitem', { name: /^orders/ }).first().tap();
+    await tree.getByRole('button', { name: 'Expand shop' }).tap();
+    await tree.getByRole('button', { name: 'Expand Tables' }).first().tap();
+    await tree.locator('.node-label', { hasText: /^orders/ }).first().tap();
     await expect(page.getByTestId('db-conn-state')).toBeVisible();
     await expect(page.getByRole('button', { name: 'Back to Tables', exact: true })).toBeVisible();
     await assertFitsWidth(page);

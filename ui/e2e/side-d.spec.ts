@@ -296,6 +296,22 @@ for (const s of ['light', 'dark'] as const) {
         await expect(page.getByRole('button', { name: 'Show History', exact: true })).toBeVisible();
         await page.keyboard.press('Meta+b');
         await expect(side).toBeVisible();
+        // Builder: the table palette is the view's Detail pane, open beside the canvas.
+        await page.getByTestId('page-header').getByRole('button', { name: 'More actions' }).click();
+        await page.getByRole('menu').getByText('Builder', { exact: true }).click();
+        const palette = page.getByTestId('qb-palette');
+        await expect(palette).toBeVisible({ timeout: 15_000 });
+        await page.getByTitle('Add orders to the canvas', { exact: true }).click();
+        await shot(page, `database-desktop-builder-${s}`);
+        // Diagram: the table picker likewise.
+        await page.getByTestId('page-header').getByRole('button', { name: 'More actions' }).click();
+        await page.getByRole('menu').getByText('Diagram', { exact: true }).click();
+        await expect(page.getByTestId('erd-picker')).toBeVisible({ timeout: 15_000 });
+        await shot(page, `database-desktop-diagram-${s}`);
+        await page.getByTestId('erd-picker-close').click();
+        await expect(page.getByTestId('erd-picker')).toBeHidden();
+        await page.getByTestId('erd-tables-toggle').click();
+        await expect(page.getByTestId('erd-picker')).toBeVisible();
       });
     });
 
@@ -326,7 +342,7 @@ for (const s of ['light', 'dark'] as const) {
         await shot(page, `database-phone-content-${s}`);
         // Row detail: the results ⋯ › Row detail, a full-width sheet.
         await page.getByRole('button', { name: 'More result actions' }).tap();
-        await page.getByRole('menuitem', { name: 'Row detail' }).tap();
+        await page.getByRole('menu').getByText('Row detail', { exact: true }).tap();
         const detail = page.getByTestId('row-detail');
         await expect(detail).toBeVisible();
         await shot(page, `database-phone-row-${s}`);
@@ -339,12 +355,14 @@ for (const s of ['light', 'dark'] as const) {
         await expect(page.getByTestId('page-header').getByRole('tablist', { name: 'Sidebar view' })).toBeVisible();
         await expectNoHorizontalOverflow(page);
         await shot(page, `database-phone-list-${s}`);
-        await tree.getByRole('treeitem', { name: /^Tables/ }).first().tap();
-        await tree.getByRole('treeitem', { name: /^orders/ }).first().tap();
+        if (await tree.getByRole('button', { name: 'Expand shop' }).isVisible()) await tree.getByRole('button', { name: 'Expand shop' }).tap();
+        await tree.getByRole('button', { name: 'Expand Tables' }).first().tap();
+        await tree.locator('.node-label', { hasText: /^orders/ }).first().tap();
         await expect(back).toBeVisible();
         await expect(tree).toBeHidden();
         await back.tap();
-        await expect(tree.getByRole('treeitem', { name: /^orders/ }).first()).toHaveAttribute('aria-selected', 'true');
+        // The list is as it was left (still expanded at the table).
+        await expect(tree.locator('.node-label', { hasText: /^orders/ }).first()).toBeVisible();
         await page.getByTestId('page-header').getByRole('tab', { name: 'Saved', exact: true }).tap();
         await expect(page.getByRole('button', { name: 'Back to Saved', exact: true })).toHaveCount(0);
         await page.getByTestId('open-navigator').tap();
