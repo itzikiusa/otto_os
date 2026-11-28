@@ -72,10 +72,10 @@ test('AWS phone detail contains focus and restores its resource row', async ({ p
   const row = page.getByRole('row').filter({ hasText: 'checkout-api' });
   await row.focus();
   await page.keyboard.press('Enter');
-  // Phone: the DockedDrawer sheet is the dialog; its ✕ is the first control.
+  // Phone: the Detail pane is a full-width sheet (a dialog) that takes the focus.
   const drawer = page.getByRole('dialog', { name: 'instance details' });
   await expect(page.getByTestId('aws-drawer')).toBeVisible();
-  await expect(drawer.getByRole('button', { name: 'Close instance details' })).toBeFocused();
+  await expect.poll(() => drawer.evaluate(el => el.contains(document.activeElement))).toBe(true);
   await page.keyboard.press('Shift+Tab');
   expect(await drawer.evaluate(el => el.contains(document.activeElement))).toBe(true);
   await page.keyboard.press('Escape');
@@ -136,7 +136,7 @@ test('Kubernetes RTL logs retain LTR punctuation and metrics retry recovers', as
 test('SQS and Athena tabs support composite keyboard navigation', async ({ page }) => {
   await queues(page);
   await openPage(page, 'aws/ux-account/sqs');
-  await page.getByRole('cell', { name: 'review-orders.fifo FIFO', exact: true }).click();
+  await page.getByTestId('aws-sqs-queues').getByRole('button', { name: /^review-orders\.fifo/ }).click();
   await page.getByRole('tab', { name: 'Messages', exact: true }).focus();
   await page.keyboard.press('ArrowRight');
   await expect(page.getByRole('tab', { name: 'Send', exact: true })).toBeFocused();
@@ -160,9 +160,9 @@ test('SQS delayed Peek cannot populate a different queue', async ({ page }) => {
     await r.fulfill({ json: { messages: [{ message_id: 'old-queue-message', body: 'private payload from previous queue', receipt_handle: 'synthetic', attributes: {} }] } });
   });
   await openPage(page, 'aws/ux-account/sqs');
-  await page.getByRole('cell', { name: 'review-orders.fifo FIFO', exact: true }).click();
+  await page.getByTestId('aws-sqs-queues').getByRole('button', { name: /^review-orders\.fifo/ }).click();
   await page.getByRole('button', { name: 'Peek', exact: true }).click();
-  await page.getByRole('cell', { name: 'review-other', exact: true }).click();
+  await page.getByTestId('aws-sqs-queues').getByRole('button', { name: /^review-other/ }).click();
   const peekResponse = page.waitForResponse(r => r.url().endsWith('/sqs/queues/peek'));
   release();
   await peekResponse;
@@ -187,7 +187,7 @@ for (const variant of [
     }, variant);
     await queues(page);
     await openPage(page, 'aws/ux-account/sqs');
-    await page.getByRole('cell', { name: 'review-orders.fifo FIFO', exact: true }).click();
+    await page.getByTestId('aws-sqs-queues').getByRole('button', { name: /^review-orders\.fifo/ }).click();
     await page.getByRole('tab', { name: 'Send', exact: true }).click();
     await page.getByLabel('Body', { exact: true }).fill(JSON.stringify({ event: 'review-order', details: 'Long synthetic attribute '.repeat(60) }));
     await expect(page.getByLabel('Body', { exact: true })).toHaveCSS('direction', 'ltr');
@@ -201,7 +201,8 @@ for (const variant of [
     }).length);
     expect(clipped).toBe(0);
     await expectNoHorizontalOverflow(page);
-    await expectFullyInViewport(page, page.getByTestId('aws-add-account'));
+    // Add account is the accounts list's one action: a phone shows it on the list page.
+    if (variant.width > 640) await expectFullyInViewport(page, page.getByTestId('aws-add-account'));
     await expectFullyInViewport(page, page.getByRole('button', { name: 'Remove attribute', exact: true }).last());
     await page.screenshot({ path: `/tmp/otto-ux-r2-cloud-${variant.name}-sqs.png` });
     await page.route('**/k8s/clusters/ux-cluster/monitor', r => r.fulfill({ json: { config: monitorConfig, status: null, presets: [] } }));
@@ -252,7 +253,7 @@ test('S3 folder response cannot replace newer navigation and text preview retrie
 test('SQS send validates delay and labels dynamic message attributes', async ({ page }) => {
   await queues(page);
   await openPage(page, 'aws/ux-account/sqs');
-  await page.getByRole('cell', { name: 'review-other', exact: true }).click();
+  await page.getByTestId('aws-sqs-queues').getByRole('button', { name: /^review-other/ }).click();
   await page.getByRole('tab', { name: 'Send', exact: true }).click();
   await page.getByLabel('Body', { exact: true }).fill('synthetic-message');
   await page.getByLabel('Delay (s)').fill('901');
@@ -351,7 +352,7 @@ test('SQS browse-only permissions retain a keyboard entry into enabled tabs', as
   await queues(page);
   await page.route('**/api/v1/access/**/capabilities*', r => r.fulfill({ json: { mode: 'enforced', operations: { sqs_view: { allowed: true } } } }));
   await openPage(page, 'aws/ux-account/sqs');
-  await page.getByRole('cell', { name: 'review-other', exact: true }).click();
+  await page.getByTestId('aws-sqs-queues').getByRole('button', { name: /^review-other/ }).click();
   await expect(page.getByRole('tab', { name: 'Messages', exact: true })).toBeDisabled();
   const attributes = page.getByRole('tab', { name: 'Attributes', exact: true });
   await expect(attributes).toHaveAttribute('tabindex', '0');

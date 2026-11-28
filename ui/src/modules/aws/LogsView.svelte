@@ -29,8 +29,9 @@
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import ContextPacketDialog from '../../lib/components/ContextPacketDialog.svelte';
-  import PaneDivider from '../../lib/components/PaneDivider.svelte';
-  import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
+  import ListDetail from '../../lib/components/side/ListDetail.svelte';
+  import ListPane from '../../lib/components/side/ListPane.svelte';
+  import SideRow from '../../lib/components/side/SideRow.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import ResultsGrid from '../database/ResultsGrid.svelte';
   import ViewToolbar from './ViewToolbar.svelte';
@@ -77,7 +78,8 @@
   let groupsLoading = $state(false);
   let groupsError = $state('');
   let selected = $state<string>(linkIsPrefix ? '' : linkGroup);
-  let groupsW = $state(loadPaneWidth('aws.logs.groupsW', LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
+  // Phone: the groups are the page until one is opened ("‹ Log groups").
+  let phoneOpen = $state(!!linkGroup && !linkIsPrefix);
   let groupSeq = 0;
 
   async function loadGroups(more = false): Promise<void> {
@@ -138,6 +140,7 @@
   });
 
   function pickGroup(name: string): void {
+    phoneOpen = true;
     if (selected === name) return;
     selected = name;
     rememberSelection('aws.logs', name);
@@ -522,52 +525,72 @@
   <Tabs label="Logs view" size="s" tabs={VIEW_TABS} value={tab} onchange={(id) => (tab = id)} />
 </ViewToolbar>
 
-<div class="logs">
-  <aside class="groups" aria-label="Log groups" style:--groups-w="{groupsW}px">
-    {#if groupsLoading && !groups}
-      <div class="pad"><Skeleton rows={8} label="log groups" /></div>
-    {:else if groupsError && !groups}
-      <LoadState what="log groups" error={awsErrorText(groupsError)} empty onretry={() => void loadGroups()}>{#snippet errorActions()}{#if groupsLogin && onsignin}<button class="btn primary" onclick={onsignin}><Icon name="key" size={12} /> Sign in</button>{/if}{/snippet}</LoadState>
-    {:else if groups && groups.length === 0}
-      <EmptyState icon="file" title={groupPrefix.trim() ? `No log groups starting with “${groupPrefix.trim()}”` : `No log groups in ${region}`} body="Group names are case-sensitive prefixes." />
-    {:else if groups}
-      <ul class="glist">
+{#snippet insightsSelection()}
+  <span class="sel-count">{plural(insightGroups.length, 'group')}</span>
+  <span class="sel-grow"></span>
+  {#if insightGroups.length}<button class="btn small ghost" onclick={() => (insightGroups = [])}>Clear</button>{/if}
+  <button class="btn small" onclick={() => (phoneOpen = true)} disabled={!insightGroups.length}>Query</button>
+{/snippet}
+
+<ListDetail
+  module="aws"
+  pane="logs"
+  name="Log groups"
+  open={phoneOpen}
+  onback={() => (phoneOpen = false)}
+  empty={!!groups && groups.length === 0 && !groupPrefix.trim()}
+  legacy={{ w: 'aws.logs.groupsW' }}
+>
+  {#snippet list()}
+    <ListPane
+      count={groups ? groups.length : null}
+      selection={tab === 'insights' ? insightsSelection : undefined}
+      loading={groupsLoading && !groups}
+      testid="aws-log-groups"
+    >
+      {#if groupsError && !groups}
+        <LoadState what="log groups" error={awsErrorText(groupsError)} empty variant="compact" onretry={() => void loadGroups()}>{#snippet errorActions()}{#if groupsLogin && onsignin}<button class="btn primary small" onclick={onsignin}><Icon name="key" size={12} /> Sign in</button>{/if}{/snippet}</LoadState>
+      {:else if groups && groups.length === 0}
+        <div class="no-match">
+          No log groups start with “{groupPrefix.trim()}”. Group names are case-sensitive prefixes.
+          <button class="btn ghost small" onclick={() => (groupPrefix = '')}>Clear filter</button>
+        </div>
+      {:else if groups}
         {#each groups as g (g.name)}
-          <li>
-            {#if tab === 'insights'}
-              <label class="gi" title={g.name}>
-                <input
-                  type="checkbox"
-                  checked={insightGroups.includes(g.name)}
-                  onchange={(e) => {
-                    const on = (e.currentTarget as HTMLInputElement).checked;
-                    insightGroups = on ? [...insightGroups, g.name] : insightGroups.filter((x) => x !== g.name);
-                  }}
-                />
-                <span class="gname">{g.name}</span>
-              </label>
-            {:else}
-              <button class="gi" class:on={selected === g.name} onclick={() => pickGroup(g.name)} title={g.name}>
-                <span class="gname">{g.name}</span>
-                <span class="gmeta">{g.stored_bytes != null ? fmtBytes(g.stored_bytes) : ''}{g.retention_days ? ` · ${g.retention_days}d` : ''}</span>
-              </button>
-            {/if}
-          </li>
+          {#if tab === 'insights'}
+            <SideRow
+              title={g.name}
+              checked={insightGroups.includes(g.name)}
+              tip={g.name}
+              onclick={() => (insightGroups = insightGroups.includes(g.name) ? insightGroups.filter((x) => x !== g.name) : [...insightGroups, g.name])}
+            />
+          {:else}
+            <SideRow
+              title={g.name}
+              meta="{g.stored_bytes != null ? fmtBytes(g.stored_bytes) : ''}{g.retention_days ? ` · ${g.retention_days}d retention` : ''}"
+              selected={selected === g.name}
+              tip={g.name}
+              onclick={() => pickGroup(g.name)}
+            />
+          {/if}
         {/each}
-      </ul>
-      {#if groupsToken}
-        <button class="btn small more" onclick={() => void loadGroups(true)} disabled={groupsLoading}>Load more</button>
+        {#if groupsToken}
+          <button class="btn small more" onclick={() => void loadGroups(true)} disabled={groupsLoading}>Load more</button>
+        {/if}
       {/if}
-    {/if}
-  </aside>
-  <PaneDivider bind:width={groupsW} storageKey="aws.logs.groupsW" label="Resize log groups list" />
+    </ListPane>
+  {/snippet}
 
   <section class="main">
     {#if tab === 'events'}
       {#if !selected}
         <!-- A group opens automatically when the list has one; this is only
              the nothing-to-read case. -->
-        <EmptyState icon="file" title="No log group open" body="Log groups in this region list on the left; their events show here." />
+        {#if groups && groups.length === 0}
+          <EmptyState icon="file" title={`No log groups in ${region}`} body="Group names are case-sensitive prefixes. Try another region." />
+        {:else}
+          <EmptyState icon="file" title="No log group open" body="Log groups in this region list on the left; their events show here." />
+        {/if}
       {:else}
         <div class="bar">
           <span class="gtitle mono" title={selected}>{selected}</span>
@@ -711,7 +734,7 @@
       </div>
     {/if}
   </section>
-</div>
+</ListDetail>
 {#if agentPacket !== null && ws.current}
   <ContextPacketDialog workspaceId={ws.current.id} sessionId={ws.targetAgentId} kind="broker" payload={agentPacket} onclose={() => (agentPacket = null)} />
 {/if}
@@ -766,65 +789,24 @@
     background: var(--accent-soft);
     color: var(--accent-text);
   }
-  .logs {
-    flex: 1;
-    min-height: 0;
-    display: flex;
-    overflow: hidden;
+  .more {
+    margin: 6px 8px 10px;
   }
-  .groups {
-    flex: 0 0 var(--groups-w);
-    border-inline-end: 1px solid var(--border);
-    overflow-y: auto;
-    min-height: 0;
-  }
-  .glist {
-    list-style: none;
-    margin: 0;
-    padding: 4px;
-  }
-  .gi {
+  .no-match {
     display: flex;
     flex-direction: column;
     align-items: flex-start;
-    gap: 1px;
-    inline-size: 100%;
-    border: 0;
-    background: transparent;
-    color: var(--text);
-    font: inherit;
-    text-align: start;
-    padding: 4px 8px;
-    border-radius: var(--radius-m);
-    cursor: pointer;
-  }
-  label.gi {
-    flex-direction: row;
-    align-items: center;
     gap: 6px;
-  }
-  .gi:hover,
-  .gi:focus-visible {
-    background: var(--hover);
-  }
-  .gi.on {
-    background: var(--accent-soft);
-    color: var(--accent-text);
-  }
-  .gname {
+    padding: 8px;
     font-size: var(--fs-s);
-    max-inline-size: 100%;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-family: var(--font-mono);
-  }
-  .gmeta {
-    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
-  .more {
-    margin: 6px 8px 10px;
+  .sel-count {
+    font-size: var(--fs-s);
+    font-weight: 600;
+  }
+  .sel-grow {
+    flex: 1;
   }
   .main {
     flex: 1;
@@ -1028,20 +1010,7 @@
     font-size: var(--fs-s);
   }
   @media (max-width: 640px) {
-    .logs {
-      flex-direction: column;
-    }
-    .groups {
-      flex: 0 0 30%;
-      min-block-size: 120px;
-      border-inline-end: 0;
-      border-bottom: 1px solid var(--border);
-    }
     .hide-sm {
-      display: none;
-    }
-    /* Stacked on phone: nothing to resize sideways. */
-    .logs > :global(.pane-divider) {
       display: none;
     }
   }

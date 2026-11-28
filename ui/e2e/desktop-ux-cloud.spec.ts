@@ -89,12 +89,13 @@ test('Kubernetes detail arrow keys move selection and focus together', async ({ 
 test('AWS detail arrow keys move selection and focus together', async ({ page }) => {
   await openPage(page, 'aws/ux-account/ec2');
   await page.getByRole('cell', { name: 'checkout-api', exact: true }).click();
-  const tabs = page.getByTestId('aws-drawer').getByRole('tab');
-  await tabs.filter({ hasText: /^Overview$/ }).focus();
+  // By accessible name: the shared <Tabs> pads each tab's text with whitespace.
+  const tab = (name: string) => page.getByTestId('aws-drawer').getByRole('tab', { name, exact: true });
+  await tab('Overview').focus();
   await page.keyboard.press('ArrowRight');
-  await expect(tabs.filter({ hasText: /^Metrics$/ })).toBeFocused();
+  await expect(tab('Metrics')).toBeFocused();
   await page.keyboard.press('ArrowRight');
-  await expect(tabs.filter({ hasText: /^Raw JSON$/ })).toBeFocused();
+  await expect(tab('Raw JSON')).toBeFocused();
 });
 
 for (const variant of [

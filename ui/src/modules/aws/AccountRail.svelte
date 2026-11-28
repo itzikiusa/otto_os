@@ -2,20 +2,19 @@
   import { announce } from '../../lib/announce.svelte';
   import { rowMenu } from '../../lib/rowMenu';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
-  // Left rail inside the AWS module: accounts → services. A service is greyed
+  // The AWS list pane's body (inside the page's ListPane): accounts → services,
+  // a tree on the shared rows. A service is greyed
   // (still navigable, so the AccessDenied is visible) when the account's IAM
   // probe said `denied`, and hidden outright when the user lacks the feature's
   // View grant. Right-click / ⋯ on an account → edit / refresh perms / delete.
   import { aws, AWS_SERVICES } from '../../lib/stores/aws.svelte';
   import { router } from '../../lib/router.svelte';
-  import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import Icon from '../../lib/components/Icon.svelte';
-  import EmptyState from '../../lib/components/EmptyState.svelte';
-  import LoadState from '../../lib/components/LoadState.svelte';
-  import Skeleton from '../../lib/components/Skeleton.svelte';
+  import SideRow from '../../lib/components/side/SideRow.svelte';
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
   import { pollWhileVisible } from '../../lib/poll';
-  import { awsErrorText, logsRoute } from './util';
+  import { logsRoute } from './util';
   import type { AwsAccount, AwsService, Feature } from '../../lib/api/types';
 
   interface Props {
@@ -27,8 +26,12 @@
     onsignin?: (a: AwsAccount) => void;
     /** The CloudWatch Logs view is open for `activeId`. */
     logsActive?: boolean;
+    /** The accounts overview (all accounts as cards). */
+    onoverview: () => void;
+    /** A service / Logs was chosen (a phone pushes its content). */
+    onopen: () => void;
   }
-  let { activeId, activeService, onedit, ondelete, onsignin, logsActive = false }: Props = $props();
+  let { activeId, activeService, onedit, ondelete, onsignin, logsActive = false, onoverview, onopen }: Props = $props();
 
   // A-5: warn BEFORE the sign-in lapses instead of failing mid-action. The
   // expiry is absolute, so a 30 s client clock is enough (no polling).
@@ -66,9 +69,17 @@
     }));
   }
 
+  function go(path: string): void {
+    router.go(path);
+    onopen();
+  }
+
   function menu(e: MouseEvent | KeyboardEvent, a: AwsAccount): void {
-    ctxMenu.show(e, [
-      { label: 'Overview', icon: 'grid', action: () => router.go('aws') },
+    ctxMenu.show(e, accountItems(a));
+  }
+  function accountItems(a: AwsAccount): MenuItem[] {
+    return [
+      { label: 'Overview', icon: 'grid', action: onoverview },
       {
         label: 'Re-check permissions',
         disabled: !resourceAccess.can('aws_account', a.id, 'configure', 'aws', 'view'),
@@ -82,7 +93,7 @@
             { label: 'Delete account…', icon: 'trash', danger: true, action: () => ondelete(a) },
           ]
         : []),
-    ]);
+    ];
   }
   // Spoken at the state edge through the shell's always-mounted announcer: a
   // live region inserted together with its text is not read (WebKit/VoiceOver).
@@ -92,89 +103,73 @@
   $effect(() => { if (sessionNotes) announce(`${sessionNotes}.`, { assertive: sessionNotes.includes('expired') }); });
 </script>
 
-<nav class="rail" aria-label="AWS accounts">
-  <div class="rail-head">
-    <span>Accounts</span>
-  </div>
+<div class="rail" role="tree" aria-label="AWS accounts">
   {#each aws.accounts as a (a.id)}
     {@const open = !collapsed[a.id]}
     {@const note = sessionNote(a)}
-    <div class="acct" class:active={a.id === activeId}>
-      <div use:rowMenu class="acct-row" role="group" aria-label={a.name} oncontextmenu={(e) => menu(e, a)}>
-        <button
-          class="acct-toggle"
-          aria-expanded={open}
-          title={a.identity?.arn ? `${a.name}\n${a.identity.arn}` : a.profile ? `${a.name} · profile ${a.profile}` : a.name}
-          onclick={() => (collapsed = { ...collapsed, [a.id]: open })}
-        >
-          <Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} />
-          <span class="dot" style="background:{a.color || 'var(--text-dim)'}"></span>
-          <span class="name">{a.name}</span>
-        </button>
-        <EnvBadge env={a.environment} />
-        <button
-          class="icon-btn more"
-          onclick={(e) => menu(e, a)}
-          aria-label={`Actions for ${a.name}`}
-          title="Actions"
-        ><Icon name="more" size={14} /></button>
-      </div>
-      {#if note}
-        <div class="sess" class:expired={note.expired}>
-          <Icon name="warning" size={12} />
-          <span>{note.text}</span>
-          {#if onsignin && a.auth_mode === 'profile'}
-            <button class="sess-btn" onclick={() => onsignin?.(a)} title={`Run aws sso login for ${a.name}`}>Sign in again</button>
-          {/if}
-        </div>
-      {/if}
-      {#if open}
-        <ul class="svcs">
-          {#each services(a) as s (s.id)}
-            <li>
-              <a
-                href={`#/aws/${a.id}/${s.id}`}
-                class:active={a.id === activeId && s.id === activeService}
-                class:denied={s.denied}
-                title={s.denied ? `${s.label}: access denied for this account` : s.label}
-                aria-current={a.id === activeId && s.id === activeService ? 'page' : undefined}
-              >
-                <Icon name={s.icon} size={13} />
-                <span>{s.label}</span>
-                {#if s.denied}<span class="deny">denied</span>{/if}
-              </a>
-            </li>
-          {/each}
-          {#if resourceAccess.can('aws_account', a.id, 'metrics', 'aws', 'view')}
-            {@const on = a.id === activeId && logsActive}
-            <li>
-              <a href={`#/${logsRoute(a.id)}`} class:active={on} title="CloudWatch Logs" aria-current={on ? 'page' : undefined}>
-                <Icon name="text" size={13} />
-                <span>CloudWatch Logs</span>
-              </a>
-            </li>
-          {/if}
-        </ul>
-      {/if}
+    <div class="side-row" data-testid="aws-account-{a.id}">
+      <button
+        use:rowMenu
+        class="side-row-main"
+        data-side-row
+        data-side-toggle
+        role="treeitem"
+        aria-level={1}
+        aria-selected="false"
+        aria-expanded={open}
+        title={a.identity?.arn ? `${a.name}\n${a.identity.arn}` : a.profile ? `${a.name} · profile ${a.profile}` : a.name}
+        onclick={() => (collapsed = { ...collapsed, [a.id]: open })}
+        oncontextmenu={(e) => menu(e, a)}
+      >
+        <Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} />
+        <span class="dot" style="background:{a.color || 'var(--text-dim)'}"></span>
+        <span class="side-row-title acct-name">{a.name}</span>
+        <span class="side-row-trailing"><EnvBadge env={a.environment} /></span>
+      </button>
+      <button class="icon-btn side-row-more" tabindex="-1" onclick={(e) => menu(e, a)} aria-label={`Actions for ${a.name}`} title="Actions">
+        <Icon name="more" size={14} />
+      </button>
     </div>
-  {:else}
-    {#if !aws.accountsLoaded}
-      <Skeleton rows={4} height={28} label="AWS accounts" />
-    {:else if aws.accountsError}
-      <!-- The content pane owns the full error + Retry; never "none yet" here. -->
-      <LoadState variant="compact" what="AWS accounts" error={awsErrorText(aws.accountsError)} empty onretry={() => void aws.loadAccounts()} />
-    {:else}
-      <EmptyState icon="cloud" title="No AWS accounts yet" />
+    {#if note}
+      <div class="sess" class:expired={note.expired}>
+        <Icon name="warning" size={12} />
+        <span>{note.text}</span>
+        {#if onsignin && a.auth_mode === 'profile'}
+          <button class="sess-btn" onclick={() => onsignin?.(a)} title={`Run aws sso login for ${a.name}`}>Sign in again</button>
+        {/if}
+      </div>
+    {/if}
+    {#if open}
+      <div role="group" aria-label={a.name}>
+        {#each services(a) as s (s.id)}
+          <SideRow
+            tree
+            depth={1}
+            icon={s.icon}
+            title={s.label}
+            selected={a.id === activeId && s.id === activeService}
+            tip={s.denied ? `${s.label}: access denied for this account` : s.label}
+            testid="aws-svc-{a.id}-{s.id}"
+            onclick={() => go(`aws/${a.id}/${s.id}`)}
+          >
+            {#snippet trailing()}{#if s.denied}<span class="deny">denied</span>{/if}{/snippet}
+          </SideRow>
+        {/each}
+        {#if resourceAccess.can('aws_account', a.id, 'metrics', 'aws', 'view')}
+          <SideRow tree depth={1} icon="text" title="CloudWatch Logs" selected={a.id === activeId && logsActive} testid="aws-svc-{a.id}-logs" onclick={() => go(logsRoute(a.id))} />
+        {/if}
+      </div>
     {/if}
   {/each}
-</nav>
+</div>
 
 <style>
   .sess {
     display: flex;
     align-items: center;
     gap: 6px;
-    margin: 2px 10px 4px;
+    margin-block: 2px 4px;
+    margin-inline: 8px 0;
     padding: 4px 8px;
     border-radius: var(--radius-s);
     background: var(--warning-soft);
@@ -199,112 +194,19 @@
     font: inherit;
     cursor: pointer;
   }
-  .rail {
-    display: flex;
-    flex-direction: column;
-    overflow-y: auto;
-    padding: 6px 0;
-    font-size: var(--fs-m);
-  }
-  .rail-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 4px 10px 6px;
-    font-size: var(--fs-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--text-dim);
-  }
-  .acct-row {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding-block: 2px;
-    padding-inline: 8px 6px;
-    color: var(--text);
-    border-inline-start: 2px solid transparent;
-  }
-  .acct.active .acct-row {
-    border-inline-start-color: var(--accent);
-  }
-  .acct-toggle {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 2px 0;
-    border: 0;
-    background: none;
-    color: inherit;
-    font: inherit;
-    text-align: start;
-    cursor: pointer;
-  }
-  .acct-row:hover {
-    background: var(--hover);
-  }
   .dot {
-    width: 8px;
-    height: 8px;
+    inline-size: 8px;
+    block-size: 8px;
     border-radius: 50%;
     flex-shrink: 0;
   }
-  .name {
-    flex: 1;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+  .acct-name {
     font-weight: 500;
   }
-  .more {
-    flex-shrink: 0;
-    opacity: 0;
-  }
-  .acct-row:hover .more,
-  .acct-row:focus-within .more,
-  .more:focus-visible {
-    opacity: 1;
-  }
-  /* No hover on touch: the account menu trigger stays visible. */
-  @media (hover: none) {
-    .more {
-      opacity: 1;
-    }
-  }
-  .svcs {
-    list-style: none;
-    margin: 0;
-    padding: 0 0 4px;
-  }
-  .svcs a {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding-block: 4px;
-    padding-inline: 32px 10px;
-    color: var(--text);
-    text-decoration: none;
-    border-inline-start: 2px solid transparent;
-  }
-  .svcs a:hover {
-    background: var(--hover);
-  }
-  .svcs a.active {
-    background: var(--accent-soft);
-    border-inline-start-color: var(--accent);
-  }
-  .svcs a.denied {
-    color: var(--text-dim);
-    opacity: 0.7;
-  }
+  /* A denied service stays navigable (so the AccessDenied is visible), greyed with the word. */
   .deny {
-    margin-inline-start: auto;
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: .06em;
-    color: var(--text-dim);
+    letter-spacing: 0.06em;
   }
 </style>

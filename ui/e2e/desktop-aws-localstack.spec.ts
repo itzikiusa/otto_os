@@ -389,7 +389,7 @@ test('S3: bucket → folder first → JSON preview → download matches the seed
   await jsonRow.click();
 
   // Pretty JSON: the JsonTree renders keys + values of the parsed body.
-  const drawer = page.getByRole('complementary', { name: 'Object preview' });
+  const drawer = page.getByTestId('aws-s3-preview');
   await expect(drawer).toBeVisible();
   await expect(drawer).toContainText('replicas', { timeout: 20_000 });
   await expect(drawer).toContainText('platform');
