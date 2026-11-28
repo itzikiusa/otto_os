@@ -195,6 +195,7 @@ export type IdeRunnerKind =
   | 'xcode'
   | 'flutter'
   | 'react_native'
+  | 'unity_attach'
   | 'kotest'
   | 'compound'
   | 'custom';
@@ -246,7 +247,7 @@ export type IdeEcosystem =
   | 'ios'
   | 'android'
   | 'flutter';
-export type IdeInstallComponent = 'sdk' | 'lsp' | 'dap' | 'all';
+export type IdeInstallComponent = 'sdk' | 'lsp' | 'dap' | 'unity_dap' | 'all';
 
 export interface IdeInstalledSdk {
   id: string;
@@ -296,6 +297,8 @@ export interface IdeToolchainEcosystem {
   installed: IdeInstalledSdk[];
   lsp_status: IdeToolStatus;
   dap_status: IdeToolStatus;
+  /** .NET on this Mac: the Unity debugger, installed with `component: 'unity_dap'`. */
+  unity_dap_status?: IdeToolStatus | null;
   downloadable: IdeDownloadableSdk[];
 }
 

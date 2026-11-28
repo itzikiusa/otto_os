@@ -25,6 +25,7 @@
     type IdeToolchainEcosystem,
   } from './ideStore.svelte';
   import SimInstallStatusCard from '../../lib/simulators/SimInstallStatusCard.svelte';
+  import IdeUnityDebuggerBox from './IdeUnityDebuggerBox.svelte';
   import { simInstaller } from '../../lib/simulators/simInstaller.svelte';
 
   interface Props {
@@ -275,11 +276,7 @@
     }
   }
 
-  async function triggerInstall(
-    ecosystem: string,
-    component: 'sdk' | 'lsp' | 'dap' | 'all',
-    version?: string,
-  ): Promise<void> {
+  async function triggerInstall(ecosystem: string, component: 'sdk' | 'lsp' | 'dap' | 'unity_dap' | 'all', version?: string): Promise<void> {
     busyKey = `install:${ecosystem}:${component}`;
     try {
       const llvm = ecosystem === 'cpp' && component !== 'lsp' && component !== 'dap' ? currentEco?.downloadable.find((d) => d.version === version) : undefined;
@@ -486,6 +483,9 @@
                     </button>
                   </div>
                 </section>
+                {#if currentEco.unity_dap_status}
+                  <IdeUnityDebuggerBox status={currentEco.unity_dap_status} busy={busyKey === `install:${currentEco.ecosystem}:unity_dap`} oninstall={() => triggerInstall(currentEco.ecosystem, 'unity_dap')} />
+                {/if}
               </div>
 
               <section class="tc-section" aria-labelledby="tc-dl-heading">

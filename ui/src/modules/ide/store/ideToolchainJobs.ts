@@ -32,7 +32,7 @@ export function toolOutdatedNotice(e: unknown): { title: string; body: string; a
 export async function installToolchainJob(
   host: DebugAndEnvHost,
   ecosystem: string,
-  component: 'sdk' | 'lsp' | 'dap' | 'all',
+  component: 'sdk' | 'lsp' | 'dap' | 'unity_dap' | 'all',
   version: string | undefined,
   ensurePoller: () => void,
 ): Promise<IdeInstallJob | null> {

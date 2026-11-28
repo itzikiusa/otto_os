@@ -35,6 +35,8 @@ const ADAPTERS: Record<string, string> = {
   java: 'Java debugger',
   node: 'JS debugger',
   shell: 'Bash debugger',
+  // The daemon's own ecosystem for a missing Unity debugger (or its .NET 10).
+  unity: 'Unity debugger',
 };
 
 /** "Delve" for go, … — the name a person knows the debugger by. */

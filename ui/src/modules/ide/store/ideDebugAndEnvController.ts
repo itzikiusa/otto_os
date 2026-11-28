@@ -128,7 +128,7 @@ export function languageFromRunner(runner: string | undefined, fallback: string)
   if (runner.startsWith('cargo_')) return 'rust';
   if (runner.startsWith('zig_')) return 'zig';
   if (runner === 'cmake' || runner === 'ctest' || runner === 'cpp_run' || runner === 'make' || runner === 'meson' || runner === 'unreal') return 'cpp';
-  if (runner.startsWith('dotnet_')) return 'csharp';
+  if (runner.startsWith('dotnet_') || runner === 'unity_attach') return 'csharp';
   if (runner.startsWith('java_') || runner === 'maven' || runner === 'gradle') return 'java';
   if (runner === 'pytest' || runner === 'python') return 'python';
   if (runner === 'node' || runner === 'npm' || runner === 'vitest' || runner === 'playwright' || runner === 'karma') return 'javascript';

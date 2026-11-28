@@ -9,6 +9,8 @@
   import { GUTTER_TARGET_ID, ide, type IdeRunConfig } from '../ideStore.svelte';
   import { ideDevices } from '../devices/ideDevicesState.svelte';
   import { launchSelectorLabel } from '../store/ideLaunchTarget';
+  import { ATTACH_ONLY_TITLE, UNITY_ATTACH_RUNNER, unityTargetLabel } from '../debug/ideUnityAttach';
+  import { unityAttach } from '../debug/ideUnityState.svelte';
   import { ideLayout } from './ideLayout.svelte';
   import { bridgeEnvCache } from './networkBridgeGuard.svelte';
   import { formatBridgeToolbarLabel } from './networkBridgeModel';
@@ -30,7 +32,11 @@
   const selectedConfig = $derived<IdeRunConfig | null>(
     ide.runConfigs.find((c) => c.id === ide.selectedConfigId) ?? null,
   );
-  const selectorLabel = $derived(gutterTarget?.label.replace(/^Run /, '') || launchSelectorLabel(selectedConfig, ide.activeTab));
+  const attachOnly = $derived(selectedConfig?.runner === UNITY_ATTACH_RUNNER);
+  const selectorLabel = $derived(
+    gutterTarget?.label.replace(/^Run /, '')
+      || (attachOnly && selectedConfig ? unityTargetLabel(selectedConfig.name, unityAttach.editors) : launchSelectorLabel(selectedConfig, ide.activeTab)),
+  );
   const bridgeLabel = $derived(
     ide.target.kind === 'local' ? formatBridgeToolbarLabel(ide.projectEnv?.network_bridge) : null,
   );
@@ -105,9 +111,10 @@
     <button
       type="button"
       class="btn small"
-      class:primary={!isRunning && !isDebugging}
+      class:primary={!isRunning && !isDebugging && !attachOnly}
+      disabled={attachOnly}
       onclick={() => void ide.startRun()}
-      title="Run selected target (⌃R)"
+      title={attachOnly ? ATTACH_ONLY_TITLE : 'Run selected target (⌃R)'}
       data-testid="ide-run-btn"
     >
       <Icon name="play" size={12} />
@@ -194,8 +201,9 @@
       type="button"
       class="btn small primary"
       data-keep
+      disabled={attachOnly}
       onclick={() => void ide.startRun()}
-      title="Run selected target"
+      title={attachOnly ? ATTACH_ONLY_TITLE : 'Run selected target'}
       data-testid="ide-run-btn"
     >
       <Icon name="play" size={12} />

@@ -629,7 +629,7 @@ class IdeStore {
       m.launchGutterAction(this, item, mode, (adhoc, keepTc) => void this.startRun({ adhoc, keepTestcontainers: keepTc }), (opts) => void this.startDebug(opts)),
     );
   }
-  installToolchain(ecosystem: string, component: 'sdk' | 'lsp' | 'dap' | 'all', version?: string): Promise<IdeInstallJob | null> {
+  installToolchain(ecosystem: string, component: 'sdk' | 'lsp' | 'dap' | 'unity_dap' | 'all', version?: string): Promise<IdeInstallJob | null> {
     return loadDebugEnvMod().then((m) => m.installToolchainJob(this, ecosystem, component, version, () => this.ensureJobsPoller()));
   }
   createPythonVenv(venvDir = '.venv', pythonVersion?: string, moduleRoot?: string): Promise<{ path: string; interpreter_path: string; version: string } | null> {

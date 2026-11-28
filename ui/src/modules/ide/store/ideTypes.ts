@@ -270,6 +270,8 @@ export interface IdeToolchainEcosystem {
   installed: IdeInstalledSdk[]; detected?: IdeDetectedSdk[];
   lsp_status: IdeToolStatus; dap_status: IdeToolStatus;
   lsp?: IdeToolStatus | null; dap?: IdeToolStatus | null;
+  /** .NET on this Mac: the Unity debugger (`component: 'unity_dap'`). */
+  unity_dap_status?: IdeToolStatus | null;
   downloadable: IdeDownloadableSdk[];
 }
 
