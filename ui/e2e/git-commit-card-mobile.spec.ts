@@ -3,7 +3,7 @@ import { expectNoHorizontalOverflow, openPage } from './helpers';
 import { expectWipFirst, remoteSubject, seedCardRepo, stubForge, type CardRepo } from './git-commit-card-fixture';
 
 // The commit card on a phone (G1/G5): a dirty repository opens on History's
-// WIP row (the Detail pane's sheet over the Branches list), the card sits on
+// WIP row (the Detail pane's sheet over the graph), the card sits on
 // top with 44 px targets, one tap commits and pushes.
 
 // The forge is stubbed with page.route: keep the app's service worker out

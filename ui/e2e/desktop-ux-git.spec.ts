@@ -51,7 +51,7 @@ async function showHead(page: Page) {
   const row = page.locator(`.graph-row[data-sha="${secondSha}"]`);
   if (page.viewportSize()!.width > 1024) return expect(row).toHaveClass(/graph-row-selected/);
   const current = page.locator('.refs-panel .ref-row.current');
-  await expect(row.or(current).first()).toBeVisible();
+  await expect(page.locator(`.graph-row[data-sha="${secondSha}"]:visible, .refs-panel .ref-row.current:visible`).first()).toBeVisible();
   if (await row.isHidden()) await current.click();
   await row.locator('.graph-select').click();
 }
@@ -109,10 +109,10 @@ test('PR filter change ignores an in-flight page from the old filter', async ({ 
   // The state is in Filters now (one tab set fewer on the PR page).
   await page.getByRole('button', { name: 'Filters' }).click();
   await page.getByRole('menuitemcheckbox', { name: 'Merged' }).click();
-  await expect(page.locator('.prlist')).toContainText('merged request 2');
+  await expect(page.getByTestId('pr-list')).toContainText('merged request 2');
   await oldPage!.fulfill({ json: { items: [pr(3)], has_more: false } });
   await page.waitForTimeout(100);
-  await expect(page.locator('.prlist')).not.toContainText('open request 3');
+  await expect(page.getByTestId('pr-list')).not.toContainText('open request 3');
 });
 
 test('Focus account failure offers Retry instead of account setup', async ({ page }) => {
