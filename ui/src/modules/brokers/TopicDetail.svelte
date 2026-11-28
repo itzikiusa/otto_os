@@ -79,9 +79,7 @@
   // sheet otherwise (always on a phone). ⌥⌘B reopens the last message.
   let msgSheet = $state(false);
   let lastMsg: KafkaMessage | null = null;
-  $effect(() => {
-    if (selected) lastMsg = selected;
-  });
+  $effect(() => void (selected && (lastMsg = selected)));
   const selKey = $derived(selected ? `${selected.partition}-${selected.offset}` : '');
   // Window the message table (SC-08): a 5000-message peek mounts only the
   // visible slice between two spacer rows. The partition ranges are indexed
