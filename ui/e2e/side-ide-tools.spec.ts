@@ -26,6 +26,7 @@ test('phone: Tests, Changes, Frames and Devices push with the shared Back', asyn
   await expect(page.getByTestId('ide-nav-back')).toHaveCount(0);
   const run = header.getByTestId('ide-run-btn');
   await expect(run).toBeVisible();
+  await expect(run).toHaveAccessibleName('Run');
   const rowBox = (await header.boundingBox())!;
   const runBox = (await run.boundingBox())!;
   expect(runBox.height).toBeLessThanOrEqual(44);
