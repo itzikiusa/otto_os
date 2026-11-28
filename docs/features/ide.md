@@ -268,7 +268,7 @@ global system directories:
 | **Python** | `uv`, standalone CPython (3.11 / 3.12 / 3.13), `pyright`, `ruff`, `debugpy` |
 | **Rust** | `rustup` (`rustc` + `cargo`), `rust-analyzer`, `CodeLLDB` (`codelldb`) |
 | **Zig** | Official Zig SDK tarball (`ziglang.org/download/index.json`, SHA-256 verified), local SDK registration, `zls` (Zig-version-matched), `CodeLLDB` (`codelldb`) / `lldb-dap` / built-in `otto-lldb-dap` with Zig LLDB type formatters |
-| **C / C++ & Unreal Engine** | Clang / GCC / LLVM toolchain discovery & local registration (Otto does not download compilers: install them with Xcode Command Line Tools, Homebrew or `apt` / `dnf`), `clangd` (auto `--compile-commands-dir` including CMake/Meson/Unreal `Intermediate/ProjectFiles` + `textDocument/switchSourceHeader` `⌥O`), `clang-format`, CMake (Presets & CTest), Meson, Make, `vcpkg.json` / `conanfile.txt` / `.uproject` deps, `CodeLLDB` / `lldb-dap` / built-in `otto-lldb-dap` with C++ STL & Unreal pretty-printers, PID/process-name attach, and core-dump debugging |
+| **C / C++ & Unreal Engine** | Clang / GCC / LLVM toolchain discovery & local registration, a managed **LLVM** download on the Mac (see below), `clangd` 23.1.0 (SHA-256 verified) (auto `--compile-commands-dir` including CMake/Meson/Unreal `Intermediate/ProjectFiles` + `textDocument/switchSourceHeader` `⌥O`), `clang-format`, CMake (Presets & CTest), Meson, Make, `vcpkg.json` / `conanfile.txt` / `.uproject` deps, `CodeLLDB` / `lldb-dap` / built-in `otto-lldb-dap` with C++ STL & Unreal pretty-printers, PID/process-name attach, and core-dump debugging |
 | **.NET (C# / F# / Unity / Unreal)** | Official .NET SDK tarball (`dotnetcli.azureedge.net` / `builds.dotnet.microsoft.com`, LTS 8.0 / 9.0), local SDK registration (`DOTNET_ROOT`), SDK-matched `csharp-ls` + `fsautocomplete` (with OmniSharp / Roslyn fallback), NuGet inspector & OSV vulnerabilities, `netcoredbg` (and `vsdbg` fallback) with `VSTEST_HOST_DEBUG` test debugging (several test projects or frameworks run as Debug All steps) & explicit PID attach (Unity Editor attach is not supported) |
 | **Go** | Official Go SDK tarball, local SDK registration (`POST /ide/toolchains/local`), `gopls`, Delve (`dlv`), `gofumpt` |
 | **Node / TypeScript & Web Frameworks** | Node LTS (22), `pnpm`, `typescript-language-server`, `svelteserver` (Svelte/SvelteKit, untrusted mode), `vue-language-server` (Vue/Nuxt standalone mode), `ngserver` (Angular with `--tsProbeLocations`/`--ngProbeLocations`), `vscode-langservers-extracted`, `prettier`, `js-debug` & built-in `otto-node-cdp` (Node + Browser CDP attach with Vite/webpack URL mapping) |
@@ -282,6 +282,35 @@ them with the project's own Go (`POST /ide/toolchains/install` with `go_root`).
 A debug launch Delve refuses ("too old for Go 1.25") shows an **Update Delve**
 action that rebuilds it and starts the same session again. A Python debugger
 without the `debugpy` module is listed as the built-in bdb bridge.
+
+**Managed LLVM (C / C++).** **Download LLVM 23.1.5…** (the C/C++ toolchain's
+**+** menu in Settings → Languages → C / C++, or Download in Project SDKs and
+the Toolchains window) installs one pinned upstream archive: LLVM 23.1.5 on Apple
+Silicon (`LLVM-23.1.5-macOS-ARM64.tar.zst`, 871 MB) and LLVM 20.1.7 on Intel
+Macs (`LLVM-20.1.7-macOS-X64.tar.xz`, the last LLVM with a macOS x64 build). The
+exact file name, byte size and SHA-256 are compiled into Otto
+(`crates/otto-ide/src/toolchains/llvm_manifest.rs`); nothing is derived from a
+version string. The confirm names the release, the file and its sizes. Before
+downloading, Otto checks Apple's Command Line Tools (`xcrun --show-sdk-path`)
+and the free disk (download + install + 10 %); the download is capped at the
+pinned size and refused on a hash mismatch ("The downloaded LLVM archive does not
+match the expected file (SHA-256 mismatch). Nothing was installed."). Only
+`clang`, `clang++`, `clangd`, `clang-format`, `clang-tidy`,
+`clang-apply-replacements`, `llvm-symbolizer` and clang's resource headers are
+unpacked into `<data_dir>/toolchains/cpp/sdks/llvm-<ver>` (≈ 444 MB); before the
+install is accepted each tool runs and `clang++ -std=c++20` compiles and runs a
+test program. The upstream `.tar.zst` uses a 1 GiB zstd window, so the daemon
+holds about 1 GiB more memory while it unpacks. When the job ends the project's
+C/C++ toolchain is set to it (with Undo). Linux pins (23.1.5 x64 / arm64) are in
+the manifest, but SSH hosts are not offered the download yet.
+
+The project's selected C/C++ toolchain decides what runs: `CC` / `CXX` and
+`PATH` (so `clang-format` / `clang-tidy`) come from its `bin/`, clangd is
+`<toolchain>/bin/clangd` when it has one (else the managed or system clangd),
+and for the managed LLVM `SDKROOT` is set to `xcrun --show-sdk-path`. Choosing
+another toolchain restarts clangd for that project (`otto/lspEvicted`
+`toolchain_changed`). Debugging on macOS keeps Apple's `lldb-dap`. **Remove**
+on the SDK deletes the folder.
 
 Installed `<data_dir>/toolchains/**/bin` directories and custom registered local
 SDKs (`POST /ide/toolchains/local`) are automatically prepended to `PATH` (setting

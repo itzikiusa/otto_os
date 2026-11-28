@@ -282,6 +282,8 @@
   ): Promise<void> {
     busyKey = `install:${ecosystem}:${component}`;
     try {
+      const llvm = ecosystem === 'cpp' && component !== 'lsp' && component !== 'dap' ? currentEco?.downloadable.find((d) => d.version === version) : undefined;
+      if (llvm) return void (await (await import('./store/ideLlvmInstall')).downloadLlvm(llvm));
       const job = await ide.installToolchain(ecosystem, component, version || undefined);
       if (job) expandedLogs = { ...expandedLogs, [job.id]: true };
     } finally {

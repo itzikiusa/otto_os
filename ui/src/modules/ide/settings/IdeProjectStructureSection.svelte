@@ -140,7 +140,13 @@
 
   async function triggerInstall(eco: string, comp: 'sdk' | 'lsp' | 'dap', version?: string): Promise<void> {
     busyInstall = `${eco}:${comp}`;
-    try { await ide.installToolchain(eco, comp, version); } finally { busyInstall = null; }
+    try {
+      const llvm = eco === 'cpp' && comp === 'sdk' ? currentEco?.downloadable.find((d) => d.version === version) : undefined;
+      if (llvm) {
+        const { downloadLlvm } = await import('../store/ideLlvmInstall');
+        await downloadLlvm(llvm, (p) => ideSettings.patchEnv({ cpp_toolchain: p }));
+      } else await ide.installToolchain(eco, comp, version);
+    } finally { busyInstall = null; }
   }
 
   function inferModuleTech(modPath: string, modName: string): string {

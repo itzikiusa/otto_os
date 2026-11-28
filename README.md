@@ -32,7 +32,9 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
   runs the project's `build.zig`, so it starts only after you trust the
   project (see the language-server note below).
 - **C / C++, Unreal Engine, Kotlin, Spring Boot, .NET and web frameworks in the
-  IDE.** C / C++ & Unreal Engine get highlighting, `clangd` with auto
+  IDE.** C / C++ & Unreal Engine get highlighting, a one-click pinned LLVM
+  download on the Mac (clang, clangd, clang-format, clang-tidy, SHA-256
+  checked, selected per project), `clangd` with auto
   `--compile-commands-dir` and `⌥O` header/source switch, CMake / Presets /
   CTest / Meson / Make / Unreal run configs, GoogleTest & Catch2 gutter runs,
   `vcpkg`/`conan`/CMake/`.uproject` inspection, and LLDB debugging (STL &
